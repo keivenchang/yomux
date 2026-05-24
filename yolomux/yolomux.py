@@ -78,6 +78,8 @@ LINEAR_API_URL = "https://api.linear.app/graphql"
 DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/GPU/issue"
 OTHER_BRANCH_LIMIT = 8
 _CACHE_MISS = object()
+PLACEHOLDER_AUTH_USERNAME = "user"
+PLACEHOLDER_AUTH_PASSWORD = "password"
 
 
 def read_config_object(path: Path) -> dict[str, Any]:
@@ -88,14 +90,23 @@ def read_config_object(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def initialize_auth_config(path: Path) -> dict[str, Any]:
+    if path.exists():
+        return read_config_object(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    config = {"user": PLACEHOLDER_AUTH_USERNAME, "password": PLACEHOLDER_AUTH_PASSWORD}
+    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return config
+
+
 def config_string(config: dict[str, Any], key: str, default: str) -> str:
     value = config.get(key)
     return value if isinstance(value, str) and value else default
 
 
-AUTH_CONFIG = read_config_object(AUTH_CONFIG_PATH)
-AUTH_USERNAME = os.environ.get("YOLOMUX_AUTH_USER") or config_string(AUTH_CONFIG, "user", "yolomux")
-AUTH_PASSWORD = os.environ.get("YOLOMUX_AUTH_PASSWORD") or config_string(AUTH_CONFIG, "password", "password")
+AUTH_CONFIG = initialize_auth_config(AUTH_CONFIG_PATH)
+AUTH_USERNAME = config_string(AUTH_CONFIG, "user", PLACEHOLDER_AUTH_USERNAME)
+AUTH_PASSWORD = config_string(AUTH_CONFIG, "password", PLACEHOLDER_AUTH_PASSWORD)
 AUTH_COOKIE_NAME = "yolomux_auth"
 AUTH_COOKIE_SECRET = os.urandom(32)
 AUTH_COOKIE_VALUE = hmac.new(
@@ -6384,6 +6395,16 @@ def print_transcripts(app: TmuxWebtermApp) -> int:
     return 1 if payload["errors"] else 0
 
 
+def warn_placeholder_auth() -> None:
+    if AUTH_USERNAME != PLACEHOLDER_AUTH_USERNAME or AUTH_PASSWORD != PLACEHOLDER_AUTH_PASSWORD:
+        return
+    print(
+        f"WARNING: YOLOMux is using placeholder auth {PLACEHOLDER_AUTH_USERNAME}/{PLACEHOLDER_AUTH_PASSWORD}. "
+        f"Edit {AUTH_CONFIG_PATH} before exposing this server.",
+        file=sys.stderr,
+    )
+
+
 def main() -> int:
     args = parse_args()
     sessions = unique_session_names(split_csv(args.sessions)) if args.sessions is not None else default_session_names()
@@ -6396,6 +6417,7 @@ def main() -> int:
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
     session_text = ", ".join(sessions) if sessions else "no tmux sessions"
     print(f"Serving YOLOMux - AI webterm on http://{url_host}:{args.port}/ for {session_text}")
+    warn_placeholder_auth()
     restored_auto = app.restore_auto_approve()
     if restored_auto:
         print(f"Restored AUTO for {', '.join(restored_auto)}")

@@ -30,7 +30,7 @@ For a background development server, run it with `nohup`:
 setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux/yolomux.py --host 0.0.0.0 > /tmp/yolomux.log 2>&1 < /dev/null &
 ```
 
-Auth defaults to `yolomux` / `password`. Override it with `YOLOMUX_AUTH_USER` and `YOLOMUX_AUTH_PASSWORD`, or put `{"user": "...", "password": "..."}` in `~/.config/yolomux/auth.json`.
+On first launch, YOLOMux creates `~/.config/yolomux/auth.json` with placeholder credentials `user` / `password`. If those placeholders are still active, startup prints a warning. Edit that file before exposing YOLOMux beyond localhost. Authentication is read only from this JSON file.
 
 YOLOMux serves xterm.js from a local editor install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `yolomux/static/xterm`, then common Cursor, VS Code, and Windsurf server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
 
