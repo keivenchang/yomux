@@ -6395,12 +6395,17 @@ def print_transcripts(app: TmuxWebtermApp) -> int:
     return 1 if payload["errors"] else 0
 
 
-def warn_placeholder_auth() -> None:
-    if AUTH_USERNAME != PLACEHOLDER_AUTH_USERNAME or AUTH_PASSWORD != PLACEHOLDER_AUTH_PASSWORD:
-        return
+def placeholder_auth_active() -> bool:
+    return AUTH_USERNAME == PLACEHOLDER_AUTH_USERNAME and AUTH_PASSWORD == PLACEHOLDER_AUTH_PASSWORD
+
+
+def print_placeholder_auth_error() -> None:
     print(
-        f"WARNING: YOLOMux is using placeholder auth {PLACEHOLDER_AUTH_USERNAME}/{PLACEHOLDER_AUTH_PASSWORD}. "
-        f"Edit {AUTH_CONFIG_PATH} before exposing this server.",
+        f"You need to set {AUTH_CONFIG_PATH} before using this program.",
+        file=sys.stderr,
+    )
+    print(
+        f"Replace the placeholder {PLACEHOLDER_AUTH_USERNAME}/{PLACEHOLDER_AUTH_PASSWORD} credentials.",
         file=sys.stderr,
     )
 
@@ -6410,6 +6415,10 @@ def main() -> int:
     sessions = unique_session_names(split_csv(args.sessions)) if args.sessions is not None else default_session_names()
     app = TmuxWebtermApp(sessions)
 
+    if placeholder_auth_active():
+        print_placeholder_auth_error()
+        return 2
+
     if args.print_transcripts:
         return print_transcripts(app)
 
@@ -6417,7 +6426,6 @@ def main() -> int:
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
     session_text = ", ".join(sessions) if sessions else "no tmux sessions"
     print(f"Serving YOLOMux - AI webterm on http://{url_host}:{args.port}/ for {session_text}")
-    warn_placeholder_auth()
     restored_auto = app.restore_auto_approve()
     if restored_auto:
         print(f"Restored AUTO for {', '.join(restored_auto)}")
