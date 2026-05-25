@@ -65,6 +65,7 @@ SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fas
 CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux")))
 STATE_PATH = CONFIG_DIR / "state.json"
 AUTH_CONFIG_PATH = CONFIG_DIR / "auth.json"
+AUTH_CONFIG_DISPLAY_PATH = "~/.config/yolomux/auth.json"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 AGENT_COMMANDS = {"claude", "codex", "term"}
 AUTO_APPROVE_SCRIPT = Path(__file__).resolve().parents[1] / "auto_approve_tmux.py"
@@ -5769,7 +5770,7 @@ boot();
 
 
 def setup_auth_html() -> str:
-    auth_path = html.escape(str(AUTH_CONFIG_PATH))
+    auth_path = html.escape(AUTH_CONFIG_DISPLAY_PATH)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -6495,7 +6496,7 @@ def print_transcripts(app: TmuxWebtermApp) -> int:
 
 def print_placeholder_auth_error() -> None:
     print(
-        f"You need to set {AUTH_CONFIG_PATH} before using this program.",
+        f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.",
         file=sys.stderr,
     )
     print(
@@ -6521,7 +6522,7 @@ def main() -> int:
     print(f"Serving YOLOMux - AI webterm on http://{url_host}:{args.port}/ for {session_text}")
     if placeholder_auth_active():
         print("=" * 78)
-        print(f"You need to set {AUTH_CONFIG_PATH} before using this program.")
+        print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
         print(f"Replace the placeholder {PLACEHOLDER_AUTH_USERNAME}/{PLACEHOLDER_AUTH_PASSWORD} credentials.")
         print(f"YOLOMux is listening on http://{url_host}:{args.port}/ and will show this setup message in the browser.")
         print("After saving auth.json, refresh the browser. No restart is required.")
