@@ -2,7 +2,7 @@
 
 Browser tools for watching, driving, and summarizing tmux sessions.
 
-## YOLOMux - AI webterm
+## YOLOMux
 
 `yolomux.py` serves the interactive YOLOMux UI. It attaches browser xterm.js terminals to local tmux sessions and adds agent-aware controls around them.
 
@@ -36,16 +36,16 @@ YOLOMux serves xterm.js from a local editor install when available. It checks `Y
 
 ## Webterm features
 
-- The page title is `YOLOMux - AI webterm`.
+- The page title is `YOLOMux`.
 - By default, YOLOMux shows the existing tmux sessions, capped at nine visible session tabs. Tabs are numbered by display order from `1` through `9`, so tab `1` is the first tmux session, tab `2` is the second, and so on.
 - The `+ Claude` and `+ Codex` tabs create the next numbered tmux session with the selected agent, such as `7` when six sessions already exist. Each create tab appears only when that CLI is available on the YOLOMux server PATH. If neither CLI is available, YOLOMux shows `+ Term` and creates a plain shell session. YOLOMux does not create default `yolomuxN` sessions.
 - The visible workspace has left and right sides. Each side can show one full-height pane or two stacked panes, for up to four visible panes total.
 - Session panels are created once at page boot. Hidden sessions live in an off-screen panel pool instead of being destroyed, so drag/drop and quick switching do not restart unchanged terminals.
 - The layout is stored in browser `localStorage` under `yolomux.layoutSlots.v1`, so it survives browser reloads and YOLOMux server restarts for the same browser/profile/origin.
-- AUTO state is stored server-side in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
+- YOLO state is stored server-side in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
 - The red mac-style circle hides a pane. The green circle expands or collapses a pane.
 - Drag a top-tray session or a pane header into a visible slot. Dropping a pane in the middle of another pane swaps them. Dropping near the top or bottom stacks into that side when a slot is available.
-- Each pane tab row has `AUTO`, previous/next tmux-window controls, `Terminal`, `Transcript`, `AI summary`, and right-aligned quick-switch buttons for replacing that pane with another session. Clicking the lit session hides that pane.
+- Each pane tab row has `YOLO`, previous/next tmux-window controls, `Terminal`, `Transcript`, `AI summary`, and right-aligned quick-switch buttons for replacing that pane with another session. Clicking the lit session hides that pane.
 - The terminal border turns yellow only for the pane that is currently focused and ready for typing.
 - Browser resize fits xterm immediately, but the tmux resize message is debounced so tmux is resized after the browser resize settles.
 - Mouse wheel scrolling in a terminal sends tmux copy-mode scroll commands instead of scrolling the AI input area.
@@ -66,7 +66,7 @@ Transcript metadata comes from tmux pane discovery plus local process-tree inspe
 
 The transcript tab uses Server-Sent Events from `/api/context-stream`. The AI summary tab uses `/api/summary-stream`, which builds a scoped prompt from the selected session's recent transcript and streams a Codex-generated summary back to the browser. Summary model settings can be overridden with `YOLOMUX_SUMMARY_MODEL`, `YOLOMUX_SUMMARY_EFFORT`, and `YOLOMUX_SUMMARY_SERVICE_TIER`.
 
-AUTO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser polls AUTO status every few seconds and reflects the active state in both the top tray and pane tab.
+YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser polls YOLO status every few seconds and reflects the active state in both the top tray and pane tab.
 
 ## Webterm API
 
@@ -77,11 +77,11 @@ AUTO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser
 - `GET /api/context-items?session=dynamo1&messages=40` returns structured transcript items.
 - `GET /api/context-stream?session=dynamo1&messages=200` streams structured transcript items with Server-Sent Events.
 - `GET /api/summary-stream?session=dynamo1&lookback=3600` streams a Codex-generated summary with Server-Sent Events.
-- `GET /api/auto-approve` returns AUTO status for all sessions.
-- `GET /api/auto-approve?session=dynamo1` returns AUTO status for one session.
+- `GET /api/auto-approve` returns YOLO status for all sessions.
+- `GET /api/auto-approve?session=dynamo1` returns YOLO status for one session.
 - `POST /api/create-session?agent=claude`, `POST /api/create-session?agent=codex`, or `POST /api/create-session?agent=term` creates the next numbered tmux session with the selected agent, capped at nine visible sessions. Claude and Codex requests are rejected if the selected CLI is not available on the YOLOMux server PATH; `term` is available only as the fallback when neither CLI is available.
 - `POST /api/ensure-session?session=dynamo1` checks that a tmux session still exists.
-- `POST /api/auto-approve?session=dynamo1&enabled=1` enables or disables AUTO for a session.
+- `POST /api/auto-approve?session=dynamo1&enabled=1` enables or disables YOLO for a session.
 - `POST /api/tmux-next?session=dynamo1` moves the session to the next tmux window.
 - `GET /ws?session=dynamo1` attaches a browser terminal to tmux.
 

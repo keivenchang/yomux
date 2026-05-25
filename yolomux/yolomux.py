@@ -248,6 +248,14 @@ def unique_session_names(values: list[str] | tuple[str, ...]) -> list[str]:
     return sorted(result, key=session_sort_key)
 
 
+def next_numbered_session_name(existing_sessions: set[str]) -> str | None:
+    for index in range(1, MAX_YOLOMUX_SESSION_TABS + 1):
+        session = str(index)
+        if session not in existing_sessions:
+            return session
+    return None
+
+
 def git(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[str]:
     return run_cmd(["git", "-C", cwd, *args], timeout=timeout)
 
@@ -1744,11 +1752,12 @@ class TmuxWebtermApp:
                 "error": f"maximum session tabs reached: {MAX_YOLOMUX_SESSION_TABS}",
                 "sessions": self.sessions,
             }, HTTPStatus.CONFLICT
-        existing = set(self.sessions)
-        index = len(self.sessions) + 1
-        while str(index) in existing:
-            index += 1
-        session = str(index)
+        session = next_numbered_session_name(set(self.sessions))
+        if session is None:
+            return {
+                "error": f"no available numbered session names from 1 to {MAX_YOLOMUX_SESSION_TABS}",
+                "sessions": self.sessions,
+            }, HTTPStatus.CONFLICT
         cwd = session_workdir(session)
         result = tmux(
             [
@@ -2408,7 +2417,7 @@ def html_page(sessions: list[str]) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YOLOMux - AI webterm</title>
+<title>YOLOMux</title>
 <link rel="stylesheet" href="/static/xterm.css" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css';">
 <script src="/static/xterm.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js';"></script>
 <style>
@@ -3479,7 +3488,7 @@ button:disabled:hover {{ border-color: var(--line); }}
 <body>
 <header class="topbar">
   <div class="brand">
-    <div class="title">YOLOMux - AI webterm</div>
+    <div class="title">YOLOMux</div>
   </div>
   <div id="sessionButtons" class="session-buttons" aria-label="Sessions"></div>
   <div class="actions">
@@ -3759,7 +3768,7 @@ function renderSessionButtons() {{
     button.className = `session-button ${{isInfo ? 'info' : ''}} ${{active ? 'active' : ''}} ${{auto ? 'auto' : ''}}`;
     button.draggable = true;
     button.innerHTML = isInfo ? 'Branches' : sessionButtonHtml(session, info, agentKind);
-    const autoText = auto ? '; AUTO on' : '';
+    const autoText = auto ? '; YOLO on' : '';
     const agentText = agentKind ? `; ${{agentName(agentKind)}}` : '';
     button.title = isInfo
       ? `Branches${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}`
@@ -3907,7 +3916,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled) {{
   const title = `${{sessionLabel(session)}} · ${{projectDirName(session, info)}}`;
   const subtitle = git?.branch || pane?.current_path || 'no checkout detected';
   const rows = [];
-  rows.push(popoverRow('agent', agentKind ? `${{agentName(agentKind)}}${{autoEnabled ? ' · AUTO' : ''}}` : `${{autoEnabled ? 'AUTO' : 'not detected'}}`));
+  rows.push(popoverRow('agent', agentKind ? `${{agentName(agentKind)}}${{autoEnabled ? ' · YOLO' : ''}}` : `${{autoEnabled ? 'YOLO' : 'not detected'}}`));
   if (git?.root) rows.push(popoverRow('repo', git.root));
   if (git?.branch) rows.push(popoverRow('branch', branchLinkHtml(git, git.branch)));
   if (git?.upstream) rows.push(popoverRow('upstream', git.upstream));
@@ -4810,7 +4819,7 @@ function createPanel(session) {{
         </div>
       </div>
       <div class="tabs" role="tablist">
-        <button class="tab auto-toggle" data-auto-session="${{esc(session)}}" title="toggle auto approval for this tmux session">AUTO</button>
+        <button class="tab auto-toggle" data-auto-session="${{esc(session)}}" title="toggle YOLO approval for this tmux session">YOLO</button>
         <button class="tab window-step" data-window-dir="prev" data-window-session="${{esc(session)}}" title="previous tmux window">&lt;</button>
         <button class="tab active" data-tab="${{esc(session)}}" data-tab-name="terminal">Terminal</button>
         <button class="tab window-step" data-window-dir="next" data-window-session="${{esc(session)}}" title="next tmux window">&gt;</button>
@@ -5382,17 +5391,17 @@ async function setAutoApprove(session, enabled) {{
     const response = await fetch(`/api/auto-approve?session=${{encodeURIComponent(session)}}&enabled=${{enabled ? '1' : '0'}}`, {{method: 'POST'}});
     const payload = await response.json();
     if (!response.ok) {{
-      statusEl.innerHTML = `<span class="err">${{esc(payload.error || 'auto approve failed')}}</span>`;
+      statusEl.innerHTML = `<span class="err">${{esc(payload.error || 'YOLO approval failed')}}</span>`;
       return;
     }}
     autoApproveStates.set(session, payload);
     renderSessionButtons();
     renderAutoApproveButton(session, payload);
     statusEl.innerHTML = payload.enabled
-      ? `<span class="err">AUTO on: ${{esc(sessionLabel(session))}}</span>`
-      : `<span class="ok">AUTO off: ${{esc(sessionLabel(session))}}</span>`;
+      ? `<span class="err">YOLO on: ${{esc(sessionLabel(session))}}</span>`
+      : `<span class="ok">YOLO off: ${{esc(sessionLabel(session))}}</span>`;
   }} catch (error) {{
-    statusEl.innerHTML = `<span class="err">AUTO request failed: ${{esc(error)}}</span>`;
+    statusEl.innerHTML = `<span class="err">YOLO request failed: ${{esc(error)}}</span>`;
   }}
 }}
 
@@ -5434,11 +5443,11 @@ function renderAutoApproveButton(session, payload) {{
   const enabled = payload?.enabled === true;
   if (button) {{
     button.classList.toggle('active', enabled);
-    button.textContent = enabled ? 'AUTO' : 'AUTO';
+    button.textContent = 'YOLO';
     const action = payload?.last_action ? `; ${{payload.last_action}}` : '';
     button.title = enabled
-      ? `AUTO on for ${{sessionLabel(session)}}${{action}}`
-      : `AUTO off for ${{sessionLabel(session)}}`;
+      ? `YOLO on for ${{sessionLabel(session)}}${{action}}`
+      : `YOLO off for ${{sessionLabel(session)}}`;
   }}
   updatePanelHeader(session, transcriptMeta.sessions?.[session]);
 }}
@@ -5717,7 +5726,7 @@ function refreshAll() {{
 }}
 
 async function boot() {{
-  statusEl.textContent = 'loading AUTO status...';
+  statusEl.textContent = 'loading YOLO status...';
   await loadAutoStatuses();
   renderSessionButtons();
   renderPanels();
@@ -6519,7 +6528,7 @@ def main() -> int:
     server = TmuxWebtermHTTPServer((args.host, args.port), app)
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
     session_text = ", ".join(sessions) if sessions else "no tmux sessions"
-    print(f"Serving YOLOMux - AI webterm on http://{url_host}:{args.port}/ for {session_text}")
+    print(f"Serving YOLOMux on http://{url_host}:{args.port}/ for {session_text}")
     if placeholder_auth_active():
         print("=" * 78)
         print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
@@ -6529,7 +6538,7 @@ def main() -> int:
         print("=" * 78)
     restored_auto = app.restore_auto_approve()
     if restored_auto:
-        print(f"Restored AUTO for {', '.join(restored_auto)}")
+        print(f"Restored YOLO for {', '.join(restored_auto)}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
