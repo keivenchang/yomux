@@ -25,6 +25,7 @@ import re
 import select
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -84,6 +85,7 @@ OTHER_BRANCH_LIMIT = 8
 _CACHE_MISS = object()
 PLACEHOLDER_AUTH_USERNAME = "user"
 PLACEHOLDER_AUTH_PASSWORD = "password"
+SERVER_HOSTNAME = socket.gethostname()
 
 
 def read_config_object(path: Path) -> dict[str, Any]:
@@ -1861,7 +1863,7 @@ class TmuxWebtermApp:
             return
         bounded_lines = str(max(1, min(lines, 80)))
         if direction == "up":
-            tmux(["copy-mode", "-eu", "-t", session], timeout=1.0)
+            tmux(["copy-mode", "-e", "-t", session], timeout=1.0)
             command = "scroll-up"
         else:
             command = "scroll-down"
@@ -2577,6 +2579,7 @@ def html_page(sessions: list[str]) -> str:
     sessions_json = html.escape(json.dumps(sessions), quote=False)
     available_agents_json = html.escape(json.dumps(available_agent_commands()), quote=False)
     home_path_json = html.escape(json.dumps(str(Path.home())), quote=False)
+    server_hostname_json = html.escape(json.dumps(SERVER_HOSTNAME), quote=False)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2599,6 +2602,7 @@ def html_page(sessions: list[str]) -> str:
   --good: #52d273;
   --active-ring: rgba(245, 197, 66, 0.96);
   --GPU-green: #76b900;
+  --GPU-green-dark: #3f6f00;
   --auto-text: #071000;
   --auto-surface: #182512;
   --auto-surface-active: #25400f;
@@ -2633,6 +2637,26 @@ body {{
 .title {{
   font-size: 15px;
   font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}}
+.title .brand-blue {{
+  color: #4285f4;
+}}
+.title .brand-red {{
+  color: #ea4335;
+}}
+.title .brand-yellow {{
+  color: #fbbc05;
+}}
+.title .brand-green {{
+  color: #34a853;
+}}
+.title .brand-greenidia {{
+  color: var(--GPU-green);
+}}
+.title .brand-white {{
+  color: #f4f7fb;
 }}
 .sub {{
   color: var(--muted);
@@ -2702,11 +2726,6 @@ body {{
   outline: 1px dashed #f5c542;
   outline-offset: 3px;
 }}
-.needs-me-toggle.active {{
-  color: #10151f;
-  background: #f5c542;
-  border-color: #ffe58a;
-}}
 .notify-toggle.active {{
   color: #082014;
   background: #52d273;
@@ -2714,9 +2733,12 @@ body {{
 }}
 .session-button-wrap {{
   position: relative;
-  flex: 1 1 132px;
-  min-width: 62px;
-  max-width: 260px;
+  flex: 0 1 auto;
+  min-width: 54px;
+  max-width: 220px;
+}}
+.session-button-wrap.info {{
+  max-width: 112px;
 }}
 .session-button-wrap.add-session {{
   flex: 0 0 86px;
@@ -2734,11 +2756,12 @@ body {{
   z-index: 79;
 }}
 .session-button {{
-  width: 100%;
+  width: max-content;
+  max-width: 100%;
   min-width: 0;
   height: 29px;
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 4px;
   padding: 3px 7px;
@@ -2751,9 +2774,17 @@ body {{
   border-color: #2f394a;
   border-bottom-color: #465267;
 }}
+.session-button:not(.active):not(.auto):not(.needs-attention) {{
+  border-color: rgba(238, 243, 255, 0.72);
+  border-bottom-color: rgba(238, 243, 255, 0.92);
+  box-shadow: inset 0 0 0 1px rgba(238, 243, 255, 0.08);
+}}
+.session-button.info {{
+  min-width: 88px;
+}}
 .session-button:hover {{
   background: #1a2230;
-  border-color: #657084;
+  border-color: rgba(255, 255, 255, 0.92);
 }}
 .session-button.add-session {{
   display: flex;
@@ -2779,11 +2810,15 @@ body {{
   align-items: center;
   justify-content: center;
   border-radius: 5px;
-  color: var(--session-number-text, #f3f6fb);
-  background: var(--session-number-bg, #202938);
-  border: 1px solid #3c4657;
-  border-color: var(--session-number-border, #3c4657);
+  color: #14171d;
+  background: #f5c542;
+  border: 1px solid #ffe58a;
   font-weight: 700;
+}}
+.session-label-agent {{
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }}
 .session-button-text {{
   min-width: 0;
@@ -2867,33 +2902,32 @@ body {{
   opacity: 0.55;
 }}
 .session-button.active {{
-  --session-number-text: #111827;
-  --session-number-bg: #f5c542;
-  --session-number-border: #ffe58a;
-  color: var(--text);
-  background: #263044;
-  border-color: #7282a0;
-  border-bottom-color: var(--active-ring);
-  box-shadow: inset 0 -3px 0 var(--active-ring);
+  color: #081205;
+  background: var(--GPU-green);
+  border-color: #9be33d;
+  border-bottom-color: #9be33d;
+  box-shadow: none;
+}}
+.session-button.active .session-button-dir,
+.session-button.active .session-button-detail {{
+  color: #081205;
 }}
 .session-button.needs-attention:not(.active) {{
   border-color: #b98c24;
   box-shadow: inset 0 -2px 0 rgba(245, 197, 66, 0.45);
 }}
 .session-button.auto {{
-  --session-number-text: var(--auto-text);
-  --session-number-bg: var(--GPU-green);
-  --session-number-border: var(--auto-border);
-  color: var(--auto-muted-text);
-  background: var(--auto-surface);
-  border-color: var(--auto-border-muted);
+  color: var(--text);
+  background: #111722;
+  border-color: rgba(238, 243, 255, 0.72);
+  border-bottom-color: rgba(238, 243, 255, 0.92);
 }}
 .session-button.active.auto {{
-  color: var(--text);
-  background: #263044;
+  color: #081205;
+  background: var(--GPU-green);
   border-color: var(--GPU-green);
   border-bottom-color: var(--GPU-green);
-  box-shadow: inset 0 -3px 0 var(--GPU-green);
+  box-shadow: none;
 }}
 .session-button.info {{
   grid-template-columns: minmax(0, 1fr);
@@ -3267,8 +3301,16 @@ button:disabled:hover {{ border-color: var(--line); }}
   pointer-events: none;
 }}
 .panel.active-window .panel-head {{
-  background: #1e2430;
+  background: var(--GPU-green-dark);
+  color: #f4ffe8;
   box-shadow: none;
+}}
+.panel.active-window .panel-head .meta,
+.panel.active-window .panel-head .meta-branch,
+.panel.active-window .panel-head .meta-path,
+.panel.active-window .panel-head .session-button-dir,
+.panel.active-window .panel-head .session-button-detail {{
+  color: #f4ffe8;
 }}
 .panel-copy {{
   min-width: 0;
@@ -3280,7 +3322,7 @@ button:disabled:hover {{ border-color: var(--line); }}
   flex: 0 0 auto;
   min-width: 0;
   display: inline-grid;
-  grid-template-columns: auto auto auto auto auto;
+  grid-template-columns: auto auto auto auto;
   align-items: center;
   gap: 5px;
   height: 24px;
@@ -3292,11 +3334,6 @@ button:disabled:hover {{ border-color: var(--line); }}
 }}
 .panel-session-label .session-button-detail {{
   max-width: 58px;
-}}
-.panel-session-label.auto .session-button-number {{
-  --session-number-text: var(--auto-text);
-  --session-number-bg: var(--GPU-green);
-  --session-number-border: var(--auto-border);
 }}
 .panel-session-label.needs-attention .session-state-badge {{
   box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.26);
@@ -3792,7 +3829,7 @@ button:disabled:hover {{ border-color: var(--line); }}
 <body>
 <header class="topbar">
   <div class="brand">
-    <div class="title">YOLOMux</div>
+    <div class="title" aria-label="YOLOMux"><span class="brand-greenidia">YOLO</span><span class="brand-blue">M</span><span class="brand-red">u</span><span class="brand-yellow">x</span></div>
   </div>
   <div id="sessionButtons" class="session-buttons" aria-label="Sessions"></div>
   <div class="actions">
@@ -3802,7 +3839,6 @@ button:disabled:hover {{ border-color: var(--line); }}
       </svg>
       <span id="latencyNumber" class="latency-number">-- ms</span>
     </div>
-    <button id="needsMeToggle" class="needs-me-toggle" title="sort attention-needed sessions first">Needs me</button>
     <button id="notifyToggle" class="notify-toggle" title="notify when a session needs attention">Notify</button>
     <button id="refreshMeta">Refresh state</button>
     <span id="status" class="sub">starting</span>
@@ -3821,6 +3857,7 @@ button:disabled:hover {{ border-color: var(--line); }}
 let sessions = {sessions_json};
 const availableAgents = new Set({available_agents_json});
 const homePath = {home_path_json};
+const serverHostname = {server_hostname_json};
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
 const sessionButtons = document.getElementById('sessionButtons');
@@ -3828,7 +3865,6 @@ const statusEl = document.getElementById('status');
 const latencyMeter = document.getElementById('latencyMeter');
 const latencyLine = document.getElementById('latencyLine');
 const latencyNumber = document.getElementById('latencyNumber');
-const needsMeToggle = document.getElementById('needsMeToggle');
 const notifyToggle = document.getElementById('notifyToggle');
 const terminals = new Map();
 const panelNodes = new Map();
@@ -3848,9 +3884,10 @@ const metadataRefreshMs = 15000;
 const latencyRefreshMs = 3000;
 const latencySamplesMax = 24;
 const terminalFitBottomReservePx = 2;
+const terminalWheelScrollLines = 3;
+const terminalWheelPageFraction = 0.85;
 const maxSessionTabs = {MAX_YOLOMUX_SESSION_TABS};
 const layoutStorageKey = 'yolomux.layoutSlots.v1';
-const needsMeStorageKey = 'yolomux.needsMe.v1';
 const notifyStorageKey = 'yolomux.notifications.v1';
 const layoutSlotKeys = ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
 const infoItemId = '__info__';
@@ -3859,7 +3896,6 @@ let layoutItems = [infoItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {{}};
-let needsMeMode = localStorage.getItem(needsMeStorageKey) === '1';
 let notificationsEnabled = localStorage.getItem(notifyStorageKey) === '1';
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
@@ -4123,36 +4159,7 @@ function sessionStateHtml(state) {{
 }}
 
 function sessionTrayItems() {{
-  const items = visibleSessions.slice();
-  if (needsMeMode) {{
-    items.sort(compareSessionState);
-  }}
-  return [infoItemId, ...items];
-}}
-
-function compareSessionState(left, right) {{
-  const leftState = sessionState(left);
-  const rightState = sessionState(right);
-  if (leftState.priority !== rightState.priority) return leftState.priority - rightState.priority;
-  return visibleSessions.indexOf(left) - visibleSessions.indexOf(right);
-}}
-
-function renderNeedsMeToggle() {{
-  if (!needsMeToggle) return;
-  needsMeToggle.classList.toggle('active', needsMeMode);
-  needsMeToggle.setAttribute('aria-pressed', needsMeMode ? 'true' : 'false');
-  needsMeToggle.title = needsMeMode
-    ? 'show sessions in normal order'
-    : 'sort attention-needed sessions first';
-}}
-
-function toggleNeedsMe() {{
-  needsMeMode = !needsMeMode;
-  try {{
-    localStorage.setItem(needsMeStorageKey, needsMeMode ? '1' : '0');
-  }} catch (_) {{}}
-  renderNeedsMeToggle();
-  renderSessionButtons();
+  return [infoItemId, ...visibleSessions];
 }}
 
 function renderNotifyToggle() {{
@@ -4186,9 +4193,6 @@ async function toggleNotifications() {{
     localStorage.setItem(notifyStorageKey, notificationsEnabled ? '1' : '0');
   }} catch (_) {{}}
   renderNotifyToggle();
-  statusEl.innerHTML = notificationsEnabled
-    ? '<span class="ok">notifications on</span>'
-    : '<span class="ok">notifications off</span>';
 }}
 
 function shouldNotifyState(state) {{
@@ -4225,7 +4229,7 @@ function maybeNotifyState(session, state) {{
   notificationLastSent.set(key, now);
   const body = `${{state.reason}} · ${{projectDirName(session, transcriptMeta.sessions?.[session])}}`;
   try {{
-    const notification = new Notification(`YOLOMux: ${{sessionLabel(session)}} ${{state.label}}`, {{
+    const notification = new Notification(`${{serverHostname}}: ${{sessionLabel(session)}} ${{state.label}}`, {{
       body,
       tag: key,
     }});
@@ -4323,7 +4327,6 @@ function renderSessionButtons() {{
     event.stopPropagation();
     removeSessionFromLayout(payload.session);
   }};
-  renderNeedsMeToggle();
   for (const session of sessionTrayItems()) {{
     const active = activeSessions.includes(session);
     const isInfo = isInfoItem(session);
@@ -4332,7 +4335,7 @@ function renderSessionButtons() {{
     const agentKind = sessionAgentKind(session);
     const state = isInfo ? null : sessionState(session, info);
     const wrapper = document.createElement('div');
-    wrapper.className = 'session-button-wrap';
+    wrapper.className = `session-button-wrap ${{isInfo ? 'info' : ''}}`;
     wrapper.dataset.session = session;
     const button = document.createElement('button');
     button.className = `session-button ${{isInfo ? 'info' : ''}} ${{active ? 'active' : ''}} ${{auto ? 'auto' : ''}} ${{state?.attention ? 'needs-attention' : ''}}`;
@@ -4450,11 +4453,10 @@ function sessionButtonHtml(session, info, agentKind, state = sessionState(sessio
 function sessionLabelHtml(session, info, agentKind, state = sessionState(session, info)) {{
   const detail = sessionButtonDetail(info);
   const detailClass = detail ? pullRequestStatusClass(info?.project?.pull_request) : '';
-  return `<span class="session-button-number">${{esc(sessionLabel(session))}}</span>
+  return `<span class="session-label-agent"><span class="session-button-number">${{esc(sessionLabel(session))}}</span>${{agentIcon(agentKind)}}</span>
     ${{state ? sessionStateHtml(state) : '<span></span>'}}
     <span class="session-button-dir">${{esc(projectDirName(session, info))}}</span>
-    ${{detail ? `<span class="session-button-detail ${{detailClass}}">${{esc(detail)}}</span>` : '<span></span>'}}
-    ${{agentIcon(agentKind)}}`;
+    ${{detail ? `<span class="session-button-detail ${{detailClass}}">${{esc(detail)}}</span>` : '<span></span>'}}`;
 }}
 
 function sessionButtonDetail(info) {{
@@ -5066,14 +5068,10 @@ function enableTerminalScroll(session, term, container) {{
     if (event.deltaY === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    let lines = event.deltaY;
-    if (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL) {{
-      lines = event.deltaY / 40;
-    }} else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {{
-      lines = event.deltaY * Math.max(1, term.rows);
-    }}
-    const direction = Math.sign(lines);
-    const amount = Math.max(1, Math.ceil(Math.abs(lines)));
+    const direction = event.deltaY < 0 ? -1 : 1;
+    const amount = event.shiftKey
+      ? Math.max(1, Math.floor(term.rows * terminalWheelPageFraction))
+      : terminalWheelScrollLines;
     const item = terminals.get(session);
     if (item?.socket?.readyState === WebSocket.OPEN) {{
       queueTmuxScroll(item, direction * amount);
@@ -6489,7 +6487,6 @@ function refreshAll() {{
 
 async function boot() {{
   statusEl.textContent = 'loading YOLO status...';
-  renderNeedsMeToggle();
   renderNotifyToggle();
   await loadAutoStatuses();
   renderSessionButtons();
@@ -6531,7 +6528,6 @@ async function showContext(session) {{
 }}
 
 document.getElementById('refreshMeta').onclick = refreshAll;
-needsMeToggle.onclick = toggleNeedsMe;
 notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
 window.addEventListener('resize', () => {{
@@ -7293,7 +7289,9 @@ def parse_args() -> argparse.Namespace:
         help="tmux sessions, comma-separated or separate args. Default: current tmux sessions",
     )
     parser.add_argument(
+        "--dang",
         "--dangerously-yolo",
+        dest="dangerously_yolo",
         action="store_true",
         help="launch Claude/Codex sessions with their dangerous approval/sandbox bypass flags",
     )
