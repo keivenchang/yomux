@@ -104,16 +104,29 @@ def config_string(config: dict[str, Any], key: str, default: str) -> str:
     return value if isinstance(value, str) and value else default
 
 
+def current_auth_credentials() -> tuple[str, str]:
+    config = initialize_auth_config(AUTH_CONFIG_PATH)
+    username = config_string(config, "user", PLACEHOLDER_AUTH_USERNAME)
+    password = config_string(config, "password", PLACEHOLDER_AUTH_PASSWORD)
+    return username, password
+
+
+def placeholder_auth_active() -> bool:
+    username, password = current_auth_credentials()
+    return username == PLACEHOLDER_AUTH_USERNAME and password == PLACEHOLDER_AUTH_PASSWORD
+
+
+def auth_cookie_value(username: str, password: str) -> str:
+    return hmac.new(
+        AUTH_COOKIE_SECRET,
+        f"{username}:{password}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 AUTH_CONFIG = initialize_auth_config(AUTH_CONFIG_PATH)
-AUTH_USERNAME = config_string(AUTH_CONFIG, "user", PLACEHOLDER_AUTH_USERNAME)
-AUTH_PASSWORD = config_string(AUTH_CONFIG, "password", PLACEHOLDER_AUTH_PASSWORD)
 AUTH_COOKIE_NAME = "yolomux_auth"
 AUTH_COOKIE_SECRET = os.urandom(32)
-AUTH_COOKIE_VALUE = hmac.new(
-    AUTH_COOKIE_SECRET,
-    f"{AUTH_USERNAME}:{AUTH_PASSWORD}".encode("utf-8"),
-    hashlib.sha256,
-).hexdigest()
 XTERM_ASSET_ROOTS = [
     *(Path(item).expanduser() for item in os.environ.get("YOLOMUX_XTERM_ROOTS", "").split(os.pathsep) if item),
     Path(__file__).resolve().parent / "static" / "xterm",
@@ -5755,6 +5768,85 @@ boot();
 """
 
 
+def setup_auth_html() -> str:
+    auth_path = html.escape(str(AUTH_CONFIG_PATH))
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YOLOMux auth setup</title>
+<style>
+:root {{
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #171c25;
+  --text: #e4e8ee;
+  --muted: #9aa5b1;
+  --line: #303948;
+  --accent: #f5c542;
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}}
+main {{
+  width: min(720px, 100%);
+  padding: 24px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}}
+h1 {{
+  margin: 0 0 8px;
+  font-size: 22px;
+}}
+p {{
+  margin: 10px 0;
+  color: var(--muted);
+}}
+code {{
+  color: var(--text);
+  background: #0d1118;
+  border: 1px solid #273142;
+  border-radius: 5px;
+  padding: 2px 5px;
+}}
+pre {{
+  margin: 14px 0 0;
+  padding: 12px;
+  overflow: auto;
+  color: var(--text);
+  background: #0d1118;
+  border: 1px solid #273142;
+  border-radius: 6px;
+}}
+.accent {{ color: var(--accent); font-weight: 700; }}
+</style>
+</head>
+<body>
+<main>
+  <h1>Set up YOLOMux auth</h1>
+  <p>YOLOMux created <code>{auth_path}</code> with placeholder credentials.</p>
+  <p class="accent">Edit that JSON file before using this program.</p>
+  <pre>{{
+  "user": "your-user",
+  "password": "your-password"
+}}</pre>
+  <p>After saving the file, refresh this page. YOLOMux reads the latest JSON auth on each request.</p>
+</main>
+</body>
+</html>
+"""
+
+
 class Handler(BaseHTTPRequestHandler):
     server: "TmuxWebtermHTTPServer"
     protocol_version = "HTTP/1.1"
@@ -5762,31 +5854,37 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
 
-    def has_valid_basic_auth(self) -> bool:
+    def has_valid_basic_auth(self, username: str, password: str) -> bool:
         header = self.headers.get("Authorization", "")
-        expected = "Basic " + base64.b64encode(f"{AUTH_USERNAME}:{AUTH_PASSWORD}".encode("utf-8")).decode("ascii")
+        expected = "Basic " + base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
         return hmac.compare_digest(header, expected)
 
-    def has_valid_auth_cookie(self) -> bool:
+    def has_valid_auth_cookie(self, username: str, password: str) -> bool:
+        expected = auth_cookie_value(username, password)
         for item in self.headers.get("Cookie", "").split(";"):
             name, separator, value = item.strip().partition("=")
             if separator and name == AUTH_COOKIE_NAME:
-                return hmac.compare_digest(value, AUTH_COOKIE_VALUE)
+                return hmac.compare_digest(value, expected)
         return False
 
-    def auth_cookie_header(self) -> str:
-        return f"{AUTH_COOKIE_NAME}={AUTH_COOKIE_VALUE}; Path=/; HttpOnly; SameSite=Lax"
+    def auth_cookie_header(self, username: str, password: str) -> str:
+        return f"{AUTH_COOKIE_NAME}={auth_cookie_value(username, password)}; Path=/; HttpOnly; SameSite=Lax"
 
     def send_auth_cookie_if_needed(self) -> None:
-        if getattr(self, "_refresh_auth_cookie", False):
-            self.send_header("Set-Cookie", self.auth_cookie_header())
+        credentials = getattr(self, "_auth_cookie_credentials", None)
+        if credentials is not None:
+            self.send_header("Set-Cookie", self.auth_cookie_header(*credentials))
 
     def require_auth(self) -> bool:
-        self._refresh_auth_cookie = False
-        if self.has_valid_auth_cookie():
+        username, password = current_auth_credentials()
+        if username == PLACEHOLDER_AUTH_USERNAME and password == PLACEHOLDER_AUTH_PASSWORD:
+            self.write_html(setup_auth_html())
+            return False
+        self._auth_cookie_credentials = None
+        if self.has_valid_auth_cookie(username, password):
             return True
-        if self.has_valid_basic_auth():
-            self._refresh_auth_cookie = True
+        if self.has_valid_basic_auth(username, password):
+            self._auth_cookie_credentials = (username, password)
             return True
         if self.command in {"POST", "PUT", "PATCH"} and self.headers.get("Content-Length"):
             self.close_connection = True
@@ -6395,10 +6493,6 @@ def print_transcripts(app: TmuxWebtermApp) -> int:
     return 1 if payload["errors"] else 0
 
 
-def placeholder_auth_active() -> bool:
-    return AUTH_USERNAME == PLACEHOLDER_AUTH_USERNAME and AUTH_PASSWORD == PLACEHOLDER_AUTH_PASSWORD
-
-
 def print_placeholder_auth_error() -> None:
     print(
         f"You need to set {AUTH_CONFIG_PATH} before using this program.",
@@ -6415,17 +6509,23 @@ def main() -> int:
     sessions = unique_session_names(split_csv(args.sessions)) if args.sessions is not None else default_session_names()
     app = TmuxWebtermApp(sessions)
 
-    if placeholder_auth_active():
-        print_placeholder_auth_error()
-        return 2
-
     if args.print_transcripts:
+        if placeholder_auth_active():
+            print_placeholder_auth_error()
+            return 2
         return print_transcripts(app)
 
     server = TmuxWebtermHTTPServer((args.host, args.port), app)
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
     session_text = ", ".join(sessions) if sessions else "no tmux sessions"
     print(f"Serving YOLOMux - AI webterm on http://{url_host}:{args.port}/ for {session_text}")
+    if placeholder_auth_active():
+        print("=" * 78)
+        print(f"You need to set {AUTH_CONFIG_PATH} before using this program.")
+        print(f"Replace the placeholder {PLACEHOLDER_AUTH_USERNAME}/{PLACEHOLDER_AUTH_PASSWORD} credentials.")
+        print(f"YOLOMux is listening on http://{url_host}:{args.port}/ and will show this setup message in the browser.")
+        print("After saving auth.json, refresh the browser. No restart is required.")
+        print("=" * 78)
     restored_auto = app.restore_auto_approve()
     if restored_auto:
         print(f"Restored AUTO for {', '.join(restored_auto)}")
