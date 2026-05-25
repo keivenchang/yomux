@@ -3496,23 +3496,8 @@ button:disabled:hover {{ border-color: var(--line); }}
   border-radius: 6px;
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.34);
 }}
-.upload-result::after {{
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 3px;
-  background: #b98c24;
-  transform-origin: left center;
-  animation: upload-result-countdown 15s linear forwards;
-}}
 .upload-result[hidden] {{
   display: none;
-}}
-@keyframes upload-result-countdown {{
-  from {{ transform: scaleX(1); }}
-  to {{ transform: scaleX(0); }}
 }}
 .upload-result-text {{
   min-width: 0;
@@ -3522,9 +3507,26 @@ button:disabled:hover {{ border-color: var(--line); }}
   font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }}
 .upload-result-line {{
+  position: relative;
+  padding-bottom: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}}
+.upload-result-line::after {{
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: #b98c24;
+  transform-origin: left center;
+  animation: upload-result-countdown var(--upload-countdown-duration, 15s) linear forwards;
+}}
+@keyframes upload-result-countdown {{
+  from {{ transform: scaleX(1); }}
+  to {{ transform: scaleX(0); }}
 }}
 .upload-result button {{
   min-width: 28px;
@@ -3832,7 +3834,9 @@ const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
 const paneSnapshots = new Map();
-const uploadHideTimers = new Map();
+const uploadResultsBySession = new Map();
+const uploadCleanupTimers = new Map();
+let uploadResultSequence = 0;
 const pasteCounters = new Map();
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const transcriptPreviewMessages = 200;
@@ -5704,23 +5708,96 @@ function showUploadResult(session, payload, inserted) {{
   const label = files.length === 1 ? (files[0].saved_name || files[0].name || 'file') : `${{files.length}} files`;
   const target = payload.target_dir || '';
   const insertedText = inserted ? '; path inserted' : '; terminal not connected';
-  const fileLines = files.length
+  const expiresAt = Date.now() + 15000;
+  const newEntries = files.length
     ? files.map(file => {{
       const name = file.saved_name || file.name || 'file';
       const destination = pathBasename(file.path || target) || target;
-      return `<div class="upload-result-line">uploaded ${{esc(name)}} to ${{esc(destination)}}${{insertedText}}</div>`;
-    }}).join('')
-    : `<div class="upload-result-line">uploaded ${{esc(label)}} to ${{esc(pathBasename(target) || target)}}${{insertedText}}</div>`;
-  node.hidden = false;
-  node.innerHTML = `<div class="upload-result-text" title="${{esc(paths.join('\\n'))}}">${{fileLines}}</div>
+      return {{
+        id: ++uploadResultSequence,
+        text: `uploaded ${{name}} to ${{destination}}${{insertedText}}`,
+        path: file.path || '',
+        expiresAt,
+      }};
+    }})
+    : [{{
+      id: ++uploadResultSequence,
+      text: `uploaded ${{label}} to ${{pathBasename(target) || target}}${{insertedText}}`,
+      path: target,
+      expiresAt,
+    }}];
+  const existing = uploadResultsBySession.get(session) || [];
+  const active = [...existing.filter(entry => entry.expiresAt > Date.now()), ...newEntries].slice(-8);
+  uploadResultsBySession.set(session, active);
+  renderUploadResult(session);
+}}
+
+function getActiveUploadPaths(session) {{
+  const now = Date.now();
+  return (uploadResultsBySession.get(session) || [])
+    .filter(entry => entry.expiresAt > now)
+    .map(entry => entry.path)
+    .filter(Boolean);
+}}
+
+function ensureUploadResultShell(session, node) {{
+  let textNode = node.querySelector('.upload-result-text');
+  if (textNode) return textNode;
+  node.innerHTML = `<div class="upload-result-text"></div>
     <button type="button" data-upload-insert>Insert</button>
     <button type="button" data-upload-copy>Copy</button>
     <button type="button" data-upload-close aria-label="Hide upload status">x</button>`;
-  node.querySelector('[data-upload-insert]')?.addEventListener('click', () => insertUploadPaths(session, paths));
-  node.querySelector('[data-upload-copy]')?.addEventListener('click', () => copyUploadPaths(session, paths));
+  node.querySelector('[data-upload-insert]')?.addEventListener('click', () => insertUploadPaths(session, getActiveUploadPaths(session)));
+  node.querySelector('[data-upload-copy]')?.addEventListener('click', () => copyUploadPaths(session, getActiveUploadPaths(session)));
   node.querySelector('[data-upload-close]')?.addEventListener('click', () => hideUploadResult(session));
-  if (uploadHideTimers.has(session)) clearTimeout(uploadHideTimers.get(session));
-  uploadHideTimers.set(session, setTimeout(() => hideUploadResult(session), 15000));
+  textNode = node.querySelector('.upload-result-text');
+  return textNode;
+}}
+
+function scheduleUploadResultCleanup(session, active, now) {{
+  if (uploadCleanupTimers.has(session)) clearTimeout(uploadCleanupTimers.get(session));
+  const delay = Math.max(1, Math.min(...active.map(entry => entry.expiresAt - now)));
+  uploadCleanupTimers.set(session, window.setTimeout(() => {{
+    uploadCleanupTimers.delete(session);
+    renderUploadResult(session);
+  }}, delay));
+}}
+
+function renderUploadResult(session) {{
+  const node = document.getElementById(`upload-${{session}}`);
+  if (!node) return;
+  const now = Date.now();
+  const active = (uploadResultsBySession.get(session) || []).filter(entry => entry.expiresAt > now).slice(-8);
+  uploadResultsBySession.set(session, active);
+  if (!active.length) {{
+    node.hidden = true;
+    const textNode = node.querySelector('.upload-result-text');
+    if (textNode) textNode.replaceChildren();
+    if (uploadCleanupTimers.has(session)) {{
+      clearTimeout(uploadCleanupTimers.get(session));
+      uploadCleanupTimers.delete(session);
+    }}
+    return;
+  }}
+  const textNode = ensureUploadResultShell(session, node);
+  if (!textNode) return;
+  const paths = active.map(entry => entry.path).filter(Boolean);
+  node.hidden = false;
+  textNode.title = paths.join('\\n');
+  for (const child of Array.from(textNode.querySelectorAll('.upload-result-line'))) {{
+    const id = Number(child.dataset.uploadId || 0);
+    if (!active.some(entry => entry.id === id)) child.remove();
+  }}
+  for (const entry of active) {{
+    if (textNode.querySelector(`[data-upload-id="${{entry.id}}"]`)) continue;
+    const line = document.createElement('div');
+    line.className = 'upload-result-line';
+    line.dataset.uploadId = String(entry.id);
+    line.style.setProperty('--upload-countdown-duration', `${{Math.max(1, entry.expiresAt - now)}}ms`);
+    line.textContent = entry.text;
+    textNode.appendChild(line);
+  }}
+  scheduleUploadResultCleanup(session, active, now);
 }}
 
 async function copyUploadPaths(session, paths) {{
@@ -5733,12 +5810,17 @@ async function copyUploadPaths(session, paths) {{
 }}
 
 function hideUploadResult(session) {{
-  if (uploadHideTimers.has(session)) {{
-    clearTimeout(uploadHideTimers.get(session));
-    uploadHideTimers.delete(session);
+  uploadResultsBySession.delete(session);
+  if (uploadCleanupTimers.has(session)) {{
+    clearTimeout(uploadCleanupTimers.get(session));
+    uploadCleanupTimers.delete(session);
   }}
   const node = document.getElementById(`upload-${{session}}`);
-  if (node) node.hidden = true;
+  if (node) {{
+    const textNode = node.querySelector('.upload-result-text');
+    if (textNode) textNode.replaceChildren();
+    node.hidden = true;
+  }}
 }}
 
 function updatePanelSlot(panel, session, slot) {{
