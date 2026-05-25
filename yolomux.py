@@ -63,7 +63,9 @@ SUMMARY_CODEX_MODEL = os.environ.get("YOLOMUX_SUMMARY_MODEL", "gpt-5.5")
 SUMMARY_CODEX_EFFORT = os.environ.get("YOLOMUX_SUMMARY_EFFORT", "low")
 SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fast")
 CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux")))
+STATE_DIR = Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
 STATE_PATH = CONFIG_DIR / "state.json"
+EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
 AUTH_CONFIG_PATH = CONFIG_DIR / "auth.json"
 AUTH_CONFIG_DISPLAY_PATH = "~/.config/yolomux/auth.json"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -74,6 +76,7 @@ LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?!
 MAIN_BRANCHES = {"main", "master"}
 METADATA_CACHE_TTL_SECONDS = 300
 HTTP_METADATA_TIMEOUT_SECONDS = 2.0
+MAX_EVENT_TAIL_LINES = 500
 GITHUB_API_ROOT = "https://api.github.com"
 LINEAR_API_URL = "https://api.linear.app/graphql"
 DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/GPU/issue"
@@ -1310,9 +1313,10 @@ def compact_description(text: str | None, limit: int = 480) -> str | None:
 class AutoApproveWorker:
     MAX_RETRIES = 10
 
-    def __init__(self, target: str, interval: float = 0.5):
+    def __init__(self, target: str, interval: float = 0.5, event_callback: Any = None):
         self.target = target
         self.interval = interval
+        self.event_callback = event_callback
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name=f"auto-approve-{target}", daemon=True)
         self.lock = threading.Lock()
@@ -1351,11 +1355,20 @@ class AutoApproveWorker:
             for key, value in values.items():
                 setattr(self, key, value)
 
+    def emit_event(self, event_type: str, message: str, **details: Any) -> None:
+        if self.event_callback is None:
+            return
+        try:
+            self.event_callback(self.target, event_type, message, details)
+        except Exception:
+            return
+
     def run(self) -> None:
         try:
             module = auto_approve_module()
         except Exception as exc:
             self.update(error=str(exc), last_action="failed to load auto_approve_tmux.py")
+            self.emit_event("worker_error", "failed to load auto_approve_tmux.py", error=str(exc))
             return
 
         idle_since: float | None = None
@@ -1379,6 +1392,7 @@ class AutoApproveWorker:
                 self.stop_event.wait(wait_for)
             except Exception as exc:
                 self.update(error=str(exc), last_action="auto approve error")
+                self.emit_event("worker_error", "auto approve error", error=str(exc))
                 self.stop_event.wait(max_interval)
 
     def process_once(self, module: Any) -> bool:
@@ -1442,6 +1456,13 @@ class AutoApproveWorker:
             self.retry_count = 0
             self.blocked += 1
             self.update(last_action=f"blocked bash: {truncate_text(cmd, 180)}")
+            self.emit_event(
+                "approval_blocked",
+                "blocked bash command",
+                command=truncate_text(cmd, 1000),
+                risk="delete" if re.search(r"\brm\b|\brmdir\b", cmd) else "unknown",
+                prompt_type="bash",
+            )
             return True
 
         self.send_action(module, action)
@@ -1450,6 +1471,14 @@ class AutoApproveWorker:
         self.approved += 1
         desc = "bash command" if cmd is None else truncate_text(cmd, 180)
         self.update(last_action=f"approved bash: {desc}")
+        self.emit_event(
+            "approval_approved",
+            f"approved bash: {desc}",
+            command=truncate_text(cmd, 1000) if cmd else None,
+            risk="process",
+            prompt_type="bash",
+            action=action or "option1",
+        )
         self.stop_event.wait(3.0)
         return True
 
@@ -1460,6 +1489,14 @@ class AutoApproveWorker:
         self.approved += 1
         opt_label = "option2" if action == "option2" else "option1"
         self.update(last_action=f"approved {prompt_type}: {opt_label}")
+        risk = "edit" if prompt_type == "file" else "unknown"
+        self.emit_event(
+            "approval_approved",
+            f"approved {prompt_type}: {opt_label}",
+            prompt_type=prompt_type,
+            risk=risk,
+            action=opt_label,
+        )
         self.stop_event.wait(3.0)
         return True
 
@@ -1487,11 +1524,84 @@ def write_yolomux_state(state: dict[str, Any]) -> None:
     tmp_path.replace(STATE_PATH)
 
 
+def update_yolomux_state(updates: dict[str, Any]) -> None:
+    state = read_yolomux_state()
+    state.update(updates)
+    write_yolomux_state(state)
+
+
+def utc_event_time() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def safe_event_details(details: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in details.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            safe[key] = truncate_text(value, 2000) if isinstance(value, str) else value
+        elif isinstance(value, list):
+            safe[key] = [
+                truncate_text(item, 1000) if isinstance(item, str) else item
+                for item in value
+                if isinstance(item, (str, int, float, bool))
+            ][:20]
+        elif isinstance(value, dict):
+            safe[key] = {
+                str(item_key): truncate_text(item_value, 1000) if isinstance(item_value, str) else item_value
+                for item_key, item_value in value.items()
+                if isinstance(item_value, (str, int, float, bool))
+            }
+    return safe
+
+
+class EventLog:
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+
+    def append(self, session: str | None, event_type: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+        event = {
+            "time": utc_event_time(),
+            "session": session or "",
+            "type": event_type,
+            "message": truncate_text(message, 2000),
+            "details": safe_event_details(details or {}),
+        }
+        line = json.dumps(event, sort_keys=True, ensure_ascii=False)
+        with self.lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        return event
+
+    def tail(self, session: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
+        keep: collections.deque[dict[str, Any]] = collections.deque(maxlen=bounded_limit)
+        try:
+            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if session and event.get("session") not in {session, ""}:
+                        continue
+                    keep.append(event)
+        except OSError:
+            return []
+        return list(keep)
+
+
 class TmuxWebtermApp:
     def __init__(self, sessions: list[str]):
         self.sessions = sessions
         self.auto_workers: dict[str, AutoApproveWorker] = {}
         self.metadata_cache = MetadataCache()
+        self.event_log = EventLog(EVENT_LOG_PATH)
 
     def refresh_sessions(self) -> list[str]:
         sessions, error = list_tmux_session_names()
@@ -1508,7 +1618,39 @@ class TmuxWebtermApp:
 
     def persist_auto_sessions(self) -> None:
         enabled = sorted(name for name, worker in self.auto_workers.items() if worker.alive())
-        write_yolomux_state({"auto_approve_enabled": enabled})
+        update_yolomux_state({"auto_approve_enabled": enabled})
+
+    def log_event(self, session: str | None, event_type: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.event_log.append(session, event_type, message, details)
+
+    def log_auto_event(self, session: str, event_type: str, message: str, details: dict[str, Any]) -> None:
+        self.log_event(session, event_type, message, details)
+
+    def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
+        if session and session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
+        return {
+            "events": self.event_log.tail(session=session, limit=bounded_limit),
+            "session": session or "",
+            "limit": bounded_limit,
+        }, HTTPStatus.OK
+
+    def client_event(self, event: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        session = event.get("session")
+        if session is not None and session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        event_type = event.get("type")
+        message = event.get("message")
+        if not isinstance(event_type, str) or not event_type:
+            return {"error": "missing event type"}, HTTPStatus.BAD_REQUEST
+        if not isinstance(message, str) or not message:
+            return {"error": "missing event message"}, HTTPStatus.BAD_REQUEST
+        details = event.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        saved = self.log_event(session, event_type, message, details)
+        return {"ok": True, "event": saved}, HTTPStatus.OK
 
     def restore_auto_approve(self) -> list[str]:
         restored: list[str] = []
@@ -1775,6 +1917,12 @@ class TmuxWebtermApp:
             error = (result.stderr or result.stdout or "tmux new-session failed").strip()
             return {"session": session, "created": False, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
         self.refresh_sessions()
+        self.log_event(
+            session,
+            "session_started",
+            f"created {session} with {agent}",
+            {"agent": agent, "cwd": str(cwd), "command": agent_command(agent)},
+        )
         return {
             "session": session,
             "sessions": self.sessions,
@@ -1826,6 +1974,17 @@ class TmuxWebtermApp:
                     "size": len(upload.content),
                 }
             )
+        self.log_event(
+            session,
+            "upload",
+            f"uploaded {len(saved)} file{'s' if len(saved) != 1 else ''}",
+            {
+                "target_dir": str(target_dir),
+                "target_source": target_source,
+                "files": [item["path"] for item in saved],
+                "sizes": [item["size"] for item in saved],
+            },
+        )
         return {
             "session": session,
             "target_dir": str(target_dir),
@@ -1877,11 +2036,12 @@ class TmuxWebtermApp:
             exists = tmux(["has-session", "-t", session], timeout=3.0)
             if exists.returncode != 0:
                 return {"session": session, "enabled": False, "error": f"tmux session not found: {session}"}, HTTPStatus.NOT_FOUND
-            worker = AutoApproveWorker(session)
+            worker = AutoApproveWorker(session, event_callback=self.log_auto_event)
             self.auto_workers[session] = worker
             worker.start()
             if persist:
                 self.persist_auto_sessions()
+            self.log_event(session, "yolo_enabled", "YOLO enabled", {"persist": persist})
             return worker.status(), HTTPStatus.OK
 
         if existing:
@@ -1889,6 +2049,7 @@ class TmuxWebtermApp:
             self.auto_workers.pop(session, None)
             if persist:
                 self.persist_auto_sessions()
+            self.log_event(session, "yolo_disabled", "YOLO disabled", {"persist": persist})
         return {"target": session, "enabled": False, "approved": 0, "blocked": 0, "last_action": "off"}, HTTPStatus.OK
 
     def auto_approve_status(self, session: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
@@ -1897,6 +2058,7 @@ class TmuxWebtermApp:
         removed = False
         for name, worker in list(self.auto_workers.items()):
             if not worker.alive():
+                self.log_event(name, "worker_stopped", "YOLO worker stopped", worker.status())
                 self.auto_workers.pop(name, None)
                 removed = True
         if removed:
@@ -2425,11 +2587,14 @@ def html_page(sessions: list[str]) -> str:
   color-scheme: dark;
   --bg: #0f1115;
   --panel: #151922;
+  --panel-inactive: #202633;
   --panel2: #1e2430;
+  --panel2-inactive: #252c3a;
   --text: #e4e8ee;
   --muted: #9aa5b1;
   --line: #303948;
   --good: #52d273;
+  --active-ring: rgba(245, 197, 66, 0.96);
   --GPU-green: #76b900;
   --auto-text: #071000;
   --auto-surface: #182512;
@@ -2451,14 +2616,14 @@ body {{
   font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }}
 .topbar {{
-  height: 54px;
+  height: 38px;
   position: relative;
   z-index: 60;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 9px 12px;
+  gap: 8px;
+  padding: 3px 8px;
   border-bottom: 1px solid var(--line);
   background: #0b0d11;
 }}
@@ -2471,23 +2636,23 @@ body {{
   font-size: 12px;
 }}
 .brand {{
-  flex: 0 0 auto;
-  min-width: 230px;
+  flex: 0 1 auto;
+  min-width: 92px;
 }}
 .actions {{
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }}
 .latency-meter {{
-  height: 28px;
-  min-width: 92px;
+  height: 24px;
+  min-width: 82px;
   display: inline-grid;
   grid-template-columns: 44px auto;
   align-items: center;
   gap: 7px;
-  padding: 3px 7px;
+  padding: 2px 6px;
   color: var(--muted);
   border: 1px solid #273142;
   border-radius: 8px;
@@ -2497,8 +2662,8 @@ body {{
 .latency-meter.warn {{ color: #f5c542; }}
 .latency-meter.bad {{ color: var(--bad); }}
 .latency-graph {{
-  width: 44px;
-  height: 18px;
+  width: 40px;
+  height: 16px;
   display: block;
 }}
 .latency-line {{
@@ -2522,23 +2687,36 @@ body {{
   flex-wrap: nowrap;
   gap: 4px;
   height: 100%;
-  overflow-x: auto;
+  overflow-x: hidden;
   overflow-y: hidden;
-  padding-bottom: 2px;
-  scrollbar-width: thin;
+  padding-bottom: 0;
+  scrollbar-width: none;
+}}
+.session-buttons::-webkit-scrollbar {{
+  display: none;
 }}
 .session-buttons.drag-over {{
   outline: 1px dashed #f5c542;
   outline-offset: 3px;
 }}
+.needs-me-toggle.active {{
+  color: #10151f;
+  background: #f5c542;
+  border-color: #ffe58a;
+}}
+.notify-toggle.active {{
+  color: #082014;
+  background: #52d273;
+  border-color: #9befad;
+}}
 .session-button-wrap {{
   position: relative;
-  flex: 0 0 128px;
-  min-width: 76px;
-  max-width: 134px;
+  flex: 1 1 132px;
+  min-width: 62px;
+  max-width: 260px;
 }}
 .session-button-wrap.add-session {{
-  flex-basis: 86px;
+  flex: 0 0 86px;
   min-width: 76px;
   max-width: 96px;
 }}
@@ -2555,12 +2733,12 @@ body {{
 .session-button {{
   width: 100%;
   min-width: 0;
-  height: 31px;
+  height: 29px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 5px;
-  padding: 4px 7px;
+  gap: 4px;
+  padding: 3px 7px;
   white-space: nowrap;
   text-align: left;
   line-height: 1.05;
@@ -2619,7 +2797,7 @@ body {{
   font-weight: 700;
 }}
 .session-button-detail {{
-  max-width: 52px;
+  max-width: 86px;
   color: #9ea8b7;
   font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }}
@@ -2637,6 +2815,51 @@ body {{
 .session-button-detail.pr-status-closed {{
   color: #aeb8c7;
 }}
+.session-state-badge {{
+  min-width: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 3px;
+  border: 1px solid #384356;
+  border-radius: 5px;
+  color: #aeb8c7;
+  background: #161d29;
+  font: 9px/1.15 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  text-transform: uppercase;
+}}
+.session-state-needs-approval,
+.session-state-needs-input {{
+  color: #10151f;
+  background: #f5c542;
+  border-color: #ffe58a;
+}}
+.session-state-blocked,
+.session-state-disconnected {{
+  color: #fff3f4;
+  background: #5b1e28;
+  border-color: #ff6673;
+}}
+.session-state-tests-running {{
+  color: #10151f;
+  background: #67d7ff;
+  border-color: #a5e8ff;
+}}
+.session-state-ready-review {{
+  color: #082014;
+  background: #52d273;
+  border-color: #9befad;
+}}
+.session-state-working {{
+  color: #dce9ff;
+  background: #1c355f;
+  border-color: #4d7ed8;
+}}
+.session-state-done {{
+  color: #d9e5f5;
+  background: #273244;
+  border-color: #58667b;
+}}
 .session-button.dragging {{
   opacity: 0.55;
 }}
@@ -2647,8 +2870,12 @@ body {{
   color: var(--text);
   background: #263044;
   border-color: #7282a0;
-  border-bottom-color: rgba(245, 197, 66, 0.55);
-  box-shadow: inset 0 -3px 0 rgba(245, 197, 66, 0.55);
+  border-bottom-color: var(--active-ring);
+  box-shadow: inset 0 -3px 0 var(--active-ring);
+}}
+.session-button.needs-attention:not(.active) {{
+  border-color: #b98c24;
+  box-shadow: inset 0 -2px 0 rgba(245, 197, 66, 0.45);
 }}
 .session-button.auto {{
   --session-number-text: var(--auto-text);
@@ -2659,10 +2886,11 @@ body {{
   border-color: var(--auto-border-muted);
 }}
 .session-button.active.auto {{
-  color: var(--auto-active-text);
-  background: var(--auto-surface-active);
+  color: var(--text);
+  background: #263044;
   border-color: var(--GPU-green);
-  border-bottom-color: rgba(245, 197, 66, 0.55);
+  border-bottom-color: var(--GPU-green);
+  box-shadow: inset 0 -3px 0 var(--GPU-green);
 }}
 .session-button.info {{
   grid-template-columns: minmax(0, 1fr);
@@ -2906,12 +3134,12 @@ button:disabled {{
 }}
 button:disabled:hover {{ border-color: var(--line); }}
 .grid {{
-  height: calc(100vh - 54px);
+  height: calc(100vh - 38px);
   min-height: 0;
-  padding: 8px;
+  padding: 0 5px 5px;
   display: grid;
   grid-template-columns: repeat(2, minmax(360px, 1fr));
-  gap: 8px;
+  gap: 5px;
 }}
 .grid.full {{
   grid-template-columns: minmax(360px, 1fr);
@@ -2924,7 +3152,7 @@ button:disabled:hover {{ border-color: var(--line); }}
   min-height: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  gap: 8px;
+  gap: 5px;
 }}
 .layout-column.split {{
   grid-template-rows: repeat(2, minmax(0, 1fr));
@@ -2977,7 +3205,7 @@ button:disabled:hover {{ border-color: var(--line); }}
   height: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel);
+  background: var(--panel-inactive);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
@@ -3000,26 +3228,40 @@ button:disabled:hover {{ border-color: var(--line); }}
 .panel.expanded {{
   position: fixed;
   z-index: 30;
-  inset: 62px 8px 8px 8px;
+  inset: 42px 8px 8px 8px;
   border-radius: 8px;
 }}
 .panel-head {{
-  min-height: 36px;
+  min-height: 30px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
-  padding: 6px 9px;
+  gap: 7px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--line);
-  background: var(--panel2);
+  background: var(--panel2-inactive);
 }}
 .panel.active-window {{
   border-color: #465267;
+  background: var(--panel);
   box-shadow: none;
 }}
 .panel.typing-ready-window {{
+  --panel-ring-color: var(--active-ring);
   border-color: #465267;
-  box-shadow: 0 0 0 3px rgba(245, 197, 66, 0.96);
+  box-shadow: none;
+}}
+.panel.typing-ready-window.yolo-ready-window {{
+  --panel-ring-color: var(--GPU-green);
+}}
+.panel.typing-ready-window::after {{
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  border: 4px solid var(--panel-ring-color);
+  border-radius: inherit;
+  pointer-events: none;
 }}
 .panel.active-window .panel-head {{
   background: #1e2430;
@@ -3035,10 +3277,10 @@ button:disabled:hover {{ border-color: var(--line); }}
   flex: 0 0 auto;
   min-width: 0;
   display: inline-grid;
-  grid-template-columns: auto auto auto auto;
+  grid-template-columns: auto auto auto auto auto;
   align-items: center;
   gap: 5px;
-  height: 28px;
+  height: 24px;
   padding-right: 4px;
   white-space: nowrap;
 }}
@@ -3052,6 +3294,9 @@ button:disabled:hover {{ border-color: var(--line); }}
   --session-number-text: var(--auto-text);
   --session-number-bg: var(--GPU-green);
   --session-number-border: var(--auto-border);
+}}
+.panel-session-label.needs-attention .session-state-badge {{
+  box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.26);
 }}
 .panel-session-label .agent-icon {{
   margin-left: 0;
@@ -3147,44 +3392,23 @@ button:disabled:hover {{ border-color: var(--line); }}
 .tabs {{
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
+  gap: 3px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--line);
   background: #111722;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.34);
   overflow-x: auto;
 }}
 .tab {{
   border-radius: 5px;
-  padding: 5px 10px;
+  padding: 3px 9px;
   color: var(--muted);
   background: transparent;
   white-space: nowrap;
 }}
 .window-step {{
-  min-width: 30px;
-  padding: 5px 8px;
-}}
-.quick-switch {{
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
-  margin-left: auto;
-  padding-left: 6px;
-  border-left: 1px solid var(--line);
-}}
-.quick-switch-button {{
-  min-width: 24px;
-  padding: 5px 6px;
-  color: var(--muted);
-  background: transparent;
-}}
-.quick-switch-button.active {{
-  color: #181100;
-  background: #f5c542;
-  border-color: #ffe58a;
-  font-weight: 700;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22), 0 0 0 1px rgba(245, 197, 66, 0.35);
+  min-width: 26px;
+  padding: 3px 7px;
 }}
 .tab.active {{
   color: var(--text);
@@ -3211,10 +3435,25 @@ button:disabled:hover {{ border-color: var(--line); }}
 .terminal {{
   height: 100%;
   min-height: 0;
-  padding: 4px;
+  padding: 2px 2px 0;
   overflow: hidden;
-  border: 2px solid transparent;
-  border-radius: 6px;
+  border: 0;
+  border-radius: 0;
+}}
+.panel-inactive-overlay {{
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: block;
+  background: rgba(130, 145, 168, 0.28);
+  cursor: text;
+}}
+.panel-overlay-root {{
+  position: relative;
+}}
+.panel.focused-window .panel-inactive-overlay,
+.panel.typing-ready-window .panel-inactive-overlay {{
+  display: none;
 }}
 .terminal.typing-ready {{
   border-color: transparent;
@@ -3247,30 +3486,52 @@ button:disabled:hover {{ border-color: var(--line); }}
   top: 10px;
   z-index: 8;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   min-height: 34px;
-  padding: 6px 7px 6px 10px;
-  color: #dfe6ef;
-  background: #17202c;
-  border: 1px solid #4b5a70;
+  padding: 6px 7px 8px 10px;
+  color: #14171d;
+  background: #f8dfa3;
+  border: 1px solid #f5c542;
   border-radius: 6px;
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.34);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.34);
+}}
+.upload-result::after {{
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: #b98c24;
+  transform-origin: left center;
+  animation: upload-result-countdown 15s linear forwards;
 }}
 .upload-result[hidden] {{
   display: none;
+}}
+@keyframes upload-result-countdown {{
+  from {{ transform: scaleX(1); }}
+  to {{ transform: scaleX(0); }}
 }}
 .upload-result-text {{
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
+  white-space: normal;
+  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.upload-result-line {{
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }}
 .upload-result button {{
   min-width: 28px;
   padding: 4px 7px;
+  color: #14171d;
+  background: #fff3c6;
+  border-color: #b98c24;
 }}
 .tmux-snapshot {{
   height: 100%;
@@ -3359,6 +3620,44 @@ button:disabled:hover {{ border-color: var(--line); }}
   overflow-wrap: anywhere;
   color: #dfe6ef;
   font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.event-list {{
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+  background: #0f141d;
+  border-top: 1px solid var(--line);
+}}
+.event-item {{
+  display: grid;
+  grid-template-columns: 132px 118px minmax(0, 1fr);
+  gap: 8px;
+  padding: 6px 7px;
+  border-bottom: 1px solid #243044;
+  color: #d9e2ef;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.event-item:last-child {{
+  border-bottom: 0;
+}}
+.event-time,
+.event-type {{
+  color: #8f9bae;
+  white-space: nowrap;
+}}
+.event-type {{
+  text-transform: uppercase;
+}}
+.event-message {{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+.event-empty {{
+  padding: 12px;
+  color: var(--muted);
 }}
 .info-pane {{
   height: 100%;
@@ -3498,6 +3797,8 @@ button:disabled:hover {{ border-color: var(--line); }}
       </svg>
       <span id="latencyNumber" class="latency-number">-- ms</span>
     </div>
+    <button id="needsMeToggle" class="needs-me-toggle" title="sort attention-needed sessions first">Needs me</button>
+    <button id="notifyToggle" class="notify-toggle" title="notify when a session needs attention">Notify</button>
     <button id="refreshMeta">Refresh state</button>
     <span id="status" class="sub">starting</span>
   </div>
@@ -3522,12 +3823,15 @@ const statusEl = document.getElementById('status');
 const latencyMeter = document.getElementById('latencyMeter');
 const latencyLine = document.getElementById('latencyLine');
 const latencyNumber = document.getElementById('latencyNumber');
+const needsMeToggle = document.getElementById('needsMeToggle');
+const notifyToggle = document.getElementById('notifyToggle');
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
+const paneSnapshots = new Map();
 const uploadHideTimers = new Map();
 const pasteCounters = new Map();
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
@@ -3536,9 +3840,11 @@ const remoteResizeDelayMs = 220;
 const metadataRefreshMs = 15000;
 const latencyRefreshMs = 3000;
 const latencySamplesMax = 24;
-const terminalFitBottomReservePx = 6;
+const terminalFitBottomReservePx = 2;
 const maxSessionTabs = {MAX_YOLOMUX_SESSION_TABS};
 const layoutStorageKey = 'yolomux.layoutSlots.v1';
+const needsMeStorageKey = 'yolomux.needsMe.v1';
+const notifyStorageKey = 'yolomux.notifications.v1';
 const layoutSlotKeys = ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
 const infoItemId = '__info__';
 let visibleSessions = sessions.slice(0, maxSessionTabs);
@@ -3546,7 +3852,13 @@ let layoutItems = [infoItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {{}};
+let needsMeMode = localStorage.getItem(needsMeStorageKey) === '1';
+let notificationsEnabled = localStorage.getItem(notifyStorageKey) === '1';
+const sessionStateKeys = new Map();
+const notificationLastSent = new Map();
+let stateTrackingReady = false;
 let focusedTerminal = null;
+let focusedPanelItem = null;
 let dragSession = null;
 let dragSourceSlot = null;
 let openPopoverSession = null;
@@ -3558,13 +3870,28 @@ let latencySamples = [];
 
 function setFocusedTerminal(session) {{
   focusedTerminal = session;
+  focusedPanelItem = session;
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
+  updatePanelInactiveOverlays();
 }}
 
 function clearFocusedTerminal(session) {{
   if (focusedTerminal !== session) return;
   focusedTerminal = null;
+  focusedPanelItem = null;
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
+  updatePanelInactiveOverlays();
+}}
+
+function setFocusedPanelItem(item) {{
+  focusedPanelItem = item;
+  updatePanelInactiveOverlays();
+}}
+
+function updatePanelInactiveOverlays() {{
+  for (const [item, panel] of panelNodes.entries()) {{
+    panel.classList.toggle('focused-window', item === focusedPanelItem);
+  }}
 }}
 
 function esc(value) {{
@@ -3676,6 +4003,240 @@ function itemParam(item) {{
   return String(item);
 }}
 
+const stateDefs = {{
+  'needs-approval': {{label: 'Needs approval', short: 'APP', priority: 0, attention: true}},
+  'needs-input': {{label: 'Needs input', short: 'ASK', priority: 1, attention: true}},
+  blocked: {{label: 'Blocked', short: 'BLK', priority: 2, attention: true}},
+  disconnected: {{label: 'Disconnected', short: 'OFF', priority: 3, attention: true}},
+  'tests-running': {{label: 'Tests running', short: 'TEST', priority: 4, attention: false}},
+  'ready-review': {{label: 'Ready for review', short: 'PR', priority: 5, attention: false}},
+  working: {{label: 'Working', short: 'RUN', priority: 6, attention: false}},
+  idle: {{label: 'Idle', short: 'IDLE', priority: 7, attention: false}},
+  done: {{label: 'Done', short: 'DONE', priority: 8, attention: false}},
+}};
+
+function stateDef(key) {{
+  return stateDefs[key] || stateDefs.idle;
+}}
+
+function terminalDisconnected(session) {{
+  if (!activeSessions.includes(session)) return false;
+  const item = terminals.get(session);
+  if (!item) return false;
+  return item.socket?.readyState === WebSocket.CLOSED || item.socket?.readyState === WebSocket.CLOSING;
+}}
+
+function snapshotText(session) {{
+  return String(paneSnapshots.get(session)?.text || '');
+}}
+
+function bottomPaneText(session) {{
+  return snapshotText(session).split('\\n').slice(-45).join('\\n');
+}}
+
+function hasVisibleApprovalPrompt(text) {{
+  return /Do you want to proceed\\?|Would you like to run the following command\\?|Do you want to make this edit|Do you want to create|Do you want to allow/i.test(text);
+}}
+
+function hasVisibleChoicePrompt(text) {{
+  if (hasVisibleApprovalPrompt(text)) return false;
+  const lines = text.split('\\n').slice(-20);
+  const joined = lines.join('\\n');
+  const hasChoiceMarker = lines.some(line => /^\\s*(?:[❯›>●-]\\s*)?(?:\\d+\\.|\\d+:|\\[[a-zA-Z]\\]|[a-zA-Z]\\))\\s+\\S/.test(line));
+  const hasQuestion = /\\?\\s*$|choose|select|pick|which|what should|how should|confirm/i.test(joined);
+  const isRatingPrompt = /how is claude doing|rate this|feedback/i.test(joined);
+  return hasChoiceMarker && hasQuestion && !isRatingPrompt;
+}}
+
+function sessionState(session, info = transcriptMeta.sessions?.[session]) {{
+  if (!isTmuxSession(session)) return {{key: 'idle', ...stateDefs.idle, reason: 'not a tmux session'}};
+  const auto = autoApproveStates.get(session) || {{}};
+  const autoEnabled = auto.enabled === true;
+  const lastAction = String(auto.last_action || '').toLowerCase();
+  const visibleText = bottomPaneText(session);
+  const approvalPromptVisible = hasVisibleApprovalPrompt(visibleText);
+  const choicePromptVisible = hasVisibleChoicePrompt(visibleText);
+  const agents = Array.isArray(info?.agents) ? info.agents : [];
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const agentText = agents
+    .map(agent => `${{agent.kind || ''}} ${{agent.status || ''}} ${{agent.error || ''}}`)
+    .join(' ')
+    .toLowerCase();
+  const paneText = panes
+    .map(pane => `${{pane.command || ''}} ${{pane.title || ''}}`)
+    .join(' ')
+    .toLowerCase();
+  const pr = info?.project?.pull_request;
+  const prStatus = pullRequestStatusLabel(pr).toLowerCase();
+  const checksState = String(pr?.checks?.state || '').toLowerCase();
+
+  if (terminalDisconnected(session) || (!info && terminals.has(session))) {{
+    return stateValue('disconnected', 'terminal connection is closed');
+  }}
+  if (/blocked|denied|rejected/.test(lastAction)) {{
+    return stateValue('blocked', 'YOLO blocked an approval prompt');
+  }}
+  if (approvalPromptVisible && autoEnabled) {{
+    return stateValue('needs-approval', 'approval prompt is still visible with YOLO on');
+  }}
+  if (approvalPromptVisible || (!autoEnabled && /permission|approval|approve|confirm/.test(agentText))) {{
+    return stateValue('needs-approval', 'approval prompt is visible');
+  }}
+  if (choicePromptVisible) {{
+    return stateValue('needs-input', 'choice prompt is visible');
+  }}
+  if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {{
+    return stateValue('needs-input', 'agent is waiting for input');
+  }}
+  if (agents.some(agent => agent.error) || /blocked|error|failed|failure|stuck/.test(agentText)) {{
+    return stateValue('blocked', 'agent reported an error or blocker');
+  }}
+  if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {{
+    return stateValue('tests-running', 'test command is active');
+  }}
+  if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && (prStatus.includes('passing') || checksState === 'success')) {{
+    return stateValue('ready-review', 'PR checks are passing');
+  }}
+  if (/done|completed|complete|finished|success/.test(agentText)) {{
+    return stateValue('done', 'agent status is complete');
+  }}
+  if (agents.length || panes.some(pane => pane.active) || terminals.get(session)?.socket?.readyState === WebSocket.OPEN) {{
+    return stateValue('working', 'agent or active pane detected');
+  }}
+  return stateValue('idle', 'no active agent state detected');
+}}
+
+function stateValue(key, reason) {{
+  const def = stateDef(key);
+  return {{key, ...def, reason}};
+}}
+
+function sessionStateHtml(state) {{
+  return `<span class="session-state-badge session-state-${{esc(state.key)}}" title="${{esc(state.label)}}: ${{esc(state.reason)}}">${{esc(state.short)}}</span>`;
+}}
+
+function sessionTrayItems() {{
+  const items = visibleSessions.slice();
+  if (needsMeMode) {{
+    items.sort(compareSessionState);
+  }}
+  return [infoItemId, ...items];
+}}
+
+function compareSessionState(left, right) {{
+  const leftState = sessionState(left);
+  const rightState = sessionState(right);
+  if (leftState.priority !== rightState.priority) return leftState.priority - rightState.priority;
+  return visibleSessions.indexOf(left) - visibleSessions.indexOf(right);
+}}
+
+function renderNeedsMeToggle() {{
+  if (!needsMeToggle) return;
+  needsMeToggle.classList.toggle('active', needsMeMode);
+  needsMeToggle.setAttribute('aria-pressed', needsMeMode ? 'true' : 'false');
+  needsMeToggle.title = needsMeMode
+    ? 'show sessions in normal order'
+    : 'sort attention-needed sessions first';
+}}
+
+function toggleNeedsMe() {{
+  needsMeMode = !needsMeMode;
+  try {{
+    localStorage.setItem(needsMeStorageKey, needsMeMode ? '1' : '0');
+  }} catch (_) {{}}
+  renderNeedsMeToggle();
+  renderSessionButtons();
+}}
+
+function renderNotifyToggle() {{
+  if (!notifyToggle) return;
+  const supported = 'Notification' in window;
+  notifyToggle.disabled = !supported;
+  notifyToggle.classList.toggle('active', supported && notificationsEnabled && Notification.permission === 'granted');
+  notifyToggle.setAttribute('aria-pressed', notificationsEnabled ? 'true' : 'false');
+  notifyToggle.title = supported
+    ? 'notify when a session needs attention'
+    : 'browser notifications are not supported';
+}}
+
+async function toggleNotifications() {{
+  if (!('Notification' in window)) {{
+    statusEl.innerHTML = '<span class="err">browser notifications are not supported</span>';
+    return;
+  }}
+  if (!notificationsEnabled && Notification.permission !== 'granted') {{
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {{
+      notificationsEnabled = false;
+      try {{ localStorage.setItem(notifyStorageKey, '0'); }} catch (_) {{}}
+      renderNotifyToggle();
+      statusEl.innerHTML = '<span class="err">notifications blocked by browser</span>';
+      return;
+    }}
+  }}
+  notificationsEnabled = !notificationsEnabled;
+  try {{
+    localStorage.setItem(notifyStorageKey, notificationsEnabled ? '1' : '0');
+  }} catch (_) {{}}
+  renderNotifyToggle();
+  statusEl.innerHTML = notificationsEnabled
+    ? '<span class="ok">notifications on</span>'
+    : '<span class="ok">notifications off</span>';
+}}
+
+function shouldNotifyState(state) {{
+  return ['needs-approval', 'needs-input', 'blocked', 'disconnected', 'ready-review'].includes(state.key);
+}}
+
+function eventMessageForState(session, state) {{
+  return `${{sessionLabel(session)}} ${{state.label}}: ${{state.reason}}`;
+}}
+
+function trackSessionStateChanges() {{
+  for (const session of sessions.filter(isTmuxSession)) {{
+    const state = sessionState(session, transcriptMeta.sessions?.[session]);
+    const previous = sessionStateKeys.get(session);
+    sessionStateKeys.set(session, state.key);
+    if (!stateTrackingReady || previous == null || previous === state.key) continue;
+    postEvent(session, 'state_changed', eventMessageForState(session, state), {{
+      from: previous,
+      to: state.key,
+      reason: state.reason,
+    }});
+    maybeNotifyState(session, state);
+  }}
+  stateTrackingReady = true;
+}}
+
+function maybeNotifyState(session, state) {{
+  if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!shouldNotifyState(state)) return;
+  const key = `${{session}}:${{state.key}}`;
+  const now = Date.now();
+  const lastSent = notificationLastSent.get(key) || 0;
+  if (now - lastSent < 60_000) return;
+  notificationLastSent.set(key, now);
+  const body = `${{state.reason}} · ${{projectDirName(session, transcriptMeta.sessions?.[session])}}`;
+  try {{
+    const notification = new Notification(`YOLOMux: ${{sessionLabel(session)}} ${{state.label}}`, {{
+      body,
+      tag: key,
+    }});
+    notification.onclick = () => {{
+      window.focus();
+      selectSession(session);
+    }};
+    postEvent(session, 'notification_sent', eventMessageForState(session, state), {{
+      state: state.key,
+      reason: state.reason,
+    }});
+  }} catch (error) {{
+    postEvent(session, 'notification_error', `notification failed: ${{error}}`, {{
+      state: state.key,
+    }});
+  }}
+}}
+
 function updateSessionList(nextSessions) {{
   if (!Array.isArray(nextSessions)) return false;
   const next = [];
@@ -3755,30 +4316,33 @@ function renderSessionButtons() {{
     event.stopPropagation();
     removeSessionFromLayout(payload.session);
   }};
-  for (const session of layoutItems) {{
+  renderNeedsMeToggle();
+  for (const session of sessionTrayItems()) {{
     const active = activeSessions.includes(session);
     const isInfo = isInfoItem(session);
     const auto = autoApproveStates.get(session)?.enabled === true;
     const info = transcriptMeta.sessions?.[session];
     const agentKind = sessionAgentKind(session);
+    const state = isInfo ? null : sessionState(session, info);
     const wrapper = document.createElement('div');
     wrapper.className = 'session-button-wrap';
     wrapper.dataset.session = session;
     const button = document.createElement('button');
-    button.className = `session-button ${{isInfo ? 'info' : ''}} ${{active ? 'active' : ''}} ${{auto ? 'auto' : ''}}`;
+    button.className = `session-button ${{isInfo ? 'info' : ''}} ${{active ? 'active' : ''}} ${{auto ? 'auto' : ''}} ${{state?.attention ? 'needs-attention' : ''}}`;
     button.draggable = true;
-    button.innerHTML = isInfo ? 'Branches' : sessionButtonHtml(session, info, agentKind);
+    button.innerHTML = isInfo ? 'Branches' : sessionButtonHtml(session, info, agentKind, state);
     const autoText = auto ? '; YOLO on' : '';
     const agentText = agentKind ? `; ${{agentName(agentKind)}}` : '';
+    const stateText = state ? `; ${{state.label}}` : '';
     button.title = isInfo
       ? `Branches${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}`
-      : `${{sessionLabel(session)}}: ${{session}} ${{projectDirName(session, info)}}${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}${{agentText}}${{autoText}}`;
+      : `${{sessionLabel(session)}}: ${{session}} ${{projectDirName(session, info)}}${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}${{agentText}}${{autoText}}${{stateText}}`;
     button.addEventListener('click', () => selectSession(session));
     button.addEventListener('dragstart', event => startSessionDrag(event, session, null));
     button.addEventListener('dragend', endSessionDrag);
     wrapper.appendChild(button);
     if (!isInfo) {{
-      wrapper.insertAdjacentHTML('beforeend', sessionPopoverHtml(session, info, agentKind, auto));
+      wrapper.insertAdjacentHTML('beforeend', sessionPopoverHtml(session, info, agentKind, auto, state));
       bindSessionPopover(wrapper);
     }} else {{
       wrapper.addEventListener('pointerenter', () => closeOpenSessionPopover({{renderDeferred: false}}));
@@ -3872,14 +4436,15 @@ function cssEscape(value) {{
   return String(value).replace(/["\\\\]/g, '\\\\$&');
 }}
 
-function sessionButtonHtml(session, info, agentKind) {{
-  return sessionLabelHtml(session, info, agentKind);
+function sessionButtonHtml(session, info, agentKind, state = sessionState(session, info)) {{
+  return sessionLabelHtml(session, info, agentKind, state);
 }}
 
-function sessionLabelHtml(session, info, agentKind) {{
+function sessionLabelHtml(session, info, agentKind, state = sessionState(session, info)) {{
   const detail = sessionButtonDetail(info);
   const detailClass = detail ? pullRequestStatusClass(info?.project?.pull_request) : '';
   return `<span class="session-button-number">${{esc(sessionLabel(session))}}</span>
+    ${{state ? sessionStateHtml(state) : '<span></span>'}}
     <span class="session-button-dir">${{esc(projectDirName(session, info))}}</span>
     ${{detail ? `<span class="session-button-detail ${{detailClass}}">${{esc(detail)}}</span>` : '<span></span>'}}
     ${{agentIcon(agentKind)}}`;
@@ -3907,7 +4472,7 @@ function pathBasename(path) {{
   return parts[parts.length - 1] || '';
 }}
 
-function sessionPopoverHtml(session, info, agentKind, autoEnabled) {{
+function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {{
   const project = info?.project || {{}};
   const git = project.git;
   const pr = project.pull_request;
@@ -3916,6 +4481,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled) {{
   const title = `${{sessionLabel(session)}} · ${{projectDirName(session, info)}}`;
   const subtitle = git?.branch || pane?.current_path || 'no checkout detected';
   const rows = [];
+  rows.push(popoverRow('state', `${{sessionStateHtml(state)}} <span class="meta-muted">${{esc(state.reason)}}</span>`));
   rows.push(popoverRow('agent', agentKind ? `${{agentName(agentKind)}}${{autoEnabled ? ' · YOLO' : ''}}` : `${{autoEnabled ? 'YOLO' : 'not detected'}}`));
   if (git?.root) rows.push(popoverRow('repo', git.root));
   if (git?.branch) rows.push(popoverRow('branch', branchLinkHtml(git, git.branch)));
@@ -4141,16 +4707,6 @@ async function selectSession(session) {{
     return;
   }}
   await moveSessionToSlot(session, firstEmptySlot(), null);
-}}
-
-async function quickSwitchSession(fromSession, toSession) {{
-  if (!isTmuxSession(fromSession) || !isTmuxSession(toSession)) return;
-  if (fromSession === toSession) {{
-    removeSessionFromLayout(fromSession);
-    return;
-  }}
-  const slot = slotForSession(fromSession);
-  await moveSessionToSlot(toSession, slot || firstEmptySlot(), null, 'replace');
 }}
 
 function sessionAgentKind(session) {{
@@ -4429,8 +4985,14 @@ function focusPanel(session) {{
   const panel = document.getElementById(`panel-${{session}}`);
   if (!panel) return;
   panel.scrollIntoView({{block: 'nearest', inline: 'nearest'}});
-  if (isInfoItem(session)) return;
+  if (isInfoItem(session)) {{
+    focusedTerminal = null;
+    setFocusedPanelItem(session);
+    return;
+  }}
   activateTab(session, 'terminal');
+  setFocusedTerminal(session);
+  setTimeout(() => terminals.get(session)?.term?.focus?.(), 25);
 }}
 
 function fitTerminal(session) {{
@@ -4758,6 +5320,7 @@ function getOrCreatePanel(session) {{
 }}
 
 function bindPanelShell(panel, session) {{
+  installPanelInactiveOverlays(panel, session);
   const head = panel.querySelector('.panel-head');
   if (head) {{
     head.draggable = true;
@@ -4779,6 +5342,21 @@ function bindPanelShell(panel, session) {{
   }});
 }}
 
+function installPanelInactiveOverlays(panel, session) {{
+  for (const root of panel.querySelectorAll('.panel-overlay-root')) {{
+    if (root.querySelector(':scope > .panel-inactive-overlay')) continue;
+    const overlay = document.createElement('div');
+    overlay.className = 'panel-inactive-overlay';
+    overlay.title = `focus ${{itemLabel(session)}}`;
+    overlay.addEventListener('click', event => {{
+      event.preventDefault();
+      event.stopPropagation();
+      focusPanel(session);
+    }});
+    root.appendChild(overlay);
+  }}
+}}
+
 function createInfoPanel() {{
   const panel = document.createElement('article');
   panel.className = 'panel info-panel';
@@ -4794,7 +5372,7 @@ function createInfoPanel() {{
           <div id="meta-${{infoItemId}}" class="meta">all branches sorted by recent activity</div>
         </div>
       </div>
-      <div class="info-pane">
+      <div class="info-pane panel-overlay-root">
         <div class="transcript-head">All branches</div>
         <div id="info-content" class="info-list"></div>
       </div>`;
@@ -4825,23 +5403,29 @@ function createPanel(session) {{
         <button class="tab window-step" data-window-dir="next" data-window-session="${{esc(session)}}" title="next tmux window">&gt;</button>
         <button class="tab" data-tab="${{esc(session)}}" data-tab-name="transcript">Transcript</button>
         <button class="tab" data-tab="${{esc(session)}}" data-tab-name="summary">AI summary</button>
-        ${{quickSwitchButtonsHtml(session)}}
+        <button class="tab" data-tab="${{esc(session)}}" data-tab-name="events">YOLO log</button>
       </div>
-      <div id="terminal-pane-${{session}}" class="tab-pane active">
+      <div id="terminal-pane-${{session}}" class="tab-pane active panel-overlay-root">
         <div id="term-${{session}}" class="terminal"></div>
         <div id="upload-${{session}}" class="upload-result" hidden></div>
       </div>
-      <div id="transcript-pane-${{session}}" class="tab-pane">
+      <div id="transcript-pane-${{session}}" class="tab-pane panel-overlay-root">
         <div class="transcript">
           <div class="transcript-head">Transcript</div>
           <div id="transcript-${{session}}" class="transcript-preview">finding transcript...</div>
         </div>
       </div>
-      <div id="summary-pane-${{session}}" class="tab-pane">
+      <div id="summary-pane-${{session}}" class="tab-pane panel-overlay-root">
         <div class="summary">
           <div class="transcript-head">AI summary</div>
           <div id="summary-context-${{session}}" class="summary-context">loading session context...</div>
           <pre id="summary-${{session}}" class="summary-preview">click AI summary to generate a Codex summary of the last hour</pre>
+        </div>
+      </div>
+      <div id="events-pane-${{session}}" class="tab-pane panel-overlay-root">
+        <div class="summary">
+          <div class="transcript-head">YOLO log</div>
+          <div id="events-${{session}}" class="event-list">loading events...</div>
         </div>
       </div>`;
   bindPanelShell(panel, session);
@@ -4924,14 +5508,6 @@ function infoBranchRows() {{
   return rows;
 }}
 
-function quickSwitchButtonsHtml(currentSession) {{
-  const buttons = visibleSessions.map(session => {{
-    const active = session === currentSession ? ' active' : '';
-    return `<button class="quick-switch-button${{active}}" data-quick-session="${{esc(session)}}" title="show ${{esc(sessionLabel(session))}} here">${{sessionLabel(session)}}</button>`;
-  }}).join('');
-  return `<span class="quick-switch" role="group" aria-label="quick session switch">${{buttons}}</span>`;
-}}
-
 function bindPanelControls(panel, session) {{
   panel.querySelectorAll('[data-tab]').forEach(button => {{
     button.addEventListener('click', () => activateTab(button.dataset.tab, button.dataset.tabName));
@@ -4947,9 +5523,6 @@ function bindPanelControls(panel, session) {{
   panel.querySelector('[data-auto-session]')?.addEventListener('click', () => toggleAutoApprove(session));
   panel.querySelector('.meta')?.addEventListener('click', event => event.stopPropagation());
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
-  panel.querySelectorAll('[data-quick-session]').forEach(button => {{
-    button.addEventListener('click', () => quickSwitchSession(session, button.dataset.quickSession));
-  }});
   bindFileUpload(panel, session);
 }}
 
@@ -5075,8 +5648,6 @@ async function uploadFiles(session, fileList, options = {{}}) {{
   for (const file of files) {{
     formData.append('files', file, file.name || 'upload.bin');
   }}
-  const sourceLabel = options.source === 'paste' ? 'pasted image' : 'upload';
-  statusEl.innerHTML = `<span class="ok">uploading ${{files.length === 1 ? esc(files[0].name || sourceLabel) : `${{files.length}} files`}} to ${{esc(sessionLabel(session))}}</span>`;
   try {{
     const response = await fetch(`/api/upload?session=${{encodeURIComponent(session)}}`, {{
       method: 'POST',
@@ -5092,6 +5663,7 @@ async function uploadFiles(session, fileList, options = {{}}) {{
     activateTab(session, 'terminal');
     const inserted = insertUploadPaths(session, paths, {{silent: true}});
     showUploadResult(session, payload, inserted);
+    refreshOpenEventLogs();
     refreshTranscripts();
   }} catch (error) {{
     statusEl.innerHTML = `<span class="err">upload failed: ${{esc(error)}}</span>`;
@@ -5132,17 +5704,23 @@ function showUploadResult(session, payload, inserted) {{
   const label = files.length === 1 ? (files[0].saved_name || files[0].name || 'file') : `${{files.length}} files`;
   const target = payload.target_dir || '';
   const insertedText = inserted ? '; path inserted' : '; terminal not connected';
+  const fileLines = files.length
+    ? files.map(file => {{
+      const name = file.saved_name || file.name || 'file';
+      const destination = pathBasename(file.path || target) || target;
+      return `<div class="upload-result-line">uploaded ${{esc(name)}} to ${{esc(destination)}}${{insertedText}}</div>`;
+    }}).join('')
+    : `<div class="upload-result-line">uploaded ${{esc(label)}} to ${{esc(pathBasename(target) || target)}}${{insertedText}}</div>`;
   node.hidden = false;
-  node.innerHTML = `<div class="upload-result-text" title="${{esc(paths.join('\\n'))}}">uploaded ${{esc(label)}} to ${{esc(pathBasename(target) || target)}}${{insertedText}}</div>
+  node.innerHTML = `<div class="upload-result-text" title="${{esc(paths.join('\\n'))}}">${{fileLines}}</div>
     <button type="button" data-upload-insert>Insert</button>
     <button type="button" data-upload-copy>Copy</button>
     <button type="button" data-upload-close aria-label="Hide upload status">x</button>`;
   node.querySelector('[data-upload-insert]')?.addEventListener('click', () => insertUploadPaths(session, paths));
   node.querySelector('[data-upload-copy]')?.addEventListener('click', () => copyUploadPaths(session, paths));
   node.querySelector('[data-upload-close]')?.addEventListener('click', () => hideUploadResult(session));
-  statusEl.innerHTML = `<span class="ok">uploaded ${{esc(label)}} to ${{esc(target)}}${{inserted ? '; path inserted' : ''}}</span>`;
   if (uploadHideTimers.has(session)) clearTimeout(uploadHideTimers.get(session));
-  uploadHideTimers.set(session, setTimeout(() => hideUploadResult(session), 30000));
+  uploadHideTimers.set(session, setTimeout(() => hideUploadResult(session), 15000));
 }}
 
 async function copyUploadPaths(session, paths) {{
@@ -5168,6 +5746,7 @@ function updatePanelSlot(panel, session, slot) {{
   panel.classList.toggle('active-window', activeSessions.includes(session));
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
+  updatePanelInactiveOverlays();
 }}
 
 function syncPanelVisibility(previousActive = []) {{
@@ -5215,7 +5794,7 @@ function activateTab(session, name) {{
   document.querySelectorAll(`[data-tab="${{session}}"]`).forEach(button => {{
     button.classList.toggle('active', button.dataset.tabName === name);
   }});
-  for (const tabName of ['terminal', 'transcript', 'summary']) {{
+  for (const tabName of ['terminal', 'transcript', 'summary', 'events']) {{
     const pane = document.getElementById(`${{tabName}}-pane-${{session}}`);
     if (pane) pane.classList.toggle('active', tabName === name);
   }}
@@ -5229,6 +5808,7 @@ function activateTab(session, name) {{
     startTranscriptStream(session, {{scrollBottom: true}});
   }}
   if (name === 'summary') startSummaryStream(session);
+  if (name === 'events') refreshEventLog(session);
 }}
 
 function tmuxWindow(session, key, label) {{
@@ -5310,6 +5890,9 @@ function startTerminal(session) {{
     }}
     updateTypingIndicator(session);
     updateStatus();
+    renderSessionButtons();
+    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    trackSessionStateChanges();
   }};
   socket.onmessage = event => {{
     if (event.data instanceof ArrayBuffer) {{
@@ -5321,13 +5904,20 @@ function startTerminal(session) {{
   socket.onclose = () => {{
     if (item.manualClose || terminals.get(session) !== item) return;
     term.writeln(`\\r\\n\\x1b[31mdisconnected from ${{session}}\\x1b[0m`);
+    postEvent(session, 'terminal_disconnected', `terminal disconnected from ${{session}}`, {{}});
     clearFocusedTerminal(session);
     updateStatus();
+    renderSessionButtons();
+    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    trackSessionStateChanges();
     scheduleTerminalReconnect(session, item);
   }};
   socket.onerror = () => {{
     updateTypingIndicator(session);
     updateStatus();
+    renderSessionButtons();
+    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+    trackSessionStateChanges();
   }};
   term.onFocus?.(() => {{
     setFocusedTerminal(session);
@@ -5361,6 +5951,7 @@ function updateTypingIndicator(session) {{
   );
   container?.classList.toggle('typing-ready', ready);
   panel?.classList.toggle('typing-ready-window', ready);
+  panel?.classList.toggle('yolo-ready-window', ready && autoApproveStates.get(session)?.enabled === true);
 }}
 
 function updateStatus() {{
@@ -5410,6 +6001,8 @@ async function refreshAutoStatuses() {{
   bindClipboardPaste();
   renderSessionButtons();
   renderAutoApproveButtons();
+  trackSessionStateChanges();
+  refreshOpenEventLogs();
 }}
 
 async function loadAutoStatuses() {{
@@ -5450,6 +6043,7 @@ function renderAutoApproveButton(session, payload) {{
       : `YOLO off for ${{sessionLabel(session)}}`;
   }}
   updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  updateTypingIndicator(session);
 }}
 
 function startSummaryStream(session) {{
@@ -5509,12 +6103,29 @@ function stopSummaryStream(session) {{
   summaryStreams.delete(session);
 }}
 
+async function refreshPaneSnapshots(targetSessions = visibleSessions.filter(isTmuxSession)) {{
+  await Promise.all(targetSessions.map(async session => {{
+    try {{
+      const response = await fetch(`/api/tmux?session=${{encodeURIComponent(session)}}&lines=80`);
+      const payload = await response.json();
+      if (response.ok && typeof payload.text === 'string') {{
+        paneSnapshots.set(session, payload);
+      }} else {{
+        paneSnapshots.delete(session);
+      }}
+    }} catch (_) {{
+      paneSnapshots.delete(session);
+    }}
+  }}));
+}}
+
 async function refreshTranscripts() {{
   try {{
     const response = await fetch('/api/transcripts');
     transcriptMeta = await response.json();
     const previousActive = activeSessions.slice();
     const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+    await refreshPaneSnapshots();
     if (sessionsChanged) renderPanels(previousActive);
     renderSessionButtons();
     renderInfoPanel();
@@ -5538,6 +6149,8 @@ async function refreshTranscripts() {{
         preview.textContent = 'no agent transcript found';
       }}
     }}
+    trackSessionStateChanges();
+    refreshOpenEventLogs();
   }} catch (error) {{
     for (const session of activeSessions.filter(isTmuxSession)) {{
       const meta = document.getElementById(`meta-${{session}}`);
@@ -5553,9 +6166,10 @@ function updatePanelHeader(session, info) {{
   if (!tab) return;
   const agentKind = sessionAgentKind(session);
   const auto = autoApproveStates.get(session)?.enabled === true;
-  tab.className = `panel-session-label ${{auto ? 'auto' : ''}}`;
-  tab.innerHTML = sessionLabelHtml(session, info, agentKind);
-  tab.title = projectMetaTitle(session, info);
+  const state = sessionState(session, info);
+  tab.className = `panel-session-label ${{auto ? 'auto' : ''}} ${{state.attention ? 'needs-attention' : ''}}`;
+  tab.innerHTML = sessionLabelHtml(session, info, agentKind, state);
+  tab.title = `${{state.label}}: ${{state.reason}}\\n${{projectMetaTitle(session, info)}}`;
 }}
 
 function renderSummaryContext(session, info, agent) {{
@@ -5661,6 +6275,69 @@ function transcriptItemHtml(item) {{
   </div>`;
 }}
 
+function eventItemHtml(event) {{
+  const details = event.details && typeof event.details === 'object' ? event.details : {{}};
+  const detailText = Object.entries(details)
+    .filter(([, value]) => value != null && value !== '')
+    .map(([key, value]) => `${{key}}=${{Array.isArray(value) ? value.join(',') : value}}`)
+    .join(' · ');
+  const title = detailText ? `${{event.message || ''}}\\n${{detailText}}` : event.message || '';
+  return `<div class="event-item" title="${{esc(title)}}">
+    <span class="event-time">${{esc(formatEventTime(event.time))}}</span>
+    <span class="event-type">${{esc(event.type || 'event')}}</span>
+    <span class="event-message">${{esc(event.message || '')}}${{detailText ? ` · ${{esc(detailText)}}` : ''}}</span>
+  </div>`;
+}}
+
+function formatEventTime(value) {{
+  const date = new Date(value || 0);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString([], {{
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }});
+}}
+
+async function refreshEventLog(session) {{
+  const node = document.getElementById(`events-${{session}}`);
+  if (!node) return;
+  try {{
+    const response = await fetch(`/api/events?session=${{encodeURIComponent(session)}}&limit=120`);
+    const payload = await response.json();
+    if (!response.ok) {{
+      node.innerHTML = `<div class="event-empty">${{esc(payload.error || 'failed to load events')}}</div>`;
+      return;
+    }}
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    node.innerHTML = events.length
+      ? events.slice().reverse().map(eventItemHtml).join('')
+      : '<div class="event-empty">no events yet</div>';
+  }} catch (error) {{
+    node.innerHTML = `<div class="event-empty">failed to load events: ${{esc(error)}}</div>`;
+  }}
+}}
+
+function refreshOpenEventLogs() {{
+  for (const session of activeSessions.filter(isTmuxSession)) {{
+    const pane = document.getElementById(`events-pane-${{session}}`);
+    if (pane?.classList.contains('active')) refreshEventLog(session);
+  }}
+}}
+
+function postEvent(session, type, message, details = {{}}) {{
+  fetch('/api/event', {{
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{session, type, message, details}}),
+  }}).then(() => {{
+    refreshOpenEventLogs();
+  }}).catch(() => {{}});
+}}
+
 function normalizeRole(role) {{
   const value = String(role || 'message').toLowerCase();
   if (value.includes('tool_use')) return 'tool_use';
@@ -5727,6 +6404,8 @@ function refreshAll() {{
 
 async function boot() {{
   statusEl.textContent = 'loading YOLO status...';
+  renderNeedsMeToggle();
+  renderNotifyToggle();
   await loadAutoStatuses();
   renderSessionButtons();
   renderPanels();
@@ -5737,6 +6416,7 @@ async function boot() {{
   setInterval(refreshAutoStatuses, 3000);
   setInterval(refreshTranscripts, metadataRefreshMs);
   setInterval(updateLatency, latencyRefreshMs);
+  setInterval(refreshOpenEventLogs, 5000);
 }}
 
 function refreshVisibleTranscripts() {{
@@ -5766,6 +6446,8 @@ async function showContext(session) {{
 }}
 
 document.getElementById('refreshMeta').onclick = refreshAll;
+needsMeToggle.onclick = toggleNeedsMe;
+notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
 window.addEventListener('resize', () => {{
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
@@ -5968,6 +6650,16 @@ class Handler(BaseHTTPRequestHandler):
             payload, status = self.server.app.auto_approve_status(session)
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/events":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [None])[0]
+            try:
+                limit = int(qs.get("limit", ["100"])[0])
+            except ValueError:
+                limit = 100
+            payload, status = self.server.app.events_payload(session, limit)
+            self.write_json(payload, status=status)
+            return
         if parsed.path == "/api/summary":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
@@ -6014,7 +6706,31 @@ class Handler(BaseHTTPRequestHandler):
             payload, status = self.server.app.tmux_next_window(session)
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/event":
+            payload, status = self.handle_client_event()
+            self.write_json(payload, status=status)
+            return
         self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def handle_client_event(self) -> tuple[dict[str, Any], HTTPStatus]:
+        content_length_text = self.headers.get("Content-Length")
+        if not content_length_text:
+            return {"error": "missing Content-Length"}, HTTPStatus.LENGTH_REQUIRED
+        try:
+            content_length = int(content_length_text)
+        except ValueError:
+            return {"error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
+        if content_length > 64 * 1024:
+            self.close_connection = True
+            return {"error": "event is too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+        body = self.rfile.read(content_length)
+        try:
+            event = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return {"error": f"invalid JSON: {exc}"}, HTTPStatus.BAD_REQUEST
+        if not isinstance(event, dict):
+            return {"error": "event must be an object"}, HTTPStatus.BAD_REQUEST
+        return self.server.app.client_event(event)
 
     def handle_upload(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         content_length_text = self.headers.get("Content-Length")
@@ -6128,10 +6844,18 @@ class Handler(BaseHTTPRequestHandler):
         meta["summary_model"] = SUMMARY_CODEX_MODEL
         meta["summary_effort"] = SUMMARY_CODEX_EFFORT
         meta["summary_service_tier"] = SUMMARY_CODEX_SERVICE_TIER
+        self.server.app.log_event(
+            session,
+            "summary_started",
+            "AI summary started",
+            {"lookback_seconds": lookback_seconds, "model": SUMMARY_CODEX_MODEL},
+        )
         try:
             self.write_sse_json("meta", meta)
             self.run_codex_summary(prompt)
+            self.server.app.log_event(session, "summary_finished", "AI summary finished", {"model": SUMMARY_CODEX_MODEL})
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+            self.server.app.log_event(session, "summary_disconnected", "AI summary stream disconnected", {})
             return
 
     def run_codex_summary(self, prompt: str) -> None:
