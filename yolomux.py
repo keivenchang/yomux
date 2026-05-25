@@ -68,7 +68,7 @@ AUTH_CONFIG_PATH = CONFIG_DIR / "auth.json"
 AUTH_CONFIG_DISPLAY_PATH = "~/.config/yolomux/auth.json"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 AGENT_COMMANDS = {"claude", "codex", "term"}
-AUTO_APPROVE_SCRIPT = Path(__file__).resolve().parents[1] / "auto_approve_tmux.py"
+AUTO_APPROVE_SCRIPT = Path(__file__).resolve().parent / "auto_approve_tmux.py"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
 MAIN_BRANCHES = {"main", "master"}
@@ -132,7 +132,7 @@ XTERM_ASSET_ROOTS = [
     *(Path(item).expanduser() for item in os.environ.get("YOLOMUX_XTERM_ROOTS", "").split(os.pathsep) if item),
     Path(__file__).resolve().parent / "static" / "xterm",
     Path.cwd() / "node_modules" / "@xterm" / "xterm",
-    Path(__file__).resolve().parents[1] / "node_modules" / "@xterm" / "xterm",
+    Path(__file__).resolve().parent / "node_modules" / "@xterm" / "xterm",
     Path("/Applications") / "Cursor.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
     Path("/Applications") / "Visual Studio Code.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
     Path("/Applications") / "Visual Studio Code - Insiders.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
@@ -6135,7 +6135,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def run_codex_summary(self, prompt: str) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
+        repo_root = Path(__file__).resolve().parent
         args = [
             "codex",
             "exec",

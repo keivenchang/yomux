@@ -9,7 +9,7 @@ Browser tools for watching, driving, and summarizing tmux sessions.
 Run:
 
 ```bash
-python3 yolomux/yolomux.py
+python3 yolomux.py
 ```
 
 Then open:
@@ -21,18 +21,18 @@ http://localhost:9998/
 To expose it beyond localhost:
 
 ```bash
-python3 yolomux/yolomux.py --host 0.0.0.0 --port 9998
+python3 yolomux.py --host 0.0.0.0 --port 9998
 ```
 
 For a background development server, run it with `nohup`:
 
 ```bash
-setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux/yolomux.py --host 0.0.0.0 > /tmp/yolomux.log 2>&1 < /dev/null &
+setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux.py --host 0.0.0.0 > /tmp/yolomux.log 2>&1 < /dev/null &
 ```
 
 On first launch, YOLOMux creates `~/.config/yolomux/auth.json` with placeholder credentials `user` / `password`. While those placeholders are active, the server still listens on the configured port, prints a large stdout setup warning, and serves only an auth setup page telling the user to edit that JSON file. Authentication is read only from this JSON file. YOLOMux reads the latest JSON auth on each request, so after saving `auth.json`, refresh the browser; no server restart is required.
 
-YOLOMux serves xterm.js from a local editor install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `yolomux/static/xterm`, then common Cursor, VS Code, and Windsurf server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
+YOLOMux serves xterm.js from a local editor install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `static/xterm`, then common Cursor, VS Code, and Windsurf server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
 
 ## Webterm features
 
@@ -88,7 +88,7 @@ YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser
 Inspect the transcript mapping without starting the server:
 
 ```bash
-python3 yolomux/yolomux.py --print-transcripts
+python3 yolomux.py --print-transcripts
 ```
 
 ## Read-only wall
@@ -104,7 +104,7 @@ python3 yolomux/yolomux.py --print-transcripts
 Run:
 
 ```bash
-python3 yolomux/tmux_wall.py --host 0.0.0.0 --port 8765
+python3 tmux_wall.py --host 0.0.0.0 --port 8765
 ```
 
 Then open:
@@ -118,13 +118,13 @@ Without `--targets`, the server discovers panes from `dynamo1` through `dynamo4`
 Current target selection can be inspected without starting the server:
 
 ```bash
-python3 yolomux/tmux_wall.py --print-targets
+python3 tmux_wall.py --print-targets
 ```
 
 To override:
 
 ```bash
-python3 yolomux/tmux_wall.py --targets dynamo1:0.0,dynamo2:0.0,dynamo3:1.0,dynamo4:0.0 --slots 6
+python3 tmux_wall.py --targets dynamo1:0.0,dynamo2:0.0,dynamo3:1.0,dynamo4:0.0 --slots 6
 ```
 
 ## Wall API
