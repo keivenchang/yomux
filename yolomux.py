@@ -1597,8 +1597,9 @@ class EventLog:
 
 
 class TmuxWebtermApp:
-    def __init__(self, sessions: list[str]):
+    def __init__(self, sessions: list[str], dangerously_yolo: bool = False):
         self.sessions = sessions
+        self.dangerously_yolo = dangerously_yolo
         self.auto_workers: dict[str, AutoApproveWorker] = {}
         self.metadata_cache = MetadataCache()
         self.event_log = EventLog(EVENT_LOG_PATH)
@@ -1901,6 +1902,7 @@ class TmuxWebtermApp:
                 "sessions": self.sessions,
             }, HTTPStatus.CONFLICT
         cwd = session_workdir(session)
+        command = agent_command(agent, self.dangerously_yolo)
         result = tmux(
             [
                 "new-session",
@@ -1909,7 +1911,7 @@ class TmuxWebtermApp:
                 session,
                 "-c",
                 str(cwd),
-                agent_command(agent),
+                command,
             ],
             timeout=5.0,
         )
@@ -1921,7 +1923,7 @@ class TmuxWebtermApp:
             session,
             "session_started",
             f"created {session} with {agent}",
-            {"agent": agent, "cwd": str(cwd), "command": agent_command(agent)},
+            {"agent": agent, "cwd": str(cwd), "command": command, "dangerously_yolo": self.dangerously_yolo},
         )
         return {
             "session": session,
@@ -1929,7 +1931,8 @@ class TmuxWebtermApp:
             "agent": agent,
             "created": True,
             "cwd": str(cwd),
-            "command": agent_command(agent),
+            "command": command,
+            "dangerously_yolo": self.dangerously_yolo,
             "ok": True,
         }, HTTPStatus.OK
 
@@ -2107,12 +2110,12 @@ def session_workdir(session: str) -> Path:
     return repo_path if repo_path.is_dir() else Path.home()
 
 
-def agent_command(agent: str) -> str:
+def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
     if agent == "codex":
-        return "codex"
+        return "codex --dangerously-bypass-approvals-and-sandbox" if dangerously_yolo else "codex"
     if agent == "term":
         return os.environ.get("SHELL") or "bash"
-    return "claude --dangerously-skip-permissions"
+    return "claude --dangerously-skip-permissions" if dangerously_yolo else "claude"
 
 
 def available_agent_commands() -> list[str]:
@@ -7289,6 +7292,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="tmux sessions, comma-separated or separate args. Default: current tmux sessions",
     )
+    parser.add_argument(
+        "--dangerously-yolo",
+        action="store_true",
+        help="launch Claude/Codex sessions with their dangerous approval/sandbox bypass flags",
+    )
     parser.add_argument("--print-transcripts", action="store_true")
     return parser.parse_args()
 
@@ -7323,7 +7331,7 @@ def print_placeholder_auth_error() -> None:
 def main() -> int:
     args = parse_args()
     sessions = unique_session_names(split_csv(args.sessions)) if args.sessions is not None else default_session_names()
-    app = TmuxWebtermApp(sessions)
+    app = TmuxWebtermApp(sessions, dangerously_yolo=args.dangerously_yolo)
 
     if args.print_transcripts:
         if placeholder_auth_active():
@@ -7335,6 +7343,8 @@ def main() -> int:
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
     session_text = ", ".join(sessions) if sessions else "no tmux sessions"
     print(f"Serving YOLOMux on http://{url_host}:{args.port}/ for {session_text}")
+    if args.dangerously_yolo:
+        print("DANGEROUS YOLO mode is enabled: new Claude/Codex sessions bypass approval and sandbox protections.")
     if placeholder_auth_active():
         print("=" * 78)
         print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
