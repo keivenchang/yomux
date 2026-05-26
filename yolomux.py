@@ -45,6 +45,7 @@ from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from urllib.parse import parse_qs
 from urllib.parse import quote
 from urllib.parse import urlencode
@@ -800,22 +801,21 @@ def local_pull_request_by_sha(cwd: str) -> dict[str, dict[str, Any]]:
     return mapping
 
 
-def pull_request_number_from_subject(subject: str | None) -> int | None:
-    if not isinstance(subject, str):
+def regex_int(pattern: str, value: str | None) -> int | None:
+    if not isinstance(value, str):
         return None
-    match = re.search(r"\(#(\d+)\)\s*$", subject)
+    match = re.search(pattern, value)
     if not match:
         return None
     return int(match.group(1))
+
+
+def pull_request_number_from_subject(subject: str | None) -> int | None:
+    return regex_int(r"\(#(\d+)\)\s*$", subject)
 
 
 def pull_request_number_from_branch(branch: str | None) -> int | None:
-    if not isinstance(branch, str):
-        return None
-    match = re.fullmatch(r"(?:pr|pull-request)[-/](\d+)", branch)
-    if not match:
-        return None
-    return int(match.group(1))
+    return regex_int(r"^(?:pr|pull-request)[-/](\d+)$", branch)
 
 
 def parse_github_remote(remote_url: str) -> dict[str, str] | None:
@@ -900,11 +900,13 @@ def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache, 
         number = local_pr.get("number") if isinstance(local_pr, dict) else None
         if not isinstance(number, int):
             continue
-        branch["pull_request"] = github_pull_request_by_number(repo, number, cache, allow_network=allow_network) or fallback_pull_request(
+        branch["pull_request"] = pull_request_by_number_or_fallback(
             repo,
             number,
+            cache,
+            allow_network,
             "local-ref",
-            title=local_pr.get("title") if isinstance(local_pr.get("title"), str) else branch.get("subject"),
+            local_pr.get("title") if isinstance(local_pr.get("title"), str) else branch.get("subject"),
         )
 
 
@@ -955,22 +957,25 @@ def project_pull_request(git_data: dict[str, Any], cache: MetadataCache, allow_n
     head_sha = git_data.get("head_sha")
     local_pr = local_pull_request_info(cwd, head_sha) if isinstance(cwd, str) and isinstance(head_sha, str) else None
     if local_pr is not None:
-        number = local_pr["number"]
-        return github_pull_request_by_number(repo, number, cache, allow_network=allow_network) or fallback_pull_request(
+        return pull_request_by_number_or_fallback(
             repo,
-            number,
+            local_pr["number"],
+            cache,
+            allow_network,
             "local-ref",
-            title=local_pr.get("title"),
+            local_pr.get("title"),
         )
 
     head_subject = str(git_data.get("head") or "")
     subject_pr_number = pull_request_number_from_subject(head_subject)
     if subject_pr_number is not None:
-        return github_pull_request_by_number(repo, subject_pr_number, cache, allow_network=allow_network) or fallback_pull_request(
+        return pull_request_by_number_or_fallback(
             repo,
             subject_pr_number,
+            cache,
+            allow_network,
             "head-subject",
-            title=head_subject,
+            head_subject,
         )
 
     branch = git_data.get("branch")
@@ -978,17 +983,35 @@ def project_pull_request(git_data: dict[str, Any], cache: MetadataCache, allow_n
         return None
     branch_pr_number = pull_request_number_from_branch(branch)
     if branch_pr_number is not None:
-        return github_pull_request_by_number(repo, branch_pr_number, cache, allow_network=allow_network) or fallback_pull_request(
+        return pull_request_by_number_or_fallback(
             repo,
             branch_pr_number,
+            cache,
+            allow_network,
             "branch-name",
-            title=str(git_data.get("head") or branch),
+            str(git_data.get("head") or branch),
         )
     return github_pull_request_by_branch(repo, branch, cache, allow_network=allow_network)
 
 
 def local_pull_request_info(cwd: str, head_sha: str) -> dict[str, Any] | None:
     return local_pull_request_by_sha(cwd).get(head_sha)
+
+
+def pull_request_by_number_or_fallback(
+    repo: dict[str, str],
+    number: int,
+    cache: MetadataCache,
+    allow_network: bool,
+    source: str,
+    title: str | None = None,
+) -> dict[str, Any]:
+    return github_pull_request_by_number(repo, number, cache, allow_network=allow_network) or fallback_pull_request(
+        repo,
+        number,
+        source,
+        title=title,
+    )
 
 
 def fallback_pull_request(repo: dict[str, str], number: int, source: str, title: str | None = None) -> dict[str, Any]:
@@ -1013,6 +1036,22 @@ def github_pull_request_url(repo: dict[str, str], number: int) -> str:
     return f"{repo['url']}/pull/{number}"
 
 
+def cached_metadata(
+    cache: MetadataCache,
+    key: str,
+    allow_network: bool,
+    load: Callable[[], Any],
+) -> Any:
+    cached = cache.get(key)
+    if cached is not _CACHE_MISS:
+        return cached
+    if not allow_network:
+        return None
+    value = load()
+    cache.set(key, value)
+    return value
+
+
 def github_pull_request_by_number(
     repo: dict[str, str],
     number: int,
@@ -1020,18 +1059,16 @@ def github_pull_request_by_number(
     allow_network: bool = True,
 ) -> dict[str, Any] | None:
     key = f"github-pr:{repo['owner']}/{repo['name']}:{number}"
-    cached = cache.get(key)
-    if cached is not _CACHE_MISS:
-        return cached
-    if not allow_network:
-        return None
-    path = f"/repos/{quote(repo['owner'])}/{quote(repo['name'])}/pulls/{number}"
-    payload = github_api_get(path)
-    value = normalize_github_pull_request(payload, repo, "github-api") if isinstance(payload, dict) else None
-    if value is not None:
-        enrich_github_pull_request(value, repo, cache)
-    cache.set(key, value)
-    return value
+
+    def load() -> dict[str, Any] | None:
+        path = f"/repos/{quote(repo['owner'])}/{quote(repo['name'])}/pulls/{number}"
+        payload = github_api_get(path)
+        value = normalize_github_pull_request(payload, repo, "github-api") if isinstance(payload, dict) else None
+        if value is not None:
+            enrich_github_pull_request(value, repo, cache)
+        return value
+
+    return cached_metadata(cache, key, allow_network, load)
 
 
 def github_pull_request_by_branch(
@@ -1041,25 +1078,23 @@ def github_pull_request_by_branch(
     allow_network: bool = True,
 ) -> dict[str, Any] | None:
     key = f"github-pr-branch:{repo['owner']}/{repo['name']}:{branch}"
-    cached = cache.get(key)
-    if cached is not _CACHE_MISS:
-        return cached
-    if not allow_network:
-        return None
-    query = urlencode({"head": f"{repo['owner']}:{branch}", "state": "all", "per_page": "10"})
-    payload = github_api_get(f"/repos/{quote(repo['owner'])}/{quote(repo['name'])}/pulls?{query}")
-    value = None
-    if isinstance(payload, list):
-        pull_requests = [item for item in payload if isinstance(item, dict)]
-        selected = next((item for item in pull_requests if item.get("state") == "open"), None)
-        if selected is None and pull_requests:
-            selected = pull_requests[0]
-        if selected is not None:
-            value = normalize_github_pull_request(selected, repo, "github-api")
-            if value is not None:
-                enrich_github_pull_request(value, repo, cache)
-    cache.set(key, value)
-    return value
+
+    def load() -> dict[str, Any] | None:
+        query = urlencode({"head": f"{repo['owner']}:{branch}", "state": "all", "per_page": "10"})
+        payload = github_api_get(f"/repos/{quote(repo['owner'])}/{quote(repo['name'])}/pulls?{query}")
+        value = None
+        if isinstance(payload, list):
+            pull_requests = [item for item in payload if isinstance(item, dict)]
+            selected = next((item for item in pull_requests if item.get("state") == "open"), None)
+            if selected is None and pull_requests:
+                selected = pull_requests[0]
+            if selected is not None:
+                value = normalize_github_pull_request(selected, repo, "github-api")
+                if value is not None:
+                    enrich_github_pull_request(value, repo, cache)
+        return value
+
+    return cached_metadata(cache, key, allow_network, load)
 
 
 def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str], source: str) -> dict[str, Any] | None:
@@ -5435,20 +5470,40 @@ function cssEscape(value) {{
   return String(value).replace(/["\\\\]/g, '\\\\$&');
 }}
 
-function sessionButtonHtml(session, info, agentKind, state = sessionState(session, info), auto = false) {{
+function metaJoin(parts) {{
+  return parts.filter(Boolean).join('<span class="meta-sep"> · </span>');
+}}
+
+function sessionNumberNameHtml(session) {{
   const label = sessionLabel(session);
   const name = String(session);
   const nameHtml = name && name !== label ? `<span class="session-button-name">${{esc(name)}}</span>` : '';
-  const autoHtml = auto ? '<span class="session-yolo-marker" title="YOLO enabled">YO</span>' : '';
+  return `<span class="session-button-number">${{esc(label)}}</span>${{nameHtml}}`;
+}}
+
+function yoloMarkerHtml(session, auto, options = {{}}) {{
+  if (!auto && options.enabledOnly !== false) return '';
+  const classes = ['session-yolo-marker'];
+  if (!auto) classes.push('inactive');
+  const toggleAttr = options.toggle ? ` data-auto-session="${{esc(session)}}"` : '';
+  const title = options.toggle ? `YOLO ${{auto ? 'on' : 'off'}} for ${{sessionLabel(session)}}` : 'YOLO enabled';
+  return `<span class="${{esc(classes.join(' '))}}"${{toggleAttr}} title="${{esc(title)}}">YO</span>`;
+}}
+
+function pullRequestCompactBadgesHtml(pr) {{
+  const statusHtml = pullRequestStatusIndicatorHtml(pr);
+  const ciHtml = pullRequestCiIndicatorHtml(pr);
+  const prHtml = statusHtml || ciHtml ? '' : pullRequestPrIndicatorHtml(pr);
+  return [statusHtml, prHtml, ciHtml].filter(Boolean).join('');
+}}
+
+function sessionButtonHtml(session, info, agentKind, state = sessionState(session, info), auto = false) {{
   const stateHtml = state ? sessionStateHtml(state) : '';
   const pr = info?.project?.pull_request;
-  const statusHtml = pullRequestStatusIndicatorHtml(pr);
-  const prHtml = pullRequestPrIndicatorHtml(pr);
-  const ciHtml = pullRequestCiIndicatorHtml(pr);
   const desc = sessionTabDescription(session, info);
   const detailHtml = desc ? `<span class="session-button-dir">${{esc(desc)}}</span>` : '';
-  return `<span class="session-button-prefix"><span class="session-button-number">${{esc(label)}}</span>${{nameHtml}}${{autoHtml}}</span>
-    <span class="session-button-text">${{stateHtml}}${{statusHtml}}${{prHtml}}${{ciHtml}}${{detailHtml}}</span>`;
+  return `<span class="session-button-prefix">${{sessionNumberNameHtml(session)}}${{yoloMarkerHtml(session, auto)}}</span>
+    <span class="session-button-text">${{stateHtml}}${{pullRequestCompactBadgesHtml(pr)}}${{detailHtml}}</span>`;
 }}
 
 function infoButtonHtml() {{
@@ -5465,17 +5520,9 @@ function sessionLabelHtml(session, info, agentKind, state = sessionState(session
     ${{detail ? `<span class="session-button-detail ${{detailClass}}">${{esc(detail)}}</span>` : ''}}`;
 }}
 
-function panelHeaderNumberHtml(session) {{
-  const label = sessionLabel(session);
-  const name = String(session);
-  const nameHtml = name && name !== label ? `<span class="session-button-name">${{esc(name)}}</span>` : '';
-  return `<span class="session-button-number">${{esc(label)}}</span>${{nameHtml}}`;
-}}
-
 function panelHeaderStateHtml(session, state, info = null, auto = false) {{
   const pr = info?.project?.pull_request;
-  const autoHtml = `<span class="session-yolo-marker ${{auto ? '' : 'inactive'}}" data-auto-session="${{esc(session)}}" title="YOLO ${{auto ? 'on' : 'off'}} for ${{esc(sessionLabel(session))}}">YO</span>`;
-  return `${{panelHeaderNumberHtml(session)}}${{autoHtml}}${{state ? sessionStateHtml(state) : ''}}${{pullRequestStatusIndicatorHtml(pr)}}${{pullRequestPrIndicatorHtml(pr)}}${{pullRequestCiIndicatorHtml(pr)}}`;
+  return `${{sessionNumberNameHtml(session)}}${{yoloMarkerHtml(session, auto, {{enabledOnly: false, toggle: true}})}}${{state ? sessionStateHtml(state) : ''}}${{pullRequestCompactBadgesHtml(pr)}}`;
 }}
 
 function sessionButtonDetail(info) {{
@@ -5553,7 +5600,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     const prParts = [pullRequestLinkHtml(pr), pullRequestAuthorHtml(pr)].filter(Boolean);
     const checks = pullRequestChecksHtml(pr);
     if (checks) prParts.push(checks);
-    rows.push(popoverRow('PR', prParts.join('<span class="meta-sep"> · </span>')));
+    rows.push(popoverRow('PR', metaJoin(prParts)));
     prDesc = pullRequestDescriptionInlineHtml(pr);
   }}
   let linearValue = '';
@@ -5642,7 +5689,7 @@ function linearInlineHtml(issues) {{
     const state = issue.state ? `<span class="meta-muted"> ${{esc(issue.state)}}</span>` : '';
     parts.push(`${{link}}${{state}}`);
   }}
-  return parts.join('<span class="meta-sep"> · </span>');
+  return metaJoin(parts);
 }}
 
 function linearDescriptionsInlineHtml(issues) {{
@@ -5989,7 +6036,6 @@ function pullRequestStatusIndicatorHtml(pr) {{
 
 function pullRequestPrIndicatorHtml(pr) {{
   if (!pr?.number) return '';
-  if (pullRequestStatusIndicatorHtml(pr) || pullRequestCiIndicatorHtml(pr)) return '';
   return '<span class="ci-indicator pr-indicator">PR</span>';
 }}
 
@@ -6025,7 +6071,7 @@ function pullRequestChecksHtml(pr) {{
   if (failing.length) parts.push(`<span class="meta-muted">failing: ${{esc(shortText(failing.join(', '), 180))}}</span>`);
   if (pending.length) parts.push(`<span class="meta-muted">pending: ${{esc(shortText(pending.join(', '), 180))}}</span>`);
   if (Number.isFinite(checks.total)) parts.push(`<span class="meta-muted">${{checks.total}} checks</span>`);
-  return parts.join('<span class="meta-sep"> · </span>');
+  return metaJoin(parts);
 }}
 
 function panelFullPath(session, info) {{
@@ -6048,7 +6094,7 @@ function projectMetaHtml(session, info) {{
   if (fullPath) parts.push(`<span class="meta-path">${{esc(fullPath)}}</span>`);
   if (!git) {{
     parts.push('<span class="meta-muted">no git checkout detected</span>');
-    return parts.join('<span class="meta-sep"> · </span>');
+    return metaJoin(parts);
   }}
   if (git.branch) parts.push(`<span class="meta-branch">${{esc(shortBranch(git.branch))}}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">behind ${{git.behind}}</span>`);
@@ -6067,7 +6113,7 @@ function projectMetaHtml(session, info) {{
   }}
   const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
   if (desc) parts.push(`<span class="meta-desc">${{esc(shortText(desc, 160))}}</span>`);
-  return parts.length ? parts.join('<span class="meta-sep"> · </span>') : '<span class="meta-muted">git checkout detected</span>';
+  return parts.length ? metaJoin(parts) : '<span class="meta-muted">git checkout detected</span>';
 }}
 
 function projectMetaTitle(session, info) {{
