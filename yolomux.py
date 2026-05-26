@@ -212,7 +212,10 @@ class UploadedFile:
 
 
 def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(args, 124, exc.stdout or "", exc.stderr or f"timed out after {timeout}s")
 
 
 def tmux(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -797,6 +800,24 @@ def local_pull_request_by_sha(cwd: str) -> dict[str, dict[str, Any]]:
     return mapping
 
 
+def pull_request_number_from_subject(subject: str | None) -> int | None:
+    if not isinstance(subject, str):
+        return None
+    match = re.search(r"\(#(\d+)\)\s*$", subject)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def pull_request_number_from_branch(branch: str | None) -> int | None:
+    if not isinstance(branch, str):
+        return None
+    match = re.fullmatch(r"(?:pr|pull-request)[-/](\d+)", branch)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 def parse_github_remote(remote_url: str) -> dict[str, str] | None:
     if not remote_url:
         return None
@@ -842,13 +863,13 @@ class MetadataCache:
             self.values[key] = (time.time() + self.ttl_seconds, value)
 
 
-def session_project_metadata(info: SessionInfo, cache: MetadataCache) -> dict[str, Any]:
+def session_project_metadata(info: SessionInfo, cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
     git_data = session_git_inventory(info)
     if git_data is None:
         return {"git": None, "pull_request": None, "linear": []}
-    enrich_branch_pull_requests(git_data, cache)
+    enrich_branch_pull_requests(git_data, cache, allow_network=allow_network)
 
-    pull_request = project_pull_request(git_data, cache)
+    pull_request = project_pull_request(git_data, cache, allow_network=allow_network)
     linear_ids = extract_linear_ids(
         git_data.get("branch"),
         git_data.get("upstream"),
@@ -860,11 +881,11 @@ def session_project_metadata(info: SessionInfo, cache: MetadataCache) -> dict[st
     return {
         "git": git_data,
         "pull_request": pull_request,
-        "linear": [linear_issue_metadata(identifier, cache) for identifier in linear_ids],
+        "linear": [linear_issue_metadata(identifier, cache, allow_network=allow_network) for identifier in linear_ids],
     }
 
 
-def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache) -> None:
+def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache, allow_network: bool = True) -> None:
     repo = git_data.get("github_repo")
     if not isinstance(repo, dict):
         return
@@ -879,7 +900,7 @@ def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache) 
         number = local_pr.get("number") if isinstance(local_pr, dict) else None
         if not isinstance(number, int):
             continue
-        branch["pull_request"] = github_pull_request_by_number(repo, number, cache) or fallback_pull_request(
+        branch["pull_request"] = github_pull_request_by_number(repo, number, cache, allow_network=allow_network) or fallback_pull_request(
             repo,
             number,
             "local-ref",
@@ -926,7 +947,7 @@ def unique_existing_paths(paths: list[str]) -> list[str]:
     return result
 
 
-def project_pull_request(git_data: dict[str, Any], cache: MetadataCache) -> dict[str, Any] | None:
+def project_pull_request(git_data: dict[str, Any], cache: MetadataCache, allow_network: bool = True) -> dict[str, Any] | None:
     repo = git_data.get("github_repo")
     if not isinstance(repo, dict):
         return None
@@ -935,17 +956,35 @@ def project_pull_request(git_data: dict[str, Any], cache: MetadataCache) -> dict
     local_pr = local_pull_request_info(cwd, head_sha) if isinstance(cwd, str) and isinstance(head_sha, str) else None
     if local_pr is not None:
         number = local_pr["number"]
-        return github_pull_request_by_number(repo, number, cache) or fallback_pull_request(
+        return github_pull_request_by_number(repo, number, cache, allow_network=allow_network) or fallback_pull_request(
             repo,
             number,
             "local-ref",
             title=local_pr.get("title"),
         )
 
+    head_subject = str(git_data.get("head") or "")
+    subject_pr_number = pull_request_number_from_subject(head_subject)
+    if subject_pr_number is not None:
+        return github_pull_request_by_number(repo, subject_pr_number, cache, allow_network=allow_network) or fallback_pull_request(
+            repo,
+            subject_pr_number,
+            "head-subject",
+            title=head_subject,
+        )
+
     branch = git_data.get("branch")
     if not isinstance(branch, str) or branch in MAIN_BRANCHES or branch == "HEAD":
         return None
-    return github_pull_request_by_branch(repo, branch, cache)
+    branch_pr_number = pull_request_number_from_branch(branch)
+    if branch_pr_number is not None:
+        return github_pull_request_by_number(repo, branch_pr_number, cache, allow_network=allow_network) or fallback_pull_request(
+            repo,
+            branch_pr_number,
+            "branch-name",
+            title=str(git_data.get("head") or branch),
+        )
+    return github_pull_request_by_branch(repo, branch, cache, allow_network=allow_network)
 
 
 def local_pull_request_info(cwd: str, head_sha: str) -> dict[str, Any] | None:
@@ -974,11 +1013,18 @@ def github_pull_request_url(repo: dict[str, str], number: int) -> str:
     return f"{repo['url']}/pull/{number}"
 
 
-def github_pull_request_by_number(repo: dict[str, str], number: int, cache: MetadataCache) -> dict[str, Any] | None:
+def github_pull_request_by_number(
+    repo: dict[str, str],
+    number: int,
+    cache: MetadataCache,
+    allow_network: bool = True,
+) -> dict[str, Any] | None:
     key = f"github-pr:{repo['owner']}/{repo['name']}:{number}"
     cached = cache.get(key)
     if cached is not _CACHE_MISS:
         return cached
+    if not allow_network:
+        return None
     path = f"/repos/{quote(repo['owner'])}/{quote(repo['name'])}/pulls/{number}"
     payload = github_api_get(path)
     value = normalize_github_pull_request(payload, repo, "github-api") if isinstance(payload, dict) else None
@@ -988,11 +1034,18 @@ def github_pull_request_by_number(repo: dict[str, str], number: int, cache: Meta
     return value
 
 
-def github_pull_request_by_branch(repo: dict[str, str], branch: str, cache: MetadataCache) -> dict[str, Any] | None:
+def github_pull_request_by_branch(
+    repo: dict[str, str],
+    branch: str,
+    cache: MetadataCache,
+    allow_network: bool = True,
+) -> dict[str, Any] | None:
     key = f"github-pr-branch:{repo['owner']}/{repo['name']}:{branch}"
     cached = cache.get(key)
     if cached is not _CACHE_MISS:
         return cached
+    if not allow_network:
+        return None
     query = urlencode({"head": f"{repo['owner']}:{branch}", "state": "all", "per_page": "10"})
     payload = github_api_get(f"/repos/{quote(repo['owner'])}/{quote(repo['name'])}/pulls?{query}")
     value = None
@@ -1021,6 +1074,8 @@ def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str],
     draft = payload.get("draft") is True
     head = payload.get("head") if isinstance(payload.get("head"), dict) else {}
     head_sha = head.get("sha") if isinstance(head.get("sha"), str) else None
+    user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    author_login = user.get("login") if isinstance(user.get("login"), str) else None
     url = payload.get("html_url") if isinstance(payload.get("html_url"), str) else github_pull_request_url(repo, number)
     result = {
         "number": number,
@@ -1029,6 +1084,7 @@ def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str],
         "merged": merged,
         "merged_at": merged_at,
         "draft": draft,
+        "author_login": author_login,
         "head_sha": head_sha,
         "url": url,
         "description": compact_description(body),
@@ -1041,6 +1097,9 @@ def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str],
 
 
 def enrich_github_pull_request(value: dict[str, Any], repo: dict[str, str], cache: MetadataCache) -> None:
+    if value.get("merged") is True or value.get("draft") is True or value.get("state") == "closed":
+        value["status_label"] = pull_request_status_label(value)
+        return
     head_sha = value.get("head_sha")
     if isinstance(head_sha, str) and head_sha:
         value["checks"] = github_commit_checks(repo, head_sha, cache)
@@ -1230,11 +1289,13 @@ def github_token() -> str | None:
     return None
 
 
-def linear_issue_metadata(identifier: str, cache: MetadataCache) -> dict[str, Any]:
+def linear_issue_metadata(identifier: str, cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
     key = f"linear:{identifier}"
     cached = cache.get(key)
     if cached is not _CACHE_MISS:
         return cached
+    if not allow_network:
+        return fallback_linear_issue(identifier)
     value = linear_issue_from_api(identifier) or fallback_linear_issue(identifier)
     cache.set(key, value)
     return value
@@ -1633,6 +1694,8 @@ class TmuxWebtermApp:
         self.dangerously_yolo = dangerously_yolo
         self.auto_workers: dict[str, AutoApproveWorker] = {}
         self.metadata_cache = MetadataCache()
+        self.metadata_warm_lock = threading.Lock()
+        self.metadata_warm_running = False
         self.event_log = EventLog(EVENT_LOG_PATH)
 
     def refresh_sessions(self) -> list[str]:
@@ -1703,12 +1766,31 @@ class TmuxWebtermApp:
     def transcripts_payload(self) -> dict[str, Any]:
         refresh_errors = self.refresh_sessions()
         sessions, errors = discover_sessions(self.sessions)
-        return {
+        payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "session_order": self.sessions,
-            "sessions": {name: session_to_json(info, self.metadata_cache) for name, info in sessions.items()},
+            "sessions": {name: session_to_json(info, self.metadata_cache, allow_network=False) for name, info in sessions.items()},
             "errors": [*refresh_errors, *errors],
         }
+        self.warm_metadata_cache_async(sessions)
+        return payload
+
+    def warm_metadata_cache_async(self, sessions: dict[str, SessionInfo]) -> None:
+        with self.metadata_warm_lock:
+            if self.metadata_warm_running:
+                return
+            self.metadata_warm_running = True
+        snapshot = dict(sessions)
+        worker = threading.Thread(target=self.warm_metadata_cache, args=(snapshot,), daemon=True)
+        worker.start()
+
+    def warm_metadata_cache(self, sessions: dict[str, SessionInfo]) -> None:
+        try:
+            for info in sessions.values():
+                session_project_metadata(info, self.metadata_cache, allow_network=True)
+        finally:
+            with self.metadata_warm_lock:
+                self.metadata_warm_running = False
 
     def tmux_snapshot(self, session: str, lines: int) -> tuple[dict[str, Any], HTTPStatus]:
         if session not in self.sessions:
@@ -2157,13 +2239,13 @@ def resolved_upload_dir(path: Path, allow_home: bool = False) -> tuple[Path | No
     return resolved, resolved.is_dir() and (allow_home or resolved != home)
 
 
-def session_to_json(info: SessionInfo, metadata_cache: MetadataCache) -> dict[str, Any]:
+def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
     return {
         "session": info.session,
         "panes": [asdict(pane) for pane in info.panes],
         "selected_pane": asdict(info.selected_pane) if info.selected_pane else None,
         "agents": [asdict(agent) for agent in info.agents],
-        "project": session_project_metadata(info, metadata_cache),
+        "project": session_project_metadata(info, metadata_cache, allow_network=allow_network),
     }
 
 
@@ -2697,6 +2779,7 @@ def html_page(sessions: list[str]) -> str:
   --popover-show-delay: 1600ms;
   --popover-hide-delay: 300ms;
   --topbar-popover-top: 42px;
+  --topbar-popover-left: 8px;
 }}
 * {{ box-sizing: border-box; }}
 html {{
@@ -2971,9 +3054,11 @@ body {{
 .session-button-detail.pr-status-draft {{
   color: #f5c542;
 }}
-.session-button-detail.pr-status-passing,
-.session-button-detail.pr-status-merged {{
+.session-button-detail.pr-status-passing {{
   color: #52d273;
+}}
+.session-button-detail.pr-status-merged {{
+  color: #c084fc;
 }}
 .session-button-detail.pr-status-closed {{
   color: #aeb8c7;
@@ -3088,6 +3173,21 @@ body {{
   box-shadow: none;
   font: 900 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }}
+.session-yolo-marker[data-auto-session] {{
+  cursor: pointer;
+}}
+.panel-session-label .session-yolo-marker {{
+  min-width: 28px;
+  height: 21px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font-size: 15px;
+}}
+.session-yolo-marker.inactive {{
+  color: #9ea8b7;
+  background: #151b25;
+  border-color: #4a5568;
+}}
 .ci-indicator {{
   flex: 0 0 auto;
   min-width: 17px;
@@ -3114,11 +3214,20 @@ body {{
   background: #f5c542;
   border-color: #ffe27a;
 }}
-.ci-indicator.pr-status-passing,
-.ci-indicator.pr-status-merged {{
+.ci-indicator.pr-status-passing {{
   color: #051408;
   background: #52d273;
   border-color: #8ff2a7;
+}}
+.ci-indicator.pr-status-merged {{
+  color: #170326;
+  background: #c084fc;
+  border-color: #e9d5ff;
+}}
+.ci-indicator.pr-indicator {{
+  color: #dfe6ef;
+  background: #1a2434;
+  border-color: #5f6f86;
 }}
 .session-popover {{
   visibility: hidden;
@@ -3128,7 +3237,7 @@ body {{
   top: calc(100% + 2px);
   left: 0;
   z-index: 80;
-  width: min(560px, 88vw);
+  width: min(640px, 88vw);
   max-height: calc(100vh - 78px);
   overflow: auto;
   padding: 8px 10px;
@@ -3150,9 +3259,9 @@ body {{
 .session-button-wrap[data-session] > .session-popover {{
   position: fixed;
   top: var(--topbar-popover-top);
-  left: 8px;
-  right: 8px;
-  width: auto;
+  left: var(--topbar-popover-left);
+  right: auto;
+  width: min(640px, calc(100vw - 16px));
   max-height: min(65vh, 620px);
 }}
 .session-button-wrap.popover-open .session-popover {{
@@ -3221,12 +3330,21 @@ body {{
   padding: 2px 0;
   border-top: 1px solid rgba(180, 230, 140, 0.22);
 }}
+.popover-row.compact {{
+  grid-template-columns: 44px minmax(0, 0.8fr) 44px minmax(0, 1fr);
+  gap: 6px 8px;
+}}
 .popover-label {{
   color: #a2c98d;
 }}
 .popover-value {{
   min-width: 0;
   overflow-wrap: anywhere;
+}}
+.popover-row.compact .popover-value {{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }}
 .session-popover .meta-muted {{
   color: #b5d2a7;
@@ -3283,14 +3401,17 @@ body {{
   color: #f5c542;
 }}
 .popover-value a.pr-status-passing,
-.popover-value a.pr-status-merged,
 .meta a.pr-status-passing,
-.meta a.pr-status-merged,
 .summary-context a.pr-status-passing,
-.summary-context a.pr-status-merged,
-.info-cell a.pr-status-passing,
-.info-cell a.pr-status-merged {{
+.info-cell a.pr-status-passing {{
   color: #52d273;
+}}
+.popover-value a.pr-status-merged,
+.meta a.pr-status-merged,
+.summary-context a.pr-status-merged,
+.branch-meta a.pr-status-merged,
+.info-cell a.pr-status-merged {{
+  color: #c084fc;
 }}
 .popover-value a.pr-status-closed,
 .meta a.pr-status-closed,
@@ -3302,6 +3423,13 @@ body {{
 .branch-link:hover {{
   color: #bfdbfe;
   text-decoration: underline;
+}}
+.popover-value a.pr-status-merged:hover,
+.meta a.pr-status-merged:hover,
+.summary-context a.pr-status-merged:hover,
+.branch-meta a.pr-status-merged:hover,
+.info-cell a.pr-status-merged:hover {{
+  color: #c084fc;
 }}
 .branch-list {{
   margin-top: 8px;
@@ -3498,10 +3626,7 @@ button:disabled:hover {{ border-color: var(--line); }}
   width: auto;
   max-height: min(60vh, 520px);
 }}
-.panel-popover-zone {{
-  min-width: 0;
-  display: contents;
-}}
+.panel-popover-zone.popover-open > .session-popover,
 .panel-popover-zone:hover > .session-popover,
 .panel-popover-zone:focus-within > .session-popover {{
   visibility: visible;
@@ -3566,11 +3691,11 @@ button:disabled:hover {{ border-color: var(--line); }}
 }}
 .panel-copy {{
   min-width: 0;
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  display: flex;
   align-items: center;
   gap: 5px;
   overflow: hidden;
+  white-space: nowrap;
 }}
 .panel-session-label {{
   flex: 0 0 auto;
@@ -3581,6 +3706,17 @@ button:disabled:hover {{ border-color: var(--line); }}
   height: 24px;
   padding-right: 0;
   white-space: nowrap;
+}}
+.panel-popover-zone {{
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}}
+.panel-popover-zone > .session-popover {{
+  white-space: normal;
 }}
 .panel-session-label .session-button-name {{
   color: inherit;
@@ -3643,9 +3779,11 @@ button:disabled:hover {{ border-color: var(--line); }}
 .meta-pr-status.pr-status-draft {{
   color: #f5c542;
 }}
-.meta-pr-status.pr-status-passing,
-.meta-pr-status.pr-status-merged {{
+.meta-pr-status.pr-status-passing {{
   color: #52d273;
+}}
+.meta-pr-status.pr-status-merged {{
+  color: #c084fc;
 }}
 .meta-pr-status.pr-status-closed {{
   color: #aeb8c7;
@@ -4099,9 +4237,11 @@ button:disabled:hover {{ border-color: var(--line); }}
 .info-cell a.pr-status-draft {{
   color: #f5c542;
 }}
-.info-cell a.pr-status-passing,
-.info-cell a.pr-status-merged {{
+.info-cell a.pr-status-passing {{
   color: #52d273;
+}}
+.info-cell a.pr-status-merged {{
+  color: #c084fc;
 }}
 .info-cell a.pr-status-closed {{
   color: #aeb8c7;
@@ -4117,9 +4257,12 @@ button:disabled:hover {{ border-color: var(--line); }}
 .info-cell a.pr-status-draft:hover {{
   color: #f5c542;
 }}
-.info-cell a.pr-status-passing:hover,
-.info-cell a.pr-status-merged:hover {{
+.info-cell a.pr-status-passing:hover {{
   color: #52d273;
+}}
+.branch-meta a.pr-status-merged:hover,
+.info-cell a.pr-status-merged:hover {{
+  color: #c084fc;
 }}
 .info-cell a.pr-status-closed:hover {{
   color: #aeb8c7;
@@ -4280,6 +4423,7 @@ let openPopoverSession = null;
 let pendingPopoverSession = null;
 let popoverShowTimer = null;
 let popoverHideTimer = null;
+const panelPopoverHideTimers = new WeakMap();
 let sessionButtonsRenderDeferred = false;
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
@@ -4671,7 +4815,7 @@ function stateBadgeHtml(key, short, title) {{
 }}
 
 function sessionStateHtml(state) {{
-  if (!state || ['working', 'tests-running', 'done', 'disconnected'].includes(state.key)) return '';
+  if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval'].includes(state.key)) return '';
   return stateBadgeHtml(state.key, state.short, `${{state.label}}: ${{state.reason}}`);
 }}
 
@@ -5116,7 +5260,21 @@ function renderSessionButtons() {{
     button.draggable = true;
     button.innerHTML = isInfo ? infoButtonHtml() : sessionButtonHtml(session, info, agentKind, state, auto);
     button.removeAttribute('title');
-    button.addEventListener('click', () => selectSession(session));
+    let handledOnPointerDown = false;
+    button.addEventListener('pointerdown', event => {{
+      if (active) return;
+      event.preventDefault();
+      handledOnPointerDown = true;
+      selectSession(session);
+    }});
+    button.addEventListener('click', event => {{
+      if (handledOnPointerDown) {{
+        handledOnPointerDown = false;
+        event.preventDefault();
+        return;
+      }}
+      selectSession(session);
+    }});
     button.addEventListener('dragstart', event => startSessionDrag(event, session, null));
     button.addEventListener('dragend', endSessionDrag);
     wrapper.appendChild(button);
@@ -5179,10 +5337,18 @@ function bindSessionPopover(wrapper) {{
   }});
 }}
 
-function updateTopbarPopoverGeometry() {{
+function updateTopbarPopoverGeometry(session = '') {{
   const bottom = topbar?.getBoundingClientRect?.().bottom;
-  if (!Number.isFinite(bottom)) return;
-  document.documentElement.style.setProperty('--topbar-popover-top', `${{Math.ceil(bottom + 4)}}px`);
+  if (Number.isFinite(bottom)) {{
+    document.documentElement.style.setProperty('--topbar-popover-top', `${{Math.ceil(bottom + 4)}}px`);
+  }}
+  const wrapper = session ? sessionButtons.querySelector(`.session-button-wrap[data-session="${{cssEscape(session)}}"]`) : null;
+  const rect = wrapper?.getBoundingClientRect?.();
+  if (!rect) return;
+  const width = Math.min(640, Math.max(320, window.innerWidth - 16));
+  const maxLeft = Math.max(8, window.innerWidth - width - 8);
+  const left = Math.min(Math.max(8, Math.floor(rect.left)), maxLeft);
+  document.documentElement.style.setProperty('--topbar-popover-left', `${{left}}px`);
 }}
 
 function queueSessionPopover(session) {{
@@ -5192,7 +5358,7 @@ function queueSessionPopover(session) {{
   if (openPopoverSession === session) return;
   if (popoverShowTimer) clearTimeout(popoverShowTimer);
   pendingPopoverSession = session;
-  updateTopbarPopoverGeometry();
+  updateTopbarPopoverGeometry(session);
   popoverShowTimer = setTimeout(() => {{
     popoverShowTimer = null;
     if (pendingPopoverSession === session) openSessionPopoverNow(session);
@@ -5214,6 +5380,7 @@ function openSessionPopoverNow(session) {{
   if (popoverHideTimer) clearTimeout(popoverHideTimer);
   popoverHideTimer = null;
   pendingPopoverSession = session;
+  updateTopbarPopoverGeometry(session);
   const targetSelector = `.session-button-wrap[data-session="${{cssEscape(session)}}"]`;
   for (const node of sessionButtons.querySelectorAll('.session-button-wrap')) {{
     const isTarget = node.dataset.session === session;
@@ -5274,11 +5441,14 @@ function sessionButtonHtml(session, info, agentKind, state = sessionState(sessio
   const nameHtml = name && name !== label ? `<span class="session-button-name">${{esc(name)}}</span>` : '';
   const autoHtml = auto ? '<span class="session-yolo-marker" title="YOLO enabled">YO</span>' : '';
   const stateHtml = state ? sessionStateHtml(state) : '';
-  const ciHtml = pullRequestCiIndicatorHtml(info?.project?.pull_request);
+  const pr = info?.project?.pull_request;
+  const statusHtml = pullRequestStatusIndicatorHtml(pr);
+  const prHtml = pullRequestPrIndicatorHtml(pr);
+  const ciHtml = pullRequestCiIndicatorHtml(pr);
   const desc = sessionTabDescription(session, info);
   const detailHtml = desc ? `<span class="session-button-dir">${{esc(desc)}}</span>` : '';
-  return `<span class="session-button-prefix">${{autoHtml}}<span class="session-button-number">${{esc(label)}}</span>${{nameHtml}}</span>
-    <span class="session-button-text">${{stateHtml}}${{ciHtml}}${{detailHtml}}</span>`;
+  return `<span class="session-button-prefix"><span class="session-button-number">${{esc(label)}}</span>${{nameHtml}}${{autoHtml}}</span>
+    <span class="session-button-text">${{stateHtml}}${{statusHtml}}${{prHtml}}${{ciHtml}}${{detailHtml}}</span>`;
 }}
 
 function infoButtonHtml() {{
@@ -5302,8 +5472,10 @@ function panelHeaderNumberHtml(session) {{
   return `<span class="session-button-number">${{esc(label)}}</span>${{nameHtml}}`;
 }}
 
-function panelHeaderStateHtml(session, state, info = null) {{
-  return `${{panelHeaderNumberHtml(session)}}${{state ? sessionStateHtml(state) : ''}}${{pullRequestCiIndicatorHtml(info?.project?.pull_request)}}`;
+function panelHeaderStateHtml(session, state, info = null, auto = false) {{
+  const pr = info?.project?.pull_request;
+  const autoHtml = `<span class="session-yolo-marker ${{auto ? '' : 'inactive'}}" data-auto-session="${{esc(session)}}" title="YOLO ${{auto ? 'on' : 'off'}} for ${{esc(sessionLabel(session))}}">YO</span>`;
+  return `${{panelHeaderNumberHtml(session)}}${{autoHtml}}${{state ? sessionStateHtml(state) : ''}}${{pullRequestStatusIndicatorHtml(pr)}}${{pullRequestPrIndicatorHtml(pr)}}${{pullRequestCiIndicatorHtml(pr)}}`;
 }}
 
 function sessionButtonDetail(info) {{
@@ -5367,28 +5539,38 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const title = `${{sessionLabel(session)}} · ${{projectDirName(session, info)}}`;
   const subtitle = description || git?.branch || pane?.current_path || 'no checkout detected';
   const rows = [];
-  rows.push(popoverRow('state', `${{sessionStateHtml(state)}} <span class="meta-muted">${{esc(state.reason)}}</span>`));
-  rows.push(popoverRow('agent', agentKind ? `${{agentName(agentKind)}}${{autoEnabled ? ' · YOLO on' : ''}}` : `${{autoEnabled ? 'YOLO on' : 'not detected'}}`));
-  rows.push(popoverRow('path', panelFullPath(session, info) || pane?.current_path || 'not available'));
+  const stateValue = `${{sessionStateHtml(state)}} <span class="meta-muted">${{esc(state.reason)}}</span>`;
+  const agentValue = agentKind ? `${{agentName(agentKind)}}${{autoEnabled ? ' · YOLO on' : ''}}` : `${{autoEnabled ? 'YOLO on' : 'not detected'}}`;
+  const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
+  rows.push(popoverPairRow('state', stateValue, 'agent', agentValue));
+  rows.push(popoverRow('path', displayPath));
   if (git?.branch) rows.push(popoverRow('branch', `${{branchLinkHtml(git, git.branch)}}${{git.upstream ? `<span class="meta-muted"> -> ${{esc(git.upstream)}}</span>` : ''}}`));
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {{
     rows.push(popoverRow('git', gitStatusText(git)));
   }}
+  let prDesc = '';
   if (pr?.number) {{
-    rows.push(popoverRow('PR', pullRequestLinkHtml(pr)));
+    const prParts = [pullRequestLinkHtml(pr), pullRequestAuthorHtml(pr)].filter(Boolean);
     const checks = pullRequestChecksHtml(pr);
-    if (checks) rows.push(popoverRow('CI', checks));
-    const prDesc = pullRequestDescriptionHtml(pr);
-    if (prDesc) rows.push(popoverRow('desc', prDesc));
+    if (checks) prParts.push(checks);
+    rows.push(popoverRow('PR', prParts.join('<span class="meta-sep"> · </span>')));
+    prDesc = pullRequestDescriptionInlineHtml(pr);
   }}
+  let linearValue = '';
+  let linearDesc = '';
   if (linear.length) {{
-    rows.push(popoverRow('Linear', linear.map(issue => linearIssueHtml(issue)).join('<span class="meta-sep"> · </span>')));
-    const linearDesc = linearDescriptionsHtml(linear);
+    linearValue = linearInlineHtml(linear);
+    linearDesc = linearDescriptionsInlineHtml(linear);
+    if (prDesc && linearValue) rows.push(popoverPairRow('desc', prDesc, 'Linear', linearValue));
+    else if (prDesc) rows.push(popoverRow('desc', prDesc));
+    else if (linearValue) rows.push(popoverRow('Linear', linearValue));
     if (linearDesc) rows.push(popoverRow('details', linearDesc));
+  }} else if (prDesc) {{
+    rows.push(popoverRow('desc', prDesc));
   }}
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow('desc', `<div class="popover-desc">${{esc(subject)}}</div>`));
-  if (git?.root) rows.push(popoverRow('repo', git.root));
+  if (git?.root && git.root !== displayPath) rows.push(popoverRow('repo', git.root));
   if (git?.head) rows.push(popoverRow('HEAD', git.head));
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">
@@ -5405,6 +5587,13 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
 
 function popoverRow(label, valueHtml) {{
   return `<div class="popover-row"><div class="popover-label">${{esc(label)}}</div><div class="popover-value">${{stripTitleAttrs(valueHtml)}}</div></div>`;
+}}
+
+function popoverPairRow(leftLabel, leftValueHtml, rightLabel, rightValueHtml) {{
+  return `<div class="popover-row compact">
+    <div class="popover-label">${{esc(leftLabel)}}</div><div class="popover-value">${{stripTitleAttrs(leftValueHtml)}}</div>
+    <div class="popover-label">${{esc(rightLabel)}}</div><div class="popover-value">${{stripTitleAttrs(rightValueHtml)}}</div>
+  </div>`;
 }}
 
 function stripTitleAttrs(html) {{
@@ -5426,6 +5615,14 @@ function pullRequestDescriptionHtml(pr) {{
   return lines.length ? `<div class="popover-desc">${{lines.join('')}}</div>` : '';
 }}
 
+function pullRequestDescriptionInlineHtml(pr) {{
+  const title = String(pr?.title || '').trim();
+  const description = String(pr?.description || '').trim();
+  const body = description && description !== title ? description.replace(/^#+\\s*Overview:\\s*/i, '').trim() : '';
+  const text = [title, body].filter(Boolean).join(' · ');
+  return text ? esc(shortText(text, 180)) : '';
+}}
+
 function linearDescriptionsHtml(issues) {{
   const lines = [];
   for (const issue of issues || []) {{
@@ -5433,6 +5630,29 @@ function linearDescriptionsHtml(issues) {{
     lines.push(`<div class="popover-desc-line"><strong>${{esc(issue.identifier)}}</strong> ${{esc(issue.title)}}</div>`);
   }}
   return lines.length ? `<div class="popover-desc">${{lines.join('')}}</div>` : '';
+}}
+
+function linearInlineHtml(issues) {{
+  const parts = [];
+  for (const issue of issues || []) {{
+    const label = issue.identifier || '';
+    if (!label) continue;
+    const link = linkHtml(issue.url, label, issue.title || '');
+    if (!link) continue;
+    const state = issue.state ? `<span class="meta-muted"> ${{esc(issue.state)}}</span>` : '';
+    parts.push(`${{link}}${{state}}`);
+  }}
+  return parts.join('<span class="meta-sep"> · </span>');
+}}
+
+function linearDescriptionsInlineHtml(issues) {{
+  const parts = [];
+  for (const issue of issues || []) {{
+    if (!issue?.title) continue;
+    const prefix = issue.identifier ? `${{issue.identifier}} ` : '';
+    parts.push(`${{prefix}}${{issue.title}}`);
+  }}
+  return parts.length ? esc(shortText(parts.join(' · '), 180)) : '';
 }}
 
 function gitStatusText(git) {{
@@ -5462,7 +5682,7 @@ function pullRequestLinkForBranch(git, branch) {{
   const repoUrl = git?.github_repo?.url;
   if (!pr?.number) return '';
   const url = pr.url || (repoUrl ? `${{repoUrl}}/pull/${{pr.number}}` : '');
-  const status = pullRequestStatusLabel(pr);
+  const status = pullRequestStatusDisplay(pr);
   const label = `#${{pr.number}}${{status && status !== 'unknown' ? ` ${{status}}` : ''}}`;
   return linkHtml(url, label, pr.title || pr.description || branch.subject || '', pullRequestStatusClass(pr));
 }}
@@ -5534,6 +5754,14 @@ function firstEmptySlot() {{
   return layoutSlotKeys.find(slot => !layoutSlots[slot]) || 'leftTop';
 }}
 
+function slotForNewSession() {{
+  const empty = layoutSlotKeys.find(slot => !layoutSlots[slot]);
+  if (empty) return empty;
+  const focusedSlot = focusedPanelItem ? slotForSession(focusedPanelItem) : null;
+  if (focusedSlot) return focusedSlot;
+  return 'leftTop';
+}}
+
 async function moveSessionToSlot(session, targetSlot, sourceSlot = null, mode = 'stack') {{
   if (!isLayoutItem(session) || !layoutSlotKeys.includes(targetSlot)) return;
   if (isTmuxSession(session)) {{
@@ -5595,10 +5823,11 @@ function alternateSlot(slot) {{
 
 async function selectSession(session) {{
   if (activeSessions.includes(session)) {{
-    removeSessionFromLayout(session);
+    closeOpenSessionPopover({{renderDeferred: false}});
+    focusPanel(session);
     return;
   }}
-  await moveSessionToSlot(session, firstEmptySlot(), null);
+  await moveSessionToSlot(session, slotForNewSession(), null, 'replace');
 }}
 
 function sessionAgentKind(session) {{
@@ -5711,19 +5940,32 @@ function pullRequestStatusLabel(pr) {{
   return pr.state || '';
 }}
 
+function pullRequestStatusDisplay(pr) {{
+  const status = pullRequestStatusLabel(pr);
+  if (!status) return '';
+  const key = status.toLowerCase();
+  if (key === 'unknown') return '';
+  if (key === 'merged') return 'MERGED';
+  if (key === 'draft') return 'DRAFT';
+  if (key === 'closed') return 'CLOSED';
+  if (key === 'open') return 'OPEN';
+  return status.replace(/\\bci\\b/gi, 'CI').toUpperCase();
+}}
+
 function pullRequestShortLabel(pr) {{
   const status = pullRequestStatusLabel(pr);
-  if (status.includes('failing')) return `PR #${{pr.number}} fail`;
-  if (status.includes('pending')) return `PR #${{pr.number}} wait`;
-  if (status.includes('passing')) return `PR #${{pr.number}} pass`;
-  if (status === 'merged') return `PR #${{pr.number}} merged`;
-  if (status === 'draft') return `PR #${{pr.number}} draft`;
-  if (status === 'closed') return `PR #${{pr.number}} closed`;
+  const key = status.toLowerCase();
+  if (key.includes('failing')) return `PR #${{pr.number}} fail`;
+  if (key.includes('pending')) return `PR #${{pr.number}} wait`;
+  if (key.includes('passing')) return `PR #${{pr.number}} pass`;
+  if (key === 'merged') return `PR #${{pr.number}} MERGED`;
+  if (key === 'draft') return `PR #${{pr.number}} DRAFT`;
+  if (key === 'closed') return `PR #${{pr.number}} CLOSED`;
   return `PR #${{pr.number}}`;
 }}
 
 function pullRequestLinkLabel(pr) {{
-  const status = pullRequestStatusLabel(pr);
+  const status = pullRequestStatusDisplay(pr);
   return `PR #${{pr.number}}${{status ? ` ${{status}}` : ''}}`;
 }}
 
@@ -5738,7 +5980,21 @@ function pullRequestStatusClass(pr) {{
   return 'pr-status-unknown';
 }}
 
+function pullRequestStatusIndicatorHtml(pr) {{
+  if (!pr?.number) return '';
+  const status = pullRequestStatusLabel(pr).toLowerCase();
+  if (!['merged', 'draft', 'closed'].includes(status)) return '';
+  return `<span class="ci-indicator ${{pullRequestStatusClass(pr)}}">${{pullRequestStatusDisplay(pr)}}</span>`;
+}}
+
+function pullRequestPrIndicatorHtml(pr) {{
+  if (!pr?.number) return '';
+  if (pullRequestStatusIndicatorHtml(pr) || pullRequestCiIndicatorHtml(pr)) return '';
+  return '<span class="ci-indicator pr-indicator">PR</span>';
+}}
+
 function pullRequestCiIndicatorHtml(pr) {{
+  if (pullRequestStatusLabel(pr).toLowerCase() === 'merged') return '';
   const state = pr?.checks?.state;
   if (!state || state === 'unknown') return '';
   return `<span class="ci-indicator ${{pullRequestStatusClass(pr)}}">CI</span>`;
@@ -5748,8 +6004,13 @@ function pullRequestLinkHtml(pr) {{
   return linkHtml(pr.url, pullRequestLinkLabel(pr), pr.title || pr.description || '', pullRequestStatusClass(pr));
 }}
 
+function pullRequestAuthorHtml(pr) {{
+  const author = String(pr?.author_login || '').trim();
+  return author ? `<span class="meta-muted">by ${{esc(author)}}</span>` : '';
+}}
+
 function pullRequestColumnLinkHtml(pr) {{
-  const status = pullRequestStatusLabel(pr);
+  const status = pullRequestStatusDisplay(pr);
   const label = `#${{pr.number}}${{status ? ` ${{status}}` : ''}}`;
   return linkHtml(pr.url, label, pr.title || pr.description || '', pullRequestStatusClass(pr));
 }}
@@ -6259,6 +6520,7 @@ function getOrCreatePanel(session) {{
 
 function bindPanelShell(panel, session) {{
   installPanelInactiveOverlays(panel, session);
+  bindPanelPopover(panel);
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
   const head = panel.querySelector('.panel-head');
   if (head) {{
@@ -6276,6 +6538,39 @@ function bindPanelShell(panel, session) {{
       if (isTmuxSession(session)) fitTerminal(session);
     }}, 80);
   }});
+}}
+
+function bindPanelPopover(panel) {{
+  const zone = panel.querySelector('.panel-popover-zone');
+  if (!zone || zone.dataset.popoverBound === 'true') return;
+  zone.dataset.popoverBound = 'true';
+  zone.addEventListener('pointerover', () => keepPanelPopoverOpen(zone));
+  zone.addEventListener('pointerout', event => {{
+    if (event.relatedTarget && zone.contains(event.relatedTarget)) return;
+    closePanelPopoverSoon(zone);
+  }});
+  zone.addEventListener('focusin', () => keepPanelPopoverOpen(zone));
+  zone.addEventListener('focusout', event => {{
+    if (event.relatedTarget && zone.contains(event.relatedTarget)) return;
+    closePanelPopoverSoon(zone);
+  }});
+}}
+
+function keepPanelPopoverOpen(zone) {{
+  const timer = panelPopoverHideTimers.get(zone);
+  if (timer) clearTimeout(timer);
+  panelPopoverHideTimers.delete(zone);
+  zone.classList.add('popover-open');
+}}
+
+function closePanelPopoverSoon(zone) {{
+  const existing = panelPopoverHideTimers.get(zone);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {{
+    zone.classList.remove('popover-open');
+    panelPopoverHideTimers.delete(zone);
+  }}, popoverHideDelayMs);
+  panelPopoverHideTimers.set(zone, timer);
 }}
 
 function setPanelExpanded(panel, session, expanded) {{
@@ -6355,9 +6650,8 @@ function createPanel(session) {{
           <button class="traffic-light zoom" data-expand="${{esc(session)}}" title="expand" aria-label="Expand ${{esc(sessionLabel(session))}}"></button>
         </div>
         <div class="panel-copy">
-          <button class="tab auto-toggle" data-auto-session="${{esc(session)}}" title="toggle YOLO approval for this tmux session">YOLO</button>
           <div class="panel-popover-zone">
-            <div id="panel-tab-${{session}}" class="panel-session-label">${{panelHeaderStateHtml(session, sessionState(session, transcriptMeta.sessions?.[session]), transcriptMeta.sessions?.[session])}}</div>
+            <div id="panel-tab-${{session}}" class="panel-session-label">${{panelHeaderStateHtml(session, sessionState(session, transcriptMeta.sessions?.[session]), transcriptMeta.sessions?.[session], autoApproveStates.get(session)?.enabled === true)}}</div>
             <div id="meta-${{session}}" class="meta">finding branch...</div>
             ${{sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}}
           </div>
@@ -6492,7 +6786,13 @@ function bindPanelControls(panel, session) {{
     }});
   }});
   panel.querySelector('[data-context]')?.addEventListener('click', () => showContext(session));
-  panel.querySelector('[data-auto-session]')?.addEventListener('click', () => toggleAutoApprove(session));
+  panel.addEventListener('click', event => {{
+    const target = event.target.closest('[data-auto-session]');
+    if (!target || !panel.contains(target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    toggleAutoApprove(session);
+  }});
   panel.querySelector('.meta')?.addEventListener('click', event => event.stopPropagation());
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
   bindFileUpload(panel, session);
@@ -7085,7 +7385,7 @@ function renderAutoApproveButton(session, payload) {{
   const enabled = payload?.enabled === true;
   if (button) {{
     button.classList.toggle('active', enabled);
-    button.textContent = 'YOLO';
+    button.textContent = 'YO';
     const action = payload?.last_action ? `; ${{payload.last_action}}` : '';
     button.title = enabled
       ? `YOLO on for ${{sessionLabel(session)}}${{action}}`
@@ -7201,7 +7501,7 @@ function updatePanelHeader(session, info) {{
   const auto = autoApproveStates.get(session)?.enabled === true;
   const state = sessionState(session, info);
   tab.className = `panel-session-label ${{auto ? 'auto' : ''}} ${{state.attention ? 'needs-attention' : ''}}`;
-  tab.innerHTML = panelHeaderStateHtml(session, state, info);
+  tab.innerHTML = panelHeaderStateHtml(session, state, info, auto);
   tab.removeAttribute('title');
   const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
   if (popover) {{
