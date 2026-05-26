@@ -801,6 +801,7 @@ def local_pull_request_by_sha(cwd: str) -> dict[str, dict[str, Any]]:
     return mapping
 
 
+# PR numbers can come from local refs, squash subjects, or synthetic branch names.
 def regex_int(pattern: str, value: str | None) -> int | None:
     if not isinstance(value, str):
         return None
@@ -998,6 +999,7 @@ def local_pull_request_info(cwd: str, head_sha: str) -> dict[str, Any] | None:
     return local_pull_request_by_sha(cwd).get(head_sha)
 
 
+# Keep tabs useful while GitHub metadata warms in the background.
 def pull_request_by_number_or_fallback(
     repo: dict[str, str],
     number: int,
@@ -1036,6 +1038,7 @@ def github_pull_request_url(repo: dict[str, str], number: int) -> str:
     return f"{repo['url']}/pull/{number}"
 
 
+# Cache misses as well as hits; repeated refreshes should not repeat the same slow lookup.
 def cached_metadata(
     cache: MetadataCache,
     key: str,
@@ -2229,10 +2232,6 @@ class TmuxWebtermApp:
             screen = {"key": "error", "text": str(exc)}
             return prompt, screen
 
-    def approval_prompt_status(self, session: str) -> dict[str, Any]:
-        prompt, _screen = self.prompt_and_screen_status(session)
-        return prompt
-
     def auto_approve_session_status(self, session: str) -> dict[str, Any]:
         worker = self.auto_workers.get(session)
         if worker:
@@ -2665,10 +2664,6 @@ def terminate_process_group(process: subprocess.Popen[Any]) -> None:
         return
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
-
-
-def extract_content_pieces(content: Any) -> list[str]:
-    return [block["text"] for block in extract_content_blocks(content, "message")]
 
 
 def extract_content_blocks(content: Any, default_role: str = "message") -> list[dict[str, str]]:
@@ -4854,12 +4849,6 @@ function sessionStateHtml(state) {{
   return stateBadgeHtml(state.key, state.short, `${{state.label}}: ${{state.reason}}`);
 }}
 
-function stateLegendHtml() {{
-  return `<div class="state-legend">${{Object.entries(stateDefs).map(([key, def]) => `
-    <span class="state-legend-item">${{stateBadgeHtml(key, def.short, def.label)}}<span>${{esc(def.label)}}</span></span>
-  `).join('')}}</div>`;
-}}
-
 function sessionTrayItems() {{
   return [infoItemId, ...visibleSessions].sort((left, right) => itemSortNumber(left) - itemSortNumber(right) || itemLabel(left).localeCompare(itemLabel(right)));
 }}
@@ -5470,6 +5459,7 @@ function cssEscape(value) {{
   return String(value).replace(/["\\\\]/g, '\\\\$&');
 }}
 
+// Tabs, headers, and popovers all use these helpers so badge precedence stays consistent.
 function metaJoin(parts) {{
   return parts.filter(Boolean).join('<span class="meta-sep"> · </span>');
 }}
@@ -5510,26 +5500,9 @@ function infoButtonHtml() {{
   return '<span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="session-button-text"><span class="session-button-dir">Branches</span></span>';
 }}
 
-function sessionLabelHtml(session, info, agentKind, state = sessionState(session, info)) {{
-  const detail = sessionButtonDetail(info);
-  const detailClass = detail ? pullRequestStatusClass(info?.project?.pull_request) : '';
-  return `${{agentIcon(agentKind)}}
-    ${{state ? sessionStateHtml(state) : ''}}
-    <span class="session-button-number">${{esc(sessionLabel(session))}}</span>
-    <span class="session-button-dir">${{esc(projectDirName(session, info))}}</span>
-    ${{detail ? `<span class="session-button-detail ${{detailClass}}">${{esc(detail)}}</span>` : ''}}`;
-}}
-
 function panelHeaderStateHtml(session, state, info = null, auto = false) {{
   const pr = info?.project?.pull_request;
   return `${{sessionNumberNameHtml(session)}}${{yoloMarkerHtml(session, auto, {{enabledOnly: false, toggle: true}})}}${{state ? sessionStateHtml(state) : ''}}${{pullRequestCompactBadgesHtml(pr)}}`;
-}}
-
-function sessionButtonDetail(info) {{
-  const project = info?.project || {{}};
-  const pr = project.pull_request;
-  if (pr?.number) return pullRequestShortLabel(pr);
-  return '';
 }}
 
 function currentBranchSubject(git) {{
@@ -5647,36 +5620,12 @@ function stripTitleAttrs(html) {{
   return String(html || '').replace(/\\s+title="[^"]*"/g, '');
 }}
 
-function popoverMutedText(value) {{
-  const text = shortText(value, 116);
-  return text ? ` <span class="meta-muted">${{esc(text)}}</span>` : '';
-}}
-
-function pullRequestDescriptionHtml(pr) {{
-  const title = String(pr?.title || '').trim();
-  const description = String(pr?.description || '').trim();
-  const body = description && description !== title ? description : '';
-  const lines = [];
-  if (title) lines.push(`<div class="popover-desc-title">${{esc(title)}}</div>`);
-  if (body) lines.push(`<div class="popover-desc-body">${{esc(body)}}</div>`);
-  return lines.length ? `<div class="popover-desc">${{lines.join('')}}</div>` : '';
-}}
-
 function pullRequestDescriptionInlineHtml(pr) {{
   const title = String(pr?.title || '').trim();
   const description = String(pr?.description || '').trim();
   const body = description && description !== title ? description.replace(/^#+\\s*Overview:\\s*/i, '').trim() : '';
   const text = [title, body].filter(Boolean).join(' · ');
   return text ? esc(shortText(text, 180)) : '';
-}}
-
-function linearDescriptionsHtml(issues) {{
-  const lines = [];
-  for (const issue of issues || []) {{
-    if (!issue?.title) continue;
-    lines.push(`<div class="popover-desc-line"><strong>${{esc(issue.identifier)}}</strong> ${{esc(issue.title)}}</div>`);
-  }}
-  return lines.length ? `<div class="popover-desc">${{lines.join('')}}</div>` : '';
 }}
 
 function linearInlineHtml(issues) {{
@@ -5906,11 +5855,6 @@ function agentName(kind) {{
   return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Term' : '';
 }}
 
-function sessionNumber(session) {{
-  const match = String(session).match(/(\\d+)$/);
-  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
-}}
-
 function numericSessionName(session) {{
   const match = String(session).match(/^[1-9]\\d*$/);
   return match ? Number(match[0]) : null;
@@ -5997,18 +5941,6 @@ function pullRequestStatusDisplay(pr) {{
   if (key === 'closed') return 'CLOSED';
   if (key === 'open') return 'OPEN';
   return status.replace(/\\bci\\b/gi, 'CI').toUpperCase();
-}}
-
-function pullRequestShortLabel(pr) {{
-  const status = pullRequestStatusLabel(pr);
-  const key = status.toLowerCase();
-  if (key.includes('failing')) return `PR #${{pr.number}} fail`;
-  if (key.includes('pending')) return `PR #${{pr.number}} wait`;
-  if (key.includes('passing')) return `PR #${{pr.number}} pass`;
-  if (key === 'merged') return `PR #${{pr.number}} MERGED`;
-  if (key === 'draft') return `PR #${{pr.number}} DRAFT`;
-  if (key === 'closed') return `PR #${{pr.number}} CLOSED`;
-  return `PR #${{pr.number}}`;
 }}
 
 function pullRequestLinkLabel(pr) {{
@@ -6114,37 +6046,6 @@ function projectMetaHtml(session, info) {{
   const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
   if (desc) parts.push(`<span class="meta-desc">${{esc(shortText(desc, 160))}}</span>`);
   return parts.length ? metaJoin(parts) : '<span class="meta-muted">git checkout detected</span>';
-}}
-
-function projectMetaTitle(session, info) {{
-  const project = info?.project || {{}};
-  const git = project.git;
-  const lines = [];
-  const fullPath = panelFullPath(session, info);
-  if (fullPath) lines.push(`path: ${{fullPath}}`);
-  if (!git) {{
-    lines.push('no git checkout detected');
-    return lines.join('\\n');
-  }}
-  if (git.branch) lines.push(`branch: ${{git.branch}}`);
-  if (git.upstream) lines.push(`upstream: ${{git.upstream}}`);
-  if (Number.isFinite(git.ahead) || Number.isFinite(git.behind)) lines.push(`ahead/behind: ${{git.ahead || 0}}/${{git.behind || 0}}`);
-  if (Number.isFinite(git.dirty_count)) lines.push(`dirty files: ${{git.dirty_count}}`);
-  const pr = project.pull_request;
-  if (pr?.number) {{
-    lines.push(`PR #${{pr.number}} ${{pullRequestStatusLabel(pr)}}: ${{pr.title || pr.description || pr.url || ''}}`);
-    if (pr.checks?.state && pr.checks.state !== 'unknown') {{
-      lines.push(`CI: ${{pr.checks.summary || pr.checks.state}}`);
-      const failing = (pr.checks.failing || []).map(item => `${{item.name}}=${{item.state}}`).join(', ');
-      const pending = (pr.checks.pending || []).map(item => `${{item.name}}=${{item.state}}`).join(', ');
-      if (failing) lines.push(`CI failing: ${{failing}}`);
-      if (pending) lines.push(`CI pending: ${{pending}}`);
-    }}
-  }}
-  for (const issue of project.linear || []) {{
-    lines.push(`${{issue.identifier}}${{issue.state ? ` ${{issue.state}}` : ''}}: ${{issue.title || issue.url || ''}}`);
-  }}
-  return lines.join('\\n');
 }}
 
 function summaryContextHtml(session, info, agent) {{
@@ -7047,14 +6948,6 @@ function showUploadResult(session, payload, inserted) {{
   renderUploadResult(session);
 }}
 
-function getActiveUploadPaths(session) {{
-  const now = Date.now();
-  return (uploadResultsBySession.get(session) || [])
-    .filter(entry => entry.expiresAt > now)
-    .map(entry => entry.path)
-    .filter(Boolean);
-}}
-
 function ensureUploadResultShell(session, node) {{
   return ensureToastShell(node, {{
     title: `YOLOMux - ${{serverHostname}}: ${{sessionLabel(session)}} upload`,
@@ -7159,21 +7052,6 @@ function slotLabel(slot) {{
     .replace('right', 'right ')
     .replace('Top', 'top')
     .replace('Bottom', 'bottom');
-}}
-
-function closeAllTerminals() {{
-  for (const observer of resizeObservers.values()) observer.disconnect();
-  resizeObservers.clear();
-  focusedTerminal = null;
-  for (const [session, item] of terminals.entries()) {{
-    closeTerminalItem(session, item);
-  }}
-  terminals.clear();
-}}
-
-function closeAllStreams() {{
-  for (const session of Array.from(transcriptStreams.keys())) stopTranscriptStream(session);
-  for (const session of Array.from(summaryStreams.keys())) stopSummaryStream(session);
 }}
 
 function activateTab(session, name) {{
@@ -7805,16 +7683,6 @@ async function boot() {{
   setInterval(refreshTranscripts, metadataRefreshMs);
   setInterval(updateLatency, latencyRefreshMs);
   setInterval(refreshOpenEventLogs, 5000);
-}}
-
-function refreshVisibleTranscripts() {{
-  for (const session of activeSessions.filter(isTmuxSession)) {{
-    const pane = document.getElementById(`transcript-pane-${{session}}`);
-    const preview = document.getElementById(`transcript-${{session}}`);
-    if (pane?.classList.contains('active') && preview && !transcriptStreams.has(session)) {{
-      refreshTranscriptPreview(session, preview, {{preserveScroll: true}});
-    }}
-  }}
 }}
 
 async function showContext(session) {{
