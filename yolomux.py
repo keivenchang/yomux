@@ -166,10 +166,12 @@ class PaneInfo:
     session: str
     window: str
     pane: str
+    pane_id: str
     target: str
     current_path: str
     command: str
     active: bool
+    window_active: bool
     title: str
     pid: int
 
@@ -217,6 +219,10 @@ def tmux(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[s
     return run_cmd(["tmux", *args], timeout=timeout)
 
 
+def tmux_session_target(session: str) -> str:
+    return f"{session}:"
+
+
 def list_tmux_session_names() -> tuple[list[str], str | None]:
     result = tmux(["list-sessions", "-F", "#{session_name}"], timeout=3.0)
     if result.returncode != 0:
@@ -224,6 +230,11 @@ def list_tmux_session_names() -> tuple[list[str], str | None]:
         return [], error
     sessions = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     return sorted(set(sessions), key=session_sort_key), None
+
+
+def tmux_has_exact_session(session: str) -> bool:
+    sessions, error = list_tmux_session_names()
+    return error is None and session in sessions
 
 
 def session_sort_key(session: str) -> tuple[int, str, int]:
@@ -322,9 +333,11 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
             "#{session_name}",
             "#{window_index}",
             "#{pane_index}",
+            "#{pane_id}",
             "#{pane_current_path}",
             "#{pane_current_command}",
             "#{pane_active}",
+            "#{window_active}",
             "#{pane_title}",
             "#{pane_pid}",
         ]
@@ -337,9 +350,9 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
     panes: list[PaneInfo] = []
     for line in result.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) != 8:
+        if len(parts) != 10:
             continue
-        session, window, pane, path, command, active, title, pid_text = parts
+        session, window, pane, pane_id, path, command, active, window_active, title, pid_text = parts
         try:
             pid = int(pid_text)
         except ValueError:
@@ -349,10 +362,12 @@ def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
                 session=session,
                 window=window,
                 pane=pane,
-                target=f"{session}:{window}.{pane}",
+                pane_id=pane_id,
+                target=pane_id,
                 current_path=path,
                 command=command,
                 active=active == "1",
+                window_active=window_active == "1",
                 title=title,
                 pid=pid,
             )
@@ -533,10 +548,19 @@ def preferred_pane(panes: list[PaneInfo], agents: list[AgentInfo]) -> PaneInfo |
         return None
     agent_targets = {agent.pane_target for agent in agents}
     for pane in sorted(panes, key=pane_sort_key):
+        if pane.window_active and pane.target in agent_targets:
+            return pane
+    for pane in sorted(panes, key=pane_sort_key):
         if pane.target in agent_targets:
             return pane
     for pane in sorted(panes, key=pane_sort_key):
+        if pane.window_active and pane.command in AGENT_COMMANDS:
+            return pane
+    for pane in sorted(panes, key=pane_sort_key):
         if pane.command in AGENT_COMMANDS:
+            return pane
+    for pane in sorted(panes, key=pane_sort_key):
+        if pane.window_active and pane.active:
             return pane
     for pane in sorted(panes, key=pane_sort_key):
         if pane.active:
@@ -1865,7 +1889,7 @@ class TmuxWebtermApp:
     def tmux_next_window(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         if session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
-        result = tmux(["next-window", "-t", session], timeout=3.0)
+        result = tmux(["next-window", "-t", tmux_session_target(session)], timeout=3.0)
         if result.returncode != 0:
             error = (result.stderr or result.stdout or "tmux next-window failed").strip()
             return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
@@ -1875,20 +1899,20 @@ class TmuxWebtermApp:
         if session not in self.sessions or direction not in {"up", "down"}:
             return
         bounded_lines = str(max(1, min(lines, 80)))
+        target = tmux_session_target(session)
         if direction == "up":
-            tmux(["copy-mode", "-e", "-t", session], timeout=1.0)
+            tmux(["copy-mode", "-e", "-t", target], timeout=1.0)
             command = "scroll-up"
         else:
             command = "scroll-down"
-        tmux(["send-keys", "-t", session, "-X", "-N", bounded_lines, command], timeout=1.0)
+        tmux(["send-keys", "-t", target, "-X", "-N", bounded_lines, command], timeout=1.0)
 
     def ensure_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
         if session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
 
-        exists = tmux(["has-session", "-t", session], timeout=3.0)
-        if exists.returncode == 0:
+        if tmux_has_exact_session(session):
             return {"session": session, "created": False, "ok": True}, HTTPStatus.OK
 
         self.sessions = [item for item in self.sessions if item != session]
@@ -2051,8 +2075,7 @@ class TmuxWebtermApp:
         if enabled:
             if existing:
                 return self.auto_approve_session_status(session), HTTPStatus.OK
-            exists = tmux(["has-session", "-t", session], timeout=3.0)
-            if exists.returncode != 0:
+            if not tmux_has_exact_session(session):
                 return {"session": session, "enabled": False, "error": f"tmux session not found: {session}"}, HTTPStatus.NOT_FOUND
             worker = AutoApproveWorker(session, event_callback=self.log_auto_event)
             self.auto_workers[session] = worker
@@ -2838,20 +2861,23 @@ body {{
   text-align: left;
   line-height: 1.05;
   border-radius: 8px 8px 0 0;
-  background: #111722;
-  border: 1px solid #2f394a;
-  border-color: #2f394a;
-  border-bottom-color: #465267;
+  background: #05070b;
+  border: 1px solid #465267;
+  border-bottom-color: #58667b;
 }}
-.session-button-wrap:not(.add-session) .session-button:not(.active) {{
+.session-button-wrap:not(.add-session) .session-button.shown:not(.active) {{
   background: linear-gradient(var(--inactive-gray), var(--inactive-gray)), #111722;
 }}
-.session-button-wrap:not(.add-session) .session-button:not(.active):hover {{
+.session-button-wrap:not(.add-session) .session-button.shown:not(.active):hover {{
   background: linear-gradient(var(--inactive-gray-hover), var(--inactive-gray-hover)), #111722;
 }}
+.session-button-wrap:not(.add-session) .session-button:not(.shown):not(.active):hover {{
+  background: #0c1119;
+  border-color: #657084;
+}}
 .session-button:not(.active):not(.needs-attention) {{
-  border-color: #2f394a;
-  border-bottom-color: #465267;
+  border-color: #465267;
+  border-bottom-color: #58667b;
   box-shadow: none;
 }}
 .session-button.info {{
@@ -2975,6 +3001,11 @@ body {{
   background: #c61f38;
   border-color: #ff7a86;
 }}
+.session-state-yolo-approval {{
+  color: #081205;
+  background: var(--GPU-green);
+  border-color: #9be33d;
+}}
 .session-state-blocked,
 .session-state-disconnected {{
   color: #fff3f4;
@@ -3022,7 +3053,8 @@ body {{
   box-shadow: inset 0 -2px 0 rgba(245, 197, 66, 0.45);
 }}
 .session-button.needs-input,
-.session-button.needs-exec {{
+.session-button.needs-exec,
+.session-button.needs-blocked {{
   --attention-ring-border: 1px;
   animation: attention-ring-fade 2s ease-in-out infinite;
 }}
@@ -3498,12 +3530,14 @@ button:disabled:hover {{ border-color: var(--line); }}
   --panel-ring-color: var(--GPU-green);
 }}
 .panel.needs-input-window,
-.panel.needs-exec-window {{
+.panel.needs-exec-window,
+.panel.needs-blocked-window {{
   --panel-ring-color: #ff3347;
 }}
 .panel.typing-ready-window::after,
 .panel.needs-input-window::after,
-.panel.needs-exec-window::after {{
+.panel.needs-exec-window::after,
+.panel.needs-blocked-window::after {{
   content: "";
   position: absolute;
   inset: 0;
@@ -3513,7 +3547,8 @@ button:disabled:hover {{ border-color: var(--line); }}
   pointer-events: none;
 }}
 .panel.needs-input-window::after,
-.panel.needs-exec-window::after {{
+.panel.needs-exec-window::after,
+.panel.needs-blocked-window::after {{
   --attention-ring-border: 1px;
   animation: attention-ring-fade 2s ease-in-out infinite;
 }}
@@ -4527,6 +4562,7 @@ function itemParam(item) {{
 
 const stateDefs = {{
   'needs-approval': {{label: 'Needs approval', short: 'EXEC?', priority: 0, attention: true}},
+  'yolo-approval': {{label: 'YOLO pending approval', short: 'YOLO?', priority: 0, attention: false}},
   'needs-input': {{label: 'Needs input', short: 'QUES?', priority: 1, attention: true}},
   blocked: {{label: 'Blocked', short: 'BLK', priority: 2, attention: true}},
   disconnected: {{label: 'Disconnected', short: 'OFF', priority: 3, attention: true}},
@@ -4584,7 +4620,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {{
     return stateValue('blocked', 'YOLO blocked an approval prompt');
   }}
   if (approvalPromptVisible && approvalYesSelected && autoEnabled) {{
-    return stateValue('working', 'YOLO is handling an approval prompt');
+    return stateValue('yolo-approval', 'YOLO sees the prompt and will press Enter');
   }}
   if (approvalPromptVisible && approvalYesSelected) {{
     return stateValue('needs-approval', approvalPromptText || 'approval prompt is visible');
@@ -5064,6 +5100,7 @@ function renderSessionButtons() {{
   for (const session of sessionTrayItems()) {{
     const isInfo = isInfoItem(session);
     const active = topTabIsActive(session);
+    const shown = activeSessions.includes(session);
     const auto = autoApproveStates.get(session)?.enabled === true;
     const info = transcriptMeta.sessions?.[session];
     const agentKind = sessionAgentKind(session);
@@ -5072,9 +5109,10 @@ function renderSessionButtons() {{
     wrapper.className = `session-button-wrap ${{isInfo ? 'info' : ''}}`;
     wrapper.dataset.session = session;
     const button = document.createElement('button');
-    button.className = `session-button ${{isInfo ? 'info' : ''}} ${{active ? 'active' : ''}} ${{auto ? 'auto' : ''}} ${{state?.attention ? 'needs-attention' : ''}}`;
+    button.className = `session-button ${{isInfo ? 'info' : ''}} ${{active ? 'active' : ''}} ${{shown ? 'shown' : ''}} ${{auto ? 'auto' : ''}} ${{state?.attention ? 'needs-attention' : ''}}`;
     button.classList.toggle('needs-input', state?.key === 'needs-input');
     button.classList.toggle('needs-exec', state?.key === 'needs-approval');
+    button.classList.toggle('needs-blocked', state?.key === 'blocked');
     button.draggable = true;
     button.innerHTML = isInfo ? infoButtonHtml() : sessionButtonHtml(session, info, agentKind, state, auto);
     button.removeAttribute('title');
@@ -7174,6 +7212,7 @@ function updatePanelHeader(session, info) {{
   }}
   panel?.classList.toggle('needs-input-window', state.key === 'needs-input');
   panel?.classList.toggle('needs-exec-window', state.key === 'needs-approval');
+  panel?.classList.toggle('needs-blocked-window', state.key === 'blocked');
 }}
 
 function renderSummaryContext(session, info, agent) {{
@@ -8090,7 +8129,7 @@ class Handler(BaseHTTPRequestHandler):
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
         process = subprocess.Popen(
-            ["tmux", "attach-session", "-t", session],
+            ["tmux", "attach-session", "-t", tmux_session_target(session)],
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,

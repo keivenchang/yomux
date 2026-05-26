@@ -456,7 +456,11 @@ def stale_approval_behind_working(visible_text: str) -> bool:
     """Return True when old prompt text remains visible above a live working row."""
     lines = visible_text.splitlines()
     prompt_index = _last_approval_prompt_index(lines)
-    return prompt_index >= 0 and _last_working_index(lines) > prompt_index
+    return (
+        prompt_index >= 0
+        and _last_working_index(lines) > prompt_index
+        and approval_prompt_has_later_activity(visible_text)
+    )
 
 
 def approval_prompt_has_later_activity(visible_text: str) -> bool:
@@ -481,7 +485,11 @@ def approval_prompt_has_later_activity(visible_text: str) -> bool:
     start = footer_index + 1 if footer_index >= 0 else selected_index + 1
     for line in lines[start:]:
         stripped = line.strip()
-        if _is_separator_or_footer(line) or _CHOICE_LINE_RE.search(line):
+        if (
+            _is_separator_or_footer(line)
+            or _CHOICE_LINE_RE.search(line)
+            or _is_prompt_trailing_ui_line(line)
+        ):
             continue
         if footer_index >= 0:
             return True
@@ -499,6 +507,19 @@ def _clean_prompt_block_line(line: str) -> str:
 def _is_separator_or_footer(line: str) -> bool:
     stripped = line.strip()
     return not stripped or bool(_FOOTER_LINE_RE.search(stripped)) or bool(re.fullmatch(r"[─\-]{10,}", stripped))
+
+
+def _is_prompt_trailing_ui_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if _WORKING_LINE_RE.search(line):
+        return True
+    if re.match(r"^\d+\s+tasks\s+\(", stripped):
+        return True
+    if stripped.startswith(("◼", "◻", "☑", "☒")):
+        return True
+    return False
 
 
 def _clip_prompt_lines(lines: list[str], max_lines: int = 12, max_chars: int = 1200) -> str:
@@ -641,7 +662,25 @@ def tmux_session_names() -> list[str]:
 
 
 def tmux_has_session(session: str) -> bool:
-    return tmux_run("has-session", "-t", session, check=False).returncode == 0
+    return session in tmux_session_names()
+
+
+def tmux_exact_target_from_sessions(target: str, sessions: list[str]) -> str:
+    """Return a tmux target that cannot confuse a numeric session with a window.
+
+    `tmux -t 1` can mean window 1 in the current session, not the session named
+    `1`. When the requested target exactly matches a session name, use `1:` so
+    tmux resolves it as that session's active pane.
+    """
+    if not target or target.startswith("%"):
+        return target
+    if target in sessions:
+        return f"{target}:"
+    return target
+
+
+def tmux_exact_target(target: str) -> str:
+    return tmux_exact_target_from_sessions(target, tmux_session_names())
 
 
 def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False) -> str | None:
@@ -657,24 +696,26 @@ def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False) 
     prompt_hash). Use the default scrollback capture only when you need
     context above the prompt (extract_command, _find_full_path).
     """
+    exact_target = tmux_exact_target(target)
     if visible_only:
-        result = tmux_run("capture-pane", "-t", target, "-p", check=False)
+        result = tmux_run("capture-pane", "-t", exact_target, "-p", check=False)
     else:
-        result = tmux_run("capture-pane", "-t", target, "-p", "-S", f"-{lines}", check=False)
+        result = tmux_run("capture-pane", "-t", exact_target, "-p", "-S", f"-{lines}", check=False)
     if result.returncode != 0:
         return None
     return result.stdout
 
 
 def tmux_send_enter(target: str) -> None:
-    tmux_run("send-keys", "-t", target, "Enter", check=False)
+    tmux_run("send-keys", "-t", tmux_exact_target(target), "Enter", check=False)
 
 
 def tmux_send_option2(target: str) -> None:
     """Select option 2 by pressing Down then Enter."""
-    tmux_run("send-keys", "-t", target, "Down")
+    exact_target = tmux_exact_target(target)
+    tmux_run("send-keys", "-t", exact_target, "Down")
     time.sleep(0.3)
-    tmux_send_enter(target)
+    tmux_send_enter(exact_target)
 
 
 # ---------------------------------------------------------------------------
@@ -1337,6 +1378,16 @@ def _self_test() -> bool:
           prompt_hash(yes_no_prompt_a) != prompt_hash(yes_no_prompt_b), True)
     check("current visible approval prompt is active",
           approval_prompt_state(yes_no_prompt_a)["visible"], True)
+    prompt_with_tasks = yes_no_prompt_a + (
+        "\n  4 tasks (0 done, 1 in progress, 3 open)\n"
+        "  ◼ Fix parser output leak\n"
+        "  ◻ Update fixtures\n"
+    )
+    check("current approval prompt with task list below is active",
+          approval_prompt_state(prompt_with_tasks)["visible"], True)
+    prompt_with_status = yes_no_prompt_a + "\n✢ Metamorphosing… (21m 2s · ↓ 295 tokens · thought for 2s)\n"
+    check("current approval prompt with status row below is active",
+          approval_prompt_state(prompt_with_status)["visible"], True)
     dismissed_prompt = yes_no_prompt_a + "\n● User approved Claude's request\n● Bash(echo one)\n  ⎿  ok\n\n❯ \n"
     check("dismissed approval prompt above newer output is ignored",
           approval_prompt_state(dismissed_prompt)["visible"], False)
@@ -1511,6 +1562,15 @@ def _self_test() -> bool:
           specs_have_wildcards(["dynamo1", "dynamo2:0.1"]), False)
     check("wildcard detection true",
           specs_have_wildcards(["dynamo1", "dyn*"]), True)
+    numeric_sessions = ["1", "6", "ant"]
+    check("numeric session target becomes explicit session",
+          tmux_exact_target_from_sessions("1", numeric_sessions), "1:")
+    check("named session target becomes explicit session",
+          tmux_exact_target_from_sessions("ant", numeric_sessions), "ant:")
+    check("pane id target stays unchanged",
+          tmux_exact_target_from_sessions("%79", numeric_sessions), "%79")
+    check("explicit pane target stays unchanged",
+          tmux_exact_target_from_sessions("1:0.0", numeric_sessions), "1:0.0")
 
     # =====================================================================
     # Summary
