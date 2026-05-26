@@ -56,7 +56,7 @@ DEFAULT_COLS = 120
 DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
-MAX_YOLOMUX_SESSION_TABS = 9
+MAX_YOLOMUX_SESSION_TABS = 99
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -253,7 +253,9 @@ def unique_session_names(values: list[str] | tuple[str, ...]) -> list[str]:
     return sorted(result, key=session_sort_key)
 
 
-def next_numbered_session_name(existing_sessions: set[str]) -> str | None:
+def next_numbered_session_name(existing_sessions: list[str]) -> str | None:
+    if len(existing_sessions) >= MAX_YOLOMUX_SESSION_TABS:
+        return None
     for index in range(1, MAX_YOLOMUX_SESSION_TABS + 1):
         session = str(index)
         if session not in existing_sessions:
@@ -879,6 +881,9 @@ def candidate_session_cwds(info: SessionInfo) -> list[str]:
         paths.append(info.selected_pane.current_path)
     paths.extend(agent.cwd for agent in info.agents if agent.cwd)
     paths.extend(pane.current_path for pane in info.panes if pane.current_path)
+    numbered_workdir = numbered_session_workdir(info.session)
+    if numbered_workdir and numbered_workdir.is_dir():
+        paths.append(str(numbered_workdir))
     return unique_existing_paths(paths)
 
 
@@ -1313,8 +1318,6 @@ def compact_description(text: str | None, limit: int = 480) -> str | None:
 
 
 class AutoApproveWorker:
-    MAX_RETRIES = 10
-
     def __init__(self, target: str, interval: float = 0.5, event_callback: Any = None):
         self.target = target
         self.interval = interval
@@ -1328,7 +1331,8 @@ class AutoApproveWorker:
         self.last_action = "starting"
         self.error: str | None = None
         self.last_hash = ""
-        self.retry_count = 0
+        self.last_hash_at = 0.0
+        self.last_blocked_hash = ""
 
     def start(self) -> None:
         self.thread.start()
@@ -1403,13 +1407,16 @@ class AutoApproveWorker:
             self.update(last_action="failed to capture pane")
             return False
 
-        prompt_type = module.detect_prompt(visible_text)
+        prompt_state = module.approval_prompt_state(visible_text)
+        prompt_type = prompt_state.get("type") or None
         if prompt_type is None:
             self.last_hash = ""
+            self.last_hash_at = 0.0
+            self.last_blocked_hash = ""
             self.update(last_action="idle")
             return False
 
-        if not module.yes_is_selected(visible_text):
+        if not prompt_state.get("yes_selected"):
             self.update(last_action="prompt found, Yes not selected")
             return False
 
@@ -1417,24 +1424,19 @@ class AutoApproveWorker:
         if pane_text is None:
             pane_text = visible_text
 
-        current_hash = module.prompt_hash(visible_text)
-        if current_hash == self.last_hash:
-            self.retry_count += 1
-            if self.retry_count <= self.MAX_RETRIES:
-                self.update(last_action=f"retrying visible prompt {self.retry_count}/{self.MAX_RETRIES}")
-                time.sleep(0.3)
-                module.tmux_send_enter(self.target)
-                self.stop_event.wait(1.0)
-            else:
-                self.last_hash = ""
-                self.retry_count = 0
-                self.update(last_action="prompt persisted; reset retry state")
+        current_hash = str(prompt_state.get("hash") or "")
+        now = time.monotonic()
+        if current_hash == self.last_blocked_hash:
+            self.update(last_action="blocked prompt still visible; waiting for manual action")
             return False
+        if current_hash == self.last_hash and now - self.last_hash_at < module.PROMPT_RETRY_SECONDS:
+            self.update(last_action="approved prompt still visible; waiting before retry")
+            return False
+        if current_hash == self.last_hash:
+            self.update(last_action=f"approved prompt still visible after {module.PROMPT_RETRY_SECONDS:g}s; retrying")
 
-        if prompt_type == "bash":
-            action = module.action_for_bash_prompt(visible_text)
-        else:
-            action = module.action_for_prompt(prompt_type)
+        action_value = prompt_state.get("action")
+        action = action_value if isinstance(action_value, str) and action_value else None
 
         if prompt_type == "bash":
             return self.handle_bash_prompt(module, pane_text, current_hash, action)
@@ -1455,7 +1457,8 @@ class AutoApproveWorker:
         cmd = module.extract_command(pane_text)
         if cmd is not None and module.is_dangerous(cmd):
             self.last_hash = current_hash
-            self.retry_count = 0
+            self.last_hash_at = time.monotonic()
+            self.last_blocked_hash = current_hash
             self.blocked += 1
             self.update(last_action=f"blocked bash: {truncate_text(cmd, 180)}")
             self.emit_event(
@@ -1469,7 +1472,8 @@ class AutoApproveWorker:
 
         self.send_action(module, action)
         self.last_hash = current_hash
-        self.retry_count = 0
+        self.last_hash_at = time.monotonic()
+        self.last_blocked_hash = ""
         self.approved += 1
         desc = "bash command" if cmd is None else truncate_text(cmd, 180)
         self.update(last_action=f"approved bash: {desc}")
@@ -1487,7 +1491,8 @@ class AutoApproveWorker:
     def approve_prompt(self, module: Any, current_hash: str, action: str | None, prompt_type: str) -> bool:
         self.send_action(module, action)
         self.last_hash = current_hash
-        self.retry_count = 0
+        self.last_hash_at = time.monotonic()
+        self.last_blocked_hash = ""
         self.approved += 1
         opt_label = "option2" if action == "option2" else "option1"
         self.update(last_action=f"approved {prompt_type}: {opt_label}")
@@ -1622,6 +1627,14 @@ class TmuxWebtermApp:
     def persist_auto_sessions(self) -> None:
         enabled = sorted(name for name, worker in self.auto_workers.items() if worker.alive())
         update_yolomux_state({"auto_approve_enabled": enabled})
+
+    def notify_status(self) -> dict[str, Any]:
+        return {"enabled": bool(read_yolomux_state().get("notify_enabled", False))}
+
+    def set_notify(self, enabled: bool) -> dict[str, Any]:
+        update_yolomux_state({"notify_enabled": enabled})
+        self.log_event(None, "notify_enabled" if enabled else "notify_disabled", "Notify enabled" if enabled else "Notify disabled", {})
+        return {"enabled": enabled}
 
     def log_event(self, session: str | None, event_type: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.event_log.append(session, event_type, message, details)
@@ -1897,7 +1910,7 @@ class TmuxWebtermApp:
                 "error": f"maximum session tabs reached: {MAX_YOLOMUX_SESSION_TABS}",
                 "sessions": self.sessions,
             }, HTTPStatus.CONFLICT
-        session = next_numbered_session_name(set(self.sessions))
+        session = next_numbered_session_name(self.sessions)
         if session is None:
             return {
                 "error": f"no available numbered session names from 1 to {MAX_YOLOMUX_SESSION_TABS}",
@@ -2019,7 +2032,7 @@ class TmuxWebtermApp:
                     if ok:
                         return resolved, f"git_{key}"
         for cwd in candidate_session_cwds(info):
-            resolved, ok = resolved_upload_dir(Path(cwd))
+            resolved, ok = resolved_upload_dir(Path(cwd), allow_home=True)
             if ok:
                 return resolved, "pane_current_path"
         return None, "session_workdir"
@@ -2037,7 +2050,7 @@ class TmuxWebtermApp:
 
         if enabled:
             if existing:
-                return existing.status(), HTTPStatus.OK
+                return self.auto_approve_session_status(session), HTTPStatus.OK
             exists = tmux(["has-session", "-t", session], timeout=3.0)
             if exists.returncode != 0:
                 return {"session": session, "enabled": False, "error": f"tmux session not found: {session}"}, HTTPStatus.NOT_FOUND
@@ -2047,7 +2060,7 @@ class TmuxWebtermApp:
             if persist:
                 self.persist_auto_sessions()
             self.log_event(session, "yolo_enabled", "YOLO enabled", {"persist": persist})
-            return worker.status(), HTTPStatus.OK
+            return self.auto_approve_session_status(session), HTTPStatus.OK
 
         if existing:
             existing.stop()
@@ -2055,7 +2068,41 @@ class TmuxWebtermApp:
             if persist:
                 self.persist_auto_sessions()
             self.log_event(session, "yolo_disabled", "YOLO disabled", {"persist": persist})
-        return {"target": session, "enabled": False, "approved": 0, "blocked": 0, "last_action": "off"}, HTTPStatus.OK
+        return self.auto_approve_session_status(session), HTTPStatus.OK
+
+    def prompt_and_screen_status(self, session: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            module = auto_approve_module()
+            visible_text = module.tmux_capture_pane(session, visible_only=True)
+            if visible_text is None:
+                prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": "", "error": "failed to capture pane"}
+                screen = {"key": "disconnected", "text": "failed to capture pane"}
+                return prompt, screen
+            prompt_state = module.approval_prompt_state(visible_text)
+            if prompt_state.get("visible") and prompt_state.get("type") == "bash":
+                pane_text = module.tmux_capture_pane(session)
+                prompt_state = module.approval_prompt_state(visible_text, pane_text or visible_text)
+            screen_state = module.agent_screen_state(visible_text)
+            return dict(prompt_state), dict(screen_state)
+        except Exception as exc:
+            prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": "", "error": str(exc)}
+            screen = {"key": "error", "text": str(exc)}
+            return prompt, screen
+
+    def approval_prompt_status(self, session: str) -> dict[str, Any]:
+        prompt, _screen = self.prompt_and_screen_status(session)
+        return prompt
+
+    def auto_approve_session_status(self, session: str) -> dict[str, Any]:
+        worker = self.auto_workers.get(session)
+        if worker:
+            payload = worker.status()
+        else:
+            payload = {"target": session, "enabled": False, "approved": 0, "blocked": 0, "last_action": "off"}
+        prompt, screen = self.prompt_and_screen_status(session)
+        payload["prompt"] = prompt
+        payload["screen"] = screen
+        return payload
 
     def auto_approve_status(self, session: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
         if session is not None and session not in self.sessions:
@@ -2069,11 +2116,8 @@ class TmuxWebtermApp:
         if removed:
             self.persist_auto_sessions()
         if session is not None:
-            worker = self.auto_workers.get(session)
-            if worker:
-                return worker.status(), HTTPStatus.OK
-            return {"target": session, "enabled": False, "approved": 0, "blocked": 0, "last_action": "off"}, HTTPStatus.OK
-        return {"sessions": {name: worker.status() for name, worker in self.auto_workers.items()}}, HTTPStatus.OK
+            return self.auto_approve_session_status(session), HTTPStatus.OK
+        return {"sessions": {name: self.auto_approve_session_status(name) for name in self.sessions}}, HTTPStatus.OK
 
     def stop_auto_approve_all(self) -> None:
         for worker in list(self.auto_workers.values()):
@@ -2081,13 +2125,13 @@ class TmuxWebtermApp:
         self.auto_workers.clear()
 
 
-def resolved_upload_dir(path: Path) -> tuple[Path | None, bool]:
+def resolved_upload_dir(path: Path, allow_home: bool = False) -> tuple[Path | None, bool]:
     try:
         resolved = path.expanduser().resolve()
         home = Path.home().resolve()
     except OSError:
         return None, False
-    return resolved, resolved.is_dir() and resolved != home
+    return resolved, resolved.is_dir() and (allow_home or resolved != home)
 
 
 def session_to_json(info: SessionInfo, metadata_cache: MetadataCache) -> dict[str, Any]:
@@ -2101,7 +2145,7 @@ def session_to_json(info: SessionInfo, metadata_cache: MetadataCache) -> dict[st
 
 
 def session_workdir(session: str) -> Path:
-    match = re.fullmatch(r"(?:yolomux|dynamo)(\d+)", session)
+    match = re.fullmatch(r"(?:yolomux|dynamo)?(\d+)", session)
     session_index = match.group(1) if match else None
     if session_index == "6":
         dev_path = Path.home() / "dynamo" / "dynamo-utils.dev"
@@ -2110,6 +2154,18 @@ def session_workdir(session: str) -> Path:
     repo_name = f"dynamo{session_index}" if session_index else session
     repo_path = Path.home() / "dynamo" / repo_name
     return repo_path if repo_path.is_dir() else Path.home()
+
+
+def numbered_session_workdir(session: str) -> Path | None:
+    match = re.fullmatch(r"\d+", session)
+    if not match:
+        return None
+    if session == "6":
+        dev_path = Path.home() / "dynamo" / "dynamo-utils.dev"
+        if dev_path.is_dir():
+            return dev_path
+    repo_path = Path.home() / "dynamo" / f"dynamo{session}"
+    return repo_path if repo_path.is_dir() else None
 
 
 def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
@@ -2613,17 +2669,29 @@ def html_page(sessions: list[str]) -> str:
   --auto-border-disabled: #4b7518;
   --auto-glow: rgba(118, 185, 0, 0.24);
   --bad: #ff6673;
+  --inactive-gray: rgba(178, 190, 210, 0.38);
+  --inactive-gray-hover: rgba(190, 202, 220, 0.44);
+  --popover-show-delay: 1600ms;
+  --popover-hide-delay: 300ms;
+  --topbar-popover-top: 42px;
 }}
 * {{ box-sizing: border-box; }}
+html {{
+  height: 100%;
+}}
 body {{
   margin: 0;
+  height: 100vh;
   min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }}
 .topbar {{
-  height: 38px;
+  min-height: 38px;
   position: relative;
   z-index: 60;
   display: flex;
@@ -2711,9 +2779,9 @@ body {{
   display: flex;
   align-items: flex-end;
   justify-content: flex-start;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 4px;
-  height: 100%;
+  height: auto;
   overflow-x: hidden;
   overflow-y: hidden;
   padding-bottom: 0;
@@ -2733,11 +2801,12 @@ body {{
 }}
 .session-button-wrap {{
   position: relative;
-  flex: 0 1 auto;
+  flex: 1 1 124px;
   min-width: 54px;
-  max-width: 220px;
+  max-width: 176px;
 }}
 .session-button-wrap.info {{
+  flex-basis: 96px;
   max-width: 112px;
 }}
 .session-button-wrap.add-session {{
@@ -2756,12 +2825,12 @@ body {{
   z-index: 79;
 }}
 .session-button {{
-  width: max-content;
+  width: 100%;
   max-width: 100%;
   min-width: 0;
   height: 29px;
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 4px;
   padding: 3px 7px;
@@ -2774,13 +2843,20 @@ body {{
   border-color: #2f394a;
   border-bottom-color: #465267;
 }}
-.session-button:not(.active):not(.auto):not(.needs-attention) {{
-  border-color: rgba(238, 243, 255, 0.72);
-  border-bottom-color: rgba(238, 243, 255, 0.92);
-  box-shadow: inset 0 0 0 1px rgba(238, 243, 255, 0.08);
+.session-button-wrap:not(.add-session) .session-button:not(.active) {{
+  background: linear-gradient(var(--inactive-gray), var(--inactive-gray)), #111722;
+}}
+.session-button-wrap:not(.add-session) .session-button:not(.active):hover {{
+  background: linear-gradient(var(--inactive-gray-hover), var(--inactive-gray-hover)), #111722;
+}}
+.session-button:not(.active):not(.needs-attention) {{
+  border-color: #2f394a;
+  border-bottom-color: #465267;
+  box-shadow: none;
 }}
 .session-button.info {{
   min-width: 88px;
+  grid-template-columns: auto minmax(0, 1fr);
 }}
 .session-button:hover {{
   background: #1a2230;
@@ -2804,16 +2880,21 @@ body {{
   margin-left: 0;
 }}
 .session-button-number {{
-  width: 18px;
-  height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 5px;
-  color: #14171d;
-  background: #f5c542;
-  border: 1px solid #ffe58a;
+  min-width: 1ch;
+  color: inherit;
+  background: transparent;
+  border: 0;
   font-weight: 700;
+}}
+.session-button-prefix {{
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
 }}
 .session-label-agent {{
   display: inline-flex;
@@ -2822,6 +2903,20 @@ body {{
 }}
 .session-button-text {{
   min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  white-space: nowrap;
+}}
+.session-button-name {{
+  flex: 0 0 auto;
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #f2f5f8;
+  font-size: 12px;
+  font-weight: 800;
 }}
 .session-button-dir,
 .session-button-detail {{
@@ -2830,6 +2925,10 @@ body {{
   text-overflow: ellipsis;
 }}
 .session-button-dir {{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: #e7ecf3;
   font-size: 12px;
   font-weight: 700;
@@ -2866,11 +2965,15 @@ body {{
   font: 9px/1.15 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   text-transform: uppercase;
 }}
-.session-state-needs-approval,
+.session-state-needs-approval {{
+  color: #fff3f4;
+  background: #c61f38;
+  border-color: #ff7a86;
+}}
 .session-state-needs-input {{
-  color: #10151f;
-  background: #f5c542;
-  border-color: #ffe58a;
+  color: #fff3f4;
+  background: #c61f38;
+  border-color: #ff7a86;
 }}
 .session-state-blocked,
 .session-state-disconnected {{
@@ -2909,35 +3012,81 @@ body {{
   box-shadow: none;
 }}
 .session-button.active .session-button-dir,
-.session-button.active .session-button-detail {{
+.session-button.active .session-button-detail,
+.session-button.active .session-button-name,
+.session-button.active .session-yolo-marker {{
   color: #081205;
 }}
 .session-button.needs-attention:not(.active) {{
   border-color: #b98c24;
   box-shadow: inset 0 -2px 0 rgba(245, 197, 66, 0.45);
 }}
-.session-button.auto {{
-  color: var(--text);
-  background: #111722;
-  border-color: rgba(238, 243, 255, 0.72);
-  border-bottom-color: rgba(238, 243, 255, 0.92);
+.session-button.needs-input,
+.session-button.needs-exec {{
+  --attention-ring-border: 1px;
+  animation: attention-ring-fade 2s ease-in-out infinite;
 }}
-.session-button.active.auto {{
-  color: #081205;
-  background: var(--GPU-green);
-  border-color: var(--GPU-green);
-  border-bottom-color: var(--GPU-green);
-  box-shadow: none;
+@keyframes attention-ring-fade {{
+  0%, 100% {{
+    border-color: rgba(255, 51, 71, 0.34);
+    box-shadow: 0 0 0 0 rgba(255, 51, 71, 0), 0 0 2px rgba(255, 51, 71, 0.12);
+  }}
+  45%, 55% {{
+    border-color: rgba(255, 51, 71, 1);
+    box-shadow: 0 0 0 var(--attention-ring-border, 1px) rgba(255, 51, 71, 0.55), 0 0 18px rgba(255, 51, 71, 0.48);
+  }}
 }}
 .session-button.info {{
-  grid-template-columns: minmax(0, 1fr);
-  justify-items: center;
+  grid-template-columns: auto minmax(0, 1fr);
+  justify-items: start;
   font-weight: 700;
 }}
-.session-button.auto:disabled {{
-  opacity: 0.85;
-  color: var(--auto-muted-text);
-  border-color: var(--auto-border-disabled);
+.session-yolo-marker {{
+  flex: 0 0 auto;
+  min-width: 19px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2px;
+  color: var(--auto-text);
+  background: var(--GPU-green);
+  border: 1px solid var(--auto-border);
+  border-radius: 0;
+  box-shadow: none;
+  font: 900 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.ci-indicator {{
+  flex: 0 0 auto;
+  min-width: 17px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2px;
+  border-radius: 0;
+  border: 1px solid #384356;
+  color: #aeb8c7;
+  background: #161d29;
+  font: 900 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.ci-indicator.pr-status-failing {{
+  color: #fff3f4;
+  background: #c61f38;
+  border-color: #ff7a86;
+  box-shadow: none;
+}}
+.ci-indicator.pr-status-pending,
+.ci-indicator.pr-status-draft {{
+  color: #161000;
+  background: #f5c542;
+  border-color: #ffe27a;
+}}
+.ci-indicator.pr-status-passing,
+.ci-indicator.pr-status-merged {{
+  color: #051408;
+  background: #52d273;
+  border-color: #8ff2a7;
 }}
 .session-popover {{
   visibility: hidden;
@@ -2950,21 +3099,29 @@ body {{
   width: min(560px, 88vw);
   max-height: calc(100vh - 78px);
   overflow: auto;
-  padding: 12px;
-  color: #dfe6ef;
-  background: #10151e;
-  border: 1px solid #3a4658;
+  padding: 8px 10px;
+  color: #eefbe6;
+  background: rgba(8, 31, 8, 0.98);
+  border: 1px solid rgba(95, 150, 42, 0.64);
   border-radius: 8px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
   transform: translateY(-2px);
   transition:
-    opacity 90ms ease 350ms,
-    transform 90ms ease 350ms,
-    visibility 0s linear 440ms;
+    opacity 90ms ease var(--popover-hide-delay),
+    transform 90ms ease var(--popover-hide-delay),
+    visibility 0s linear calc(var(--popover-hide-delay) + 90ms);
 }}
 .session-button-wrap:nth-last-child(-n + 2) .session-popover {{
   right: 0;
   left: auto;
+}}
+.session-button-wrap[data-session] > .session-popover {{
+  position: fixed;
+  top: var(--topbar-popover-top);
+  left: 8px;
+  right: 8px;
+  width: auto;
+  max-height: min(65vh, 620px);
 }}
 .session-button-wrap.popover-open .session-popover {{
   visibility: visible;
@@ -2988,28 +3145,31 @@ body {{
   width: 10px;
   height: 10px;
   transform: rotate(45deg);
-  background: #10151e;
-  border-left: 1px solid #3a4658;
-  border-top: 1px solid #3a4658;
+  background: rgba(8, 31, 8, 0.98);
+  border-left: 1px solid rgba(95, 150, 42, 0.64);
+  border-top: 1px solid rgba(95, 150, 42, 0.64);
 }}
 .session-button-wrap:nth-last-child(-n + 2) .session-popover::before {{
   right: 18px;
   left: auto;
 }}
+.session-button-wrap[data-session] > .session-popover::before {{
+  display: none;
+}}
 .popover-head {{
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
+  gap: 8px;
+  margin-bottom: 5px;
 }}
 .popover-title {{
   font-weight: 700;
   font-size: 13px;
 }}
 .popover-subtitle {{
-  margin-top: 2px;
-  color: #9ea8b7;
+  margin-top: 1px;
+  color: #bddcaf;
   font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   overflow-wrap: anywhere;
 }}
@@ -3019,25 +3179,44 @@ body {{
   background: #f5c542;
   border: 1px solid #ffe58a;
   border-radius: 5px;
-  padding: 3px 6px;
+  padding: 2px 5px;
   font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }}
 .popover-row {{
   display: grid;
-  grid-template-columns: 70px minmax(0, 1fr);
-  gap: 8px;
-  padding: 4px 0;
-  border-top: 1px solid rgba(82, 95, 116, 0.42);
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 6px;
+  padding: 2px 0;
+  border-top: 1px solid rgba(180, 230, 140, 0.22);
 }}
 .popover-label {{
-  color: #8b95a5;
+  color: #a2c98d;
 }}
 .popover-value {{
   min-width: 0;
   overflow-wrap: anywhere;
 }}
+.session-popover .meta-muted {{
+  color: #b5d2a7;
+}}
+.session-popover .meta-sep {{
+  color: #87aa76;
+}}
+.state-legend {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 9px;
+}}
+.state-legend-item {{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #dbeed2;
+  font-size: 11px;
+  white-space: nowrap;
+}}
 .popover-desc {{
-  color: #cbd5e1;
+  color: #e5f6dc;
   line-height: 1.35;
 }}
 .popover-desc-title {{
@@ -3045,7 +3224,7 @@ body {{
 }}
 .popover-desc-body {{
   margin-top: 4px;
-  color: #aeb8c7;
+  color: #bddcaf;
 }}
 .popover-desc-line + .popover-desc-line {{
   margin-top: 4px;
@@ -3171,12 +3350,13 @@ button:disabled {{
 }}
 button:disabled:hover {{ border-color: var(--line); }}
 .grid {{
-  height: calc(100vh - 38px);
+  height: 100%;
   min-height: 0;
   padding: 0 5px 5px;
   display: grid;
   grid-template-columns: repeat(2, minmax(360px, 1fr));
   gap: 5px;
+  overflow: auto;
 }}
 .grid.full {{
   grid-template-columns: minmax(360px, 1fr);
@@ -3244,13 +3424,13 @@ button:disabled:hover {{ border-color: var(--line); }}
   border-radius: 8px;
   background: var(--panel-inactive);
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
 }}
 .panel.file-drag-over::before {{
   content: "Drop files to upload";
   position: absolute;
-  inset: 44px 10px 10px 10px;
+  inset: 36px 10px 10px 10px;
   z-index: 7;
   display: flex;
   align-items: center;
@@ -3269,19 +3449,45 @@ button:disabled:hover {{ border-color: var(--line); }}
   border-radius: 8px;
 }}
 .panel-head {{
+  position: relative;
   min-height: 30px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
-  padding: 4px 8px;
+  padding: 3px 7px;
   border-bottom: 1px solid var(--line);
   background: var(--panel2-inactive);
 }}
+.panel-popover-zone > .session-popover {{
+  top: calc(100% + 4px);
+  left: 8px;
+  right: 8px;
+  width: auto;
+  max-height: min(60vh, 520px);
+}}
+.panel-popover-zone {{
+  min-width: 0;
+  display: contents;
+}}
+.panel-popover-zone:hover > .session-popover,
+.panel-popover-zone:focus-within > .session-popover {{
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition:
+    opacity 90ms ease var(--popover-show-delay),
+    transform 90ms ease var(--popover-show-delay),
+    visibility 0s linear var(--popover-show-delay);
+}}
+.panel-popover-zone > .session-popover::before {{
+  left: 94px;
+}}
 .panel.active-window {{
-  border-color: #465267;
+  border-color: var(--GPU-green);
   background: var(--panel);
-  box-shadow: none;
+  box-shadow: inset 0 0 0 3px rgba(118, 185, 0, 0.95);
 }}
 .panel.typing-ready-window {{
   --panel-ring-color: var(--active-ring);
@@ -3291,14 +3497,25 @@ button:disabled:hover {{ border-color: var(--line); }}
 .panel.typing-ready-window.yolo-ready-window {{
   --panel-ring-color: var(--GPU-green);
 }}
-.panel.typing-ready-window::after {{
+.panel.needs-input-window,
+.panel.needs-exec-window {{
+  --panel-ring-color: #ff3347;
+}}
+.panel.typing-ready-window::after,
+.panel.needs-input-window::after,
+.panel.needs-exec-window::after {{
   content: "";
   position: absolute;
   inset: 0;
   z-index: 20;
-  border: 4px solid var(--panel-ring-color);
+  border: 3px solid var(--panel-ring-color);
   border-radius: inherit;
   pointer-events: none;
+}}
+.panel.needs-input-window::after,
+.panel.needs-exec-window::after {{
+  --attention-ring-border: 1px;
+  animation: attention-ring-fade 2s ease-in-out infinite;
 }}
 .panel.active-window .panel-head {{
   background: var(--GPU-green-dark);
@@ -3314,19 +3531,28 @@ button:disabled:hover {{ border-color: var(--line); }}
 }}
 .panel-copy {{
   min-width: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  gap: 5px;
+  overflow: hidden;
 }}
 .panel-session-label {{
   flex: 0 0 auto;
   min-width: 0;
-  display: inline-grid;
-  grid-template-columns: auto auto auto auto;
+  display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   height: 24px;
-  padding-right: 4px;
+  padding-right: 0;
+  white-space: nowrap;
+}}
+.panel-session-label .session-button-name {{
+  color: inherit;
+  font-weight: 800;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }}
 .panel-session-label .session-button-dir {{
@@ -3347,6 +3573,8 @@ button:disabled:hover {{ border-color: var(--line); }}
 }}
 .meta {{
   min-width: 0;
+  flex: 1 1 auto;
+  max-width: 100%;
   margin-top: 0;
   color: var(--muted);
   font: 12px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -3411,7 +3639,7 @@ button:disabled:hover {{ border-color: var(--line); }}
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
 }}
 .traffic-light.close {{
-  background: #ff5f57;
+  background: #ffbd2e;
 }}
 .traffic-light.zoom {{
   background: #28c840;
@@ -3423,37 +3651,57 @@ button:disabled:hover {{ border-color: var(--line); }}
   content: "";
 }}
 .traffic-light.close:hover::before {{
-  content: "x";
+  content: "-";
   display: block;
-  color: #5b1515;
+  color: #5b3b00;
   font: 10px/13px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   text-align: center;
 }}
 .tabs {{
+  justify-self: end;
   display: flex;
   align-items: center;
   gap: 3px;
-  padding: 4px 8px;
-  border-bottom: 1px solid var(--line);
-  background: #111722;
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.34);
+  min-width: max-content;
+  max-width: none;
+  margin-left: auto;
+  padding: 0;
+  border-bottom: 0;
+  background: transparent;
+  box-shadow: none;
   overflow-x: auto;
+  scrollbar-width: none;
+}}
+.tabs::-webkit-scrollbar {{
+  display: none;
 }}
 .tab {{
   border-radius: 5px;
-  padding: 3px 9px;
+  padding: 2px 7px;
   color: var(--muted);
   background: transparent;
   white-space: nowrap;
+  line-height: 1.1;
 }}
 .window-step {{
-  min-width: 26px;
-  padding: 3px 7px;
+  min-width: 24px;
+  padding: 2px 6px;
 }}
 .tab.active {{
   color: var(--text);
   background: #263044;
   border-color: #566176;
+  font-weight: 700;
+}}
+.panel-head .tab.active:not(.auto-toggle) {{
+  color: #ffffff;
+  background: #263044;
+  border-color: #93c5fd;
+}}
+.panel.active-window .panel-head .tab.active:not(.auto-toggle) {{
+  color: #ffffff;
+  background: #14385f;
+  border-color: #bfdbfe;
 }}
 .tab.auto-toggle.active {{
   color: var(--auto-text);
@@ -3485,7 +3733,7 @@ button:disabled:hover {{ border-color: var(--line); }}
   inset: 0;
   z-index: 6;
   display: block;
-  background: rgba(130, 145, 168, 0.28);
+  background: var(--inactive-gray);
   cursor: text;
 }}
 .panel-overlay-root {{
@@ -3519,61 +3767,125 @@ button:disabled:hover {{ border-color: var(--line); }}
   white-space: pre-wrap;
   font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }}
-.upload-result {{
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  top: 10px;
-  z-index: 8;
+/* Upload and attention/status messages must stay visually identical. Keep shared box styling on .toast. */
+.toast {{
+  position: relative;
+  overflow: hidden;
+  padding: 7px 9px 9px;
+  color: #14171d;
+  background: rgba(255, 244, 194, 0.58);
+  border: 1px solid #f5c542;
+  border-radius: 8px;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+  backdrop-filter: blur(2px);
+}}
+.toast-header {{
+  min-width: 0;
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  min-height: 34px;
-  padding: 6px 7px 8px 10px;
-  color: #14171d;
-  background: #f8dfa3;
-  border: 1px solid #f5c542;
-  border-radius: 6px;
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.34);
+  gap: 6px;
+  margin-bottom: 3px;
 }}
-.upload-result[hidden] {{
-  display: none;
-}}
-.upload-result-text {{
+.toast-title {{
   min-width: 0;
   flex: 1 1 auto;
-  overflow: hidden;
-  white-space: normal;
-  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-weight: 800;
+  font-size: 12px;
+  line-height: 1.2;
 }}
-.upload-result-line {{
+.toast-control-row {{
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}}
+.toast-body {{
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.toast-line {{
   position: relative;
-  padding-bottom: 4px;
+  padding-bottom: 3px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }}
-.upload-result-line::after {{
+.toast-line::after,
+.toast-countdown::after {{
   content: "";
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: 2px;
-  background: #b98c24;
+  height: 3px;
+  background: #d28b00;
   transform-origin: left center;
-  animation: upload-result-countdown var(--upload-countdown-duration, 15s) linear forwards;
+  animation: toast-countdown var(--toast-countdown-duration, 10s) linear forwards;
 }}
-@keyframes upload-result-countdown {{
+@keyframes toast-countdown {{
   from {{ transform: scaleX(1); }}
   to {{ transform: scaleX(0); }}
 }}
-.upload-result button {{
+.toast button {{
   min-width: 28px;
-  padding: 4px 7px;
+  padding: 2px 6px;
   color: #14171d;
   background: #fff3c6;
   border-color: #b98c24;
+}}
+.toast-close {{
+  position: static;
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  padding: 0;
+  color: #3a2b00;
+  background: transparent;
+  border: 0;
+  font: 700 16px/1 system-ui, sans-serif;
+}}
+.toast-keep {{
+  position: static;
+  min-width: 42px;
+  height: 20px;
+  padding: 0 6px;
+  color: #3a2b00;
+  background: rgba(255, 243, 198, 0.72);
+  border-color: #b98c24;
+  font: 700 11px/1 system-ui, sans-serif;
+}}
+.toast.kept .toast-line::after,
+.toast.kept .toast-countdown::after {{
+  animation-play-state: paused;
+  transform: scaleX(1);
+}}
+.toast-actions {{
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  justify-content: flex-end;
+}}
+.panel-toast-stack {{
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 8;
+  width: calc(100% - 16px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}}
+.panel-toast-stack .toast {{
+  width: 100%;
+  pointer-events: auto;
+}}
+.upload-result {{
+  width: 100%;
+}}
+.upload-result[hidden] {{
+  display: none;
 }}
 .tmux-snapshot {{
   height: 100%;
@@ -3788,6 +4100,22 @@ button:disabled:hover {{ border-color: var(--line); }}
 }}
 .ok {{ color: var(--good); }}
 .err {{ color: var(--bad); }}
+.attention-alerts {{
+  position: fixed;
+  top: 48px;
+  left: 12px;
+  right: 12px;
+  z-index: 140;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: auto;
+  pointer-events: none;
+}}
+.attention-alert {{
+  pointer-events: auto;
+  cursor: pointer;
+}}
 .modal {{
   display: none;
   position: fixed;
@@ -3817,9 +4145,9 @@ button:disabled:hover {{ border-color: var(--line); }}
 }}
 @media (max-width: 980px) {{
   .topbar {{ height: auto; align-items: flex-start; flex-direction: column; }}
+  .session-buttons {{ width: 100%; }}
+  .actions {{ width: 100%; flex-wrap: wrap; }}
   .grid {{
-    height: auto;
-    min-height: calc(100vh - 86px);
     grid-template-columns: 1fr;
     grid-auto-rows: minmax(420px, 48vh);
   }}
@@ -3844,6 +4172,7 @@ button:disabled:hover {{ border-color: var(--line); }}
     <span id="status" class="sub">starting</span>
   </div>
 </header>
+<div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>
 <main id="grid" class="grid"></main>
 <div id="panelPool" class="panel-pool" aria-hidden="true"></div>
 <section id="modal" class="modal">
@@ -3860,8 +4189,10 @@ const homePath = {home_path_json};
 const serverHostname = {server_hostname_json};
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
+const topbar = document.querySelector('.topbar');
 const sessionButtons = document.getElementById('sessionButtons');
 const statusEl = document.getElementById('status');
+const attentionAlerts = document.getElementById('attentionAlerts');
 const latencyMeter = document.getElementById('latencyMeter');
 const latencyLine = document.getElementById('latencyLine');
 const latencyNumber = document.getElementById('latencyNumber');
@@ -3872,7 +4203,6 @@ const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
-const paneSnapshots = new Map();
 const uploadResultsBySession = new Map();
 const uploadCleanupTimers = new Map();
 let uploadResultSequence = 0;
@@ -3881,14 +4211,19 @@ const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const transcriptPreviewMessages = 200;
 const remoteResizeDelayMs = 220;
 const metadataRefreshMs = 15000;
+const paneStateRefreshMs = 2000;
 const latencyRefreshMs = 3000;
 const latencySamplesMax = 24;
+const toastDurationMs = 10000;
+const toastMaxLines = 3;
+const toastMaxLineChars = 180;
+const popoverShowDelayMs = 1600;
+const popoverHideDelayMs = 300;
 const terminalFitBottomReservePx = 2;
 const terminalWheelScrollLines = 3;
 const terminalWheelPageFraction = 0.85;
 const maxSessionTabs = {MAX_YOLOMUX_SESSION_TABS};
 const layoutStorageKey = 'yolomux.layoutSlots.v1';
-const notifyStorageKey = 'yolomux.notifications.v1';
 const layoutSlotKeys = ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
 const infoItemId = '__info__';
 let visibleSessions = sessions.slice(0, maxSessionTabs);
@@ -3896,15 +4231,19 @@ let layoutItems = [infoItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {{}};
-let notificationsEnabled = localStorage.getItem(notifyStorageKey) === '1';
+let notificationsEnabled = false;
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
+const attentionAlertTimers = new Map();
+let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;
 let focusedPanelItem = null;
 let dragSession = null;
 let dragSourceSlot = null;
 let openPopoverSession = null;
+let pendingPopoverSession = null;
+let popoverShowTimer = null;
 let popoverHideTimer = null;
 let sessionButtonsRenderDeferred = false;
 let clipboardPasteBound = false;
@@ -3914,6 +4253,8 @@ let latencySamples = [];
 function setFocusedTerminal(session) {{
   focusedTerminal = session;
   focusedPanelItem = session;
+  dismissAttentionAlertsForSession(session);
+  renderSessionButtons();
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
 }}
@@ -3922,18 +4263,39 @@ function clearFocusedTerminal(session) {{
   if (focusedTerminal !== session) return;
   focusedTerminal = null;
   focusedPanelItem = null;
+  renderSessionButtons();
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
 }}
 
 function setFocusedPanelItem(item) {{
+  if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
+  if (isTmuxSession(item)) dismissAttentionAlertsForSession(item);
+  renderSessionButtons();
   updatePanelInactiveOverlays();
+}}
+
+function terminalPaneIsActive(session) {{
+  return document.getElementById(`terminal-pane-${{session}}`)?.classList.contains('active') === true;
+}}
+
+function selectPanelOnHover(item) {{
+  if (!item) return;
+  if (isTmuxSession(item) && terminalPaneIsActive(item)) {{
+    setFocusedTerminal(item);
+    scheduleFit(item);
+    setTimeout(() => terminals.get(item)?.term?.focus?.(), 0);
+    return;
+  }}
+  if (focusedPanelItem === item) return;
+  setFocusedPanelItem(item);
 }}
 
 function updatePanelInactiveOverlays() {{
   for (const [item, panel] of panelNodes.entries()) {{
     panel.classList.toggle('focused-window', item === focusedPanelItem);
+    panel.classList.toggle('active-window', item === focusedPanelItem);
   }}
 }}
 
@@ -3950,6 +4312,98 @@ function stripTerminalQueryResponses(data) {{
   return String(data)
     .replace(/\\x1b\\[[?>]?[0-9;]*c/g, '')
     .replace(/\\x1bP[>|!][^\\x1b]*(?:\\x1b\\\\|\\x9c)/g, '');
+}}
+
+const terminalLinkPattern = /(?:https?:\\/\\/|file:\\/\\/|www\\.)[^\\s<>"'`]+/gi;
+const terminalLinkClosePairs = [
+  [')', '('],
+  [']', '['],
+  ['}}', '{{'],
+];
+
+function countChar(value, char) {{
+  let count = 0;
+  for (const item of value) {{
+    if (item === char) count += 1;
+  }}
+  return count;
+}}
+
+function trimTerminalLinkCandidate(value) {{
+  let text = String(value || '').replace(/^[<("'`]+/, '');
+  let changed = true;
+  while (changed && text) {{
+    changed = false;
+    const trimmed = text.replace(/[.,;:!?"'`>]+$/, '');
+    if (trimmed !== text) {{
+      text = trimmed;
+      changed = true;
+    }}
+    for (const [closeChar, openChar] of terminalLinkClosePairs) {{
+      if (text.endsWith(closeChar) && countChar(text, closeChar) > countChar(text, openChar)) {{
+        text = text.slice(0, -1);
+        changed = true;
+      }}
+    }}
+  }}
+  return text;
+}}
+
+function normalizeTerminalLink(value) {{
+  const text = trimTerminalLinkCandidate(value);
+  if (!text) return '';
+  if (/^www\\./i.test(text)) return `https://${{text}}`;
+  return text;
+}}
+
+function openTerminalLink(rawLink) {{
+  const link = normalizeTerminalLink(rawLink);
+  if (!link) return;
+  try {{
+    const opened = window.open(link, '_blank', 'noopener,noreferrer');
+    if (!opened) statusEl.innerHTML = `<span class="err">browser blocked link: ${{esc(link)}}</span>`;
+  }} catch (error) {{
+    statusEl.innerHTML = `<span class="err">could not open link: ${{esc(error)}}</span>`;
+  }}
+}}
+
+function terminalLineLinks(lineText, y) {{
+  const links = [];
+  terminalLinkPattern.lastIndex = 0;
+  for (const match of lineText.matchAll(terminalLinkPattern)) {{
+    const raw = match[0] || '';
+    const text = trimTerminalLinkCandidate(raw);
+    if (!text) continue;
+    const startIndex = (match.index || 0) + raw.indexOf(text);
+    const endIndex = startIndex + text.length;
+    links.push({{
+      text,
+      range: {{
+        start: {{x: startIndex + 1, y}},
+        end: {{x: endIndex, y}},
+      }},
+      activate: () => openTerminalLink(text),
+    }});
+  }}
+  return links;
+}}
+
+function installTerminalLinkProvider(term) {{
+  if (typeof term.registerLinkProvider !== 'function') return;
+  term.registerLinkProvider({{
+    provideLinks: (y, callback) => {{
+      try {{
+        const line = term.buffer?.active?.getLine(y - 1);
+        if (!line) {{
+          callback([]);
+          return;
+        }}
+        callback(terminalLineLinks(line.translateToString(true), y));
+      }} catch (_) {{
+        callback([]);
+      }}
+    }},
+  }});
 }}
 
 function emptyLayoutSlots() {{
@@ -3983,8 +4437,27 @@ function layoutFromSessionList(values) {{
   return next;
 }}
 
+function layoutFromParam(raw) {{
+  const values = String(raw || '').split(',');
+  if (!values.some(value => value.trim())) return null;
+  const next = emptyLayoutSlots();
+  for (let index = 0; index < layoutSlotKeys.length; index += 1) {{
+    const value = values[index]?.trim() || '';
+    if (!value) continue;
+    const item = resolveLayoutItem(value);
+    if (isLayoutItem(item) && !Object.values(next).includes(item)) next[layoutSlotKeys[index]] = item;
+  }}
+  return sessionsFromSlots(next).length ? next : null;
+}}
+
+function layoutParamValue(slots) {{
+  return layoutSlotKeys.map(slot => slots[slot] ? itemParam(slots[slot]) : '').join(',');
+}}
+
 function initialLayoutSlots() {{
   const params = new URLSearchParams(location.search);
+  const layoutFromUrl = layoutFromParam(params.get('layout') || '');
+  if (layoutFromUrl) return layoutFromUrl;
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
   for (const part of raw.split(',')) {{
@@ -4033,12 +4506,18 @@ function resolveLayoutItem(value) {{
   const text = String(value || '');
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
-  if (Number.isInteger(ordinal) && ordinal > 0) return visibleSessions[ordinal - 1] || null;
+  if (Number.isInteger(ordinal) && ordinal > 0) return sessionForLabel(String(ordinal));
   return text;
 }}
 
 function itemLabel(item) {{
   return isInfoItem(item) ? 'Branches' : sessionLabel(item);
+}}
+
+function itemSortNumber(item) {{
+  if (isInfoItem(item)) return 0;
+  const label = Number(sessionLabel(item));
+  return Number.isFinite(label) ? label : Number.MAX_SAFE_INTEGER;
 }}
 
 function itemParam(item) {{
@@ -4047,8 +4526,8 @@ function itemParam(item) {{
 }}
 
 const stateDefs = {{
-  'needs-approval': {{label: 'Needs approval', short: 'APP', priority: 0, attention: true}},
-  'needs-input': {{label: 'Needs input', short: 'ASK', priority: 1, attention: true}},
+  'needs-approval': {{label: 'Needs approval', short: 'EXEC?', priority: 0, attention: true}},
+  'needs-input': {{label: 'Needs input', short: 'QUES?', priority: 1, attention: true}},
   blocked: {{label: 'Blocked', short: 'BLK', priority: 2, attention: true}},
   disconnected: {{label: 'Disconnected', short: 'OFF', priority: 3, attention: true}},
   'tests-running': {{label: 'Tests running', short: 'TEST', priority: 4, attention: false}},
@@ -4069,36 +4548,18 @@ function terminalDisconnected(session) {{
   return item.socket?.readyState === WebSocket.CLOSED || item.socket?.readyState === WebSocket.CLOSING;
 }}
 
-function snapshotText(session) {{
-  return String(paneSnapshots.get(session)?.text || '');
-}}
-
-function bottomPaneText(session) {{
-  return snapshotText(session).split('\\n').slice(-45).join('\\n');
-}}
-
-function hasVisibleApprovalPrompt(text) {{
-  return /Do you want to proceed\\?|Would you like to run the following command\\?|Do you want to make this edit|Do you want to create|Do you want to allow/i.test(text);
-}}
-
-function hasVisibleChoicePrompt(text) {{
-  if (hasVisibleApprovalPrompt(text)) return false;
-  const lines = text.split('\\n').slice(-20);
-  const joined = lines.join('\\n');
-  const hasChoiceMarker = lines.some(line => /^\\s*(?:[❯›>●-]\\s*)?(?:\\d+\\.|\\d+:|\\[[a-zA-Z]\\]|[a-zA-Z]\\))\\s+\\S/.test(line));
-  const hasQuestion = /\\?\\s*$|choose|select|pick|which|what should|how should|confirm/i.test(joined);
-  const isRatingPrompt = /how is claude doing|rate this|feedback/i.test(joined);
-  return hasChoiceMarker && hasQuestion && !isRatingPrompt;
-}}
-
 function sessionState(session, info = transcriptMeta.sessions?.[session]) {{
   if (!isTmuxSession(session)) return {{key: 'idle', ...stateDefs.idle, reason: 'not a tmux session'}};
   const auto = autoApproveStates.get(session) || {{}};
   const autoEnabled = auto.enabled === true;
+  const approvalPrompt = auto.prompt || {{}};
+  const screen = auto.screen || {{}};
   const lastAction = String(auto.last_action || '').toLowerCase();
-  const visibleText = bottomPaneText(session);
-  const approvalPromptVisible = hasVisibleApprovalPrompt(visibleText);
-  const choicePromptVisible = hasVisibleChoicePrompt(visibleText);
+  const approvalPromptVisible = approvalPrompt.visible === true;
+  const approvalYesSelected = approvalPrompt.yes_selected === true;
+  const approvalPromptText = String(approvalPrompt.text || 'approval prompt is visible');
+  const screenKey = String(screen.key || '');
+  const screenText = String(screen.text || '');
   const agents = Array.isArray(info?.agents) ? info.agents : [];
   const panes = Array.isArray(info?.panes) ? info.panes : [];
   const agentText = agents
@@ -4116,17 +4577,32 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {{
   if (terminalDisconnected(session) || (!info && terminals.has(session))) {{
     return stateValue('disconnected', 'terminal connection is closed');
   }}
+  if (screenKey === 'disconnected') {{
+    return stateValue('disconnected', screenText || 'terminal screen unavailable');
+  }}
   if (/blocked|denied|rejected/.test(lastAction)) {{
     return stateValue('blocked', 'YOLO blocked an approval prompt');
   }}
-  if (approvalPromptVisible && autoEnabled) {{
-    return stateValue('needs-approval', 'approval prompt is still visible with YOLO on');
+  if (approvalPromptVisible && approvalYesSelected && autoEnabled) {{
+    return stateValue('working', 'YOLO is handling an approval prompt');
   }}
-  if (approvalPromptVisible || (!autoEnabled && /permission|approval|approve|confirm/.test(agentText))) {{
-    return stateValue('needs-approval', 'approval prompt is visible');
+  if (approvalPromptVisible && approvalYesSelected) {{
+    return stateValue('needs-approval', approvalPromptText || 'approval prompt is visible');
   }}
-  if (choicePromptVisible) {{
-    return stateValue('needs-input', 'choice prompt is visible');
+  if (approvalPromptVisible) {{
+    return stateValue('needs-input', 'approval prompt is visible but Yes is not selected');
+  }}
+  if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {{
+    return stateValue('needs-approval', approvalPromptText || 'approval prompt is visible');
+  }}
+  if (screenKey === 'working') {{
+    return stateValue('working', screenText || 'agent is working');
+  }}
+  if (screenKey === 'needs-input') {{
+    return stateValue('needs-input', screenText || 'agent is waiting for input');
+  }}
+  if (screenKey === 'error') {{
+    return stateValue('blocked', screenText || 'agent screen detection failed');
   }}
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {{
     return stateValue('needs-input', 'agent is waiting for input');
@@ -4154,63 +4630,306 @@ function stateValue(key, reason) {{
   return {{key, ...def, reason}};
 }}
 
+function stateBadgeHtml(key, short, title) {{
+  return `<span class="session-state-badge session-state-${{esc(key)}}" title="${{esc(title)}}">${{esc(short)}}</span>`;
+}}
+
 function sessionStateHtml(state) {{
-  return `<span class="session-state-badge session-state-${{esc(state.key)}}" title="${{esc(state.label)}}: ${{esc(state.reason)}}">${{esc(state.short)}}</span>`;
+  if (!state || ['working', 'tests-running', 'done', 'disconnected'].includes(state.key)) return '';
+  return stateBadgeHtml(state.key, state.short, `${{state.label}}: ${{state.reason}}`);
+}}
+
+function stateLegendHtml() {{
+  return `<div class="state-legend">${{Object.entries(stateDefs).map(([key, def]) => `
+    <span class="state-legend-item">${{stateBadgeHtml(key, def.short, def.label)}}<span>${{esc(def.label)}}</span></span>
+  `).join('')}}</div>`;
 }}
 
 function sessionTrayItems() {{
-  return [infoItemId, ...visibleSessions];
+  return [infoItemId, ...visibleSessions].sort((left, right) => itemSortNumber(left) - itemSortNumber(right) || itemLabel(left).localeCompare(itemLabel(right)));
 }}
 
 function renderNotifyToggle() {{
   if (!notifyToggle) return;
   const supported = 'Notification' in window;
-  notifyToggle.disabled = !supported;
-  notifyToggle.classList.toggle('active', supported && notificationsEnabled && Notification.permission === 'granted');
+  notifyToggle.disabled = false;
+  notifyToggle.classList.toggle('active', notificationsEnabled);
   notifyToggle.setAttribute('aria-pressed', notificationsEnabled ? 'true' : 'false');
-  notifyToggle.title = supported
-    ? 'notify when a session needs attention'
-    : 'browser notifications are not supported';
+  const browserState = supported ? Notification.permission : 'unsupported';
+  notifyToggle.title = `notify when a session needs attention; browser notifications: ${{browserState}}`;
 }}
 
 async function toggleNotifications() {{
-  if (!('Notification' in window)) {{
-    statusEl.innerHTML = '<span class="err">browser notifications are not supported</span>';
+  const nextEnabled = !notificationsEnabled;
+  let browserPermission = 'unsupported';
+  if (nextEnabled && 'Notification' in window && Notification.permission === 'default') {{
+    const permission = await Notification.requestPermission();
+    browserPermission = permission;
+  }} else if ('Notification' in window) {{
+    browserPermission = Notification.permission;
+  }}
+  try {{
+    const response = await fetch(`/api/notify?enabled=${{nextEnabled ? '1' : '0'}}`, {{method: 'POST'}});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || response.statusText || `HTTP ${{response.status}}`);
+    notificationsEnabled = payload.enabled === true;
+  }} catch (error) {{
+    statusEl.innerHTML = `<span class="err">Notify request failed: ${{esc(error)}}</span>`;
     return;
   }}
-  if (!notificationsEnabled && Notification.permission !== 'granted') {{
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') {{
-      notificationsEnabled = false;
-      try {{ localStorage.setItem(notifyStorageKey, '0'); }} catch (_) {{}}
-      renderNotifyToggle();
-      statusEl.innerHTML = '<span class="err">notifications blocked by browser</span>';
-      return;
+  renderNotifyToggle();
+  if (notificationsEnabled) {{
+    if (browserPermission !== 'granted') {{
+      statusEl.innerHTML = `<span class="ok">in-page alerts on; browser notifications ${{esc(browserPermission)}}</span>`;
     }}
+    sendTestNotification();
+    notifyCurrentAttentionStates();
+  }} else {{
+    statusEl.innerHTML = '<span class="ok">Notify off</span>';
   }}
-  notificationsEnabled = !notificationsEnabled;
+}}
+
+async function loadNotifyStatus() {{
   try {{
-    localStorage.setItem(notifyStorageKey, notificationsEnabled ? '1' : '0');
-  }} catch (_) {{}}
+    const response = await fetch('/api/notify', {{cache: 'no-store'}});
+    const payload = await response.json();
+    notificationsEnabled = response.ok && payload.enabled === true;
+  }} catch (_) {{
+    notificationsEnabled = false;
+  }}
   renderNotifyToggle();
 }}
 
 function shouldNotifyState(state) {{
-  return ['needs-approval', 'needs-input', 'blocked', 'disconnected', 'ready-review'].includes(state.key);
+  return ['needs-approval', 'needs-input', 'blocked', 'ready-review'].includes(state.key);
+}}
+
+function sendBrowserNotification(title, options = {{}}) {{
+  const notification = new Notification(title, options);
+  notification.onclick = () => {{
+    window.focus();
+    if (options.session) selectSession(options.session);
+  }};
+  return notification;
+}}
+
+function setToastCountdown(node, durationMs) {{
+  if (!node) return;
+  if (!Number.isFinite(durationMs)) {{
+    node.style.removeProperty('--toast-countdown-duration');
+    return;
+  }}
+  node.style.setProperty('--toast-countdown-duration', `${{Math.max(1, durationMs)}}ms`);
+}}
+
+// Upload and attention/status messages share this renderer. Keep visual differences out of call sites.
+function ensureToastShell(node, options = {{}}) {{
+  let bodyNode = node.querySelector('.toast-body');
+  if (!bodyNode) {{
+    node.innerHTML = `
+      <div class="toast-header">
+        <div class="toast-title"></div>
+        <div class="toast-control-row">
+          <button type="button" class="toast-keep" data-toast-keep aria-label="${{esc(options.keepLabel || 'Keep alert visible')}}">Keep</button>
+          <button type="button" class="toast-close" data-toast-close aria-label="${{esc(options.closeLabel || 'Close alert')}}">x</button>
+        </div>
+      </div>
+      <div class="toast-body"></div>
+      <div class="toast-actions"></div>`;
+    bodyNode = node.querySelector('.toast-body');
+  }}
+  const titleNode = node.querySelector('.toast-title');
+  if (titleNode) titleNode.textContent = options.title || '';
+  const actionsNode = node.querySelector('.toast-actions');
+  if (actionsNode) {{
+    actionsNode.replaceChildren(...(options.actions || []));
+    actionsNode.hidden = !actionsNode.children.length;
+  }}
+  const closeButton = node.querySelector('[data-toast-close]');
+  if (closeButton) {{
+    closeButton.onclick = event => {{
+      event.stopPropagation();
+      options.onClose?.();
+    }};
+  }}
+  const keepButton = node.querySelector('[data-toast-keep]');
+  if (keepButton) {{
+    keepButton.onclick = event => {{
+      event.stopPropagation();
+      node.classList.add('kept');
+      keepButton.hidden = true;
+      options.onKeep?.();
+    }};
+  }}
+  return bodyNode;
+}}
+
+function renderToastLines(bodyNode, lines, options = {{}}) {{
+  bodyNode.replaceChildren();
+  for (const item of summarizeToastLines(lines, options)) {{
+    const lineText = typeof item === 'object' && item !== null ? item.text : item;
+    const countdownMs = typeof item === 'object' && item !== null ? item.countdownMs : options.countdownMs;
+    const line = document.createElement('div');
+    line.className = 'toast-line';
+    setToastCountdown(line, countdownMs || toastDurationMs);
+    line.textContent = lineText;
+    bodyNode.appendChild(line);
+  }}
+}}
+
+function normalizeToastLine(item, options = {{}}) {{
+  const objectItem = typeof item === 'object' && item !== null;
+  const text = objectItem ? item.text : item;
+  return {{
+    text: compactToastText(text),
+    countdownMs: objectItem ? item.countdownMs : options.countdownMs,
+  }};
+}}
+
+function compactToastText(text) {{
+  const value = String(text || '').replace(/\\s+/g, ' ').trim();
+  if (value.length <= toastMaxLineChars) return value;
+  return `${{value.slice(0, toastMaxLineChars - 3)}}...`;
+}}
+
+function summarizeToastLines(lines, options = {{}}) {{
+  const normalized = (Array.isArray(lines) ? lines : toastTextLines(lines)).map(item => normalizeToastLine(item, options));
+  if (normalized.length <= toastMaxLines) return normalized;
+  const visible = normalized.slice(0, toastMaxLines - 1);
+  const hidden = normalized.slice(toastMaxLines - 1);
+  const countdownValues = hidden.map(item => item.countdownMs).filter(Number.isFinite);
+  visible.push({{
+    text: `+${{hidden.length}} more`,
+    countdownMs: countdownValues.length ? Math.max(...countdownValues) : options.countdownMs,
+  }});
+  return visible;
+}}
+
+function toastTextLines(text) {{
+  const lines = String(text || '').split('\\n').map(line => line.trim()).filter(Boolean);
+  return lines.length ? lines : [''];
+}}
+
+function showToast(title, lines, options = {{}}) {{
+  const container = options.container || attentionAlerts;
+  if (!container) return null;
+  const id = ++attentionAlertSequence;
+  const node = document.createElement('div');
+  node.className = options.className || 'attention-alert toast';
+  node.dataset.alertId = String(id);
+  const bodyNode = ensureToastShell(node, {{
+    title,
+    closeLabel: options.closeLabel,
+    keepLabel: options.keepLabel,
+    actions: options.actions,
+    onKeep: () => {{
+      if (attentionAlertTimers.has(id)) {{
+        clearTimeout(attentionAlertTimers.get(id));
+        attentionAlertTimers.delete(id);
+      }}
+      options.onKeep?.();
+    }},
+    onClose: () => {{
+      options.onClose?.();
+      removeAttentionAlert(id);
+    }},
+  }});
+  renderToastLines(bodyNode, Array.isArray(lines) ? lines : toastTextLines(lines), {{
+    countdownMs: options.countdownMs || toastDurationMs,
+  }});
+  node.addEventListener('click', event => {{
+    if (event.target.closest('[data-toast-close], .toast-actions')) return;
+    options.onClick?.();
+  }});
+  container.appendChild(node);
+  while (container.children.length > 5) {{
+    const first = container.firstElementChild;
+    if (!first) break;
+    removeAttentionAlert(Number(first.dataset.alertId || 0));
+  }}
+  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), toastDurationMs));
+  return node;
+}}
+
+function showAttentionAlert(session, state) {{
+  const panelContainer = document.getElementById(`panel-toasts-${{session}}`);
+  const node = showToast(
+    `YOLOMux - ${{serverHostname}}: ${{sessionLabel(session)}} ${{state.label}}`,
+    state.reason,
+    {{
+      container: panelContainer || attentionAlerts,
+      onClick: () => selectSession(session),
+    }},
+  );
+  if (node) {{
+    node.dataset.toastSession = session;
+    node.dataset.toastKind = 'attention';
+  }}
+}}
+
+function dismissAttentionAlertsForSession(session) {{
+  for (const node of document.querySelectorAll('.toast[data-toast-kind="attention"]')) {{
+    if (node.dataset.toastSession !== session) continue;
+    removeAttentionAlert(Number(node.dataset.alertId || 0));
+  }}
+}}
+
+function attentionAlreadyVisible(session) {{
+  if (document.visibilityState !== 'visible') return false;
+  if (!activeSessions.includes(session)) return false;
+  const panel = document.getElementById(`panel-${{session}}`);
+  if (!panel || !panel.isConnected) return false;
+  return focusedPanelItem === session || focusedTerminal === session || expandedPanelItem() === session || activeSessions.length === 1;
+}}
+
+function removeAttentionAlert(id) {{
+  if (attentionAlertTimers.has(id)) {{
+    clearTimeout(attentionAlertTimers.get(id));
+    attentionAlertTimers.delete(id);
+  }}
+  document.querySelector(`[data-alert-id="${{id}}"]`)?.remove();
+}}
+
+function sendTestNotification() {{
+  showToast(`YOLOMux - ${{serverHostname}}: notifications enabled`, 'YOLOMux in-page alerts are enabled.');
+  if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+  try {{
+    sendBrowserNotification(`YOLOMux - ${{serverHostname}}: notifications enabled`, {{
+      body: 'YOLOMux can send browser notifications from this server.',
+      tag: `yolomux:test:${{Date.now()}}`,
+    }});
+    postEvent(null, 'notification_test_sent', 'notification test sent', {{hostname: serverHostname}});
+  }} catch (error) {{
+    statusEl.innerHTML = `<span class="err">notification failed: ${{esc(error)}}</span>`;
+    postEvent(null, 'notification_error', `notification test failed: ${{error}}`, {{hostname: serverHostname}});
+  }}
+}}
+
+function notifyCurrentAttentionStates() {{
+  for (const session of sessions.filter(isTmuxSession)) {{
+    const state = sessionState(session, transcriptMeta.sessions?.[session]);
+    if (shouldNotifyState(state)) maybeNotifyState(session, state, {{force: true}});
+  }}
 }}
 
 function eventMessageForState(session, state) {{
   return `${{sessionLabel(session)}} ${{state.label}}: ${{state.reason}}`;
 }}
 
+function stateSignature(state) {{
+  return `${{state.key}}:${{state.reason || ''}}`;
+}}
+
 function trackSessionStateChanges() {{
   for (const session of sessions.filter(isTmuxSession)) {{
     const state = sessionState(session, transcriptMeta.sessions?.[session]);
     const previous = sessionStateKeys.get(session);
-    sessionStateKeys.set(session, state.key);
-    if (!stateTrackingReady || previous == null || previous === state.key) continue;
+    const signature = stateSignature(state);
+    sessionStateKeys.set(session, {{key: state.key, reason: state.reason, signature}});
+    if (!stateTrackingReady || previous == null || previous.signature === signature) continue;
     postEvent(session, 'state_changed', eventMessageForState(session, state), {{
-      from: previous,
+      from: previous.key,
+      from_reason: previous.reason,
       to: state.key,
       reason: state.reason,
     }});
@@ -4219,24 +4938,37 @@ function trackSessionStateChanges() {{
   stateTrackingReady = true;
 }}
 
-function maybeNotifyState(session, state) {{
-  if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+function maybeNotifyState(session, state, options = {{}}) {{
+  if (!notificationsEnabled) return;
   if (!shouldNotifyState(state)) return;
-  const key = `${{session}}:${{state.key}}`;
+  const key = `${{session}}:${{stateSignature(state)}}`;
   const now = Date.now();
+  if (attentionAlreadyVisible(session)) {{
+    notificationLastSent.set(key, now);
+    dismissAttentionAlertsForSession(session);
+    postEvent(session, 'alert_suppressed_visible', eventMessageForState(session, state), {{
+      state: state.key,
+      reason: state.reason,
+    }});
+    return;
+  }}
   const lastSent = notificationLastSent.get(key) || 0;
-  if (now - lastSent < 60_000) return;
+  if (options.force !== true && now - lastSent < 60_000) return;
   notificationLastSent.set(key, now);
   const body = `${{state.reason}} · ${{projectDirName(session, transcriptMeta.sessions?.[session])}}`;
+  showAttentionAlert(session, state);
+  postEvent(session, 'alert_shown', eventMessageForState(session, state), {{
+    state: state.key,
+    reason: state.reason,
+  }});
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try {{
-    const notification = new Notification(`${{serverHostname}}: ${{sessionLabel(session)}} ${{state.label}}`, {{
+    sendBrowserNotification(`YOLOMux - ${{serverHostname}}: ${{sessionLabel(session)}} ${{state.label}}`, {{
       body,
       tag: key,
+      renotify: true,
+      session,
     }});
-    notification.onclick = () => {{
-      window.focus();
-      selectSession(session);
-    }};
     postEvent(session, 'notification_sent', eventMessageForState(session, state), {{
       state: state.key,
       reason: state.reason,
@@ -4295,8 +5027,10 @@ function updateActiveSessionParam() {{
   const params = new URLSearchParams(location.search);
   if (activeSessions.length) {{
     params.set('sessions', activeSessions.map(itemParam).join(','));
+    params.set('layout', layoutParamValue(layoutSlots));
   }} else {{
     params.delete('sessions');
+    params.delete('layout');
   }}
   params.delete('active');
   const query = params.toString();
@@ -4328,8 +5062,8 @@ function renderSessionButtons() {{
     removeSessionFromLayout(payload.session);
   }};
   for (const session of sessionTrayItems()) {{
-    const active = activeSessions.includes(session);
     const isInfo = isInfoItem(session);
+    const active = topTabIsActive(session);
     const auto = autoApproveStates.get(session)?.enabled === true;
     const info = transcriptMeta.sessions?.[session];
     const agentKind = sessionAgentKind(session);
@@ -4339,14 +5073,11 @@ function renderSessionButtons() {{
     wrapper.dataset.session = session;
     const button = document.createElement('button');
     button.className = `session-button ${{isInfo ? 'info' : ''}} ${{active ? 'active' : ''}} ${{auto ? 'auto' : ''}} ${{state?.attention ? 'needs-attention' : ''}}`;
+    button.classList.toggle('needs-input', state?.key === 'needs-input');
+    button.classList.toggle('needs-exec', state?.key === 'needs-approval');
     button.draggable = true;
-    button.innerHTML = isInfo ? 'Branches' : sessionButtonHtml(session, info, agentKind, state);
-    const autoText = auto ? '; YOLO on' : '';
-    const agentText = agentKind ? `; ${{agentName(agentKind)}}` : '';
-    const stateText = state ? `; ${{state.label}}` : '';
-    button.title = isInfo
-      ? `Branches${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}`
-      : `${{sessionLabel(session)}}: ${{session}} ${{projectDirName(session, info)}}${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}${{agentText}}${{autoText}}${{stateText}}`;
+    button.innerHTML = isInfo ? infoButtonHtml() : sessionButtonHtml(session, info, agentKind, state, auto);
+    button.removeAttribute('title');
     button.addEventListener('click', () => selectSession(session));
     button.addEventListener('dragstart', event => startSessionDrag(event, session, null));
     button.addEventListener('dragend', endSessionDrag);
@@ -4364,6 +5095,19 @@ function renderSessionButtons() {{
       if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
     }}
   }}
+  updateTopbarPopoverGeometry();
+}}
+
+function expandedPanelItem() {{
+  const panel = document.querySelector('.panel.expanded');
+  if (!panel?.id?.startsWith('panel-')) return null;
+  return panel.id.slice('panel-'.length);
+}}
+
+function topTabIsActive(session) {{
+  const expanded = expandedPanelItem();
+  if (expanded) return session === expanded;
+  return session === focusedPanelItem || session === focusedTerminal;
 }}
 
 function createAddSessionButton(agent) {{
@@ -4381,26 +5125,57 @@ function createAddSessionButton(agent) {{
 
 function bindSessionPopover(wrapper) {{
   const session = wrapper.dataset.session;
-  wrapper.addEventListener('pointerenter', () => openSessionPopover(session));
+  wrapper.addEventListener('pointerenter', () => queueSessionPopover(session));
   wrapper.addEventListener('pointerleave', () => closeSessionPopoverSoon(session));
-  wrapper.addEventListener('focusin', () => openSessionPopover(session));
+  wrapper.addEventListener('focusin', () => queueSessionPopover(session));
   wrapper.addEventListener('focusout', event => {{
     if (wrapper.contains(event.relatedTarget)) return;
     closeSessionPopoverSoon(session);
   }});
   const popover = wrapper.querySelector('.session-popover');
-  popover?.addEventListener('pointerenter', () => openSessionPopover(session));
+  popover?.addEventListener('pointerenter', () => keepSessionPopoverOpen(session));
   popover?.addEventListener('pointerleave', () => closeSessionPopoverSoon(session));
   popover?.querySelectorAll('a').forEach(link => {{
-    link.addEventListener('pointerenter', () => openSessionPopover(session));
+    link.addEventListener('pointerenter', () => keepSessionPopoverOpen(session));
     link.addEventListener('click', event => event.stopPropagation());
   }});
 }}
 
-function openSessionPopover(session) {{
+function updateTopbarPopoverGeometry() {{
+  const bottom = topbar?.getBoundingClientRect?.().bottom;
+  if (!Number.isFinite(bottom)) return;
+  document.documentElement.style.setProperty('--topbar-popover-top', `${{Math.ceil(bottom + 4)}}px`);
+}}
+
+function queueSessionPopover(session) {{
   if (!session) return;
   if (popoverHideTimer) clearTimeout(popoverHideTimer);
   popoverHideTimer = null;
+  if (openPopoverSession === session) return;
+  if (popoverShowTimer) clearTimeout(popoverShowTimer);
+  pendingPopoverSession = session;
+  updateTopbarPopoverGeometry();
+  popoverShowTimer = setTimeout(() => {{
+    popoverShowTimer = null;
+    if (pendingPopoverSession === session) openSessionPopoverNow(session);
+  }}, popoverShowDelayMs);
+}}
+
+function keepSessionPopoverOpen(session) {{
+  if (!session) return;
+  if (popoverShowTimer) clearTimeout(popoverShowTimer);
+  popoverShowTimer = null;
+  pendingPopoverSession = session;
+  if (popoverHideTimer) clearTimeout(popoverHideTimer);
+  popoverHideTimer = null;
+  if (openPopoverSession !== session) openSessionPopoverNow(session);
+}}
+
+function openSessionPopoverNow(session) {{
+  if (!session) return;
+  if (popoverHideTimer) clearTimeout(popoverHideTimer);
+  popoverHideTimer = null;
+  pendingPopoverSession = session;
   const targetSelector = `.session-button-wrap[data-session="${{cssEscape(session)}}"]`;
   for (const node of sessionButtons.querySelectorAll('.session-button-wrap')) {{
     const isTarget = node.dataset.session === session;
@@ -4417,12 +5192,21 @@ function openSessionPopover(session) {{
 }}
 
 function closeSessionPopoverSoon(session) {{
-  if (!session || openPopoverSession !== session) return;
+  if (!session) return;
+  if (pendingPopoverSession === session) {{
+    if (popoverShowTimer) clearTimeout(popoverShowTimer);
+    popoverShowTimer = null;
+    pendingPopoverSession = null;
+  }}
+  if (openPopoverSession !== session) return;
   if (popoverHideTimer) clearTimeout(popoverHideTimer);
-  popoverHideTimer = setTimeout(() => closeOpenSessionPopover(), 350);
+  popoverHideTimer = setTimeout(() => closeOpenSessionPopover(), popoverHideDelayMs);
 }}
 
 function closeOpenSessionPopover(options = {{}}) {{
+  if (popoverShowTimer) clearTimeout(popoverShowTimer);
+  popoverShowTimer = null;
+  pendingPopoverSession = null;
   if (popoverHideTimer) clearTimeout(popoverHideTimer);
   popoverHideTimer = null;
   const session = openPopoverSession;
@@ -4446,17 +5230,42 @@ function cssEscape(value) {{
   return String(value).replace(/["\\\\]/g, '\\\\$&');
 }}
 
-function sessionButtonHtml(session, info, agentKind, state = sessionState(session, info)) {{
-  return sessionLabelHtml(session, info, agentKind, state);
+function sessionButtonHtml(session, info, agentKind, state = sessionState(session, info), auto = false) {{
+  const label = sessionLabel(session);
+  const name = String(session);
+  const nameHtml = name && name !== label ? `<span class="session-button-name">${{esc(name)}}</span>` : '';
+  const autoHtml = auto ? '<span class="session-yolo-marker" title="YOLO enabled">YO</span>' : '';
+  const stateHtml = state ? sessionStateHtml(state) : '';
+  const ciHtml = pullRequestCiIndicatorHtml(info?.project?.pull_request);
+  const desc = sessionTabDescription(session, info);
+  const detailHtml = desc ? `<span class="session-button-dir">${{esc(desc)}}</span>` : '';
+  return `<span class="session-button-prefix">${{autoHtml}}<span class="session-button-number">${{esc(label)}}</span>${{nameHtml}}</span>
+    <span class="session-button-text">${{stateHtml}}${{ciHtml}}${{detailHtml}}</span>`;
+}}
+
+function infoButtonHtml() {{
+  return '<span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="session-button-text"><span class="session-button-dir">Branches</span></span>';
 }}
 
 function sessionLabelHtml(session, info, agentKind, state = sessionState(session, info)) {{
   const detail = sessionButtonDetail(info);
   const detailClass = detail ? pullRequestStatusClass(info?.project?.pull_request) : '';
-  return `<span class="session-label-agent"><span class="session-button-number">${{esc(sessionLabel(session))}}</span>${{agentIcon(agentKind)}}</span>
-    ${{state ? sessionStateHtml(state) : '<span></span>'}}
+  return `${{agentIcon(agentKind)}}
+    ${{state ? sessionStateHtml(state) : ''}}
+    <span class="session-button-number">${{esc(sessionLabel(session))}}</span>
     <span class="session-button-dir">${{esc(projectDirName(session, info))}}</span>
-    ${{detail ? `<span class="session-button-detail ${{detailClass}}">${{esc(detail)}}</span>` : '<span></span>'}}`;
+    ${{detail ? `<span class="session-button-detail ${{detailClass}}">${{esc(detail)}}</span>` : ''}}`;
+}}
+
+function panelHeaderNumberHtml(session) {{
+  const label = sessionLabel(session);
+  const name = String(session);
+  const nameHtml = name && name !== label ? `<span class="session-button-name">${{esc(name)}}</span>` : '';
+  return `<span class="session-button-number">${{esc(label)}}</span>${{nameHtml}}`;
+}}
+
+function panelHeaderStateHtml(session, state, info = null) {{
+  return `${{panelHeaderNumberHtml(session)}}${{state ? sessionStateHtml(state) : ''}}${{pullRequestCiIndicatorHtml(info?.project?.pull_request)}}`;
 }}
 
 function sessionButtonDetail(info) {{
@@ -4464,6 +5273,35 @@ function sessionButtonDetail(info) {{
   const pr = project.pull_request;
   if (pr?.number) return pullRequestShortLabel(pr);
   return '';
+}}
+
+function currentBranchSubject(git) {{
+  const branches = git?.other_branches?.branches || [];
+  const current = branches.find(branch => branch.current);
+  return current?.subject || '';
+}}
+
+function sessionWorkDescription(session, info, limit = 96) {{
+  const project = info?.project || {{}};
+  const git = project.git;
+  const pr = project.pull_request;
+  if (pr?.number) {{
+    const status = pullRequestStatusLabel(pr);
+    const title = pr.title || pr.description || '';
+    const prefix = `#${{pr.number}}${{status && status !== 'unknown' ? ` ${{status}}` : ''}}`;
+    return shortText(title ? `${{prefix}}: ${{title}}` : prefix, limit);
+  }}
+  const linear = project.linear || [];
+  const issue = linear.find(item => item.title);
+  if (issue) return shortText(`${{issue.identifier}}: ${{issue.title}}`, limit);
+  const subject = currentBranchSubject(git);
+  if (subject) return shortText(subject, limit);
+  if (git?.branch) return shortText(shortBranch(git.branch), limit);
+  return shortText(projectDirName(session, info), limit);
+}}
+
+function sessionTabDescription(session, info) {{
+  return sessionWorkDescription(session, info, 72);
 }}
 
 function projectDirName(session, info) {{
@@ -4487,31 +5325,33 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const pr = project.pull_request;
   const linear = project.linear || [];
   const pane = info?.selected_pane;
+  const description = sessionWorkDescription(session, info, 220);
   const title = `${{sessionLabel(session)}} · ${{projectDirName(session, info)}}`;
-  const subtitle = git?.branch || pane?.current_path || 'no checkout detected';
+  const subtitle = description || git?.branch || pane?.current_path || 'no checkout detected';
   const rows = [];
   rows.push(popoverRow('state', `${{sessionStateHtml(state)}} <span class="meta-muted">${{esc(state.reason)}}</span>`));
-  rows.push(popoverRow('agent', agentKind ? `${{agentName(agentKind)}}${{autoEnabled ? ' · YOLO' : ''}}` : `${{autoEnabled ? 'YOLO' : 'not detected'}}`));
-  if (git?.root) rows.push(popoverRow('repo', git.root));
-  if (git?.branch) rows.push(popoverRow('branch', branchLinkHtml(git, git.branch)));
-  if (git?.upstream) rows.push(popoverRow('upstream', git.upstream));
+  rows.push(popoverRow('agent', agentKind ? `${{agentName(agentKind)}}${{autoEnabled ? ' · YOLO on' : ''}}` : `${{autoEnabled ? 'YOLO on' : 'not detected'}}`));
+  rows.push(popoverRow('path', panelFullPath(session, info) || pane?.current_path || 'not available'));
+  if (git?.branch) rows.push(popoverRow('branch', `${{branchLinkHtml(git, git.branch)}}${{git.upstream ? `<span class="meta-muted"> -> ${{esc(git.upstream)}}</span>` : ''}}`));
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {{
-    rows.push(popoverRow('status', gitStatusText(git)));
+    rows.push(popoverRow('git', gitStatusText(git)));
   }}
   if (pr?.number) {{
-    rows.push(popoverRow('github', pullRequestLinkHtml(pr)));
+    rows.push(popoverRow('PR', pullRequestLinkHtml(pr)));
     const checks = pullRequestChecksHtml(pr);
-    if (checks) rows.push(popoverRow('ci', checks));
+    if (checks) rows.push(popoverRow('CI', checks));
     const prDesc = pullRequestDescriptionHtml(pr);
     if (prDesc) rows.push(popoverRow('desc', prDesc));
   }}
   if (linear.length) {{
-    rows.push(popoverRow('linear', linear.map(issue => linearIssueHtml(issue)).join('<span class="meta-sep"> · </span>')));
+    rows.push(popoverRow('Linear', linear.map(issue => linearIssueHtml(issue)).join('<span class="meta-sep"> · </span>')));
     const linearDesc = linearDescriptionsHtml(linear);
     if (linearDesc) rows.push(popoverRow('details', linearDesc));
   }}
-  if (git?.head) rows.push(popoverRow('head', git.head));
-  if (!git) rows.push(popoverRow('path', pane?.current_path || 'not available'));
+  const subject = currentBranchSubject(git);
+  if (subject && !pr?.number) rows.push(popoverRow('desc', `<div class="popover-desc">${{esc(subject)}}</div>`));
+  if (git?.root) rows.push(popoverRow('repo', git.root));
+  if (git?.head) rows.push(popoverRow('HEAD', git.head));
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">
       <div>
@@ -4526,7 +5366,11 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
 }}
 
 function popoverRow(label, valueHtml) {{
-  return `<div class="popover-row"><div class="popover-label">${{esc(label)}}</div><div class="popover-value">${{valueHtml}}</div></div>`;
+  return `<div class="popover-row"><div class="popover-label">${{esc(label)}}</div><div class="popover-value">${{stripTitleAttrs(valueHtml)}}</div></div>`;
+}}
+
+function stripTitleAttrs(html) {{
+  return String(html || '').replace(/\\s+title="[^"]*"/g, '');
 }}
 
 function popoverMutedText(value) {{
@@ -4661,12 +5505,13 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, mode = 
   const next = {{...layoutSlots}};
   const targetSession = next[targetSlot];
   const currentSlot = slotForSession(session);
+  const resolvedSourceSlot = sourceSlot || currentSlot;
   if (currentSlot === targetSlot) {{
     focusPanel(session);
     return;
   }}
-  if (mode === 'swap' && sourceSlot && targetSession && targetSession !== session) {{
-    next[sourceSlot] = targetSession;
+  if (mode === 'swap' && resolvedSourceSlot && targetSession && targetSession !== session) {{
+    next[resolvedSourceSlot] = targetSession;
     next[targetSlot] = session;
     applyLayoutSlots(next, {{focusSession: session}});
     return;
@@ -4752,9 +5597,52 @@ function sessionNumber(session) {{
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }}
 
+function numericSessionName(session) {{
+  const match = String(session).match(/^[1-9]\\d*$/);
+  return match ? Number(match[0]) : null;
+}}
+
+function sessionLabelAssignments() {{
+  const assigned = new Map();
+  const used = new Set();
+  for (const session of visibleSessions) {{
+    const numeric = numericSessionName(session);
+    if (numeric !== null) {{
+      assigned.set(session, String(numeric));
+      used.add(numeric);
+    }}
+  }}
+
+  const backfill = [];
+  for (let value = 9; value >= 1; value -= 1) {{
+    if (!used.has(value)) backfill.push(value);
+  }}
+
+  let overflow = 10;
+  for (const session of visibleSessions) {{
+    if (assigned.has(session)) continue;
+    let label = backfill.length ? backfill.shift() : overflow;
+    while (used.has(label)) label += 1;
+    assigned.set(session, String(label));
+    used.add(label);
+    if (label >= overflow) overflow = label + 1;
+  }}
+  return assigned;
+}}
+
+function sessionForLabel(label) {{
+  const text = String(label);
+  for (const [session, assignedLabel] of sessionLabelAssignments()) {{
+    if (assignedLabel === text) return session;
+  }}
+  return null;
+}}
+
 function sessionLabel(session) {{
-  const index = visibleSessions.indexOf(session);
-  if (index >= 0) return String(index + 1);
+  const assigned = sessionLabelAssignments().get(session);
+  if (assigned) return assigned;
+  const numeric = numericSessionName(session);
+  if (numeric !== null) return String(numeric);
   return String(session);
 }}
 
@@ -4810,6 +5698,12 @@ function pullRequestStatusClass(pr) {{
   if (status.includes('draft')) return 'pr-status-draft';
   if (status.includes('closed')) return 'pr-status-closed';
   return 'pr-status-unknown';
+}}
+
+function pullRequestCiIndicatorHtml(pr) {{
+  const state = pr?.checks?.state;
+  if (!state || state === 'unknown') return '';
+  return `<span class="ci-indicator ${{pullRequestStatusClass(pr)}}">CI</span>`;
 }}
 
 function pullRequestLinkHtml(pr) {{
@@ -5219,8 +6113,9 @@ function dropSessionAtEvent(event) {{
   grid.querySelectorAll('.drag-over').forEach(node => node.classList.remove('drag-over'));
   grid.querySelectorAll('.drag-replace,.drag-stack-top,.drag-stack-bottom').forEach(node => node.classList.remove('drag-replace', 'drag-stack-top', 'drag-stack-bottom'));
   const intent = dropIntentForEvent(event);
-  const mode = payload.sourceSlot && intent.zone === 'middle' ? 'swap' : intent.mode;
-  moveSessionToSlot(payload.session, intent.slot, payload.sourceSlot || null, mode);
+  const sourceSlot = payload.sourceSlot || slotForSession(payload.session);
+  const mode = sourceSlot && intent.zone === 'middle' ? 'swap' : intent.mode;
+  moveSessionToSlot(payload.session, intent.slot, sourceSlot, mode);
 }}
 
 function handleDropDragOver(event) {{
@@ -5326,25 +6221,51 @@ function getOrCreatePanel(session) {{
 
 function bindPanelShell(panel, session) {{
   installPanelInactiveOverlays(panel, session);
+  panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
   const head = panel.querySelector('.panel-head');
   if (head) {{
     head.draggable = true;
     head.dataset.dragSession = session;
-    head.title = 'Drag to another slot or back to the top tray';
     head.addEventListener('dragstart', event => startSessionDrag(event, session, head.dataset.dragSlot || null));
     head.addEventListener('dragend', endSessionDrag);
   }}
   panel.querySelector('[data-remove]')?.addEventListener('click', () => removeSessionFromLayout(session));
   panel.querySelector('[data-expand]')?.addEventListener('click', buttonEvent => {{
     const button = buttonEvent.currentTarget;
-    const expanded = panel.classList.toggle('expanded');
-    button.title = expanded ? 'collapse' : 'expand';
-    button.setAttribute('aria-label', `${{expanded ? 'Collapse' : 'Expand'}} ${{itemLabel(session)}}`);
-    if (!button.classList.contains('traffic-light')) button.textContent = expanded ? 'Collapse' : 'Expand';
+    const expanded = !panel.classList.contains('expanded');
+    setPanelExpanded(panel, session, expanded);
     setTimeout(() => {{
       if (isTmuxSession(session)) fitTerminal(session);
     }}, 80);
   }});
+}}
+
+function setPanelExpanded(panel, session, expanded) {{
+  if (expanded) {{
+    for (const other of panelNodes.values()) {{
+      if (other !== panel) other.classList.remove('expanded');
+    }}
+  }}
+  panel.classList.toggle('expanded', expanded);
+  const button = panel.querySelector('[data-expand]');
+  if (button) {{
+    button.title = expanded ? 'collapse' : 'expand';
+    button.setAttribute('aria-label', `${{expanded ? 'Collapse' : 'Expand'}} ${{itemLabel(session)}}`);
+    if (!button.classList.contains('traffic-light')) button.textContent = expanded ? 'Collapse' : 'Expand';
+  }}
+  if (expanded) {{
+    if (isTmuxSession(session)) {{
+      activateTab(session, 'terminal');
+      setFocusedTerminal(session);
+      setTimeout(() => terminals.get(session)?.term?.focus?.(), 25);
+    }} else {{
+      focusedTerminal = null;
+      setFocusedPanelItem(session);
+    }}
+  }}
+  renderSessionButtons();
+  for (const activeSession of activeSessions.filter(isTmuxSession)) updateTypingIndicator(activeSession);
+  updatePanelInactiveOverlays();
 }}
 
 function installPanelInactiveOverlays(panel, session) {{
@@ -5352,7 +6273,6 @@ function installPanelInactiveOverlays(panel, session) {{
     if (root.querySelector(':scope > .panel-inactive-overlay')) continue;
     const overlay = document.createElement('div');
     overlay.className = 'panel-inactive-overlay';
-    overlay.title = `focus ${{itemLabel(session)}}`;
     overlay.addEventListener('click', event => {{
       event.preventDefault();
       event.stopPropagation();
@@ -5369,7 +6289,7 @@ function createInfoPanel() {{
   panel.innerHTML = `
       <div class="panel-head">
         <div class="panel-buttons traffic-controls">
-          <button class="traffic-light close" data-remove="${{esc(infoItemId)}}" title="hide Branches" aria-label="Hide Branches"></button>
+          <button class="traffic-light close" data-remove="${{esc(infoItemId)}}" title="minimize Branches" aria-label="Minimize Branches"></button>
           <button class="traffic-light zoom" data-expand="${{esc(infoItemId)}}" title="expand" aria-label="Expand Branches"></button>
         </div>
         <div class="panel-copy">
@@ -5393,41 +6313,46 @@ function createPanel(session) {{
   panel.innerHTML = `
       <div class="panel-head">
         <div class="panel-buttons traffic-controls">
-          <button class="traffic-light close" data-remove="${{esc(session)}}" title="hide this session" aria-label="Hide ${{esc(sessionLabel(session))}}"></button>
+          <button class="traffic-light close" data-remove="${{esc(session)}}" title="minimize this session" aria-label="Minimize ${{esc(sessionLabel(session))}}"></button>
           <button class="traffic-light zoom" data-expand="${{esc(session)}}" title="expand" aria-label="Expand ${{esc(sessionLabel(session))}}"></button>
         </div>
         <div class="panel-copy">
-          <div id="panel-tab-${{session}}" class="panel-session-label">${{sessionLabelHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session))}}</div>
-          <div id="meta-${{session}}" class="meta">finding branch...</div>
+          <button class="tab auto-toggle" data-auto-session="${{esc(session)}}" title="toggle YOLO approval for this tmux session">YOLO</button>
+          <div class="panel-popover-zone">
+            <div id="panel-tab-${{session}}" class="panel-session-label">${{panelHeaderStateHtml(session, sessionState(session, transcriptMeta.sessions?.[session]), transcriptMeta.sessions?.[session])}}</div>
+            <div id="meta-${{session}}" class="meta">finding branch...</div>
+            ${{sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}}
+          </div>
         </div>
-      </div>
       <div class="tabs" role="tablist">
-        <button class="tab auto-toggle" data-auto-session="${{esc(session)}}" title="toggle YOLO approval for this tmux session">YOLO</button>
         <button class="tab window-step" data-window-dir="prev" data-window-session="${{esc(session)}}" title="previous tmux window">&lt;</button>
-        <button class="tab active" data-tab="${{esc(session)}}" data-tab-name="terminal">Terminal</button>
+        <button class="tab active" data-tab="${{esc(session)}}" data-tab-name="terminal">Term</button>
         <button class="tab window-step" data-window-dir="next" data-window-session="${{esc(session)}}" title="next tmux window">&gt;</button>
-        <button class="tab" data-tab="${{esc(session)}}" data-tab-name="transcript">Transcript</button>
-        <button class="tab" data-tab="${{esc(session)}}" data-tab-name="summary">AI summary</button>
-        <button class="tab" data-tab="${{esc(session)}}" data-tab-name="events">YOLO log</button>
+        <button class="tab" data-tab="${{esc(session)}}" data-tab-name="transcript">Tx</button>
+        <button class="tab" data-tab="${{esc(session)}}" data-tab-name="summary">AI</button>
+        <button class="tab" data-tab="${{esc(session)}}" data-tab-name="events">Log</button>
+      </div>
       </div>
       <div id="terminal-pane-${{session}}" class="tab-pane active panel-overlay-root">
         <div id="term-${{session}}" class="terminal"></div>
-        <div id="upload-${{session}}" class="upload-result" hidden></div>
+        <div id="panel-toasts-${{session}}" class="panel-toast-stack">
+          <div id="upload-${{session}}" class="upload-result toast" hidden></div>
+        </div>
       </div>
-      <div id="transcript-pane-${{session}}" class="tab-pane panel-overlay-root">
+      <div id="transcript-pane-${{session}}" class="tab-pane">
         <div class="transcript">
           <div class="transcript-head">Transcript</div>
           <div id="transcript-${{session}}" class="transcript-preview">finding transcript...</div>
         </div>
       </div>
-      <div id="summary-pane-${{session}}" class="tab-pane panel-overlay-root">
+      <div id="summary-pane-${{session}}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">AI summary</div>
           <div id="summary-context-${{session}}" class="summary-context">loading session context...</div>
           <pre id="summary-${{session}}" class="summary-preview">click AI summary to generate a Codex summary of the last hour</pre>
         </div>
       </div>
-      <div id="events-pane-${{session}}" class="tab-pane panel-overlay-root">
+      <div id="events-pane-${{session}}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">YOLO log</div>
           <div id="events-${{session}}" class="event-list">loading events...</div>
@@ -5515,7 +6440,11 @@ function infoBranchRows() {{
 
 function bindPanelControls(panel, session) {{
   panel.querySelectorAll('[data-tab]').forEach(button => {{
-    button.addEventListener('click', () => activateTab(button.dataset.tab, button.dataset.tabName));
+    button.addEventListener('click', () => {{
+      const currentName = button.dataset.tabName;
+      const nextName = currentName !== 'terminal' && button.classList.contains('active') ? 'terminal' : currentName;
+      activateTab(button.dataset.tab, nextName);
+    }});
   }});
   panel.querySelectorAll('[data-window-dir]').forEach(button => {{
     button.addEventListener('click', () => {{
@@ -5613,6 +6542,7 @@ function pasteTargetSession(event) {{
   const panelSession = panel?.id?.startsWith('panel-') ? panel.id.slice('panel-'.length) : '';
   if (sessions.includes(panelSession) && activeSessions.includes(panelSession)) return panelSession;
   if (focusedTerminal && activeSessions.includes(focusedTerminal)) return focusedTerminal;
+  if (focusedPanelItem && sessions.includes(focusedPanelItem) && activeSessions.includes(focusedPanelItem)) return focusedPanelItem;
   const activeTmuxSessions = activeSessions.filter(isTmuxSession);
   return activeTmuxSessions.length === 1 ? activeTmuxSessions[0] : null;
 }}
@@ -5709,7 +6639,7 @@ function showUploadResult(session, payload, inserted) {{
   const label = files.length === 1 ? (files[0].saved_name || files[0].name || 'file') : `${{files.length}} files`;
   const target = payload.target_dir || '';
   const insertedText = inserted ? '; path inserted' : '; terminal not connected';
-  const expiresAt = Date.now() + 15000;
+  const expiresAt = Date.now() + toastDurationMs;
   const newEntries = files.length
     ? files.map(file => {{
       const name = file.saved_name || file.name || 'file';
@@ -5742,17 +6672,23 @@ function getActiveUploadPaths(session) {{
 }}
 
 function ensureUploadResultShell(session, node) {{
-  let textNode = node.querySelector('.upload-result-text');
-  if (textNode) return textNode;
-  node.innerHTML = `<div class="upload-result-text"></div>
-    <button type="button" data-upload-insert>Insert</button>
-    <button type="button" data-upload-copy>Copy</button>
-    <button type="button" data-upload-close aria-label="Hide upload status">x</button>`;
-  node.querySelector('[data-upload-insert]')?.addEventListener('click', () => insertUploadPaths(session, getActiveUploadPaths(session)));
-  node.querySelector('[data-upload-copy]')?.addEventListener('click', () => copyUploadPaths(session, getActiveUploadPaths(session)));
-  node.querySelector('[data-upload-close]')?.addEventListener('click', () => hideUploadResult(session));
-  textNode = node.querySelector('.upload-result-text');
-  return textNode;
+  return ensureToastShell(node, {{
+    title: `YOLOMux - ${{serverHostname}}: ${{sessionLabel(session)}} upload`,
+    closeLabel: 'Hide upload status',
+    keepLabel: 'Keep upload status visible',
+    onKeep: () => keepUploadResult(session),
+    onClose: () => hideUploadResult(session),
+  }});
+}}
+
+function keepUploadResult(session) {{
+  const entries = uploadResultsBySession.get(session) || [];
+  for (const entry of entries) entry.expiresAt = Number.POSITIVE_INFINITY;
+  uploadResultsBySession.set(session, entries);
+  if (uploadCleanupTimers.has(session)) {{
+    clearTimeout(uploadCleanupTimers.get(session));
+    uploadCleanupTimers.delete(session);
+  }}
 }}
 
 function scheduleUploadResultCleanup(session, active, now) {{
@@ -5772,7 +6708,9 @@ function renderUploadResult(session) {{
   uploadResultsBySession.set(session, active);
   if (!active.length) {{
     node.hidden = true;
-    const textNode = node.querySelector('.upload-result-text');
+    const titleNode = node.querySelector('.toast-title');
+    if (titleNode) titleNode.textContent = '';
+    const textNode = node.querySelector('.toast-body');
     if (textNode) textNode.replaceChildren();
     if (uploadCleanupTimers.has(session)) {{
       clearTimeout(uploadCleanupTimers.get(session));
@@ -5785,29 +6723,11 @@ function renderUploadResult(session) {{
   const paths = active.map(entry => entry.path).filter(Boolean);
   node.hidden = false;
   textNode.title = paths.join('\\n');
-  for (const child of Array.from(textNode.querySelectorAll('.upload-result-line'))) {{
-    const id = Number(child.dataset.uploadId || 0);
-    if (!active.some(entry => entry.id === id)) child.remove();
-  }}
-  for (const entry of active) {{
-    if (textNode.querySelector(`[data-upload-id="${{entry.id}}"]`)) continue;
-    const line = document.createElement('div');
-    line.className = 'upload-result-line';
-    line.dataset.uploadId = String(entry.id);
-    line.style.setProperty('--upload-countdown-duration', `${{Math.max(1, entry.expiresAt - now)}}ms`);
-    line.textContent = entry.text;
-    textNode.appendChild(line);
-  }}
+  renderToastLines(textNode, active.map(entry => ({{
+    text: entry.text,
+    countdownMs: entry.expiresAt - now,
+  }})));
   scheduleUploadResultCleanup(session, active, now);
-}}
-
-async function copyUploadPaths(session, paths) {{
-  try {{
-    await navigator.clipboard.writeText(paths.join('\\n'));
-    statusEl.innerHTML = `<span class="ok">copied upload path for ${{esc(sessionLabel(session))}}</span>`;
-  }} catch (error) {{
-    statusEl.innerHTML = `<span class="err">copy failed: ${{esc(error)}}</span>`;
-  }}
 }}
 
 function hideUploadResult(session) {{
@@ -5818,7 +6738,9 @@ function hideUploadResult(session) {{
   }}
   const node = document.getElementById(`upload-${{session}}`);
   if (node) {{
-    const textNode = node.querySelector('.upload-result-text');
+    const titleNode = node.querySelector('.toast-title');
+    if (titleNode) titleNode.textContent = '';
+    const textNode = node.querySelector('.toast-body');
     if (textNode) textNode.replaceChildren();
     node.hidden = true;
   }}
@@ -5826,7 +6748,6 @@ function hideUploadResult(session) {{
 
 function updatePanelSlot(panel, session, slot) {{
   panel.dataset.slot = slot;
-  panel.classList.toggle('active-window', activeSessions.includes(session));
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
   updatePanelInactiveOverlays();
@@ -5872,6 +6793,7 @@ function closeAllStreams() {{
 }}
 
 function activateTab(session, name) {{
+  setFocusedPanelItem(session);
   if (name !== 'transcript') stopTranscriptStream(session);
   if (name !== 'summary') stopSummaryStream(session);
   document.querySelectorAll(`[data-tab="${{session}}"]`).forEach(button => {{
@@ -5886,6 +6808,8 @@ function activateTab(session, name) {{
     scheduleFit(session);
     setTimeout(() => refreshTerminal(session), 120);
     setTimeout(() => terminals.get(session)?.term?.focus(), 25);
+  }} else {{
+    clearFocusedTerminal(session);
   }}
   if (name === 'transcript') {{
     startTranscriptStream(session, {{scrollBottom: true}});
@@ -5954,6 +6878,7 @@ function startTerminal(session) {{
     }}
   }});
   term.open(container);
+  installTerminalLinkProvider(term);
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {{
     term.resize(openedSize.cols, openedSize.rows);
@@ -6084,6 +7009,9 @@ async function refreshAutoStatuses() {{
   bindClipboardPaste();
   renderSessionButtons();
   renderAutoApproveButtons();
+  for (const session of activeSessions.filter(isTmuxSession)) {{
+    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  }}
   trackSessionStateChanges();
   refreshOpenEventLogs();
 }}
@@ -6186,29 +7114,13 @@ function stopSummaryStream(session) {{
   summaryStreams.delete(session);
 }}
 
-async function refreshPaneSnapshots(targetSessions = visibleSessions.filter(isTmuxSession)) {{
-  await Promise.all(targetSessions.map(async session => {{
-    try {{
-      const response = await fetch(`/api/tmux?session=${{encodeURIComponent(session)}}&lines=80`);
-      const payload = await response.json();
-      if (response.ok && typeof payload.text === 'string') {{
-        paneSnapshots.set(session, payload);
-      }} else {{
-        paneSnapshots.delete(session);
-      }}
-    }} catch (_) {{
-      paneSnapshots.delete(session);
-    }}
-  }}));
-}}
-
 async function refreshTranscripts() {{
   try {{
     const response = await fetch('/api/transcripts');
     transcriptMeta = await response.json();
     const previousActive = activeSessions.slice();
     const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
-    await refreshPaneSnapshots();
+    await loadAutoStatuses();
     if (sessionsChanged) renderPanels(previousActive);
     renderSessionButtons();
     renderInfoPanel();
@@ -6219,8 +7131,8 @@ async function refreshTranscripts() {{
       const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
       updatePanelHeader(session, info);
       if (meta) {{
-        meta.innerHTML = projectMetaHtml(session, info);
-        meta.title = projectMetaTitle(session, info);
+        meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+        meta.removeAttribute('title');
       }}
       renderSummaryContext(session, info, agent);
       if (agent?.transcript) {{
@@ -6246,13 +7158,22 @@ async function refreshTranscripts() {{
 
 function updatePanelHeader(session, info) {{
   const tab = document.getElementById(`panel-tab-${{session}}`);
+  const panel = document.getElementById(`panel-${{session}}`);
   if (!tab) return;
-  const agentKind = sessionAgentKind(session);
   const auto = autoApproveStates.get(session)?.enabled === true;
   const state = sessionState(session, info);
   tab.className = `panel-session-label ${{auto ? 'auto' : ''}} ${{state.attention ? 'needs-attention' : ''}}`;
-  tab.innerHTML = sessionLabelHtml(session, info, agentKind, state);
-  tab.title = `${{state.label}}: ${{state.reason}}\\n${{projectMetaTitle(session, info)}}`;
+  tab.innerHTML = panelHeaderStateHtml(session, state, info);
+  tab.removeAttribute('title');
+  const popover = panel?.querySelector(':scope .panel-popover-zone > .session-popover');
+  if (popover) {{
+    const agentKind = sessionAgentKind(session);
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = sessionPopoverHtml(session, info, agentKind, auto, state);
+    popover.replaceWith(wrapper.firstElementChild);
+  }}
+  panel?.classList.toggle('needs-input-window', state.key === 'needs-input');
+  panel?.classList.toggle('needs-exec-window', state.key === 'needs-approval');
 }}
 
 function renderSummaryContext(session, info, agent) {{
@@ -6487,7 +7408,7 @@ function refreshAll() {{
 
 async function boot() {{
   statusEl.textContent = 'loading YOLO status...';
-  renderNotifyToggle();
+  await loadNotifyStatus();
   await loadAutoStatuses();
   renderSessionButtons();
   renderPanels();
@@ -6495,7 +7416,7 @@ async function boot() {{
   refreshTranscripts();
   renderAutoApproveButtons();
   updateLatency();
-  setInterval(refreshAutoStatuses, 3000);
+  setInterval(refreshAutoStatuses, paneStateRefreshMs);
   setInterval(refreshTranscripts, metadataRefreshMs);
   setInterval(updateLatency, latencyRefreshMs);
   setInterval(refreshOpenEventLogs, 5000);
@@ -6531,6 +7452,7 @@ document.getElementById('refreshMeta').onclick = refreshAll;
 notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
 window.addEventListener('resize', () => {{
+  updateTopbarPopoverGeometry();
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
 }});
 
@@ -6731,6 +7653,9 @@ class Handler(BaseHTTPRequestHandler):
             payload, status = self.server.app.auto_approve_status(session)
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/notify":
+            self.write_json(self.server.app.notify_status())
+            return
         if parsed.path == "/api/events":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [None])[0]
@@ -6780,6 +7705,11 @@ class Handler(BaseHTTPRequestHandler):
             enabled = parse_bool(qs.get("enabled", ["0"])[0])
             payload, status = self.server.app.set_auto_approve(session, enabled)
             self.write_json(payload, status=status)
+            return
+        if parsed.path == "/api/notify":
+            qs = parse_qs(parsed.query)
+            enabled = parse_bool(qs.get("enabled", ["0"])[0])
+            self.write_json(self.server.app.set_notify(enabled))
             return
         if parsed.path == "/api/tmux-next":
             qs = parse_qs(parsed.query)

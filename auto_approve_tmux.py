@@ -48,6 +48,10 @@ import time
 
 log = logging.getLogger("auto_approve")
 
+# If Enter is missed, a current prompt should not be stuck forever behind the
+# de-dup hash. Retry only after the exact prompt remains visible briefly.
+PROMPT_RETRY_SECONDS = 5.0
+
 # ---------------------------------------------------------------------------
 # Denylist: block only genuinely dangerous commands
 # ---------------------------------------------------------------------------
@@ -309,13 +313,19 @@ def detect_prompt(pane_text: str) -> str | None:
 # Selector glyphs for the highlighted option:
 #   ❯  - Claude Code (U+276F HEAVY RIGHT-POINTING ANGLE QUOTATION MARK ORNAMENT)
 #   ›  - Codex CLI   (U+203A SINGLE RIGHT-POINTING ANGLE QUOTATION MARK)
-_YES_SELECTOR_RE = re.compile(r"[❯›]\s*1\.\s*Yes")
-
+#
+# Matches the first numbered option with the selector glyph. For Yes/No
+# permission prompts the option text is literally "Yes"; for AskUserQuestion
+# prompts it's arbitrary (e.g., "Go + gRPC"). We match any non-empty option
+# text so the same check works for both shapes.
+_YES_SELECTOR_RE = re.compile(r"[❯›]\s*1\.\s*\S")
 
 def yes_is_selected(pane_text: str) -> bool:
-    """Check that the first option (Yes) is currently highlighted.
+    """Check that the first option is currently highlighted.
 
-    Works for both Claude (❯) and Codex (›) selectors.
+    Works for both Claude (❯) and Codex (›) selectors, and for both Yes/No
+    permission prompts and AskUserQuestion-style prompts with arbitrary
+    first-option text.
     """
     return bool(_YES_SELECTOR_RE.search(pane_text))
 
@@ -363,6 +373,245 @@ def action_for_bash_prompt(pane_text: str) -> str:
     if match and match.group(1).strip() in _CODEX_GENERIC_OPTION2_PREFIXES:
         return "option2"
     return "option1"
+
+
+def prompt_text(pane_text: str, prompt_type: str | None = None) -> str:
+    """Return the bottom-most visible approval prompt text.
+
+    This is the display companion to ``detect_prompt``. Keep the matching
+    rules aligned so UI code and auto-approval code describe the same prompt.
+    """
+    text = ""
+    codex_body_until = -1
+    lines = pane_text.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if "Do you want to proceed" in stripped:
+            text = "Do you want to proceed?"
+        elif "Would you like to run the following command" in stripped:
+            text = "Would you like to run the following command?"
+            codex_body_until = i + 20
+        else:
+            file_match = _FILE_PROMPT_RE.search(stripped)
+            if file_match:
+                text = stripped
+            elif "Do you want to allow" in stripped and i > codex_body_until:
+                text = stripped
+    if text:
+        return text
+    if prompt_type == "bash":
+        return "approval prompt is visible"
+    if prompt_type == "file":
+        return "file approval prompt is visible"
+    if prompt_type == "tool":
+        return "tool approval prompt is visible"
+    return ""
+
+
+_WORKING_LINE_RE = re.compile(
+    r"(?:"
+    r"[✢✶✻✹✷✸✺✽✾✿*]\s+.+…\s*\([^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt)[^)]*\)"
+    r"|^[◦•*]\s*Working\s*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
+    r")",
+    re.IGNORECASE,
+)
+_CHOICE_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?\d+[.:]\s+\S")
+_SELECTED_CHOICE_LINE_RE = re.compile(r"^\s*[❯›>]\s*\d+[.:]\s+\S")
+_FOOTER_LINE_RE = re.compile(
+    r"^\s*(?:\? for shortcuts|Esc to cancel|Enter to select|Tab to amend|ctrl\+e to explain)",
+    re.IGNORECASE,
+)
+_QUESTION_RE = re.compile(r"(?:^|\b)(?:Q\d+\s*/\s*\d+\s*:\s*)?.+\?\s*$")
+
+
+def visible_agent_working(visible_text: str) -> bool:
+    """Return True when the visible pane is showing an active thinking/working row."""
+    return any(_WORKING_LINE_RE.search(line) for line in visible_text.splitlines()[-25:])
+
+
+def _last_approval_prompt_index(lines: list[str]) -> int:
+    last_index = -1
+    codex_body_until = -1
+    for index, line in enumerate(lines):
+        if "Do you want to proceed" in line or "Would you like to run the following command" in line:
+            last_index = index
+            if "Would you like to run the following command" in line:
+                codex_body_until = index + 20
+        elif _FILE_PROMPT_RE.search(line):
+            last_index = index
+        elif "Do you want to allow" in line and index > codex_body_until:
+            last_index = index
+    return last_index
+
+
+def _last_working_index(lines: list[str]) -> int:
+    last_index = -1
+    for index, line in enumerate(lines):
+        if _WORKING_LINE_RE.search(line):
+            last_index = index
+    return last_index
+
+
+def stale_approval_behind_working(visible_text: str) -> bool:
+    """Return True when old prompt text remains visible above a live working row."""
+    lines = visible_text.splitlines()
+    prompt_index = _last_approval_prompt_index(lines)
+    return prompt_index >= 0 and _last_working_index(lines) > prompt_index
+
+
+def approval_prompt_has_later_activity(visible_text: str) -> bool:
+    """Return True when a dismissed prompt remains visible above newer output."""
+    lines = visible_text.splitlines()
+    prompt_index = _last_approval_prompt_index(lines)
+    if prompt_index < 0:
+        return False
+
+    footer_index = -1
+    selected_index = -1
+    for index in range(prompt_index + 1, len(lines)):
+        line = lines[index]
+        if _SELECTED_CHOICE_LINE_RE.search(line):
+            selected_index = index
+        if _FOOTER_LINE_RE.search(line.strip()):
+            footer_index = index
+
+    if selected_index < 0:
+        return False
+
+    start = footer_index + 1 if footer_index >= 0 else selected_index + 1
+    for line in lines[start:]:
+        stripped = line.strip()
+        if _is_separator_or_footer(line) or _CHOICE_LINE_RE.search(line):
+            continue
+        if footer_index >= 0:
+            return True
+        if stripped.startswith(("●", "•", "✻", "✢", "❯", "›")):
+            return True
+        if re.search(r"[@:][^@\s]+[$#]\s*$", stripped):
+            return True
+    return False
+
+
+def _clean_prompt_block_line(line: str) -> str:
+    return re.sub(r"\s+", " ", line.strip().lstrip("●•").lstrip("❯›>").strip())
+
+
+def _is_separator_or_footer(line: str) -> bool:
+    stripped = line.strip()
+    return not stripped or bool(_FOOTER_LINE_RE.search(stripped)) or bool(re.fullmatch(r"[─\-]{10,}", stripped))
+
+
+def _clip_prompt_lines(lines: list[str], max_lines: int = 12, max_chars: int = 1200) -> str:
+    cleaned = [_clean_prompt_block_line(line) for line in lines]
+    cleaned = [line for line in cleaned if line and not re.fullmatch(r"got it\.?", line, re.IGNORECASE)]
+    text = "\n".join(cleaned[:max_lines])
+    if len(text) > max_chars:
+        text = text[: max_chars - 1].rstrip() + "…"
+    return text
+
+
+def visible_choice_prompt_text(visible_text: str) -> str:
+    """Return the current user-question prompt from the visible pane only.
+
+    This intentionally ignores scrollback. If a spinner/working line is visible,
+    working wins over older questions still present above the prompt.
+    """
+    if not visible_text.strip():
+        return ""
+    if detect_prompt(visible_text) is not None or visible_agent_working(visible_text):
+        return ""
+    if re.search(r"accept edits on\s*\(", visible_text, re.IGNORECASE):
+        return ""
+
+    lines = visible_text.splitlines()[-80:]
+    selected_indices = [i for i, line in enumerate(lines) if _SELECTED_CHOICE_LINE_RE.search(line)]
+    if selected_indices:
+        selected = selected_indices[-1]
+        start = selected
+        while start > 0 and not _is_separator_or_footer(lines[start - 1]):
+            start -= 1
+        question_index = start - 1
+        while question_index >= 0 and not lines[question_index].strip():
+            question_index -= 1
+        if question_index >= 0 and _QUESTION_RE.match(_clean_prompt_block_line(lines[question_index])):
+            start = question_index
+        end = selected + 1
+        while end < len(lines) and not _is_separator_or_footer(lines[end]):
+            end += 1
+        block = lines[start:end]
+        if sum(1 for line in block if _CHOICE_LINE_RE.search(line)) >= 2:
+            return _clip_prompt_lines(block)
+
+    # Plain assistant question with an empty input prompt below it.
+    prompt_line_visible = any(re.match(r"^\s*[❯›>]\s*$", line) for line in lines[-8:])
+    if not prompt_line_visible:
+        return ""
+    for line in reversed(lines[:-1]):
+        stripped = _clean_prompt_block_line(line)
+        if not stripped or _FOOTER_LINE_RE.search(stripped) or stripped.startswith(("keivenc@", "$ ")):
+            continue
+        if _QUESTION_RE.match(stripped):
+            return stripped
+        if re.match(r"^\s*[❯›>]\s+\S", line):
+            break
+    return ""
+
+
+def agent_screen_state(visible_text: str) -> dict[str, object]:
+    """Classify the visible terminal screen for YOLOMux UI badges.
+
+    Approval detection and auto-approval use the same visible pane text as this
+    UI state, so the browser does not need its own stale scrollback parser.
+    """
+    prompt_state = approval_prompt_state(visible_text)
+    prompt_type = prompt_state.get("type") or None
+    if prompt_type is not None:
+        return {
+            "key": "approval",
+            "text": str(prompt_state.get("text") or prompt_text(visible_text, prompt_type)),
+            "prompt_type": prompt_type,
+        }
+    if visible_agent_working(visible_text):
+        return {"key": "working", "text": "agent is working"}
+    question = visible_choice_prompt_text(visible_text)
+    if question:
+        return {"key": "needs-input", "text": question}
+    return {"key": "idle", "text": ""}
+
+
+def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> dict[str, object]:
+    """Return structured approval prompt state from the shared detector.
+
+    ``visible_text`` must be captured with ``visible_only=True``. ``pane_text``
+    may include scrollback and is used only to extract command context after a
+    visible bash prompt has already been confirmed.
+    """
+    prompt_type = detect_prompt(visible_text)
+    selected = yes_is_selected(visible_text)
+    if prompt_type is not None and (
+        stale_approval_behind_working(visible_text) or approval_prompt_has_later_activity(visible_text)
+    ):
+        prompt_type = None
+
+    state: dict[str, object] = {
+        "visible": prompt_type is not None,
+        "type": prompt_type or "",
+        "text": prompt_text(visible_text, prompt_type) if prompt_type is not None else "",
+        "yes_selected": selected if prompt_type is not None else False,
+        "action": None,
+        "command": None,
+        "dangerous": False,
+        "hash": prompt_hash(visible_text) if prompt_type is not None else "",
+    }
+    if prompt_type is None:
+        return state
+    action = action_for_bash_prompt(visible_text) if prompt_type == "bash" else action_for_prompt(prompt_type)
+    state["action"] = action or ""
+    if prompt_type == "bash" and pane_text is not None:
+        command = extract_command(pane_text)
+        state["command"] = command
+        state["dangerous"] = command is not None and is_dangerous(command)
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -418,17 +667,7 @@ def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False) 
 
 
 def tmux_send_enter(target: str) -> None:
-    # Use shell command to add a tiny delay, which helps the TUI register the key
-    subprocess.run(
-        ["tmux", "send-keys", "-t", target, "", "Enter"],
-        capture_output=True, text=True,
-    )
-    time.sleep(0.1)
-    # Send a second Enter as insurance — harmless if the first one worked
-    subprocess.run(
-        ["tmux", "send-keys", "-t", target, "Enter"],
-        capture_output=True, text=True,
-    )
+    tmux_run("send-keys", "-t", target, "Enter", check=False)
 
 
 def tmux_send_option2(target: str) -> None:
@@ -496,18 +735,47 @@ def resolve_targets(specs: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def prompt_hash(pane_text: str) -> str:
-    """Hash the lines around the Yes selector to deduplicate repeated polls.
+    """Hash the visible approval prompt block to deduplicate repeated polls.
 
-    Matches both the Claude (❯) and Codex (›) selector glyphs.
+    Claude Yes/No prompts all have the same selector text. Include the command
+    block above the selector so two different commands do not look like the
+    same already-approved prompt.
     """
     all_lines = pane_text.splitlines()
-    context_lines: list[str] = []
+    selector_re = re.compile(r"[❯›]\s*\d+\.\s*\S")
+    selector_index = -1
     for i, line in enumerate(all_lines):
-        if _YES_SELECTOR_RE.search(line):
-            start = max(0, i - 5)
-            context_lines = all_lines[start : i + 3]
-            break
-    blob = "\n".join(context_lines).encode()
+        if selector_re.search(line):
+            selector_index = i
+
+    if selector_index >= 0:
+        start = max(0, selector_index - 80)
+        for i in range(selector_index - 1, -1, -1):
+            stripped = all_lines[i].strip()
+            if re.fullmatch(r"[─\-]{10,}", stripped):
+                start = i + 1
+                break
+            if stripped.startswith(("● Bash(", "• Bash(")):
+                start = i
+                break
+            if stripped in {"Bash command", "Bash command (unsandboxed)"}:
+                start = i
+        end = min(len(all_lines), selector_index + 6)
+        context_lines = all_lines[start:end]
+    else:
+        context_lines = all_lines[-80:]
+
+    normalized_lines: list[str] = []
+    for line in context_lines:
+        stripped = line.rstrip()
+        if not stripped:
+            continue
+        # Spinner elapsed time is not part of the approval identity.
+        if _WORKING_LINE_RE.search(stripped):
+            continue
+        normalized_lines.append(stripped)
+
+    blob = "\n".join(normalized_lines).encode()
     return hashlib.md5(blob).hexdigest()
 
 
@@ -1044,6 +1312,36 @@ def _self_test() -> bool:
     check("no selector at all", yes_is_selected("random text"), False)
 
     # =====================================================================
+    # prompt_hash
+    # =====================================================================
+    print()
+    print("=== prompt_hash: deduplicates only identical visible prompts ===")
+
+    yes_no_prompt_a = """Bash command (unsandboxed)
+
+   echo one
+   Pause before continuing
+
+ Permission rule Bash requires confirmation for this command.
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend · ctrl+e to explain
+"""
+    yes_no_prompt_b = yes_no_prompt_a.replace("echo one", "echo two")
+    check("same command prompt hashes match",
+          prompt_hash(yes_no_prompt_a), prompt_hash(yes_no_prompt_a))
+    check("different command prompts hash differently",
+          prompt_hash(yes_no_prompt_a) != prompt_hash(yes_no_prompt_b), True)
+    check("current visible approval prompt is active",
+          approval_prompt_state(yes_no_prompt_a)["visible"], True)
+    dismissed_prompt = yes_no_prompt_a + "\n● User approved Claude's request\n● Bash(echo one)\n  ⎿  ok\n\n❯ \n"
+    check("dismissed approval prompt above newer output is ignored",
+          approval_prompt_state(dismissed_prompt)["visible"], False)
+
+    # =====================================================================
     # extract_command — real pane layouts
     # =====================================================================
     print()
@@ -1232,13 +1530,12 @@ def _self_test() -> bool:
 class SessionState:
     """Per-session tracking for dedup and counters."""
 
-    MAX_RETRIES = 10  # resend Enter if prompt persists after approval
-
     def __init__(self, target: str) -> None:
         self.target = target
         self.label = target.split(":")[0]  # short name for log output
         self.last_hash = ""
-        self.retry_count = 0
+        self.last_hash_at = 0.0
+        self.last_blocked_hash = ""
         self.approved = 0
         self.blocked = 0
 
@@ -1418,6 +1715,8 @@ def main() -> None:
 
             if prompt_type is None:
                 st.last_hash = ""  # reset so next prompt is always fresh
+                st.last_hash_at = 0.0
+                st.last_blocked_hash = ""
                 log_dedup(logging.DEBUG, f"[{st.label}] No prompt (approved={st.approved} blocked={st.blocked})")
                 continue
 
@@ -1432,25 +1731,15 @@ def main() -> None:
                 pane_text = visible_text
 
             current_hash = prompt_hash(visible_text)
-            if current_hash == st.last_hash:
-                st.retry_count += 1
-                if st.retry_count <= SessionState.MAX_RETRIES:
-                    if st.retry_count <= 3:
-                        log.info("[%s] Prompt still visible after Enter — retry %d/%d",
-                                 st.label, st.retry_count, SessionState.MAX_RETRIES)
-                    if not args.dry_run:
-                        time.sleep(0.3)
-                        tmux_send_enter(st.target)
-                    time.sleep(1)
-                else:
-                    # Retries exhausted. Reset state so the next iteration
-                    # treats this prompt as fresh and re-fires Enter with a
-                    # full retry budget, instead of silently dedup-looping.
-                    log.warning("[%s] Same prompt persists after %d retries — resetting state and retrying",
-                                st.label, SessionState.MAX_RETRIES)
-                    st.last_hash = ""
-                    st.retry_count = 0
+            now = time.monotonic()
+            if current_hash == st.last_blocked_hash:
+                log_dedup(logging.DEBUG, f"[{st.label}] Blocked prompt still visible; waiting for manual action")
                 continue
+            if current_hash == st.last_hash and now - st.last_hash_at < PROMPT_RETRY_SECONDS:
+                log_dedup(logging.DEBUG, f"[{st.label}] Approved prompt still visible; waiting before retry")
+                continue
+            if current_hash == st.last_hash:
+                log_dedup(logging.INFO, f"[{st.label}] Approved prompt still visible after {PROMPT_RETRY_SECONDS:g}s; retrying")
 
             acted = True
 
@@ -1484,7 +1773,8 @@ def main() -> None:
                 log.info("[%s] %s (%s, %s): %s", st.label, verb_word, verb, opt_label, desc)
                 _send(action)
                 st.last_hash = current_hash
-                st.retry_count = 0
+                st.last_hash_at = time.monotonic()
+                st.last_blocked_hash = ""
                 st.approved += 1
                 if should_exit_once(st, "file approval"):
                     return
@@ -1499,7 +1789,8 @@ def main() -> None:
                 log.info("[%s] %s (tool, %s): %s", st.label, verb_word, opt_label, tool_name)
                 _send(action)
                 st.last_hash = current_hash
-                st.retry_count = 0
+                st.last_hash_at = time.monotonic()
+                st.last_blocked_hash = ""
                 st.approved += 1
                 if should_exit_once(st, "tool approval"):
                     return
@@ -1526,7 +1817,8 @@ def main() -> None:
                         log_dedup(logging.INFO, f"[{st.label}] APPROVE (no cmd extracted, {opt_label})")
                         _send(action)
                     st.last_hash = current_hash
-                    st.retry_count = 0
+                    st.last_hash_at = time.monotonic()
+                    st.last_blocked_hash = ""
                     st.approved += 1
                     if should_exit_once(st, "bash approval without command extraction"):
                         return
@@ -1535,7 +1827,8 @@ def main() -> None:
                 elif is_dangerous(cmd):
                     log.info("[%s] BLOCKED (dangerous): %s", st.label, cmd)
                     st.last_hash = current_hash
-                    st.retry_count = 0
+                    st.last_hash_at = time.monotonic()
+                    st.last_blocked_hash = current_hash
                     st.blocked += 1
                     if should_exit_once(st, "dangerous-command block"):
                         return
@@ -1548,7 +1841,8 @@ def main() -> None:
                         log.info("[%s] APPROVE (%s): %s", st.label, opt_label, cmd)
                         _send(action)
                     st.last_hash = current_hash
-                    st.retry_count = 0
+                    st.last_hash_at = time.monotonic()
+                    st.last_blocked_hash = ""
                     st.approved += 1
                     if should_exit_once(st, "bash approval"):
                         return
