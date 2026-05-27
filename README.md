@@ -41,7 +41,7 @@ YOLOmux serves xterm.js from a local editor install when available. It checks `Y
 - The `+ Claude` and `+ Codex` tabs create the next numbered tmux session with the selected agent, such as `7` when six sessions already exist. Each create tab appears only when that CLI is available on the YOLOmux server PATH. If neither CLI is available, YOLOmux shows `+ Term` and creates a plain shell session. YOLOmux does not create default `yolomuxN` sessions.
 - The visible workspace has left and right sides. Each side can show one full-height pane or two stacked panes, for up to four visible panes total.
 - Session panels are created once at page boot. Hidden sessions live in an off-screen panel pool instead of being destroyed, so drag/drop and quick switching do not restart unchanged terminals.
-- The layout is stored in browser `localStorage` under `yolomux.layoutSlots.v1`, so it survives browser reloads and YOLOmux server restarts for the same browser/profile/origin.
+- The layout is stored in the page URL through readable `sessions`, `layout`, and `tabs` query parameters. Split positions are recorded as percentages in `layout`, so reloads preserve the layout without browser storage.
 - YOLO state is stored server-side in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
 - The red mac-style circle hides a pane. The green circle expands or collapses a pane.
 - Drag a top-tray session or a pane header into a visible slot. Dropping a pane in the middle of another pane swaps them. Dropping near the top or bottom stacks into that side when a slot is available.

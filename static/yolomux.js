@@ -40,7 +40,6 @@ const terminalFitBottomReservePx = 2;
 const terminalWheelScrollLines = 3;
 const terminalWheelPageFraction = 0.85;
 const maxSessionTabs = bootstrap.maxSessionTabs;
-const layoutStorageKey = 'yolomux.windowTabs.v1';
 const baseWindowKeys = ['left', 'right'];
 const splitWindowKeys = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'];
 const windowKeys = [...baseWindowKeys, ...splitWindowKeys];
@@ -48,6 +47,9 @@ const layoutTreeKey = '__tree';
 const layoutTreeParamPrefix = 'tree:';
 const minSplitPaneWidthPx = 320;
 const minSplitPaneHeightPx = 220;
+const defaultSplitPercent = 50;
+const minSplitPercent = 5;
+const maxSplitPercent = 95;
 const infoItemId = '__info__';
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [infoItemId, ...visibleSessions];
@@ -72,6 +74,8 @@ const panelPopoverHideTimers = new WeakMap();
 let sessionButtonsRenderDeferred = false;
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
+let layoutResizeState = null;
+let responsiveLayoutPruneTimer = null;
 let latencySamples = [];
 
 function setFocusedTerminal(session) {
@@ -98,6 +102,11 @@ function setFocusedPanelItem(item) {
   if (isTmuxSession(item)) dismissAttentionAlertsForSession(item);
   updateSessionButtonStates();
   updatePanelInactiveOverlays();
+}
+
+function clearFocusForInactiveLayout() {
+  if (focusedTerminal && !activeSessions.includes(focusedTerminal)) focusedTerminal = null;
+  if (focusedPanelItem && !activeSessions.includes(focusedPanelItem)) focusedPanelItem = null;
 }
 
 function terminalPaneIsActive(session) {
@@ -242,8 +251,19 @@ function leafNode(slot) {
   return {slot};
 }
 
-function splitNode(direction, first, second) {
-  return {split: direction, children: [first, second]};
+function splitNode(direction, first, second, pct = defaultSplitPercent) {
+  return {split: direction, pct: splitPercent(pct), children: [first, second]};
+}
+
+function splitPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return defaultSplitPercent;
+  return Math.min(maxSplitPercent, Math.max(minSplitPercent, number));
+}
+
+function splitPercentForDisplay(value) {
+  const rounded = Math.round(splitPercent(value) * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
 }
 
 function layoutLeafSlots(node) {
@@ -301,7 +321,7 @@ function normalizeLayoutNode(node, value, next, seen) {
   }
   const direction = node.split === 'column' ? 'column' : 'row';
   const children = (node.children || []).map(child => normalizeLayoutNode(child, value, next, seen)).filter(Boolean);
-  if (children.length >= 2) return splitNode(direction, children[0], children[1]);
+  if (children.length >= 2) return splitNode(direction, children[0], children[1], node.pct);
   return children[0] || null;
 }
 
@@ -342,7 +362,7 @@ function compactLayoutNode(node, slots) {
   if (!node) return null;
   if (node.slot) return windowStack(node.slot, slots).length ? leafNode(node.slot) : null;
   const children = (node.children || []).map(child => compactLayoutNode(child, slots)).filter(Boolean);
-  if (children.length >= 2) return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1]);
+  if (children.length >= 2) return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
   return children[0] || null;
 }
 
@@ -412,7 +432,7 @@ function treeLayoutFromParam(raw) {
 }
 
 function compactLayoutParamLooksLikeTree(text) {
-  return /^(row|col|column)\(/.test(text);
+  return /^(row|col|column)(?:@\d+(?:\.\d+)?)?\(/.test(text);
 }
 
 function compactTreeLayoutFromParam(raw, tabsRaw) {
@@ -434,9 +454,9 @@ function parseCompactLayoutNode(parser) {
   skipCompactLayoutWhitespace(parser);
   const name = readCompactLayoutToken(parser);
   if (!name) return null;
-  const normalized = name.toLowerCase();
+  const splitMatch = name.toLowerCase().match(/^(row|col|column)(?:@(\d+(?:\.\d+)?))?$/);
   skipCompactLayoutWhitespace(parser);
-  if (['row', 'col', 'column'].includes(normalized) && parser.text[parser.index] === '(') {
+  if (splitMatch && parser.text[parser.index] === '(') {
     parser.index += 1;
     const children = [];
     while (parser.index < parser.text.length) {
@@ -455,7 +475,7 @@ function parseCompactLayoutNode(parser) {
       return null;
     }
     if (children.length < 2) return children[0] || null;
-    return splitNode(normalized === 'row' ? 'row' : 'column', children[0], children[1]);
+    return splitNode(splitMatch[1] === 'row' ? 'row' : 'column', children[0], children[1], splitMatch[2]);
   }
   const slot = layoutSlotName(readableParamComponentDecode(name));
   return slot ? leafNode(slot) : null;
@@ -476,7 +496,7 @@ function layoutTreeFromParamNode(node) {
   const slot = layoutSlotName(node.slot);
   if (slot) return leafNode(slot);
   const children = (node.children || []).map(layoutTreeFromParamNode).filter(Boolean);
-  if (children.length >= 2) return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1]);
+  if (children.length >= 2) return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
   return children[0] || null;
 }
 
@@ -495,7 +515,7 @@ function compactLayoutTreeParam(node) {
   if (!node) return '';
   if (node.slot) return readableParamComponent(node.slot);
   const name = node.split === 'column' ? 'col' : 'row';
-  return `${name}(${(node.children || []).map(compactLayoutTreeParam).filter(Boolean).join(',')})`;
+  return `${name}@${splitPercentForDisplay(node.pct)}(${(node.children || []).map(compactLayoutTreeParam).filter(Boolean).join(',')})`;
 }
 
 function layoutTabsParamValue(slots) {
@@ -568,11 +588,6 @@ function initialLayoutSlots() {
   }
   if (selected.length) return layoutFromSessionList(selected);
   if (!visibleSessions.length) return emptyLayoutSlots();
-  try {
-    const stored = JSON.parse(localStorage.getItem(layoutStorageKey) || 'null');
-    const normalized = normalizeLayoutSlots(stored);
-    if (sessionsFromSlots(normalized).length) return normalized;
-  } catch (_) {}
   return defaultLayoutSlots();
 }
 
@@ -781,7 +796,9 @@ function stateValue(key, reason) {
 }
 
 function stateBadgeHtml(key, short, title) {
-  return `<span class="session-state-badge session-state-${esc(key)}" title="${esc(title)}">${esc(short)}</span>`;
+  const classes = ['session-state-badge', `session-state-${key}`];
+  if (stateDef(key).attention) classes.push('session-state-reminder');
+  return `<span class="${esc(classes.join(' '))}" title="${esc(title)}">${esc(short)}</span>`;
 }
 
 function sessionStateHtml(state) {
@@ -1140,15 +1157,9 @@ function updateSessionList(nextSessions) {
   layoutItems = [infoItemId, ...visibleSessions];
   layoutSlots = normalizeLayoutSlots(layoutSlots);
   activeSessions = sessionsFromLayout();
-  saveLayoutSlots();
+  clearFocusForInactiveLayout();
   updateActiveSessionParam();
   return true;
-}
-
-function saveLayoutSlots() {
-  try {
-    localStorage.setItem(layoutStorageKey, JSON.stringify(layoutSlots));
-  } catch (_) {}
 }
 
 function applyLayoutSlots(nextSlots, options = {}) {
@@ -1156,7 +1167,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
   layoutSlots = normalizeLayoutSlots(nextSlots);
   activeSessions = sessionsFromLayout();
-  saveLayoutSlots();
+  clearFocusForInactiveLayout();
   updateActiveSessionParam();
   renderSessionButtons();
   renderPanels(previousActive);
@@ -1165,6 +1176,8 @@ function applyLayoutSlots(nextSlots, options = {}) {
   renderAutoApproveButtons();
   if (options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
+  } else if (options.message && activeSessions.length) {
+    statusEl.textContent = options.message;
   } else {
     updateStatus();
   }
@@ -1278,7 +1291,9 @@ function updateSessionButtonStates() {
 }
 
 function topTabIsActive(session) {
-  return session === focusedPanelItem || session === focusedTerminal;
+  if (!activeSessions.includes(session)) return false;
+  if (focusedPanelItem || focusedTerminal) return session === focusedPanelItem || session === focusedTerminal;
+  return activeSessions.length === 1 && activeSessions[0] === session;
 }
 
 function applySessionStateClasses(node, state) {
@@ -1788,6 +1803,16 @@ function layoutWithoutItem(item) {
   return next;
 }
 
+function layoutWithoutSlot(slot) {
+  const next = emptyLayoutSlots();
+  next[layoutTreeKey] = layoutSlots[layoutTreeKey];
+  for (const side of layoutSlotKeys()) {
+    if (side === slot) continue;
+    next[side] = windowStateWithTabs(windowStack(side), activeItemForSide(side));
+  }
+  return next;
+}
+
 function firstEmptyWindow() {
   return layoutSlotKeys().length ? null : 'left';
 }
@@ -1852,7 +1877,7 @@ function replaceLayoutLeaf(node, slot, replacement) {
   if (!node) return replacement;
   if (node.slot) return node.slot === slot ? replacement : node;
   const children = (node.children || []).map(child => replaceLayoutLeaf(child, slot, replacement));
-  return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1]);
+  return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
 }
 
 function activateWindowSession(side, session) {
@@ -2454,6 +2479,7 @@ function renderPanels(previousActive = []) {
   bindDropTargets();
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
+  scheduleResponsiveLayoutPrune();
 }
 
 function movePanelsToPool() {
@@ -2478,16 +2504,142 @@ function bindDropTargets() {
 function renderLayoutRoot(node) {
   const section = document.createElement('section');
   section.className = 'layout-root';
-  section.appendChild(renderLayoutNode(node));
+  section.appendChild(renderLayoutNode(node, ''));
   return section;
 }
 
-function renderLayoutNode(node) {
+function renderLayoutNode(node, path) {
   if (node.slot) return renderLayoutColumn(node.slot);
   const section = document.createElement('section');
   section.className = `layout-split ${node.split === 'column' ? 'split-column' : 'split-row'}`;
-  for (const child of node.children || []) section.appendChild(renderLayoutNode(child));
+  section.dataset.splitPath = path;
+  const children = node.children || [];
+  const first = renderLayoutNode(children[0], layoutChildPath(path, 0));
+  const second = renderLayoutNode(children[1], layoutChildPath(path, 1));
+  const handle = document.createElement('div');
+  handle.className = `layout-resizer ${node.split === 'column' ? 'resizer-column' : 'resizer-row'}`;
+  handle.role = 'separator';
+  handle.tabIndex = 0;
+  handle.dataset.splitPath = path;
+  handle.setAttribute('aria-orientation', node.split === 'column' ? 'horizontal' : 'vertical');
+  handle.setAttribute('aria-label', 'Resize panes');
+  section.append(first, handle, second);
+  applySplitPercentToSection(section, node.pct);
+  bindLayoutResizer(handle, section, path);
   return section;
+}
+
+function layoutChildPath(path, index) {
+  return path ? `${path}.${index}` : String(index);
+}
+
+function layoutNodeAtPath(path, root = layoutSlots[layoutTreeKey]) {
+  let node = root;
+  if (!path) return node;
+  for (const part of String(path).split('.')) {
+    const index = Number(part);
+    if (!node?.children || !Number.isInteger(index)) return null;
+    node = node.children[index];
+  }
+  return node || null;
+}
+
+function applySplitPercentToSection(section, pct) {
+  const first = section.children[0];
+  const second = section.children[2];
+  if (!first || !second) return;
+  const value = splitPercent(pct);
+  first.style.flex = `0 1 ${value}%`;
+  second.style.flex = `1 1 ${100 - value}%`;
+  const handle = section.children[1];
+  if (handle?.style) handle.style.setProperty('--split-percent', `${value}%`);
+}
+
+function bindLayoutResizer(handle, section, path) {
+  handle.addEventListener('pointerdown', event => {
+    const node = layoutNodeAtPath(path);
+    if (!node || !node.children) return;
+    event.preventDefault();
+    event.stopPropagation();
+    layoutResizeState = {section, path, pointerId: event.pointerId};
+    handle.setPointerCapture?.(event.pointerId);
+    document.body.classList.add('layout-resizing', node.split === 'column' ? 'layout-resizing-column' : 'layout-resizing-row');
+    window.addEventListener('pointermove', onLayoutResizeMove, {capture: true});
+    window.addEventListener('pointerup', onLayoutResizeEnd, {capture: true});
+    onLayoutResizeMove(event);
+  });
+}
+
+function onLayoutResizeMove(event) {
+  const state = layoutResizeState;
+  if (!state) return;
+  event.preventDefault();
+  const node = layoutNodeAtPath(state.path);
+  if (!node || !node.children) return;
+  const pct = splitPercentForPointer(state.section, node.split, event);
+  node.pct = pct;
+  applySplitPercentToSection(state.section, pct);
+  for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
+}
+
+function onLayoutResizeEnd(event) {
+  if (!layoutResizeState) return;
+  event.preventDefault();
+  const state = layoutResizeState;
+  const handle = state.section.querySelector(`:scope > .layout-resizer[data-split-path="${cssEscape(state.path)}"]`);
+  try { handle?.releasePointerCapture?.(state.pointerId); } catch (_) {}
+  layoutResizeState = null;
+  document.body.classList.remove('layout-resizing', 'layout-resizing-column', 'layout-resizing-row');
+  window.removeEventListener('pointermove', onLayoutResizeMove, {capture: true});
+  window.removeEventListener('pointerup', onLayoutResizeEnd, {capture: true});
+  updateActiveSessionParam();
+  scheduleResponsiveLayoutPrune();
+}
+
+function splitPercentForPointer(section, direction, event) {
+  const rect = section.getBoundingClientRect();
+  const size = direction === 'column' ? rect.height : rect.width;
+  if (!size) return defaultSplitPercent;
+  const offset = direction === 'column' ? event.clientY - rect.top : event.clientX - rect.left;
+  const raw = (offset / size) * 100;
+  const minPx = direction === 'column' ? minSplitPaneHeightPx : minSplitPaneWidthPx;
+  if (size >= minPx * 2) {
+    const minPct = (minPx / size) * 100;
+    return Math.min(100 - minPct, Math.max(minPct, raw));
+  }
+  return splitPercent(raw);
+}
+
+function scheduleResponsiveLayoutPrune() {
+  if (layoutResizeState || responsiveLayoutPruneTimer) return;
+  responsiveLayoutPruneTimer = setTimeout(() => {
+    responsiveLayoutPruneTimer = null;
+    requestAnimationFrame(pruneSmallLayoutSlots);
+  }, 80);
+}
+
+function pruneSmallLayoutSlots() {
+  if (layoutResizeState || activeSessions.length <= 1) return;
+  const candidate = smallLayoutSlotCandidate();
+  if (!candidate) return;
+  const moved = windowStack(candidate.slot);
+  applyLayoutSlots(layoutWithoutSlot(candidate.slot), {
+    message: moved.length ? `${moved.map(itemLabel).join(', ')} moved to top bar: not enough room` : '',
+  });
+}
+
+function smallLayoutSlotCandidate() {
+  let candidate = null;
+  for (const column of grid.querySelectorAll('.layout-column[data-slot]')) {
+    const slot = column.dataset.slot;
+    if (!slot || !windowStack(slot).length) continue;
+    const rect = column.getBoundingClientRect();
+    const tooSmall = rect.width < minSplitPaneWidthPx || rect.height < minSplitPaneHeightPx;
+    if (!tooSmall) continue;
+    const area = Math.max(0, rect.width) * Math.max(0, rect.height);
+    if (!candidate || area < candidate.area) candidate = {slot, area};
+  }
+  return candidate;
 }
 
 function renderLayoutColumn(side) {
@@ -4012,6 +4164,7 @@ notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
 window.addEventListener('resize', () => {
   updateTopbarPopoverGeometry();
+  scheduleResponsiveLayoutPrune();
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
 });
 
