@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared mock agent terminal for YOLOMux UI testing."""
+"""Shared mock agent terminal for YOLOmux UI testing."""
 
 import atexit
 import os

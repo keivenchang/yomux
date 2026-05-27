@@ -1,12 +1,12 @@
-# YOLOMux TODOs
+# YOLOmux TODOs
 
-YOLOMux-specific roadmap notes. Keep UI, terminal, YOLO approval, session state, and launch ideas here instead of the Dynamo TODO list.
+YOLOmux-specific roadmap notes. Keep UI, terminal, YOLO approval, session state, and launch ideas here instead of the Dynamo TODO list.
 
 ---
 
 ## Product Direction
 
-YOLOMux should stay a lightweight local tmux browser control plane. The useful niche is not another full SaaS-style orchestration stack. It is a fast local UI for existing Claude/Codex/tmux sessions with clear state, safe YOLO controls, repo metadata, file paste/upload, and low-friction attach/reply.
+YOLOmux should stay a lightweight local tmux browser control plane. The useful niche is not another full SaaS-style orchestration stack. It is a fast local UI for existing Claude/Codex/tmux sessions with clear state, safe YOLO controls, repo metadata, file paste/upload, and low-friction attach/reply.
 
 Borrow from other tools only when the feature improves the local control loop: know which session needs attention, understand what changed, approve or block risky work, and jump back into the right terminal quickly.
 
@@ -79,7 +79,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 ### P9: Multi-Machine Connector
 
 - [ ] Defer until the local product is stable. This changes auth, networking, logging, and failure modes.
-- [ ] If built, use a small remote agent that reports tmux sessions, metadata, vitals, and WebSocket terminal streams back to one YOLOMux instance.
+- [ ] If built, use a small remote agent that reports tmux sessions, metadata, vitals, and WebSocket terminal streams back to one YOLOmux instance.
 - [ ] Keep local-only as the default.
 
 ---
@@ -98,14 +98,14 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Feature Comparison
 
-| Feature | Projects that already have it | YOLOMux action |
+| Feature | Projects that already have it | YOLOmux action |
 | --- | --- | --- |
 | Multi-session dashboard | Claude Code Agent View, ClauBoard, CLD CTRL, Agent Cockpit | Already has panes and tabs; add better state grouping and session ordering. |
 | `Needs input` / `Working` / `Done` grouping | Claude Code Agent View, Agent Conductor-style dashboards | Build first. Put state badges in top tabs and add a `Needs me` view. |
-| Background sessions that keep running | Claude Code Agent View, dmux, YOLOMux | Already has this through tmux; make hidden/running state more obvious. |
-| Tmux-backed parallel agents | dmux, workmux, YOLOMux | Keep this as a core differentiator. Do not replace tmux with a heavier runtime. |
+| Background sessions that keep running | Claude Code Agent View, dmux, YOLOmux | Already has this through tmux; make hidden/running state more obvious. |
+| Tmux-backed parallel agents | dmux, workmux, YOLOmux | Keep this as a core differentiator. Do not replace tmux with a heavier runtime. |
 | Git worktree-backed sessions | dmux, pertmux, webmux, workmux | Add after launch dialog exists. Keep worktree cleanup guarded and explicit. |
-| Browser terminal streaming | webmux, Handler, YOLOMux | Already has this. Improve mobile behavior later instead of rewriting terminal plumbing. |
+| Browser terminal streaming | webmux, Handler, YOLOmux | Already has this. Improve mobile behavior later instead of rewriting terminal plumbing. |
 | Approval queue / approval cards | Agent Cockpit, purplemux-style timeline prompts | Add after YOLO event log exists. Start with visibility, then live allow/deny. |
 | Risk-rated approvals | Agent Cockpit | Use concrete labels: `read`, `edit`, `network`, `process`, `delete`, `credential`, `unknown`. |
 | YOLO / approval audit log | Agent Cockpit, Cogpit, ClauBoard | Add JSONL event log before timeline UI. This is P1. |
@@ -118,14 +118,14 @@ Borrow from other tools only when the feature improves the local control loop: k
 | Resume/fork sessions | CC Assist, CLD CTRL, Blackcrab, Claude Code session history tools | Add resume picker first. Forking can wait. |
 | Browser/native notifications | dmux, webmux, Agent Watch-style tools | Add after session state exists. Notify only on state transitions. |
 | Mobile check-in UI | webmux, Cogpit, Blackcrab | Add a single-pane focus mode. Do not force the desktop pane layout onto mobile. |
-| Multi-agent task board / orchestration | ClauBoard, Cogpit, Agent Cockpit | Defer. YOLOMux should stay a local control plane before becoming an orchestrator. |
+| Multi-agent task board / orchestration | ClauBoard, Cogpit, Agent Cockpit | Defer. YOLOmux should stay a local control plane before becoming an orchestrator. |
 | Multi-machine / remote connector | webmux, Agent Cockpit, agentserver, Handler | Defer. This changes auth, networking, logging, and threat model. |
 
 ---
 
 ## Recommendation
 
-Do next: session state plus `Needs me`. This is the highest leverage feature because it makes every existing YOLOMux pane easier to manage without changing tmux architecture.
+Do next: session state plus `Needs me`. This is the highest leverage feature because it makes every existing YOLOmux pane easier to manage without changing tmux architecture.
 
 Do second: YOLO event log and audit panel. It makes YOLO understandable and creates the data foundation for notifications, timelines, and risk review.
 

@@ -50,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.command in {"POST", "PUT", "PATCH"} and self.headers.get("Content-Length"):
             self.close_connection = True
         self.send_response(HTTPStatus.UNAUTHORIZED)
-        self.send_header("WWW-Authenticate", 'Basic realm="YOLOMux"')
+        self.send_header("WWW-Authenticate", 'Basic realm="YOLOmux"')
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len("authentication required\n")))
         self.send_header("Cache-Control", "no-store")

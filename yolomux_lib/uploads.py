@@ -33,7 +33,8 @@ def unique_paste_upload_path(target_dir: Path, filename: str) -> Path | None:
         return None
     date_text = match.group("date")
     suffix = match.group("suffix")
-    for index in range(1, 1000):
+    start_index = int(match.group("index"))
+    for index in range(start_index, 1000):
         candidate = target_dir / f"{date_text}-{index:03d}{suffix}"
         if not candidate.exists():
             return candidate
@@ -96,4 +97,3 @@ def parse_multipart_upload(content_type: str, body: bytes) -> list[UploadedFile]
         if len(files) > UPLOAD_MAX_FILES:
             raise ValueError(f"too many files; limit is {UPLOAD_MAX_FILES}")
     return files
-

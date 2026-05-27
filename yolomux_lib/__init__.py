@@ -1,1 +1,1 @@
-"""YOLOMux implementation modules."""
+"""YOLOmux implementation modules."""

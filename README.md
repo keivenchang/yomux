@@ -1,10 +1,10 @@
-# YOLOMux
+# YOLOmux
 
 Browser tools for watching, driving, and summarizing tmux sessions.
 
-## YOLOMux
+## YOLOmux
 
-`yolomux.py` serves the interactive YOLOMux UI. It attaches browser xterm.js terminals to local tmux sessions and adds agent-aware controls around them.
+`yolomux.py` serves the interactive YOLOmux UI. It attaches browser xterm.js terminals to local tmux sessions and adds agent-aware controls around them.
 
 Run:
 
@@ -30,18 +30,18 @@ For a background development server, run it with `nohup`:
 setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux.py --host 0.0.0.0 > /tmp/yolomux.log 2>&1 < /dev/null &
 ```
 
-On first launch, YOLOMux creates `~/.config/yolomux/auth.json` with placeholder credentials `user` / `password`. While those placeholders are active, the server still listens on the configured port, prints a large stdout setup warning, and serves only an auth setup page telling the user to edit that JSON file. Authentication is read only from this JSON file. YOLOMux reads the latest JSON auth on each request, so after saving `auth.json`, refresh the browser; no server restart is required.
+On first launch, YOLOmux creates `~/.config/yolomux/auth.json` with placeholder credentials `user` / `password`. While those placeholders are active, the server still listens on the configured port, prints a large stdout setup warning, and serves only an auth setup page telling the user to edit that JSON file. Authentication is read only from this JSON file. YOLOmux reads the latest JSON auth on each request, so after saving `auth.json`, refresh the browser; no server restart is required.
 
-YOLOMux serves xterm.js from a local editor install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `static/xterm`, then common Cursor, VS Code, and Windsurf server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
+YOLOmux serves xterm.js from a local editor install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `static/xterm`, then common Cursor, VS Code, and Windsurf server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
 
 ## Webterm features
 
-- The page title is `YOLOMux`.
-- By default, YOLOMux shows the existing tmux sessions, capped at nine visible session tabs. Tabs are numbered by display order from `1` through `9`, so tab `1` is the first tmux session, tab `2` is the second, and so on.
-- The `+ Claude` and `+ Codex` tabs create the next numbered tmux session with the selected agent, such as `7` when six sessions already exist. Each create tab appears only when that CLI is available on the YOLOMux server PATH. If neither CLI is available, YOLOMux shows `+ Term` and creates a plain shell session. YOLOMux does not create default `yolomuxN` sessions.
+- The page title is `YOLOmux`.
+- By default, YOLOmux shows the existing tmux sessions, capped at nine visible session tabs. Tabs are numbered by display order from `1` through `9`, so tab `1` is the first tmux session, tab `2` is the second, and so on.
+- The `+ Claude` and `+ Codex` tabs create the next numbered tmux session with the selected agent, such as `7` when six sessions already exist. Each create tab appears only when that CLI is available on the YOLOmux server PATH. If neither CLI is available, YOLOmux shows `+ Term` and creates a plain shell session. YOLOmux does not create default `yolomuxN` sessions.
 - The visible workspace has left and right sides. Each side can show one full-height pane or two stacked panes, for up to four visible panes total.
 - Session panels are created once at page boot. Hidden sessions live in an off-screen panel pool instead of being destroyed, so drag/drop and quick switching do not restart unchanged terminals.
-- The layout is stored in browser `localStorage` under `yolomux.layoutSlots.v1`, so it survives browser reloads and YOLOMux server restarts for the same browser/profile/origin.
+- The layout is stored in browser `localStorage` under `yolomux.layoutSlots.v1`, so it survives browser reloads and YOLOmux server restarts for the same browser/profile/origin.
 - YOLO state is stored server-side in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
 - The red mac-style circle hides a pane. The green circle expands or collapses a pane.
 - Drag a top-tray session or a pane header into a visible slot. Dropping a pane in the middle of another pane swaps them. Dropping near the top or bottom stacks into that side when a slot is available.
@@ -62,7 +62,7 @@ Resizing is handled on the PTY slave file descriptor, then the server sends `SIG
 
 The browser creates panel DOM nodes for visible sessions at boot, checks that the backing tmux sessions exist, and starts terminal connections for them. Visible layout changes move existing panel nodes into slot containers. Hidden panels move back to `#panelPool`. This keeps xterm instances and WebSocket connections alive while changing layout.
 
-Transcript metadata comes from tmux pane discovery plus local process-tree inspection. YOLOMux looks for Claude or Codex processes in the selected tmux pane, finds their transcript/session metadata, and exposes it in the pane header, transcript tab, and API responses.
+Transcript metadata comes from tmux pane discovery plus local process-tree inspection. YOLOmux looks for Claude or Codex processes in the selected tmux pane, finds their transcript/session metadata, and exposes it in the pane header, transcript tab, and API responses.
 
 The transcript tab uses Server-Sent Events from `/api/context-stream`. The AI summary tab uses `/api/summary-stream`, which builds a scoped prompt from the selected session's recent transcript and streams a Codex-generated summary back to the browser. Summary model settings can be overridden with `YOLOMUX_SUMMARY_MODEL`, `YOLOMUX_SUMMARY_EFFORT`, and `YOLOMUX_SUMMARY_SERVICE_TIER`.
 
@@ -79,7 +79,7 @@ YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser
 - `GET /api/summary-stream?session=dynamo1&lookback=3600` streams a Codex-generated summary with Server-Sent Events.
 - `GET /api/auto-approve` returns YOLO status for all sessions.
 - `GET /api/auto-approve?session=dynamo1` returns YOLO status for one session.
-- `POST /api/create-session?agent=claude`, `POST /api/create-session?agent=codex`, or `POST /api/create-session?agent=term` creates the next numbered tmux session with the selected agent, capped at nine visible sessions. Claude and Codex requests are rejected if the selected CLI is not available on the YOLOMux server PATH; `term` is available only as the fallback when neither CLI is available.
+- `POST /api/create-session?agent=claude`, `POST /api/create-session?agent=codex`, or `POST /api/create-session?agent=term` creates the next numbered tmux session with the selected agent, capped at nine visible sessions. Claude and Codex requests are rejected if the selected CLI is not available on the YOLOmux server PATH; `term` is available only as the fallback when neither CLI is available.
 - `POST /api/ensure-session?session=dynamo1` checks that a tmux session still exists.
 - `POST /api/auto-approve?session=dynamo1&enabled=1` enables or disables YOLO for a session.
 - `POST /api/tmux-next?session=dynamo1` moves the session to the next tmux window.

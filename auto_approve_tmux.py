@@ -579,7 +579,7 @@ def visible_choice_prompt_text(visible_text: str) -> str:
 
 
 def agent_screen_state(visible_text: str) -> dict[str, object]:
-    """Classify the visible terminal screen for YOLOMux UI badges.
+    """Classify the visible terminal screen for YOLOmux UI badges.
 
     Approval detection and auto-approval use the same visible pane text as this
     UI state, so the browser does not need its own stale scrollback parser.

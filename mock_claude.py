@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code style mock terminal for YOLOMux UI testing."""
+"""Claude Code style mock terminal for YOLOmux UI testing."""
 
 from mock_agent_common import configure, main
 

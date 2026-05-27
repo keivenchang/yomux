@@ -653,7 +653,7 @@ def passing_github_check_count(
 def github_api_get(path: str) -> Any:
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "YOLOMux",
+        "User-Agent": "YOLOmux",
     }
     token = github_token()
     if token:

@@ -67,14 +67,14 @@ def main() -> int:
     server = TmuxWebtermHTTPServer((args.host, args.port), app)
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
     session_text = ", ".join(sessions) if sessions else "no tmux sessions"
-    print(f"Serving YOLOMux on http://{url_host}:{args.port}/ for {session_text}")
+    print(f"Serving YOLOmux on http://{url_host}:{args.port}/ for {session_text}")
     if args.dangerously_yolo:
         print("DANGEROUS YOLO mode is enabled: new Claude/Codex sessions bypass approval and sandbox protections.")
     if placeholder_auth_active():
         print("=" * 78)
         print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
         print(f"Replace the placeholder {PLACEHOLDER_AUTH_USERNAME}/{PLACEHOLDER_AUTH_PASSWORD} credentials.")
-        print(f"YOLOMux is listening on http://{url_host}:{args.port}/ and will show this setup message in the browser.")
+        print(f"YOLOmux is listening on http://{url_host}:{args.port}/ and will show this setup message in the browser.")
         print("After saving auth.json, refresh the browser. No restart is required.")
         print("=" * 78)
     restored_auto = app.restore_auto_approve()

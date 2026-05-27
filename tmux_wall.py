@@ -316,7 +316,7 @@ def html_page() -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>YOLOMux tmux wall</title>
+<title>YOLOmux tmux wall</title>
 <style>
 :root {
   color-scheme: dark;
@@ -443,7 +443,7 @@ td.path { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
 <body>
 <header class="topbar">
   <div>
-    <div class="title">YOLOMux tmux wall</div>
+    <div class="title">YOLOmux tmux wall</div>
     <div class="sub">Six live tmux snapshots, container metadata, and AI-readable transcript endpoints.</div>
   </div>
   <div class="actions">
@@ -673,7 +673,7 @@ def main() -> int:
 
     server = TmuxWallHTTPServer((args.host, args.port), app)
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
-    print(f"Serving YOLOMux tmux wall on http://{url_host}:{args.port}/")
+    print(f"Serving YOLOmux tmux wall on http://{url_host}:{args.port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
