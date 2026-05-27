@@ -6,7 +6,24 @@ Browser tools for watching, driving, and summarizing tmux sessions.
 
 `yolomux.py` serves the interactive YOLOmux UI. It attaches browser xterm.js terminals to local tmux sessions and adds agent-aware controls around them.
 
-Run:
+### Server setup
+
+Run YOLOmux on the machine that owns the tmux sessions. The server needs Python 3 and tmux. Claude and Codex are optional, but the `+ Claude` and `+ Codex` buttons only appear when those commands are available on the server `PATH`.
+
+Get the code onto that server:
+
+```bash
+git clone https://github.com/keivenchang/yolomux.git
+cd yolomux
+```
+
+Start with an existing tmux session:
+
+```bash
+tmux new-session -A -s dynamo1
+```
+
+Then launch YOLOmux:
 
 ```bash
 python3 yolomux.py
@@ -18,21 +35,124 @@ Then open:
 http://localhost:9998/
 ```
 
-To expose it beyond localhost:
+To choose specific sessions:
+
+```bash
+python3 yolomux.py --sessions dynamo1,dynamo2
+```
+
+To run on a shared development host:
 
 ```bash
 python3 yolomux.py --host 0.0.0.0 --port 9998
 ```
 
-For a background development server, run it with `nohup`:
+For a background server, write logs under `/tmp`:
 
 ```bash
 setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux.py --host 0.0.0.0 > /tmp/yolomux.log 2>&1 < /dev/null &
 ```
 
+Use `--dangerously-yolo` only when you intentionally want newly created Claude/Codex sessions to launch with their dangerous approval and sandbox bypass flags:
+
+```bash
+python3 yolomux.py --host 0.0.0.0 --port 9998 --dangerously-yolo
+```
+
+With that server flag enabled, the `+ Claude` and `+ Codex` buttons create new tmux sessions with these commands:
+
+```bash
+claude --dangerously-skip-permissions
+codex --dangerously-bypass-approvals-and-sandbox
+```
+
+Without `--dangerously-yolo`, the same buttons create sessions with plain `claude` and `codex`. The flag affects only new sessions created by YOLOmux after the server starts. It does not change existing tmux sessions, and it is separate from the `YO` auto-approval toggle.
+
 On first launch, YOLOmux creates `~/.config/yolomux/auth.json` with placeholder credentials `user` / `password`. While those placeholders are active, the server still listens on the configured port, prints a large stdout setup warning, and serves only an auth setup page telling the user to edit that JSON file. Authentication is read only from this JSON file. YOLOmux reads the latest JSON auth on each request, so after saving `auth.json`, refresh the browser; no server restart is required.
 
 YOLOmux serves xterm.js from a local editor install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `static/xterm`, then common Cursor, VS Code, and Windsurf server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
+
+### Remote access
+
+The safer default is to keep YOLOmux bound to localhost on the server and tunnel it from your client:
+
+```bash
+autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0.0.1:9998 user@server
+```
+
+Then open this on the client:
+
+```text
+http://localhost:9998/
+```
+
+If you bind with `--host 0.0.0.0`, the host firewall or cloud security group must allow the selected port. For example, open TCP `9998` only from trusted client IPs. Do not expose the port broadly just because YOLOmux has basic authentication; the browser terminal can type into your tmux sessions.
+
+Firewall examples:
+
+```bash
+sudo ufw allow from <client-ip> to any port 9998 proto tcp
+sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="<client-ip>" port protocol="tcp" port="9998" accept'
+sudo firewall-cmd --reload
+```
+
+### Daily use
+
+Open YOLOmux, edit `~/.config/yolomux/auth.json` if the setup page asks for credentials, then refresh. Existing tmux sessions appear as tabs inside window tab bars. Click a tab to focus that pane. Click `X` on a tab to minimize it into the top strip. Click the top-strip button to restore it into a window. Drag tabs between window tab bars or onto a pane to split the layout. Use the pane toolbar to switch tmux windows, show transcripts, ask for an AI summary, inspect the event log, or collapse the info row.
+
+The `YO` button toggles YOLO auto-approval for that tmux session. YOLO state is stored in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts. The red `QUES?` and `EXEC?` badges come from visible tmux screen detection, not transcript scraping.
+
+## auto_approve_tmux.py
+
+`auto_approve_tmux.py` is the standalone auto-approval tool. Use it when you want YOLO behavior without the browser UI. It runs on the same server as tmux, polls the visible pane text with `tmux capture-pane`, detects Claude/Codex approval prompts, and sends the selected approval key with `tmux send-keys`.
+
+List available tmux sessions:
+
+```bash
+python3 auto_approve_tmux.py --list
+```
+
+Dry-run one visible prompt before enabling it:
+
+```bash
+python3 auto_approve_tmux.py --dry-run --once dynamo1
+```
+
+Watch one session:
+
+```bash
+python3 auto_approve_tmux.py dynamo1
+```
+
+Watch several sessions:
+
+```bash
+python3 auto_approve_tmux.py dynamo1 dynamo2
+python3 auto_approve_tmux.py dynamo1,dynamo2
+python3 auto_approve_tmux.py "dynamo*"
+```
+
+Watch one tmux window or pane:
+
+```bash
+python3 auto_approve_tmux.py dynamo1:0.1
+```
+
+Run it in the background:
+
+```bash
+setsid nohup env PYTHONUNBUFFERED=1 python3 auto_approve_tmux.py --interval 0.5 "dynamo*" > /tmp/auto_approve_tmux.log 2>&1 < /dev/null &
+```
+
+Use `--verbose` when debugging prompt detection:
+
+```bash
+python3 auto_approve_tmux.py --verbose --dry-run dynamo1
+```
+
+The standalone script and YOLOmux use the same detector. YOLOmux imports `auto_approve_tmux.py` as a Python module and wraps one `AutoApproveWorker` around each enabled session. The GUI endpoint flow is `JS YO button -> POST /api/auto-approve -> TmuxWebtermApp.set_auto_approve -> AutoApproveWorker -> auto_approve_tmux.py -> tmux capture-pane/send-keys`.
+
+Prompt detection intentionally uses the visible tmux screen for presence checks. That avoids approving stale prompts that remain in scrollback after the agent has moved on. The script also recognizes active Codex working rows such as `• Working (4m 06s • esc to interrupt)`, and color rotation is not a blocker because `tmux capture-pane -p` returns the text without terminal color styling. Dangerous shell commands are blocked instead of approved.
 
 ## Webterm features
 
@@ -43,9 +163,9 @@ YOLOmux serves xterm.js from a local editor install when available. It checks `Y
 - Session panels are created once at page boot. Hidden sessions live in an off-screen panel pool instead of being destroyed, so drag/drop and quick switching do not restart unchanged terminals.
 - The layout is stored in the page URL through readable `sessions`, `layout`, and `tabs` query parameters. Split positions are recorded as percentages in `layout`, so reloads preserve the layout without browser storage.
 - YOLO state is stored server-side in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
-- The red mac-style circle hides a pane. The green circle expands or collapses a pane.
-- Drag a pane tab or pane header into a visible slot. Dropping a pane in the middle of another pane swaps them. Dropping near the top or bottom stacks into that side when a slot is available.
-- Each pane tab row has `YOLO`, previous/next tmux-window controls, `Terminal`, `Transcript`, `AI summary`, and right-aligned quick-switch buttons for replacing that pane with another session. Clicking the lit session hides that pane.
+- Drag a pane tab or pane header into a visible slot. Dropping a pane in the middle of another pane moves it into that window tab bar. Dropping near the top, bottom, left, or right splits the target pane when there is enough room.
+- Each pane tab has its own `YO` button, status badges, session label, compact work description, and `X` minimize button. Minimized sessions appear in the top strip as compact buttons.
+- Each pane toolbar has previous/next tmux-window controls, a terminal button labeled from the active tmux window process such as `bash`, `codex`, or `mock_codex.py`, plus `Tx`, `AI`, `Log`, and `Info`.
 - The terminal border turns yellow only for the pane that is currently focused and ready for typing.
 - Browser resize fits xterm immediately, but the tmux resize message is debounced so tmux is resized after the browser resize settles.
 - Mouse wheel scrolling in a terminal sends tmux copy-mode scroll commands instead of scrolling the AI input area.

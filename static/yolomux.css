@@ -1236,16 +1236,17 @@ body.layout-resizing {
 }
 .window-tab-close {
   position: relative;
-  flex: 0 0 14px;
-  width: 14px;
-  height: 14px;
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-left: 2px;
+  margin-left: 0;
   padding: 0;
   color: currentColor;
-  opacity: 0.48;
+  opacity: 0.58;
   background: transparent;
   border: 0;
   border-radius: 50%;
@@ -1256,7 +1257,7 @@ body.layout-resizing {
   content: "";
   position: absolute;
   width: 8px;
-  height: 1.5px;
+  height: 1.4px;
   border-radius: 999px;
   background: currentColor;
 }
