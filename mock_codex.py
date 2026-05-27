@@ -7,15 +7,16 @@ from mock_agent_common import configure, main
 configure(
     agent_name="codex",
     agent_display_name="Codex",
-    agent_product_name="Codex CLI",
+    agent_product_name="OpenAI Codex",
     history_file="~/.cache/yolomux/mock_codex_history",
-    version="9.9.999",
+    version="0.134.0",
     model="gpt-5.5",
-    effort="high",
-    model_line="gpt-5.5 high · API Usage Billing",
+    effort="mock",
+    model_line="gpt-5.5 mock · API Usage Billing",
     prompt_glyph="›",
     selector_glyph="›",
     permission_style="codex",
+    startup_style="codex",
 )
 
 

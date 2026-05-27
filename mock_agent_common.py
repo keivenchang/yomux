@@ -30,6 +30,7 @@ DEFAULT_WIDTH = 126
 PROMPT_GLYPH = "❯"
 SELECTOR_GLYPH = "❯"
 PERMISSION_STYLE = "claude"
+STARTUP_STYLE = "default"
 
 VERBS = [
     "Hashing", "Cooking", "Pondering", "Distilling", "Considering",
@@ -121,9 +122,11 @@ def configure(
     prompt_glyph: str,
     selector_glyph: str,
     permission_style: str,
+    startup_style: str = "default",
 ) -> None:
     global AGENT_NAME, AGENT_DISPLAY_NAME, AGENT_PRODUCT_NAME, HISTORY_FILE
     global VERSION, MODEL, EFFORT, MODEL_LINE, PROMPT_GLYPH, SELECTOR_GLYPH, PERMISSION_STYLE
+    global STARTUP_STYLE
 
     AGENT_NAME = agent_name
     AGENT_DISPLAY_NAME = agent_display_name
@@ -136,6 +139,7 @@ def configure(
     PROMPT_GLYPH = prompt_glyph
     SELECTOR_GLYPH = selector_glyph
     PERMISSION_STYLE = permission_style
+    STARTUP_STYLE = startup_style
 
 
 def looks_like_shell_command(value: str) -> bool:
@@ -203,12 +207,37 @@ def display_cwd() -> str:
 
 
 def print_startup() -> None:
+    if STARTUP_STYLE == "codex":
+        print_codex_startup()
+        return
     width = terminal_width()
     print(f"  ▐▛███▜▌   Mock {AGENT_PRODUCT_NAME} v{VERSION}")
     print(f"▝▜█████▛▘  {MODEL_LINE}")
     print(f"  ▘▘ ▝▝    {display_cwd()}")
     print()
     print_prompt_box(f'{PROMPT_GLYPH} Try "fix typecheck errors"', width)
+    print()
+
+
+def print_codex_startup() -> None:
+    inner = 45
+
+    def box_line(text: str = "") -> str:
+        return "│" + clipped(text, inner) + "│"
+
+    print("╭" + ("─" * inner) + "╮")
+    print(box_line(f" >_ {AGENT_PRODUCT_NAME} (v{VERSION})"))
+    print(box_line())
+    print(box_line(f" model:     {MODEL} {EFFORT}   /model to change"))
+    print(box_line(f" directory: {display_cwd()}"))
+    print("╰" + ("─" * inner) + "╯")
+    print()
+    print("  Tip: NEW: Codex can now generate and use memories. Try it now with /memories")
+    print()
+    print()
+    print(f"{PROMPT_GLYPH} Implement {{feature}}")
+    print()
+    print(f"  {MODEL} {EFFORT} · {display_cwd()}")
     print()
 
 
