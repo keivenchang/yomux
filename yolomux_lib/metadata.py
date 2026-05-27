@@ -324,6 +324,9 @@ def project_pull_request(git_data: dict[str, Any], cache: MetadataCache, allow_n
     repo = git_data.get("github_repo")
     if not isinstance(repo, dict):
         return None
+    branch = git_data.get("branch")
+    if not isinstance(branch, str) or branch in MAIN_BRANCHES or branch == "HEAD":
+        return None
     cwd = git_data.get("root") or git_data.get("cwd")
     head_sha = git_data.get("head_sha")
     local_pr = local_pull_request_info(cwd, head_sha) if isinstance(cwd, str) and isinstance(head_sha, str) else None
@@ -349,9 +352,6 @@ def project_pull_request(git_data: dict[str, Any], cache: MetadataCache, allow_n
             head_subject,
         )
 
-    branch = git_data.get("branch")
-    if not isinstance(branch, str) or branch in MAIN_BRANCHES or branch == "HEAD":
-        return None
     branch_pr_number = pull_request_number_from_branch(branch)
     if branch_pr_number is not None:
         return pull_request_by_number_or_fallback(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .auto_approve_worker import *
 from .common import *
+from .control import *
 from .events import *
 from .metadata import *
 from .sessions import *

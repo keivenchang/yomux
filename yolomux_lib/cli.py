@@ -59,10 +59,13 @@ def main() -> int:
     app = TmuxWebtermApp(sessions, dangerously_yolo=args.dangerously_yolo)
 
     if args.print_transcripts:
-        if placeholder_auth_active():
-            print_placeholder_auth_error()
-            return 2
-        return print_transcripts(app)
+        try:
+            if placeholder_auth_active():
+                print_placeholder_auth_error()
+                return 2
+            return print_transcripts(app)
+        finally:
+            app.stop_auto_approve_all()
 
     server = TmuxWebtermHTTPServer((args.host, args.port), app)
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host

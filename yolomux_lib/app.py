@@ -8,10 +8,13 @@ class TmuxWebtermApp:
         self.sessions = sessions
         self.dangerously_yolo = dangerously_yolo
         self.auto_workers: dict[str, AutoApproveWorker] = {}
+        self.auto_workers_lock = threading.RLock()
         self.metadata_cache = MetadataCache()
         self.metadata_warm_lock = threading.Lock()
         self.metadata_warm_running = False
         self.event_log = EventLog(EVENT_LOG_PATH)
+        self.control_server = YolomuxControlServer(self.handle_control_request)
+        self.control_server.start()
 
     def refresh_sessions(self) -> list[str]:
         sessions, error = list_tmux_session_names()
@@ -26,9 +29,29 @@ class TmuxWebtermApp:
             return []
         return [session for session in enabled if isinstance(session, str) and session in self.sessions]
 
+    def set_persisted_auto_session(self, session: str, enabled: bool) -> None:
+        state = read_yolomux_state()
+        current = state.get("auto_approve_enabled", [])
+        sessions = {name for name in current if isinstance(name, str)} if isinstance(current, list) else set()
+        if enabled:
+            sessions.add(session)
+        else:
+            sessions.discard(session)
+        update_yolomux_state({"auto_approve_enabled": sorted(sessions)})
+
     def persist_auto_sessions(self) -> None:
-        enabled = sorted(name for name, worker in self.auto_workers.items() if worker.alive())
-        update_yolomux_state({"auto_approve_enabled": enabled})
+        with self.auto_workers_lock:
+            local_enabled = {name for name, worker in self.auto_workers.items() if worker.alive()}
+        current = read_yolomux_state().get("auto_approve_enabled", [])
+        if isinstance(current, list):
+            external_enabled = {
+                session
+                for session in current
+                if isinstance(session, str) and session not in self.auto_workers and auto_approve_lock_owner(session)
+            }
+        else:
+            external_enabled = set()
+        update_yolomux_state({"auto_approve_enabled": sorted(local_enabled | external_enabled)})
 
     def notify_status(self) -> dict[str, Any]:
         return {"enabled": bool(read_yolomux_state().get("notify_enabled", False))}
@@ -73,10 +96,30 @@ class TmuxWebtermApp:
     def restore_auto_approve(self) -> list[str]:
         restored: list[str] = []
         for session in self.persisted_auto_sessions():
-            payload, status = self.set_auto_approve(session, True, persist=False)
+            payload, status = self.set_auto_approve(session, True, persist=False, takeover=False)
             if status == HTTPStatus.OK and payload.get("enabled") is True:
                 restored.append(session)
         return restored
+
+    def handle_control_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        action = request.get("action")
+        if action == "disable_auto_approve":
+            session = request.get("session")
+            requester = request.get("requester")
+            return self.disable_auto_approve_for_takeover(session, requester if isinstance(requester, dict) else {})
+        return {"ok": False, "error": f"unknown action: {action}"}
+
+    def disable_auto_approve_for_takeover(self, session: Any, requester: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(session, str) or session not in self.sessions:
+            return {"ok": False, "error": f"unknown session: {session}"}
+        with self.auto_workers_lock:
+            worker = self.auto_workers.get(session)
+            if worker is None:
+                return {"ok": True, "session": session, "enabled": False, "message": "YOLO was not enabled here"}
+            worker.stop()
+            self.auto_workers.pop(session, None)
+        self.log_event(session, "yolo_released", "YOLO released for another server", {"requester": requester})
+        return {"ok": True, "session": session, "enabled": False}
 
     def transcripts_payload(self) -> dict[str, Any]:
         refresh_errors = self.refresh_sessions()
@@ -458,37 +501,84 @@ class TmuxWebtermApp:
                 return resolved, "pane_current_path"
         return None, "session_workdir"
 
-    def set_auto_approve(self, session: str, enabled: bool, persist: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
+    def set_auto_approve(self, session: str, enabled: bool, persist: bool = True, takeover: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
         if session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
 
-        existing = self.auto_workers.get(session)
-        if existing and not existing.alive():
-            self.auto_workers.pop(session, None)
-            existing = None
-            if persist:
-                self.persist_auto_sessions()
+        with self.auto_workers_lock:
+            existing = self.auto_workers.get(session)
+            if existing and not existing.alive():
+                self.auto_workers.pop(session, None)
+                existing = None
+                if persist:
+                    self.persist_auto_sessions()
 
-        if enabled:
-            if existing:
+            if enabled:
+                if existing:
+                    return self.auto_approve_session_status(session), HTTPStatus.OK
+                if not tmux_has_exact_session(session):
+                    return {"session": session, "enabled": False, "error": f"tmux session not found: {session}"}, HTTPStatus.NOT_FOUND
+                worker, status = self.start_auto_approve_worker(session, takeover=takeover)
+                if worker is None:
+                    return status, HTTPStatus.CONFLICT
+                self.auto_workers[session] = worker
+                if persist:
+                    self.set_persisted_auto_session(session, True)
+                self.log_event(session, "yolo_enabled", "YOLO enabled", {"persist": persist})
                 return self.auto_approve_session_status(session), HTTPStatus.OK
-            if not tmux_has_exact_session(session):
-                return {"session": session, "enabled": False, "error": f"tmux session not found: {session}"}, HTTPStatus.NOT_FOUND
-            worker = AutoApproveWorker(session, event_callback=self.log_auto_event)
-            self.auto_workers[session] = worker
-            worker.start()
-            if persist:
-                self.persist_auto_sessions()
-            self.log_event(session, "yolo_enabled", "YOLO enabled", {"persist": persist})
-            return self.auto_approve_session_status(session), HTTPStatus.OK
 
-        if existing:
-            existing.stop()
-            self.auto_workers.pop(session, None)
-            if persist:
-                self.persist_auto_sessions()
-            self.log_event(session, "yolo_disabled", "YOLO disabled", {"persist": persist})
+            if existing:
+                existing.stop()
+                self.auto_workers.pop(session, None)
+                if persist:
+                    self.set_persisted_auto_session(session, False)
+                self.log_event(session, "yolo_disabled", "YOLO disabled", {"persist": persist})
         return self.auto_approve_session_status(session), HTTPStatus.OK
+
+    def start_auto_approve_worker(self, session: str, takeover: bool) -> tuple[AutoApproveWorker | None, dict[str, Any]]:
+        worker = AutoApproveWorker(session, event_callback=self.log_auto_event, owner_extra=self.control_server.owner_payload())
+        started, owner = worker.start()
+        if started:
+            return worker, worker.status()
+        locked_owner = owner
+        if takeover and self.request_auto_approve_release(session, owner):
+            worker = AutoApproveWorker(session, event_callback=self.log_auto_event, owner_extra=self.control_server.owner_payload())
+            started, owner = worker.start()
+            if started:
+                self.log_event(session, "yolo_takeover", "YOLO moved from another server", {"owner": locked_owner or {}})
+                return worker, worker.status()
+        payload = worker.status()
+        payload.update({
+            "enabled": False,
+            "locked": True,
+            "lock_owner": owner,
+            "error": auto_approve_lock_message(owner),
+        })
+        self.log_event(session, "yolo_locked", "YOLO already owned by another server", {"owner": owner or {}})
+        return None, payload
+
+    def request_auto_approve_release(self, session: str, owner: dict[str, Any] | None) -> bool:
+        request = {
+            "action": "disable_auto_approve",
+            "session": session,
+            "requester": {
+                "pid": os.getpid(),
+                "hostname": SERVER_HOSTNAME,
+                "project_root": str(PROJECT_ROOT),
+                "control_socket": str(self.control_server.path),
+            },
+        }
+        response = send_yolomux_control_request(owner, request)
+        if response.get("ok") is not True:
+            self.log_event(session, "yolo_takeover_failed", "YOLO owner did not release", {"owner": owner or {}, "response": response})
+            return False
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if auto_approve_lock_owner(session) is None:
+                return True
+            time.sleep(0.05)
+        self.log_event(session, "yolo_takeover_failed", "YOLO owner kept lock after release request", {"owner": owner or {}, "response": response})
+        return False
 
     def prompt_and_screen_status(self, session: str) -> tuple[dict[str, Any], dict[str, Any]]:
         try:
@@ -510,11 +600,20 @@ class TmuxWebtermApp:
             return prompt, screen
 
     def auto_approve_session_status(self, session: str) -> dict[str, Any]:
-        worker = self.auto_workers.get(session)
+        with self.auto_workers_lock:
+            worker = self.auto_workers.get(session)
         if worker:
             payload = worker.status()
         else:
             payload = {"target": session, "enabled": False, "approved": 0, "blocked": 0, "last_action": "off"}
+            owner = auto_approve_lock_owner(session)
+            if owner:
+                payload.update({
+                    "locked": True,
+                    "lock_owner": owner,
+                    "last_action": auto_approve_lock_message(owner),
+                    "error": auto_approve_lock_message(owner),
+                })
         prompt, screen = self.prompt_and_screen_status(session)
         payload["prompt"] = prompt
         payload["screen"] = screen
@@ -524,11 +623,12 @@ class TmuxWebtermApp:
         if session is not None and session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         removed = False
-        for name, worker in list(self.auto_workers.items()):
-            if not worker.alive():
-                self.log_event(name, "worker_stopped", "YOLO worker stopped", worker.status())
-                self.auto_workers.pop(name, None)
-                removed = True
+        with self.auto_workers_lock:
+            for name, worker in list(self.auto_workers.items()):
+                if not worker.alive():
+                    self.log_event(name, "worker_stopped", "YOLO worker stopped", worker.status())
+                    self.auto_workers.pop(name, None)
+                    removed = True
         if removed:
             self.persist_auto_sessions()
         if session is not None:
@@ -536,6 +636,8 @@ class TmuxWebtermApp:
         return {"sessions": {name: self.auto_approve_session_status(name) for name in self.sessions}}, HTTPStatus.OK
 
     def stop_auto_approve_all(self) -> None:
-        for worker in list(self.auto_workers.values()):
-            worker.stop()
-        self.auto_workers.clear()
+        with self.auto_workers_lock:
+            for worker in list(self.auto_workers.values()):
+                worker.stop()
+            self.auto_workers.clear()
+        self.control_server.stop()

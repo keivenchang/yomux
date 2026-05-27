@@ -32,10 +32,10 @@
   --popover-hide-delay: 300ms;
   --ui-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  --tab-font: var(--ui-font);
   --control-font: "Arial Narrow", "Aptos Narrow", "Liberation Sans Narrow", "Roboto Condensed", var(--ui-font);
-  --tab-label-size: 12px;
-  --tab-line-height: 1.1;
+  --tab-font: var(--control-font);
+  --tab-label-size: 13px;
+  --tab-line-height: 1;
   --red-reminder-duration: 2s;
   --red-reminder-easing: ease-in-out;
 }
@@ -107,6 +107,40 @@ body {
   align-items: center;
   gap: 6px;
 }
+.actions button {
+  width: 32px;
+  min-width: 32px;
+  max-width: 32px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  overflow: hidden;
+  font-size: 0;
+}
+.actions button::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  background: currentColor;
+  -webkit-mask: var(--action-icon) center / contain no-repeat;
+  mask: var(--action-icon) center / contain no-repeat;
+}
+#notifyToggle {
+  --action-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.3 21a2 2 0 0 0 3.4 0'/%3E%3Cpath d='M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9'/%3E%3C/svg%3E");
+}
+#refreshMeta {
+  --action-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12a9 9 0 0 1-9 9 9.5 9.5 0 0 1-6.7-2.7'/%3E%3Cpath d='M3 12a9 9 0 0 1 9-9 9.5 9.5 0 0 1 6.7 2.7'/%3E%3Cpath d='M3 3v6h6'/%3E%3Cpath d='M21 21v-6h-6'/%3E%3C/svg%3E");
+}
+#status {
+  max-width: 112px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#status:empty {
+  display: none;
+}
 .latency-meter {
   height: 24px;
   min-width: 82px;
@@ -154,6 +188,34 @@ body {
   padding-bottom: 0;
   scrollbar-width: none;
 }
+.session-buttons.tabs-overflowing .session-yolo-marker,
+.window-session-tabs.tabs-overflowing .session-yolo-marker {
+  display: none;
+}
+.session-buttons.tabs-overflowing .session-button,
+.window-session-tabs.tabs-overflowing .window-session-tab {
+  gap: 2px;
+}
+.session-buttons.tabs-overflowing .session-button-wrap {
+  min-width: 28px;
+}
+.session-buttons.tabs-overflowing .session-button-wrap.info {
+  min-width: 28px;
+}
+.session-buttons.tabs-overflowing .session-button-text,
+.window-session-tabs.tabs-overflowing .session-button-text {
+  display: none;
+}
+.session-buttons.tabs-overflowing .session-button.add-session > span:last-child {
+  display: none;
+}
+.session-buttons.tabs-overflowing .window-tab-close,
+.window-session-tabs.tabs-overflowing .window-tab-close {
+  display: none;
+}
+.window-session-tabs.tabs-overflowing .window-session-tab {
+  min-width: 36px;
+}
 .session-buttons::-webkit-scrollbar {
   display: none;
 }
@@ -170,14 +232,19 @@ body {
 .session-button-wrap {
   position: relative;
   flex: 0 1 auto;
-  width: fit-content;
-  min-width: 96px;
-  max-width: min(360px, 42vw);
+  width: auto;
+  min-width: 44px;
+  max-width: 180px;
+}
+.session-button-wrap.info {
+  flex-basis: auto;
+  min-width: 44px;
+  max-width: 116px;
 }
 .session-button-wrap.add-session {
-  flex: 0 0 86px;
-  min-width: 76px;
-  max-width: 96px;
+  flex: 0 1 auto;
+  min-width: 38px;
+  max-width: 72px;
 }
 .session-button {
   width: 100%;
@@ -187,12 +254,14 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 7px;
+  padding: 3px 6px;
   white-space: nowrap;
   text-align: left;
   line-height: var(--tab-line-height);
   font-family: var(--tab-font);
   font-size: var(--tab-label-size);
+  font-stretch: condensed;
+  font-weight: 500;
   overflow: hidden;
   border-radius: 7px;
   background: var(--inactive-tab-green);
@@ -211,12 +280,12 @@ body {
 .session-button.add-session {
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 3px;
   color: #dfe6ef;
   background: #111820;
   border-color: #456038;
   font-size: var(--tab-label-size);
-  font-weight: 700;
+  font-weight: 500;
 }
 .session-button.add-session .add-plus {
   font-size: 18px;
@@ -234,7 +303,7 @@ body {
   color: inherit;
   background: transparent;
   border: 0;
-  font-weight: 700;
+  font-weight: 500;
 }
 .session-button-prefix {
   flex: 0 0 auto;
@@ -267,7 +336,7 @@ body {
   text-overflow: ellipsis;
   color: #f2f5f8;
   font-size: var(--tab-label-size);
-  font-weight: 800;
+  font-weight: 500;
 }
 .session-button-dir,
 .session-button-detail {
@@ -282,7 +351,7 @@ body {
   white-space: nowrap;
   color: #e7ecf3;
   font-size: var(--tab-label-size);
-  font-weight: 700;
+  font-weight: 500;
 }
 .session-button-detail {
   max-width: 86px;
@@ -457,7 +526,7 @@ body {
   border: 1px solid var(--auto-border);
   border-radius: 4px;
   box-shadow: none;
-  font: 900 10px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font: 800 10px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 .session-yolo-marker[data-auto-session] {
   cursor: pointer;
@@ -474,6 +543,11 @@ body {
   background: #384356;
   border-color: #5d6878;
 }
+.session-yolo-marker.locked {
+  color: #f5c987;
+  background: #293243;
+  border-color: #f0b85d;
+}
 .ci-indicator {
   flex: 0 0 auto;
   max-width: none;
@@ -487,7 +561,7 @@ body {
   border: 1px solid #384356;
   color: #aeb8c7;
   background: #161d29;
-  font: 900 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font: 800 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -519,6 +593,11 @@ body {
   background: #1a2434;
   border-color: #5f6f86;
 }
+.ci-indicator.branch-indicator {
+  color: #071321;
+  background: #9fd8ff;
+  border-color: #c9ebff;
+}
 .session-popover {
   visibility: hidden;
   opacity: 0;
@@ -532,6 +611,7 @@ body {
   overflow: auto;
   padding: 8px 10px;
   color: #eefbe6;
+  font-weight: 400;
   background: rgba(8, 31, 8, 0.98);
   border: 1px solid rgba(95, 150, 42, 0.64);
   border-radius: 8px;
@@ -562,7 +642,7 @@ body {
   margin-bottom: 5px;
 }
 .popover-title {
-  font-weight: 700;
+  font-weight: 600;
   font-size: 13px;
 }
 .popover-subtitle {
@@ -584,10 +664,12 @@ body {
 }
 .popover-label {
   color: #a2c98d;
+  font-weight: 500;
 }
 .popover-value {
   min-width: 0;
   overflow-wrap: anywhere;
+  font-weight: 400;
 }
 .popover-row.compact .popover-value {
   overflow: hidden;
@@ -704,7 +786,7 @@ body {
 }
 .branch-list-title {
   color: #cbd5e1;
-  font-weight: 700;
+  font-weight: 600;
   font-size: 12px;
   margin-bottom: 6px;
 }
@@ -714,6 +796,7 @@ body {
   gap: 8px;
   padding: 4px 0;
   font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-weight: 400;
 }
 .branch-name {
   overflow: hidden;
@@ -738,26 +821,27 @@ body {
   align-items: center;
   justify-content: center;
   margin-left: 4px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  border: 1px solid #596577;
-  vertical-align: -3px;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  background: transparent;
+  vertical-align: -4px;
+  overflow: hidden;
 }
 .agent-icon svg {
-  width: 12px;
-  height: 12px;
-  stroke: currentColor;
+  width: 18px;
+  height: 18px;
+  display: block;
 }
 .agent-icon.codex {
-  color: #cde8ff;
-  border-color: #4f7fa6;
-  background: #152535;
+  color: #ffffff;
+}
+.agent-icon.codex svg {
+  transform: scale(1.16);
+  transform-origin: center;
 }
 .agent-icon.claude {
-  color: #ffe1bc;
-  border-color: #9a6a35;
-  background: #332414;
+  color: #ffffff;
 }
 button {
   min-width: 34px;
@@ -1093,7 +1177,7 @@ body.layout-resizing {
 }
 .panel-session-label .session-button-name {
   color: inherit;
-  font-weight: 800;
+  font-weight: 500;
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1207,6 +1291,8 @@ body.layout-resizing {
   text-align: left;
   font-family: var(--tab-font);
   font-size: var(--tab-label-size);
+  font-stretch: condensed;
+  font-weight: 500;
   overflow: hidden;
   cursor: pointer;
   user-select: none;
@@ -1220,7 +1306,7 @@ body.layout-resizing {
   background: var(--GPU-green);
   border-color: #9be33d;
   border-bottom-color: #9be33d;
-  font-weight: 800;
+  font-weight: 500;
 }
 .window-session-tab.active .session-button-name,
 .window-session-tab.active .session-button-dir,
@@ -1346,14 +1432,14 @@ body.layout-resizing {
 .window-session-tab > .session-popover::before {
   display: none;
 }
-.disabled-panel-controls {
+.disabled-panel-controls .tab:disabled {
   pointer-events: none;
 }
 .window-tab-info-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-weight: 800;
+  font-weight: 500;
 }
 .tabs {
   justify-self: end;
@@ -1377,6 +1463,9 @@ body.layout-resizing {
   border-radius: 5px;
   min-width: 0;
   height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 1px 5px;
   color: var(--muted);
   background: transparent;
@@ -1405,6 +1494,28 @@ body.layout-resizing {
 }
 .tabs .panel-detail-toggle {
   min-width: 33px;
+}
+.tabs .window-close {
+  position: relative;
+  flex: 0 0 22px;
+  min-width: 22px;
+  max-width: 22px;
+  padding: 0;
+}
+.tabs .window-close::before,
+.tabs .window-close::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 1.4px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.tabs .window-close::before {
+  transform: rotate(45deg);
+}
+.tabs .window-close::after {
+  transform: rotate(-45deg);
 }
 .tab.active {
   color: var(--text);
@@ -1746,11 +1857,11 @@ body.layout-resizing {
 }
 .info-row {
   display: grid;
-  grid-template-columns: 150px 230px minmax(310px, 1fr) 112px 230px 180px;
+  grid-template-columns: 150px minmax(230px, 1fr) 170px 170px minmax(310px, 1fr) 112px;
   gap: 10px;
   align-items: baseline;
   padding: 7px 8px;
-  min-width: 1220px;
+  min-width: 1260px;
   border-bottom: 1px solid #263044;
   color: #dfe6ef;
   font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -1867,6 +1978,119 @@ body.layout-resizing {
   overflow-wrap: anywhere;
   font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
+@media (max-width: 1500px) {
+  .topbar {
+    gap: 6px;
+    padding-inline: 6px;
+  }
+  .brand {
+    min-width: 82px;
+  }
+  .session-button-wrap {
+    flex-basis: auto;
+    min-width: 38px;
+    max-width: 142px;
+  }
+  .session-button-wrap.info {
+    flex-basis: auto;
+    min-width: 38px;
+    max-width: 86px;
+  }
+  .session-button {
+    gap: 3px;
+    padding-inline: 5px;
+  }
+  .session-buttons .session-button-text {
+    gap: 3px;
+  }
+  .session-buttons .session-button-dir {
+    max-width: 52px;
+  }
+  .actions {
+    gap: 4px;
+  }
+}
+
+@media (max-width: 1280px) {
+  .session-buttons {
+    justify-content: flex-start;
+  }
+  .session-button-wrap {
+    flex-basis: auto;
+    min-width: 32px;
+    max-width: 94px;
+  }
+  .session-button-wrap.add-session {
+    flex-basis: auto;
+    min-width: 34px;
+    max-width: 48px;
+  }
+  .session-buttons .session-button-dir {
+    display: none;
+  }
+  .session-buttons .session-button-text {
+    flex: 0 1 auto;
+  }
+  .latency-meter {
+    min-width: 62px;
+    grid-template-columns: 34px auto;
+    gap: 4px;
+    padding-inline: 4px;
+  }
+  .latency-graph {
+    width: 32px;
+  }
+  .latency-number {
+    min-width: 28px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .brand {
+    min-width: 72px;
+  }
+  .title {
+    font-size: 13px;
+  }
+  .session-button-wrap {
+    flex-basis: auto;
+    min-width: 28px;
+    max-width: 68px;
+  }
+  .session-button-wrap.add-session {
+    flex-basis: auto;
+    min-width: 30px;
+    max-width: 34px;
+  }
+  .session-button.add-session > span:last-child {
+    display: none;
+  }
+  .session-buttons .session-button-text {
+    display: none;
+  }
+  .session-yolo-marker {
+    min-width: 22px;
+    padding-inline: 3px;
+  }
+  .latency-graph {
+    display: none;
+  }
+  .latency-meter {
+    min-width: 42px;
+    grid-template-columns: auto;
+  }
+  .actions button {
+    width: 34px;
+    min-width: 34px;
+    max-width: 34px;
+    padding-inline: 0;
+    font-size: 0;
+  }
+  #status {
+    max-width: 72px;
+  }
+}
+
 @media (max-width: 980px) {
   .topbar {
     grid-template-columns: auto minmax(0, 1fr) auto;

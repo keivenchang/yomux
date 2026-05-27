@@ -14,6 +14,7 @@ const latencyMeter = document.getElementById('latencyMeter');
 const latencyLine = document.getElementById('latencyLine');
 const latencyNumber = document.getElementById('latencyNumber');
 const notifyToggle = document.getElementById('notifyToggle');
+const refreshMeta = document.getElementById('refreshMeta');
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -31,6 +32,7 @@ const remoteResizeDelayMs = 220;
 const metadataRefreshMs = 15000;
 const paneStateRefreshMs = 2000;
 const latencyRefreshMs = 3000;
+const eventLogRefreshMs = 5000;
 const latencySamplesMax = 24;
 const toastDurationMs = 10000;
 const toastMaxLines = 3;
@@ -702,7 +704,7 @@ function resolveLayoutItem(value) {
 }
 
 function itemLabel(item) {
-  return isInfoItem(item) ? 'Branches' : sessionLabel(item);
+  return isInfoItem(item) ? 'Branch Info' : sessionLabel(item);
 }
 
 function itemSortNumber(item) {
@@ -817,9 +819,9 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   return stateValue('idle', 'no active agent state detected');
 }
 
-function stateValue(key, reason) {
+function stateValue(key, reason, extra = {}) {
   const def = stateDef(key);
-  return {key, ...def, reason};
+  return {key, ...def, reason, ...extra};
 }
 
 function stateBadgeHtml(key, short, title) {
@@ -846,6 +848,7 @@ function renderNotifyToggle() {
   notifyToggle.disabled = readOnlyMode;
   notifyToggle.classList.toggle('active', notificationsEnabled);
   notifyToggle.setAttribute('aria-pressed', notificationsEnabled ? 'true' : 'false');
+  notifyToggle.setAttribute('aria-label', 'Notify');
   const browserState = supported ? Notification.permission : 'unsupported';
   notifyToggle.title = readOnlyMode
     ? 'Notify is admin-only'
@@ -1177,6 +1180,21 @@ function maybeNotifyState(session, state, options = {}) {
   }
 }
 
+function scheduleTabStripOverflowCheck(strip) {
+  if (!strip) return;
+  strip.classList.remove('tabs-overflowing');
+  requestAnimationFrame(() => {
+    strip.classList.toggle('tabs-overflowing', strip.scrollWidth > strip.clientWidth + 1);
+  });
+}
+
+function scheduleAllTabStripOverflowChecks() {
+  scheduleTabStripOverflowCheck(sessionButtons);
+  for (const strip of document.querySelectorAll('.window-session-tabs')) {
+    scheduleTabStripOverflowCheck(strip);
+  }
+}
+
 function updateSessionList(nextSessions) {
   if (!Array.isArray(nextSessions)) return false;
   const previousItems = new Set(layoutItems);
@@ -1268,6 +1286,7 @@ function renderSessionButtons() {
       if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
     }
   }
+  scheduleTabStripOverflowCheck(sessionButtons);
 }
 
 function updateSessionButtonStates() {
@@ -1479,10 +1498,62 @@ function currentBranchSubject(git) {
   return current?.subject || '';
 }
 
+function isDefaultBranch(git) {
+  return ['main', 'master'].includes(String(git?.branch || ''));
+}
+
+function gitHeadSubject(git) {
+  return String(git?.head || '').replace(/^[0-9a-f]{7,40}\s+/, '');
+}
+
+function pullRequestNumberFromSubject(subject) {
+  const match = String(subject || '').match(/\(#(\d+)\)\s*$/);
+  return match ? Number(match[1]) : null;
+}
+
+function subjectWithoutPullRequestNumber(subject) {
+  return String(subject || '').replace(/\s*\(#\d+\)\s*$/, '').trim();
+}
+
+function githubPullRequestUrlFromGit(git, number) {
+  const repoUrl = git?.github_repo?.url;
+  return repoUrl && number ? `${repoUrl}/pull/${number}` : '';
+}
+
+function defaultBranchHeadPullRequest(info) {
+  const project = info?.project || {};
+  const git = project.git;
+  if (!isDefaultBranch(git)) return null;
+  const subject = gitHeadSubject(git);
+  const number = pullRequestNumberFromSubject(subject);
+  if (!number) return null;
+  const existing = project.pull_request?.number === number ? project.pull_request : {};
+  const title = subjectWithoutPullRequestNumber(existing.title || subject);
+  const description = subjectWithoutPullRequestNumber(existing.description || subject);
+  return {
+    ...existing,
+    number,
+    title,
+    description,
+    url: existing.url || githubPullRequestUrlFromGit(git, number),
+    checks: existing.checks || {state: 'unknown'},
+    status_label: '',
+    source_only: true,
+  };
+}
+
+function displayPullRequest(info) {
+  return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || null;
+}
+
+function defaultBranchBadgeHtml(info) {
+  return isDefaultBranch(info?.project?.git) ? '<span class="ci-indicator branch-indicator">MAIN</span>' : '';
+}
+
 function sessionWorkDescription(session, info, limit = 96) {
   const project = info?.project || {};
   const git = project.git;
-  const pr = project.pull_request;
+  const pr = displayPullRequest(info);
   if (pr?.number) {
     const status = pullRequestStatusLabel(pr);
     const title = pr.title || pr.description || '';
@@ -1499,7 +1570,7 @@ function sessionWorkDescription(session, info, limit = 96) {
 }
 
 function sessionTabDescription(session, info) {
-  const pr = info?.project?.pull_request;
+  const pr = displayPullRequest(info);
   if (pr?.number) {
     const title = pr.title || pr.description || '';
     if (title) return shortText(title, 72);
@@ -1508,15 +1579,15 @@ function sessionTabDescription(session, info) {
 }
 
 function infoButtonHtml() {
-  return '<span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="session-button-text"><span class="session-button-dir">Branches</span></span>';
+  return '<span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="session-button-text"><span class="session-button-dir">Branch Info</span></span>';
 }
 
 function sessionButtonHtml(session, info, state, auto) {
-  const pr = info?.project?.pull_request;
+  const pr = displayPullRequest(info);
   const desc = sessionTabDescription(session, info);
   const detailHtml = desc ? `<span class="session-button-dir">${esc(desc)}</span>` : '';
   return `${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${pullRequestCompactBadgesHtml(pr)}${detailHtml}</span>`;
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(info)}${pullRequestCompactBadgesHtml(pr)}${detailHtml}</span>`;
 }
 
 function projectDirName(session, info) {
@@ -1537,7 +1608,7 @@ function pathBasename(path) {
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
   const project = info?.project || {};
   const git = project.git;
-  const pr = project.pull_request;
+  const pr = displayPullRequest(info);
   const linear = project.linear || [];
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
@@ -1667,6 +1738,12 @@ function pullRequestLinkForBranch(git, branch) {
   return linkHtml(url, label, pr.title || pr.description || branch.subject || '', pullRequestStatusClass(pr));
 }
 
+function pullRequestTextForBranch(pr, fallback = '') {
+  if (!pr?.number) return '';
+  const status = pullRequestStatusDisplay(pr);
+  return [`#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`, pr.title || pr.description || fallback].filter(Boolean).join(' ');
+}
+
 function otherBranchesHtml(git) {
   const inventory = git?.other_branches || {};
   const branches = inventory.branches || [];
@@ -1736,6 +1813,15 @@ function removeSessionFromLayout(item) {
   if (!itemInLayout(item)) return;
   applyLayoutSlots(layoutWithoutItem(item), {
     message: `${itemLabel(item)} moved to top strip`,
+  });
+}
+
+function removeWindowFromLayout(item) {
+  const slot = slotForSession(item);
+  if (!slot) return;
+  const moved = windowStack(slot);
+  applyLayoutSlots(layoutWithoutSlot(slot), {
+    message: moved.length ? `${moved.map(itemLabel).join(', ')} moved to top strip` : '',
   });
 }
 
@@ -1851,20 +1937,36 @@ function sessionAgentKind(session) {
 
 function agentIcon(kind) {
   if (kind === 'codex') {
-    return `<span class="agent-icon codex" aria-label="Codex" title="Codex">${terminalIcon()}</span>`;
+    return `<span class="agent-icon codex" aria-label="Codex" title="Codex">${codexIcon()}</span>`;
   }
   if (kind === 'claude') {
-    return `<span class="agent-icon claude" aria-label="Claude" title="Claude">${sparkIcon()}</span>`;
+    return `<span class="agent-icon claude" aria-label="Claude" title="Claude">${claudeIcon()}</span>`;
   }
   return '';
 }
 
-function terminalIcon() {
-  return '<svg viewBox="0 0 16 16" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11v9h-11z"/><path d="M5 6.2 6.8 8 5 9.8"/><path d="M8.5 10h2.5"/></svg>';
+function codexIcon() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">
+    <path fill="#667ef8" d="M7.3 20.8c-3.1 0-5.7-2.4-5.9-5.5-.2-2.4 1.1-4.6 3.1-5.7C4.8 5.9 7.9 3 11.8 3c3.3 0 6.2 2.2 7 5.4 2.4.7 4 2.8 4 5.4 0 3.2-2.6 5.8-5.8 5.8-.9 1.1-2.2 1.8-3.8 1.8-1.2 0-2.3-.4-3.1-1.1-.8.3-1.8.5-2.8.5z"/>
+    <path fill="#fff" d="M6.4 8.2c.5-.5 1.2-.5 1.7 0l2.8 2.8c.5.5.5 1.2 0 1.7l-2.8 2.8c-.5.5-1.2.5-1.7 0s-.5-1.2 0-1.7l1.9-1.9-1.9-1.9c-.5-.5-.5-1.3 0-1.8zM13 13.2h5.1c.7 0 1.2.5 1.2 1.2s-.5 1.2-1.2 1.2H13c-.7 0-1.2-.5-1.2-1.2s.5-1.2 1.2-1.2z"/>
+  </svg>`;
 }
 
-function sparkIcon() {
-  return '<svg viewBox="0 0 16 16" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5 9.2 6.8 13.5 8 9.2 9.2 8 13.5 6.8 9.2 2.5 8 6.8 6.8 8 2.5z"/></svg>';
+function claudeIcon() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">
+    <rect width="24" height="24" rx="5.5" fill="#cf7554"/>
+    <g fill="#fff7f1">
+      <path d="M11.1 2.4h1.8l1.1 7.9-2 .6-2-.6 1.1-7.9z"/>
+      <path d="m17.8 4.3 1.4 1.1-4.3 6.7-2.1-1.3 5-6.5z"/>
+      <path d="m21.5 10.2.3 1.8-8.2 2-1-2.3 8.9-1.5z"/>
+      <path d="m20.2 16.8-1.1 1.4-6.7-4.3 1.3-2.1 6.5 5z"/>
+      <path d="m13.8 21.5-1.8.3-2-8.2 2.3-1 1.5 8.9z"/>
+      <path d="m6.2 19.7-1.4-1.1 4.3-6.7 2.1 1.3-5 6.5z"/>
+      <path d="m2.5 13.8-.3-1.8 8.2-2 1 2.3-8.9 1.5z"/>
+      <path d="m3.8 7.2 1.1-1.4 6.7 4.3-1.3 2.1-6.5-5z"/>
+      <circle cx="12" cy="12" r="2.2"/>
+    </g>
+  </svg>`;
 }
 
 function agentName(kind) {
@@ -1941,6 +2043,7 @@ function linkHtml(url, label, title = '', className = '') {
 
 function pullRequestStatusLabel(pr) {
   if (!pr) return '';
+  if (pr.source_only) return '';
   if (pr.status_label) return pr.status_label;
   if (pr.draft) return 'draft';
   if (pr.merged || pr.merged_at) return 'merged';
@@ -2053,7 +2156,7 @@ function projectMetaHtml(session, info) {
     parts.push('<span class="meta-muted">no git checkout detected</span>');
     return metaJoin(parts);
   }
-  const pr = project.pull_request;
+  const pr = displayPullRequest(info);
   if (pr?.number) parts.push(pullRequestLinkHtml(pr));
   if (git.branch) parts.push(`<span class="meta-branch">${esc(shortBranch(git.branch))}</span>`);
   if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
@@ -2095,7 +2198,7 @@ function summaryContextHtml(session, info, agent) {
   } else {
     lines.push(summaryContextLine('repo', 'no git checkout detected'));
   }
-  const pr = project.pull_request;
+  const pr = displayPullRequest(info);
   if (pr?.number) {
     const label = pullRequestLinkLabel(pr);
     lines.push(summaryContextLine('github', `${label} ${pr.title || pr.description || ''}`, pr.url, label, pullRequestStatusClass(pr)));
@@ -2408,7 +2511,7 @@ function handleDropDragLeave(event) {
   clearDropPreview();
 }
 
-function renderPanels(previousActive = []) {
+function renderPanels(previousActive = [], options = {}) {
   movePanelsToPool();
   const activeWindowCount = layoutSlotKeys().filter(side => activeItemForSide(side)).length;
   grid.className = `grid ${activeWindowCount === 1 ? 'full' : ''} ${activeWindowCount === 0 ? 'empty' : ''}`.trim();
@@ -2419,7 +2522,7 @@ function renderPanels(previousActive = []) {
   bindDropTargets();
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
-  scheduleResponsiveLayoutPrune();
+  if (options.prune !== false) scheduleResponsiveLayoutPrune();
 }
 
 function movePanelsToPool() {
@@ -2619,6 +2722,7 @@ function updateWindowTabStrip(panel, side) {
   strip.dataset.side = side;
   strip.replaceChildren(...stack.map(item => createWindowSessionTab(side, item)));
   bindWindowTabStrip(strip, side);
+  scheduleTabStripOverflowCheck(strip);
 }
 
 function createWindowSessionTab(side, item) {
@@ -2631,7 +2735,8 @@ function createWindowSessionTab(side, item) {
   const tab = document.createElement('div');
   tab.role = 'button';
   tab.tabIndex = 0;
-  tab.className = `window-session-tab ${active ? 'active' : ''} ${state?.attention ? 'needs-attention' : ''}`;
+  tab.className = `window-session-tab ${active ? 'active' : ''}`;
+  applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.windowSessionTab = item;
   tab.innerHTML = isInfo ? windowInfoTabHtml() : windowSessionTabHtml(item, info, state, auto);
@@ -2640,7 +2745,7 @@ function createWindowSessionTab(side, item) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindWindowSessionPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isInfo ? 'Branches' : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-window-tab-close]')) {
       event.stopPropagation();
@@ -2784,15 +2889,15 @@ function positionTopSessionPopover(wrapper) {
 }
 
 function windowInfoTabHtml() {
-  return '<span class="window-tab-core"><span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="window-tab-info-label">Branches</span></span>';
+  return '<span class="window-tab-core"><span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="window-tab-info-label">Branch Info</span></span>';
 }
 
 function windowSessionTabHtml(session, info, state, auto) {
-  const pr = info?.project?.pull_request;
+  const pr = displayPullRequest(info);
   const desc = sessionTabDescription(session, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
   return `<span class="window-tab-core">${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${pullRequestCompactBadgesHtml(pr)}${detailHtml}</span></span>`;
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(info)}${pullRequestCompactBadgesHtml(pr)}${detailHtml}</span></span>`;
 }
 
 function bindWindowTabStrip(strip, side) {
@@ -2899,7 +3004,7 @@ function terminalTabLabel(session, info) {
 }
 
 function terminalTabTitle(session, info) {
-  if (isInfoItem(session)) return 'unavailable for Branches';
+  if (isInfoItem(session)) return 'unavailable for Branch Info';
   return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
 }
 
@@ -3013,16 +3118,16 @@ function createInfoPanel() {
   panel.innerHTML = `
       <div class="panel-head">
         <div class="window-session-tabs" role="tablist" aria-label="Window tabs"></div>
-        ${panelControlsHtml(infoItemId, {disabled: true, unavailableLabel: 'Branches'})}
+        ${panelControlsHtml(infoItemId, {disabled: true, unavailableLabel: 'Branch Info'})}
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
-          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">Branches</span></div>
+          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">Branch Info</span></div>
           <div id="meta-${infoItemId}" class="meta">all branches sorted by recent activity</div>
         </div>
       </div>
       <div class="info-pane panel-overlay-root">
-        <div class="transcript-head">All branches</div>
+        <div class="transcript-head">Branch Info</div>
         <div id="info-content" class="info-list"></div>
       </div>`;
   bindPanelShell(panel, infoItemId);
@@ -3048,6 +3153,7 @@ function panelControlsHtml(session, options = {}) {
   const infoAttrs = disabled ? disabledAttrs : ` data-detail-toggle="${esc(session)}" title="hide details"`;
   const terminalAttrs = disabled ? disabledAttrs : `${tabAttrs('terminal')} title="${esc(terminalTabTitle(session, transcriptMeta.sessions?.[session]))}"`;
   const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, transcriptMeta.sessions?.[session]);
+  const closeAttrs = ` type="button" data-window-close="${esc(session)}" title="move all tabs in this window to top strip" aria-label="Move all tabs in this window to top strip"`;
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           <button class="tab window-step" ${stepAttrs('prev')}>&lt;</button>
           <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
@@ -3056,6 +3162,7 @@ function panelControlsHtml(session, options = {}) {
           <button class="tab" ${tabAttrs('summary')}>AI</button>
           <button class="tab" ${tabAttrs('events')}>Log</button>
           <button class="tab panel-detail-toggle active" ${infoAttrs}>Info</button>
+          <button class="tab window-close" ${closeAttrs}></button>
         </div>`;
 }
 
@@ -3116,18 +3223,18 @@ function renderInfoPanel() {
   const header = `<div class="info-row header">
     <div class="info-cell">path</div>
     <div class="info-cell">branch</div>
-    <div class="info-cell">desc</div>
-    <div class="info-cell">updated</div>
     <div class="info-cell">PR</div>
     <div class="info-cell">Linear</div>
+    <div class="info-cell">desc</div>
+    <div class="info-cell">updated</div>
   </div>`;
   const body = rows.map(row => `<div class="info-row${row.current ? ' current' : ''}">
     <div class="info-cell" title="${esc(row.path)}">${esc(pathBasename(row.path) || row.session || '')}</div>
     <div class="info-cell" title="${esc(row.branch)}">${row.current ? '<span class="info-branch-current">*</span> ' : ''}${row.branchHtml}</div>
+    <div class="info-cell" title="${esc(row.prTitle)}">${row.prHtml}</div>
+    <div class="info-cell" title="${esc(row.linearTitle)}">${row.linearHtml}</div>
     <div class="info-cell" title="${esc(row.desc)}">${esc(row.desc)}</div>
     <div class="info-cell" title="${esc(row.updated)}">${esc(row.updated)}</div>
-    <div class="info-cell">${row.prHtml}</div>
-    <div class="info-cell">${row.linearHtml}</div>
   </div>`).join('');
   node.innerHTML = header + body;
 }
@@ -3145,7 +3252,7 @@ function infoBranchRows() {
       if (seen.has(key)) continue;
       seen.add(key);
       const current = branch.current === true;
-      const currentPr = current ? project.pull_request : null;
+      const currentPr = current ? displayPullRequest(info) : null;
       const currentLinear = current ? project.linear || [] : [];
       const linearIds = currentLinear.length
         ? currentLinear.map(issue => issue.identifier).filter(Boolean)
@@ -3154,6 +3261,11 @@ function infoBranchRows() {
         ? currentLinear.map(issue => linearIssueHtml(issue)).join(' ')
         : linearIds.map(linearIssueLinkHtml).filter(Boolean).join(' ');
       const prHtml = currentPr?.number ? pullRequestColumnLinkHtml(currentPr) : pullRequestLinkForBranch(git, branch);
+      const prValue = currentPr?.number ? currentPr : branch.pull_request;
+      const prTitle = pullRequestTextForBranch(prValue, branch.subject || '');
+      const linearTitle = currentLinear.length
+        ? currentLinear.map(issue => [issue.identifier, issue.state, issue.title].filter(Boolean).join(' ')).filter(Boolean).join(' · ')
+        : linearIds.join(' ');
       const desc = shortText(
         currentPr?.title
           || currentPr?.description
@@ -3171,7 +3283,9 @@ function infoBranchRows() {
         updated: branch.updated || '',
         updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
         prHtml: prHtml || '',
+        prTitle,
         linearHtml,
+        linearTitle,
         current,
       });
     }
@@ -3194,6 +3308,11 @@ function bindPanelControls(panel, session) {
       const label = button.dataset.windowDir === 'prev' ? 'previous window' : 'next window';
       tmuxWindow(button.dataset.windowSession, key, label);
     });
+  });
+  panel.querySelector('[data-window-close]')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    removeWindowFromLayout(event.currentTarget.dataset.windowClose);
   });
   panel.querySelector('[data-context]')?.addEventListener('click', () => showContext(session));
   panel.addEventListener('click', event => {
@@ -3810,11 +3929,13 @@ function updateTypingIndicator(session) {
 function updateStatus() {
   if (activeSessions.length === 0) {
     statusEl.textContent = 'no session selected';
+    statusEl.removeAttribute('title');
     return;
   }
   const activeTmuxSessions = activeSessions.filter(isTmuxSession);
   if (!activeTmuxSessions.length) {
-    statusEl.textContent = 'Branches shown';
+    statusEl.textContent = 'Branch Info shown';
+    statusEl.removeAttribute('title');
     return;
   }
   let open = 0;
@@ -3822,7 +3943,9 @@ function updateStatus() {
     const item = terminals.get(session);
     if (item?.socket?.readyState === WebSocket.OPEN) open += 1;
   }
-  statusEl.innerHTML = open === activeTmuxSessions.length ? '<span class="ok">all connected</span>' : `${open}/${activeTmuxSessions.length} connected`;
+  const total = activeTmuxSessions.length;
+  statusEl.textContent = open === total ? '' : `${open}/${total} conn`;
+  statusEl.title = open === total ? '' : `${open}/${total} terminal sockets connected`;
 }
 
 async function toggleAutoApprove(session) {
@@ -3830,7 +3953,8 @@ async function toggleAutoApprove(session) {
     statusEl.innerHTML = '<span class="err">readonly access cannot change YOLO</span>';
     return;
   }
-  const current = autoApproveStates.get(session)?.enabled === true;
+  const state = autoApproveStates.get(session) || {};
+  const current = state.enabled === true;
   await setAutoApprove(session, !current);
 }
 
@@ -3843,6 +3967,11 @@ async function setAutoApprove(session, enabled) {
     const response = await fetch(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
+      if (payload?.target || payload?.session) {
+        autoApproveStates.set(session, payload);
+        updateSessionButtonStates();
+        renderAutoApproveButton(session, payload);
+      }
       statusEl.innerHTML = `<span class="err">${esc(payload.error || 'YOLO approval failed')}</span>`;
       return;
     }
@@ -3888,6 +4017,13 @@ async function loadAutoStatuses() {
   }
 }
 
+function autoApproveOwnerLabel(payload) {
+  const owner = payload?.lock_owner || {};
+  const pid = owner.pid ? `pid ${owner.pid}` : '';
+  const root = owner.project_root || '';
+  return [pid, root].filter(Boolean).join(' ') || payload?.last_action || 'another YOLOmux';
+}
+
 function renderAutoApproveButtons() {
   for (const session of sessions) {
     const state = autoApproveStates.get(session) || {target: session, enabled: false, last_action: 'off'};
@@ -3898,13 +4034,17 @@ function renderAutoApproveButtons() {
 function renderAutoApproveButton(session, payload) {
   const buttons = document.querySelectorAll(`[data-yolo-session="${cssEscape(session)}"]`);
   const enabled = payload?.enabled === true;
+  const locked = payload?.locked === true && !enabled;
   for (const button of buttons) {
     button.classList.toggle('active', enabled);
     button.classList.toggle('inactive', !enabled);
+    button.classList.toggle('locked', locked);
     button.textContent = 'YO';
     const action = payload?.last_action ? `; ${payload.last_action}` : '';
     button.title = enabled
       ? `YOLO on for ${sessionLabel(session)}${action}${readOnlyMode ? '; readonly access' : ''}`
+      : locked
+        ? `YOLO owned by ${autoApproveOwnerLabel(payload)}`
       : `YOLO off for ${sessionLabel(session)}${readOnlyMode ? '; readonly access' : ''}`;
   }
   updatePanelHeader(session, transcriptMeta.sessions?.[session]);
@@ -4272,7 +4412,7 @@ async function boot() {
   await loadNotifyStatus();
   await loadAutoStatuses();
   renderSessionButtons();
-  renderPanels();
+  renderPanels([], {prune: false});
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
   refreshTranscripts();
   renderAutoApproveButtons();
@@ -4280,7 +4420,7 @@ async function boot() {
   setInterval(refreshAutoStatuses, paneStateRefreshMs);
   setInterval(refreshTranscripts, metadataRefreshMs);
   setInterval(updateLatency, latencyRefreshMs);
-  setInterval(refreshOpenEventLogs, 5000);
+  setInterval(refreshOpenEventLogs, eventLogRefreshMs);
 }
 
 async function showContext(session) {
@@ -4299,11 +4439,26 @@ async function showContext(session) {
   }
 }
 
-document.getElementById('refreshMeta').onclick = refreshAll;
+if (refreshMeta) {
+  refreshMeta.textContent = 'Refresh';
+  refreshMeta.setAttribute('aria-label', 'Refresh session state');
+  const seconds = ms => `${Math.round(ms / 1000)}s`;
+  refreshMeta.title = [
+    'Refresh session state',
+    'Re-list tmux sessions.',
+    'Refresh git, PR, Linear, and agent metadata.',
+    'Refresh YOLO status and open event logs.',
+    'Refresh active transcript previews.',
+    `Auto-refresh: YOLO ${seconds(paneStateRefreshMs)}, metadata ${seconds(metadataRefreshMs)}, ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
+    'Does not reload the page or reconnect terminals.',
+  ].join('\n');
+  refreshMeta.onclick = refreshAll;
+}
 notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
 window.addEventListener('resize', () => {
   scheduleResponsiveLayoutPrune();
+  scheduleAllTabStripOverflowChecks();
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
 });
 
