@@ -75,7 +75,7 @@ def main() -> int:
         print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
         print(f"Replace the placeholder {PLACEHOLDER_AUTH_USERNAME}/{PLACEHOLDER_AUTH_PASSWORD} credentials.")
         print(f"YOLOmux is listening on http://{url_host}:{args.port}/ and will show this setup message in the browser.")
-        print("After saving auth.json, refresh the browser. No restart is required.")
+        print("After saving auth.yaml, refresh the browser. No restart is required.")
         print("=" * 78)
     restored_auto = app.restore_auto_approve()
     if restored_auto:

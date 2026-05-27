@@ -25,10 +25,11 @@ def static_asset_path(asset: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def html_page(sessions: list[str]) -> str:
+def html_page(sessions: list[str], access_role: str = "admin") -> str:
     bootstrap = {
         "sessions": sessions,
         "availableAgents": available_agent_commands(),
+        "accessRole": access_role,
         "homePath": str(Path.home()),
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
         "serverHostname": SERVER_HOSTNAME,
@@ -51,12 +52,15 @@ def setup_auth_html() -> str:
 <main>
   <h1>Set up YOLOmux auth</h1>
   <p>YOLOmux created <code>{auth_path}</code> with placeholder credentials.</p>
-  <p class="accent">Edit that JSON file before using this program.</p>
-  <pre>{{
-  "user": "your-user",
-  "password": "your-password"
-}}</pre>
-  <p>After saving the file, refresh this page. YOLOmux reads the latest JSON auth on each request.</p>
+  <p class="accent">Edit that YAML file before using this program.</p>
+  <pre>users:
+  - username: "admin"
+    password: "your-admin-password"
+    role: "admin"
+  - username: "viewer"
+    password: "your-viewer-password"
+    role: "readonly"</pre>
+  <p>After saving the file, refresh this page. YOLOmux reads the latest YAML auth on each request.</p>
 </main>
 </body>
 </html>

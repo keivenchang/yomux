@@ -1,6 +1,8 @@
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
 let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
+const accessRole = bootstrap.accessRole || 'admin';
+const readOnlyMode = accessRole !== 'admin';
 const homePath = bootstrap.homePath;
 const serverHostname = bootstrap.serverHostname;
 const grid = document.getElementById('grid');
@@ -841,14 +843,20 @@ function sessionTrayItems() {
 function renderNotifyToggle() {
   if (!notifyToggle) return;
   const supported = 'Notification' in window;
-  notifyToggle.disabled = false;
+  notifyToggle.disabled = readOnlyMode;
   notifyToggle.classList.toggle('active', notificationsEnabled);
   notifyToggle.setAttribute('aria-pressed', notificationsEnabled ? 'true' : 'false');
   const browserState = supported ? Notification.permission : 'unsupported';
-  notifyToggle.title = `notify when a session needs attention; browser notifications: ${browserState}`;
+  notifyToggle.title = readOnlyMode
+    ? 'Notify is admin-only'
+    : `notify when a session needs attention; browser notifications: ${browserState}`;
 }
 
 async function toggleNotifications() {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot change Notify</span>';
+    return;
+  }
   const nextEnabled = !notificationsEnabled;
   let browserPermission = 'unsupported';
   if (nextEnabled && 'Notification' in window && Notification.permission === 'default') {
@@ -1255,7 +1263,7 @@ function renderSessionButtons() {
   for (const item of sessionTrayItems()) {
     sessionButtons.appendChild(createTopSessionButton(item));
   }
-  if (visibleSessions.length < maxSessionTabs) {
+  if (!readOnlyMode && visibleSessions.length < maxSessionTabs) {
     for (const agent of ['claude', 'codex', 'term']) {
       if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
     }
@@ -1438,9 +1446,13 @@ function yoloMarkerHtml(session, auto, options = {}) {
   const classes = ['session-yolo-marker'];
   if (auto) classes.push('active');
   if (!auto) classes.push('inactive');
-  const toggleAttr = options.toggle ? ` data-auto-session="${esc(session)}"` : '';
-  const title = options.toggle ? `YOLO ${auto ? 'on' : 'off'} for ${sessionLabel(session)}` : 'YOLO enabled';
-  return `<span class="${esc(classes.join(' '))}"${toggleAttr} title="${esc(title)}">YO</span>`;
+  if (readOnlyMode) classes.push('readonly');
+  const yoloAttr = ` data-yolo-session="${esc(session)}"`;
+  const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
+  const title = options.toggle && readOnlyMode
+    ? `YOLO ${auto ? 'on' : 'off'} for ${sessionLabel(session)}; readonly access`
+    : (options.toggle ? `YOLO ${auto ? 'on' : 'off'} for ${sessionLabel(session)}` : 'YOLO enabled');
+  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}">YO</span>`;
 }
 
 function pullRequestCompactBadgesHtml(pr) {
@@ -2103,6 +2115,7 @@ function summaryContextLine(label, text, url = '', linkLabel = '', linkClass = '
 }
 
 async function ensureSession(session) {
+  if (readOnlyMode) return true;
   try {
     const response = await fetch(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const payload = await response.json();
@@ -2121,6 +2134,10 @@ async function ensureSession(session) {
 }
 
 async function createNextSession(agent) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot create sessions</span>';
+    return;
+  }
   const agentLabel = agentName(agent) || 'agent';
   statusEl.textContent = `creating ${agentLabel} session...`;
   try {
@@ -2227,7 +2244,7 @@ function enableTerminalScroll(session, term, container) {
       ? Math.max(1, Math.floor(term.rows * terminalWheelPageFraction))
       : terminalWheelScrollLines;
     const item = terminals.get(session);
-    if (item?.socket?.readyState === WebSocket.OPEN) {
+    if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
       queueTmuxScroll(item, direction * amount);
       return;
     }
@@ -3017,8 +3034,17 @@ function panelControlsHtml(session, options = {}) {
   const disabled = options.disabled === true;
   const unavailableLabel = options.unavailableLabel || itemLabel(session);
   const disabledAttrs = disabled ? ` type="button" disabled title="unavailable for ${esc(unavailableLabel)}"` : '';
-  const stepAttrs = dir => disabled ? disabledAttrs : ` data-window-dir="${dir}" data-window-session="${esc(session)}" title="${dir === 'prev' ? 'previous' : 'next'} tmux window"`;
-  const tabAttrs = name => disabled ? disabledAttrs : ` data-tab="${esc(session)}" data-tab-name="${name}"`;
+  const readonlyAttrs = label => ` type="button" disabled title="${esc(label)} requires admin access"`;
+  const stepAttrs = dir => {
+    if (disabled) return disabledAttrs;
+    if (readOnlyMode) return readonlyAttrs(`${dir === 'prev' ? 'previous' : 'next'} tmux window`);
+    return ` data-window-dir="${dir}" data-window-session="${esc(session)}" title="${dir === 'prev' ? 'previous' : 'next'} tmux window"`;
+  };
+  const tabAttrs = name => {
+    if (disabled) return disabledAttrs;
+    if (readOnlyMode && name === 'summary') return readonlyAttrs('AI summary');
+    return ` data-tab="${esc(session)}" data-tab-name="${name}"`;
+  };
   const infoAttrs = disabled ? disabledAttrs : ` data-detail-toggle="${esc(session)}" title="hide details"`;
   const terminalAttrs = disabled ? disabledAttrs : `${tabAttrs('terminal')} title="${esc(terminalTabTitle(session, transcriptMeta.sessions?.[session]))}"`;
   const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, transcriptMeta.sessions?.[session]);
@@ -3188,6 +3214,7 @@ function hasFileDrag(event) {
 }
 
 function bindFileUpload(panel, session) {
+  if (readOnlyMode) return;
   panel.addEventListener('dragenter', event => {
     if (!hasFileDrag(event)) return;
     event.preventDefault();
@@ -3216,6 +3243,7 @@ function bindFileUpload(panel, session) {
 }
 
 function bindClipboardPaste() {
+  if (readOnlyMode) return;
   if (clipboardPasteBound) return;
   clipboardPasteBound = true;
   document.addEventListener('paste', event => {
@@ -3359,6 +3387,10 @@ function imageSuffix(mimeType) {
 }
 
 async function uploadFiles(session, fileList, options = {}) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot upload files</span>';
+    return;
+  }
   const files = Array.from(fileList || []);
   if (!files.length) return;
   const formData = new FormData();
@@ -3444,6 +3476,10 @@ function syncPasteCounterFromPath(path) {
 }
 
 function insertIntoTerminal(session, text) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot type into terminal sessions</span>';
+    return false;
+  }
   const item = terminals.get(session);
   if (!item || item.socket.readyState !== WebSocket.OPEN) return false;
   const filtered = stripTerminalQueryResponses(text);
@@ -3616,6 +3652,10 @@ function activateTab(session, name) {
 }
 
 function tmuxWindow(session, key, label) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot switch tmux windows</span>';
+    return;
+  }
   const item = terminals.get(session);
   if (!item || item.socket.readyState !== WebSocket.OPEN) {
     statusEl.innerHTML = `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
@@ -3633,6 +3673,10 @@ function tmuxWindow(session, key, label) {
 async function ensureTerminalRunning(session) {
   const item = terminals.get(session);
   if (item && item.socket.readyState !== WebSocket.CLOSING && item.socket.readyState !== WebSocket.CLOSED) return;
+  if (readOnlyMode) {
+    startTerminal(session);
+    return;
+  }
   const ensured = await ensureSession(session);
   if (!ensured) {
     const container = document.getElementById(`term-${session}`);
@@ -3669,6 +3713,7 @@ function startTerminal(session) {
     letterSpacing: 0,
     lineHeight: 1.0,
     scrollback: 5000,
+    disableStdin: readOnlyMode,
     theme: {
       background: '#11151d',
       foreground: '#dfe6ef',
@@ -3739,6 +3784,7 @@ function startTerminal(session) {
     clearFocusedTerminal(session);
   });
   term.onData(data => {
+    if (readOnlyMode) return;
     if (socket.readyState === WebSocket.OPEN) {
       const filtered = stripTerminalQueryResponses(data);
       if (filtered) socket.send(JSON.stringify({type: 'input', data: filtered}));
@@ -3780,11 +3826,19 @@ function updateStatus() {
 }
 
 async function toggleAutoApprove(session) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot change YOLO</span>';
+    return;
+  }
   const current = autoApproveStates.get(session)?.enabled === true;
   await setAutoApprove(session, !current);
 }
 
 async function setAutoApprove(session, enabled) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot change YOLO</span>';
+    return;
+  }
   try {
     const response = await fetch(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
     const payload = await response.json();
@@ -3842,7 +3896,7 @@ function renderAutoApproveButtons() {
 }
 
 function renderAutoApproveButton(session, payload) {
-  const buttons = document.querySelectorAll(`[data-auto-session="${cssEscape(session)}"]`);
+  const buttons = document.querySelectorAll(`[data-yolo-session="${cssEscape(session)}"]`);
   const enabled = payload?.enabled === true;
   for (const button of buttons) {
     button.classList.toggle('active', enabled);
@@ -3850,8 +3904,8 @@ function renderAutoApproveButton(session, payload) {
     button.textContent = 'YO';
     const action = payload?.last_action ? `; ${payload.last_action}` : '';
     button.title = enabled
-      ? `YOLO on for ${sessionLabel(session)}${action}`
-      : `YOLO off for ${sessionLabel(session)}`;
+      ? `YOLO on for ${sessionLabel(session)}${action}${readOnlyMode ? '; readonly access' : ''}`
+      : `YOLO off for ${sessionLabel(session)}${readOnlyMode ? '; readonly access' : ''}`;
   }
   updatePanelHeader(session, transcriptMeta.sessions?.[session]);
   updateTypingIndicator(session);
@@ -3861,6 +3915,11 @@ function startSummaryStream(session) {
   stopSummaryStream(session);
   const node = document.getElementById(`summary-${session}`);
   if (!node) return;
+  if (readOnlyMode) {
+    node.textContent = 'AI summary requires admin access.';
+    statusEl.innerHTML = '<span class="err">readonly access cannot run AI summary</span>';
+    return;
+  }
   node.textContent = 'starting structured Codex summary for the last hour...\n\n';
   const source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
   summaryStreams.set(session, source);

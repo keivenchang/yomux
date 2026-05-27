@@ -226,6 +226,7 @@ body {
   margin-left: 0;
 }
 .session-button-number {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -236,11 +237,12 @@ body {
   font-weight: 700;
 }
 .session-button-prefix {
-  min-width: 0;
+  flex: 0 0 auto;
+  min-width: max-content;
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  overflow: hidden;
+  overflow: visible;
   white-space: nowrap;
 }
 .session-label-agent {
@@ -249,6 +251,7 @@ body {
   gap: 3px;
 }
 .session-button-text {
+  flex: 1 1 auto;
   min-width: 0;
   display: inline-flex;
   align-items: center;

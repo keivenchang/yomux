@@ -67,8 +67,9 @@ CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".confi
 STATE_DIR = Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
 STATE_PATH = CONFIG_DIR / "state.json"
 EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
-AUTH_CONFIG_PATH = CONFIG_DIR / "auth.json"
-AUTH_CONFIG_DISPLAY_PATH = "~/.config/yolomux/auth.json"
+AUTH_CONFIG_PATH = CONFIG_DIR / "auth.yaml"
+AUTH_LEGACY_JSON_CONFIG_PATH = CONFIG_DIR / "auth.json"
+AUTH_CONFIG_DISPLAY_PATH = "~/.config/yolomux/auth.yaml"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 AGENT_COMMANDS = {"claude", "codex", "term"}
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -90,6 +91,20 @@ PLACEHOLDER_AUTH_PASSWORD = "password"
 SERVER_HOSTNAME = socket.gethostname()
 
 
+@dataclass(frozen=True)
+class AuthUser:
+    username: str
+    password: str
+    role: str
+
+
+@dataclass(frozen=True)
+class AuthIdentity:
+    username: str
+    password: str
+    role: str
+
+
 def read_config_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -98,13 +113,158 @@ def read_config_object(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def initialize_auth_config(path: Path) -> dict[str, Any]:
+def yaml_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def yaml_scalar(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        return text[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    if len(text) >= 2 and text[0] == text[-1] == "'":
+        return text[1:-1].replace("''", "'")
+    return text
+
+
+def strip_yaml_comment(line: str) -> str:
+    in_single = False
+    in_double = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_double:
+            escaped = True
+            continue
+        if char == '"' and not in_single:
+            in_double = not in_double
+            continue
+        if char == "'" and not in_double:
+            in_single = not in_single
+            continue
+        if char == "#" and not in_single and not in_double:
+            return line[:index]
+    return line
+
+
+def parse_yaml_key_value(line: str) -> tuple[str, str] | None:
+    key, separator, value = line.partition(":")
+    if not separator:
+        return None
+    key = key.strip()
+    if not key:
+        return None
+    return key, yaml_scalar(value)
+
+
+def normalize_auth_role(value: str) -> str:
+    role = value.strip().lower()
+    if role in {"admin", "readonly"}:
+        return role
+    if role in {"read-only", "read_only", "viewer", "view", "ro"}:
+        return "readonly"
+    return "readonly"
+
+
+def auth_user_from_mapping(mapping: dict[str, str]) -> AuthUser | None:
+    username = mapping.get("username", "").strip()
+    password = mapping.get("password", "")
+    role = normalize_auth_role(mapping.get("role", mapping.get("access", "readonly")))
+    if not username or not password:
+        return None
+    return AuthUser(username=username, password=password, role=role)
+
+
+def parse_auth_yaml(text: str) -> tuple[AuthUser, ...]:
+    users: list[AuthUser] = []
+    in_users = False
+    current: dict[str, str] | None = None
+    for raw_line in text.splitlines():
+        line = strip_yaml_comment(raw_line).rstrip()
+        if not line.strip():
+            continue
+        stripped = line.strip()
+        if stripped == "users:":
+            in_users = True
+            if current is not None:
+                user = auth_user_from_mapping(current)
+                if user:
+                    users.append(user)
+                current = None
+            continue
+        if not in_users:
+            continue
+        if stripped.startswith("- "):
+            if current is not None:
+                user = auth_user_from_mapping(current)
+                if user:
+                    users.append(user)
+            current = {}
+            remainder = stripped[2:].strip()
+            if remainder:
+                pair = parse_yaml_key_value(remainder)
+                if pair:
+                    current[pair[0]] = pair[1]
+            continue
+        if current is None and stripped.endswith(":"):
+            current = {"username": yaml_scalar(stripped[:-1])}
+            continue
+        if current is None:
+            continue
+        pair = parse_yaml_key_value(stripped)
+        if pair:
+            current[pair[0]] = pair[1]
+    if current is not None:
+        user = auth_user_from_mapping(current)
+        if user:
+            users.append(user)
+    return tuple(users)
+
+
+def auth_config_text(users: tuple[AuthUser, ...]) -> str:
+    lines = [
+        "users:",
+    ]
+    for user in users:
+        lines.extend(
+            [
+                f"  - username: {yaml_quote(user.username)}",
+                f"    password: {yaml_quote(user.password)}",
+                f"    role: {yaml_quote(user.role)}",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def read_auth_users(path: Path) -> tuple[AuthUser, ...]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    return parse_auth_yaml(text)
+
+
+def legacy_json_auth_users(path: Path) -> tuple[AuthUser, ...]:
+    config = read_config_object(path)
+    username = config_string(config, "user", PLACEHOLDER_AUTH_USERNAME)
+    password = config_string(config, "password", PLACEHOLDER_AUTH_PASSWORD)
+    role = normalize_auth_role(config_string(config, "role", "admin"))
+    return (AuthUser(username=username, password=password, role=role),)
+
+
+def default_auth_users() -> tuple[AuthUser, ...]:
+    return (AuthUser(username=PLACEHOLDER_AUTH_USERNAME, password=PLACEHOLDER_AUTH_PASSWORD, role="admin"),)
+
+
+def initialize_auth_config(path: Path) -> tuple[AuthUser, ...]:
     if path.exists():
-        return read_config_object(path)
+        users = read_auth_users(path)
+        return users or default_auth_users()
     path.parent.mkdir(parents=True, exist_ok=True)
-    config = {"user": PLACEHOLDER_AUTH_USERNAME, "password": PLACEHOLDER_AUTH_PASSWORD}
-    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return config
+    users = legacy_json_auth_users(AUTH_LEGACY_JSON_CONFIG_PATH) if AUTH_LEGACY_JSON_CONFIG_PATH.exists() else default_auth_users()
+    path.write_text(auth_config_text(users), encoding="utf-8")
+    return users
 
 
 def config_string(config: dict[str, Any], key: str, default: str) -> str:
@@ -112,16 +272,17 @@ def config_string(config: dict[str, Any], key: str, default: str) -> str:
     return value if isinstance(value, str) and value else default
 
 
-def current_auth_credentials() -> tuple[str, str]:
-    config = initialize_auth_config(AUTH_CONFIG_PATH)
-    username = config_string(config, "user", PLACEHOLDER_AUTH_USERNAME)
-    password = config_string(config, "password", PLACEHOLDER_AUTH_PASSWORD)
-    return username, password
+def current_auth_users() -> tuple[AuthUser, ...]:
+    return initialize_auth_config(AUTH_CONFIG_PATH)
 
 
 def placeholder_auth_active() -> bool:
-    username, password = current_auth_credentials()
-    return username == PLACEHOLDER_AUTH_USERNAME and password == PLACEHOLDER_AUTH_PASSWORD
+    users = current_auth_users()
+    return len(users) == 1 and users[0].username == PLACEHOLDER_AUTH_USERNAME and users[0].password == PLACEHOLDER_AUTH_PASSWORD
+
+
+AUTH_COOKIE_NAME = "yolomux_auth"
+AUTH_COOKIE_SECRET = os.urandom(32)
 
 
 def auth_cookie_value(username: str, password: str) -> str:
@@ -133,8 +294,6 @@ def auth_cookie_value(username: str, password: str) -> str:
 
 
 AUTH_CONFIG = initialize_auth_config(AUTH_CONFIG_PATH)
-AUTH_COOKIE_NAME = "yolomux_auth"
-AUTH_COOKIE_SECRET = os.urandom(32)
 XTERM_ASSET_ROOTS = [
     *(Path(item).expanduser() for item in os.environ.get("YOLOMUX_XTERM_ROOTS", "").split(os.pathsep) if item),
     STATIC_DIR / "xterm",

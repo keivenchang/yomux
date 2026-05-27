@@ -68,7 +68,21 @@ codex --dangerously-bypass-approvals-and-sandbox
 
 Without `--dangerously-yolo`, the same buttons create sessions with plain `claude` and `codex`. The flag affects only new sessions created by YOLOmux after the server starts. It does not change existing tmux sessions, and it is separate from the `YO` auto-approval toggle.
 
-On first launch, YOLOmux creates `~/.config/yolomux/auth.json` with placeholder credentials `user` / `password`. While those placeholders are active, the server still listens on the configured port, prints a large stdout setup warning, and serves only an auth setup page telling the user to edit that JSON file. Authentication is read only from this JSON file. YOLOmux reads the latest JSON auth on each request, so after saving `auth.json`, refresh the browser; no server restart is required.
+On first launch, YOLOmux creates `~/.config/yolomux/auth.yaml` with placeholder credentials `user` / `password`. While those placeholders are active, the server still listens on the configured port, prints a large stdout setup warning, and serves only an auth setup page telling the user to edit that YAML file. YOLOmux reads the latest YAML auth on each request, so after saving `auth.yaml`, refresh the browser; no server restart is required. If an old `~/.config/yolomux/auth.json` exists and no YAML file exists yet, YOLOmux migrates the single JSON user into `auth.yaml`.
+
+Example `auth.yaml`:
+
+```yaml
+users:
+  - username: "admin"
+    password: "change-this-admin-password"
+    role: "admin"
+  - username: "viewer"
+    password: "change-this-viewer-password"
+    role: "readonly"
+```
+
+`admin` users can type into tmux panes, create sessions, upload files, toggle `YO`, change Notify, switch tmux windows, and run AI summaries. `readonly` users can view existing panes, transcripts, branch metadata, logs, and YOLO status. Readonly browser terminals attach to tmux with `tmux attach-session -r`, and mutating HTTP endpoints require admin access.
 
 YOLOmux serves xterm.js from a local editor install when available. It checks `YOLOMUX_XTERM_ROOTS` first, then `static/xterm`, then common Cursor, VS Code, and Windsurf server installs under the home directory. If `/static/xterm.js` or `/static/xterm.css` is missing, the browser falls back to jsDelivr.
 
@@ -98,7 +112,7 @@ sudo firewall-cmd --reload
 
 ### Daily use
 
-Open YOLOmux, edit `~/.config/yolomux/auth.json` if the setup page asks for credentials, then refresh. Existing tmux sessions appear as tabs inside window tab bars. Click a tab to focus that pane. Click `X` on a tab to minimize it into the top strip. Click the top-strip button to restore it into a window. Drag tabs between window tab bars or onto a pane to split the layout. Use the pane toolbar to switch tmux windows, show transcripts, ask for an AI summary, inspect the event log, or collapse the info row.
+Open YOLOmux, edit `~/.config/yolomux/auth.yaml` if the setup page asks for credentials, then refresh. Existing tmux sessions appear as tabs inside window tab bars. Click a tab to focus that pane. Click `X` on a tab to minimize it into the top strip. Click the top-strip button to restore it into a window. Drag tabs between window tab bars or onto a pane to split the layout. Use the pane toolbar to switch tmux windows, show transcripts, ask for an AI summary, inspect the event log, or collapse the info row.
 
 The `YO` button toggles YOLO auto-approval for that tmux session. YOLO state is stored in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts. The red `QUES?` and `EXEC?` badges come from visible tmux screen detection, not transcript scraping.
 
@@ -174,7 +188,7 @@ Prompt detection intentionally uses the visible tmux screen for presence checks.
 
 The server is a dependency-light Python `ThreadingHTTPServer`. It serves one HTML page, local xterm.js assets, JSON APIs, Server-Sent Events streams, and a WebSocket endpoint.
 
-For each terminal connection, the browser opens `/ws?session=<tmux-session>`. The server creates a PTY, runs `tmux attach-session -t <tmux-session>` on the PTY slave, reads terminal bytes from the PTY master, and sends those bytes to xterm.js as WebSocket binary frames.
+For each terminal connection, the browser opens `/ws?session=<tmux-session>`. The server creates a PTY, runs `tmux attach-session -t <tmux-session>` for admin users or `tmux attach-session -r -t <tmux-session>` for readonly users on the PTY slave, reads terminal bytes from the PTY master, and sends those bytes to xterm.js as WebSocket binary frames.
 
 Browser input is sent as JSON messages over the same WebSocket. Normal keyboard data becomes `{"type": "input", "data": "..."}`. Resize messages become `{"type": "resize", "cols": ..., "rows": ...}`. Scroll messages become `{"type": "tmux-scroll", "direction": "up|down", "lines": ...}`.
 
@@ -189,6 +203,8 @@ The transcript tab uses Server-Sent Events from `/api/context-stream`. The AI su
 YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser polls YOLO status every few seconds and reflects the active state in each pane tab.
 
 ## Webterm API
+
+All API routes require auth. Read endpoints accept `readonly` or `admin`, except `/api/summary-stream` because it launches Codex and requires `admin`. Mutating POST routes require `admin` except `/api/event`, which accepts readonly client telemetry. `/ws` accepts readonly users but attaches tmux with `-r` and ignores keyboard input and tmux-scroll messages.
 
 - `GET /api/transcripts` returns pane, process, and transcript-path metadata.
 - `GET /api/tmux?session=dynamo1&lines=90` returns a tmux capture-pane snapshot.

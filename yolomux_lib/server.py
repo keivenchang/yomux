@@ -15,40 +15,76 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
 
-    def has_valid_basic_auth(self, username: str, password: str) -> bool:
+    def basic_auth_identity(self) -> AuthIdentity | None:
         header = self.headers.get("Authorization", "")
-        expected = "Basic " + base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-        return hmac.compare_digest(header, expected)
+        for user in current_auth_users():
+            expected = "Basic " + base64.b64encode(f"{user.username}:{user.password}".encode("utf-8")).decode("ascii")
+            if hmac.compare_digest(header, expected):
+                return AuthIdentity(username=user.username, password=user.password, role=user.role)
+        return None
 
-    def has_valid_auth_cookie(self, username: str, password: str) -> bool:
-        expected = auth_cookie_value(username, password)
+    def cookie_auth_identity(self) -> AuthIdentity | None:
         for item in self.headers.get("Cookie", "").split(";"):
             name, separator, value = item.strip().partition("=")
-            if separator and name == AUTH_COOKIE_NAME:
-                return hmac.compare_digest(value, expected)
-        return False
+            if not separator or name != AUTH_COOKIE_NAME:
+                continue
+            for user in current_auth_users():
+                expected = auth_cookie_value(user.username, user.password)
+                if hmac.compare_digest(value, expected):
+                    return AuthIdentity(username=user.username, password=user.password, role=user.role)
+        return None
 
-    def auth_cookie_header(self, username: str, password: str) -> str:
-        return f"{AUTH_COOKIE_NAME}={auth_cookie_value(username, password)}; Path=/; HttpOnly; SameSite=Lax"
+    def auth_cookie_header(self, identity: AuthIdentity) -> str:
+        for user in current_auth_users():
+            if user.username == identity.username and user.password == identity.password:
+                return f"{AUTH_COOKIE_NAME}={auth_cookie_value(user.username, user.password)}; Path=/; HttpOnly; SameSite=Lax"
+        return f"{AUTH_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
 
     def send_auth_cookie_if_needed(self) -> None:
-        credentials = getattr(self, "_auth_cookie_credentials", None)
-        if credentials is not None:
-            self.send_header("Set-Cookie", self.auth_cookie_header(*credentials))
+        identity = getattr(self, "_auth_cookie_identity", None)
+        if identity is not None:
+            self.send_header("Set-Cookie", self.auth_cookie_header(identity))
 
-    def require_auth(self) -> bool:
-        username, password = current_auth_credentials()
-        if username == PLACEHOLDER_AUTH_USERNAME and password == PLACEHOLDER_AUTH_PASSWORD:
+    def request_has_unread_body(self) -> bool:
+        return self.command in {"POST", "PUT", "PATCH"} and bool(self.headers.get("Content-Length"))
+
+    def close_after_unread_body(self) -> None:
+        if self.request_has_unread_body():
+            self.close_connection = True
+
+    def role_allows(self, identity: AuthIdentity, required_role: str) -> bool:
+        if required_role == "readonly":
+            return identity.role in {"admin", "readonly"}
+        if required_role == "admin":
+            return identity.role == "admin"
+        return False
+
+    def reject_forbidden(self, identity: AuthIdentity, required_role: str) -> None:
+        self.close_after_unread_body()
+        self.write_json({"error": f"{required_role} access required", "role": identity.role}, status=HTTPStatus.FORBIDDEN)
+
+    def require_auth(self, required_role: str = "readonly") -> bool:
+        if placeholder_auth_active():
             self.write_html(setup_auth_html())
             return False
-        self._auth_cookie_credentials = None
-        if self.has_valid_auth_cookie(username, password):
-            return True
-        if self.has_valid_basic_auth(username, password):
-            self._auth_cookie_credentials = (username, password)
-            return True
-        if self.command in {"POST", "PUT", "PATCH"} and self.headers.get("Content-Length"):
-            self.close_connection = True
+        self._auth_cookie_identity = None
+        identity = self.cookie_auth_identity()
+        if identity is not None:
+            self._auth_identity = identity
+            if self.role_allows(identity, required_role):
+                return True
+            self.reject_forbidden(identity, required_role)
+            return False
+        identity = self.basic_auth_identity()
+        if identity is not None:
+            self._auth_identity = identity
+            self._auth_cookie_identity = identity
+            if self.role_allows(identity, required_role):
+                return True
+            self.reject_forbidden(identity, required_role)
+            return False
+        self._auth_identity = None
+        self.close_after_unread_body()
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("WWW-Authenticate", 'Basic realm="YOLOmux"')
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -60,6 +96,20 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"authentication required\n")
         return False
 
+    def auth_identity(self) -> AuthIdentity:
+        identity = getattr(self, "_auth_identity", None)
+        if identity is not None:
+            return identity
+        return AuthIdentity(username="", password="", role="readonly")
+
+    def auth_readonly(self) -> bool:
+        return self.auth_identity().role == "readonly"
+
+    def require_auth_for_post(self, path: str) -> bool:
+        if path == "/api/event":
+            return self.require_auth("readonly")
+        return self.require_auth("admin")
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path.startswith("/static/"):
@@ -68,13 +118,14 @@ class Handler(BaseHTTPRequestHandler):
             if content_type:
                 self.write_static_asset(asset, content_type)
                 return
-        if not self.require_auth():
+        required_role = "admin" if parsed.path == "/api/summary-stream" else "readonly"
+        if not self.require_auth(required_role):
             return
         if parsed.path == "/api/ping":
             self.write_json({"ok": True, "time": time.time()})
             return
         if parsed.path == "/":
-            self.write_html(html_page(self.server.app.sessions))
+            self.write_html(html_page(self.server.app.sessions, self.auth_identity().role))
             return
         if parsed.path == "/api/transcripts":
             self.write_json(self.server.app.transcripts_payload())
@@ -144,9 +195,9 @@ class Handler(BaseHTTPRequestHandler):
         self.write_text("not found\n", status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if not self.require_auth():
-            return
         parsed = urlparse(self.path)
+        if not self.require_auth_for_post(parsed.path):
+            return
         if parsed.path == "/api/ensure-session":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
@@ -242,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         if parsed.path == "/":
-            data = html_page(self.server.app.sessions).encode("utf-8")
+            data = html_page(self.server.app.sessions, self.auth_identity().role).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -478,6 +529,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
@@ -496,6 +549,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
@@ -519,6 +574,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
@@ -528,6 +585,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
@@ -547,16 +606,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Sec-WebSocket-Accept", accept)
         self.send_auth_cookie_if_needed()
         self.end_headers()
-        self.bridge_tmux(session)
+        self.bridge_tmux(session, readonly=self.auth_readonly())
 
-    def bridge_tmux(self, session: str) -> None:
+    def bridge_tmux(self, session: str, readonly: bool = False) -> None:
         initial_rows, initial_cols, pending_payloads = self.read_initial_ws_payloads()
         master_fd, slave_fd = pty.openpty()
         set_pty_size(slave_fd, initial_rows, initial_cols)
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
+        attach_args = ["tmux", "attach-session"]
+        if readonly:
+            attach_args.append("-r")
+        attach_args.extend(["-t", tmux_session_target(session)])
         process = subprocess.Popen(
-            ["tmux", "attach-session", "-t", tmux_session_target(session)],
+            attach_args,
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
@@ -567,7 +630,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             for payload in pending_payloads:
-                self.handle_ws_payload(session, master_fd, slave_fd, process, payload)
+                self.handle_ws_payload(session, master_fd, slave_fd, process, payload, readonly=readonly)
             while process.poll() is None:
                 readable, _, _ = select.select([master_fd, self.connection], [], [], 0.1)
                 if master_fd in readable:
@@ -584,7 +647,7 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     if opcode not in {1, 2}:
                         continue
-                    self.handle_ws_payload(session, master_fd, slave_fd, process, payload)
+                    self.handle_ws_payload(session, master_fd, slave_fd, process, payload, readonly=readonly)
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:
@@ -637,14 +700,18 @@ class Handler(BaseHTTPRequestHandler):
             break
         return rows, cols, pending_payloads
 
-    def handle_ws_payload(self, session: str, master_fd: int, resize_fd: int, process: subprocess.Popen[Any], payload: bytes) -> None:
+    def handle_ws_payload(self, session: str, master_fd: int, resize_fd: int, process: subprocess.Popen[Any], payload: bytes, readonly: bool = False) -> None:
         try:
             message = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
+            if readonly:
+                return
             os.write(master_fd, payload)
             return
         msg_type = message.get("type")
         if msg_type == "input":
+            if readonly:
+                return
             data = message.get("data")
             if isinstance(data, str):
                 filtered = strip_terminal_query_responses(data)
@@ -660,6 +727,8 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
         elif msg_type == "tmux-scroll":
+            if readonly:
+                return
             direction = message.get("direction")
             lines = message.get("lines")
             if isinstance(direction, str) and isinstance(lines, int):
