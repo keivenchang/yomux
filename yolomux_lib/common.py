@@ -176,6 +176,7 @@ class PaneInfo:
     window_active: bool
     title: str
     pid: int
+    process_label: str | None = None
 
 
 @dataclass(frozen=True)

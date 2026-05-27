@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shlex
+from dataclasses import replace
+
 from .common import *
 from .workdir import session_workdir
 
@@ -95,6 +98,41 @@ def command_basename(command: str) -> str:
         return ""
     first = command.strip().split(None, 1)[0]
     return Path(first).name.lower()
+
+
+def command_tokens(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def process_display_label(command: str) -> str:
+    tokens = command_tokens(command)
+    if not tokens:
+        return ""
+    base = Path(tokens[0]).name.lstrip("-")
+    base_lower = base.lower()
+    if base_lower.startswith("python") and len(tokens) > 1 and not tokens[1].startswith("-"):
+        return Path(tokens[1]).name
+    if base_lower == "node" and len(tokens) > 1 and not tokens[1].startswith("-"):
+        return Path(tokens[1]).name
+    return base
+
+
+def pane_process_label(pane: PaneInfo, candidates: list[ProcessInfo]) -> str:
+    for process in candidates:
+        label = process_display_label(process.command)
+        if label in AGENT_COMMANDS or (label.startswith("mock_") and label.endswith(".py")):
+            return label
+    for process in candidates:
+        kind = classify_agent(process.command)
+        if kind:
+            return kind
+    for process in candidates:
+        if process.pid == pane.pid:
+            return process_display_label(process.command) or pane.command
+    return pane.command
 
 
 def classify_agent(command: str) -> str | None:
@@ -262,15 +300,18 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
 
     result: dict[str, SessionInfo] = {}
     for session in sessions:
-        session_panes = sorted(by_session.get(session, []), key=pane_sort_key)
+        raw_session_panes = sorted(by_session.get(session, []), key=pane_sort_key)
+        session_panes: list[PaneInfo] = []
         agents: list[AgentInfo] = []
         seen_pids: set[int] = set()
-        for pane in session_panes:
+        for raw_pane in raw_session_panes:
             candidates = []
-            root_process = processes.get(pane.pid)
+            root_process = processes.get(raw_pane.pid)
             if root_process:
                 candidates.append(root_process)
-            candidates.extend(descendants(pane.pid, children))
+            candidates.extend(descendants(raw_pane.pid, children))
+            pane = replace(raw_pane, process_label=pane_process_label(raw_pane, candidates))
+            session_panes.append(pane)
             for process in candidates:
                 kind = classify_agent(process.command)
                 if not kind or process.pid in seen_pids:

@@ -9,7 +9,7 @@
   --muted: #9aa5b1;
   --line: #303948;
   --good: #52d273;
-  --active-ring: rgba(245, 197, 66, 0.96);
+  --active-ring: rgba(255, 255, 255, 0.96);
   --GPU-green: #76b900;
   --GPU-green-dark: #3f6f00;
   --auto-text: #071000;
@@ -25,16 +25,15 @@
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
   --inactive-window-overlay: rgba(178, 190, 210, 0.20);
-  --inactive-tab-green: #2f6635;
-  --inactive-tab-green-hover: #3a7a42;
+  --inactive-tab-green: #285a2f;
+  --inactive-tab-green-hover: #336d3a;
   --inactive-tab-green-border: #9bd480;
   --popover-show-delay: 1600ms;
   --popover-hide-delay: 300ms;
-  --topbar-popover-top: 42px;
-  --topbar-popover-left: 8px;
   --ui-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --tab-font: var(--ui-font);
+  --control-font: "Arial Narrow", "Aptos Narrow", "Liberation Sans Narrow", "Roboto Condensed", var(--ui-font);
   --tab-label-size: 12px;
   --tab-line-height: 1.1;
   --red-reminder-duration: 2s;
@@ -145,7 +144,7 @@ body {
   width: 100%;
   min-width: 0;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: center;
   flex-wrap: nowrap;
   gap: 4px;
@@ -160,7 +159,8 @@ body {
 }
 .session-buttons.drag-over {
   outline: 1px dashed #f5c542;
-  outline-offset: 3px;
+  outline-offset: 2px;
+  border-radius: 7px;
 }
 .notify-toggle.active {
   color: #082014;
@@ -169,36 +169,22 @@ body {
 }
 .session-button-wrap {
   position: relative;
-  flex: 1 1 0;
+  flex: 0 1 auto;
+  width: fit-content;
   min-width: 96px;
-  max-width: none;
-}
-.session-button-wrap.info {
-  flex: 1 1 0;
-  max-width: none;
+  max-width: min(360px, 42vw);
 }
 .session-button-wrap.add-session {
   flex: 0 0 86px;
   min-width: 76px;
   max-width: 96px;
 }
-.session-button-wrap.popover-open::after,
-.session-button-wrap:focus-within::after {
-  content: "";
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  height: 12px;
-  z-index: 79;
-}
 .session-button {
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  height: 29px;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  height: 28px;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 3px 7px;
@@ -208,41 +194,27 @@ body {
   font-family: var(--tab-font);
   font-size: var(--tab-label-size);
   overflow: hidden;
-  border-radius: 8px 8px 0 0;
+  border-radius: 7px;
   background: var(--inactive-tab-green);
   border: 1px solid var(--inactive-tab-green-border);
-  border-bottom-color: #45703c;
-}
-.session-button-wrap:not(.add-session) .session-button.shown:not(.active) {
-  background: linear-gradient(var(--inactive-gray), var(--inactive-gray)), #111722;
-}
-.session-button-wrap:not(.add-session) .session-button.shown:not(.active):hover {
-  background: linear-gradient(var(--inactive-gray-hover), var(--inactive-gray-hover)), #111722;
-}
-.session-button-wrap:not(.add-session) .session-button:not(.shown):not(.active):hover {
-  background: var(--inactive-tab-green-hover);
-  border-color: #578948;
+  border-bottom-color: var(--inactive-tab-green-border);
 }
 .session-button:not(.active):not(.needs-attention) {
   border-color: var(--inactive-tab-green-border);
-  border-bottom-color: #45703c;
+  border-bottom-color: var(--inactive-tab-green-border);
   box-shadow: none;
 }
-.session-button.info {
-  min-width: 0;
-  grid-template-columns: auto minmax(0, 1fr);
-}
 .session-button:hover {
-  background: #1a2230;
+  background: var(--inactive-tab-green-hover);
   border-color: rgba(255, 255, 255, 0.92);
 }
 .session-button.add-session {
-  display: flex;
   align-items: center;
   justify-content: center;
-  grid-template-columns: none;
   gap: 5px;
   color: #dfe6ef;
+  background: #111820;
+  border-color: #456038;
   font-size: var(--tab-label-size);
   font-weight: 700;
 }
@@ -404,6 +376,15 @@ body {
   border-color: #b98c24;
   box-shadow: inset 0 -2px 0 rgba(245, 197, 66, 0.45);
 }
+.session-buttons .session-button.needs-attention:not(.active) {
+  border-color: rgba(155, 212, 128, 0.72);
+  box-shadow: none;
+}
+.session-buttons .session-button.needs-input,
+.session-buttons .session-button.needs-exec,
+.session-buttons .session-button.needs-blocked {
+  animation: none;
+}
 .session-button.needs-input,
 .session-button.needs-exec,
 .session-button.needs-blocked {
@@ -460,11 +441,6 @@ body {
     animation: none;
   }
 }
-.session-button.info {
-  grid-template-columns: auto minmax(0, 1fr);
-  justify-items: start;
-  font-weight: 700;
-}
 .session-yolo-marker {
   flex: 0 0 auto;
   min-width: 26px;
@@ -491,9 +467,9 @@ body {
   font-size: 15px;
 }
 .session-yolo-marker.inactive {
-  color: #1f1700;
-  background: #f5c542;
-  border-color: #ffe27a;
+  color: #d7dde5;
+  background: #384356;
+  border-color: #5d6878;
 }
 .ci-indicator {
   flex: 0 0 auto;
@@ -563,28 +539,6 @@ body {
     transform 90ms ease var(--popover-hide-delay),
     visibility 0s linear calc(var(--popover-hide-delay) + 90ms);
 }
-.session-button-wrap[data-session] > .session-popover {
-  position: fixed;
-  top: var(--topbar-popover-top);
-  left: var(--topbar-popover-left);
-  right: auto;
-  width: min(640px, calc(100vw - 16px));
-  max-height: min(65vh, 620px);
-}
-.session-button-wrap.popover-open .session-popover {
-  visibility: visible;
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
-  transition-delay: 0s;
-}
-.session-button-wrap.popover-hide-now .session-popover {
-  visibility: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-2px);
-  transition: none;
-}
 .session-popover::before {
   content: "";
   position: absolute;
@@ -596,9 +550,6 @@ body {
   background: rgba(8, 31, 8, 0.98);
   border-left: 1px solid rgba(95, 150, 42, 0.64);
   border-top: 1px solid rgba(95, 150, 42, 0.64);
-}
-.session-button-wrap[data-session] > .session-popover::before {
-  display: none;
 }
 .popover-head {
   display: flex;
@@ -645,6 +596,24 @@ body {
 }
 .session-popover .meta-sep {
   color: #87aa76;
+}
+.session-button-wrap > .session-popover {
+  position: fixed;
+  top: var(--top-button-popover-top, 42px);
+  left: var(--top-button-popover-left, 8px);
+  width: min(640px, calc(100vw - 16px));
+  max-height: min(65vh, 620px);
+  white-space: normal;
+}
+.session-button-wrap.popover-open > .session-popover {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition-delay: 0s;
+}
+.session-button-wrap > .session-popover::before {
+  display: none;
 }
 .state-legend {
   display: flex;
@@ -1258,35 +1227,57 @@ body.layout-resizing {
 }
 .session-button.active .session-yolo-marker.inactive,
 .window-session-tab.active .session-yolo-marker.inactive {
-  color: #1f1700;
-  background: #f5c542;
-  border-color: #ffe27a;
+  color: #d7dde5;
+  background: #384356;
+  border-color: #5d6878;
 }
 .window-session-tab.dragging {
   opacity: 0.55;
 }
 .window-tab-close {
-  flex: 0 0 auto;
-  width: 18px;
-  min-width: 18px;
-  height: 18px;
+  position: relative;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   margin-left: 2px;
   padding: 0;
   color: currentColor;
+  opacity: 0.48;
   background: transparent;
   border: 0;
   border-radius: 50%;
-  opacity: 0.76;
-  font: 800 12px/18px var(--tab-font);
-  text-align: center;
+  cursor: pointer;
+}
+.window-tab-close::before,
+.window-tab-close::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.window-tab-close::before {
+  transform: rotate(45deg);
+}
+.window-tab-close::after {
+  transform: rotate(-45deg);
 }
 .window-tab-close:hover {
-  opacity: 1;
-  background: rgba(255, 255, 255, 0.18);
-  border-color: transparent;
+  opacity: 0.92;
+  background: rgba(255, 255, 255, 0.16);
+}
+.window-session-tab.active .window-tab-close {
+  color: #081205;
+  opacity: 0.52;
+  background: transparent;
 }
 .window-session-tab.active .window-tab-close:hover {
-  background: rgba(8, 18, 5, 0.15);
+  opacity: 0.92;
+  background: rgba(8, 18, 5, 0.16);
 }
 .window-session-tab .session-button-prefix {
   flex: 0 0 auto;
@@ -1364,7 +1355,7 @@ body.layout-resizing {
   justify-self: end;
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   min-width: max-content;
   max-width: none;
   margin-left: auto;
@@ -1380,15 +1371,36 @@ body.layout-resizing {
 }
 .tab {
   border-radius: 5px;
-  padding: 2px 7px;
+  min-width: 0;
+  height: 22px;
+  padding: 1px 5px;
   color: var(--muted);
   background: transparent;
   white-space: nowrap;
+  font-family: var(--control-font);
+  font-size: 10px;
+  font-stretch: condensed;
+  font-weight: 700;
+  letter-spacing: 0;
   line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .window-step {
-  min-width: 24px;
-  padding: 2px 6px;
+  flex: 0 0 22px;
+  min-width: 22px;
+  padding: 1px 0;
+}
+.terminal-tab {
+  max-width: 68px;
+  min-width: 34px;
+}
+.tabs .tab:not(.window-step):not(.terminal-tab) {
+  min-width: 27px;
+  padding-inline: 4px;
+}
+.tabs .panel-detail-toggle {
+  min-width: 33px;
 }
 .tab.active {
   color: var(--text);

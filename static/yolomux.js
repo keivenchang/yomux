@@ -5,7 +5,6 @@ const homePath = bootstrap.homePath;
 const serverHostname = bootstrap.serverHostname;
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
-const topbar = document.querySelector('.topbar');
 const sessionButtons = document.getElementById('sessionButtons');
 const statusEl = document.getElementById('status');
 const attentionAlerts = document.getElementById('attentionAlerts');
@@ -66,12 +65,7 @@ let focusedTerminal = null;
 let focusedPanelItem = null;
 let dragSession = null;
 let dragSourceSlot = null;
-let openPopoverSession = null;
-let pendingPopoverSession = null;
-let popoverShowTimer = null;
-let popoverHideTimer = null;
 const panelPopoverHideTimers = new WeakMap();
-let sessionButtonsRenderDeferred = false;
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
 let layoutResizeState = null;
@@ -381,12 +375,13 @@ function layoutFromSessionList(values) {
     index += 1;
   }
   next[layoutTreeKey] = legacyLayoutTree(next);
-  return next;
+  return compactLayoutSlots(next);
 }
 
 function layoutFromParam(raw, tabsRaw = '') {
   const text = String(raw || '').trim();
   if (!text) return null;
+  if (text.toLowerCase() === 'empty') return emptyLayoutSlots();
   if (text.startsWith(layoutTreeParamPrefix)) return treeLayoutFromParam(text.slice(layoutTreeParamPrefix.length));
   if (compactLayoutParamLooksLikeTree(text)) return compactTreeLayoutFromParam(text, tabsRaw);
   const sides = text.split(',');
@@ -508,7 +503,9 @@ function layoutSlotName(value) {
 function layoutParamValue(slots) {
   const tree = slots?.[layoutTreeKey];
   if (tree) return compactLayoutTreeParam(tree);
-  return layoutSlotKeys(slots).map(side => windowStack(side, slots).map(readableItemParam).join('+')).join(',');
+  const keys = layoutSlotKeys(slots);
+  if (!keys.length) return 'empty';
+  return keys.map(side => windowStack(side, slots).map(readableItemParam).join('+')).join(',');
 }
 
 function compactLayoutTreeParam(node) {
@@ -587,13 +584,41 @@ function initialLayoutSlots() {
     if (selected.length >= baseWindowKeys.length) break;
   }
   if (selected.length) return layoutFromSessionList(selected);
-  if (!visibleSessions.length) return emptyLayoutSlots();
   return defaultLayoutSlots();
 }
 
 function defaultLayoutSlots() {
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  return layoutFromSessionList(sorted.slice(0, baseWindowKeys.length));
+  const next = emptyLayoutSlots();
+  if (!sorted.length) {
+    next.left = windowStateWithTabs([infoItemId], infoItemId);
+  } else if (sorted.length === 1) {
+    next.left = windowStateWithTabs([sorted[0], infoItemId], sorted[0]);
+  } else {
+    const leftTabs = sorted.filter((_, index) => index % 2 === 0);
+    const rightTabs = sorted.filter((_, index) => index % 2 === 1);
+    next.left = windowStateWithTabs([...leftTabs, infoItemId], leftTabs[0]);
+    next.right = windowStateWithTabs(rightTabs, rightTabs[0]);
+  }
+  next[layoutTreeKey] = legacyLayoutTree(next);
+  return compactLayoutSlots(next);
+}
+
+function layoutWithItems(value, items, preferredSlot = null) {
+  const next = normalizeLayoutSlots(value);
+  const present = new Set(windowedItems(next));
+  const missing = items.filter(item => isLayoutItem(item) && !present.has(item));
+  if (!missing.length) return next;
+  let slot = preferredSlot && layoutSlotKeys(next).includes(preferredSlot) ? preferredSlot : layoutSlotKeys(next)[0];
+  if (!slot) {
+    slot = 'left';
+    next[layoutTreeKey] = leafNode(slot);
+    next[slot] = emptyWindowState();
+  }
+  const tabs = [...windowStack(slot, next), ...missing];
+  const active = activeItemForSide(slot, next) || tabs.find(isTmuxSession) || tabs[0] || null;
+  next[slot] = windowStateWithTabs(tabs, active);
+  return compactLayoutSlots(next);
 }
 
 function windowStack(side, slots = layoutSlots) {
@@ -1146,6 +1171,7 @@ function maybeNotifyState(session, state, options = {}) {
 
 function updateSessionList(nextSessions) {
   if (!Array.isArray(nextSessions)) return false;
+  const previousItems = new Set(layoutItems);
   const next = [];
   for (const session of nextSessions) {
     if (typeof session === 'string' && session && !next.includes(session)) next.push(session);
@@ -1155,7 +1181,8 @@ function updateSessionList(nextSessions) {
   sessions = next;
   visibleSessions = sessions.slice(0, maxSessionTabs);
   layoutItems = [infoItemId, ...visibleSessions];
-  layoutSlots = normalizeLayoutSlots(layoutSlots);
+  const newItems = layoutItems.filter(item => !previousItems.has(item));
+  layoutSlots = newItems.length ? layoutWithItems(layoutSlots, newItems) : normalizeLayoutSlots(layoutSlots);
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
@@ -1163,7 +1190,6 @@ function updateSessionList(nextSessions) {
 }
 
 function applyLayoutSlots(nextSlots, options = {}) {
-  closeOpenSessionPopover({renderDeferred: false});
   const previousActive = activeSessions.slice();
   layoutSlots = normalizeLayoutSlots(nextSlots);
   activeSessions = sessionsFromLayout();
@@ -1190,8 +1216,11 @@ function updateActiveSessionParam() {
   params.delete('layout');
   params.delete('tabs');
   const queryParts = [];
-  if (activeSessions.length) {
-    queryParts.push(`sessions=${activeSessions.map(readableItemParam).join(',')}`);
+  const minimizedItems = sessionTrayItems();
+  if (activeSessions.length || minimizedItems.length) {
+    if (activeSessions.length) {
+      queryParts.push(`sessions=${activeSessions.map(readableItemParam).join(',')}`);
+    }
     queryParts.push(`layout=${layoutParamValue(layoutSlots)}`);
     const tabs = layoutTabsParamValue(layoutSlots);
     if (tabs) queryParts.push(`tabs=${tabs}`);
@@ -1203,10 +1232,6 @@ function updateActiveSessionParam() {
 }
 
 function renderSessionButtons() {
-  if (openPopoverSession) {
-    sessionButtonsRenderDeferred = true;
-    return;
-  }
   sessionButtons.innerHTML = '';
   sessionButtons.ondragover = event => {
     const payload = dragPayload(event);
@@ -1226,81 +1251,65 @@ function renderSessionButtons() {
     event.stopPropagation();
     removeSessionFromLayout(payload.session);
   };
-  for (const session of sessionTrayItems()) {
-    const isInfo = isInfoItem(session);
-    const active = topTabIsActive(session);
-    const shown = itemInLayout(session);
-    const auto = autoApproveStates.get(session)?.enabled === true;
-    const info = transcriptMeta.sessions?.[session];
-    const state = isInfo ? null : sessionState(session, info);
-    const wrapper = document.createElement('div');
-    wrapper.className = `session-button-wrap ${isInfo ? 'info' : ''}`;
-    wrapper.dataset.session = session;
-    const button = document.createElement('button');
-    button.className = `session-button ${isInfo ? 'info' : ''} ${active ? 'active' : ''} ${shown ? 'shown' : ''} ${auto ? 'auto' : ''}`;
-    applySessionStateClasses(button, state);
-    button.draggable = true;
-    button.innerHTML = isInfo ? infoButtonHtml() : sessionButtonHtml(session, info, state, auto);
-    button.removeAttribute('title');
-    button.addEventListener('click', event => {
-      const autoTarget = event.target.closest('[data-auto-session]');
-      if (!autoTarget) return;
-      event.preventDefault();
-      event.stopPropagation();
-      toggleAutoApprove(autoTarget.dataset.autoSession);
-    });
-    bindTabActivation(button, () => {
-      selectSession(session);
-    }, {
-      ignore: event => Boolean(event.target.closest('[data-auto-session]')),
-    });
-    button.addEventListener('dragstart', event => startSessionDrag(event, session, null));
-    button.addEventListener('dragend', endSessionDrag);
-    wrapper.appendChild(button);
-    if (!isInfo) {
-      const agentKind = sessionAgentKind(session);
-      wrapper.insertAdjacentHTML('beforeend', sessionPopoverHtml(session, info, agentKind, auto, state));
-      bindSessionPopover(wrapper);
-    } else {
-      wrapper.addEventListener('pointerenter', () => closeOpenSessionPopover({renderDeferred: false}));
-    }
-    sessionButtons.appendChild(wrapper);
+  sessionButtons.classList.remove('drag-over');
+  for (const item of sessionTrayItems()) {
+    sessionButtons.appendChild(createTopSessionButton(item));
   }
   if (visibleSessions.length < maxSessionTabs) {
     for (const agent of ['claude', 'codex', 'term']) {
       if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
     }
   }
-  updateTopbarPopoverGeometry();
 }
 
 function updateSessionButtonStates() {
   for (const wrapper of sessionButtons.querySelectorAll('.session-button-wrap[data-session]')) {
-    const session = wrapper.dataset.session;
+    const item = wrapper.dataset.session;
     const button = wrapper.querySelector('.session-button');
     if (!button) continue;
-    const isInfo = isInfoItem(session);
-    const info = transcriptMeta.sessions?.[session];
-    const state = isInfo ? null : sessionState(session, info);
-    const auto = autoApproveStates.get(session)?.enabled === true;
-    button.classList.toggle('active', topTabIsActive(session));
-    button.classList.toggle('shown', itemInLayout(session));
+    const isInfo = isInfoItem(item);
+    const info = transcriptMeta.sessions?.[item];
+    const state = isInfo ? null : sessionState(item, info);
+    const auto = autoApproveStates.get(item)?.enabled === true;
     button.classList.toggle('auto', auto);
     applySessionStateClasses(button, state);
   }
 }
 
-function topTabIsActive(session) {
-  if (!activeSessions.includes(session)) return false;
-  if (focusedPanelItem || focusedTerminal) return session === focusedPanelItem || session === focusedTerminal;
-  return activeSessions.length === 1 && activeSessions[0] === session;
-}
-
-function applySessionStateClasses(node, state) {
-  node.classList.toggle('needs-attention', state?.attention === true);
-  node.classList.toggle('needs-input', state?.key === 'needs-input');
-  node.classList.toggle('needs-exec', state?.key === 'needs-approval');
-  node.classList.toggle('needs-blocked', state?.key === 'blocked');
+function createTopSessionButton(item) {
+  const isInfo = isInfoItem(item);
+  const info = transcriptMeta.sessions?.[item];
+  const auto = autoApproveStates.get(item)?.enabled === true;
+  const state = isInfo ? null : sessionState(item, info);
+  const agentKind = isInfo ? '' : sessionAgentKind(item);
+  const wrapper = document.createElement('div');
+  wrapper.className = `session-button-wrap ${isInfo ? 'info' : ''}`;
+  wrapper.dataset.session = item;
+  const button = document.createElement('button');
+  button.className = `session-button ${isInfo ? 'info' : ''} ${auto ? 'auto' : ''}`;
+  button.type = 'button';
+  button.draggable = true;
+  applySessionStateClasses(button, state);
+  button.innerHTML = isInfo ? infoButtonHtml() : sessionButtonHtml(item, info, state, auto);
+  button.removeAttribute('title');
+  button.addEventListener('click', async event => {
+    const autoTarget = event.target.closest('[data-auto-session]');
+    if (!autoTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+    await toggleAutoApprove(autoTarget.dataset.autoSession);
+  });
+  bindTabActivation(button, () => selectSession(item), {
+    ignore: event => Boolean(event.target.closest('[data-auto-session]')),
+  });
+  button.addEventListener('dragstart', event => startSessionDrag(event, item, null));
+  button.addEventListener('dragend', endSessionDrag);
+  wrapper.appendChild(button);
+  if (!isInfo) {
+    wrapper.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
+    bindTopSessionPopover(wrapper);
+  }
+  return wrapper;
 }
 
 function createAddSessionButton(agent) {
@@ -1347,99 +1356,6 @@ function bindPopoverHover(anchor, popover, handlers) {
     link.addEventListener('pointerenter', keepOpen);
     link.addEventListener('click', stopPopoverEvent);
   });
-}
-
-function bindSessionPopover(wrapper) {
-  const session = wrapper.dataset.session;
-  bindPopoverHover(wrapper, wrapper.querySelector('.session-popover'), {
-    queueOpen: () => queueSessionPopover(session),
-    keepOpen: () => keepSessionPopoverOpen(session),
-    closeSoon: () => closeSessionPopoverSoon(session),
-  });
-}
-
-function updateTopbarPopoverGeometry(session = '') {
-  const bottom = topbar?.getBoundingClientRect?.().bottom;
-  if (Number.isFinite(bottom)) {
-    document.documentElement.style.setProperty('--topbar-popover-top', `${Math.ceil(bottom + 4)}px`);
-  }
-  const wrapper = session ? sessionButtons.querySelector(`.session-button-wrap[data-session="${cssEscape(session)}"]`) : null;
-  const rect = wrapper?.getBoundingClientRect?.();
-  if (!rect) return;
-  const width = Math.min(640, Math.max(320, window.innerWidth - 16));
-  const maxLeft = Math.max(8, window.innerWidth - width - 8);
-  const left = Math.min(Math.max(8, Math.floor(rect.left)), maxLeft);
-  document.documentElement.style.setProperty('--topbar-popover-left', `${left}px`);
-}
-
-function queueSessionPopover(session) {
-  if (!session) return;
-  popoverHideTimer = clearTimer(popoverHideTimer);
-  if (openPopoverSession === session) return;
-  popoverShowTimer = clearTimer(popoverShowTimer);
-  pendingPopoverSession = session;
-  updateTopbarPopoverGeometry(session);
-  popoverShowTimer = setTimeout(() => {
-    popoverShowTimer = null;
-    if (pendingPopoverSession === session) openSessionPopoverNow(session);
-  }, popoverShowDelayMs);
-}
-
-function keepSessionPopoverOpen(session) {
-  if (!session) return;
-  popoverShowTimer = clearTimer(popoverShowTimer);
-  pendingPopoverSession = session;
-  popoverHideTimer = clearTimer(popoverHideTimer);
-  if (openPopoverSession !== session) openSessionPopoverNow(session);
-}
-
-function openSessionPopoverNow(session) {
-  if (!session) return;
-  popoverHideTimer = clearTimer(popoverHideTimer);
-  pendingPopoverSession = session;
-  updateTopbarPopoverGeometry(session);
-  for (const node of sessionButtons.querySelectorAll('.session-button-wrap')) {
-    const isTarget = node.dataset.session === session;
-    node.classList.toggle('popover-open', isTarget);
-    if (isTarget) {
-      node.classList.remove('popover-hide-now');
-    } else if (node.classList.contains('popover-open') || node.querySelector('.session-popover')) {
-      node.classList.add('popover-hide-now');
-      window.setTimeout(() => node.classList.remove('popover-hide-now'), 120);
-    }
-  }
-  openPopoverSession = session;
-}
-
-function closeSessionPopoverSoon(session) {
-  if (!session) return;
-  if (pendingPopoverSession === session) {
-    popoverShowTimer = clearTimer(popoverShowTimer);
-    pendingPopoverSession = null;
-  }
-  if (openPopoverSession !== session) return;
-  popoverHideTimer = clearTimer(popoverHideTimer);
-  popoverHideTimer = setTimeout(() => closeOpenSessionPopover(), popoverHideDelayMs);
-}
-
-function closeOpenSessionPopover(options = {}) {
-  popoverShowTimer = clearTimer(popoverShowTimer);
-  pendingPopoverSession = null;
-  popoverHideTimer = clearTimer(popoverHideTimer);
-  const session = openPopoverSession;
-  openPopoverSession = null;
-  for (const node of sessionButtons.querySelectorAll('.session-button-wrap.popover-open')) {
-    node.classList.remove('popover-open');
-  }
-  if (options.renderDeferred === false) return;
-  if (session || sessionButtonsRenderDeferred) {
-    const shouldRender = sessionButtonsRenderDeferred;
-    sessionButtonsRenderDeferred = false;
-    if (shouldRender) {
-      renderSessionButtons();
-      renderAutoApproveButtons();
-    }
-  }
 }
 
 function cssEscape(value) {
@@ -1534,17 +1450,11 @@ function pullRequestCompactBadgesHtml(pr) {
   return [prHtml, statusHtml, ciHtml].filter(Boolean).join('');
 }
 
-function sessionButtonHtml(session, info, state = sessionState(session, info), auto = false) {
-  const stateHtml = state ? sessionStateHtml(state) : '';
-  const pr = info?.project?.pull_request;
-  const desc = sessionTabDescription(session, info);
-  const detailHtml = desc ? `<span class="session-button-dir">${esc(desc)}</span>` : '';
-  return `<span class="session-button-prefix">${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true})}${sessionNumberNameHtml(session)}</span>
-    <span class="session-button-text">${pullRequestCompactBadgesHtml(pr)}${stateHtml}${detailHtml}</span>`;
-}
-
-function infoButtonHtml() {
-  return '<span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="session-button-text"><span class="session-button-dir">Branches</span></span>';
+function applySessionStateClasses(node, state) {
+  node.classList.toggle('needs-attention', state?.attention === true);
+  node.classList.toggle('needs-input', state?.key === 'needs-input');
+  node.classList.toggle('needs-exec', state?.key === 'needs-approval');
+  node.classList.toggle('needs-blocked', state?.key === 'blocked');
 }
 
 function panelHeaderStateHtml(state) {
@@ -1583,6 +1493,18 @@ function sessionTabDescription(session, info) {
     if (title) return shortText(title, 72);
   }
   return sessionWorkDescription(session, info, 72);
+}
+
+function infoButtonHtml() {
+  return '<span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="session-button-text"><span class="session-button-dir">Branches</span></span>';
+}
+
+function sessionButtonHtml(session, info, state, auto) {
+  const pr = info?.project?.pull_request;
+  const desc = sessionTabDescription(session, info);
+  const detailHtml = desc ? `<span class="session-button-dir">${esc(desc)}</span>` : '';
+  return `${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${pullRequestCompactBadgesHtml(pr)}${detailHtml}</span>`;
 }
 
 function projectDirName(session, info) {
@@ -1788,11 +1710,6 @@ function endSessionDrag(event) {
   clearDropPreview();
 }
 
-function removeSessionFromLayout(session) {
-  const next = layoutWithoutItem(session);
-  applyLayoutSlots(next, {message: `${itemLabel(session)} removed`});
-}
-
 function layoutWithoutItem(item) {
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
@@ -1801,6 +1718,13 @@ function layoutWithoutItem(item) {
     next[side] = windowStateWithTabs(windowStack(side).filter(value => value !== item), active === item ? null : active);
   }
   return next;
+}
+
+function removeSessionFromLayout(item) {
+  if (!itemInLayout(item)) return;
+  applyLayoutSlots(layoutWithoutItem(item), {
+    message: `${itemLabel(item)} moved to top strip`,
+  });
 }
 
 function layoutWithoutSlot(slot) {
@@ -1895,7 +1819,6 @@ function activateWindowSession(side, session) {
 
 async function selectSession(session) {
   if (activeSessions.includes(session)) {
-    closeOpenSessionPopover({renderDeferred: false});
     focusPanel(session);
     return;
   }
@@ -2624,7 +2547,7 @@ function pruneSmallLayoutSlots() {
   if (!candidate) return;
   const moved = windowStack(candidate.slot);
   applyLayoutSlots(layoutWithoutSlot(candidate.slot), {
-    message: moved.length ? `${moved.map(itemLabel).join(', ')} moved to top bar: not enough room` : '',
+    message: moved.length ? `${moved.map(itemLabel).join(', ')} moved to top strip: not enough room` : '',
   });
 }
 
@@ -2694,25 +2617,38 @@ function createWindowSessionTab(side, item) {
   tab.className = `window-session-tab ${active ? 'active' : ''} ${state?.attention ? 'needs-attention' : ''}`;
   tab.draggable = true;
   tab.dataset.windowSessionTab = item;
-  tab.innerHTML = `${isInfo ? windowInfoTabHtml() : windowSessionTabHtml(item, info, state, auto)}${windowTabCloseHtml(item)}`;
+  tab.innerHTML = isInfo ? windowInfoTabHtml() : windowSessionTabHtml(item, info, state, auto);
+  tab.insertAdjacentHTML('beforeend', `<button type="button" class="window-tab-close" data-window-tab-close title="move ${esc(itemLabel(item))} to top strip" aria-label="Move ${esc(itemLabel(item))} to top strip"></button>`);
   if (!isInfo) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindWindowSessionPopover(tab, item);
   }
   tab.setAttribute('aria-label', isInfo ? 'Branches' : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
-  tab.addEventListener('click', event => {
-    const removeTarget = event.target.closest('[data-tab-remove]');
-    if (removeTarget) {
+  tab.addEventListener('pointerdown', event => {
+    if (event.target.closest('[data-window-tab-close]')) {
+      event.stopPropagation();
+      return;
+    }
+    const autoTarget = event.target.closest('[data-auto-session]');
+    if (!autoTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (item === activeItemForSide(side)) setFocusedPanelItem(item);
+  });
+  tab.addEventListener('click', async event => {
+    if (event.target.closest('[data-window-tab-close]')) {
       event.preventDefault();
       event.stopPropagation();
-      removeSessionFromLayout(removeTarget.dataset.tabRemove);
+      removeSessionFromLayout(item);
       return;
     }
     const autoTarget = event.target.closest('[data-auto-session]');
     if (autoTarget) {
       event.preventDefault();
       event.stopPropagation();
-      toggleAutoApprove(autoTarget.dataset.autoSession);
+      const shouldRefocus = item === activeItemForSide(side);
+      await toggleAutoApprove(autoTarget.dataset.autoSession);
+      if (shouldRefocus) focusPanel(item);
       return;
     }
   });
@@ -2723,7 +2659,7 @@ function createWindowSessionTab(side, item) {
   });
   bindTabActivation(tab, () => activateWindowSession(side, item), {
     stopPropagation: true,
-    ignore: event => Boolean(event.target.closest('[data-auto-session], [data-tab-remove]')),
+    ignore: event => Boolean(event.target.closest('[data-auto-session], [data-window-tab-close]')),
   });
   tab.addEventListener('dragstart', event => {
     event.stopPropagation();
@@ -2748,7 +2684,7 @@ function bindWindowSessionPopover(tab, session) {
     clearShowTimer();
     clearHideTimer();
     positionWindowSessionPopover(tab);
-    for (const other of document.querySelectorAll('.window-session-tab.popover-open')) {
+    for (const other of document.querySelectorAll('.session-button-wrap.popover-open, .window-session-tab.popover-open')) {
       if (other !== tab) other.classList.remove('popover-open');
     }
     tab.classList.add('popover-open');
@@ -2774,6 +2710,44 @@ function bindWindowSessionPopover(tab, session) {
   bindPopoverHover(tab, popover, {queueOpen, keepOpen, closeSoon});
 }
 
+function bindTopSessionPopover(wrapper) {
+  let showTimer = null;
+  let hideTimer = null;
+  const popover = wrapper.querySelector(':scope > .session-popover');
+  if (!popover) return;
+  const clearShowTimer = () => {
+    showTimer = clearTimer(showTimer);
+  };
+  const clearHideTimer = () => {
+    hideTimer = clearTimer(hideTimer);
+  };
+  const openNow = () => {
+    clearShowTimer();
+    clearHideTimer();
+    positionTopSessionPopover(wrapper);
+    for (const other of document.querySelectorAll('.session-button-wrap.popover-open, .window-session-tab.popover-open')) {
+      if (other !== wrapper) other.classList.remove('popover-open');
+    }
+    wrapper.classList.add('popover-open');
+  };
+  const queueOpen = () => {
+    clearHideTimer();
+    if (wrapper.classList.contains('popover-open')) return;
+    clearShowTimer();
+    positionTopSessionPopover(wrapper);
+    showTimer = setTimeout(openNow, popoverShowDelayMs);
+  };
+  const closeSoon = () => {
+    clearShowTimer();
+    clearHideTimer();
+    hideTimer = setTimeout(() => {
+      wrapper.classList.remove('popover-open');
+      hideTimer = null;
+    }, popoverHideDelayMs);
+  };
+  bindPopoverHover(wrapper, popover, {queueOpen, keepOpen: openNow, closeSoon});
+}
+
 function positionWindowSessionPopover(tab) {
   const rect = tab.getBoundingClientRect();
   const width = Math.min(640, Math.max(320, window.innerWidth - 16));
@@ -2783,9 +2757,13 @@ function positionWindowSessionPopover(tab) {
   document.documentElement.style.setProperty('--window-tab-popover-left', `${left}px`);
 }
 
-function windowTabCloseHtml(item) {
-  const label = itemLabel(item);
-  return `<button type="button" class="window-tab-close" data-tab-remove="${esc(item)}" draggable="false" title="minimize ${esc(label)}" aria-label="Minimize ${esc(label)}">x</button>`;
+function positionTopSessionPopover(wrapper) {
+  const rect = wrapper.getBoundingClientRect();
+  const width = Math.min(640, Math.max(320, window.innerWidth - 16));
+  const maxLeft = Math.max(8, window.innerWidth - width - 8);
+  const left = Math.min(Math.max(8, Math.floor(rect.left)), maxLeft);
+  document.documentElement.style.setProperty('--top-button-popover-top', `${Math.ceil(rect.bottom + 4)}px`);
+  document.documentElement.style.setProperty('--top-button-popover-left', `${left}px`);
 }
 
 function windowInfoTabHtml() {
@@ -2897,6 +2875,106 @@ function setPanelDetailsCollapsed(panel, collapsed) {
   }
 }
 
+function terminalTabLabel(session, info) {
+  if (isInfoItem(session)) return 'Term';
+  const label = terminalProcessLabel(info);
+  return shortText(label || 'Term', 16);
+}
+
+function terminalTabTitle(session, info) {
+  if (isInfoItem(session)) return 'unavailable for Branches';
+  return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
+}
+
+function terminalProcessLabel(info) {
+  const pane = terminalDisplayPane(info);
+  if (pane?.process_label) return pane.process_label;
+  const agent = agentForPane(info, pane) || info?.agents?.[0];
+  if (agent?.command) return processLabelFromCommand(agent.command);
+  if (agent?.kind) return agent.kind;
+  if (pane?.command) return pane.command;
+  return 'Term';
+}
+
+function terminalDisplayPane(info) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  return panes.find(pane => pane.window_active && pane.active)
+    || panes.find(pane => pane.window_active)
+    || info?.selected_pane
+    || panes[0]
+    || null;
+}
+
+function tmuxWindowNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function previewTmuxWindowInfo(info, key) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  if (panes.length < 2) return null;
+  const windows = [];
+  const seen = new Set();
+  for (const pane of panes) {
+    const index = tmuxWindowNumber(pane.window);
+    if (index === null || seen.has(index)) continue;
+    seen.add(index);
+    windows.push({index, pane});
+  }
+  windows.sort((left, right) => left.index - right.index);
+  if (windows.length < 2) return null;
+  const activePane = terminalDisplayPane(info);
+  const activeIndex = tmuxWindowNumber(activePane?.window);
+  const current = Math.max(0, windows.findIndex(item => item.index === activeIndex));
+  const delta = key === 'p' ? -1 : 1;
+  const target = windows[(current + delta + windows.length) % windows.length];
+  const nextPanes = panes.map(pane => ({...pane, window_active: tmuxWindowNumber(pane.window) === target.index}));
+  return {
+    ...info,
+    panes: nextPanes,
+    selected_pane: nextPanes.find(pane => pane.window_active && pane.active)
+      || nextPanes.find(pane => pane.window_active)
+      || info?.selected_pane
+      || null,
+  };
+}
+
+function previewTmuxWindowLabel(session, key) {
+  const info = transcriptMeta.sessions?.[session];
+  const nextInfo = previewTmuxWindowInfo(info, key);
+  if (!nextInfo) return;
+  transcriptMeta = {
+    ...transcriptMeta,
+    sessions: {
+      ...(transcriptMeta.sessions || {}),
+      [session]: nextInfo,
+    },
+  };
+  updatePanelControlLabels(session, nextInfo);
+}
+
+function agentForPane(info, pane) {
+  if (!pane || !Array.isArray(info?.agents)) return null;
+  return info.agents.find(agent => agent.pane_target === pane.target) || null;
+}
+
+function processLabelFromCommand(command) {
+  const tokens = String(command || '').trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return '';
+  const base = pathBasename(tokens[0]) || tokens[0];
+  const lower = base.toLowerCase();
+  if (lower.startsWith('python') && tokens[1] && !tokens[1].startsWith('-')) return pathBasename(tokens[1]) || tokens[1];
+  if (lower === 'node' && tokens[1] && !tokens[1].startsWith('-')) return pathBasename(tokens[1]) || tokens[1];
+  return base;
+}
+
+function updatePanelControlLabels(session, info) {
+  const button = document.querySelector(`[data-tab="${cssEscape(session)}"][data-tab-name="terminal"]`);
+  if (!button) return;
+  button.textContent = terminalTabLabel(session, info);
+  button.title = terminalTabTitle(session, info);
+}
+
 function installPanelInactiveOverlays(panel, session) {
   for (const root of panel.querySelectorAll('.panel-overlay-root')) {
     if (root.querySelector(':scope > .panel-inactive-overlay')) continue;
@@ -2942,9 +3020,11 @@ function panelControlsHtml(session, options = {}) {
   const stepAttrs = dir => disabled ? disabledAttrs : ` data-window-dir="${dir}" data-window-session="${esc(session)}" title="${dir === 'prev' ? 'previous' : 'next'} tmux window"`;
   const tabAttrs = name => disabled ? disabledAttrs : ` data-tab="${esc(session)}" data-tab-name="${name}"`;
   const infoAttrs = disabled ? disabledAttrs : ` data-detail-toggle="${esc(session)}" title="hide details"`;
+  const terminalAttrs = disabled ? disabledAttrs : `${tabAttrs('terminal')} title="${esc(terminalTabTitle(session, transcriptMeta.sessions?.[session]))}"`;
+  const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, transcriptMeta.sessions?.[session]);
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           <button class="tab window-step" ${stepAttrs('prev')}>&lt;</button>
-          <button class="tab active" ${tabAttrs('terminal')}>Term</button>
+          <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
           <button class="tab window-step" ${stepAttrs('next')}>&gt;</button>
           <button class="tab" ${tabAttrs('transcript')}>Tx</button>
           <button class="tab" ${tabAttrs('summary')}>AI</button>
@@ -3543,9 +3623,11 @@ function tmuxWindow(session, key, label) {
   }
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
+  previewTmuxWindowLabel(session, key);
   statusEl.innerHTML = `<span class="ok">${esc(label)}: ${esc(sessionLabel(session))}</span>`;
   scheduleFit(session);
   setTimeout(() => terminals.get(session)?.term?.focus(), 75);
+  setTimeout(refreshTranscripts, 250);
 }
 
 async function ensureTerminalRunning(session) {
@@ -3880,6 +3962,7 @@ function updatePanelHeader(session, info) {
   const panel = document.getElementById(`panel-${session}`);
   const auto = autoApproveStates.get(session)?.enabled === true;
   const state = sessionState(session, info);
+  updatePanelControlLabels(session, info);
   if (tab) {
     tab.className = `panel-session-label ${auto ? 'auto' : ''} ${state.attention ? 'needs-attention' : ''}`;
     tab.innerHTML = panelHeaderStateHtml(state);
@@ -4121,8 +4204,6 @@ async function updateLatency() {
 }
 
 function refreshAll() {
-  closeOpenSessionPopover({renderDeferred: false});
-  sessionButtonsRenderDeferred = false;
   refreshTranscripts();
   refreshAutoStatuses();
 }
@@ -4163,7 +4244,6 @@ document.getElementById('refreshMeta').onclick = refreshAll;
 notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
 window.addEventListener('resize', () => {
-  updateTopbarPopoverGeometry();
   scheduleResponsiveLayoutPrune();
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
 });

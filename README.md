@@ -44,7 +44,7 @@ YOLOmux serves xterm.js from a local editor install when available. It checks `Y
 - The layout is stored in the page URL through readable `sessions`, `layout`, and `tabs` query parameters. Split positions are recorded as percentages in `layout`, so reloads preserve the layout without browser storage.
 - YOLO state is stored server-side in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
 - The red mac-style circle hides a pane. The green circle expands or collapses a pane.
-- Drag a top-tray session or a pane header into a visible slot. Dropping a pane in the middle of another pane swaps them. Dropping near the top or bottom stacks into that side when a slot is available.
+- Drag a pane tab or pane header into a visible slot. Dropping a pane in the middle of another pane swaps them. Dropping near the top or bottom stacks into that side when a slot is available.
 - Each pane tab row has `YOLO`, previous/next tmux-window controls, `Terminal`, `Transcript`, `AI summary`, and right-aligned quick-switch buttons for replacing that pane with another session. Clicking the lit session hides that pane.
 - The terminal border turns yellow only for the pane that is currently focused and ready for typing.
 - Browser resize fits xterm immediately, but the tmux resize message is debounced so tmux is resized after the browser resize settles.
@@ -66,7 +66,7 @@ Transcript metadata comes from tmux pane discovery plus local process-tree inspe
 
 The transcript tab uses Server-Sent Events from `/api/context-stream`. The AI summary tab uses `/api/summary-stream`, which builds a scoped prompt from the selected session's recent transcript and streams a Codex-generated summary back to the browser. Summary model settings can be overridden with `YOLOMUX_SUMMARY_MODEL`, `YOLOMUX_SUMMARY_EFFORT`, and `YOLOMUX_SUMMARY_SERVICE_TIER`.
 
-YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser polls YOLO status every few seconds and reflects the active state in both the top tray and pane tab.
+YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser polls YOLO status every few seconds and reflects the active state in each pane tab.
 
 ## Webterm API
 
