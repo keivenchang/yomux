@@ -39,8 +39,8 @@ const terminalFitBottomReservePx = 2;
 const terminalWheelScrollLines = 3;
 const terminalWheelPageFraction = 0.85;
 const maxSessionTabs = bootstrap.maxSessionTabs;
-const layoutStorageKey = 'yolomux.layoutSlots.v1';
-const layoutSlotKeys = ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
+const layoutStorageKey = 'yolomux.windowTabs.v1';
+const windowKeys = ['left', 'right'];
 const infoItemId = '__info__';
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [infoItemId, ...visibleSessions];
@@ -224,18 +224,21 @@ function installTerminalLinkProvider(term) {
 }
 
 function emptyLayoutSlots() {
-  return {leftTop: null, leftBottom: null, rightTop: null, rightBottom: null};
+  return {left: [], right: []};
 }
 
 function normalizeLayoutSlots(value) {
   const next = emptyLayoutSlots();
   const seen = new Set();
   if (!value || typeof value !== 'object') return next;
-  for (const slot of layoutSlotKeys) {
-    const item = resolveLayoutItem(value[slot]);
-    if (isLayoutItem(item) && !seen.has(item)) {
-      next[slot] = item;
-      seen.add(item);
+  for (const side of windowKeys) {
+    const items = Array.isArray(value[side]) ? value[side] : [];
+    for (const raw of items) {
+      const item = resolveLayoutItem(raw);
+      if (isLayoutItem(item) && !seen.has(item)) {
+        next[side].push(item);
+        seen.add(item);
+      }
     }
   }
   return next;
@@ -243,32 +246,39 @@ function normalizeLayoutSlots(value) {
 
 function layoutFromSessionList(values) {
   const next = emptyLayoutSlots();
-  const slots = ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
   let index = 0;
-  for (const item of values) {
-    if (isLayoutItem(item) && !Object.values(next).includes(item) && index < slots.length) {
-      next[slots[index]] = item;
-      index += 1;
-    }
+  const seen = new Set();
+  for (const raw of values) {
+    const item = resolveLayoutItem(raw);
+    if (!isLayoutItem(item) || seen.has(item) || index >= windowKeys.length) continue;
+    next[windowKeys[index]].push(item);
+    seen.add(item);
+    index += 1;
   }
   return next;
 }
 
 function layoutFromParam(raw) {
-  const values = String(raw || '').split(',');
-  if (!values.some(value => value.trim())) return null;
+  const sides = String(raw || '').split(',');
+  if (!sides.some(value => value.trim())) return null;
   const next = emptyLayoutSlots();
-  for (let index = 0; index < layoutSlotKeys.length; index += 1) {
-    const value = values[index]?.trim() || '';
-    if (!value) continue;
-    const item = resolveLayoutItem(value);
-    if (isLayoutItem(item) && !Object.values(next).includes(item)) next[layoutSlotKeys[index]] = item;
+  const seen = new Set();
+  for (let index = 0; index < windowKeys.length; index += 1) {
+    const side = windowKeys[index];
+    for (const value of (sides[index] || '').split('+')) {
+      if (!value.trim()) continue;
+      const item = resolveLayoutItem(value.trim());
+      if (isLayoutItem(item) && !seen.has(item)) {
+        next[side].push(item);
+        seen.add(item);
+      }
+    }
   }
   return sessionsFromSlots(next).length ? next : null;
 }
 
 function layoutParamValue(slots) {
-  return layoutSlotKeys.map(slot => slots[slot] ? itemParam(slots[slot]) : '').join(',');
+  return windowKeys.map(side => windowStack(side, slots).map(itemParam).join('+')).join(',');
 }
 
 function initialLayoutSlots() {
@@ -282,21 +292,49 @@ function initialLayoutSlots() {
     if (!value) continue;
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
-    if (selected.length >= layoutSlotKeys.length) break;
+    if (selected.length >= windowKeys.length) break;
   }
   if (selected.length) return layoutFromSessionList(selected);
+  if (!visibleSessions.length) return emptyLayoutSlots();
   try {
     const stored = JSON.parse(localStorage.getItem(layoutStorageKey) || 'null');
     const normalized = normalizeLayoutSlots(stored);
     if (sessionsFromSlots(normalized).length) return normalized;
   } catch (_) {}
-  return layoutFromSessionList(sessions.slice(0, 2));
+  return defaultLayoutSlots();
+}
+
+function defaultLayoutSlots() {
+  const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
+  return layoutFromSessionList(sorted.slice(0, windowKeys.length));
+}
+
+function windowStack(side, slots = layoutSlots) {
+  return windowKeys.includes(side) && Array.isArray(slots?.[side]) ? slots[side] : [];
+}
+
+function activeItemForSide(side, slots = layoutSlots) {
+  return windowStack(side, slots)[0] || null;
+}
+
+function windowedItems(slots = layoutSlots) {
+  const result = [];
+  for (const side of windowKeys) {
+    for (const item of windowStack(side, slots)) {
+      if (!result.includes(item)) result.push(item);
+    }
+  }
+  return result;
+}
+
+function itemInLayout(item, slots = layoutSlots) {
+  return windowedItems(slots).includes(item);
 }
 
 function sessionsFromSlots(slots) {
   const result = [];
-  for (const slot of layoutSlotKeys) {
-    const session = slots[slot];
+  for (const side of windowKeys) {
+    const session = activeItemForSide(side, slots);
     if (session && !result.includes(session)) result.push(session);
   }
   return result;
@@ -458,7 +496,10 @@ function sessionStateHtml(state) {
 }
 
 function sessionTrayItems() {
-  return [infoItemId, ...visibleSessions].sort((left, right) => itemSortNumber(left) - itemSortNumber(right) || itemLabel(left).localeCompare(itemLabel(right)));
+  const inWindow = new Set(windowedItems());
+  return [infoItemId, ...visibleSessions]
+    .filter(item => !inWindow.has(item))
+    .sort((left, right) => itemSortNumber(left) - itemSortNumber(right) || itemLabel(left).localeCompare(itemLabel(right)));
 }
 
 function renderNotifyToggle() {
@@ -857,7 +898,7 @@ function renderSessionButtons() {
   sessionButtons.innerHTML = '';
   sessionButtons.ondragover = event => {
     const payload = dragPayload(event);
-    if (!payload?.session || !activeSessions.includes(payload.session)) return;
+    if (!payload?.session || !itemInLayout(payload.session)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
     sessionButtons.classList.add('drag-over');
@@ -876,7 +917,7 @@ function renderSessionButtons() {
   for (const session of sessionTrayItems()) {
     const isInfo = isInfoItem(session);
     const active = topTabIsActive(session);
-    const shown = activeSessions.includes(session);
+    const shown = itemInLayout(session);
     const auto = autoApproveStates.get(session)?.enabled === true;
     const info = transcriptMeta.sessions?.[session];
     const agentKind = sessionAgentKind(session);
@@ -924,6 +965,7 @@ function renderSessionButtons() {
     }
   }
   updateTopbarPopoverGeometry();
+  renderWindowTabStrips();
 }
 
 function expandedPanelItem() {
@@ -1343,86 +1385,45 @@ function endSessionDrag(event) {
   dragSourceSlot = null;
   event.currentTarget?.classList.remove('dragging');
   sessionButtons.classList.remove('drag-over');
-  grid.querySelectorAll('.drag-over,.drag-replace,.drag-stack-top,.drag-stack-bottom').forEach(node => node.classList.remove('drag-over', 'drag-replace', 'drag-stack-top', 'drag-stack-bottom'));
+  grid.querySelectorAll('.drag-over').forEach(node => node.classList.remove('drag-over'));
 }
 
 function removeSessionFromLayout(session) {
-  const next = {...layoutSlots};
-  for (const slot of layoutSlotKeys) {
-    if (next[slot] === session) next[slot] = null;
-  }
+  const next = emptyLayoutSlots();
+  for (const side of windowKeys) next[side] = windowStack(side).filter(item => item !== session);
   applyLayoutSlots(next, {message: `${itemLabel(session)} removed`});
 }
 
-function firstEmptySlot() {
-  return layoutSlotKeys.find(slot => !layoutSlots[slot]) || 'leftTop';
+function firstEmptyWindow() {
+  return windowKeys.find(side => !windowStack(side).length) || null;
 }
 
 function slotForNewSession() {
-  const empty = layoutSlotKeys.find(slot => !layoutSlots[slot]);
+  const empty = firstEmptyWindow();
   if (empty) return empty;
   const focusedSlot = focusedPanelItem ? slotForSession(focusedPanelItem) : null;
   if (focusedSlot) return focusedSlot;
-  return 'leftTop';
+  return 'left';
 }
 
-async function moveSessionToSlot(session, targetSlot, sourceSlot = null, mode = 'stack') {
-  if (!isLayoutItem(session) || !layoutSlotKeys.includes(targetSlot)) return;
+async function moveSessionToSlot(session, targetSlot, sourceSlot = null) {
+  if (!isLayoutItem(session) || !windowKeys.includes(targetSlot)) return;
   if (isTmuxSession(session)) {
     const ensured = await ensureSession(session);
     if (!ensured) return;
   }
-  const next = {...layoutSlots};
-  const targetSession = next[targetSlot];
-  const currentSlot = slotForSession(session);
-  const resolvedSourceSlot = sourceSlot || currentSlot;
-  if (currentSlot === targetSlot) {
-    focusPanel(session);
-    return;
-  }
-  if (mode === 'swap' && resolvedSourceSlot && targetSession && targetSession !== session) {
-    next[resolvedSourceSlot] = targetSession;
-    next[targetSlot] = session;
-    applyLayoutSlots(next, {focusSession: session});
-    return;
-  }
-  if (mode === 'stack' && targetSession && targetSession !== session) {
-    const alternate = alternateSlot(targetSlot);
-    for (const slot of layoutSlotKeys) {
-      if (next[slot] === session) next[slot] = null;
-    }
-    if (alternate && !next[alternate]) {
-      next[alternate] = targetSession;
-      next[targetSlot] = session;
-      applyLayoutSlots(next, {focusSession: session});
-      return;
-    }
-    if (currentSlot) {
-      next[currentSlot] = targetSession;
-      next[targetSlot] = session;
-      applyLayoutSlots(next, {focusSession: session});
-      return;
-    }
-  }
-  if (mode !== 'replace' && mode !== 'stack' && currentSlot && targetSession && targetSession !== session) {
-    next[currentSlot] = targetSession;
-    next[targetSlot] = session;
-    applyLayoutSlots(next, {focusSession: session});
-    return;
-  }
-  for (const slot of layoutSlotKeys) {
-    if (next[slot] === session) next[slot] = null;
-  }
-  next[targetSlot] = session;
+  const next = emptyLayoutSlots();
+  for (const side of windowKeys) next[side] = windowStack(side).filter(item => item !== session);
+  next[targetSlot].unshift(session);
   applyLayoutSlots(next, {focusSession: session});
 }
 
-function alternateSlot(slot) {
-  if (slot === 'leftTop') return 'leftBottom';
-  if (slot === 'leftBottom') return 'leftTop';
-  if (slot === 'rightTop') return 'rightBottom';
-  if (slot === 'rightBottom') return 'rightTop';
-  return null;
+function activateWindowSession(side, session) {
+  if (!windowKeys.includes(side) || !itemInLayout(session)) return;
+  const next = emptyLayoutSlots();
+  for (const key of windowKeys) next[key] = windowStack(key).filter(item => item !== session);
+  next[side].unshift(session);
+  applyLayoutSlots(next, {focusSession: session});
 }
 
 async function selectSession(session) {
@@ -1431,7 +1432,12 @@ async function selectSession(session) {
     focusPanel(session);
     return;
   }
-  await moveSessionToSlot(session, slotForNewSession(), null, 'replace');
+  const windowSlot = slotForSession(session);
+  if (windowSlot) {
+    activateWindowSession(windowSlot, session);
+    return;
+  }
+  await moveSessionToSlot(session, slotForNewSession(), null);
 }
 
 function sessionAgentKind(session) {
@@ -1738,7 +1744,7 @@ async function createNextSession(agent) {
     updateSessionList(payload.sessions || []);
     renderSessionButtons();
     renderPanels(previousActive);
-    await moveSessionToSlot(payload.session, firstEmptySlot(), null);
+    await moveSessionToSlot(payload.session, slotForNewSession(), null);
     await ensureTerminalRunning(payload.session);
     refreshTranscripts();
     renderAutoApproveButtons();
@@ -1921,52 +1927,25 @@ function px(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
-function sideSlotKeys(side) {
-  return side === 'left' ? ['leftTop', 'leftBottom'] : ['rightTop', 'rightBottom'];
-}
-
 function slotSide(slot) {
-  return slot.startsWith('left') ? 'left' : 'right';
-}
-
-function occupiedSlotsForSide(side) {
-  return sideSlotKeys(side).filter(slot => layoutSlots[slot]);
+  return windowKeys.includes(slot) ? slot : 'left';
 }
 
 function slotForSession(session) {
-  return layoutSlotKeys.find(slot => layoutSlots[slot] === session) || null;
+  return windowKeys.find(side => windowStack(side).includes(session)) || null;
 }
 
 function slotForDropEvent(event) {
   const rect = grid.getBoundingClientRect();
-  const side = event.clientX < rect.left + rect.width / 2 ? 'left' : 'right';
-  return slotForSideDrop(side, event);
+  return event.clientX < rect.left + rect.width / 2 ? 'left' : 'right';
 }
 
 function dropIntentForEvent(event) {
   const slotNode = event.target.closest('.drop-slot');
-  if (!slotNode) return {slot: slotForDropEvent(event), mode: 'stack'};
-  const slot = slotNode.dataset.slot;
-  if (!layoutSlots[slot]) return {slot, mode: 'replace'};
-  const rect = slotNode.getBoundingClientRect();
-  const ratio = (event.clientY - rect.top) / Math.max(1, rect.height);
-  if (ratio < 0.28) return {slot: sideSlotKeys(slotSide(slot))[0], mode: 'stack', zone: 'top'};
-  if (ratio > 0.72) return {slot: sideSlotKeys(slotSide(slot))[1], mode: 'stack', zone: 'bottom'};
-  return {slot, mode: 'replace', zone: 'middle'};
-}
-
-function slotForSideDrop(side, event) {
-  const [topSlot, bottomSlot] = sideSlotKeys(side);
-  const topSession = layoutSlots[topSlot];
-  const bottomSession = layoutSlots[bottomSlot];
-  if (!topSession && !bottomSession) return topSlot;
-  const column = document.querySelector(`[data-side="${side}"]`);
-  const rect = column?.getBoundingClientRect() || grid.getBoundingClientRect();
-  const topHalf = event.clientY < rect.top + rect.height / 2;
-  if (topSession && bottomSession) return topHalf ? topSlot : bottomSlot;
-  if (topSession && !bottomSession) return topHalf ? topSlot : bottomSlot;
-  if (!topSession && bottomSession) return topHalf ? topSlot : bottomSlot;
-  return topSlot;
+  if (slotNode?.dataset.slot) return {slot: slotSide(slotNode.dataset.slot)};
+  const sideNode = event.target.closest('[data-side]');
+  if (sideNode?.dataset.side && windowKeys.includes(sideNode.dataset.side)) return {slot: sideNode.dataset.side};
+  return {slot: slotForDropEvent(event)};
 }
 
 function dropSessionAtEvent(event) {
@@ -1975,11 +1954,8 @@ function dropSessionAtEvent(event) {
   event.preventDefault();
   event.stopPropagation();
   grid.querySelectorAll('.drag-over').forEach(node => node.classList.remove('drag-over'));
-  grid.querySelectorAll('.drag-replace,.drag-stack-top,.drag-stack-bottom').forEach(node => node.classList.remove('drag-replace', 'drag-stack-top', 'drag-stack-bottom'));
   const intent = dropIntentForEvent(event);
-  const sourceSlot = payload.sourceSlot || slotForSession(payload.session);
-  const mode = sourceSlot && intent.zone === 'middle' ? 'swap' : intent.mode;
-  moveSessionToSlot(payload.session, intent.slot, sourceSlot, mode);
+  moveSessionToSlot(payload.session, intent.slot, payload.sourceSlot || slotForSession(payload.session));
 }
 
 function handleDropDragOver(event) {
@@ -1988,35 +1964,27 @@ function handleDropDragOver(event) {
   event.preventDefault();
   event.stopPropagation();
   event.dataTransfer.dropEffect = 'move';
-  grid.querySelectorAll('.drag-over,.drag-replace,.drag-stack-top,.drag-stack-bottom').forEach(node => node.classList.remove('drag-over', 'drag-replace', 'drag-stack-top', 'drag-stack-bottom'));
+  grid.querySelectorAll('.drag-over').forEach(node => node.classList.remove('drag-over'));
   const column = event.target.closest('[data-side]');
   const slot = event.target.closest('.drop-slot');
   column?.classList.add('drag-over');
   slot?.classList.add('drag-over');
-  if (slot) {
-    const intent = dropIntentForEvent(event);
-    if (intent.mode === 'replace') {
-      slot.classList.add('drag-replace');
-    } else if (intent.zone === 'top') {
-      slot.classList.add('drag-stack-top');
-    } else if (intent.zone === 'bottom') {
-      slot.classList.add('drag-stack-bottom');
-    }
-  }
 }
 
 function handleDropDragLeave(event) {
   const current = event.currentTarget;
   if (current?.contains(event.relatedTarget)) return;
-  current?.classList.remove('drag-over', 'drag-replace', 'drag-stack-top', 'drag-stack-bottom');
+  current?.classList.remove('drag-over');
 }
 
 function renderPanels(previousActive = []) {
   movePanelsToPool();
-  grid.className = 'grid';
+  const activeWindowCount = windowKeys.filter(side => activeItemForSide(side)).length;
+  grid.className = `grid ${activeWindowCount === 1 ? 'full' : ''} ${activeWindowCount === 0 ? 'empty' : ''}`.trim();
   grid.innerHTML = '';
-  grid.appendChild(renderLayoutColumn('left'));
-  grid.appendChild(renderLayoutColumn('right'));
+  for (const side of windowKeys) {
+    if (activeItemForSide(side)) grid.appendChild(renderLayoutColumn(side));
+  }
 
   bindDropTargets();
   syncPanelVisibility(previousActive);
@@ -2024,8 +1992,7 @@ function renderPanels(previousActive = []) {
 }
 
 function movePanelsToPool() {
-  for (const session of layoutItems) {
-    const panel = getOrCreatePanel(session);
+  for (const panel of panelNodes.values()) {
     panel.classList.remove('expanded');
     panel.classList.remove('active-window');
     panel.dataset.slot = '';
@@ -2046,32 +2013,93 @@ function bindDropTargets() {
 
 function renderLayoutColumn(side) {
   const column = document.createElement('section');
-  const occupied = occupiedSlotsForSide(side);
-  column.className = `layout-column ${occupied.length > 1 ? 'split' : ''}`;
+  const session = activeItemForSide(side);
+  column.className = 'layout-column';
   column.dataset.side = side;
-  if (occupied.length === 0) {
-    column.appendChild(renderDropSlot(sideSlotKeys(side)[0], null, `Drop ${side}`));
-    return column;
-  }
-  for (const slot of occupied) {
-    column.appendChild(renderDropSlot(slot, layoutSlots[slot], `Drop ${slotLabel(slot)}`));
-  }
+  column.appendChild(renderDropSlot(side, session));
   return column;
 }
 
-function renderDropSlot(slot, session, label) {
+function renderDropSlot(slot, session) {
   const node = document.createElement('section');
-  node.className = `drop-slot ${session ? '' : 'empty'}`;
+  node.className = 'drop-slot';
   node.dataset.slot = slot;
   node.dataset.side = slotSide(slot);
-  if (!session) {
-    node.innerHTML = `<div class="drop-label">${esc(label)}</div>`;
-    return node;
-  }
   const panel = getOrCreatePanel(session);
   updatePanelSlot(panel, session, slot);
   node.appendChild(panel);
   return node;
+}
+
+function renderWindowTabStrips() {
+  for (const side of windowKeys) {
+    const session = activeItemForSide(side);
+    if (!session) continue;
+    const panel = panelNodes.get(session);
+    if (panel) updateWindowTabStrip(panel, side);
+  }
+}
+
+function updateWindowTabStrip(panel, side) {
+  const strip = panel.querySelector('.window-session-tabs');
+  if (!strip) return;
+  const stack = windowStack(side);
+  strip.dataset.side = side;
+  strip.replaceChildren(...stack.map(item => createWindowSessionTab(side, item)));
+  bindWindowTabStrip(strip, side);
+}
+
+function createWindowSessionTab(side, item) {
+  const isInfo = isInfoItem(item);
+  const info = transcriptMeta.sessions?.[item];
+  const auto = autoApproveStates.get(item)?.enabled === true;
+  const state = isInfo ? null : sessionState(item, info);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `window-session-tab ${item === activeItemForSide(side) ? 'active' : ''} ${state?.attention ? 'needs-attention' : ''}`;
+  button.draggable = true;
+  button.dataset.windowSessionTab = item;
+  button.innerHTML = isInfo ? infoButtonHtml() : windowSessionTabHtml(item, info, state, auto);
+  button.title = isInfo ? 'Branches' : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim();
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    activateWindowSession(side, item);
+  });
+  button.addEventListener('dragstart', event => {
+    event.stopPropagation();
+    startSessionDrag(event, item, side);
+  });
+  button.addEventListener('dragend', endSessionDrag);
+  return button;
+}
+
+function windowSessionTabHtml(session, info, state, auto) {
+  const pr = info?.project?.pull_request;
+  return `<span class="session-button-prefix">${sessionNumberNameHtml(session)}${yoloMarkerHtml(session, auto)}</span>
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${pullRequestCompactBadgesHtml(pr)}</span>`;
+}
+
+function bindWindowTabStrip(strip, side) {
+  strip.ondragover = event => {
+    const payload = dragPayload(event);
+    if (!payload?.session) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    event.dataTransfer.dropEffect = 'move';
+    strip.classList.add('drag-over');
+  };
+  strip.ondragleave = event => {
+    if (!strip.contains(event.relatedTarget)) strip.classList.remove('drag-over');
+  };
+  strip.ondrop = event => {
+    const payload = dragPayload(event);
+    strip.classList.remove('drag-over');
+    if (!payload?.session) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session));
+  };
 }
 
 function getOrCreatePanel(session) {
@@ -2195,6 +2223,7 @@ function createInfoPanel() {
           <div id="meta-${infoItemId}" class="meta">all branches sorted by recent activity</div>
         </div>
       </div>
+      <div class="window-session-tabs" role="tablist" aria-label="Window tabs"></div>
       <div class="info-pane panel-overlay-root">
         <div class="transcript-head">All branches</div>
         <div id="info-content" class="info-list"></div>
@@ -2230,6 +2259,7 @@ function createPanel(session) {
         <button class="tab" data-tab="${esc(session)}" data-tab-name="events">Log</button>
       </div>
       </div>
+      <div class="window-session-tabs" role="tablist" aria-label="Window tabs"></div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
         <div id="term-${session}" class="terminal"></div>
         <div id="panel-toasts-${session}" class="panel-toast-stack">
@@ -2645,6 +2675,7 @@ function updatePanelSlot(panel, session, slot) {
   panel.dataset.slot = slot;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
+  updateWindowTabStrip(panel, slotSide(slot));
   updatePanelInactiveOverlays();
 }
 
@@ -2662,14 +2693,6 @@ function syncPanelVisibility(previousActive = []) {
     const pane = document.getElementById(`terminal-pane-${session}`);
     if (pane?.classList.contains('active')) scheduleFit(session);
   }
-}
-
-function slotLabel(slot) {
-  return slot
-    .replace('left', 'left ')
-    .replace('right', 'right ')
-    .replace('Top', 'top')
-    .replace('Bottom', 'bottom');
 }
 
 function activateTab(session, name) {
@@ -3055,6 +3078,7 @@ function updatePanelHeader(session, info) {
   panel?.classList.toggle('needs-input-window', state.key === 'needs-input');
   panel?.classList.toggle('needs-exec-window', state.key === 'needs-approval');
   panel?.classList.toggle('needs-blocked-window', state.key === 'blocked');
+  renderWindowTabStrips();
 }
 
 function renderSummaryContext(session, info, agent) {
@@ -3293,7 +3317,7 @@ async function boot() {
   await loadAutoStatuses();
   renderSessionButtons();
   renderPanels();
-  await Promise.all(visibleSessions.map(session => ensureTerminalRunning(session)));
+  await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
   refreshTranscripts();
   renderAutoApproveButtons();
   updateLatency();
