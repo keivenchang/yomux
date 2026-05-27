@@ -189,6 +189,16 @@ function canonical(value) {
 }
 
 {
+  const api = loadYolomux('?sessions=3&layout=left&tabs=left:3,2');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {slot: 'left'},
+    windows: {
+      left: {tabs: ['3', '2'], active: '3'},
+    },
+  });
+}
+
+{
   const api = loadYolomux();
   const info = {
     project: {

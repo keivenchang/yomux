@@ -388,6 +388,8 @@ function layoutFromParam(raw, tabsRaw = '') {
   if (text.toLowerCase() === 'empty') return emptyLayoutSlots();
   if (text.startsWith(layoutTreeParamPrefix)) return treeLayoutFromParam(text.slice(layoutTreeParamPrefix.length));
   if (compactLayoutParamLooksLikeTree(text)) return compactTreeLayoutFromParam(text, tabsRaw);
+  const namedSlotLayout = namedSlotLayoutFromParam(text, tabsRaw);
+  if (namedSlotLayout) return namedSlotLayout;
   const sides = text.split(',');
   if (!sides.some(value => value.trim())) return null;
   const next = emptyLayoutSlots();
@@ -407,6 +409,31 @@ function layoutFromParam(raw, tabsRaw = '') {
   }
   next[layoutTreeKey] = legacyLayoutTree(next);
   return sessionsFromSlots(next).length ? next : null;
+}
+
+function namedSlotLayoutFromParam(raw, tabsRaw) {
+  const tabStates = layoutTabStatesFromParam(tabsRaw);
+  if (!tabStates.size) return null;
+  const slotNames = String(raw || '')
+    .split(',')
+    .map(value => layoutSlotName(readableParamComponentDecode(value.trim())))
+    .filter(Boolean);
+  if (!slotNames.length) return null;
+  const next = emptyLayoutSlots();
+  const leaves = [];
+  const seen = new Set();
+  for (const slot of slotNames) {
+    if (seen.has(slot)) continue;
+    seen.add(slot);
+    const state = tabStates.get(slot);
+    if (!state || !windowStack(slot, {[slot]: state}).length) continue;
+    next[slot] = state;
+    leaves.push(leafNode(slot));
+  }
+  if (!leaves.length) return null;
+  next[layoutTreeKey] = leaves.reduce((tree, leaf) => (tree ? splitNode('row', tree, leaf) : leaf), null);
+  const normalized = normalizeLayoutSlots(next);
+  return sessionsFromSlots(normalized).length ? normalized : null;
 }
 
 function treeLayoutFromParam(raw) {
