@@ -115,7 +115,7 @@ function isFileExplorerItem(item) { return item === fileExplorerItemId; }
 function isFileEditorItem(item) { return typeof item === 'string' && item.startsWith(fileEditorItemPrefix); }
 function fileItemPath(item) { return isFileEditorItem(item) ? item.slice(fileEditorItemPrefix.length) : null; }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, ...visibleSessions];
+let layoutItems = [infoItemId, fileExplorerItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
@@ -1037,17 +1037,24 @@ function resolveLayoutItem(value) {
 }
 
 function itemLabel(item) {
-  return isInfoItem(item) ? 'Branch Info' : sessionLabel(item);
+  if (isInfoItem(item)) return 'Branch Info';
+  if (isFileExplorerItem(item)) return 'Files';
+  if (isFileEditorItem(item)) return basenameOf(fileItemPath(item));
+  return sessionLabel(item);
 }
 
 function itemSortNumber(item) {
   if (isInfoItem(item)) return 0;
+  if (isFileExplorerItem(item)) return 0.5;
+  if (isFileEditorItem(item)) return 0.75;
   const label = Number(sessionLabel(item));
   return Number.isFinite(label) ? label : Number.MAX_SAFE_INTEGER;
 }
 
 function itemParam(item) {
   if (isInfoItem(item)) return 'info';
+  if (isFileExplorerItem(item)) return 'files';
+  if (isFileEditorItem(item)) return item;
   return String(item);
 }
 
@@ -1596,7 +1603,7 @@ function updateSessionList(nextSessions) {
   if (!changed) return false;
   sessions = next;
   visibleSessions = sessions.slice(0, maxSessionTabs);
-  layoutItems = [infoItemId, ...visibleSessions];
+  layoutItems = [infoItemId, fileExplorerItemId, ...openFileEditorItems(), ...visibleSessions];
   const newItems = layoutItems.filter(item => !previousItems.has(item));
   layoutSlots = newItems.length ? layoutWithItems(layoutSlots, newItems) : normalizeLayoutSlots(layoutSlots);
   activeSessions = sessionsFromLayout();
@@ -4085,7 +4092,9 @@ function windowTabDropIndex(strip, event, movingSession) {
 function getOrCreatePanel(session) {
   let panel = panelNodes.get(session);
   if (panel) return panel;
-  panel = isInfoItem(session) ? createInfoPanel() : createPanel(session);
+  if (isInfoItem(session)) panel = createInfoPanel();
+  else if (isFileExplorerItem(session)) panel = createFileExplorerPanel();
+  else panel = createPanel(session);
   panelNodes.set(session, panel);
   panelPool.appendChild(panel);
   return panel;
@@ -4312,6 +4321,62 @@ function createInfoPanel() {
   bindPanelShell(panel, infoItemId);
   renderInfoPanel();
   return panel;
+}
+
+// Builds a draggable Files panel — a sibling of the InfoPanel. Self-contained:
+// owns its own tree element, doesn't reference the overlay-based fileExplorer
+// DOM constants. Clicking a folder expands inline; clicking a file delegates
+// to the existing openFileInEditor() which still drives the overlay editor.
+// (A later step swaps file-click to open a draggable editor panel instead.)
+function createFileExplorerPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel file-explorer-panel';
+  panel.id = `panel-${fileExplorerItemId}`;
+  const initialPath = fileExplorerRoot || homePath || '/';
+  panel.innerHTML = `
+      <div class="panel-head">
+        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
+        ${panelControlsHtml(fileExplorerItemId, {disabled: true, unavailableLabel: 'Files'})}
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div class="panel-session-label"><span class="session-button-dir">Files</span></div>
+          <div class="meta file-explorer-panel-meta">
+            <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
+            <span class="file-explorer-path-inline">${esc(initialPath)}</span>
+          </div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(fileExplorerItemId)}" title="hide details" aria-label="hide details"></button>
+      </div>
+      <div class="file-explorer-pane panel-overlay-root">
+        <div id="panel-toasts-${fileExplorerItemId}" class="panel-toast-stack"></div>
+        <div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
+      </div>`;
+  bindPanelShell(panel, fileExplorerItemId);
+  const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
+  if (hiddenBtn) {
+    hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
+    hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+    hiddenBtn.addEventListener('click', () => refreshFileExplorerPanelTree(panel));
+  }
+  refreshFileExplorerPanelTree(panel);
+  return panel;
+}
+
+function refreshFileExplorerPanelTree(panel) {
+  const treeEl = panel.querySelector('.file-explorer-tree-panel');
+  const pathEl = panel.querySelector('.file-explorer-path-inline');
+  if (!treeEl) return;
+  const root = fileExplorerRoot || homePath || '/';
+  if (pathEl) pathEl.textContent = root;
+  treeEl.replaceChildren();
+  apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`)
+    .then(resp => resp.ok ? resp.json() : null)
+    .then(payload => {
+      if (!payload) return;
+      renderTreeChildren(treeEl, root, payload.entries || [], 0);
+    })
+    .catch(err => console.warn('fs list (panel) failed', err));
 }
 
 function panelControlsHtml(session, options = {}) {
