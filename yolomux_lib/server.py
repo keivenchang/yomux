@@ -300,6 +300,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/fs/read":
             self.handle_fs_read(parsed)
             return
+        if parsed.path == "/api/fs/raw":
+            self.handle_fs_raw(parsed)
+            return
         if parsed.path == "/ws":
             self.websocket(parsed)
             return
@@ -324,6 +327,24 @@ class Handler(BaseHTTPRequestHandler):
             self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
             return
         self.write_json(payload)
+
+    def handle_fs_raw(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", [""])[0]
+        try:
+            data, mime = filesystem.read_raw(raw_path)
+        except FilesystemError as exc:
+            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
 
     def handle_fs_write(self, parsed: Any) -> None:
         length_text = self.headers.get("Content-Length", "")

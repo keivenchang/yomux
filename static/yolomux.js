@@ -32,8 +32,22 @@ const fileExplorer = document.getElementById('fileExplorer');
 const fileExplorerTree = document.getElementById('fileExplorerTree');
 const fileExplorerPath = document.getElementById('fileExplorerPath');
 const fileExplorerClose = document.getElementById('fileExplorerClose');
+const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenToggle');
+const fileEditor = document.getElementById('fileEditor');
+const fileEditorPath = document.getElementById('fileEditorPath');
+const fileEditorTextarea = document.getElementById('fileEditorTextarea');
+const fileEditorSave = document.getElementById('fileEditorSave');
+const fileEditorClose = document.getElementById('fileEditorClose');
+const fileEditorStatus = document.getElementById('fileEditorStatus');
 const fileExplorerExpanded = new Set();
+const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
 let fileExplorerRoot = null;
+let fileExplorerShowHidden = (() => {
+  try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
+  catch (_) { return false; }
+})();
+let fileEditorState = null;  // {path, mtime, kind: 'text'|'image', dirty}
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -1690,7 +1704,8 @@ async function fetchDirectory(path) {
 }
 
 function renderTreeChildren(container, parentPath, entries, depth) {
-  for (const entry of entries) {
+  const visible = entries.filter(e => fileExplorerShowHidden || !e.name.startsWith('.'));
+  for (const entry of visible) {
     const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
     const row = document.createElement('div');
     row.className = `file-tree-row kind-${entry.kind}`;
@@ -1720,9 +1735,135 @@ async function onFileTreeRowClick(row, fullPath, entry) {
   if (entry.kind === 'file') {
     document.querySelectorAll('.file-tree-row.selected').forEach(el => el.classList.remove('selected'));
     row.classList.add('selected');
-    // Phase 3 will open the CodeMirror editor here. For now, just log.
-    console.log('file selected:', fullPath, entry);
+    await openFileInEditor(fullPath, entry.name);
   }
+}
+
+function fileExtensionOf(name) {
+  const dot = name.lastIndexOf('.');
+  return dot === -1 ? '' : name.slice(dot).toLowerCase();
+}
+
+async function openFileInEditor(fullPath, name) {
+  const ext = fileExtensionOf(name);
+  if (IMAGE_EXTENSIONS.has(ext)) {
+    showImagePreview(fullPath);
+    return;
+  }
+  await showTextEditor(fullPath);
+}
+
+function ensureEditorVisible() {
+  if (!fileEditor) return;
+  fileEditor.removeAttribute('hidden');
+  document.body.classList.add('file-editor-open');
+}
+
+function hideEditor() {
+  if (!fileEditor) return;
+  fileEditor.setAttribute('hidden', '');
+  document.body.classList.remove('file-editor-open');
+  fileEditorState = null;
+  if (fileEditorTextarea) fileEditorTextarea.value = '';
+  setEditorStatus('');
+  const img = fileEditor.querySelector('.file-editor-image');
+  if (img) img.remove();
+  if (fileEditorTextarea) fileEditorTextarea.hidden = false;
+  if (fileEditorSave) fileEditorSave.hidden = false;
+}
+
+function setEditorStatus(msg, level) {
+  if (!fileEditorStatus) return;
+  fileEditorStatus.textContent = msg || '';
+  fileEditorStatus.dataset.level = level || '';
+}
+
+async function showTextEditor(fullPath) {
+  ensureEditorVisible();
+  if (fileEditorPath) fileEditorPath.textContent = fullPath;
+  // Tear down any image preview from a previous file
+  const existingImg = fileEditor?.querySelector('.file-editor-image');
+  if (existingImg) existingImg.remove();
+  if (fileEditorTextarea) {
+    fileEditorTextarea.hidden = false;
+    fileEditorTextarea.value = 'loading...';
+    fileEditorTextarea.readOnly = readOnlyMode;
+  }
+  if (fileEditorSave) fileEditorSave.hidden = readOnlyMode;
+  try {
+    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setEditorStatus(`error: ${payload.error || response.status}`, 'error');
+      fileEditorTextarea.value = '';
+      fileEditorState = null;
+      return;
+    }
+    const payload = await response.json();
+    fileEditorTextarea.value = payload.content;
+    fileEditorState = { path: fullPath, mtime: payload.mtime, kind: 'text', dirty: false };
+    setEditorStatus(`${payload.size} bytes`, '');
+  } catch (err) {
+    setEditorStatus(`error: ${err}`, 'error');
+  }
+}
+
+function showImagePreview(fullPath) {
+  ensureEditorVisible();
+  if (fileEditorPath) fileEditorPath.textContent = fullPath;
+  if (fileEditorTextarea) fileEditorTextarea.hidden = true;
+  if (fileEditorSave) fileEditorSave.hidden = true;
+  const existing = fileEditor.querySelector('.file-editor-image');
+  if (existing) existing.remove();
+  const img = document.createElement('img');
+  img.className = 'file-editor-image';
+  img.src = `/api/fs/raw?path=${encodeURIComponent(fullPath)}`;
+  img.alt = fullPath;
+  img.onload = () => setEditorStatus(`${img.naturalWidth}×${img.naturalHeight}`, '');
+  img.onerror = () => setEditorStatus('failed to load image', 'error');
+  fileEditor.insertBefore(img, fileEditorStatus);
+  fileEditorState = { path: fullPath, kind: 'image', dirty: false };
+  setEditorStatus('loading…', '');
+}
+
+async function saveCurrentEditor() {
+  if (!fileEditorState || fileEditorState.kind !== 'text' || readOnlyMode) return;
+  setEditorStatus('saving…', '');
+  try {
+    const body = JSON.stringify({
+      path: fileEditorState.path,
+      content: fileEditorTextarea.value,
+      expected_mtime: fileEditorState.mtime,
+    });
+    const response = await apiFetch('/api/fs/write', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setEditorStatus(`save failed: ${payload.error || response.status}`, 'error');
+      return;
+    }
+    const payload = await response.json();
+    fileEditorState.mtime = payload.mtime;
+    fileEditorState.dirty = false;
+    setEditorStatus(`saved (${payload.size} bytes)`, 'ok');
+  } catch (err) {
+    setEditorStatus(`save failed: ${err}`, 'error');
+  }
+}
+
+function toggleHiddenFiles() {
+  fileExplorerShowHidden = !fileExplorerShowHidden;
+  try { window.localStorage?.setItem(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0'); }
+  catch (_) {}
+  if (fileExplorerHiddenToggle) {
+    fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
+    fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
+    fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+  }
+  if (fileExplorerRoot) openFileExplorerAt(fileExplorerRoot);
 }
 
 async function expandDirectoryRow(row, fullPath) {
@@ -1751,6 +1892,29 @@ function collapseDirectoryRow(row, fullPath) {
 }
 
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
+if (fileExplorerHiddenToggle) {
+  fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
+  fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
+  fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+  fileExplorerHiddenToggle.addEventListener('click', toggleHiddenFiles);
+}
+if (fileEditorClose) fileEditorClose.addEventListener('click', hideEditor);
+if (fileEditorSave) fileEditorSave.addEventListener('click', saveCurrentEditor);
+if (fileEditorTextarea) {
+  fileEditorTextarea.addEventListener('input', () => {
+    if (fileEditorState && fileEditorState.kind === 'text') {
+      fileEditorState.dirty = true;
+      setEditorStatus('modified', '');
+    }
+  });
+  fileEditorTextarea.addEventListener('keydown', event => {
+    const isSave = (event.ctrlKey || event.metaKey) && event.key === 's' && !event.shiftKey;
+    if (isSave) {
+      event.preventDefault();
+      saveCurrentEditor();
+    }
+  });
+}
 
 function shouldShowTabListMenu(items) {
   return Array.isArray(items) && items.length > 1;

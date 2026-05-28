@@ -26,6 +26,19 @@ TEXT_EXTENSIONS = {
     ".log", ".gitignore", ".dockerignore", ".dockerfile",
 }
 
+IMAGE_EXTENSIONS = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".bmp": "image/bmp",
+}
+
+MAX_RAW_BYTES = 25 * 1024 * 1024  # 25 MB cap on raw (image) reads
+
 
 class FilesystemError(Exception):
     def __init__(self, message: str, status: int = 400):
@@ -171,3 +184,28 @@ def is_text_path(raw_path: str) -> bool:
     except FilesystemError:
         return False
     return path.suffix.lower() in TEXT_EXTENSIONS
+
+
+def read_raw(raw_path: str) -> tuple[bytes, str]:
+    """Return (bytes, mime_type) for a file. Used to stream images and other
+    binary previews. Caller decides whether to serve based on extension."""
+    path = _validated_path(raw_path)
+    if not path.exists():
+        raise FilesystemError(f"path not found: {path}", status=404)
+    if path.is_dir():
+        raise FilesystemError(f"is a directory: {path}", status=400)
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise FilesystemError(str(exc), status=500)
+    if size > MAX_RAW_BYTES:
+        raise FilesystemError(f"file too large ({size} bytes; max {MAX_RAW_BYTES})", status=413)
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(MAX_RAW_BYTES + 1)
+    except PermissionError as exc:
+        raise FilesystemError(str(exc), status=403)
+    except OSError as exc:
+        raise FilesystemError(str(exc), status=500)
+    mime = IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
+    return data, mime
