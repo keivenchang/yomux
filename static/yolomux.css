@@ -2773,3 +2773,133 @@ body.file-editor-open .file-explorer {
 }
 .file-editor-status[data-level="error"] { color: #ff8a95; }
 .file-editor-status[data-level="ok"]    { color: var(--good); }
+
+/* File tabs in the session strip — render like session-buttons but
+   without a YO marker; have a built-in close (X) and a dirty dot. */
+.file-tab-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  position: relative;
+}
+.session-button.file-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 8px;
+  min-width: 0;
+  max-width: 180px;
+  border-color: rgba(120, 180, 255, 0.4);
+}
+.session-button.file-tab.active {
+  border-color: rgba(120, 180, 255, 0.95);
+  background: rgba(40, 60, 100, 0.6);
+}
+.session-button.file-tab .file-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+.session-button.file-tab.dirty .file-tab-name::after {
+  /* Reserved for future style; the dot is rendered explicitly. */
+}
+.file-tab-dirty {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-radius: 999px;
+  background: #f5c542;
+  flex: 0 0 6px;
+}
+.file-tab-close {
+  width: 16px;
+  height: 18px;
+  margin-left: -2px;
+  padding: 0;
+  border: 1px solid rgba(120, 180, 255, 0.25);
+  border-left: 0;
+  border-top-right-radius: 5px;
+  border-bottom-right-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  position: relative;
+}
+.file-tab-close::before,
+.file-tab-close::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 7px;
+  height: 1.2px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.file-tab-close::before { transform: translate(-50%, -50%) rotate(45deg); }
+.file-tab-close::after  { transform: translate(-50%, -50%) rotate(-45deg); }
+.file-tab-close:hover { color: #ff8a95; }
+
+/* Preview / Edit toggle button in editor head */
+.file-editor-preview {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.file-editor-preview:hover { color: var(--text); border-color: var(--text); }
+.file-editor-preview.active { color: #9fd8ff; border-color: #9fd8ff; }
+
+/* Rendered markdown preview pane */
+.file-editor-preview-pane {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 16px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--ui-font);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.file-editor-preview-pane[hidden] { display: none; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
+}
+.markdown-body h1 { font-size: 1.7em; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.markdown-body h2 { font-size: 1.4em; border-bottom: 1px solid var(--line); padding-bottom: 3px; }
+.markdown-body h3 { font-size: 1.2em; }
+.markdown-body p { margin: 6px 0 10px; }
+.markdown-body a { color: #9fd8ff; text-decoration: underline; }
+.markdown-body code { font-family: var(--mono-font); font-size: 0.9em; background: rgba(255,255,255,0.06); padding: 1px 4px; border-radius: 3px; }
+.markdown-body pre { background: #0b0e14; border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; overflow: auto; margin: 8px 0; }
+.markdown-body pre code { background: transparent; padding: 0; }
+.markdown-body ul, .markdown-body ol { margin: 6px 0 10px 22px; }
+.markdown-body li { margin: 2px 0; }
+.markdown-body blockquote { border-left: 3px solid var(--line); margin: 8px 0; padding: 4px 10px; color: var(--muted); }
+.markdown-body table { border-collapse: collapse; margin: 8px 0; }
+.markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }
+.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+
+/* Read-only highlight view (defer; pre/code remain hidden for now) */
+.file-editor-highlight {
+  flex: 1;
+  margin: 0;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--bg);
+  font-family: var(--mono-font);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.file-editor-highlight[hidden] { display: none; }

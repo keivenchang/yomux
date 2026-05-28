@@ -36,18 +36,36 @@ const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenTogg
 const fileEditor = document.getElementById('fileEditor');
 const fileEditorPath = document.getElementById('fileEditorPath');
 const fileEditorTextarea = document.getElementById('fileEditorTextarea');
+const fileEditorPreviewBtn = document.getElementById('fileEditorPreview');
+const fileEditorPreviewPane = document.getElementById('fileEditorPreviewPane');
+const fileEditorHighlight = document.getElementById('fileEditorHighlight');
+const fileEditorHighlightCode = document.getElementById('fileEditorHighlightCode');
 const fileEditorSave = document.getElementById('fileEditorSave');
 const fileEditorClose = document.getElementById('fileEditorClose');
 const fileEditorStatus = document.getElementById('fileEditorStatus');
 const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
+const HIGHLIGHTABLE_EXTENSIONS = {
+  '.md': 'markdown', '.markdown': 'markdown',
+  '.html': 'xml', '.htm': 'xml', '.xml': 'xml', '.svg': 'xml',
+  '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
+  '.json': 'json', '.css': 'css', '.scss': 'scss',
+  '.rs': 'rust', '.go': 'go', '.c': 'c', '.h': 'c',
+  '.cpp': 'cpp', '.hpp': 'cpp', '.cc': 'cpp',
+  '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+  '.yaml': 'yaml', '.yml': 'yaml',
+  '.toml': 'ini', '.ini': 'ini', '.cfg': 'ini',
+  '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
+};
+const openFiles = new Map();  // path -> {mtime, kind, original, content, dirty}
+let activeFile = null;
 let fileExplorerRoot = null;
 let fileExplorerShowHidden = (() => {
   try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
   catch (_) { return false; }
 })();
-let fileEditorState = null;  // {path, mtime, kind: 'text'|'image', dirty}
+const fileEditorPreviewMode = new Map();  // path -> true when previewing markdown
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -1649,7 +1667,46 @@ function renderSessionButtons() {
     }
   }
   sessionButtons.appendChild(createFileExplorerButton());
+  for (const path of openFiles.keys()) {
+    sessionButtons.appendChild(createFileTabButton(path));
+  }
   scheduleTabStripOverflowCheck(sessionButtons);
+}
+
+function createFileTabButton(path) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'session-button-wrap file-tab-wrap';
+  wrapper.dataset.filePath = path;
+  const isActive = path === activeFile;
+  const state = openFiles.get(path) || {};
+  const dirty = !!state.dirty;
+  const button = document.createElement('button');
+  button.className = `session-button file-tab ${isActive ? 'active' : ''} ${dirty ? 'dirty' : ''}`;
+  button.type = 'button';
+  button.title = path;
+  const dot = dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
+  button.innerHTML = `${dot}<span class="agent-icon file" aria-hidden="true">📄</span><span class="file-tab-name">${esc(basenameOf(path))}</span>`;
+  button.addEventListener('click', event => {
+    if (event.target.closest('.file-tab-close')) return;
+    event.preventDefault();
+    activeFile = path;
+    renderEditorForActive();
+    renderSessionButtons();
+  });
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'file-tab-close';
+  closeBtn.title = dirty ? 'Discard changes and close' : 'Close';
+  closeBtn.setAttribute('aria-label', 'Close');
+  closeBtn.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (dirty && !window.confirm(`Discard unsaved changes to ${basenameOf(path)}?`)) return;
+    closeFileTab(path);
+  });
+  wrapper.appendChild(button);
+  wrapper.appendChild(closeBtn);
+  return wrapper;
 }
 
 function createFileExplorerButton() {
@@ -1744,13 +1801,50 @@ function fileExtensionOf(name) {
   return dot === -1 ? '' : name.slice(dot).toLowerCase();
 }
 
+function basenameOf(path) {
+  if (!path) return '';
+  const idx = path.lastIndexOf('/');
+  return idx === -1 ? path : path.slice(idx + 1) || '/';
+}
+
 async function openFileInEditor(fullPath, name) {
   const ext = fileExtensionOf(name);
-  if (IMAGE_EXTENSIONS.has(ext)) {
-    showImagePreview(fullPath);
+  const kind = IMAGE_EXTENSIONS.has(ext) ? 'image' : 'text';
+  if (openFiles.has(fullPath)) {
+    activeFile = fullPath;
+    renderEditorForActive();
+    renderSessionButtons();
     return;
   }
-  await showTextEditor(fullPath);
+  if (kind === 'image') {
+    openFiles.set(fullPath, { mtime: 0, kind: 'image', original: '', content: '', dirty: false });
+    activeFile = fullPath;
+    renderEditorForActive();
+    renderSessionButtons();
+    return;
+  }
+  try {
+    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setEditorStatus(`error: ${payload.error || response.status}`, 'error');
+      ensureEditorVisible();
+      return;
+    }
+    const payload = await response.json();
+    openFiles.set(fullPath, {
+      mtime: payload.mtime,
+      kind: 'text',
+      original: payload.content,
+      content: payload.content,
+      dirty: false,
+    });
+    activeFile = fullPath;
+    renderEditorForActive();
+    renderSessionButtons();
+  } catch (err) {
+    setEditorStatus(`error: ${err}`, 'error');
+  }
 }
 
 function ensureEditorVisible() {
@@ -1763,13 +1857,13 @@ function hideEditor() {
   if (!fileEditor) return;
   fileEditor.setAttribute('hidden', '');
   document.body.classList.remove('file-editor-open');
-  fileEditorState = null;
-  if (fileEditorTextarea) fileEditorTextarea.value = '';
-  setEditorStatus('');
+  activeFile = null;
+  if (fileEditorTextarea) { fileEditorTextarea.value = ''; fileEditorTextarea.hidden = false; }
+  if (fileEditorPreviewPane) { fileEditorPreviewPane.hidden = true; fileEditorPreviewPane.innerHTML = ''; }
+  if (fileEditorHighlight) fileEditorHighlight.hidden = true;
   const img = fileEditor.querySelector('.file-editor-image');
   if (img) img.remove();
-  if (fileEditorTextarea) fileEditorTextarea.hidden = false;
-  if (fileEditorSave) fileEditorSave.hidden = false;
+  setEditorStatus('');
 }
 
 function setEditorStatus(msg, level) {
@@ -1778,62 +1872,106 @@ function setEditorStatus(msg, level) {
   fileEditorStatus.dataset.level = level || '';
 }
 
-async function showTextEditor(fullPath) {
-  ensureEditorVisible();
-  if (fileEditorPath) fileEditorPath.textContent = fullPath;
-  // Tear down any image preview from a previous file
-  const existingImg = fileEditor?.querySelector('.file-editor-image');
-  if (existingImg) existingImg.remove();
-  if (fileEditorTextarea) {
-    fileEditorTextarea.hidden = false;
-    fileEditorTextarea.value = 'loading...';
-    fileEditorTextarea.readOnly = readOnlyMode;
+function closeFileTab(path) {
+  openFiles.delete(path);
+  fileEditorPreviewMode.delete(path);
+  if (activeFile === path) {
+    const remaining = Array.from(openFiles.keys());
+    activeFile = remaining[remaining.length - 1] || null;
   }
+  if (!activeFile) {
+    hideEditor();
+  } else {
+    renderEditorForActive();
+  }
+  renderSessionButtons();
+}
+
+function renderEditorForActive() {
+  if (!activeFile || !openFiles.has(activeFile)) {
+    hideEditor();
+    return;
+  }
+  ensureEditorVisible();
+  const state = openFiles.get(activeFile);
+  if (fileEditorPath) fileEditorPath.textContent = activeFile;
+  const isMarkdown = activeFile.toLowerCase().endsWith('.md') || activeFile.toLowerCase().endsWith('.markdown');
+  if (fileEditorPreviewBtn) {
+    fileEditorPreviewBtn.hidden = !(isMarkdown && state.kind === 'text');
+    fileEditorPreviewBtn.classList.toggle('active', fileEditorPreviewMode.get(activeFile) === true);
+    fileEditorPreviewBtn.textContent = fileEditorPreviewMode.get(activeFile) ? 'Edit' : 'Preview';
+  }
+  // Clear any image from a previous tab
+  const oldImg = fileEditor.querySelector('.file-editor-image');
+  if (oldImg) oldImg.remove();
+  if (state.kind === 'image') {
+    if (fileEditorTextarea) fileEditorTextarea.hidden = true;
+    if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = true;
+    if (fileEditorHighlight) fileEditorHighlight.hidden = true;
+    if (fileEditorSave) fileEditorSave.hidden = true;
+    const img = document.createElement('img');
+    img.className = 'file-editor-image';
+    img.src = `/api/fs/raw?path=${encodeURIComponent(activeFile)}`;
+    img.alt = activeFile;
+    img.onload = () => setEditorStatus(`${img.naturalWidth}×${img.naturalHeight}`, '');
+    img.onerror = () => setEditorStatus('failed to load image', 'error');
+    fileEditor.insertBefore(img, fileEditorStatus);
+    setEditorStatus('loading…', '');
+    return;
+  }
+  // text mode
   if (fileEditorSave) fileEditorSave.hidden = readOnlyMode;
-  try {
-    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      setEditorStatus(`error: ${payload.error || response.status}`, 'error');
-      fileEditorTextarea.value = '';
-      fileEditorState = null;
-      return;
+  const ext = activeFile.slice(activeFile.lastIndexOf('.')).toLowerCase();
+  const previewing = fileEditorPreviewMode.get(activeFile) === true;
+  if (previewing && isMarkdown) {
+    renderMarkdownPreview(state.content);
+    if (fileEditorTextarea) fileEditorTextarea.hidden = true;
+    if (fileEditorHighlight) fileEditorHighlight.hidden = true;
+    if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = false;
+  } else {
+    if (fileEditorTextarea) {
+      fileEditorTextarea.hidden = false;
+      fileEditorTextarea.value = state.content;
+      fileEditorTextarea.readOnly = readOnlyMode;
     }
-    const payload = await response.json();
-    fileEditorTextarea.value = payload.content;
-    fileEditorState = { path: fullPath, mtime: payload.mtime, kind: 'text', dirty: false };
-    setEditorStatus(`${payload.size} bytes`, '');
-  } catch (err) {
-    setEditorStatus(`error: ${err}`, 'error');
+    if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = true;
+    if (fileEditorHighlight) fileEditorHighlight.hidden = true;
+  }
+  setEditorStatus(state.dirty ? 'modified' : `${state.original.length} chars`, state.dirty ? '' : '');
+}
+
+function renderMarkdownPreview(text) {
+  if (!fileEditorPreviewPane) return;
+  if (typeof window.marked === 'undefined') {
+    fileEditorPreviewPane.textContent = 'marked.js not loaded (offline CDN?)';
+    return;
+  }
+  const html = window.marked.parse(text, { gfm: true, breaks: true });
+  fileEditorPreviewPane.innerHTML = html;
+  if (typeof window.hljs !== 'undefined') {
+    fileEditorPreviewPane.querySelectorAll('pre code').forEach(block => {
+      try { window.hljs.highlightElement(block); } catch (_) {}
+    });
   }
 }
 
-function showImagePreview(fullPath) {
-  ensureEditorVisible();
-  if (fileEditorPath) fileEditorPath.textContent = fullPath;
-  if (fileEditorTextarea) fileEditorTextarea.hidden = true;
-  if (fileEditorSave) fileEditorSave.hidden = true;
-  const existing = fileEditor.querySelector('.file-editor-image');
-  if (existing) existing.remove();
-  const img = document.createElement('img');
-  img.className = 'file-editor-image';
-  img.src = `/api/fs/raw?path=${encodeURIComponent(fullPath)}`;
-  img.alt = fullPath;
-  img.onload = () => setEditorStatus(`${img.naturalWidth}×${img.naturalHeight}`, '');
-  img.onerror = () => setEditorStatus('failed to load image', 'error');
-  fileEditor.insertBefore(img, fileEditorStatus);
-  fileEditorState = { path: fullPath, kind: 'image', dirty: false };
-  setEditorStatus('loading…', '');
+function togglePreview() {
+  if (!activeFile) return;
+  const wasPreviewing = fileEditorPreviewMode.get(activeFile) === true;
+  fileEditorPreviewMode.set(activeFile, !wasPreviewing);
+  renderEditorForActive();
 }
 
 async function saveCurrentEditor() {
-  if (!fileEditorState || fileEditorState.kind !== 'text' || readOnlyMode) return;
+  if (!activeFile || readOnlyMode) return;
+  const state = openFiles.get(activeFile);
+  if (!state || state.kind !== 'text') return;
   setEditorStatus('saving…', '');
   try {
     const body = JSON.stringify({
-      path: fileEditorState.path,
+      path: activeFile,
       content: fileEditorTextarea.value,
-      expected_mtime: fileEditorState.mtime,
+      expected_mtime: state.mtime,
     });
     const response = await apiFetch('/api/fs/write', {
       method: 'POST',
@@ -1846,9 +1984,12 @@ async function saveCurrentEditor() {
       return;
     }
     const payload = await response.json();
-    fileEditorState.mtime = payload.mtime;
-    fileEditorState.dirty = false;
+    state.mtime = payload.mtime;
+    state.original = fileEditorTextarea.value;
+    state.content = fileEditorTextarea.value;
+    state.dirty = false;
     setEditorStatus(`saved (${payload.size} bytes)`, 'ok');
+    renderSessionButtons();
   } catch (err) {
     setEditorStatus(`save failed: ${err}`, 'error');
   }
@@ -1898,14 +2039,21 @@ if (fileExplorerHiddenToggle) {
   fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
   fileExplorerHiddenToggle.addEventListener('click', toggleHiddenFiles);
 }
-if (fileEditorClose) fileEditorClose.addEventListener('click', hideEditor);
+if (fileEditorClose) fileEditorClose.addEventListener('click', () => {
+  if (activeFile) closeFileTab(activeFile);
+});
 if (fileEditorSave) fileEditorSave.addEventListener('click', saveCurrentEditor);
+if (fileEditorPreviewBtn) fileEditorPreviewBtn.addEventListener('click', togglePreview);
 if (fileEditorTextarea) {
   fileEditorTextarea.addEventListener('input', () => {
-    if (fileEditorState && fileEditorState.kind === 'text') {
-      fileEditorState.dirty = true;
-      setEditorStatus('modified', '');
-    }
+    if (!activeFile) return;
+    const state = openFiles.get(activeFile);
+    if (!state || state.kind !== 'text') return;
+    state.content = fileEditorTextarea.value;
+    const wasDirty = state.dirty;
+    state.dirty = state.content !== state.original;
+    setEditorStatus(state.dirty ? 'modified' : `${state.original.length} chars`, '');
+    if (wasDirty !== state.dirty) renderSessionButtons();
   });
   fileEditorTextarea.addEventListener('keydown', event => {
     const isSave = (event.ctrlKey || event.metaKey) && event.key === 's' && !event.shiftKey;

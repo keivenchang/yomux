@@ -77,7 +77,10 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
 <link rel="stylesheet" href="{static_asset_url("xterm.css")}" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css';">
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
 <link rel="stylesheet" href="{static_asset_url("yolomux.css")}">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
 <script src="{static_asset_url("xterm.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js';"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js" defer></script>
 </head>
 <body>
 <header class="topbar">
@@ -112,10 +115,13 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
   <div class="file-editor" id="fileEditor" hidden>
     <div class="file-editor-head">
       <div class="file-editor-path" id="fileEditorPath"></div>
+      <button type="button" id="fileEditorPreview" class="file-editor-preview" title="Toggle Markdown preview" hidden>Preview</button>
       <button type="button" id="fileEditorSave" class="file-editor-save" title="Save (Ctrl/Cmd+S)">Save</button>
-      <button type="button" id="fileEditorClose" class="file-editor-close" title="Close editor" aria-label="Close"></button>
+      <button type="button" id="fileEditorClose" class="file-editor-close" title="Close current file" aria-label="Close"></button>
     </div>
     <textarea id="fileEditorTextarea" class="file-editor-textarea" spellcheck="false" wrap="off"></textarea>
+    <div id="fileEditorPreviewPane" class="file-editor-preview-pane markdown-body" hidden></div>
+    <pre id="fileEditorHighlight" class="file-editor-highlight" hidden><code id="fileEditorHighlightCode"></code></pre>
     <div id="fileEditorStatus" class="file-editor-status"></div>
   </div>
 </aside>
