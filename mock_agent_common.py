@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import termios
+import threading
 import textwrap
 import time
 import tty
@@ -244,6 +245,9 @@ def print_codex_startup() -> None:
 def print_thinking(seconds: float = 0.5, tokens: int = 39) -> None:
     """Animated thinking spinner. Brief by default (~500ms)."""
     print()
+    if PERMISSION_STYLE == "codex":
+        print_codex_working(seconds)
+        return
     if not sys.stdout.isatty():
         print(f"✻ {random.choice(VERBS)}… ({seconds}s · ↓ {tokens} tokens · thinking with {EFFORT} effort)")
         return
@@ -262,6 +266,75 @@ def print_thinking(seconds: float = 0.5, tokens: int = 39) -> None:
             time.sleep(tick)
     sys.stdout.write("\r\x1b[2K")
     sys.stdout.flush()
+
+
+def format_working_elapsed(seconds: float) -> str:
+    total = max(1, int(seconds))
+    minutes, remaining = divmod(total, 60)
+    if minutes:
+        return f"{minutes}m {remaining}s"
+    return f"{remaining}s"
+
+
+def codex_working_word(frame: int) -> str:
+    word = "Working"
+    active = frame % len(word)
+    parts = []
+    for index, char in enumerate(word):
+        color = "\x1b[97m" if index == active else "\x1b[90m"
+        parts.append(f"{color}{char}")
+    return "".join(parts) + "\x1b[0m"
+
+
+def print_codex_working(seconds: float) -> None:
+    if not sys.stdout.isatty():
+        print(f"• Working ({format_working_elapsed(seconds)} • esc to interrupt)")
+        return
+
+    tick = 0.12
+    total_ticks = max(1, int(seconds / tick))
+    for i in range(total_ticks + 1):
+        elapsed = min(seconds, i * tick)
+        line = f"• {codex_working_word(i)} ({format_working_elapsed(elapsed)} • esc to interrupt)"
+        sys.stdout.write("\r\x1b[2K" + line)
+        sys.stdout.flush()
+        if i < total_ticks:
+            time.sleep(tick)
+    sys.stdout.write("\r\x1b[2K")
+    sys.stdout.flush()
+
+
+def codex_working_status(stop_event: threading.Event, started_at: float) -> None:
+    frame = 0
+    while not stop_event.is_set():
+        elapsed = max(1, time.time() - started_at)
+        line = f"• {codex_working_word(frame)} ({format_working_elapsed(elapsed)} • esc to interrupt)"
+        sys.stdout.write("\r\x1b[2K" + line)
+        sys.stdout.flush()
+        frame += 1
+        stop_event.wait(0.12)
+
+
+def run_with_codex_working_status(command: str, use_real: bool) -> tuple[str, int]:
+    started_at = time.time()
+    if not sys.stdout.isatty():
+        print("• Working (1s • esc to interrupt)")
+        result = real_exec(command) if use_real else result_for_command(command)
+        elapsed = max(1, round(time.time() - started_at))
+        return result, elapsed
+
+    stop_event = threading.Event()
+    worker = threading.Thread(target=codex_working_status, args=(stop_event, started_at), daemon=True)
+    worker.start()
+    try:
+        result = real_exec(command) if use_real else result_for_command(command)
+    finally:
+        stop_event.set()
+        worker.join(timeout=0.5)
+    elapsed = max(1, round(time.time() - started_at))
+    sys.stdout.write("\r\x1b[2K" + f"• Working ({format_working_elapsed(elapsed)} • esc to interrupt)" + "\n")
+    sys.stdout.flush()
+    return result, elapsed
 
 
 def print_assistant(text: str) -> None:
@@ -576,15 +649,19 @@ def approve_pending_permission(state: dict[str, str]) -> None:
     clear_pending(state)
     print(f"● User approved {AGENT_DISPLAY_NAME}'s request")
     print()
-    print(f"● Bash({command})")
-    print("  ⎿  Running…")
-    sys.stdout.flush()
-    t0 = time.time()
-    result = real_exec(command) if use_real else result_for_command(command)
-    elapsed = max(1, round(time.time() - t0))
-    if sys.stdout.isatty():
-        sys.stdout.write("\x1b[1A\x1b[2K\r")
+    if PERMISSION_STYLE == "codex":
+        result, elapsed = run_with_codex_working_status(command, use_real)
+        print(f"● Bash({command})")
+    else:
+        print(f"● Bash({command})")
+        print("  ⎿  Running…")
         sys.stdout.flush()
+        t0 = time.time()
+        result = real_exec(command) if use_real else result_for_command(command)
+        elapsed = max(1, round(time.time() - t0))
+        if sys.stdout.isatty():
+            sys.stdout.write("\x1b[1A\x1b[2K\r")
+            sys.stdout.flush()
     result_lines = result.split("\n") if result else [""]
     for i, line in enumerate(result_lines):
         prefix = "  ⎿  " if i == 0 else "     "

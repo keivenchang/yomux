@@ -102,6 +102,12 @@ globalThis.__layoutTestApi = {
   windowStack,
   windowStateWithTabs,
   currentSlots() { return layoutSlots; },
+  setAutoApproveStateForTest(session, payload) {
+    autoApproveStates.set(session, payload);
+  },
+  applyServerMetadataPulsesForTest(session, pulses) {
+    updateMetadataBadgePulses({sessions: {[session]: {metadata_badge_pulse_remaining_ms: pulses}}});
+  },
   serialize(slots) {
     return {
       tree: slots[layoutTreeKey],
@@ -218,4 +224,38 @@ function canonical(value) {
   assert.equal(api.pullRequestStatusLabel({number: 9961, source_only: true, merged: true}), '');
   assert.equal(html.includes('MERGED'), false, 'main fallback does not show merged status');
   assert.equal(html.includes('(#9961)'), false, 'tab title strips duplicated PR suffix');
+
+  const genericWorkingHtml = api.windowSessionTabHtml('4', info, {key: 'working'}, true);
+  assert.equal(genericWorkingHtml.includes('session-yolo-marker active working'), false, 'generic working state does not pulse YO marker');
+
+  api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'working'}});
+  const workingHtml = api.windowSessionTabHtml('4', info, {key: 'idle'}, true);
+  assert.ok(workingHtml.includes('session-yolo-marker active working'), 'visible screen working pulses active YO marker');
+  const workingTopHtml = api.sessionButtonHtml('4', info, {key: 'idle'}, true);
+  assert.ok(workingTopHtml.includes('session-yolo-marker active working'), 'visible screen working pulses top YO marker');
+
+  api.applyServerMetadataPulsesForTest('4', {main: 20000, pr: 20000});
+  const metadataPulseHtml = api.windowSessionTabHtml('4', info, {key: 'idle'}, true);
+  assert.ok(metadataPulseHtml.includes('branch-indicator metadata-pulse'), 'MAIN badge pulses after metadata change');
+  assert.ok(metadataPulseHtml.includes('pr-indicator pr-status-unknown metadata-pulse'), 'PR number badge pulses after metadata change');
+
+  const mergedInfo = {
+    project: {
+      git: {branch: 'feature'},
+      pull_request: {number: 12, merged: true, checks: {state: 'success'}},
+    },
+  };
+  api.applyServerMetadataPulsesForTest('8', {status: 20000});
+  const mergedPulseHtml = api.windowSessionTabHtml('8', mergedInfo, {key: 'idle'}, true);
+  assert.ok(mergedPulseHtml.includes('pr-status-merged metadata-pulse'), 'MERGED badge pulses after status change');
+
+  const ciInfo = {
+    project: {
+      git: {branch: 'feature'},
+      pull_request: {number: 13, status_label: 'CI failing', checks: {state: 'failure'}},
+    },
+  };
+  api.applyServerMetadataPulsesForTest('9', {ci: 20000});
+  const ciPulseHtml = api.windowSessionTabHtml('9', ciInfo, {key: 'idle'}, true);
+  assert.ok(ciPulseHtml.includes('pr-status-failing metadata-pulse'), 'CI badge is marked after CI change');
 }

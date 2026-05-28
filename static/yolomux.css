@@ -36,8 +36,9 @@
   --tab-font: var(--control-font);
   --tab-label-size: 13px;
   --tab-line-height: 1;
-  --red-reminder-duration: 2s;
+  --red-reminder-duration: 1.55s;
   --red-reminder-easing: ease-in-out;
+  --yolo-reminder-duration: 2.8s;
 }
 * { box-sizing: border-box; }
 html {
@@ -70,27 +71,6 @@ body {
 }
 .title {
   font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0;
-  white-space: nowrap;
-}
-.title .brand-blue {
-  color: #4285f4;
-}
-.title .brand-red {
-  color: #ea4335;
-}
-.title .brand-yellow {
-  color: #fbbc05;
-}
-.title .brand-green {
-  color: #34a853;
-}
-.title .brand-greenidia {
-  color: var(--GPU-green);
-}
-.title .brand-white {
-  color: #f4f7fb;
 }
 .sub {
   color: var(--muted);
@@ -465,12 +445,12 @@ body {
 }
 @keyframes attention-ring-fade {
   0%, 100% {
-    border-color: rgba(255, 51, 71, 0.34);
-    box-shadow: 0 0 0 0 rgba(255, 51, 71, 0), 0 0 2px rgba(255, 51, 71, 0.12);
+    border-color: rgba(255, 51, 71, 0.56);
+    box-shadow: 0 0 0 0 rgba(255, 51, 71, 0), 0 0 5px rgba(255, 51, 71, 0.24);
   }
   45%, 55% {
     border-color: rgba(255, 51, 71, 1);
-    box-shadow: 0 0 0 var(--attention-ring-border, 1px) rgba(255, 51, 71, 0.55), 0 0 18px rgba(255, 51, 71, 0.48);
+    box-shadow: 0 0 0 2px rgba(255, 51, 71, 0.72), 0 0 26px rgba(255, 51, 71, 0.68);
   }
 }
 .session-state-badge.session-state-reminder,
@@ -489,13 +469,15 @@ body {
 @keyframes red-pill-fill-fade {
   0%, 100% {
     color: #ffd7dc;
-    background-color: #841928;
-    transform: scale(0.98);
+    background-color: #7a1020;
+    filter: saturate(1.05) brightness(0.92);
+    transform: scale(0.97);
   }
   45%, 55% {
     color: #ffffff;
-    background-color: #ef2f49;
-    transform: scale(1.05);
+    background-color: #ff304a;
+    filter: saturate(1.45) brightness(1.12);
+    transform: scale(1.08);
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -507,6 +489,8 @@ body {
   .session-button.needs-input,
   .session-button.needs-exec,
   .session-button.needs-blocked,
+  .session-yolo-marker.active.working,
+  .ci-indicator.metadata-pulse,
   .panel.needs-input-window::after,
   .panel.needs-exec-window::after,
   .panel.needs-blocked-window::after {
@@ -515,16 +499,16 @@ body {
 }
 .session-yolo-marker {
   flex: 0 0 auto;
-  min-width: 26px;
+  min-width: 18px;
   height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 1px 5px;
+  padding: 1px 0;
   color: var(--auto-text);
   background: var(--GPU-green);
   border: 1px solid var(--auto-border);
-  border-radius: 4px;
+  border-radius: 2px;
   box-shadow: none;
   font: 800 10px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
@@ -532,10 +516,10 @@ body {
   cursor: pointer;
 }
 .panel-session-label .session-yolo-marker {
-  min-width: 28px;
+  min-width: 20px;
   height: 21px;
-  padding: 0 7px;
-  border-radius: 5px;
+  padding: 0;
+  border-radius: 2px;
   font-size: 15px;
 }
 .session-yolo-marker.inactive {
@@ -547,6 +531,42 @@ body {
   color: #f5c987;
   background: #293243;
   border-color: #f0b85d;
+}
+.session-yolo-marker.active.working {
+  --attention-ring-border: 1px;
+  transform-origin: center;
+  animation-name: yolo-ring-fade, yolo-pill-fill-fade, yolo-marker-rotate !important;
+  animation-duration: var(--yolo-reminder-duration), var(--yolo-reminder-duration), 20s !important;
+  animation-delay: 0s, 0s, var(--yolo-rotate-delay, 0s) !important;
+  animation-timing-function: var(--red-reminder-easing), var(--red-reminder-easing), linear !important;
+  animation-iteration-count: infinite, infinite, infinite !important;
+}
+@keyframes yolo-ring-fade {
+  0%, 100% {
+    border-color: rgba(120, 188, 27, 0.82);
+    box-shadow: inset 0 0 0 1px rgba(155, 227, 61, 0.12), 0 0 1px rgba(118, 185, 0, 0.08);
+  }
+  45%, 55% {
+    border-color: rgba(184, 238, 92, 0.95);
+    box-shadow: inset 0 0 0 1px rgba(7, 16, 0, 0.18), 0 0 5px rgba(155, 227, 61, 0.32);
+  }
+}
+@keyframes yolo-pill-fill-fade {
+  0%, 100% {
+    color: #071000;
+    background-color: #69aa00;
+    filter: saturate(0.95) brightness(0.96);
+  }
+  45%, 55% {
+    color: #071000;
+    background-color: #86c91b;
+    filter: saturate(1.12) brightness(1.06);
+  }
+}
+@keyframes yolo-marker-rotate {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .ci-indicator {
   flex: 0 0 auto;
@@ -598,6 +618,25 @@ body {
   background: #9fd8ff;
   border-color: #c9ebff;
 }
+.ci-indicator.metadata-pulse:not(.pr-status-failing) {
+  transform-origin: center;
+  animation: metadata-badge-pulse 1.4s var(--red-reminder-easing) 14;
+}
+@keyframes metadata-badge-pulse {
+  0%, 100% {
+    outline: 0 solid rgba(255, 226, 122, 0);
+    box-shadow: 0 0 0 0 rgba(255, 226, 122, 0);
+    filter: saturate(1) brightness(1);
+    transform: scale(1);
+  }
+  45%, 55% {
+    outline: 2px solid rgba(255, 226, 122, 0.92);
+    outline-offset: 1px;
+    box-shadow: 0 0 12px rgba(255, 226, 122, 0.62), 0 0 2px rgba(255, 255, 255, 0.62);
+    filter: saturate(1.25) brightness(1.18);
+    transform: scale(1.08);
+  }
+}
 .session-popover {
   visibility: hidden;
   opacity: 0;
@@ -611,6 +650,10 @@ body {
   overflow: auto;
   padding: 8px 10px;
   color: #eefbe6;
+  font-family: var(--ui-font);
+  font-size: 13px;
+  font-stretch: normal;
+  line-height: 1.25;
   font-weight: 400;
   background: rgba(8, 31, 8, 0.98);
   border: 1px solid rgba(95, 150, 42, 0.64);
@@ -648,7 +691,7 @@ body {
 .popover-subtitle {
   margin-top: 1px;
   color: #bddcaf;
-  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font: inherit;
   overflow-wrap: anywhere;
 }
 .popover-row {
@@ -795,8 +838,7 @@ body {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   padding: 4px 0;
-  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  font-weight: 400;
+  font: inherit;
 }
 .branch-name {
   overflow: hidden;
@@ -1400,10 +1442,10 @@ body.layout-resizing {
 }
 .window-tab-core > .session-yolo-marker {
   flex: 0 0 auto;
-  min-width: 26px;
+  min-width: 18px;
   height: 18px;
-  padding: 1px 5px;
-  border-radius: 4px;
+  padding: 1px 0;
+  border-radius: 2px;
   font-size: 10px;
 }
 .window-tab-core .session-button-text {
@@ -2069,8 +2111,8 @@ body.layout-resizing {
     display: none;
   }
   .session-yolo-marker {
-    min-width: 22px;
-    padding-inline: 3px;
+    min-width: 18px;
+    padding-inline: 0;
   }
   .latency-graph {
     display: none;

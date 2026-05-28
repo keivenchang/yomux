@@ -53,7 +53,27 @@ For a background server, write logs under `/tmp`:
 setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 yolomux.py --host 0.0.0.0 > /tmp/yolomux.log 2>&1 < /dev/null &
 ```
 
-Use `--dangerously-yolo` only when you intentionally want newly created Claude/Codex sessions to launch with their dangerous approval and sandbox bypass flags:
+Agent launch flags are separate from YOLOmux's per-session `YO` toggle. If you launch agents by hand, Claude's auto permission mode is:
+
+```bash
+claude --permission-mode auto
+```
+
+This is not the same as Claude's full permission bypass. It still uses Claude's permission system, but lets Claude auto-handle more decisions. Claude's full bypass is `claude --dangerously-skip-permissions`.
+
+The current Codex CLI does not expose a `codex --yolo` flag. The closest no-prompt approval setting is:
+
+```bash
+codex --ask-for-approval never
+```
+
+That removes Codex approval prompts but keeps the configured sandbox policy. The full Codex approval-and-sandbox bypass is:
+
+```bash
+codex --dangerously-bypass-approvals-and-sandbox
+```
+
+Use YOLOmux `--dangerously-yolo` only when you intentionally want newly created Claude/Codex sessions to launch with their dangerous approval and sandbox bypass flags:
 
 ```bash
 python3 yolomux.py --host 0.0.0.0 --port 9998 --dangerously-yolo
@@ -68,17 +88,19 @@ codex --dangerously-bypass-approvals-and-sandbox
 
 Without `--dangerously-yolo`, the same buttons create sessions with plain `claude` and `codex`. The flag affects only new sessions created by YOLOmux after the server starts. It does not change existing tmux sessions, and it is separate from the `YO` auto-approval toggle.
 
-On first launch, YOLOmux creates `~/.config/yolomux/auth.yaml` with placeholder credentials `user` / `password`. While those placeholders are active, the server still listens on the configured port, prints a large stdout setup warning, and serves only an auth setup page telling the user to edit that YAML file. YOLOmux reads the latest YAML auth on each request, so after saving `auth.yaml`, refresh the browser; no server restart is required. If an old `~/.config/yolomux/auth.json` exists and no YAML file exists yet, YOLOmux migrates the single JSON user into `auth.yaml`.
+The `YO` button is runtime auto-approval for an existing tmux session. It watches the visible tmux screen for approval prompts and sends the approval key when the detector says the prompt is safe. It does not relaunch Claude or Codex, and it does not change the agent's own permission or sandbox flags.
+
+On first launch, YOLOmux creates `~/.config/yolomux/auth.yaml` as an inactive starter file. The starter leaves `users:` uncommented, then comments out an admin account for the current login user with a random generated password plus a readonly `guest` / `guest` account. None of those credentials are active while their account entries are commented. YOLOmux writes the directory as `0700` and `auth.yaml` as `0600`; existing auth files are also tightened when read. If an old default `user` / `password` auth file is found, YOLOmux replaces it with the inactive starter. Until at least one account is uncommented, the server still listens on the configured port, prints a stdout setup warning, and serves only a setup page telling the user to edit that YAML file. YOLOmux reads the latest YAML auth on each setup poll, so after saving `auth.yaml`, the setup page reloads automatically; no server restart is required.
 
 Example `auth.yaml`:
 
 ```yaml
 users:
-  - username: "admin"
+  - username: "keivenc"
     password: "change-this-admin-password"
     role: "admin"
-  - username: "viewer"
-    password: "change-this-viewer-password"
+  - username: "guest"
+    password: "guest"
     role: "readonly"
 ```
 
@@ -202,6 +224,22 @@ The transcript tab uses Server-Sent Events from `/api/context-stream`. The AI su
 
 YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser polls YOLO status every few seconds and reflects the active state in each pane tab.
 
+## Code layout
+
+The main server entry point is `yolomux.py`, which delegates to `yolomux_lib/cli.py`. Request routing lives in `yolomux_lib/server.py`, application state and tmux actions live in `yolomux_lib/app.py`, and shared helpers live in smaller modules such as `metadata.py`, `sessions.py`, `transcripts.py`, `uploads.py`, `events.py`, and `websocket.py`.
+
+Frontend code for the interactive UI lives in `static/yolomux.js` and `static/yolomux.css`. Python keeps only the small HTML shell in `yolomux_lib/web.py`, plus bootstrap JSON and versioned static asset URLs. The read-only wall has its own frontend files, `static/tmux-wall.js` and `static/tmux-wall.css`, so `tmux_wall.py` stays focused on tmux capture, JSON endpoints, and Server-Sent Events.
+
+Useful local checks:
+
+```bash
+python3 -m py_compile yolomux.py tmux_wall.py auto_approve_tmux.py yolomux_lib/*.py
+python3 -m pytest tests
+node --check static/yolomux.js
+node --check static/tmux-wall.js
+node tests/layout_url.test.js
+```
+
 ## Webterm API
 
 All API routes require auth. Read endpoints accept `readonly` or `admin`, except `/api/summary-stream` because it launches Codex and requires `admin`. Mutating POST routes require `admin` except `/api/event`, which accepts readonly client telemetry. `/ws` accepts readonly users but attaches tmux with `-r` and ignores keyboard input and tmux-scroll messages.
@@ -229,13 +267,14 @@ python3 yolomux.py --print-transcripts
 
 ## Read-only wall
 
-`tmux_wall.py` is a read-only dashboard:
+`tmux_wall.py` is an optional read-only sidecar dashboard. It is useful when you only need a passive wall of terminal snapshots and JSON context, not the full interactive YOLOmux terminal UI.
 
 - Stdlib HTTP server.
 - Server-Sent Events for live terminal snapshots.
 - `tmux capture-pane` as the terminal source.
 - Existing `container/show_dynamo_containers.py` as optional container metadata.
 - JSON endpoints that can feed a future AI summarizer without scraping the browser.
+- Static frontend assets in `static/tmux-wall.css` and `static/tmux-wall.js`.
 
 Run:
 

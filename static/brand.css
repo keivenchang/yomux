@@ -1,0 +1,41 @@
+:root {
+  --brand-greenidia-green: var(--GPU-green, #76b900);
+}
+.brand-title {
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.brand-title .brand-blue {
+  color: #4285f4;
+}
+.brand-title .brand-red {
+  color: #ea4335;
+}
+.brand-title .brand-yellow {
+  color: #fbbc05;
+}
+.brand-title .brand-green {
+  color: #34a853;
+}
+.brand-title .brand-greenidia {
+  color: var(--brand-greenidia-green);
+}
+.brand-title .brand-yolo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 1px;
+  padding: 0 0 1px;
+  color: #071000;
+  background: var(--brand-greenidia-green);
+  border: 1px solid rgba(155, 227, 61, 0.08);
+  border-radius: 3px;
+  line-height: 1;
+}
+.brand-title .brand-lo {
+  color: var(--brand-greenidia-green);
+}
+.brand-title .brand-white {
+  color: #f4f7fb;
+}

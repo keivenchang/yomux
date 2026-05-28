@@ -64,7 +64,7 @@ class Handler(BaseHTTPRequestHandler):
         self.write_json({"error": f"{required_role} access required", "role": identity.role}, status=HTTPStatus.FORBIDDEN)
 
     def require_auth(self, required_role: str = "readonly") -> bool:
-        if placeholder_auth_active():
+        if auth_setup_required():
             self.write_html(setup_auth_html())
             return False
         self._auth_cookie_identity = None
@@ -118,6 +118,9 @@ class Handler(BaseHTTPRequestHandler):
             if content_type:
                 self.write_static_asset(asset, content_type)
                 return
+        if parsed.path == "/api/auth-setup":
+            self.write_json({"setup_required": auth_setup_required()})
+            return
         required_role = "admin" if parsed.path == "/api/summary-stream" else "readonly"
         if not self.require_auth(required_role):
             return

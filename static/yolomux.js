@@ -33,6 +33,7 @@ const metadataRefreshMs = 15000;
 const paneStateRefreshMs = 2000;
 const latencyRefreshMs = 3000;
 const eventLogRefreshMs = 5000;
+const yoloRotateMs = 20000;
 const latencySamplesMax = 24;
 const toastDurationMs = 10000;
 const toastMaxLines = 3;
@@ -63,6 +64,7 @@ let notificationsEnabled = false;
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
 const attentionAlertTimers = new Map();
+const metadataBadgePulseUntil = new Map();
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;
@@ -851,6 +853,18 @@ function stateValue(key, reason, extra = {}) {
   return {key, ...def, reason, ...extra};
 }
 
+function autoApproveScreenIsWorking(payload) {
+  return String(payload?.screen?.key || '') === 'working';
+}
+
+function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
+  return payload?.enabled === true && autoApproveScreenIsWorking(payload);
+}
+
+function yoloRotationDelay(now = Date.now()) {
+  return `${-((now % yoloRotateMs) / 1000).toFixed(3)}s`;
+}
+
 function stateBadgeHtml(key, short, title) {
   const classes = ['session-state-badge', `session-state-${key}`];
   if (stateDef(key).attention) classes.push('session-state-reminder');
@@ -1348,13 +1362,14 @@ function createTopSessionButton(item) {
   button.removeAttribute('title');
   button.addEventListener('click', async event => {
     const autoTarget = event.target.closest('[data-auto-session]');
-    if (!autoTarget) return;
+    if (!autoTarget) {
+      event.preventDefault();
+      await selectSession(item);
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     await toggleAutoApprove(autoTarget.dataset.autoSession);
-  });
-  bindTabActivation(button, () => selectSession(item), {
-    ignore: event => Boolean(event.target.closest('[data-auto-session]')),
   });
   button.addEventListener('dragstart', event => startSessionDrag(event, item, null));
   button.addEventListener('dragend', endSessionDrag);
@@ -1492,19 +1507,21 @@ function yoloMarkerHtml(session, auto, options = {}) {
   const classes = ['session-yolo-marker'];
   if (auto) classes.push('active');
   if (!auto) classes.push('inactive');
+  if (auto && options.yoloWorking) classes.push('working');
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
+  const rotationStyle = auto && options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
   const title = options.toggle && readOnlyMode
     ? `YOLO ${auto ? 'on' : 'off'} for ${sessionLabel(session)}; readonly access`
     : (options.toggle ? `YOLO ${auto ? 'on' : 'off'} for ${sessionLabel(session)}` : 'YOLO enabled');
-  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr} title="${esc(title)}">YO</span>`;
+  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">YO</span>`;
 }
 
-function pullRequestCompactBadgesHtml(pr) {
-  const statusHtml = pullRequestStatusIndicatorHtml(pr);
-  const ciHtml = pullRequestCiIndicatorHtml(pr);
-  const prHtml = pullRequestPrIndicatorHtml(pr);
+function pullRequestCompactBadgesHtml(session, pr) {
+  const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
+  const ciHtml = pullRequestCiIndicatorHtml(session, pr);
+  const prHtml = pullRequestPrIndicatorHtml(session, pr);
   return [prHtml, statusHtml, ciHtml].filter(Boolean).join('');
 }
 
@@ -1573,8 +1590,40 @@ function displayPullRequest(info) {
   return defaultBranchHeadPullRequest(info) || info?.project?.pull_request || null;
 }
 
-function defaultBranchBadgeHtml(info) {
-  return isDefaultBranch(info?.project?.git) ? '<span class="ci-indicator branch-indicator">MAIN</span>' : '';
+function metadataBadgeKey(session, badge) {
+  return `${session}:${badge}`;
+}
+
+function metadataBadgePulseClass(session, badge) {
+  if (!session) return '';
+  const until = metadataBadgePulseUntil.get(metadataBadgeKey(session, badge));
+  if (!until || until <= Date.now()) return '';
+  return ' metadata-pulse';
+}
+
+function metadataBadgeClasses(session, badge, classes) {
+  return `${classes}${metadataBadgePulseClass(session, badge)}`;
+}
+
+function updateMetadataBadgePulses(meta) {
+  const now = Date.now();
+  for (const [key, until] of metadataBadgePulseUntil.entries()) {
+    if (until <= now) metadataBadgePulseUntil.delete(key);
+  }
+  for (const [session, info] of Object.entries(meta?.sessions || {})) {
+    const pulses = info?.metadata_badge_pulse_remaining_ms || {};
+    for (const badge of ['main', 'pr', 'status', 'ci']) {
+      const remaining = Number(pulses[badge] || 0);
+      if (remaining > 0) {
+        metadataBadgePulseUntil.set(metadataBadgeKey(session, badge), now + remaining);
+      }
+    }
+  }
+}
+
+function defaultBranchBadgeHtml(session, info) {
+  if (!isDefaultBranch(info?.project?.git)) return '';
+  return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator branch-indicator')}">MAIN</span>`;
 }
 
 function sessionWorkDescription(session, info, limit = 96) {
@@ -1613,8 +1662,8 @@ function sessionButtonHtml(session, info, state, auto) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(session, info);
   const detailHtml = desc ? `<span class="session-button-dir">${esc(desc)}</span>` : '';
-  return `${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(info)}${pullRequestCompactBadgesHtml(pr)}${detailHtml}</span>`;
+  return `${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(session)})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}${detailHtml}</span>`;
 }
 
 function projectDirName(session, info) {
@@ -2105,23 +2154,23 @@ function pullRequestStatusClass(pr) {
   return 'pr-status-unknown';
 }
 
-function pullRequestStatusIndicatorHtml(pr) {
+function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
   if (!['merged', 'draft', 'closed'].includes(status)) return '';
-  return `<span class="ci-indicator ${pullRequestStatusClass(pr)}">${pullRequestStatusDisplay(pr)}</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator ${pullRequestStatusClass(pr)}`)}">${pullRequestStatusDisplay(pr)}</span>`;
 }
 
-function pullRequestPrIndicatorHtml(pr) {
+function pullRequestPrIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
-  return `<span class="ci-indicator pr-indicator ${pullRequestStatusClass(pr)}">#${esc(pr.number)}</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'pr', `ci-indicator pr-indicator ${pullRequestStatusClass(pr)}`)}">#${esc(pr.number)}</span>`;
 }
 
-function pullRequestCiIndicatorHtml(pr) {
+function pullRequestCiIndicatorHtml(session, pr) {
   if (pullRequestStatusLabel(pr).toLowerCase() === 'merged') return '';
   const state = pr?.checks?.state;
   if (!state || state === 'unknown') return '';
-  return `<span class="ci-indicator ${pullRequestStatusClass(pr)}">CI</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator ${pullRequestStatusClass(pr)}`)}">CI</span>`;
 }
 
 function pullRequestLinkHtml(pr) {
@@ -2923,8 +2972,8 @@ function windowSessionTabHtml(session, info, state, auto) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(session, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="window-tab-core">${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(info)}${pullRequestCompactBadgesHtml(pr)}${detailHtml}</span></span>`;
+  return `<span class="window-tab-core">${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(session)})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}${detailHtml}</span></span>`;
 }
 
 function bindWindowTabStrip(strip, side) {
@@ -3888,9 +3937,7 @@ function startTerminal(session) {
     }
     updateTypingIndicator(session);
     updateStatus();
-    updateSessionButtonStates();
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
-    trackSessionStateChanges();
+    refreshTrackedSessionChrome(session);
   };
   socket.onmessage = event => {
     if (event.data instanceof ArrayBuffer) {
@@ -3905,17 +3952,13 @@ function startTerminal(session) {
     postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
     clearFocusedTerminal(session);
     updateStatus();
-    updateSessionButtonStates();
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
-    trackSessionStateChanges();
+    refreshTrackedSessionChrome(session);
     scheduleTerminalReconnect(session, item);
   };
   socket.onerror = () => {
     updateTypingIndicator(session);
     updateStatus();
-    updateSessionButtonStates();
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
-    trackSessionStateChanges();
+    refreshTrackedSessionChrome(session);
   };
   term.onFocus?.(() => {
     setFocusedTerminal(session);
@@ -4016,11 +4059,9 @@ async function setAutoApprove(session, enabled) {
 async function refreshAutoStatuses() {
   await loadAutoStatuses();
   bindClipboardPaste();
-  updateSessionButtonStates();
   renderAutoApproveButtons();
-  for (const session of activeSessions.filter(isTmuxSession)) {
-    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
-  }
+  updateSessionButtonStates();
+  refreshActivePanelHeaders();
   trackSessionStateChanges();
   refreshOpenEventLogs();
 }
@@ -4062,10 +4103,21 @@ function renderAutoApproveButton(session, payload) {
   const buttons = document.querySelectorAll(`[data-yolo-session="${cssEscape(session)}"]`);
   const enabled = payload?.enabled === true;
   const locked = payload?.locked === true && !enabled;
+  const working = sessionYoloIsWorking(session, payload);
   for (const button of buttons) {
+    const wasWorking = button.classList.contains('working');
     button.classList.toggle('active', enabled);
     button.classList.toggle('inactive', !enabled);
     button.classList.toggle('locked', locked);
+    button.classList.toggle('working', working);
+    if (working) {
+      if (!wasWorking || !button.style.getPropertyValue('--yolo-rotate-delay')) {
+        button.style.setProperty('--yolo-rotate-delay', yoloRotationDelay());
+      }
+    } else {
+      button.style.removeProperty('--yolo-rotate-delay');
+    }
+    button.closest('.session-button, .window-session-tab')?.classList.remove('is-working');
     button.textContent = 'YO';
     const action = payload?.last_action ? `; ${payload.last_action}` : '';
     button.title = enabled
@@ -4144,6 +4196,7 @@ async function refreshTranscripts() {
   try {
     const response = await fetch('/api/transcripts');
     transcriptMeta = await response.json();
+    updateMetadataBadgePulses(transcriptMeta);
     const previousActive = activeSessions.slice();
     const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
     await loadAutoStatuses();
@@ -4204,6 +4257,22 @@ function updatePanelHeader(session, info) {
   panel?.classList.toggle('needs-input-window', state.key === 'needs-input');
   panel?.classList.toggle('needs-exec-window', state.key === 'needs-approval');
   panel?.classList.toggle('needs-blocked-window', state.key === 'blocked');
+}
+
+function refreshSessionChrome(session) {
+  updateSessionButtonStates();
+  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+}
+
+function refreshTrackedSessionChrome(session) {
+  refreshSessionChrome(session);
+  trackSessionStateChanges();
+}
+
+function refreshActivePanelHeaders() {
+  for (const session of activeSessions.filter(isTmuxSession)) {
+    updatePanelHeader(session, transcriptMeta.sessions?.[session]);
+  }
 }
 
 function renderSummaryContext(session, info, agent) {

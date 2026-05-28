@@ -411,7 +411,7 @@ def prompt_text(pane_text: str, prompt_type: str | None = None) -> str:
 _WORKING_LINE_RE = re.compile(
     r"(?:"
     r"[✢✶✻✹✷✸✺✽✾✿*]\s+.+…\s*\([^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt)[^)]*\)"
-    r"|^[◦•*]\s*Working\s*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
+    r"|[^\n]*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
     r")",
     re.IGNORECASE,
 )

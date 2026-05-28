@@ -42,13 +42,13 @@ def print_transcripts(app: TmuxWebtermApp) -> int:
     return 1 if payload["errors"] else 0
 
 
-def print_placeholder_auth_error() -> None:
+def print_auth_setup_error() -> None:
     print(
         f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.",
         file=sys.stderr,
     )
     print(
-        f"Replace the placeholder {PLACEHOLDER_AUTH_USERNAME}/{PLACEHOLDER_AUTH_PASSWORD} credentials.",
+        "Uncomment and edit the YAML account entries, then refresh the browser.",
         file=sys.stderr,
     )
 
@@ -60,8 +60,8 @@ def main() -> int:
 
     if args.print_transcripts:
         try:
-            if placeholder_auth_active():
-                print_placeholder_auth_error()
+            if auth_setup_required():
+                print_auth_setup_error()
                 return 2
             return print_transcripts(app)
         finally:
@@ -73,10 +73,11 @@ def main() -> int:
     print(f"Serving YOLOmux on http://{url_host}:{args.port}/ for {session_text}")
     if args.dangerously_yolo:
         print("DANGEROUS YOLO mode is enabled: new Claude/Codex sessions bypass approval and sandbox protections.")
-    if placeholder_auth_active():
+    if auth_setup_required():
         print("=" * 78)
         print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
-        print(f"Replace the placeholder {PLACEHOLDER_AUTH_USERNAME}/{PLACEHOLDER_AUTH_PASSWORD} credentials.")
+        print("YOLOmux created an inactive starter YAML file.")
+        print("Leave users: as-is, then uncomment and edit one or more account entries before logging in.")
         print(f"YOLOmux is listening on http://{url_host}:{args.port}/ and will show this setup message in the browser.")
         print("After saving auth.yaml, refresh the browser. No restart is required.")
         print("=" * 78)

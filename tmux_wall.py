@@ -12,9 +12,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import html
 import json
-import os
 import re
 import subprocess
 import sys
@@ -35,6 +33,11 @@ DEFAULT_SLOTS = 6
 DEFAULT_LINES = 90
 CONTAINER_HELPER = Path.home() / "utils" / "container" / "show_dynamo_containers.py"
 AGENT_COMMANDS = {"claude", "codex"}
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_CONTENT_TYPES = {
+    "tmux-wall.css": "text/css; charset=utf-8",
+    "tmux-wall.js": "application/javascript; charset=utf-8",
+}
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,23 @@ class PaneInfo:
 
 def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def static_asset_path(asset: str) -> Path | None:
+    if asset not in STATIC_CONTENT_TYPES:
+        return None
+    path = STATIC_DIR / asset
+    return path if path.is_file() else None
+
+
+def static_asset_version(asset: str) -> int:
+    path = static_asset_path(asset)
+    if path is None:
+        return 0
+    try:
+        return int(path.stat().st_mtime)
+    except OSError:
+        return 0
 
 
 def tmux(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -311,134 +331,15 @@ class TmuxWallApp:
 
 
 def html_page() -> str:
-    return """<!doctype html>
+    css_version = static_asset_version("tmux-wall.css")
+    js_version = static_asset_version("tmux-wall.js")
+    return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>YOLOmux tmux wall</title>
-<style>
-:root {
-  color-scheme: dark;
-  --bg: #101317;
-  --panel: #171b20;
-  --panel2: #20262d;
-  --text: #d7dde5;
-  --muted: #8f9baa;
-  --green: #4ade80;
-  --red: #fb7185;
-  --border: #313944;
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  min-height: 100vh;
-  background: var(--bg);
-  color: var(--text);
-  font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-.topbar {
-  height: 64px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  background: #0d1014;
-}
-.title { font-weight: 700; font-size: 16px; }
-.sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.actions { display: flex; align-items: center; gap: 8px; }
-button {
-  background: var(--panel2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  cursor: pointer;
-}
-button:hover { border-color: #556171; }
-.status { color: var(--muted); min-width: 170px; text-align: right; }
-.wrap { height: calc(100vh - 64px); padding: 10px; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 8px; }
-.grid {
-  min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-.pane {
-  min-width: 0;
-  min-height: 0;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  overflow: hidden;
-}
-.pane-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 9px;
-  background: var(--panel2);
-  border-bottom: 1px solid var(--border);
-}
-.pane-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 650;
-}
-.pane-meta {
-  color: var(--muted);
-  white-space: nowrap;
-  font-size: 12px;
-}
-pre.term {
-  margin: 0;
-  min-height: 0;
-  overflow: auto;
-  padding: 9px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  color: #dce5ef;
-}
-.err { color: var(--red); }
-.ok { color: var(--green); }
-.containers {
-  min-height: 84px;
-  max-height: 132px;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel);
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-th, td {
-  padding: 5px 8px;
-  border-bottom: 1px solid #252c35;
-  text-align: left;
-  white-space: nowrap;
-}
-th { color: var(--muted); font-weight: 650; background: var(--panel2); position: sticky; top: 0; }
-td.path { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
-@media (max-width: 900px) {
-  .grid { grid-template-columns: 1fr; grid-template-rows: repeat(6, minmax(260px, 1fr)); }
-  .wrap { height: auto; min-height: calc(100vh - 64px); }
-  .topbar { height: auto; align-items: flex-start; flex-direction: column; }
-  .status { text-align: left; }
-}
-</style>
+<link rel="stylesheet" href="/static/tmux-wall.css?v={css_version}">
 </head>
 <body>
 <header class="topbar">
@@ -462,92 +363,7 @@ td.path { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
     </table>
   </section>
 </main>
-<script>
-const grid = document.getElementById('grid');
-const statusEl = document.getElementById('status');
-const containersEl = document.getElementById('containers');
-let source = null;
-let paused = false;
-let lastPayload = null;
-
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-function paneTitle(slot) {
-  if (!slot.target) return 'empty';
-  const p = slot.pane || {};
-  const title = p.title ? ' - ' + p.title : '';
-  return slot.target + title;
-}
-
-function paneMeta(slot) {
-  const p = slot.pane || {};
-  const bits = [];
-  if (p.command) bits.push(p.command);
-  if (p.current_path) bits.push(p.current_path.replace(/^\\/home\\/keivenc\\//, '~/'));
-  return bits.join(' | ');
-}
-
-function render(payload) {
-  lastPayload = payload;
-  statusEl.textContent = payload.server_time || 'live';
-  if (payload.tmux_error) statusEl.innerHTML = '<span class="err">' + esc(payload.tmux_error) + '</span>';
-  grid.innerHTML = '';
-  for (const slot of payload.slots || []) {
-    const text = slot.error && !slot.text ? slot.error : slot.text;
-    const div = document.createElement('article');
-    div.className = 'pane';
-    div.innerHTML = `
-      <div class="pane-head">
-        <div class="pane-title" title="${esc(paneTitle(slot))}">${esc(paneTitle(slot))}</div>
-        <div class="pane-meta" title="${esc(paneMeta(slot))}">${esc(paneMeta(slot))}</div>
-      </div>
-      <pre class="term ${slot.error ? 'err' : ''}">${esc(text)}</pre>`;
-    grid.appendChild(div);
-  }
-
-  containersEl.innerHTML = '';
-  const containers = payload.containers || [];
-  if (!containers.length) {
-    const msg = payload.container_error || 'No running Dynamo containers found.';
-    containersEl.innerHTML = '<tr><td colspan="8" class="err">' + esc(msg) + '</td></tr>';
-  } else {
-    for (const c of containers) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${esc(c.repo)}</td><td>${esc(c.backend)}</td><td>${esc(c.user)}</td><td>${esc(c.container_id)}</td><td>${esc(c.git_head)}</td><td>${esc(c.dynamo_sha)}</td><td>${esc(c.branch)}</td><td class="path" title="${esc(c.host_path)}">${esc(c.host_path)}</td>`;
-      containersEl.appendChild(tr);
-    }
-  }
-}
-
-function connect() {
-  if (source) source.close();
-  source = new EventSource('/events');
-  source.onopen = () => { statusEl.textContent = 'connected'; };
-  source.onmessage = event => {
-    if (!paused) render(JSON.parse(event.data));
-  };
-  source.onerror = () => {
-    statusEl.innerHTML = '<span class="err">disconnected; retrying</span>';
-  };
-}
-
-document.getElementById('pauseBtn').onclick = () => {
-  paused = !paused;
-  document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
-  if (!paused && lastPayload) render(lastPayload);
-};
-document.getElementById('refreshBtn').onclick = async () => {
-  const r = await fetch('/api/snapshot');
-  render(await r.json());
-};
-document.getElementById('summaryBtn').onclick = () => {
-  window.open('/api/summary-input?lines=1200', '_blank');
-};
-
-connect();
-</script>
+<script src="/static/tmux-wall.js?v={js_version}"></script>
 </body>
 </html>
 """
@@ -561,6 +377,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/static/"):
+            asset = parsed.path.removeprefix("/static/")
+            content_type = STATIC_CONTENT_TYPES.get(asset)
+            if content_type:
+                self.write_static_asset(asset, content_type)
+                return
         if parsed.path == "/":
             self.write_html(html_page())
             return
@@ -598,6 +420,23 @@ class Handler(BaseHTTPRequestHandler):
         data = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def write_static_asset(self, asset: str, content_type: str) -> None:
+        path = static_asset_path(asset)
+        if path is None:
+            self.write_text(f"missing static asset: {asset}\n", status=HTTPStatus.NOT_FOUND)
+            return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            self.write_text(f"failed to read static asset: {exc}\n", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

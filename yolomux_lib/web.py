@@ -4,7 +4,9 @@ from .core import *
 
 
 STATIC_CONTENT_TYPES = {
+    "brand.css": "text/css; charset=utf-8",
     "setup-auth.css": "text/css; charset=utf-8",
+    "setup-auth.js": "application/javascript; charset=utf-8",
     "xterm.css": "text/css; charset=utf-8",
     "xterm.js": "application/javascript; charset=utf-8",
     "yolomux.css": "text/css; charset=utf-8",
@@ -25,6 +27,32 @@ def static_asset_path(asset: str) -> Path | None:
     return path if path.is_file() else None
 
 
+def static_asset_version(asset: str) -> int:
+    path = static_asset_path(asset)
+    if path is None:
+        return 0
+    try:
+        return int(path.stat().st_mtime)
+    except OSError:
+        return 0
+
+
+def static_asset_url(asset: str) -> str:
+    return f"/static/{asset}?v={static_asset_version(asset)}"
+
+
+def brand_html(class_name: str = "brand-title", tag: str = "span") -> str:
+    return (
+        f'<{tag} class="{html.escape(class_name, quote=True)}" aria-label="YOLOmux">'
+        '<span class="brand-yolo brand-greenidia">YO</span>'
+        '<span class="brand-lo brand-greenidia">LO</span>'
+        '<span class="brand-blue">m</span>'
+        '<span class="brand-red">u</span>'
+        '<span class="brand-yellow">x</span>'
+        f"</{tag}>"
+    )
+
+
 def html_page(sessions: list[str], access_role: str = "admin") -> str:
     bootstrap = {
         "sessions": sessions,
@@ -35,33 +63,76 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
         "serverHostname": SERVER_HOSTNAME,
     }
     bootstrap_json = html.escape(json.dumps(bootstrap, separators=(",", ":")), quote=False)
-    return '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>YOLOmux</title>\n<link rel="stylesheet" href="/static/xterm.css" onerror="this.onerror=null;this.href=\'https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css\';">\n<link rel="stylesheet" href="/static/yolomux.css">\n<script src="/static/xterm.js" onerror="this.onerror=null;this.src=\'https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js\';"></script>\n</head>\n<body>\n<header class="topbar">\n  <div class="brand title" aria-label="YOLOmux"><span class="brand-greenidia">YOLO</span><span class="brand-blue">m</span><span class="brand-red">u</span><span class="brand-yellow">x</span></div>\n  <div id="sessionButtons" class="session-buttons" aria-label="Sessions"></div>\n  <div class="actions">\n    <div id="latencyMeter" class="latency-meter" title="Browser to YOLOmux latency">\n      <svg class="latency-graph" viewBox="0 0 44 18" aria-hidden="true">\n        <polyline id="latencyLine" class="latency-line" points=""></polyline>\n      </svg>\n      <span id="latencyNumber" class="latency-number">-- ms</span>\n    </div>\n    <button id="notifyToggle" class="notify-toggle" title="notify when a session needs attention">Notify</button>\n    <button id="refreshMeta">Refresh</button>\n    <span id="status" class="sub">starting</span>\n  </div>\n</header>\n<div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>\n<main id="grid" class="grid"></main>\n<div id="panelPool" class="panel-pool" aria-hidden="true"></div>\n<section id="modal" class="modal">\n  <div class="modal-head">\n    <div id="modalTitle">Transcript</div>\n    <button id="closeModal">Close</button>\n  </div>\n  <pre id="modalBody"></pre>\n</section>\n' + f'<script id="yolomux-bootstrap" type="application/json">{bootstrap_json}</script>\n<script src="/static/yolomux.js"></script>\n' + '</body>\n</html>\n'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YOLOmux</title>
+<link rel="stylesheet" href="{static_asset_url("xterm.css")}" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css';">
+<link rel="stylesheet" href="{static_asset_url("brand.css")}">
+<link rel="stylesheet" href="{static_asset_url("yolomux.css")}">
+<script src="{static_asset_url("xterm.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js';"></script>
+</head>
+<body>
+<header class="topbar">
+  {brand_html("brand brand-title title", "div")}
+  <div id="sessionButtons" class="session-buttons" aria-label="Sessions"></div>
+  <div class="actions">
+    <div id="latencyMeter" class="latency-meter" title="Browser to YOLOmux latency">
+      <svg class="latency-graph" viewBox="0 0 44 18" aria-hidden="true">
+        <polyline id="latencyLine" class="latency-line" points=""></polyline>
+      </svg>
+      <span id="latencyNumber" class="latency-number">-- ms</span>
+    </div>
+    <button id="notifyToggle" class="notify-toggle" title="notify when a session needs attention">Notify</button>
+    <button id="refreshMeta">Refresh</button>
+    <span id="status" class="sub">starting</span>
+  </div>
+</header>
+<div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>
+<main id="grid" class="grid"></main>
+<div id="panelPool" class="panel-pool" aria-hidden="true"></div>
+<section id="modal" class="modal">
+  <div class="modal-head">
+    <div id="modalTitle">Transcript</div>
+    <button id="closeModal">Close</button>
+  </div>
+  <pre id="modalBody"></pre>
+</section>
+<script id="yolomux-bootstrap" type="application/json">{bootstrap_json}</script>
+<script src="{static_asset_url("yolomux.js")}"></script>
+</body>
+</html>
+"""
 
 
 def setup_auth_html() -> str:
     auth_path = html.escape(AUTH_CONFIG_DISPLAY_PATH)
+    login = html.escape(login_username())
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>YOLOmux auth setup</title>
-<link rel="stylesheet" href="/static/setup-auth.css">
+<link rel="stylesheet" href="{static_asset_url("brand.css")}">
+<link rel="stylesheet" href="{static_asset_url("setup-auth.css")}">
 </head>
 <body>
 <main>
-  <h1>Set up YOLOmux auth</h1>
-  <p>YOLOmux created <code>{auth_path}</code> with placeholder credentials.</p>
-  <p class="accent">Edit that YAML file before using this program.</p>
+  <h1>Set up {brand_html("brand-title setup-brand setup-brand-waiting")}</h1>
+  <p>Edit <code>{auth_path}</code>.</p>
   <pre>users:
-  - username: "admin"
+  - username: "{login}"
     password: "your-admin-password"
     role: "admin"
-  - username: "viewer"
-    password: "your-viewer-password"
+  - username: "guest"
+    password: "guest"
     role: "readonly"</pre>
-  <p>After saving the file, refresh this page. YOLOmux reads the latest YAML auth on each request.</p>
+  <p id="setupStatus" class="setup-status">Waiting for auth.yaml changes<span class="setup-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></p>
 </main>
+<script src="{static_asset_url("setup-auth.js")}"></script>
 </body>
 </html>
 """

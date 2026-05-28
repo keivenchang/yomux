@@ -3,6 +3,12 @@ from __future__ import annotations
 from .core import *
 
 
+METADATA_BADGE_PULSE_SECONDS = 20.0
+METADATA_BADGES = ("main", "pr", "status", "ci")
+METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
+METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
+
+
 class TmuxWebtermApp:
     def __init__(self, sessions: list[str], dangerously_yolo: bool = False):
         self.sessions = sessions
@@ -12,6 +18,10 @@ class TmuxWebtermApp:
         self.metadata_cache = MetadataCache()
         self.metadata_warm_lock = threading.Lock()
         self.metadata_warm_running = False
+        self.metadata_badge_lock = threading.Lock()
+        self.metadata_badge_signatures: dict[str, dict[str, str]] = {}
+        self.metadata_badge_pulse_until: dict[str, dict[str, float]] = {}
+        self.load_metadata_badge_state()
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
         self.control_server.start()
@@ -124,14 +134,191 @@ class TmuxWebtermApp:
     def transcripts_payload(self) -> dict[str, Any]:
         refresh_errors = self.refresh_sessions()
         sessions, errors = discover_sessions(self.sessions)
+        session_payloads = {
+            name: session_to_json(info, self.metadata_cache, allow_network=False)
+            for name, info in sessions.items()
+        }
         payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "session_order": self.sessions,
-            "sessions": {name: session_to_json(info, self.metadata_cache, allow_network=False) for name, info in sessions.items()},
+            "sessions": session_payloads,
             "errors": [*refresh_errors, *errors],
         }
+        self.apply_metadata_badge_pulses(session_payloads)
         self.warm_metadata_cache_async(sessions)
         return payload
+
+    def apply_metadata_badge_pulses(self, session_payloads: dict[str, dict[str, Any]]) -> None:
+        now = time.time()
+        next_signatures = {
+            session: self.metadata_badge_signatures_for_session(payload)
+            for session, payload in session_payloads.items()
+        }
+        with self.metadata_badge_lock:
+            state_changed = False
+            for session, next_signature in list(next_signatures.items()):
+                previous_signature = self.metadata_badge_signatures.get(session)
+                if previous_signature and self.metadata_badge_change_is_cold_cache_degradation(previous_signature, next_signature):
+                    next_signatures[session] = previous_signature
+
+            for session, badge_times in list(self.metadata_badge_pulse_until.items()):
+                current = {badge: until for badge, until in badge_times.items() if until > now}
+                if current != badge_times:
+                    state_changed = True
+                if current:
+                    self.metadata_badge_pulse_until[session] = current
+                else:
+                    self.metadata_badge_pulse_until.pop(session, None)
+
+            for session, next_signature in next_signatures.items():
+                previous_signature = self.metadata_badge_signatures.get(session)
+                if previous_signature is None:
+                    continue
+                for badge in METADATA_BADGES:
+                    if self.metadata_badge_change_should_pulse(previous_signature, next_signature, badge):
+                        self.metadata_badge_pulse_until.setdefault(session, {})[badge] = now + METADATA_BADGE_PULSE_SECONDS
+                        state_changed = True
+
+            if self.metadata_badge_signatures != next_signatures:
+                self.metadata_badge_signatures = next_signatures
+                state_changed = True
+
+            for session, payload in session_payloads.items():
+                badge_times = self.metadata_badge_pulse_until.get(session, {})
+                remaining = {
+                    badge: max(1, int((until - now) * 1000))
+                    for badge, until in badge_times.items()
+                    if until > now
+                }
+                if remaining:
+                    payload["metadata_badge_pulse_remaining_ms"] = remaining
+
+            if state_changed:
+                self.persist_metadata_badge_state_locked()
+
+    def load_metadata_badge_state(self) -> None:
+        state = read_yolomux_state()
+        with self.metadata_badge_lock:
+            self.metadata_badge_signatures = self.sanitized_metadata_badge_signatures(
+                state.get(METADATA_BADGE_SIGNATURES_STATE_KEY)
+            )
+            self.metadata_badge_pulse_until = self.sanitized_metadata_badge_pulse_until(
+                state.get(METADATA_BADGE_PULSE_UNTIL_STATE_KEY)
+            )
+
+    def persist_metadata_badge_state_locked(self) -> None:
+        update_yolomux_state(
+            {
+                METADATA_BADGE_SIGNATURES_STATE_KEY: self.metadata_badge_signatures,
+                METADATA_BADGE_PULSE_UNTIL_STATE_KEY: self.metadata_badge_pulse_until,
+            }
+        )
+
+    def sanitized_metadata_badge_signatures(self, value: Any) -> dict[str, dict[str, str]]:
+        if not isinstance(value, dict):
+            return {}
+        clean: dict[str, dict[str, str]] = {}
+        for session, badges in value.items():
+            if not isinstance(session, str) or not isinstance(badges, dict):
+                continue
+            clean[session] = {badge: str(badges.get(badge) or "") for badge in METADATA_BADGES}
+        return clean
+
+    def sanitized_metadata_badge_pulse_until(self, value: Any) -> dict[str, dict[str, float]]:
+        if not isinstance(value, dict):
+            return {}
+        clean: dict[str, dict[str, float]] = {}
+        for session, badges in value.items():
+            if not isinstance(session, str) or not isinstance(badges, dict):
+                continue
+            clean_badges: dict[str, float] = {}
+            for badge, pulse_until in badges.items():
+                if badge not in METADATA_BADGES or not isinstance(pulse_until, (int, float)):
+                    continue
+                if pulse_until > 0:
+                    clean_badges[badge] = float(pulse_until)
+            if clean_badges:
+                clean[session] = clean_badges
+        return clean
+
+    def metadata_badge_signatures_for_session(self, payload: dict[str, Any]) -> dict[str, str]:
+        project = payload.get("project") if isinstance(payload.get("project"), dict) else {}
+        git_data = project.get("git") if isinstance(project.get("git"), dict) else {}
+        pr = self.metadata_badge_pull_request(project)
+        checks = pr.get("checks") if isinstance(pr.get("checks"), dict) else {}
+        failing = self.metadata_check_names(checks.get("failing"))
+        pending = self.metadata_check_names(checks.get("pending"))
+        status = "" if not pr or pr.get("source_only") else pull_request_status_label(pr)
+        check_state = str(checks.get("state") or "")
+        return {
+            "main": "main" if str(git_data.get("branch") or "") in {"main", "master"} else "",
+            "pr": str(pr.get("number") or "") if pr else "",
+            "status": status,
+            "ci": ":".join(
+                [
+                    status,
+                    check_state,
+                    str(checks.get("summary") or ""),
+                    "|".join(failing),
+                    "|".join(pending),
+                    str(checks.get("total") if checks.get("total") is not None else ""),
+                ]
+            ) if pr and check_state and check_state != "unknown" else "",
+        }
+
+    def metadata_badge_change_should_pulse(self, previous: dict[str, str], next_signature: dict[str, str], badge: str) -> bool:
+        if previous.get(badge, "") == next_signature.get(badge, ""):
+            return False
+        return not self.metadata_badge_change_is_initial_enrichment(previous, next_signature, badge)
+
+    def metadata_badge_change_is_initial_enrichment(self, previous: dict[str, str], next_signature: dict[str, str], badge: str) -> bool:
+        previous_pr = previous.get("pr", "")
+        next_pr = next_signature.get("pr", "")
+        previous_status = previous.get("status", "")
+        previous_ci = previous.get("ci", "")
+        if previous_status not in {"", "unknown"} or previous_ci:
+            return False
+        if badge in {"status", "ci"} and previous_pr and previous_pr == next_pr:
+            return True
+        if badge == "pr" and not previous_pr and next_pr:
+            return True
+        return False
+
+    def metadata_badge_change_is_cold_cache_degradation(self, previous: dict[str, str], next_signature: dict[str, str]) -> bool:
+        previous_pr = previous.get("pr", "")
+        next_pr = next_signature.get("pr", "")
+        if not previous_pr or previous_pr != next_pr:
+            return False
+        previous_status = previous.get("status", "")
+        next_status = next_signature.get("status", "")
+        if previous_status not in {"", "unknown"} and next_status in {"", "unknown"}:
+            return True
+        return bool(previous.get("ci", "")) and not next_signature.get("ci", "") and next_status in {"", "unknown"}
+
+    def metadata_badge_pull_request(self, project: dict[str, Any]) -> dict[str, Any]:
+        pr = project.get("pull_request")
+        if isinstance(pr, dict) and pr.get("number"):
+            return pr
+        git_data = project.get("git") if isinstance(project.get("git"), dict) else {}
+        if str(git_data.get("branch") or "") not in {"main", "master"}:
+            return {}
+        number = pull_request_number_from_subject(str(git_data.get("head") or ""))
+        if number is None:
+            return {}
+        return {
+            "number": number,
+            "checks": github_checks_unknown(),
+            "source_only": True,
+        }
+
+    def metadata_check_names(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        names = []
+        for item in value:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.append(item["name"])
+        return sorted(names)
 
     def warm_metadata_cache_async(self, sessions: dict[str, SessionInfo]) -> None:
         with self.metadata_warm_lock:

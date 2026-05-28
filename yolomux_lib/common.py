@@ -13,6 +13,7 @@ import argparse
 import base64
 import collections
 import fcntl
+import getpass
 import hashlib
 import hmac
 import html
@@ -23,6 +24,7 @@ import pty
 import re
 import select
 import shutil
+import secrets
 import signal
 import socket
 import struct
@@ -70,7 +72,6 @@ EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
 AUTO_APPROVE_LOCK_DIR = STATE_DIR / "locks"
 CONTROL_SOCKET_DIR = STATE_DIR / "control"
 AUTH_CONFIG_PATH = CONFIG_DIR / "auth.yaml"
-AUTH_LEGACY_JSON_CONFIG_PATH = CONFIG_DIR / "auth.json"
 AUTH_CONFIG_DISPLAY_PATH = "~/.config/yolomux/auth.yaml"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 AGENT_COMMANDS = {"claude", "codex", "term"}
@@ -90,6 +91,8 @@ OTHER_BRANCH_LIMIT = 8
 _CACHE_MISS = object()
 PLACEHOLDER_AUTH_USERNAME = "user"
 PLACEHOLDER_AUTH_PASSWORD = "password"
+GUEST_AUTH_USERNAME = "guest"
+GUEST_AUTH_PASSWORD = "guest"
 SERVER_HOSTNAME = socket.gethostname()
 
 
@@ -105,14 +108,6 @@ class AuthIdentity:
     username: str
     password: str
     role: str
-
-
-def read_config_object(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 def yaml_quote(value: str) -> str:
@@ -247,44 +242,81 @@ def read_auth_users(path: Path) -> tuple[AuthUser, ...]:
     return parse_auth_yaml(text)
 
 
-def legacy_json_auth_users(path: Path) -> tuple[AuthUser, ...]:
-    config = read_config_object(path)
-    username = config_string(config, "user", PLACEHOLDER_AUTH_USERNAME)
-    password = config_string(config, "password", PLACEHOLDER_AUTH_PASSWORD)
-    role = normalize_auth_role(config_string(config, "role", "admin"))
-    return (AuthUser(username=username, password=password, role=role),)
+def login_username() -> str:
+    username = getpass.getuser().strip()
+    if username:
+        return username
+    return os.environ.get("USER", "").strip() or "admin"
 
 
-def default_auth_users() -> tuple[AuthUser, ...]:
-    return (AuthUser(username=PLACEHOLDER_AUTH_USERNAME, password=PLACEHOLDER_AUTH_PASSWORD, role="admin"),)
+def random_auth_password() -> str:
+    return secrets.token_urlsafe(18)
+
+
+def starter_auth_users() -> tuple[AuthUser, ...]:
+    return (
+        AuthUser(username=login_username(), password=random_auth_password(), role="admin"),
+        AuthUser(username=GUEST_AUTH_USERNAME, password=GUEST_AUTH_PASSWORD, role="readonly"),
+    )
+
+
+def commented_auth_config_text(users: tuple[AuthUser, ...]) -> str:
+    lines = [
+        "YOLOmux authentication is disabled until one or more account entries are uncommented.",
+        "Uncomment and edit the account entries below, save the file, then refresh the browser.",
+        "Keep admin credentials private. The guest/guest account is readonly.",
+        "",
+    ]
+    for line in auth_config_text(users).splitlines():
+        if line == "users:":
+            lines.append(line)
+        else:
+            lines.append(f"# {line}" if line else "#")
+    return "\n".join((f"# {line}" if line else "#") if index < 4 else line for index, line in enumerate(lines)) + "\n"
 
 
 def initialize_auth_config(path: Path) -> tuple[AuthUser, ...]:
     if path.exists():
+        secure_auth_config_permissions(path)
         users = read_auth_users(path)
-        return users or default_auth_users()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    users = legacy_json_auth_users(AUTH_LEGACY_JSON_CONFIG_PATH) if AUTH_LEGACY_JSON_CONFIG_PATH.exists() else default_auth_users()
-    path.write_text(auth_config_text(users), encoding="utf-8")
-    return users
-
-
-def config_string(config: dict[str, Any], key: str, default: str) -> str:
-    value = config.get(key)
-    return value if isinstance(value, str) and value else default
+        if legacy_placeholder_auth_active(users):
+            write_auth_config(path, commented_auth_config_text(starter_auth_users()))
+            return ()
+        return users
+    write_auth_config(path, commented_auth_config_text(starter_auth_users()))
+    return ()
 
 
 def current_auth_users() -> tuple[AuthUser, ...]:
     return initialize_auth_config(AUTH_CONFIG_PATH)
 
 
-def placeholder_auth_active() -> bool:
-    users = current_auth_users()
+def legacy_placeholder_auth_active(users: tuple[AuthUser, ...]) -> bool:
     return len(users) == 1 and users[0].username == PLACEHOLDER_AUTH_USERNAME and users[0].password == PLACEHOLDER_AUTH_PASSWORD
+
+
+def auth_setup_required() -> bool:
+    users = current_auth_users()
+    return not users or legacy_placeholder_auth_active(users)
 
 
 AUTH_COOKIE_NAME = "yolomux_auth"
 AUTH_COOKIE_SECRET = os.urandom(32)
+
+
+def write_auth_config(path: Path, text: str) -> None:
+    secure_auth_config_permissions(path)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    path.chmod(0o600)
+
+
+def secure_auth_config_permissions(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    if path.exists():
+        path.chmod(0o600)
 
 
 def auth_cookie_value(username: str, password: str) -> str:
