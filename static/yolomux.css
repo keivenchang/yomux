@@ -2903,3 +2903,152 @@ body.file-editor-open .file-explorer {
   line-height: 1.45;
 }
 .file-editor-highlight[hidden] { display: none; }
+
+/* File Explorer & File Editor panels (now first-class layout panels,
+   not overlays). They reuse the standard .panel chrome (head + tabs +
+   detail-row) and just provide their own content area. */
+.panel.file-explorer-panel,
+.panel.file-editor-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+.file-explorer-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel);
+  min-height: 0;
+}
+.file-explorer-tree-panel {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0;
+}
+.file-explorer-path-inline {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 6px;
+}
+.file-explorer-hidden-toggle-panel {
+  width: 28px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.file-explorer-hidden-toggle-panel.active {
+  color: var(--good);
+  border-color: var(--good);
+}
+.file-editor-pane {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+  min-height: 0;
+  position: relative;
+}
+.file-editor-textarea-panel {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  resize: none;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono-font);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+  outline: none;
+  white-space: pre;
+  tab-size: 4;
+}
+.file-editor-textarea-panel[hidden] { display: none; }
+.file-editor-preview-pane[hidden] { display: none; }
+.file-editor-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.file-editor-meta-path {
+  font-family: var(--mono-font);
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+.file-editor-meta-status {
+  font-family: var(--mono-font);
+  font-size: 10px;
+  color: var(--muted);
+}
+.file-editor-meta-status[data-level="error"] { color: #ff8a95; }
+.file-editor-meta-status[data-level="ok"]    { color: var(--good); }
+.file-editor-meta-status[data-level="dirty"] { color: #f5c542; }
+.file-editor-save-btn,
+.file-editor-preview-btn {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.file-editor-save-btn { color: var(--good); border-color: var(--good); }
+.file-editor-save-btn:hover { background: rgba(82, 210, 115, 0.18); }
+.file-editor-preview-btn:hover { color: var(--text); border-color: var(--text); }
+.file-editor-preview-btn.active { color: #9fd8ff; border-color: #9fd8ff; }
+
+/* Session-strip styling for file items. They get the same .session-button
+   chrome as terminal sessions; we just suppress YO + tweak the icon and
+   the close (×) glyph inside the button. */
+.session-button-wrap.file-explorer .session-button,
+.session-button-wrap.file-editor .session-button {
+  border-color: rgba(120, 180, 255, 0.4);
+}
+.session-button-wrap.file-explorer .session-button .session-button-text,
+.session-button-wrap.file-editor   .session-button .session-button-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.session-button.file-editor.dirty {
+  border-color: rgba(245, 197, 66, 0.85);
+}
+.file-editor-tab-close {
+  display: inline-block;
+  position: relative;
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--muted);
+}
+.file-editor-tab-close::before,
+.file-editor-tab-close::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 1.2px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.file-editor-tab-close::before { transform: translate(-50%, -50%) rotate(45deg); }
+.file-editor-tab-close::after  { transform: translate(-50%, -50%) rotate(-45deg); }
+.file-editor-tab-close:hover { color: #ff8a95; background: rgba(255, 138, 149, 0.12); }
