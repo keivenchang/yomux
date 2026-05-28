@@ -100,6 +100,13 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
   </div>
 </header>
 <div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>
+<aside id="fileExplorer" class="file-explorer" hidden aria-label="File Explorer">
+  <div class="file-explorer-head">
+    <div class="file-explorer-path" id="fileExplorerPath">/</div>
+    <button type="button" id="fileExplorerClose" class="file-explorer-close" title="Close File Explorer" aria-label="Close"></button>
+  </div>
+  <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>
+</aside>
 <main id="grid" class="grid"></main>
 <div id="panelPool" class="panel-pool" aria-hidden="true"></div>
 <section id="modal" class="modal">

@@ -28,6 +28,12 @@ const tabMetaToggle = (() => {
 })();
 const logoutButton = document.getElementById('logoutButton');
 const httpsWarning = document.getElementById('httpsWarning');
+const fileExplorer = document.getElementById('fileExplorer');
+const fileExplorerTree = document.getElementById('fileExplorerTree');
+const fileExplorerPath = document.getElementById('fileExplorerPath');
+const fileExplorerClose = document.getElementById('fileExplorerClose');
+const fileExplorerExpanded = new Set();
+let fileExplorerRoot = null;
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -1628,8 +1634,123 @@ function renderSessionButtons() {
       if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
     }
   }
+  sessionButtons.appendChild(createFileExplorerButton());
   scheduleTabStripOverflowCheck(sessionButtons);
 }
+
+function createFileExplorerButton() {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'session-button-wrap add-session';
+  const button = document.createElement('button');
+  button.className = 'session-button add-session file';
+  button.type = 'button';
+  button.title = 'Toggle File Explorer';
+  button.innerHTML = '<span class="add-plus">+</span><span class="agent-icon file" aria-hidden="true">📁</span><span>File</span>';
+  button.addEventListener('click', () => toggleFileExplorer());
+  wrapper.appendChild(button);
+  return wrapper;
+}
+
+function toggleFileExplorer() {
+  if (!fileExplorer) return;
+  const opening = fileExplorer.hasAttribute('hidden');
+  if (opening) {
+    fileExplorer.removeAttribute('hidden');
+    document.body.classList.add('file-explorer-open');
+    if (!fileExplorerRoot) openFileExplorerAt(homePath || '/');
+  } else {
+    fileExplorer.setAttribute('hidden', '');
+    document.body.classList.remove('file-explorer-open');
+  }
+}
+
+async function openFileExplorerAt(path) {
+  fileExplorerRoot = path;
+  if (fileExplorerPath) fileExplorerPath.textContent = path;
+  if (fileExplorerTree) fileExplorerTree.replaceChildren();
+  fileExplorerExpanded.clear();
+  const entries = await fetchDirectory(path);
+  if (!entries) return;
+  renderTreeChildren(fileExplorerTree, path, entries, 0);
+}
+
+async function fetchDirectory(path) {
+  try {
+    const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(path)}`);
+    if (!response.ok) {
+      console.warn('fs list failed', path, response.status);
+      return null;
+    }
+    const payload = await response.json();
+    return payload.entries || [];
+  } catch (err) {
+    console.warn('fs list error', path, err);
+    return null;
+  }
+}
+
+function renderTreeChildren(container, parentPath, entries, depth) {
+  for (const entry of entries) {
+    const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
+    const row = document.createElement('div');
+    row.className = `file-tree-row kind-${entry.kind}`;
+    row.dataset.path = fullPath;
+    row.dataset.kind = entry.kind;
+    row.style.paddingLeft = `${8 + depth * 14}px`;
+    row.setAttribute('role', 'treeitem');
+    const icon = entry.kind === 'dir' ? '▸' : (entry.kind === 'file' ? '📄' : '·');
+    row.innerHTML = `<span class="file-tree-icon">${icon}</span><span class="file-tree-name">${esc(entry.name)}</span>`;
+    row.addEventListener('click', event => {
+      event.stopPropagation();
+      onFileTreeRowClick(row, fullPath, entry);
+    });
+    container.appendChild(row);
+  }
+}
+
+async function onFileTreeRowClick(row, fullPath, entry) {
+  if (entry.kind === 'dir') {
+    if (fileExplorerExpanded.has(fullPath)) {
+      collapseDirectoryRow(row, fullPath);
+    } else {
+      await expandDirectoryRow(row, fullPath);
+    }
+    return;
+  }
+  if (entry.kind === 'file') {
+    document.querySelectorAll('.file-tree-row.selected').forEach(el => el.classList.remove('selected'));
+    row.classList.add('selected');
+    // Phase 3 will open the CodeMirror editor here. For now, just log.
+    console.log('file selected:', fullPath, entry);
+  }
+}
+
+async function expandDirectoryRow(row, fullPath) {
+  const entries = await fetchDirectory(fullPath);
+  if (!entries) return;
+  fileExplorerExpanded.add(fullPath);
+  row.classList.add('expanded');
+  row.querySelector('.file-tree-icon').textContent = '▾';
+  const children = document.createElement('div');
+  children.className = 'file-tree-children';
+  children.dataset.parent = fullPath;
+  const depth = parseInt(row.style.paddingLeft, 10);
+  const nextDepth = Math.round((depth - 8) / 14) + 1;
+  renderTreeChildren(children, fullPath, entries, nextDepth);
+  row.insertAdjacentElement('afterend', children);
+}
+
+function collapseDirectoryRow(row, fullPath) {
+  fileExplorerExpanded.delete(fullPath);
+  row.classList.remove('expanded');
+  row.querySelector('.file-tree-icon').textContent = '▸';
+  const next = row.nextElementSibling;
+  if (next && next.classList.contains('file-tree-children') && next.dataset.parent === fullPath) {
+    next.remove();
+  }
+}
+
+if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
 
 function shouldShowTabListMenu(items) {
   return Array.isArray(items) && items.length > 1;
