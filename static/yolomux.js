@@ -1740,9 +1740,9 @@ function createFileExplorerButton() {
   const button = document.createElement('button');
   button.className = 'session-button add-session file';
   button.type = 'button';
-  button.title = 'Toggle File Explorer';
+  button.title = 'Open Files panel';
   button.innerHTML = '<span class="add-plus">+</span><span class="agent-icon file" aria-hidden="true">📁</span><span>File</span>';
-  button.addEventListener('click', () => toggleFileExplorer());
+  button.addEventListener('click', () => selectSession(fileExplorerItemId));
   wrapper.appendChild(button);
   return wrapper;
 }
