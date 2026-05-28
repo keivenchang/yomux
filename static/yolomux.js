@@ -108,6 +108,12 @@ const defaultSplitPercent = 50;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
+const fileExplorerItemId = '__files__';
+const fileEditorItemPrefix = 'file:';
+function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
+function isFileExplorerItem(item) { return item === fileExplorerItemId; }
+function isFileEditorItem(item) { return typeof item === 'string' && item.startsWith(fileEditorItemPrefix); }
+function fileItemPath(item) { return isFileEditorItem(item) ? item.slice(fileEditorItemPrefix.length) : null; }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [infoItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
@@ -999,6 +1005,18 @@ function sessionsFromLayout() {
 
 function isInfoItem(item) {
   return item === infoItemId;
+}
+
+function isVirtualItem(item) {
+  return isInfoItem(item) || isFileExplorerItem(item) || isFileEditorItem(item);
+}
+
+function openFileEditorItems() {
+  return Array.from(openFiles.keys()).map(fileEditorItemFor);
+}
+
+function computeLayoutItems() {
+  return [infoItemId, fileExplorerItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {
