@@ -91,7 +91,7 @@ class TestElement {
   setAttribute() {}
 }
 
-function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6']) {
+function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:') {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const bootStart = source.indexOf("if (refreshMeta) {");
   assert.ok(bootStart > 0, 'could not find browser boot section');
@@ -131,7 +131,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6']) {
         context.__lastUrl = url;
       },
     },
-    location: {search, pathname: '/', hash: ''},
+    location: {search, pathname: '/', hash: '', protocol, hostname: 'localhost', port: '7777', host: 'localhost:7777'},
     Notification: {permission: 'denied'},
     performance: {now: () => 0},
     requestAnimationFrame(callback) { return callback(); },
@@ -159,8 +159,11 @@ globalThis.__layoutTestApi = {
   clearWindowTabDropPreview,
   createTabListMenu,
   dedentSelectionText,
+  infoBranchRows,
   pullRequestStatusLabel,
+  renderTransportWarning,
   sessionButtonHtml,
+  setInfoBranchSort,
   showWindowTabDropPreview,
   startSessionDrag,
   tabListDetailText,
@@ -183,6 +186,9 @@ globalThis.__layoutTestApi = {
   applyServerMetadataPulsesForTest(session, pulses) {
     updateMetadataBadgePulses({sessions: {[session]: {metadata_badge_pulse_remaining_ms: pulses}}});
   },
+  setInfoBranchSortForTest(key, dir = 'asc') {
+    infoBranchSort = {key, dir};
+  },
   serialize(slots) {
     return {
       tree: slots[layoutTreeKey],
@@ -203,6 +209,9 @@ globalThis.__layoutTestApi = {
   },
   customDragPreviewForTest() {
     return customDragPreview;
+  },
+  httpsWarningForTest() {
+    return document.getElementById('httpsWarning');
   },
 };`, context);
   return context.__layoutTestApi;
@@ -286,6 +295,19 @@ function parseUrl(url) {
 
 function canonical(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+{
+  const api = loadYolomux();
+  api.renderTransportWarning();
+  const warning = api.httpsWarningForTest();
+  assert.equal(warning.hidden, false);
+  assert.ok(warning.dataset.tip.includes('--port 7777 --self-signed'));
+  assert.equal(warning.dataset.tip.includes('--host 0.0.0.0'), false);
+
+  const secureApi = loadYolomux('', ['1'], 'https:');
+  secureApi.renderTransportWarning();
+  assert.equal(secureApi.httpsWarningForTest().hidden, true);
 }
 
 {
@@ -449,7 +471,7 @@ function canonical(value) {
 
   const windowMenu = api.createTabListMenu(['4', '5'], {kind: 'window', side: 'left'});
   assert.equal(windowMenu.children[0].textContent, '');
-  assert.equal(windowMenu.children[1].innerHTML.includes('Window tabs'), true);
+  assert.equal(windowMenu.children[1].innerHTML.includes('Window tabs'), false);
   assert.equal(windowMenu.children[1].children.length, 2);
   assert.ok(windowMenu.children[1].children[0].className.includes('active'), 'active window tab is marked in show-all menu');
   assert.equal(windowMenu.children[1].children[0].draggable, true);
@@ -459,6 +481,42 @@ function canonical(value) {
   assert.equal(trayMenu.children[1].innerHTML.includes('Inactive tabs'), true);
   assert.equal(trayMenu.children[1].children.length, 2);
   assert.equal(trayMenu.children[1].children[0].draggable, true);
+}
+
+{
+  const api = loadYolomux('', ['alpha', 'beta']);
+  api.setTranscriptInfoForTest('alpha', {
+    project: {
+      git: {
+        root: '/repo/alpha',
+        other_branches: {
+          branches: [
+            {name: 'zeta', updated: 'yesterday', updated_ts: 100, subject: 'second item', linear_ids: ['GH-2']},
+          ],
+        },
+      },
+    },
+  });
+  api.setTranscriptInfoForTest('beta', {
+    project: {
+      git: {
+        root: '/repo/beta',
+        other_branches: {
+          branches: [
+            {name: 'alpha', updated: 'today', updated_ts: 200, subject: 'first item', linear_ids: ['GH-1']},
+          ],
+        },
+      },
+    },
+  });
+
+  assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['beta', 'alpha']);
+  api.setInfoBranchSortForTest('session', 'asc');
+  assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['alpha', 'beta']);
+  api.setInfoBranchSort('session');
+  assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['beta', 'alpha']);
+  api.setInfoBranchSortForTest('branch', 'asc');
+  assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.branch)), ['alpha', 'zeta']);
 }
 
 {

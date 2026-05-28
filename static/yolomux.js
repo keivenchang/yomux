@@ -15,6 +15,7 @@ const latencyLine = document.getElementById('latencyLine');
 const latencyNumber = document.getElementById('latencyNumber');
 const notifyToggle = document.getElementById('notifyToggle');
 const refreshMeta = document.getElementById('refreshMeta');
+const httpsWarning = document.getElementById('httpsWarning');
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -66,6 +67,7 @@ const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
 const attentionAlertTimers = new Map();
 const metadataBadgePulseUntil = new Map();
+let infoBranchSort = {key: 'updated', dir: 'desc'};
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;
@@ -144,6 +146,19 @@ function esc(value) {
 function wsUrl(session) {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${scheme}//${location.host}/ws?session=${encodeURIComponent(session)}`;
+}
+
+function renderTransportWarning() {
+  if (!httpsWarning) return;
+  const secure = location.protocol === 'https:';
+  httpsWarning.hidden = secure;
+  if (secure) return;
+  const port = location.port || '9998';
+  const selfSigned = `python3 yolomux.py --port ${port} --self-signed`;
+  const cert = `python3 yolomux.py --port ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;
+  httpsWarning.dataset.tip = `No HTTPS. Relaunch with ${selfSigned}. Or use ${cert}.`;
+  httpsWarning.setAttribute('aria-label', httpsWarning.dataset.tip);
+  httpsWarning.tabIndex = 0;
 }
 
 function stripTerminalQueryResponses(data) {
@@ -1292,13 +1307,23 @@ function showToast(title, lines, options = {}) {
   return node;
 }
 
+function displayToastContainer(session) {
+  const sessionContainer = session ? document.getElementById(`panel-toasts-${session}`) : null;
+  if (sessionContainer && sessionContainer.isConnected !== false) return sessionContainer;
+  const candidates = [focusedPanelItem, ...activeSessions];
+  for (const item of candidates) {
+    const node = item ? document.getElementById(`panel-toasts-${item}`) : null;
+    if (node && node.isConnected !== false) return node;
+  }
+  return document.querySelector('.panel-toast-stack') || attentionAlerts;
+}
+
 function showAttentionAlert(session, state) {
-  const panelContainer = document.getElementById(`panel-toasts-${session}`);
   const node = showToast(
     `YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}`,
     state.reason,
     {
-      container: panelContainer || attentionAlerts,
+      container: displayToastContainer(session),
       onClick: () => selectSession(session),
     },
   );
@@ -1332,7 +1357,9 @@ function removeAttentionAlert(id) {
 }
 
 function sendTestNotification() {
-  showToast(`YOLOmux - ${serverHostname}: notifications enabled`, 'YOLOmux in-page alerts are enabled.');
+  showToast(`YOLOmux - ${serverHostname}: notifications enabled`, 'YOLOmux in-page alerts are enabled.', {
+    container: displayToastContainer(focusedPanelItem),
+  });
   if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
     sendBrowserNotification(`YOLOmux - ${serverHostname}: notifications enabled`, {
@@ -1539,13 +1566,12 @@ function createTabListMenu(items, options = {}) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'tab-list-menu-button';
-  button.title = options.kind === 'tray' ? 'show inactive tabs' : 'show all tabs in this window';
-  button.setAttribute('aria-label', button.title);
+  button.setAttribute('aria-label', options.kind === 'tray' ? 'show inactive tabs' : 'show all tabs');
   wrapper.appendChild(button);
   const popover = document.createElement('div');
   popover.className = 'tab-list-menu-popover';
   popover.setAttribute('role', 'menu');
-  popover.innerHTML = `<div class="tab-list-menu-title">${options.kind === 'tray' ? 'Inactive tabs' : 'Window tabs'}</div>`;
+  popover.innerHTML = options.kind === 'tray' ? '<div class="tab-list-menu-title">Inactive tabs</div>' : '';
   for (const item of items) {
     popover.appendChild(createTabListEntry(item, options));
   }
@@ -1641,14 +1667,20 @@ function bindTabListMenuPopover(wrapper) {
 
 function positionTabListPopover(wrapper) {
   const rect = wrapper.getBoundingClientRect();
-  const container = wrapper.closest('.panel') || wrapper.closest('.session-buttons') || wrapper.parentElement || wrapper;
+  const panel = wrapper.closest('.panel');
+  const container = panel || wrapper.closest('.session-buttons') || wrapper.parentElement || wrapper;
   const containerRect = container.getBoundingClientRect();
   const width = Math.min(Math.max(320, containerRect.width), window.innerWidth - 16);
   const maxLeft = Math.max(8, window.innerWidth - width - 8);
   const left = Math.min(Math.max(8, Math.floor(containerRect.left)), maxLeft);
-  document.documentElement.style.setProperty('--tab-list-popover-top', `${Math.ceil(rect.bottom + 1)}px`);
+  const panelHead = panel?.querySelector('.panel-head');
+  const topBase = panelHead ? panelHead.getBoundingClientRect().bottom : rect.bottom;
+  const top = Math.min(Math.ceil(topBase + 1), Math.max(8, window.innerHeight - 80));
+  const maxHeight = Math.max(120, window.innerHeight - top - 8);
+  document.documentElement.style.setProperty('--tab-list-popover-top', `${top}px`);
   document.documentElement.style.setProperty('--tab-list-popover-left', `${left}px`);
   document.documentElement.style.setProperty('--tab-list-popover-width', `${Math.floor(width)}px`);
+  document.documentElement.style.setProperty('--tab-list-popover-max-height', `${Math.floor(maxHeight)}px`);
 }
 
 function updateSessionButtonStates() {
@@ -3735,7 +3767,7 @@ function createInfoPanel() {
   panel.id = `panel-${infoItemId}`;
   panel.innerHTML = `
       <div class="panel-head">
-        <div class="window-session-tabs" role="tablist" aria-label="Window tabs"></div>
+        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
         ${panelControlsHtml(infoItemId, {disabled: true, unavailableLabel: 'Branch Info'})}
       </div>
       <div class="panel-detail-row">
@@ -3745,6 +3777,7 @@ function createInfoPanel() {
         </div>
       </div>
       <div class="info-pane panel-overlay-root">
+        <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
         <div class="transcript-head">Branch Info</div>
         <div id="info-content" class="info-list"></div>
       </div>`;
@@ -3790,7 +3823,7 @@ function createPanel(session) {
   panel.id = `panel-${session}`;
   panel.innerHTML = `
       <div class="panel-head">
-        <div class="window-session-tabs" role="tablist" aria-label="Window tabs"></div>
+        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
         ${panelControlsHtml(session)}
       </div>
       <div class="panel-detail-row">
@@ -3838,15 +3871,23 @@ function renderInfoPanel() {
     node.innerHTML = '<div class="info-empty">No branch metadata loaded yet.</div>';
     return;
   }
+  const headerCell = (key, label) => {
+    const active = infoBranchSort.key === key;
+    const dirLabel = active ? (infoBranchSort.dir === 'asc' ? 'ascending' : 'descending') : 'unsorted';
+    const marker = active ? (infoBranchSort.dir === 'asc' ? 'A-Z' : 'Z-A') : '';
+    return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="sort ${esc(label)} ${esc(dirLabel)}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
+  };
   const header = `<div class="info-row header">
-    <div class="info-cell">path</div>
-    <div class="info-cell">branch</div>
-    <div class="info-cell">PR</div>
-    <div class="info-cell">Linear</div>
-    <div class="info-cell">desc</div>
-    <div class="info-cell">updated</div>
+    <div class="info-cell">${headerCell('session', 'session-name')}</div>
+    <div class="info-cell">${headerCell('path', 'path')}</div>
+    <div class="info-cell">${headerCell('branch', 'branch')}</div>
+    <div class="info-cell">${headerCell('pr', 'PR')}</div>
+    <div class="info-cell">${headerCell('linear', 'Linear')}</div>
+    <div class="info-cell">${headerCell('desc', 'desc')}</div>
+    <div class="info-cell">${headerCell('updated', 'updated')}</div>
   </div>`;
   const body = rows.map(row => `<div class="info-row${row.current ? ' current' : ''}">
+    <div class="info-cell" title="${esc(row.session)}">${esc(row.session)}</div>
     <div class="info-cell" title="${esc(row.path)}">${esc(pathBasename(row.path) || row.session || '')}</div>
     <div class="info-cell" title="${esc(row.branch)}">${row.current ? '<span class="info-branch-current">*</span> ' : ''}${row.branchHtml}</div>
     <div class="info-cell" title="${esc(row.prTitle)}">${row.prHtml}</div>
@@ -3855,9 +3896,19 @@ function renderInfoPanel() {
     <div class="info-cell" title="${esc(row.updated)}">${esc(row.updated)}</div>
   </div>`).join('');
   node.innerHTML = header + body;
+  node.querySelectorAll('[data-info-sort]').forEach(button => {
+    button.addEventListener('click', () => {
+      setInfoBranchSort(button.dataset.infoSort);
+      renderInfoPanel();
+    });
+  });
 }
 
 function infoBranchRows() {
+  return sortedInfoBranchRows(rawInfoBranchRows(), infoBranchSort);
+}
+
+function rawInfoBranchRows() {
   const rows = [];
   const seen = new Set();
   for (const session of sessions) {
@@ -3902,14 +3953,54 @@ function infoBranchRows() {
         updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
         prHtml: prHtml || '',
         prTitle,
+        prSort: prTitle || (prValue?.number ? String(prValue.number) : ''),
         linearHtml,
         linearTitle,
         current,
       });
     }
   }
-  rows.sort((a, b) => b.updatedTs - a.updatedTs || a.path.localeCompare(b.path) || a.branch.localeCompare(b.branch));
   return rows;
+}
+
+function setInfoBranchSort(key) {
+  if (!infoBranchSortColumns.has(key)) return;
+  if (infoBranchSort.key === key) {
+    infoBranchSort = {key, dir: infoBranchSort.dir === 'asc' ? 'desc' : 'asc'};
+  } else {
+    infoBranchSort = {key, dir: 'asc'};
+  }
+}
+
+const infoBranchSortColumns = new Set(['session', 'path', 'branch', 'pr', 'linear', 'desc', 'updated']);
+
+function infoBranchSortValue(row, key) {
+  if (key === 'updated') return Number.isFinite(row.updatedTs) ? row.updatedTs : 0;
+  if (key === 'pr') return row.prSort || row.prTitle || '';
+  if (key === 'linear') return row.linearTitle || '';
+  return row[key] || '';
+}
+
+function compareInfoBranchRows(left, right, sortState) {
+  const key = infoBranchSortColumns.has(sortState?.key) ? sortState.key : 'updated';
+  const direction = sortState?.dir === 'asc' ? 1 : -1;
+  const leftValue = infoBranchSortValue(left, key);
+  const rightValue = infoBranchSortValue(right, key);
+  let result = 0;
+  if (typeof leftValue === 'number' && typeof rightValue === 'number') {
+    result = leftValue - rightValue;
+  } else {
+    result = String(leftValue).localeCompare(String(rightValue), undefined, {numeric: true, sensitivity: 'base'});
+  }
+  if (result !== 0) return result * direction;
+  return (right.updatedTs - left.updatedTs)
+    || String(left.session).localeCompare(String(right.session), undefined, {numeric: true, sensitivity: 'base'})
+    || String(left.path).localeCompare(String(right.path), undefined, {numeric: true, sensitivity: 'base'})
+    || String(left.branch).localeCompare(String(right.branch), undefined, {numeric: true, sensitivity: 'base'});
+}
+
+function sortedInfoBranchRows(rows, sortState = infoBranchSort) {
+  return rows.slice().sort((left, right) => compareInfoBranchRows(left, right, sortState));
 }
 
 function bindPanelControls(panel, session) {
@@ -5049,6 +5140,7 @@ function refreshAll() {
 }
 
 async function boot() {
+  renderTransportWarning();
   statusEl.textContent = 'loading YOLO status...';
   await loadNotifyStatus();
   await loadAutoStatuses();

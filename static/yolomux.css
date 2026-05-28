@@ -79,9 +79,58 @@ body {
   color: var(--muted);
   font-size: 12px;
 }
-.brand {
+.brand-cell {
   justify-self: start;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.brand {
   min-width: 92px;
+}
+.transport-warning {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff4f5;
+  background: #b42332;
+  border: 1px solid #ff8a95;
+  border-radius: 999px;
+  font: 900 12px/1 var(--ui-font);
+  cursor: help;
+}
+.transport-warning::before {
+  content: "!";
+}
+.transport-warning::after {
+  content: attr(data-tip);
+  position: fixed;
+  top: 36px;
+  left: 8px;
+  z-index: 160;
+  width: min(520px, calc(100vw - 16px));
+  padding: 8px 10px;
+  color: #ffd8dc;
+  background: rgba(42, 14, 18, 0.98);
+  border: 1px solid #ff8a95;
+  border-radius: 7px;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.42);
+  white-space: normal;
+  font: 12px/1.35 var(--ui-font);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 100ms ease, transform 100ms ease;
+}
+.transport-warning:hover::after,
+.transport-warning:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
 }
 .actions {
   justify-self: end;
@@ -804,7 +853,7 @@ body {
   left: var(--tab-list-popover-left, 8px);
   z-index: 82;
   width: var(--tab-list-popover-width, min(560px, calc(100vw - 16px)));
-  max-height: min(70vh, 620px);
+  max-height: var(--tab-list-popover-max-height, min(70vh, 620px));
   overflow: auto;
   padding: 7px;
   color: #e7ecf3;
@@ -2109,11 +2158,11 @@ body.layout-resizing {
 }
 .info-row {
   display: grid;
-  grid-template-columns: 150px minmax(230px, 1fr) 170px 170px minmax(310px, 1fr) 112px;
+  grid-template-columns: 120px 150px minmax(230px, 1fr) 170px 170px minmax(310px, 1fr) 112px;
   gap: 10px;
   align-items: baseline;
   padding: 7px 8px;
-  min-width: 1260px;
+  min-width: 1380px;
   border-bottom: 1px solid #263044;
   color: #dfe6ef;
   font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -2125,6 +2174,36 @@ body.layout-resizing {
   color: #9ea8b7;
   background: #151b25;
   font-weight: 700;
+}
+.info-sort-button {
+  width: 100%;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.info-sort-button span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.info-sort-button:hover,
+.info-sort-button:focus-visible {
+  color: #e7ecf3;
+  outline: 0;
+}
+.info-sort-marker {
+  flex: 0 0 auto;
+  color: #f5c542;
+  font-size: 10px;
 }
 .info-row.current {
   background: #161f2c;
@@ -2189,7 +2268,7 @@ body.layout-resizing {
 .err { color: var(--bad); }
 .attention-alerts {
   position: fixed;
-  top: 48px;
+  bottom: 12px;
   left: 12px;
   right: 12px;
   z-index: 140;

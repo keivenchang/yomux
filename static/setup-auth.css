@@ -63,6 +63,14 @@ pre {
   margin-top: 14px;
   color: var(--accent);
 }
+.setup-security {
+  color: #ffb3ba;
+}
+.setup-security code {
+  color: #ffe1e4;
+  border-color: #6e2d36;
+  background: #1b1014;
+}
 .setup-dots {
   display: inline-flex;
   width: 1.2em;

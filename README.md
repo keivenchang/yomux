@@ -47,6 +47,18 @@ To run on a shared development host:
 python3 yolomux.py --host 0.0.0.0 --port 9998
 ```
 
+Optional HTTPS stays off by default. To run with a generated self-signed certificate:
+
+```bash
+python3 yolomux.py --port 9998 --self-signed
+```
+
+Then open `https://localhost:9998/`. The browser will show a certificate warning because the certificate is self-signed. YOLOmux stores the generated PEM files under `~/.local/state/yolomux/tls/` and reuses them across restarts. To use your own certificate:
+
+```bash
+python3 yolomux.py --port 9998 --cert /path/fullchain.pem --key /path/privkey.pem
+```
+
 For a background server, write logs under `/tmp`:
 
 ```bash

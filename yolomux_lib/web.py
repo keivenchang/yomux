@@ -80,7 +80,10 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
 </head>
 <body>
 <header class="topbar">
-  {brand_html("brand brand-title title", "div")}
+  <div class="brand-cell">
+    {brand_html("brand brand-title title", "div")}
+    <span id="httpsWarning" class="transport-warning" hidden aria-label="No HTTPS"></span>
+  </div>
   <div id="sessionButtons" class="session-buttons" aria-label="Sessions"></div>
   <div class="actions">
     <div id="latencyMeter" class="latency-meter" title="Browser to YOLOmux latency">
@@ -126,7 +129,8 @@ def setup_auth_html() -> str:
 <body>
 <main>
   <h1>Set up {brand_html("brand-title setup-brand setup-brand-waiting")}</h1>
-  <p>Edit <code>{auth_path}</code>.</p>
+  <p id="setupSecurity" class="setup-security">Recommended: restart with HTTPS: <code>python3 yolomux.py --port 9998 --self-signed</code></p>
+  <p>Edit <code>{auth_path}</code></p>
   <pre>users:
   - username: "{login}"
     password: "your-admin-password"

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import socket
+import ssl
+
 from .app import TmuxWebtermApp
 from .core import *
 from .web import html_page
@@ -738,9 +741,70 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.app.tmux_scroll(session, direction, lines)
 
 
+TLS_FIRST_BYTES = {0x16, 0x80}
+HTTP_METHOD_PREFIXES = (b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"TRACE ", b"CONNECT ")
+
+
+def parse_http_request_target(request_bytes: bytes) -> tuple[str, str]:
+    text = request_bytes.decode("iso-8859-1", errors="replace")
+    lines = text.splitlines()
+    request_line = lines[0] if lines else ""
+    parts = request_line.split()
+    target = parts[1] if len(parts) >= 2 and parts[1].startswith("/") else "/"
+    host = ""
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if separator and name.lower() == "host":
+            host = value.strip()
+            break
+    return host, target
+
+
+def https_redirect_response(request_bytes: bytes, fallback_host: str) -> bytes:
+    host, target = parse_http_request_target(request_bytes)
+    location = f"https://{host or fallback_host}{target}"
+    body = f"Use HTTPS for this YOLOmux server: {location}\n".encode("utf-8")
+    headers = [
+        b"HTTP/1.1 308 Permanent Redirect",
+        f"Location: {location}".encode("utf-8"),
+        b"Content-Type: text/plain; charset=utf-8",
+        f"Content-Length: {len(body)}".encode("ascii"),
+        b"Connection: close",
+        b"",
+        b"",
+    ]
+    return b"\r\n".join(headers) + body
+
+
 class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, server_address: tuple[str, int], app: TmuxWebtermApp):
+    def __init__(self, server_address: tuple[str, int], app: TmuxWebtermApp, tls_context: ssl.SSLContext | None = None):
         super().__init__(server_address, Handler)
         self.app = app
+        self.tls_context = tls_context
+
+    def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
+        request, client_address = self.socket.accept()
+        if not self.tls_context:
+            return request, client_address
+        try:
+            request.settimeout(2.0)
+            first = request.recv(1, socket.MSG_PEEK)
+            if first and first[0] in TLS_FIRST_BYTES:
+                request.settimeout(None)
+                return self.tls_context.wrap_socket(request, server_side=True), client_address
+            request_bytes = request.recv(4096)
+            response = https_redirect_response(request_bytes, self.server_name_with_port())
+            request.sendall(response)
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            request.close()
+        raise OSError("redirected plain HTTP request to HTTPS")
+
+    def server_name_with_port(self) -> str:
+        host, port = self.server_address[:2]
+        if host in {"0.0.0.0", "::"}:
+            host = "localhost"
+        return f"{host}:{port}"

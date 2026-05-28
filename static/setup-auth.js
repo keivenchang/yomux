@@ -1,5 +1,10 @@
 const setupStatus = document.getElementById('setupStatus');
+const setupSecurity = document.getElementById('setupSecurity');
 const setupCheckMs = 1500;
+
+if (setupSecurity && location.protocol === 'https:') {
+  setupSecurity.hidden = true;
+}
 
 function setWaitingStatus(text = 'waiting for auth.yaml changes...') {
   if (!setupStatus) return;

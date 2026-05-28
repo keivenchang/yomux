@@ -1,4 +1,5 @@
 from yolomux_lib import common
+from yolomux_lib import web
 from yolomux_lib.common import AuthUser
 
 
@@ -83,3 +84,14 @@ def test_commit_time_display_uses_pt(monkeypatch):
     monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: GitResult())
 
     assert common.yolomux_commit_time_pt() == "2026-01-15 04:34:56 PT"
+
+
+def test_setup_auth_page_recommends_https(monkeypatch):
+    monkeypatch.setattr(web, "login_username", lambda: "keivenc")
+
+    setup_html = web.setup_auth_html()
+
+    assert "Recommended: restart with HTTPS" in setup_html
+    assert "--self-signed" in setup_html
+    assert "--host 0.0.0.0" not in setup_html
+    assert setup_html.index("Recommended: restart with HTTPS") < setup_html.index("Edit <code>")
