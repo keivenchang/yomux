@@ -32,7 +32,7 @@
   --window-inactive-tab-bg-hover: #336d3a;
   --window-inactive-tab-border: #9bd480;
   --popover-show-delay: 300ms;
-  --popover-hide-delay: 300ms;
+  --popover-hide-delay: 1000ms;
   --ui-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --control-font: "Arial Narrow", "Aptos Narrow", "Liberation Sans Narrow", "Roboto Condensed", var(--ui-font);
@@ -234,22 +234,21 @@ body {
   padding-bottom: 0;
   scrollbar-width: none;
 }
-.session-buttons.tabs-overflowing > .session-button-wrap > .session-button .session-yolo-marker,
-.window-session-tabs.tabs-overflowing > .window-session-tab .session-yolo-marker {
-  display: none;
-}
 .session-buttons.tabs-overflowing > .session-button-wrap > .session-button,
 .window-session-tabs.tabs-overflowing > .window-session-tab {
   gap: 2px;
 }
 .session-buttons.tabs-overflowing .session-button-wrap {
-  min-width: 28px;
+  min-width: 0;
 }
 .session-buttons.tabs-overflowing .session-button-wrap.info {
-  min-width: 28px;
+  min-width: 0;
 }
-.session-buttons.tabs-overflowing > .session-button-wrap > .session-button .session-button-text,
-.window-session-tabs.tabs-overflowing > .window-session-tab .session-button-text {
+/* When tabs overflow, keep status badges (YO, MAIN, PR) visible — they are the
+   whole point of glancing at the tab strip. Hide only the wordy description
+   span; the strip already has overflow-x: auto for horizontal scroll. */
+.session-buttons.tabs-overflowing > .session-button-wrap > .session-button .session-button-dir,
+.window-session-tabs.tabs-overflowing > .window-session-tab .session-button-dir {
   display: none;
 }
 .session-buttons.tabs-overflowing > .session-button-wrap > .session-button.add-session > span:last-child {
