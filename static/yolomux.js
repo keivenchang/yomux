@@ -1565,7 +1565,6 @@ function createTabListEntry(item, options = {}) {
   entry.dataset.tabListItem = item;
   entry.innerHTML = tabListEntryBodyHtml(item);
   entry.setAttribute('aria-label', `${itemLabel(item)} ${tabListDetailText(item)}`.trim());
-  entry.title = tabListDetailText(item);
   const activate = () => {
     closeOtherSessionPopovers(null);
     if (side) {
@@ -2026,19 +2025,34 @@ function stripPullRequestSuffixText(value) {
   return String(value || '').replace(/\s+\(#\d+\)\s*$/, '').trim();
 }
 
-function tabListEntryDescription(item, info = transcriptMeta.sessions?.[item]) {
+function tabListEntryLineText(item, info = transcriptMeta.sessions?.[item]) {
   if (isInfoItem(item)) return itemLabel(item);
   const project = info?.project || {};
+  const git = project.git || {};
   const pr = displayPullRequest(info);
+  const parts = [];
   const title = pr?.title || pr?.description || '';
-  if (title) return shortText(stripPullRequestSuffixText(title), 110);
+  if (title) parts.push(stripPullRequestSuffixText(title));
+  else {
+    const issue = (project.linear || []).find(value => value.title);
+    const subject = currentBranchSubject(git);
+    if (issue?.title) parts.push(`${issue.identifier}: ${issue.title}`);
+    else if (subject) parts.push(stripPullRequestSuffixText(subject));
+  }
+  if (git.branch) parts.push(shortBranch(git.branch));
+  const path = panelFullPath(item, info);
+  if (path) parts.push(compactHomePath(path));
   const linear = project.linear || [];
-  const issue = linear.find(value => value.title);
-  if (issue?.title) return shortText(`${issue.identifier}: ${issue.title}`, 110);
-  const subject = currentBranchSubject(project.git);
-  if (subject) return shortText(stripPullRequestSuffixText(subject), 110);
-  if (project.git?.branch) return shortText(shortBranch(project.git.branch), 110);
-  return shortText(projectDirName(item, info), 110);
+  const linearText = linear
+    .map(issue => [issue.identifier, issue.state].filter(Boolean).join(' '))
+    .filter(Boolean)
+    .join(', ');
+  if (linearText) parts.push(linearText);
+  const gitText = gitStatusText(git);
+  if (gitText && gitText !== 'clean') parts.push(gitText);
+  if (!parts.length && git.branch) parts.push(shortBranch(git.branch));
+  if (!parts.length) parts.push(projectDirName(item, info));
+  return shortText(parts.filter(Boolean).join(' · '), 220);
 }
 
 function tabListEntryBodyHtml(item) {
@@ -2049,7 +2063,7 @@ function tabListEntryBodyHtml(item) {
   const auto = autoApproveStates.get(item)?.enabled === true;
   const state = sessionState(item, info);
   const pr = displayPullRequest(info);
-  const desc = tabListEntryDescription(item, info);
+  const desc = tabListEntryLineText(item, info);
   const descHtml = desc ? `<span class="session-button-dir">${esc(desc)}</span>` : '';
   return `<span class="tab-list-entry-main">
     ${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(item)})}

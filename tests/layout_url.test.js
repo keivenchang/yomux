@@ -412,28 +412,31 @@ function canonical(value) {
   const info = {
     selected_pane: {current_path: '/home/test/project/project3'},
     project: {
-      git: {branch: 'keivenc/DIS-2132__reasoning-dangling-end-marker', root: '/home/test/project/project3'},
+      git: {branch: 'keivenc/GH-2132__reasoning-dangling-end-marker', root: '/home/test/project/project3'},
       pull_request: {
         number: 9981,
         title: 'fix(parser): parse dangling reasoning end markers',
         status_label: 'CI failing',
         checks: {state: 'failure'},
       },
-      linear: [{identifier: 'DIS-2132', title: 'DeepSeek V4 validation'}],
+      linear: [{identifier: 'GH-2132', title: 'DeepSeek V4 validation'}],
     },
   };
   api.setTranscriptInfoForTest('4', info);
 
   const detail = api.tabListDetailText('4', info);
-  assert.ok(detail.includes('DIS-2132__reasoning-dangling-end-marker'), 'tab list detail includes fuller branch name');
+  assert.ok(detail.includes('GH-2132__reasoning-dangling-end-marker'), 'tab list detail includes fuller branch name');
   assert.ok(detail.includes('~/project/project3'), 'tab list detail includes compact path');
   assert.ok(detail.includes('#9981 CI failing'), 'tab list detail includes PR and status');
-  assert.ok(detail.includes('DIS-2132'), 'tab list detail includes Linear identifier');
+  assert.ok(detail.includes('GH-2132'), 'tab list detail includes Linear identifier');
 
   const html = api.tabListEntryBodyHtml('4');
   assert.ok(html.includes('session-yolo-marker inactive'), 'tab list entry shows inactive YO indicator');
   assert.ok(html.includes('data-auto-session="4"'), 'tab list YO indicator is clickable');
   assert.ok(html.includes('fix(parser): parse dangling reasoning end markers'), 'tab list entry includes long PR title');
+  assert.ok(html.includes('dangling-end-marker'), 'tab list entry includes branch detail inline');
+  assert.ok(html.includes('~/project/project3'), 'tab list entry includes compact path inline');
+  assert.ok(html.includes('GH-2132'), 'tab list entry includes Linear detail inline');
   assert.equal(html.includes('tab-list-entry-detail'), false, 'tab list entry is a single visible line');
 }
 
