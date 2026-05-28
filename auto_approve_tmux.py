@@ -25,13 +25,13 @@ Detected prompt patterns:
   5. "Do you want to allow"                        (Claude tool, e.g. WebFetch)
 
 Usage:
-  ./auto_approve_tmux.py dynamo1                  # single session
-  ./auto_approve_tmux.py dynamo1,dynamo2          # comma-separated
-  ./auto_approve_tmux.py "dynamo*"                # wildcard (glob)
-  ./auto_approve_tmux.py dynamo1:0.1              # specific pane
-  ./auto_approve_tmux.py --dry-run dynamo1
-  ./auto_approve_tmux.py --dry-run --once dynamo1  # debug one prompt and exit
-  ./auto_approve_tmux.py --once dynamo1            # approve one prompt and exit
+  ./auto_approve_tmux.py project1                  # single session
+  ./auto_approve_tmux.py project1,project2          # comma-separated
+  ./auto_approve_tmux.py "project*"                # wildcard (glob)
+  ./auto_approve_tmux.py project1:0.1              # specific pane
+  ./auto_approve_tmux.py --dry-run project1
+  ./auto_approve_tmux.py --dry-run --once project1  # debug one prompt and exit
+  ./auto_approve_tmux.py --once project1            # approve one prompt and exit
   ./auto_approve_tmux.py --list
 """
 
@@ -408,9 +408,11 @@ def prompt_text(pane_text: str, prompt_type: str | None = None) -> str:
     return ""
 
 
+_WORKING_SPINNER_GLYPHS = "✢✣✤✥✦✧✩✱✲✳✴✵✶✷✸✹✺✻✽✾✿*"
 _WORKING_LINE_RE = re.compile(
     r"(?:"
-    r"[✢✶✻✹✷✸✺✽✾✿*]\s+.+…\s*\([^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt)[^)]*\)"
+    rf"[{re.escape(_WORKING_SPINNER_GLYPHS)}]\s+.+…\s*\("
+    r"[^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt|↓|\b\d+(?:\.\d+)?\s*[smh]\b)[^)]*\)"
     r"|[^\n]*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
     r")",
     re.IGNORECASE,
@@ -426,7 +428,21 @@ _QUESTION_RE = re.compile(r"(?:^|\b)(?:Q\d+\s*/\s*\d+\s*:\s*)?.+\?\s*$")
 
 def visible_agent_working(visible_text: str) -> bool:
     """Return True when the visible pane is showing an active thinking/working row."""
-    return any(_WORKING_LINE_RE.search(line) for line in visible_text.splitlines()[-25:])
+    lines = visible_text.splitlines()[-25:]
+    working_index = _last_working_index(lines)
+    return working_index >= 0 and not _working_line_has_later_prompt(lines, working_index)
+
+
+def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool:
+    for line in lines[working_index + 1:]:
+        stripped = line.strip()
+        if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
+            continue
+        if re.match(r"^[❯›>]\s+\S", stripped):
+            return True
+        if re.search(r"[@:][^@\s]+[$#]\s*$", stripped):
+            return True
+    return False
 
 
 def _last_approval_prompt_index(lines: list[str]) -> int:
@@ -829,12 +845,12 @@ def parse_args() -> argparse.Namespace:
         description="Auto-approve Cursor CLI permission prompts in tmux sessions.",
         epilog=(
             "Target formats:\n"
-            '  dynamo1                single session\n'
-            '  dynamo1 dynamo2        multiple positional targets\n'
-            '  dynamo1,dynamo2        comma-separated\n'
-            '  dynamo1 "dynamo*"      mixed explicit + wildcard\n'
-            '  "dynamo*"             wildcard (glob against session names)\n'
-            '  dynamo1:0.1            specific window.pane\n'
+            '  project1                single session\n'
+            '  project1 project2        multiple positional targets\n'
+            '  project1,project2        comma-separated\n'
+            '  project1 "project*"      mixed explicit + wildcard\n'
+            '  "project*"             wildcard (glob against session names)\n'
+            '  project1:0.1            specific window.pane\n'
             "\n"
             "To create/attach a named tmux session:\n"
             "  tmux new-session -s mysession      # create new\n"
@@ -955,9 +971,9 @@ def _self_test() -> bool:
         "chmod +x ~/.claude/skills/dyn-pull-and-build-localdev-all/pick_images.py",
         # Real: read-only / inspection
         "ls -la",
-        "ls ~/dynamo/.claude/skills/review-pr/ 2>/dev/null",
-        "ls ~/dynamo/ 2>/dev/null; echo '---'; find ~/dynamo* -name 'gh_review.sh' -type f 2>/dev/null | head -5",
-        "ls -la ~/dynamo1 2>&1 | head -5",
+        "ls ~/project/.claude/skills/review-pr/ 2>/dev/null",
+        "ls ~/project/ 2>/dev/null; echo '---'; find ~/project* -name 'gh_review.sh' -type f 2>/dev/null | head -5",
+        "ls -la ~/project1 2>&1 | head -5",
         "cat /etc/passwd",
         "cat /tmp/review.json",
         "head -n 20 somefile.txt",
@@ -965,52 +981,52 @@ def _self_test() -> bool:
         "tail -20 /tmp/build-localdev-vllm.log",
         "grep -r pattern src/",
         "find . -name '*.py'",
-        "find ~/dynamo -maxdepth 5 -name 'gh_review.sh' -type f 2>/dev/null",
+        "find ~/project -maxdepth 5 -name 'gh_review.sh' -type f 2>/dev/null",
         "stat -c '%s bytes, modified %y' /tmp/build-localdev-vllm.log",
         "wc -l /tmp/pr8269.diff",
         # Real: curl / network
         "curl https://example.com",
         "curl -s localhost:8081/metrics > /tmp/trtllm-backend-metrics.txt",
-        'curl -sL http://speedoflight.GPU.com/dynamo/commits/index.json | python3 -c "import json, sys; data = json.load(sys.stdin)"',
+        'curl -sL http://speedoflight.nv.com/project/commits/index.json | python3 -c "import json, sys; data = json.load(sys.stdin)"',
         # Real: docker exec (most common pattern)
         'docker exec foo bash -c "ls"',
         'docker exec fa12f1aa09df bash -c "python3 /utils/soak_fe.py --max-tokens 1000 --requests_per_worker 5"',
         'docker exec fa12f1aa09df bash -c "curl -s http://localhost:8000/v1/models 2>&1 | head -c 500"',
         'docker exec da18aeee0059 bash -c "cd /workspace && CUDA_VISIBLE_DEVICES=0 WORKSPACE_DIR=/workspace python3 -m pytest tests/serve/test_vllm.py -v --timeout=300 2>&1"',
         'docker exec 1c5b911efcb7 bash -c "grep \'_TEST_META_FILENAME\' /workspace/tests/utils/vram_utils.py"',
-        'docker exec fa12f1aa09df bash -c "~/utils/await_output.sh -t 240 -s \'model_name=Qwen\' -q -- tail -n +1 -F /home/dynamo/notes/inference.log 2>&1 | tail -5"',
+        'docker exec fa12f1aa09df bash -c "~/utils/await_output.sh -t 240 -s \'model_name=Qwen\' -q -- tail -n +1 -F /home/project/notes/inference.log 2>&1 | tail -5"',
         # Real: docker status / images / cleanup (no rm)
-        "docker images dynamoci.azurecr.io/ai-dynamo/dynamo --format '{{.Tag}} {{.Size}}' 2>/dev/null | grep 261881221",
-        'docker ps -a --format "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}" | grep vsc-dynamo',
-        "docker manifest inspect dynamoci.azurecr.io/ai-dynamo/dynamo:abc-vllm-dev-cuda13 >/dev/null 2>&1",
-        "docker pull dynamoci.azurecr.io/ai-dynamo/dynamo:abc-vllm-dev-cuda13",
-        "docker rmi dynamoci.azurecr.io/ai-dynamo/dynamo:old-tag",
+        "docker images projectci.azurecr.io/ai-project/project --format '{{.Tag}} {{.Size}}' 2>/dev/null | grep 261881221",
+        'docker ps -a --format "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}" | grep vsc-project',
+        "docker manifest inspect projectci.azurecr.io/ai-project/project:abc-vllm-dev-cuda13 >/dev/null 2>&1",
+        "docker pull projectci.azurecr.io/ai-project/project:abc-vllm-dev-cuda13",
+        "docker rmi projectci.azurecr.io/ai-project/project:old-tag",
         "docker system df 2>&1 | head -10",
         # Real: git / gh
         "git push origin main",
-        "gh pr view 8362 --repo ai-dynamo/dynamo --json title,body,author 2>&1",
-        "gh pr diff 8362 --repo ai-dynamo/dynamo 2>&1 | head -600",
-        "gh pr diff 8362 --repo ai-dynamo/dynamo 2>&1 | sed -n '600,900p'",
-        "gh pr checks 1234 --repo ai-dynamo/dynamo",
+        "gh pr view 8362 --repo ai-project/project --json title,body,author 2>&1",
+        "gh pr diff 8362 --repo ai-project/project 2>&1 | head -600",
+        "gh pr diff 8362 --repo ai-project/project 2>&1 | sed -n '600,900p'",
+        "gh pr checks 1234 --repo ai-project/project",
         # Real: python / pytest / build
         "python3 -m pytest tests/",
         "python3 ~/.claude/skills/dyn-pull-and-build-localdev-all/pick_images.py",
         "cargo fmt",
         "npm install",
         # Real: gh_review.sh
-        "~/.claude/skills/dyn-review-pr/gh_review.sh reviews ai-dynamo/dynamo 8362 2>&1 | head -100",
-        "cat /tmp/review.json | ~/.claude/skills/dyn-review-pr/gh_review.sh post ai-dynamo/dynamo 8362 2>&1",
+        "~/.claude/skills/dyn-review-pr/gh_review.sh reviews ai-project/project 8362 2>&1 | head -100",
+        "cat /tmp/review.json | ~/.claude/skills/dyn-review-pr/gh_review.sh post ai-project/project 8362 2>&1",
         # Real: GH API via curl + token
-        'GH_TOKEN=$(grep oauth_token ~/.config/gh/hosts.yml | head -1 | awk \'{print $2}\') && curl -sH "Authorization: token $GH_TOKEN" "https://api.github.com/repos/ai-dynamo/dynamo/contents/tests/hf_cache.py?ref=main"',
+        'GH_TOKEN=$(grep oauth_token ~/.config/gh/hosts.yml | head -1 | awk \'{print $2}\') && curl -sH "Authorization: token $GH_TOKEN" "https://api.github.com/repos/ai-project/project/contents/tests/hf_cache.py?ref=main"',
         # Real: multi-command status checks
         'echo "=== pulls running ==="; pgrep -af "docker pull" 2>/dev/null | grep -v pgrep || echo "(none)"',
         'pgrep -af "docker build.*local-dev" 2>/dev/null | grep -v pgrep || echo "(none)"',
         "journalctl -u docker --since '10 min ago' --no-pager 2>/dev/null | tail -5",
         'nohup bash /tmp/bench_ecr_vs_acr.sh > /tmp/bench_ecr_vs_acr.log 2>&1 &',
         # Real: process inspection
-        'ps -eo pid,ppid,cmd --no-headers | grep -E "python|dynamo|vllm" | head -30',
+        'ps -eo pid,ppid,cmd --no-headers | grep -E "python|project|vllm" | head -30',
         "ss -tlnp 2>/dev/null | grep -E '8000|8081'",
-        "gpu-info --query-gpu=index,memory.used,memory.total --format=csv,noheader",
+        "nv-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader",
         # Edge: empty / whitespace
         "",
         "   ",
@@ -1170,7 +1186,7 @@ def _self_test() -> bool:
 
     # Real: Codex bash prompt — "Would you like to run the following command?"
     codex_pane = (
-        "◦ Running gh api repos/ai-dynamo/dynamo/pulls/9579/comments\n"
+        "◦ Running gh api repos/ai-project/project/pulls/9579/comments\n"
         "\n"
         "  Would you like to run the following command?\n"
         "\n"
@@ -1247,10 +1263,10 @@ def _self_test() -> bool:
     # Real: no prompt — shell prompt
     check("no prompt: shell prompt",
           detect_prompt(
-              "keivenc@keivenc-linux:~/dynamo/dynamo3$ gg\n"
+              "keivenc@keivenc-linux:~/project/project3$ gg\n"
               "=== Git log ===\n"
               "c78fac3 style: cargo fmt on test_streaming_tool_parsers.rs\n"
-              "keivenc@keivenc-linux:~/dynamo/dynamo3$\n"
+              "keivenc@keivenc-linux:~/project/project3$\n"
           ),
           None)
 
@@ -1325,7 +1341,7 @@ def _self_test() -> bool:
     check("codex bash generic gh api prefix -> option2",
           action_for_bash_prompt(
               "  Would you like to run the following command?\n"
-              "  $ gh api repos/ai-dynamo/dynamo/pulls/9579/comments\n"
+              "  $ gh api repos/ai-project/project/pulls/9579/comments\n"
               "› 1. Yes, proceed (y)\n"
               "  2. Yes, and don't ask again for commands that start with `gh api` (p)\n"
           ),
@@ -1437,7 +1453,7 @@ def _self_test() -> bool:
         "─────────────────────────────────────────────\n"
         " Bash command\n"
         "\n"
-        "   gh pr view 8362 --repo ai-dynamo/dynamo --json title,body,author 2>&1\n"
+        "   gh pr view 8362 --repo ai-project/project --json title,body,author 2>&1\n"
         "   View PR details\n"
         "\n"
         " Permission rule Bash requires confirmation for this command.\n"
@@ -1451,7 +1467,7 @@ def _self_test() -> bool:
         "─────────────────────────────────────────────\n"
         " Bash command\n"
         "\n"
-        "   ~/.claude/skills/dyn-review-pr/gh_review.sh reviews ai-dynamo/dynamo 8362 2>&1 | head -80\n"
+        "   ~/.claude/skills/dyn-review-pr/gh_review.sh reviews ai-project/project 8362 2>&1 | head -80\n"
         "   List existing reviews on PR 8362\n"
         "\n"
         " Permission rule Bash requires confirmation for this command.\n"
@@ -1479,7 +1495,7 @@ def _self_test() -> bool:
         "─────────────────────────────────────────────\n"
         " Bash command\n"
         "\n"
-        '   DIR=/home/dynamo/notes/logs; docker exec fa12f1aa09df bash -c "set -x; '
+        '   DIR=/home/project/notes/logs; docker exec fa12f1aa09df bash -c "set -x; '
         "curl -sS -N --max-time 2 -o $DIR/h2a.body.sse -D $DIR/h2a.headers "
         "-H 'Content-Type: application/json' -d @/tmp/h2a-body.json "
         'http://localhost:8000/v1/chat/completions 2>&1"\n'
@@ -1533,35 +1549,35 @@ def _self_test() -> bool:
     print()
     print("=== target resolution ===")
 
-    sessions = ["dynamo1", "dynamo2", "dynamo3", "misc"]
+    sessions = ["project1", "project2", "project3", "misc"]
     check("single target",
-          _resolve_targets_from_sessions(["dynamo1"], sessions),
-          ["dynamo1"])
+          _resolve_targets_from_sessions(["project1"], sessions),
+          ["project1"])
     check("multiple positional targets",
-          _resolve_targets_from_sessions(["dynamo1", "dynamo2"], sessions),
-          ["dynamo1", "dynamo2"])
+          _resolve_targets_from_sessions(["project1", "project2"], sessions),
+          ["project1", "project2"])
     check("comma-separated targets",
-          _resolve_targets_from_sessions(["dynamo1,dynamo2"], sessions),
-          ["dynamo1", "dynamo2"])
+          _resolve_targets_from_sessions(["project1,project2"], sessions),
+          ["project1", "project2"])
     check("mixed positional + comma-separated",
-          _resolve_targets_from_sessions(["dynamo1", "dynamo2,dynamo3"], sessions),
-          ["dynamo1", "dynamo2", "dynamo3"])
+          _resolve_targets_from_sessions(["project1", "project2,project3"], sessions),
+          ["project1", "project2", "project3"])
     check("wildcard target",
-          _resolve_targets_from_sessions(["dynamo*"], sessions),
-          ["dynamo1", "dynamo2", "dynamo3"])
+          _resolve_targets_from_sessions(["project*"], sessions),
+          ["project1", "project2", "project3"])
     check("mixed explicit + wildcard dedups exact duplicate",
-          _resolve_targets_from_sessions(["dynamo1", "dynamo*"], sessions),
-          ["dynamo1", "dynamo2", "dynamo3"])
+          _resolve_targets_from_sessions(["project1", "project*"], sessions),
+          ["project1", "project2", "project3"])
     check("wildcard preserves pane suffix",
-          _resolve_targets_from_sessions(["dynamo*:0.1"], sessions),
-          ["dynamo1:0.1", "dynamo2:0.1", "dynamo3:0.1"])
+          _resolve_targets_from_sessions(["project*:0.1"], sessions),
+          ["project1:0.1", "project2:0.1", "project3:0.1"])
     check("same session with two panes kept separately",
-          _resolve_targets_from_sessions(["dynamo1:0.0", "dynamo1:1.0"], sessions),
-          ["dynamo1:0.0", "dynamo1:1.0"])
+          _resolve_targets_from_sessions(["project1:0.0", "project1:1.0"], sessions),
+          ["project1:0.0", "project1:1.0"])
     check("wildcard detection false",
-          specs_have_wildcards(["dynamo1", "dynamo2:0.1"]), False)
+          specs_have_wildcards(["project1", "project2:0.1"]), False)
     check("wildcard detection true",
-          specs_have_wildcards(["dynamo1", "dyn*"]), True)
+          specs_have_wildcards(["project1", "dyn*"]), True)
     numeric_sessions = ["1", "6", "ant"]
     check("numeric session target becomes explicit session",
           tmux_exact_target_from_sessions("1", numeric_sessions), "1:")
@@ -1623,7 +1639,7 @@ def main() -> None:
         sessions = tmux_list_sessions()
         print(sessions or "  (none)")
         print()
-        print('Usage: auto_approve_tmux.py <target> [<target> ...]  (e.g. dynamo1 dynamo2 "dynamo*" d1,d2)')
+        print('Usage: auto_approve_tmux.py <target> [<target> ...]  (e.g. project1 project2 "project*" d1,d2)')
         print()
         print("To create/attach a named tmux session:")
         print("  tmux new-session -s mysession      # create new")

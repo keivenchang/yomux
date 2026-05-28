@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Browser wall for Dynamo tmux panes.
+"""Browser wall for Project tmux panes.
 
 This is a small local dashboard for watching several long-running agent
 sessions at once. It intentionally uses only Python stdlib so it can run from a
@@ -28,10 +28,10 @@ from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
 
-DEFAULT_SESSIONS = ("dynamo1", "dynamo2", "dynamo3", "dynamo4")
+DEFAULT_SESSIONS = ("project1", "project2", "project3", "project4")
 DEFAULT_SLOTS = 6
 DEFAULT_LINES = 90
-CONTAINER_HELPER = Path.home() / "utils" / "container" / "show_dynamo_containers.py"
+CONTAINER_HELPER = Path.home() / "utils" / "container" / "show_project_containers.py"
 AGENT_COMMANDS = {"claude", "codex"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_CONTENT_TYPES = {
@@ -233,7 +233,7 @@ def parse_container_table(text: str) -> list[dict[str, str]]:
         parts = re.split(r"\s{2,}", line.strip())
         if len(parts) < 8:
             continue
-        repo, backend, user, container_id, git_head, dynamo_sha, host_path, branch = parts[:8]
+        repo, backend, user, container_id, git_head, project_sha, host_path, branch = parts[:8]
         rows.append(
             {
                 "repo": repo,
@@ -241,7 +241,7 @@ def parse_container_table(text: str) -> list[dict[str, str]]:
                 "user": user,
                 "container_id": container_id,
                 "git_head": git_head,
-                "dynamo_sha": dynamo_sha,
+                "project_sha": project_sha,
                 "host_path": host_path,
                 "branch": branch,
             }
@@ -358,7 +358,7 @@ def html_page() -> str:
   <section id="grid" class="grid"></section>
   <section class="containers">
     <table>
-      <thead><tr><th>Repo</th><th>Backend</th><th>User</th><th>Container</th><th>Git HEAD</th><th>Dynamo SHA</th><th>Branch</th><th>Path</th></tr></thead>
+      <thead><tr><th>Repo</th><th>Backend</th><th>User</th><th>Container</th><th>Git HEAD</th><th>Project SHA</th><th>Branch</th><th>Path</th></tr></thead>
       <tbody id="containers"></tbody>
     </table>
   </section>
@@ -476,7 +476,7 @@ class TmuxWallHTTPServer(ThreadingHTTPServer):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Show Dynamo tmux panes in a browser.")
+    parser = argparse.ArgumentParser(description="Show Project tmux panes in a browser.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--slots", type=int, default=DEFAULT_SLOTS)
@@ -486,7 +486,7 @@ def parse_args() -> argparse.Namespace:
         "--targets",
         nargs="*",
         default=[],
-        help='tmux targets, comma-separated or separate args. Example: --targets "dynamo1:0.0,dynamo2:0.0"',
+        help='tmux targets, comma-separated or separate args. Example: --targets "project1:0.0,project2:0.0"',
     )
     parser.add_argument("--print-targets", action="store_true")
     return parser.parse_args()

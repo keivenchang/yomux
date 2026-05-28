@@ -51,6 +51,7 @@ from urllib.parse import parse_qs
 from urllib.parse import quote
 from urllib.parse import urlencode
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_SESSIONS: tuple[str, ...] = ()
@@ -59,6 +60,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
+YOLOMUX_VERSION = "0.1"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -86,7 +88,7 @@ HTTP_METADATA_TIMEOUT_SECONDS = 2.0
 MAX_EVENT_TAIL_LINES = 500
 GITHUB_API_ROOT = "https://api.github.com"
 LINEAR_API_URL = "https://api.linear.app/graphql"
-DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/GPU/issue"
+DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/nv/issue"
 OTHER_BRANCH_LIMIT = 8
 _CACHE_MISS = object()
 PLACEHOLDER_AUTH_USERNAME = "user"
@@ -94,6 +96,8 @@ PLACEHOLDER_AUTH_PASSWORD = "password"
 GUEST_AUTH_USERNAME = "guest"
 GUEST_AUTH_PASSWORD = "guest"
 SERVER_HOSTNAME = socket.gethostname()
+PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
+_YOLOMUX_COMMIT_TIME_PT: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +116,26 @@ class AuthIdentity:
 
 def yaml_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def yolomux_commit_time_pt() -> str:
+    global _YOLOMUX_COMMIT_TIME_PT
+    if _YOLOMUX_COMMIT_TIME_PT is not None:
+        return _YOLOMUX_COMMIT_TIME_PT
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "show", "-s", "--format=%cI", "HEAD"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=1.0,
+        )
+        timestamp = result.stdout.strip()
+        commit_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        _YOLOMUX_COMMIT_TIME_PT = commit_time.astimezone(PACIFIC_TIME).strftime("%Y-%m-%d %H:%M:%S PT")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
+        _YOLOMUX_COMMIT_TIME_PT = "commit time unavailable"
+    return _YOLOMUX_COMMIT_TIME_PT
 
 
 def yaml_scalar(value: str) -> str:
@@ -440,9 +464,9 @@ def session_sort_key(session: str) -> tuple[int, str, int]:
     match = re.fullmatch(r"yolomux(\d+)", session)
     if match:
         return 0, "yolomux", int(match.group(1))
-    match = re.fullmatch(r"dynamo(\d+)", session)
+    match = re.fullmatch(r"project(\d+)", session)
     if match:
-        return 1, "dynamo", int(match.group(1))
+        return 1, "project", int(match.group(1))
     return 2, session.lower(), 0
 
 

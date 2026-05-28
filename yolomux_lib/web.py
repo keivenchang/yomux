@@ -42,13 +42,15 @@ def static_asset_url(asset: str) -> str:
 
 
 def brand_html(class_name: str = "brand-title", tag: str = "span") -> str:
+    version_title = html.escape(f"Last commit: {yolomux_commit_time_pt()}", quote=True)
     return (
-        f'<{tag} class="{html.escape(class_name, quote=True)}" aria-label="YOLOmux">'
-        '<span class="brand-yolo brand-greenidia">YO</span>'
-        '<span class="brand-lo brand-greenidia">LO</span>'
+        f'<{tag} class="{html.escape(class_name, quote=True)}" aria-label="YOLOmux {html.escape(YOLOMUX_VERSION, quote=True)}">'
+        '<span class="brand-yolo brand-green">YO</span>'
+        '<span class="brand-lo brand-green">LO</span>'
         '<span class="brand-blue">m</span>'
         '<span class="brand-red">u</span>'
         '<span class="brand-yellow">x</span>'
+        f'<span class="brand-version" title="{version_title}">{html.escape(YOLOMUX_VERSION)}</span>'
         f"</{tag}>"
     )
 
@@ -61,6 +63,8 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
         "homePath": str(Path.home()),
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
         "serverHostname": SERVER_HOSTNAME,
+        "version": YOLOMUX_VERSION,
+        "versionCommitTime": yolomux_commit_time_pt(),
     }
     bootstrap_json = html.escape(json.dumps(bootstrap, separators=(",", ":")), quote=False)
     return f"""<!doctype html>

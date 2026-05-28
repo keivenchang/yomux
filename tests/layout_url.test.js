@@ -158,12 +158,14 @@ globalThis.__layoutTestApi = {
   bindWindowTabStrip,
   clearWindowTabDropPreview,
   createTabListMenu,
+  dedentSelectionText,
   pullRequestStatusLabel,
   sessionButtonHtml,
   showWindowTabDropPreview,
   startSessionDrag,
   tabListDetailText,
   tabListEntryBodyHtml,
+  terminalWrappedLineLinks,
   splitNode,
   updateActiveSessionParam,
   windowTabDropIndex,
@@ -254,6 +256,15 @@ function dragEvent(clientX, session = '9') {
   };
 }
 
+function terminalLine(text, isWrapped = false) {
+  return {
+    isWrapped,
+    translateToString() {
+      return text;
+    },
+  };
+}
+
 function nestedSlots(api) {
   const slots = api.emptyLayoutSlots();
   slots[api.layoutTreeKey] = api.splitNode(
@@ -338,7 +349,7 @@ function canonical(value) {
       git: {
         branch: 'main',
         head: '747c3fd0c6 ci: Update the dep for the whl publish to be automated (#9961)',
-        github_repo: {url: 'https://github.com/ai-dynamo/dynamo'},
+        github_repo: {url: 'https://github.com/ai-project/project'},
       },
       pull_request: null,
     },
@@ -352,6 +363,9 @@ function canonical(value) {
   assert.equal(html.includes('MERGED'), false, 'main fallback does not show merged status');
   assert.equal(html.includes('(#9961)'), false, 'tab title strips duplicated PR suffix');
 
+  const blockedHtml = api.windowSessionTabHtml('4', info, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'blocked command'}, false);
+  assert.ok(blockedHtml.includes('--attention-animation-delay:'), 'red attention badges carry a synchronized animation delay');
+
   const genericWorkingHtml = api.windowSessionTabHtml('4', info, {key: 'working'}, true);
   assert.equal(genericWorkingHtml.includes('session-yolo-marker active working'), false, 'generic working state does not pulse YO marker');
 
@@ -360,6 +374,12 @@ function canonical(value) {
   assert.ok(workingHtml.includes('session-yolo-marker active working'), 'visible screen working pulses active YO marker');
   const workingTopHtml = api.sessionButtonHtml('4', info, {key: 'idle'}, true);
   assert.ok(workingTopHtml.includes('session-yolo-marker active working'), 'visible screen working pulses top YO marker');
+
+  api.setAutoApproveStateForTest('4', {enabled: false, enabled_elsewhere: true, locked: true, lock_owner: {pid: 1234}, screen: {key: 'working'}});
+  const externalHtml = api.windowSessionTabHtml('4', info, {key: 'idle'}, false);
+  assert.ok(externalHtml.includes('session-yolo-marker locked'), 'YO owned by another server renders as yellow locked marker');
+  assert.equal(externalHtml.includes('session-yolo-marker active'), false, 'external YO is not shown as local active YO');
+  assert.ok(externalHtml.includes('YOLO on elsewhere'), 'external YO marker title explains ownership is elsewhere');
 
   api.applyServerMetadataPulsesForTest('4', {main: 20000, pr: 20000});
   const metadataPulseHtml = api.windowSessionTabHtml('4', info, {key: 'idle'}, true);
@@ -390,9 +410,9 @@ function canonical(value) {
 {
   const api = loadYolomux();
   const info = {
-    selected_pane: {current_path: '/home/test/dynamo/dynamo3'},
+    selected_pane: {current_path: '/home/test/project/project3'},
     project: {
-      git: {branch: 'keivenc/DIS-2132__reasoning-dangling-end-marker', root: '/home/test/dynamo/dynamo3'},
+      git: {branch: 'keivenc/DIS-2132__reasoning-dangling-end-marker', root: '/home/test/project/project3'},
       pull_request: {
         number: 9981,
         title: 'fix(parser): parse dangling reasoning end markers',
@@ -406,7 +426,7 @@ function canonical(value) {
 
   const detail = api.tabListDetailText('4', info);
   assert.ok(detail.includes('DIS-2132__reasoning-dangling-end-marker'), 'tab list detail includes fuller branch name');
-  assert.ok(detail.includes('~/dynamo/dynamo3'), 'tab list detail includes compact path');
+  assert.ok(detail.includes('~/project/project3'), 'tab list detail includes compact path');
   assert.ok(detail.includes('#9981 CI failing'), 'tab list detail includes PR and status');
   assert.ok(detail.includes('DIS-2132'), 'tab list detail includes Linear identifier');
 
@@ -434,6 +454,47 @@ function canonical(value) {
   assert.equal(trayMenu.children[1].innerHTML.includes('Inactive tabs'), true);
   assert.equal(trayMenu.children[1].children.length, 2);
   assert.equal(trayMenu.children[1].children[0].draggable, true);
+}
+
+{
+  const api = loadYolomux();
+  assert.equal(api.dedentSelectionText('  hello\n  world'), 'hello\nworld');
+  assert.equal(api.dedentSelectionText('  hello\n    world'), 'hello\n  world');
+  assert.equal(api.dedentSelectionText('\n  hello\n  world\n'), '\nhello\nworld\n');
+  assert.equal(api.dedentSelectionText('hello\n  world'), 'hello\nworld');
+  assert.equal(api.dedentSelectionText('● 1\n  2\n  3'), '1\n2\n3');
+  assert.equal(api.dedentSelectionText('• answer'), 'answer');
+  assert.equal(api.dedentSelectionText('• answer:\n\n  \"  hello\\n  world\"'), 'answer:\n\n\"  hello\\n  world\"');
+}
+
+{
+  const api = loadYolomux();
+  const lines = [
+    terminalLine('https://ex'),
+    terminalLine('ample.com/', true),
+    terminalLine('abcdef', true),
+  ];
+  const term = {
+    buffer: {
+      active: {
+        getLine(index) {
+          return lines[index] || null;
+        },
+      },
+    },
+  };
+
+  const middleLinks = api.terminalWrappedLineLinks(term, 2);
+  assert.equal(middleLinks.length, 1);
+  assert.equal(middleLinks[0].text, 'https://example.com/abcdef');
+  assert.deepStrictEqual(canonical(middleLinks[0].range), {
+    start: {x: 1, y: 1},
+    end: {x: 6, y: 3},
+  });
+
+  const lastLinks = api.terminalWrappedLineLinks(term, 3);
+  assert.equal(lastLinks.length, 1);
+  assert.equal(lastLinks[0].text, 'https://example.com/abcdef');
 }
 
 {

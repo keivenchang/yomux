@@ -3,9 +3,9 @@ from yolomux_lib.metadata import project_pull_request
 
 
 REPO = {
-    "owner": "ai-dynamo",
-    "name": "dynamo",
-    "url": "https://github.com/ai-dynamo/dynamo",
+    "owner": "ai-project",
+    "name": "project",
+    "url": "https://github.com/ai-project/project",
 }
 
 

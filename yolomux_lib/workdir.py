@@ -12,14 +12,15 @@ def resolved_upload_dir(path: Path, allow_home: bool = False) -> tuple[Path | No
     return resolved, resolved.is_dir() and (allow_home or resolved != home)
 
 def session_workdir(session: str) -> Path:
-    match = re.fullmatch(r"(?:yolomux|dynamo)?(\d+)", session)
+    match = re.fullmatch(r"(?:yolomux|project)?(\d+)", session)
     session_index = match.group(1) if match else None
     if session_index == "6":
-        dev_path = Path.home() / "dynamo" / "dynamo-utils.dev"
+        dev_path = Path(os.environ.get("YOLOMUX_DEV_WORKDIR", str(PROJECT_ROOT)))
         if dev_path.is_dir():
             return dev_path
-    repo_name = f"dynamo{session_index}" if session_index else session
-    repo_path = Path.home() / "dynamo" / repo_name
+    repo_name = f"project{session_index}" if session_index else session
+    workspace_base = Path(os.environ.get("YOLOMUX_WORKSPACE_BASE", str(Path.home() / "workspaces")))
+    repo_path = workspace_base / repo_name
     return repo_path if repo_path.is_dir() else Path.home()
 
 def numbered_session_workdir(session: str) -> Path | None:
@@ -27,10 +28,11 @@ def numbered_session_workdir(session: str) -> Path | None:
     if not match:
         return None
     if session == "6":
-        dev_path = Path.home() / "dynamo" / "dynamo-utils.dev"
+        dev_path = Path(os.environ.get("YOLOMUX_DEV_WORKDIR", str(PROJECT_ROOT)))
         if dev_path.is_dir():
             return dev_path
-    repo_path = Path.home() / "dynamo" / f"dynamo{session}"
+    workspace_base = Path(os.environ.get("YOLOMUX_WORKSPACE_BASE", str(Path.home() / "workspaces")))
+    repo_path = workspace_base / f"project{session}"
     return repo_path if repo_path.is_dir() else None
 
 def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
@@ -43,4 +45,3 @@ def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
 def available_agent_commands() -> list[str]:
     agents = [agent for agent in ("claude", "codex") if shutil.which(agent)]
     return agents or ["term"]
-

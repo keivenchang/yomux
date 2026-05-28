@@ -10,8 +10,8 @@
   --line: #303948;
   --good: #52d273;
   --active-ring: rgba(255, 255, 255, 0.96);
-  --GPU-green: #76b900;
-  --GPU-green-dark: #3f6f00;
+  --brand-green: #76b900;
+  --brand-green-dark: #3f6f00;
   --auto-text: #071000;
   --auto-surface: #182512;
   --auto-surface-active: #25400f;
@@ -432,7 +432,7 @@ body {
 }
 .session-state-yolo-approval {
   color: #081205;
-  background: var(--GPU-green);
+  background: var(--brand-green);
   border-color: #9be33d;
 }
 .session-state-blocked,
@@ -463,7 +463,7 @@ body {
 }
 .session-button.active {
   color: #081205;
-  background: var(--GPU-green);
+  background: var(--brand-green);
   border-color: #9be33d;
   border-bottom-color: #9be33d;
   box-shadow: none;
@@ -492,6 +492,7 @@ body {
 .session-button.needs-blocked {
   --attention-ring-border: 1px;
   animation: attention-ring-fade var(--red-reminder-duration) var(--red-reminder-easing) infinite;
+  animation-delay: var(--attention-animation-delay, 0s);
 }
 @keyframes attention-ring-fade {
   0%, 100% {
@@ -513,6 +514,7 @@ body {
   transform-origin: center;
   animation-name: attention-ring-fade, red-pill-fill-fade;
   animation-duration: var(--red-reminder-duration), var(--red-reminder-duration);
+  animation-delay: var(--attention-animation-delay, 0s), var(--attention-animation-delay, 0s);
   animation-timing-function: var(--red-reminder-easing), var(--red-reminder-easing);
   animation-iteration-count: infinite, infinite;
 }
@@ -556,7 +558,7 @@ body {
   justify-content: center;
   padding: 1px 0;
   color: var(--auto-text);
-  background: var(--GPU-green);
+  background: var(--brand-green);
   border: 1px solid var(--auto-border);
   border-radius: 2px;
   box-shadow: none;
@@ -578,8 +580,8 @@ body {
   border-color: #5d6878;
 }
 .session-yolo-marker.locked {
-  color: #f5c987;
-  background: #293243;
+  color: #ffd75d;
+  background: #3a3524;
   border-color: #f0b85d;
 }
 .session-yolo-marker.active.working {
@@ -856,7 +858,7 @@ body {
 }
 .tab-list-entry.active {
   color: #081205;
-  background: var(--GPU-green);
+  background: var(--brand-green);
   border-color: #9be33d;
 }
 .tab-list-entry-main {
@@ -1286,7 +1288,7 @@ body.layout-resizing {
   left: 94px;
 }
 .panel.active-window {
-  border-color: var(--GPU-green);
+  border-color: var(--brand-green);
   background: var(--panel);
   box-shadow: inset 0 0 0 3px rgba(118, 185, 0, 0.95);
 }
@@ -1296,7 +1298,7 @@ body.layout-resizing {
   box-shadow: none;
 }
 .panel.typing-ready-window.yolo-ready-window {
-  --panel-ring-color: var(--GPU-green);
+  --panel-ring-color: var(--brand-green);
 }
 .panel.needs-input-window,
 .panel.needs-exec-window,
@@ -1320,9 +1322,10 @@ body.layout-resizing {
 .panel.needs-blocked-window::after {
   --attention-ring-border: 1px;
   animation: attention-ring-fade var(--red-reminder-duration) var(--red-reminder-easing) infinite;
+  animation-delay: var(--attention-animation-delay, 0s);
 }
 .panel.active-window .panel-head {
-  background: var(--GPU-green-dark);
+  background: var(--brand-green-dark);
   color: #f4ffe8;
   box-shadow: none;
 }
@@ -1526,7 +1529,7 @@ body.layout-resizing {
 }
 .window-session-tab.active {
   color: #081205;
-  background: var(--GPU-green);
+  background: var(--brand-green);
   border-color: #9be33d;
   border-bottom-color: #9be33d;
   font-weight: 500;
@@ -1755,7 +1758,7 @@ body.layout-resizing {
 }
 .tab.auto-toggle.active {
   color: var(--auto-text);
-  background: var(--GPU-green);
+  background: var(--brand-green);
   border-color: var(--auto-border);
   font-weight: 700;
   box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.28), 0 0 14px var(--auto-glow);
@@ -1807,6 +1810,35 @@ body.layout-resizing {
 }
 .terminal .xterm-viewport {
   overflow-y: auto;
+}
+.terminal-context-menu {
+  position: fixed;
+  z-index: 120;
+  min-width: 150px;
+  padding: 4px;
+  color: #e7ecf3;
+  background: rgba(17, 24, 32, 0.98);
+  border: 1px solid #5e6878;
+  border-radius: 7px;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.45);
+}
+.terminal-context-menu button {
+  width: 100%;
+  display: block;
+  padding: 5px 8px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  text-align: left;
+  font: 12px/1.25 var(--ui-font);
+  cursor: pointer;
+}
+.terminal-context-menu button:hover,
+.terminal-context-menu button:focus-visible {
+  outline: 0;
+  color: #081205;
+  background: var(--brand-green);
 }
 .terminal-error {
   height: 100%;

@@ -1,6 +1,6 @@
 # YOLOmux TODOs
 
-YOLOmux-specific roadmap notes. Keep UI, terminal, YOLO approval, session state, and launch ideas here instead of the Dynamo TODO list.
+YOLOmux-specific roadmap notes. Keep UI, terminal, YOLO approval, session state, and launch ideas here instead of the Project TODO list.
 
 ---
 
@@ -73,7 +73,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 ### P8: Host And Process Vitals
 
 - [ ] Add lightweight CPU/memory/load probes and per-session process trees.
-- [ ] Add optional `gpu-info` GPU status when available, but do not make GPU support required.
+- [ ] Add optional `nv-smi` GPU status when available, but do not make GPU support required.
 - [ ] Show vitals in an info drawer or compact topbar popover, not as a dominant dashboard.
 
 ### P9: Multi-Machine Connector

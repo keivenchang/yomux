@@ -33,6 +33,7 @@ const metadataRefreshMs = 15000;
 const paneStateRefreshMs = 2000;
 const latencyRefreshMs = 3000;
 const eventLogRefreshMs = 5000;
+const redReminderMs = 1550;
 const yoloRotateMs = 20000;
 const latencySamplesMax = 24;
 const toastDurationMs = 10000;
@@ -74,6 +75,7 @@ let dragSourceSlot = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
 let transparentDragImage = null;
+let terminalContextMenu = null;
 const panelPopoverHideTimers = new WeakMap();
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
@@ -203,7 +205,7 @@ function openTerminalLink(rawLink) {
   }
 }
 
-function terminalLineLinks(lineText, y) {
+function terminalTextLinks(lineText, rangeForOffsets, y = null) {
   const links = [];
   terminalLinkPattern.lastIndex = 0;
   for (const match of lineText.matchAll(terminalLinkPattern)) {
@@ -212,16 +214,67 @@ function terminalLineLinks(lineText, y) {
     if (!text) continue;
     const startIndex = (match.index || 0) + raw.indexOf(text);
     const endIndex = startIndex + text.length;
+    const range = rangeForOffsets(startIndex, endIndex);
+    if (!range) continue;
+    if (Number.isFinite(y) && (range.start.y > y || range.end.y < y)) continue;
     links.push({
       text,
-      range: {
-        start: {x: startIndex + 1, y},
-        end: {x: endIndex, y},
-      },
+      range,
       activate: () => openTerminalLink(text),
     });
   }
   return links;
+}
+
+function terminalLineLinks(lineText, y) {
+  return terminalTextLinks(lineText, (startIndex, endIndex) => ({
+    start: {x: startIndex + 1, y},
+    end: {x: endIndex, y},
+  }));
+}
+
+function terminalBufferLineText(line) {
+  return line?.translateToString?.(true) || '';
+}
+
+function terminalWrappedLineGroup(term, y) {
+  const buffer = term.buffer?.active;
+  if (!buffer?.getLine) return null;
+  const requested = Math.max(0, y - 1);
+  if (!buffer.getLine(requested)) return null;
+  let start = requested;
+  while (start > 0 && buffer.getLine(start)?.isWrapped === true) start -= 1;
+  let end = requested;
+  while (buffer.getLine(end + 1)?.isWrapped === true) end += 1;
+  const rows = [];
+  let offset = 0;
+  for (let index = start; index <= end; index += 1) {
+    const text = terminalBufferLineText(buffer.getLine(index));
+    rows.push({y: index + 1, text, start: offset, end: offset + text.length});
+    offset += text.length;
+  }
+  return {text: rows.map(row => row.text).join(''), rows};
+}
+
+function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
+  const target = endPosition ? Math.max(0, offset - 1) : offset;
+  const row = group.rows.find(candidate => target >= candidate.start && target < candidate.end) || group.rows[group.rows.length - 1];
+  if (!row) return null;
+  return {x: Math.max(1, target - row.start + 1), y: row.y};
+}
+
+function terminalWrappedRange(group, startIndex, endIndex) {
+  const start = terminalWrappedOffsetPosition(group, startIndex, false);
+  const end = terminalWrappedOffsetPosition(group, endIndex, true);
+  if (!start || !end) return null;
+  return {start, end};
+}
+
+function terminalWrappedLineLinks(term, y) {
+  const group = terminalWrappedLineGroup(term, y);
+  if (!group) return [];
+  if (group.rows.length === 1) return terminalLineLinks(group.text, y);
+  return terminalTextLinks(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
 }
 
 function installTerminalLinkProvider(term) {
@@ -229,16 +282,127 @@ function installTerminalLinkProvider(term) {
   term.registerLinkProvider({
     provideLinks: (y, callback) => {
       try {
-        const line = term.buffer?.active?.getLine(y - 1);
-        if (!line) {
-          callback([]);
-          return;
-        }
-        callback(terminalLineLinks(line.translateToString(true), y));
+        callback(terminalWrappedLineLinks(term, y));
       } catch (_) {
         callback([]);
       }
     },
+  });
+}
+
+function dedentSelectionText(value) {
+  const text = String(value ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = text.split('\n');
+  const indents = lines
+    .filter(line => line.trim().length > 0 && /^[ \t]+/.test(line))
+    .map(line => (line.match(/^[ \t]+/) || [''])[0].length);
+  const stripBullet = line => line.replace(/^[ \t]*[●•]\s*/, '');
+  if (!indents.length) return lines.map(stripBullet).join('\n');
+  const commonIndent = Math.min(...indents);
+  return lines
+    .map(line => line.trim().length > 0 && /^[ \t]+/.test(line) ? line.slice(commonIndent) : line)
+    .map(stripBullet)
+    .join('\n');
+}
+
+async function copyTextToClipboard(text) {
+  const clipboard = globalThis.navigator?.clipboard;
+  if (clipboard?.writeText) {
+    await clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-10000px';
+  textarea.style.top = '-10000px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand?.('copy') === true;
+  textarea.remove();
+  if (!copied) throw new Error('clipboard copy is unavailable');
+}
+
+function closeTerminalContextMenu() {
+  if (!terminalContextMenu) return;
+  terminalContextMenu.remove();
+  terminalContextMenu = null;
+  document.removeEventListener('pointerdown', terminalContextMenuPointerdown, true);
+  document.removeEventListener('keydown', terminalContextMenuKeydown, true);
+  window.removeEventListener('blur', closeTerminalContextMenu);
+}
+
+function terminalContextMenuPointerdown(event) {
+  if (terminalContextMenu?.contains(event.target)) return;
+  closeTerminalContextMenu();
+}
+
+function terminalContextMenuKeydown(event) {
+  if (event.key === 'Escape') closeTerminalContextMenu();
+}
+
+function positionTerminalContextMenu(menu, x, y) {
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(Math.max(6, x), Math.max(6, window.innerWidth - rect.width - 6));
+  const top = Math.min(Math.max(6, y), Math.max(6, window.innerHeight - rect.height - 6));
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+async function copyTerminalSelection(session, term, options = {}) {
+  const selected = term.getSelection?.() || '';
+  if (!selected) {
+    statusEl.textContent = 'nothing selected';
+    return;
+  }
+  const text = options.dedent ? dedentSelectionText(selected) : selected;
+  try {
+    await copyTextToClipboard(text);
+    statusEl.textContent = options.dedent ? 'copied without indent' : 'copied';
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`;
+  }
+}
+
+function showTerminalContextMenu(session, term, x, y) {
+  closeTerminalContextMenu();
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu';
+  menu.setAttribute('role', 'menu');
+  const items = [
+    ['Copy', false],
+    ['Copy without indent', true],
+  ];
+  for (const [label, dedent] of items) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('role', 'menuitem');
+    button.textContent = label;
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      copyTerminalSelection(session, term, {dedent});
+      closeTerminalContextMenu();
+    });
+    menu.appendChild(button);
+  }
+  menu.addEventListener('pointerdown', event => event.stopPropagation());
+  document.body.appendChild(menu);
+  terminalContextMenu = menu;
+  positionTerminalContextMenu(menu, x, y);
+  document.addEventListener('pointerdown', terminalContextMenuPointerdown, true);
+  document.addEventListener('keydown', terminalContextMenuKeydown, true);
+  window.addEventListener('blur', closeTerminalContextMenu);
+}
+
+function installTerminalContextMenu(session, term, container) {
+  container.addEventListener('contextmenu', event => {
+    const selected = term.getSelection?.() || '';
+    if (!selected) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showTerminalContextMenu(session, term, event.clientX, event.clientY);
   });
 }
 
@@ -777,7 +941,7 @@ function terminalDisconnected(session) {
 function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (!isTmuxSession(session)) return {key: 'idle', ...stateDefs.idle, reason: 'not a tmux session'};
   const auto = autoApproveStates.get(session) || {};
-  const autoEnabled = auto.enabled === true;
+  const autoEnabled = autoApproveEnabledForSession(auto);
   const approvalPrompt = auto.prompt || {};
   const screen = auto.screen || {};
   const lastAction = String(auto.last_action || '').toLowerCase();
@@ -856,22 +1020,55 @@ function stateValue(key, reason, extra = {}) {
   return {key, ...def, reason, ...extra};
 }
 
+function autoApproveEnabledHere(payload) {
+  return payload?.enabled === true;
+}
+
+function autoApproveEnabledElsewhere(payload) {
+  return payload?.enabled_elsewhere === true || (payload?.locked === true && payload?.enabled !== true);
+}
+
+function autoApproveEnabledForSession(payload) {
+  return autoApproveEnabledHere(payload) || autoApproveEnabledElsewhere(payload);
+}
+
 function autoApproveScreenIsWorking(payload) {
   return String(payload?.screen?.key || '') === 'working';
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  return payload?.enabled === true && autoApproveScreenIsWorking(payload);
+  return autoApproveEnabledHere(payload) && autoApproveScreenIsWorking(payload);
 }
 
 function yoloRotationDelay(now = Date.now()) {
   return `${-((now % yoloRotateMs) / 1000).toFixed(3)}s`;
 }
 
+function attentionAnimationDelay(now = Date.now()) {
+  return `${-((now % redReminderMs) / 1000).toFixed(3)}s`;
+}
+
+function attentionAnimationStyle() {
+  return `--attention-animation-delay: ${attentionAnimationDelay()}`;
+}
+
+function syncAttentionAnimation(node, active) {
+  if (!node?.style) return;
+  if (active) {
+    if (!node.style.getPropertyValue('--attention-animation-delay')) {
+      node.style.setProperty('--attention-animation-delay', attentionAnimationDelay());
+    }
+  } else {
+    node.style.removeProperty('--attention-animation-delay');
+  }
+}
+
 function stateBadgeHtml(key, short, title) {
   const classes = ['session-state-badge', `session-state-${key}`];
-  if (stateDef(key).attention) classes.push('session-state-reminder');
-  return `<span class="${esc(classes.join(' '))}" title="${esc(title)}">${esc(short)}</span>`;
+  const attention = stateDef(key).attention;
+  if (attention) classes.push('session-state-reminder');
+  const style = attention ? ` style="${attentionAnimationStyle()}"` : '';
+  return `<span class="${esc(classes.join(' '))}"${style} title="${esc(title)}">${esc(short)}</span>`;
 }
 
 function sessionStateHtml(state) {
@@ -1445,8 +1642,11 @@ function updateSessionButtonStates() {
     const isInfo = isInfoItem(item);
     const info = transcriptMeta.sessions?.[item];
     const state = isInfo ? null : sessionState(item, info);
-    const auto = autoApproveStates.get(item)?.enabled === true;
+    const autoPayload = autoApproveStates.get(item);
+    const auto = autoApproveEnabledHere(autoPayload);
+    const locked = autoApproveEnabledElsewhere(autoPayload);
     button.classList.toggle('auto', auto);
+    button.classList.toggle('auto-elsewhere', locked);
     applySessionStateClasses(button, state);
   }
 }
@@ -1454,14 +1654,16 @@ function updateSessionButtonStates() {
 function createTopSessionButton(item) {
   const isInfo = isInfoItem(item);
   const info = transcriptMeta.sessions?.[item];
-  const auto = autoApproveStates.get(item)?.enabled === true;
+  const autoPayload = autoApproveStates.get(item);
+  const auto = autoApproveEnabledHere(autoPayload);
+  const locked = autoApproveEnabledElsewhere(autoPayload);
   const state = isInfo ? null : sessionState(item, info);
   const agentKind = isInfo ? '' : sessionAgentKind(item);
   const wrapper = document.createElement('div');
   wrapper.className = `session-button-wrap ${isInfo ? 'info' : ''}`;
   wrapper.dataset.session = item;
   const button = document.createElement('button');
-  button.className = `session-button ${isInfo ? 'info' : ''} ${auto ? 'auto' : ''}`;
+  button.className = `session-button ${isInfo ? 'info' : ''} ${auto ? 'auto' : ''} ${locked ? 'auto-elsewhere' : ''}`;
   button.type = 'button';
   button.draggable = true;
   applySessionStateClasses(button, state);
@@ -1626,18 +1828,22 @@ function sessionNumberNameHtml(session) {
 }
 
 function yoloMarkerHtml(session, auto, options = {}) {
-  if (!auto && options.enabledOnly !== false) return '';
+  const payload = options.payload || autoApproveStates.get(session);
+  const locked = !auto && (options.locked === true || (options.locked !== false && autoApproveEnabledElsewhere(payload)));
+  if (!auto && !locked && options.enabledOnly !== false) return '';
   const classes = ['session-yolo-marker'];
   if (auto) classes.push('active');
-  if (!auto) classes.push('inactive');
+  else if (locked) classes.push('locked');
+  else classes.push('inactive');
   if (auto && options.yoloWorking) classes.push('working');
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
   const rotationStyle = auto && options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
+  const stateText = auto ? 'on here' : (locked ? 'on elsewhere' : 'off');
   const title = options.toggle && readOnlyMode
-    ? `YOLO ${auto ? 'on' : 'off'} for ${sessionLabel(session)}; readonly access`
-    : (options.toggle ? `YOLO ${auto ? 'on' : 'off'} for ${sessionLabel(session)}` : 'YOLO enabled');
+    ? `YOLO ${stateText} for ${sessionLabel(session)}; readonly access`
+    : (options.toggle ? `YOLO ${stateText} for ${sessionLabel(session)}` : `YOLO ${stateText}`);
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">YO</span>`;
 }
 
@@ -1653,6 +1859,7 @@ function applySessionStateClasses(node, state) {
   node.classList.toggle('needs-input', state?.key === 'needs-input');
   node.classList.toggle('needs-exec', state?.key === 'needs-approval');
   node.classList.toggle('needs-blocked', state?.key === 'blocked');
+  syncAttentionAnimation(node, state?.attention === true);
 }
 
 function panelHeaderStateHtml(state) {
@@ -1815,7 +2022,7 @@ function tabListEntryBodyHtml(item) {
 }
 
 function infoButtonHtml() {
-  return '<span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="session-button-text"><span class="session-button-dir">Branch Info</span></span>';
+  return '<span class="session-button-text"><span class="session-button-dir">Branch Info</span></span>';
 }
 
 function sessionButtonHtml(session, info, state, auto) {
@@ -1852,7 +2059,10 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const subtitle = description || git?.branch || pane?.current_path || 'no checkout detected';
   const rows = [];
   const stateValue = `${sessionStateHtml(state)} <span class="meta-muted">${esc(state.reason)}</span>`;
-  const agentValue = agentKind ? `${agentName(agentKind)}${autoEnabled ? ' · YOLO on' : ''}` : `${autoEnabled ? 'YOLO on' : 'not detected'}`;
+  const autoPayload = autoApproveStates.get(session);
+  const autoElsewhere = autoApproveEnabledElsewhere(autoPayload);
+  const autoText = autoEnabled ? 'YOLO on' : (autoElsewhere ? 'YOLO elsewhere' : '');
+  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || 'not detected');
   const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
   rows.push(popoverPairRow('state', stateValue, 'agent', agentValue));
   rows.push(popoverRow('path', displayPath));
@@ -1961,7 +2171,7 @@ function linearIssueHtml(issue) {
 
 function linearIssueLinkHtml(identifier) {
   if (!identifier) return '';
-  return linkHtml(`https://linear.app/GPU/issue/${encodeURIComponent(identifier)}`, identifier, identifier);
+  return linkHtml(`https://linear.app/nv/issue/${encodeURIComponent(identifier)}`, identifier, identifier);
 }
 
 function pullRequestLinkForBranch(git, branch) {
@@ -3197,7 +3407,7 @@ function positionTopSessionPopover(wrapper) {
 }
 
 function windowInfoTabHtml() {
-  return '<span class="window-tab-core"><span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="window-tab-info-label">Branch Info</span></span>';
+  return '<span class="window-tab-core"><span class="window-tab-info-label">Branch Info</span></span>';
 }
 
 function windowSessionTabHtml(session, info, state, auto) {
@@ -4200,6 +4410,7 @@ function startTerminal(session) {
   });
   term.open(container);
   installTerminalLinkProvider(term);
+  installTerminalContextMenu(session, term, container);
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
     term.resize(openedSize.cols, openedSize.rows);
@@ -4389,7 +4600,7 @@ function renderAutoApproveButton(session, payload) {
   for (const button of buttons) {
     const wasWorking = button.classList.contains('working');
     button.classList.toggle('active', enabled);
-    button.classList.toggle('inactive', !enabled);
+    button.classList.toggle('inactive', !enabled && !locked);
     button.classList.toggle('locked', locked);
     button.classList.toggle('working', working);
     if (working) {
@@ -4524,8 +4735,10 @@ function updatePanelHeader(session, info) {
   const auto = autoApproveStates.get(session)?.enabled === true;
   const state = sessionState(session, info);
   updatePanelControlLabels(session, info);
+  syncAttentionAnimation(panel, state.attention === true);
   if (tab) {
     tab.className = `panel-session-label ${auto ? 'auto' : ''} ${state.attention ? 'needs-attention' : ''}`;
+    syncAttentionAnimation(tab, state.attention === true);
     tab.innerHTML = panelHeaderStateHtml(state);
     tab.removeAttribute('title');
   }

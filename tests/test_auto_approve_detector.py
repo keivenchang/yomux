@@ -15,6 +15,35 @@ def test_visible_agent_working_detects_esc_to_interrupt_without_working_word():
     assert auto_approve_tmux.agent_screen_state(visible_text)["key"] == "working"
 
 
+def test_visible_agent_working_detects_claude_random_status_verb():
+    samples = [
+        "✱ Imagining… (4s · ↓ 98 tokens)\n  ⎿  Tip: Connect Claude to your IDE · /ide\n",
+        "✦ Comboublahblah… (7s · ↓ 123 tokens)\n",
+        "✳ Doodooshit… (1m 2s · ↓ 1.2k tokens)\n",
+    ]
+
+    for visible_text in samples:
+        assert auto_approve_tmux.visible_agent_working(visible_text) is True
+        assert auto_approve_tmux.agent_screen_state(visible_text)["key"] == "working"
+
+
+def test_visible_agent_working_ignores_stale_example_above_prompt():
+    visible_text = "\n".join([
+        "  Then sleep 10 approval should show:",
+        "",
+        "  • Working (10s • esc to interrupt)",
+        "",
+        "  with Working animated in the real TTY.",
+        "",
+        "› Explain this codebase",
+        "",
+        "  gpt-5.5 xhigh · ~",
+    ])
+
+    assert auto_approve_tmux.visible_agent_working(visible_text) is False
+    assert auto_approve_tmux.agent_screen_state(visible_text)["key"] == "idle"
+
+
 def test_visible_agent_working_ignores_non_parenthesized_footer_hint():
     visible_text = "  esc to interrupt · ctrl+t to hide tasks\n"
 

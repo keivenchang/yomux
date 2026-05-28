@@ -73,3 +73,13 @@ def test_uncommented_auth_yaml_is_active(monkeypatch, tmp_path):
     assert common.auth_setup_required() is False
     assert auth_path.stat().st_mode & 0o777 == 0o600
     assert auth_path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_commit_time_display_uses_pt(monkeypatch):
+    class GitResult:
+        stdout = "2026-01-15T12:34:56+00:00\n"
+
+    monkeypatch.setattr(common, "_YOLOMUX_COMMIT_TIME_PT", None)
+    monkeypatch.setattr(common.subprocess, "run", lambda *args, **kwargs: GitResult())
+
+    assert common.yolomux_commit_time_pt() == "2026-01-15 04:34:56 PT"

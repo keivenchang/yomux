@@ -1,5 +1,5 @@
 :root {
-  --brand-greenidia-green: var(--GPU-green, #76b900);
+  --brand-primary-green: var(--brand-green, #76b900);
 }
 .brand-title {
   font-weight: 700;
@@ -18,8 +18,8 @@
 .brand-title .brand-green {
   color: #34a853;
 }
-.brand-title .brand-greenidia {
-  color: var(--brand-greenidia-green);
+.brand-title .brand-green {
+  color: var(--brand-primary-green);
 }
 .brand-title .brand-yolo {
   display: inline-flex;
@@ -28,14 +28,21 @@
   margin-right: 1px;
   padding: 0 0 1px;
   color: #071000;
-  background: var(--brand-greenidia-green);
+  background: var(--brand-primary-green);
   border: 1px solid rgba(155, 227, 61, 0.08);
   border-radius: 3px;
   line-height: 1;
 }
 .brand-title .brand-lo {
-  color: var(--brand-greenidia-green);
+  color: var(--brand-primary-green);
 }
 .brand-title .brand-white {
   color: #f4f7fb;
+}
+.brand-title .brand-version {
+  margin-left: 5px;
+  color: #8f98a6;
+  font-size: 0.62em;
+  font-weight: 650;
+  vertical-align: baseline;
 }

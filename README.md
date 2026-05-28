@@ -20,7 +20,7 @@ cd yolomux
 Start with an existing tmux session:
 
 ```bash
-tmux new-session -A -s dynamo1
+tmux new-session -A -s project1
 ```
 
 Then launch YOLOmux:
@@ -38,7 +38,7 @@ http://localhost:9998/
 To choose specific sessions:
 
 ```bash
-python3 yolomux.py --sessions dynamo1,dynamo2
+python3 yolomux.py --sessions project1,project2
 ```
 
 To run on a shared development host:
@@ -151,39 +151,39 @@ python3 auto_approve_tmux.py --list
 Dry-run one visible prompt before enabling it:
 
 ```bash
-python3 auto_approve_tmux.py --dry-run --once dynamo1
+python3 auto_approve_tmux.py --dry-run --once project1
 ```
 
 Watch one session:
 
 ```bash
-python3 auto_approve_tmux.py dynamo1
+python3 auto_approve_tmux.py project1
 ```
 
 Watch several sessions:
 
 ```bash
-python3 auto_approve_tmux.py dynamo1 dynamo2
-python3 auto_approve_tmux.py dynamo1,dynamo2
-python3 auto_approve_tmux.py "dynamo*"
+python3 auto_approve_tmux.py project1 project2
+python3 auto_approve_tmux.py project1,project2
+python3 auto_approve_tmux.py "project*"
 ```
 
 Watch one tmux window or pane:
 
 ```bash
-python3 auto_approve_tmux.py dynamo1:0.1
+python3 auto_approve_tmux.py project1:0.1
 ```
 
 Run it in the background:
 
 ```bash
-setsid nohup env PYTHONUNBUFFERED=1 python3 auto_approve_tmux.py --interval 0.5 "dynamo*" > /tmp/auto_approve_tmux.log 2>&1 < /dev/null &
+setsid nohup env PYTHONUNBUFFERED=1 python3 auto_approve_tmux.py --interval 0.5 "project*" > /tmp/auto_approve_tmux.log 2>&1 < /dev/null &
 ```
 
 Use `--verbose` when debugging prompt detection:
 
 ```bash
-python3 auto_approve_tmux.py --verbose --dry-run dynamo1
+python3 auto_approve_tmux.py --verbose --dry-run project1
 ```
 
 The standalone script and YOLOmux use the same detector. YOLOmux imports `auto_approve_tmux.py` as a Python module and wraps one `AutoApproveWorker` around each enabled session. The GUI endpoint flow is `JS YO button -> POST /api/auto-approve -> TmuxWebtermApp.set_auto_approve -> AutoApproveWorker -> auto_approve_tmux.py -> tmux capture-pane/send-keys`.
@@ -201,7 +201,7 @@ Prompt detection intentionally uses the visible tmux screen for presence checks.
 - YOLO state is stored server-side in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
 - Drag a pane tab or pane header into a visible slot. Dropping a pane in the middle of another pane moves it into that window tab bar. Dropping near the top, bottom, left, or right splits the target pane when there is enough room.
 - Each pane tab has its own `YO` button, status badges, session label, compact work description, and `X` minimize button. Minimized sessions appear in the top strip as compact buttons.
-- Each pane toolbar has previous/next tmux-window controls, a terminal button labeled from the active tmux window process such as `bash`, `codex`, or `mock_codex.py`, plus `Tx`, `AI`, `Log`, and `Info`.
+- Each pane toolbar has previous/next tmux-window controls, a terminal button labeled from the active tmux window process such as `bash`, `codex`, or `mock/mock_codex.py`, plus `Tx`, `AI`, `Log`, and `Info`.
 - The terminal border turns yellow only for the pane that is currently focused and ready for typing.
 - Browser resize fits xterm immediately, but the tmux resize message is debounced so tmux is resized after the browser resize settles.
 - Mouse wheel scrolling in a terminal sends tmux copy-mode scroll commands instead of scrolling the AI input area.
@@ -245,19 +245,19 @@ node tests/layout_url.test.js
 All API routes require auth. Read endpoints accept `readonly` or `admin`, except `/api/summary-stream` because it launches Codex and requires `admin`. Mutating POST routes require `admin` except `/api/event`, which accepts readonly client telemetry. `/ws` accepts readonly users but attaches tmux with `-r` and ignores keyboard input and tmux-scroll messages.
 
 - `GET /api/transcripts` returns pane, process, and transcript-path metadata.
-- `GET /api/tmux?session=dynamo1&lines=90` returns a tmux capture-pane snapshot.
-- `GET /api/transcript?session=dynamo1&lines=120` returns the transcript tail for one session.
-- `GET /api/context?session=dynamo1&messages=40` returns a compact, message-oriented transcript tail.
-- `GET /api/context-items?session=dynamo1&messages=40` returns structured transcript items.
-- `GET /api/context-stream?session=dynamo1&messages=200` streams structured transcript items with Server-Sent Events.
-- `GET /api/summary-stream?session=dynamo1&lookback=3600` streams a Codex-generated summary with Server-Sent Events.
+- `GET /api/tmux?session=project1&lines=90` returns a tmux capture-pane snapshot.
+- `GET /api/transcript?session=project1&lines=120` returns the transcript tail for one session.
+- `GET /api/context?session=project1&messages=40` returns a compact, message-oriented transcript tail.
+- `GET /api/context-items?session=project1&messages=40` returns structured transcript items.
+- `GET /api/context-stream?session=project1&messages=200` streams structured transcript items with Server-Sent Events.
+- `GET /api/summary-stream?session=project1&lookback=3600` streams a Codex-generated summary with Server-Sent Events.
 - `GET /api/auto-approve` returns YOLO status for all sessions.
-- `GET /api/auto-approve?session=dynamo1` returns YOLO status for one session.
+- `GET /api/auto-approve?session=project1` returns YOLO status for one session.
 - `POST /api/create-session?agent=claude`, `POST /api/create-session?agent=codex`, or `POST /api/create-session?agent=term` creates the next numbered tmux session with the selected agent, capped at nine visible sessions. Claude and Codex requests are rejected if the selected CLI is not available on the YOLOmux server PATH; `term` is available only as the fallback when neither CLI is available.
-- `POST /api/ensure-session?session=dynamo1` checks that a tmux session still exists.
-- `POST /api/auto-approve?session=dynamo1&enabled=1` enables or disables YOLO for a session.
-- `POST /api/tmux-next?session=dynamo1` moves the session to the next tmux window.
-- `GET /ws?session=dynamo1` attaches a browser terminal to tmux.
+- `POST /api/ensure-session?session=project1` checks that a tmux session still exists.
+- `POST /api/auto-approve?session=project1&enabled=1` enables or disables YOLO for a session.
+- `POST /api/tmux-next?session=project1` moves the session to the next tmux window.
+- `GET /ws?session=project1` attaches a browser terminal to tmux.
 
 Inspect the transcript mapping without starting the server:
 
@@ -272,7 +272,7 @@ python3 yolomux.py --print-transcripts
 - Stdlib HTTP server.
 - Server-Sent Events for live terminal snapshots.
 - `tmux capture-pane` as the terminal source.
-- Existing `container/show_dynamo_containers.py` as optional container metadata.
+- Existing `container/show_project_containers.py` as optional container metadata.
 - JSON endpoints that can feed a future AI summarizer without scraping the browser.
 - Static frontend assets in `static/tmux-wall.css` and `static/tmux-wall.js`.
 
@@ -288,7 +288,7 @@ Then open:
 http://localhost:8765/
 ```
 
-Without `--targets`, the server discovers panes from `dynamo1` through `dynamo4`, picks one agent pane per session first, then fills the remaining six slots with other panes from those sessions.
+Without `--targets`, the server discovers panes from `project1` through `project4`, picks one agent pane per session first, then fills the remaining six slots with other panes from those sessions.
 
 Current target selection can be inspected without starting the server:
 
@@ -299,13 +299,13 @@ python3 tmux_wall.py --print-targets
 To override:
 
 ```bash
-python3 tmux_wall.py --targets dynamo1:0.0,dynamo2:0.0,dynamo3:1.0,dynamo4:0.0 --slots 6
+python3 tmux_wall.py --targets project1:0.0,project2:0.0,project3:1.0,project4:0.0 --slots 6
 ```
 
 ## Wall API
 
 - `GET /api/snapshot` returns the current six-pane dashboard payload.
-- `GET /api/transcript?target=dynamo1:0.0&lines=2000` returns one tmux pane transcript.
+- `GET /api/transcript?target=project1:0.0&lines=2000` returns one tmux pane transcript.
 - `GET /api/summary-input?lines=1200` returns the active dashboard panes and container metadata as one JSON payload.
 
 These wall endpoints do not call an LLM. They are the stable input surface for a later summarizer.

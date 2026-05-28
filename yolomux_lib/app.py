@@ -737,6 +737,7 @@ class TmuxWebtermApp:
         payload = worker.status()
         payload.update({
             "enabled": False,
+            "enabled_elsewhere": True,
             "locked": True,
             "lock_owner": owner,
             "error": auto_approve_lock_message(owner),
@@ -791,11 +792,22 @@ class TmuxWebtermApp:
             worker = self.auto_workers.get(session)
         if worker:
             payload = worker.status()
+            payload["enabled_elsewhere"] = False
+            payload["locked"] = False
         else:
-            payload = {"target": session, "enabled": False, "approved": 0, "blocked": 0, "last_action": "off"}
+            payload = {
+                "target": session,
+                "enabled": False,
+                "enabled_elsewhere": False,
+                "locked": False,
+                "approved": 0,
+                "blocked": 0,
+                "last_action": "off",
+            }
             owner = auto_approve_lock_owner(session)
             if owner:
                 payload.update({
+                    "enabled_elsewhere": True,
                     "locked": True,
                     "lock_owner": owner,
                     "last_action": auto_approve_lock_message(owner),

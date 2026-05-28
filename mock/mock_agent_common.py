@@ -65,6 +65,15 @@ PAST_VERBS = [
 ]
 
 FRAMES = ["✻", "✶", "✷", "✸", "✹", "✺"]
+CLAUDE_WORKING_VERBS = VERBS + [
+    "Imagining", "Transmogrifying", "Combobulating", "Recombobulating",
+    "Perambulating", "Doodling", "Frobnitzing", "Hypernoodling",
+]
+CLAUDE_TIPS = [
+    "Connect Claude to your IDE · /ide",
+    "Press Esc to interrupt",
+    "Use ctrl+t to hide tasks",
+]
 
 SHELL_COMMANDS = {
     "ls", "pwd", "cat", "head", "tail", "grep", "find", "ps", "df", "du",
@@ -276,8 +285,10 @@ def format_working_elapsed(seconds: float) -> str:
     return f"{remaining}s"
 
 
-def codex_working_word(frame: int) -> str:
+def codex_working_word(frame: int, color: bool = True) -> str:
     word = "Working"
+    if not color:
+        return word
     active = frame % len(word)
     parts = []
     for index, char in enumerate(word):
@@ -304,27 +315,64 @@ def print_codex_working(seconds: float) -> None:
     sys.stdout.flush()
 
 
-def codex_working_status(stop_event: threading.Event, started_at: float) -> None:
+def claude_working_status_lines(frame: int, started_at: float, verb: str, tip: str) -> list[str]:
+    elapsed = max(1, time.time() - started_at)
+    tokens = max(1, int(elapsed * 24))
+    spinner = FRAMES[frame % len(FRAMES)]
+    return [
+        f"{spinner} {verb}… ({format_working_elapsed(elapsed)} · ↓ {tokens} tokens)",
+        f"  ⎿  Tip: {tip}",
+    ]
+
+
+def codex_working_status_lines(frame: int, started_at: float) -> list[str]:
+    elapsed = max(1, time.time() - started_at)
+    return [f"• {codex_working_word(frame, sys.stdout.isatty())} ({format_working_elapsed(elapsed)} • esc to interrupt)"]
+
+
+def agent_working_status_lines(frame: int, started_at: float, verb: str, tip: str) -> list[str]:
+    if PERMISSION_STYLE == "codex":
+        return codex_working_status_lines(frame, started_at)
+    return claude_working_status_lines(frame, started_at, verb, tip)
+
+
+def write_working_status_block(lines: list[str]) -> None:
+    sys.stdout.write("\r\x1b[2K" + lines[0])
+    for line in lines[1:]:
+        sys.stdout.write("\n\r\x1b[2K" + line)
+    if len(lines) > 1:
+        sys.stdout.write(f"\x1b[{len(lines) - 1}A")
+    sys.stdout.flush()
+
+
+def finish_working_status_block(lines: list[str]) -> None:
+    write_working_status_block(lines)
+    if len(lines) > 1:
+        sys.stdout.write(f"\x1b[{len(lines) - 1}B")
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def agent_working_status(stop_event: threading.Event, started_at: float, verb: str, tip: str) -> None:
     frame = 0
     while not stop_event.is_set():
-        elapsed = max(1, time.time() - started_at)
-        line = f"• {codex_working_word(frame)} ({format_working_elapsed(elapsed)} • esc to interrupt)"
-        sys.stdout.write("\r\x1b[2K" + line)
-        sys.stdout.flush()
+        write_working_status_block(agent_working_status_lines(frame, started_at, verb, tip))
         frame += 1
         stop_event.wait(0.12)
 
 
-def run_with_codex_working_status(command: str, use_real: bool) -> tuple[str, int]:
+def run_with_agent_working_status(command: str, use_real: bool) -> tuple[str, int]:
     started_at = time.time()
+    verb = random.choice(CLAUDE_WORKING_VERBS)
+    tip = random.choice(CLAUDE_TIPS)
     if not sys.stdout.isatty():
-        print("• Working (1s • esc to interrupt)")
+        print("\n".join(agent_working_status_lines(0, started_at, verb, tip)))
         result = real_exec(command) if use_real else result_for_command(command)
         elapsed = max(1, round(time.time() - started_at))
         return result, elapsed
 
     stop_event = threading.Event()
-    worker = threading.Thread(target=codex_working_status, args=(stop_event, started_at), daemon=True)
+    worker = threading.Thread(target=agent_working_status, args=(stop_event, started_at, verb, tip), daemon=True)
     worker.start()
     try:
         result = real_exec(command) if use_real else result_for_command(command)
@@ -332,8 +380,7 @@ def run_with_codex_working_status(command: str, use_real: bool) -> tuple[str, in
         stop_event.set()
         worker.join(timeout=0.5)
     elapsed = max(1, round(time.time() - started_at))
-    sys.stdout.write("\r\x1b[2K" + f"• Working ({format_working_elapsed(elapsed)} • esc to interrupt)" + "\n")
-    sys.stdout.flush()
+    finish_working_status_block(agent_working_status_lines(0, started_at, verb, tip))
     return result, elapsed
 
 
@@ -547,26 +594,26 @@ def print_confirm_menu(title: str, body: str, options: list[tuple[str, str]]) ->
     print()
 
 
-def print_dynamo_rename_flow() -> tuple[str, str, int]:
+def print_project_rename_flow() -> tuple[str, str, int]:
     print_thinking(seconds=2)
-    command = "tmux ls 2>/dev/null | grep -E '^dynamo[0-9]+:' || echo \"no dynamo sessions\""
+    command = "tmux ls 2>/dev/null | grep -E '^project[0-9]+:' || echo \"no project sessions\""
     print_tool_error(command)
     print_tool_multiline(
         command,
         [
-            "dynamo1: 2 windows (created Thu May  7 14:34:50 2026) (attached)",
-            "dynamo2: 2 windows (created Wed May  6 13:46:17 2026) (attached)",
-            "dynamo3: 2 windows (created Fri May  8 12:41:25 2026) (attached)",
+            "project1: 2 windows (created Thu May  7 14:34:50 2026) (attached)",
+            "project2: 2 windows (created Wed May  6 13:46:17 2026) (attached)",
+            "project3: 2 windows (created Fri May  8 12:41:25 2026) (attached)",
         ],
         more=2,
     )
-    print("● Found 5 sessions: dynamo1-4, dynamo6. Rename them?")
+    print("● Found 5 sessions: project1-4, project6. Rename them?")
     print()
     print(f"● User answered {AGENT_DISPLAY_NAME}'s questions:")
-    print("  ⎿  · Rename dynamo1, dynamo2, dynamo3, dynamo4, dynamo6 → 1, 2, 3, 4, 6? → Yes, rename all")
+    print("  ⎿  · Rename project1, project2, project3, project4, project6 → 1, 2, 3, 4, 6? → Yes, rename all")
     print()
-    rename_command = "for n in 1 2 3 4 6; do tmux rename-session -t dynamo$n $n; done && tmux ls"
-    description = "Rename dynamo sessions"
+    rename_command = "for n in 1 2 3 4 6; do tmux rename-session -t project$n $n; done && tmux ls"
+    description = "Rename project sessions"
     n = print_bash_prompt(rename_command, description)
     return rename_command, description, n
 
@@ -649,19 +696,8 @@ def approve_pending_permission(state: dict[str, str]) -> None:
     clear_pending(state)
     print(f"● User approved {AGENT_DISPLAY_NAME}'s request")
     print()
-    if PERMISSION_STYLE == "codex":
-        result, elapsed = run_with_codex_working_status(command, use_real)
-        print(f"● Bash({command})")
-    else:
-        print(f"● Bash({command})")
-        print("  ⎿  Running…")
-        sys.stdout.flush()
-        t0 = time.time()
-        result = real_exec(command) if use_real else result_for_command(command)
-        elapsed = max(1, round(time.time() - t0))
-        if sys.stdout.isatty():
-            sys.stdout.write("\x1b[1A\x1b[2K\r")
-            sys.stdout.flush()
+    result, elapsed = run_with_agent_working_status(command, use_real)
+    print(f"● Bash({command})")
     result_lines = result.split("\n") if result else [""]
     for i, line in enumerate(result_lines):
         prefix = "  ⎿  " if i == 0 else "     "
@@ -884,7 +920,7 @@ def cmd_help() -> None:
     print('     write <path>      Mock Write tool (cosmetic)')
     print('     todos             Mock TodoWrite tool (cosmetic)')
     print('     permission/bash   Permission prompt with canned "ok" result')
-    print('     dynamo rename     Multi-step tool flow demo')
+    print('     project rename     Multi-step tool flow demo')
     print('     ask, question     AskUserQuestion demo')
     print('     guess             20-questions demo')
     print()
@@ -1043,7 +1079,7 @@ def print_capabilities() -> None:
     print()
     print("  Cosmetic demos (no real action):")
     print("    read <path>, grep <pat>, edit <path>, write <path>, todos")
-    print("    dynamo rename, 20 questions")
+    print("    project rename, 20 questions")
     print()
 
 
@@ -1132,9 +1168,9 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
         return
 
     if (len(value) <= 60
-            and re.search(r"\bdynamo\b", lower)
+            and re.search(r"\bproject\b", lower)
             and re.search(r"\brename\b", lower)):
-        command, description, n = print_dynamo_rename_flow()
+        command, description, n = print_project_rename_flow()
         set_pending_permission(state, command, description, lines=n)
         return
 

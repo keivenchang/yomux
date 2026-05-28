@@ -41,13 +41,13 @@ function renderContainers(payload) {
   containersEl.innerHTML = '';
   const containers = payload.containers || [];
   if (!containers.length) {
-    const msg = payload.container_error || 'No running Dynamo containers found.';
+    const msg = payload.container_error || 'No running Project containers found.';
     containersEl.innerHTML = `<tr><td colspan="8" class="err">${esc(msg)}</td></tr>`;
     return;
   }
   for (const c of containers) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(c.repo)}</td><td>${esc(c.backend)}</td><td>${esc(c.user)}</td><td>${esc(c.container_id)}</td><td>${esc(c.git_head)}</td><td>${esc(c.dynamo_sha)}</td><td>${esc(c.branch)}</td><td class="path" title="${esc(c.host_path)}">${esc(c.host_path)}</td>`;
+    tr.innerHTML = `<td>${esc(c.repo)}</td><td>${esc(c.backend)}</td><td>${esc(c.user)}</td><td>${esc(c.container_id)}</td><td>${esc(c.git_head)}</td><td>${esc(c.project_sha)}</td><td>${esc(c.branch)}</td><td class="path" title="${esc(c.host_path)}">${esc(c.host_path)}</td>`;
     containersEl.appendChild(tr);
   }
 }
