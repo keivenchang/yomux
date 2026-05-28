@@ -28,9 +28,21 @@ const tabMetaToggle = (() => {
 })();
 const logoutButton = document.getElementById('logoutButton');
 const httpsWarning = document.getElementById('httpsWarning');
-// File explorer + editor are now first-class layout items rendered into
-// dynamic panels (createFileExplorerPanel / createFileEditorPanel). No
-// static DOM elements; state below drives panel renders.
+const fileExplorer = document.getElementById('fileExplorer');
+const fileExplorerTree = document.getElementById('fileExplorerTree');
+const fileExplorerPath = document.getElementById('fileExplorerPath');
+const fileExplorerClose = document.getElementById('fileExplorerClose');
+const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenToggle');
+const fileEditor = document.getElementById('fileEditor');
+const fileEditorPath = document.getElementById('fileEditorPath');
+const fileEditorTextarea = document.getElementById('fileEditorTextarea');
+const fileEditorPreviewBtn = document.getElementById('fileEditorPreview');
+const fileEditorPreviewPane = document.getElementById('fileEditorPreviewPane');
+const fileEditorHighlight = document.getElementById('fileEditorHighlight');
+const fileEditorHighlightCode = document.getElementById('fileEditorHighlightCode');
+const fileEditorSave = document.getElementById('fileEditorSave');
+const fileEditorClose = document.getElementById('fileEditorClose');
+const fileEditorStatus = document.getElementById('fileEditorStatus');
 const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
@@ -47,6 +59,7 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
 const openFiles = new Map();  // path -> {mtime, kind, original, content, dirty}
+let activeFile = null;
 let fileExplorerRoot = null;
 let fileExplorerShowHidden = (() => {
   try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
@@ -95,11 +108,8 @@ const defaultSplitPercent = 50;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
-const fileExplorerItemId = '__files__';
-const fileEditorItemPrefix = 'file:';
-function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, ...visibleSessions];  // recomputed in updateSessionList
+let layoutItems = [infoItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
@@ -991,36 +1001,6 @@ function isInfoItem(item) {
   return item === infoItemId;
 }
 
-function isFileExplorerItem(item) {
-  return item === fileExplorerItemId;
-}
-
-function isFileEditorItem(item) {
-  return typeof item === 'string' && item.startsWith(fileEditorItemPrefix);
-}
-
-function fileEditorPath(item) {
-  return isFileEditorItem(item) ? item.slice(fileEditorItemPrefix.length) : null;
-}
-
-function isVirtualItem(item) {
-  return isInfoItem(item) || isFileExplorerItem(item) || isFileEditorItem(item);
-}
-
-function openFileEditorItems() {
-  return Array.from(openFiles.keys()).map(fileEditorItemFor);
-}
-
-function computeLayoutItems() {
-  // Order matters for tray sort: Branch Info first, then Files explorer,
-  // then open file editors, then real tmux sessions.
-  return [infoItemId, fileExplorerItemId, ...openFileEditorItems(), ...visibleSessions];
-}
-
-function syncLayoutItems() {
-  layoutItems = computeLayoutItems();
-}
-
 function isTmuxSession(item) {
   return sessions.includes(item);
 }
@@ -1031,9 +1011,7 @@ function isLayoutItem(item) {
 
 function resolveLayoutItem(value) {
   if (value === 'info') return infoItemId;
-  if (value === 'files') return fileExplorerItemId;
   const text = String(value || '');
-  if (text.startsWith(fileEditorItemPrefix)) return text;
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
   if (Number.isInteger(ordinal) && ordinal > 0) return sessionForLabel(String(ordinal));
@@ -1041,24 +1019,17 @@ function resolveLayoutItem(value) {
 }
 
 function itemLabel(item) {
-  if (isInfoItem(item)) return 'Branch Info';
-  if (isFileExplorerItem(item)) return 'Files';
-  if (isFileEditorItem(item)) return basenameOf(fileEditorPath(item));
-  return sessionLabel(item);
+  return isInfoItem(item) ? 'Branch Info' : sessionLabel(item);
 }
 
 function itemSortNumber(item) {
   if (isInfoItem(item)) return 0;
-  if (isFileExplorerItem(item)) return 0.5;
-  if (isFileEditorItem(item)) return 0.75;
   const label = Number(sessionLabel(item));
   return Number.isFinite(label) ? label : Number.MAX_SAFE_INTEGER;
 }
 
 function itemParam(item) {
   if (isInfoItem(item)) return 'info';
-  if (isFileExplorerItem(item)) return 'files';
-  if (isFileEditorItem(item)) return item;  // 'file:/abs/path'
   return String(item);
 }
 
@@ -1226,7 +1197,7 @@ function sessionStateHtml(state) {
 
 function sessionTrayItems() {
   const inWindow = new Set(windowedItems());
-  return computeLayoutItems()
+  return [infoItemId, ...visibleSessions]
     .filter(item => !inWindow.has(item))
     .sort((left, right) => itemSortNumber(left) - itemSortNumber(right) || itemLabel(left).localeCompare(itemLabel(right)));
 }
@@ -1607,7 +1578,7 @@ function updateSessionList(nextSessions) {
   if (!changed) return false;
   sessions = next;
   visibleSessions = sessions.slice(0, maxSessionTabs);
-  layoutItems = computeLayoutItems();
+  layoutItems = [infoItemId, ...visibleSessions];
   const newItems = layoutItems.filter(item => !previousItems.has(item));
   layoutSlots = newItems.length ? layoutWithItems(layoutSlots, newItems) : normalizeLayoutSlots(layoutSlots);
   activeSessions = sessionsFromLayout();
@@ -1696,9 +1667,46 @@ function renderSessionButtons() {
     }
   }
   sessionButtons.appendChild(createFileExplorerButton());
-  // File-editor tabs are part of layoutItems (handled in the trayItems
-  // loop above via createTopSessionButton) — no separate rendering here.
+  for (const path of openFiles.keys()) {
+    sessionButtons.appendChild(createFileTabButton(path));
+  }
   scheduleTabStripOverflowCheck(sessionButtons);
+}
+
+function createFileTabButton(path) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'session-button-wrap file-tab-wrap';
+  wrapper.dataset.filePath = path;
+  const isActive = path === activeFile;
+  const state = openFiles.get(path) || {};
+  const dirty = !!state.dirty;
+  const button = document.createElement('button');
+  button.className = `session-button file-tab ${isActive ? 'active' : ''} ${dirty ? 'dirty' : ''}`;
+  button.type = 'button';
+  button.title = path;
+  const dot = dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
+  button.innerHTML = `${dot}<span class="agent-icon file" aria-hidden="true">📄</span><span class="file-tab-name">${esc(basenameOf(path))}</span>`;
+  button.addEventListener('click', event => {
+    if (event.target.closest('.file-tab-close')) return;
+    event.preventDefault();
+    activeFile = path;
+    renderEditorForActive();
+    renderSessionButtons();
+  });
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'file-tab-close';
+  closeBtn.title = dirty ? 'Discard changes and close' : 'Close';
+  closeBtn.setAttribute('aria-label', 'Close');
+  closeBtn.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (dirty && !window.confirm(`Discard unsaved changes to ${basenameOf(path)}?`)) return;
+    closeFileTab(path);
+  });
+  wrapper.appendChild(button);
+  wrapper.appendChild(closeBtn);
+  return wrapper;
 }
 
 function createFileExplorerButton() {
@@ -1707,11 +1715,34 @@ function createFileExplorerButton() {
   const button = document.createElement('button');
   button.className = 'session-button add-session file';
   button.type = 'button';
-  button.title = 'Open Files panel';
+  button.title = 'Toggle File Explorer';
   button.innerHTML = '<span class="add-plus">+</span><span class="agent-icon file" aria-hidden="true">📁</span><span>File</span>';
-  button.addEventListener('click', () => selectSession(fileExplorerItemId));
+  button.addEventListener('click', () => toggleFileExplorer());
   wrapper.appendChild(button);
   return wrapper;
+}
+
+function toggleFileExplorer() {
+  if (!fileExplorer) return;
+  const opening = fileExplorer.hasAttribute('hidden');
+  if (opening) {
+    fileExplorer.removeAttribute('hidden');
+    document.body.classList.add('file-explorer-open');
+    if (!fileExplorerRoot) openFileExplorerAt(homePath || '/');
+  } else {
+    fileExplorer.setAttribute('hidden', '');
+    document.body.classList.remove('file-explorer-open');
+  }
+}
+
+async function openFileExplorerAt(path) {
+  fileExplorerRoot = path;
+  if (fileExplorerPath) fileExplorerPath.textContent = path;
+  if (fileExplorerTree) fileExplorerTree.replaceChildren();
+  fileExplorerExpanded.clear();
+  const entries = await fetchDirectory(path);
+  if (!entries) return;
+  renderTreeChildren(fileExplorerTree, path, entries, 0);
 }
 
 async function fetchDirectory(path) {
@@ -1777,44 +1808,203 @@ function basenameOf(path) {
 }
 
 async function openFileInEditor(fullPath, name) {
-  // First, ensure the file-editor item exists in the layout (so its tab
-  // shows in the session strip and its panel is created). selectSession
-  // activates it in a slot. The panel's first render will fetch content.
-  const item = fileEditorItemFor(fullPath);
-  syncLayoutItems();
-  await selectSession(item);
+  const ext = fileExtensionOf(name);
+  const kind = IMAGE_EXTENSIONS.has(ext) ? 'image' : 'text';
+  if (openFiles.has(fullPath)) {
+    activeFile = fullPath;
+    renderEditorForActive();
+    renderSessionButtons();
+    return;
+  }
+  if (kind === 'image') {
+    openFiles.set(fullPath, { mtime: 0, kind: 'image', original: '', content: '', dirty: false });
+    activeFile = fullPath;
+    renderEditorForActive();
+    renderSessionButtons();
+    return;
+  }
+  try {
+    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setEditorStatus(`error: ${payload.error || response.status}`, 'error');
+      ensureEditorVisible();
+      return;
+    }
+    const payload = await response.json();
+    openFiles.set(fullPath, {
+      mtime: payload.mtime,
+      kind: 'text',
+      original: payload.content,
+      content: payload.content,
+      dirty: false,
+    });
+    activeFile = fullPath;
+    renderEditorForActive();
+    renderSessionButtons();
+  } catch (err) {
+    setEditorStatus(`error: ${err}`, 'error');
+  }
+}
+
+function ensureEditorVisible() {
+  if (!fileEditor) return;
+  fileEditor.removeAttribute('hidden');
+  document.body.classList.add('file-editor-open');
+}
+
+function hideEditor() {
+  if (!fileEditor) return;
+  fileEditor.setAttribute('hidden', '');
+  document.body.classList.remove('file-editor-open');
+  activeFile = null;
+  if (fileEditorTextarea) { fileEditorTextarea.value = ''; fileEditorTextarea.hidden = false; }
+  if (fileEditorPreviewPane) { fileEditorPreviewPane.hidden = true; fileEditorPreviewPane.innerHTML = ''; }
+  if (fileEditorHighlight) fileEditorHighlight.hidden = true;
+  const img = fileEditor.querySelector('.file-editor-image');
+  if (img) img.remove();
+  setEditorStatus('');
+}
+
+function setEditorStatus(msg, level) {
+  if (!fileEditorStatus) return;
+  fileEditorStatus.textContent = msg || '';
+  fileEditorStatus.dataset.level = level || '';
 }
 
 function closeFileTab(path) {
-  const item = fileEditorItemFor(path);
-  // Remove the panel node and any cached state.
-  removeSessionFromLayout(item);
-  const node = panelNodes.get(item);
-  if (node) node.remove();
-  panelNodes.delete(item);
   openFiles.delete(path);
   fileEditorPreviewMode.delete(path);
-  syncLayoutItems();
+  if (activeFile === path) {
+    const remaining = Array.from(openFiles.keys());
+    activeFile = remaining[remaining.length - 1] || null;
+  }
+  if (!activeFile) {
+    hideEditor();
+  } else {
+    renderEditorForActive();
+  }
   renderSessionButtons();
+}
+
+function renderEditorForActive() {
+  if (!activeFile || !openFiles.has(activeFile)) {
+    hideEditor();
+    return;
+  }
+  ensureEditorVisible();
+  const state = openFiles.get(activeFile);
+  if (fileEditorPath) fileEditorPath.textContent = activeFile;
+  const isMarkdown = activeFile.toLowerCase().endsWith('.md') || activeFile.toLowerCase().endsWith('.markdown');
+  if (fileEditorPreviewBtn) {
+    fileEditorPreviewBtn.hidden = !(isMarkdown && state.kind === 'text');
+    fileEditorPreviewBtn.classList.toggle('active', fileEditorPreviewMode.get(activeFile) === true);
+    fileEditorPreviewBtn.textContent = fileEditorPreviewMode.get(activeFile) ? 'Edit' : 'Preview';
+  }
+  // Clear any image from a previous tab
+  const oldImg = fileEditor.querySelector('.file-editor-image');
+  if (oldImg) oldImg.remove();
+  if (state.kind === 'image') {
+    if (fileEditorTextarea) fileEditorTextarea.hidden = true;
+    if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = true;
+    if (fileEditorHighlight) fileEditorHighlight.hidden = true;
+    if (fileEditorSave) fileEditorSave.hidden = true;
+    const img = document.createElement('img');
+    img.className = 'file-editor-image';
+    img.src = `/api/fs/raw?path=${encodeURIComponent(activeFile)}`;
+    img.alt = activeFile;
+    img.onload = () => setEditorStatus(`${img.naturalWidth}×${img.naturalHeight}`, '');
+    img.onerror = () => setEditorStatus('failed to load image', 'error');
+    fileEditor.insertBefore(img, fileEditorStatus);
+    setEditorStatus('loading…', '');
+    return;
+  }
+  // text mode
+  if (fileEditorSave) fileEditorSave.hidden = readOnlyMode;
+  const ext = activeFile.slice(activeFile.lastIndexOf('.')).toLowerCase();
+  const previewing = fileEditorPreviewMode.get(activeFile) === true;
+  if (previewing && isMarkdown) {
+    renderMarkdownPreview(state.content);
+    if (fileEditorTextarea) fileEditorTextarea.hidden = true;
+    if (fileEditorHighlight) fileEditorHighlight.hidden = true;
+    if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = false;
+  } else {
+    if (fileEditorTextarea) {
+      fileEditorTextarea.hidden = false;
+      fileEditorTextarea.value = state.content;
+      fileEditorTextarea.readOnly = readOnlyMode;
+    }
+    if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = true;
+    if (fileEditorHighlight) fileEditorHighlight.hidden = true;
+  }
+  setEditorStatus(state.dirty ? 'modified' : `${state.original.length} chars`, state.dirty ? '' : '');
+}
+
+function renderMarkdownPreview(text) {
+  if (!fileEditorPreviewPane) return;
+  if (typeof window.marked === 'undefined') {
+    fileEditorPreviewPane.textContent = 'marked.js not loaded (offline CDN?)';
+    return;
+  }
+  const html = window.marked.parse(text, { gfm: true, breaks: true });
+  fileEditorPreviewPane.innerHTML = html;
+  if (typeof window.hljs !== 'undefined') {
+    fileEditorPreviewPane.querySelectorAll('pre code').forEach(block => {
+      try { window.hljs.highlightElement(block); } catch (_) {}
+    });
+  }
+}
+
+function togglePreview() {
+  if (!activeFile) return;
+  const wasPreviewing = fileEditorPreviewMode.get(activeFile) === true;
+  fileEditorPreviewMode.set(activeFile, !wasPreviewing);
+  renderEditorForActive();
+}
+
+async function saveCurrentEditor() {
+  if (!activeFile || readOnlyMode) return;
+  const state = openFiles.get(activeFile);
+  if (!state || state.kind !== 'text') return;
+  setEditorStatus('saving…', '');
+  try {
+    const body = JSON.stringify({
+      path: activeFile,
+      content: fileEditorTextarea.value,
+      expected_mtime: state.mtime,
+    });
+    const response = await apiFetch('/api/fs/write', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setEditorStatus(`save failed: ${payload.error || response.status}`, 'error');
+      return;
+    }
+    const payload = await response.json();
+    state.mtime = payload.mtime;
+    state.original = fileEditorTextarea.value;
+    state.content = fileEditorTextarea.value;
+    state.dirty = false;
+    setEditorStatus(`saved (${payload.size} bytes)`, 'ok');
+    renderSessionButtons();
+  } catch (err) {
+    setEditorStatus(`save failed: ${err}`, 'error');
+  }
 }
 
 function toggleHiddenFiles() {
   fileExplorerShowHidden = !fileExplorerShowHidden;
   try { window.localStorage?.setItem(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0'); }
   catch (_) {}
-  // Update the toggle button in any rendered File panel.
-  document.querySelectorAll('.file-explorer-hidden-toggle-panel').forEach(btn => {
-    btn.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
-    btn.classList.toggle('active', fileExplorerShowHidden);
-    btn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
-  });
-  // Refresh any visible tree.
-  const panel = panelNodes.get(fileExplorerItemId);
-  if (panel) {
-    const treeEl = panel.querySelector('.file-explorer-tree-panel');
-    const pathEl = panel.querySelector('.file-explorer-path-inline');
-    refreshFileExplorerTree(treeEl, pathEl);
+  if (fileExplorerHiddenToggle) {
+    fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
+    fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
+    fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
   }
+  if (fileExplorerRoot) openFileExplorerAt(fileExplorerRoot);
 }
 
 async function expandDirectoryRow(row, fullPath) {
@@ -1842,8 +2032,37 @@ function collapseDirectoryRow(row, fullPath) {
   }
 }
 
-// File explorer + editor event handlers are bound inside each dynamic panel
-// (see createFileExplorerPanel / createFileEditorPanel above).
+if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
+if (fileExplorerHiddenToggle) {
+  fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
+  fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
+  fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+  fileExplorerHiddenToggle.addEventListener('click', toggleHiddenFiles);
+}
+if (fileEditorClose) fileEditorClose.addEventListener('click', () => {
+  if (activeFile) closeFileTab(activeFile);
+});
+if (fileEditorSave) fileEditorSave.addEventListener('click', saveCurrentEditor);
+if (fileEditorPreviewBtn) fileEditorPreviewBtn.addEventListener('click', togglePreview);
+if (fileEditorTextarea) {
+  fileEditorTextarea.addEventListener('input', () => {
+    if (!activeFile) return;
+    const state = openFiles.get(activeFile);
+    if (!state || state.kind !== 'text') return;
+    state.content = fileEditorTextarea.value;
+    const wasDirty = state.dirty;
+    state.dirty = state.content !== state.original;
+    setEditorStatus(state.dirty ? 'modified' : `${state.original.length} chars`, '');
+    if (wasDirty !== state.dirty) renderSessionButtons();
+  });
+  fileEditorTextarea.addEventListener('keydown', event => {
+    const isSave = (event.ctrlKey || event.metaKey) && event.key === 's' && !event.shiftKey;
+    if (isSave) {
+      event.preventDefault();
+      saveCurrentEditor();
+    }
+  });
+}
 
 function shouldShowTabListMenu(items) {
   return Array.isArray(items) && items.length > 1;
@@ -1977,9 +2196,9 @@ function updateSessionButtonStates() {
     const item = wrapper.dataset.session;
     const button = wrapper.querySelector('.session-button');
     if (!button) continue;
-    const isVirtual = isVirtualItem(item);
+    const isInfo = isInfoItem(item);
     const info = transcriptMeta.sessions?.[item];
-    const state = isVirtual ? null : sessionState(item, info);
+    const state = isInfo ? null : sessionState(item, info);
     const autoPayload = autoApproveStates.get(item);
     const auto = autoApproveEnabledHere(autoPayload);
     const locked = autoApproveEnabledElsewhere(autoPayload);
@@ -1990,38 +2209,24 @@ function updateSessionButtonStates() {
 }
 
 function createTopSessionButton(item) {
-  const isVirtual = isVirtualItem(item);
+  const isInfo = isInfoItem(item);
   const info = transcriptMeta.sessions?.[item];
   const autoPayload = autoApproveStates.get(item);
   const auto = autoApproveEnabledHere(autoPayload);
   const locked = autoApproveEnabledElsewhere(autoPayload);
-  const state = isVirtual ? null : sessionState(item, info);
-  const agentKind = isVirtual ? '' : sessionAgentKind(item);
+  const state = isInfo ? null : sessionState(item, info);
+  const agentKind = isInfo ? '' : sessionAgentKind(item);
   const wrapper = document.createElement('div');
-  const virtualClass = isInfoItem(item) ? 'info' : isFileExplorerItem(item) ? 'file-explorer' : isFileEditorItem(item) ? 'file-editor' : '';
-  wrapper.className = `session-button-wrap ${virtualClass}`;
+  wrapper.className = `session-button-wrap ${isInfo ? 'info' : ''}`;
   wrapper.dataset.session = item;
   const button = document.createElement('button');
-  const dirty = isFileEditorItem(item) && openFiles.get(fileEditorPath(item))?.dirty;
-  button.className = `session-button ${virtualClass} ${auto ? 'auto' : ''} ${locked ? 'auto-elsewhere' : ''} ${dirty ? 'dirty' : ''}`;
+  button.className = `session-button ${isInfo ? 'info' : ''} ${auto ? 'auto' : ''} ${locked ? 'auto-elsewhere' : ''}`;
   button.type = 'button';
   button.draggable = true;
   applySessionStateClasses(button, state);
-  if (isInfoItem(item)) button.innerHTML = infoButtonHtml();
-  else if (isFileExplorerItem(item)) button.innerHTML = fileExplorerButtonHtml();
-  else if (isFileEditorItem(item)) button.innerHTML = fileEditorButtonHtml(item);
-  else button.innerHTML = sessionButtonHtml(item, info, state, auto);
+  button.innerHTML = isInfo ? infoButtonHtml() : sessionButtonHtml(item, info, state, auto);
   button.removeAttribute('title');
   button.addEventListener('click', async event => {
-    if (event.target.closest('.file-editor-tab-close')) {
-      event.preventDefault();
-      event.stopPropagation();
-      const path = fileEditorPath(item);
-      const state = openFiles.get(path);
-      if (state?.dirty && !window.confirm(`Discard unsaved changes to ${basenameOf(path)}?`)) return;
-      closeFileTab(path);
-      return;
-    }
     const autoTarget = event.target.closest('[data-auto-session]');
     if (!autoTarget) {
       event.preventDefault();
@@ -2035,23 +2240,11 @@ function createTopSessionButton(item) {
   button.addEventListener('dragstart', event => startSessionDrag(event, item, null));
   button.addEventListener('dragend', endSessionDrag);
   wrapper.appendChild(button);
-  if (!isVirtual) {
+  if (!isInfo) {
     wrapper.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindTopSessionPopover(wrapper);
   }
   return wrapper;
-}
-
-function fileExplorerButtonHtml() {
-  return '<span class="session-button-text"><span class="agent-icon file" aria-hidden="true">📁</span><span class="session-button-dir">Files</span></span>';
-}
-
-function fileEditorButtonHtml(item) {
-  const path = fileEditorPath(item);
-  const state = openFiles.get(path);
-  const dirty = state?.dirty;
-  const dot = dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
-  return `<span class="session-button-text">${dot}<span class="agent-icon file" aria-hidden="true">📄</span><span class="session-button-dir">${esc(basenameOf(path))}</span><span class="file-editor-tab-close" title="${dirty ? 'Discard changes and close' : 'Close'}" aria-label="Close"></span></span>`;
 }
 
 function createAddSessionButton(agent) {
@@ -2350,8 +2543,6 @@ function sessionTabDescription(session, info) {
 
 function tabListDetailText(item, info = transcriptMeta.sessions?.[item]) {
   if (isInfoItem(item)) return 'all branches sorted by recent activity';
-  if (isFileExplorerItem(item)) return 'browse the filesystem';
-  if (isFileEditorItem(item)) return fileEditorPath(item);
   const project = info?.project || {};
   const git = project.git;
   const parts = [];
@@ -2375,7 +2566,7 @@ function stripPullRequestSuffixText(value) {
 }
 
 function tabListEntryLineText(item, info = transcriptMeta.sessions?.[item]) {
-  if (isVirtualItem(item)) return itemLabel(item);
+  if (isInfoItem(item)) return itemLabel(item);
   const project = info?.project || {};
   const git = project.git || {};
   const pr = displayPullRequest(info);
@@ -2407,14 +2598,6 @@ function tabListEntryLineText(item, info = transcriptMeta.sessions?.[item]) {
 function tabListEntryBodyHtml(item) {
   if (isInfoItem(item)) {
     return `<span class="tab-list-entry-main">${windowInfoTabHtml()}</span>`;
-  }
-  if (isFileExplorerItem(item)) {
-    return `<span class="tab-list-entry-main"><span class="agent-icon file" aria-hidden="true">📁</span><span class="session-button-dir">Files</span></span>`;
-  }
-  if (isFileEditorItem(item)) {
-    const p = fileEditorPath(item);
-    const dirty = openFiles.get(p)?.dirty ? '<span class="file-tab-dirty" title="modified"></span>' : '';
-    return `<span class="tab-list-entry-main">${dirty}<span class="agent-icon file" aria-hidden="true">📄</span><span class="session-button-dir">${esc(basenameOf(p))}</span></span>`;
   }
   const info = transcriptMeta.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true;
@@ -3178,7 +3361,7 @@ function focusPanel(session) {
   const panel = document.getElementById(`panel-${session}`);
   if (!panel) return;
   panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
-  if (isVirtualItem(session)) {
+  if (isInfoItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session);
     return;
@@ -3648,30 +3831,22 @@ function updateWindowTabStrip(panel, side) {
 }
 
 function createWindowSessionTab(side, item) {
-  const isVirtual = isVirtualItem(item);
+  const isInfo = isInfoItem(item);
   const info = transcriptMeta.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true;
-  const state = isVirtual ? null : sessionState(item, info);
-  const agentKind = isVirtual ? '' : sessionAgentKind(item);
+  const state = isInfo ? null : sessionState(item, info);
+  const agentKind = isInfo ? '' : sessionAgentKind(item);
   const active = item === activeItemForSide(side);
   const tab = document.createElement('div');
   tab.role = 'button';
   tab.tabIndex = 0;
-  const virtualClass = isInfoItem(item) ? 'info' : isFileExplorerItem(item) ? 'file-explorer' : isFileEditorItem(item) ? 'file-editor' : '';
-  const dirty = isFileEditorItem(item) && openFiles.get(fileEditorPath(item))?.dirty;
-  tab.className = `window-session-tab ${virtualClass} ${active ? 'active' : ''} ${dirty ? 'dirty' : ''}`;
+  tab.className = `window-session-tab ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.windowSessionTab = item;
-  if (isInfoItem(item)) tab.innerHTML = windowInfoTabHtml();
-  else if (isFileExplorerItem(item)) tab.innerHTML = `<span class="window-tab-core"><span class="agent-icon file" aria-hidden="true">📁</span><span class="session-button-dir">Files</span></span>`;
-  else if (isFileEditorItem(item)) {
-    const p = fileEditorPath(item);
-    const dot = dirty ? '<span class="file-tab-dirty" title="modified"></span>' : '';
-    tab.innerHTML = `<span class="window-tab-core">${dot}<span class="agent-icon file" aria-hidden="true">📄</span><span class="session-button-dir">${esc(basenameOf(p))}</span></span>`;
-  } else tab.innerHTML = windowSessionTabHtml(item, info, state, auto);
+  tab.innerHTML = isInfo ? windowInfoTabHtml() : windowSessionTabHtml(item, info, state, auto);
   tab.insertAdjacentHTML('beforeend', `<button type="button" class="window-tab-close" data-window-tab-close title="move ${esc(itemLabel(item))} to top strip" aria-label="Move ${esc(itemLabel(item))} to top strip"></button>`);
-  if (!isVirtual) {
+  if (!isInfo) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindWindowSessionPopover(tab, item);
   }
@@ -3892,10 +4067,7 @@ function windowTabDropIndex(strip, event, movingSession) {
 function getOrCreatePanel(session) {
   let panel = panelNodes.get(session);
   if (panel) return panel;
-  if (isInfoItem(session)) panel = createInfoPanel();
-  else if (isFileExplorerItem(session)) panel = createFileExplorerPanel();
-  else if (isFileEditorItem(session)) panel = createFileEditorPanel(session);
-  else panel = createPanel(session);
+  panel = isInfoItem(session) ? createInfoPanel() : createPanel(session);
   panelNodes.set(session, panel);
   panelPool.appendChild(panel);
   return panel;
@@ -3986,16 +4158,12 @@ function setPanelDetailsCollapsed(panel, collapsed) {
 
 function terminalTabLabel(session, info) {
   if (isInfoItem(session)) return 'Term';
-  if (isFileExplorerItem(session)) return 'Files';
-  if (isFileEditorItem(session)) return 'Edit';
   const label = terminalProcessLabel(info);
   return shortText(label || 'Term', 16);
 }
 
 function terminalTabTitle(session, info) {
   if (isInfoItem(session)) return 'unavailable for Branch Info';
-  if (isFileExplorerItem(session)) return 'unavailable for Files';
-  if (isFileEditorItem(session)) return 'unavailable for file editor';
   return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
 }
 
@@ -4126,253 +4294,6 @@ function createInfoPanel() {
   bindPanelShell(panel, infoItemId);
   renderInfoPanel();
   return panel;
-}
-
-function createFileExplorerPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel file-explorer-panel';
-  panel.id = `panel-${fileExplorerItemId}`;
-  panel.innerHTML = `
-      <div class="panel-head">
-        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
-        ${panelControlsHtml(fileExplorerItemId, {disabled: true, unavailableLabel: 'Files'})}
-      </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
-          <div class="panel-session-label"><span class="session-button-dir">Files</span></div>
-          <div class="meta">
-            <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="false">.*</button>
-            <span class="file-explorer-path-inline"></span>
-          </div>
-        </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(fileExplorerItemId)}" title="hide details" aria-label="hide details"></button>
-      </div>
-      <div class="file-explorer-pane panel-overlay-root">
-        <div id="panel-toasts-${fileExplorerItemId}" class="panel-toast-stack"></div>
-        <div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
-      </div>`;
-  bindPanelShell(panel, fileExplorerItemId);
-  const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
-  if (hiddenBtn) {
-    hiddenBtn.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
-    hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
-    hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
-    hiddenBtn.addEventListener('click', toggleHiddenFiles);
-  }
-  const treeEl = panel.querySelector('.file-explorer-tree-panel');
-  refreshFileExplorerTree(treeEl, panel.querySelector('.file-explorer-path-inline'));
-  return panel;
-}
-
-function refreshFileExplorerTree(treeEl, pathEl) {
-  if (!treeEl) return;
-  const root = fileExplorerRoot || homePath || '/';
-  fileExplorerRoot = root;
-  if (pathEl) pathEl.textContent = root;
-  treeEl.replaceChildren();
-  fileExplorerExpanded.clear();
-  apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`)
-    .then(resp => resp.ok ? resp.json() : null)
-    .then(payload => {
-      if (!payload) return;
-      renderTreeChildren(treeEl, root, payload.entries || [], 0);
-    })
-    .catch(err => console.warn('fs list failed', err));
-}
-
-function createFileEditorPanel(item) {
-  const path = fileEditorPath(item);
-  const panel = document.createElement('article');
-  panel.className = 'panel file-editor-panel';
-  panel.id = `panel-${cssEscape(item)}`;
-  panel.dataset.filePath = path;
-  panel.innerHTML = `
-      <div class="panel-head">
-        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
-        ${panelControlsHtml(item, {disabled: true, unavailableLabel: basenameOf(path)})}
-      </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
-          <div class="panel-session-label"><span class="session-button-dir">${esc(basenameOf(path))}</span></div>
-          <div class="meta file-editor-meta">
-            <span class="file-editor-meta-path">${esc(path)}</span>
-            <button type="button" class="file-editor-preview-btn" title="Toggle Markdown preview" hidden>Preview</button>
-            <button type="button" class="file-editor-save-btn" title="Save (Ctrl/Cmd+S)" hidden>Save</button>
-            <span class="file-editor-meta-status"></span>
-          </div>
-        </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(item)}" title="hide details" aria-label="hide details"></button>
-      </div>
-      <div class="file-editor-pane panel-overlay-root">
-        <div id="panel-toasts-${cssEscape(item)}" class="panel-toast-stack"></div>
-        <textarea class="file-editor-textarea-panel" spellcheck="false" wrap="off"></textarea>
-        <div class="file-editor-preview-pane markdown-body" hidden></div>
-        <img class="file-editor-image" hidden alt="">
-      </div>`;
-  bindPanelShell(panel, item);
-  bindFileEditorPanel(panel, item);
-  renderFileEditorPanel(panel, item);
-  return panel;
-}
-
-function bindFileEditorPanel(panel, item) {
-  const textarea = panel.querySelector('.file-editor-textarea-panel');
-  const saveBtn = panel.querySelector('.file-editor-save-btn');
-  const previewBtn = panel.querySelector('.file-editor-preview-btn');
-  if (textarea) {
-    textarea.addEventListener('input', () => {
-      const state = openFiles.get(fileEditorPath(item));
-      if (!state || state.kind !== 'text') return;
-      state.content = textarea.value;
-      const wasDirty = state.dirty;
-      state.dirty = state.content !== state.original;
-      updateFileEditorStatus(panel, state);
-      if (wasDirty !== state.dirty) renderSessionButtons();
-    });
-    textarea.addEventListener('keydown', event => {
-      if ((event.ctrlKey || event.metaKey) && event.key === 's' && !event.shiftKey) {
-        event.preventDefault();
-        saveFileEditorPanel(panel, item);
-      }
-    });
-  }
-  if (saveBtn) saveBtn.addEventListener('click', () => saveFileEditorPanel(panel, item));
-  if (previewBtn) previewBtn.addEventListener('click', () => {
-    const path = fileEditorPath(item);
-    const current = fileEditorPreviewMode.get(path) === true;
-    fileEditorPreviewMode.set(path, !current);
-    renderFileEditorPanel(panel, item);
-  });
-}
-
-async function renderFileEditorPanel(panel, item) {
-  const path = fileEditorPath(item);
-  let state = openFiles.get(path);
-  if (!state) {
-    // First time the panel is shown — load the file.
-    state = await loadFileIntoState(path);
-    if (!state) return;
-  }
-  const textarea = panel.querySelector('.file-editor-textarea-panel');
-  const preview = panel.querySelector('.file-editor-preview-pane');
-  const img = panel.querySelector('.file-editor-image');
-  const saveBtn = panel.querySelector('.file-editor-save-btn');
-  const previewBtn = panel.querySelector('.file-editor-preview-btn');
-
-  if (state.kind === 'image') {
-    if (textarea) textarea.hidden = true;
-    if (preview) preview.hidden = true;
-    if (saveBtn) saveBtn.hidden = true;
-    if (previewBtn) previewBtn.hidden = true;
-    if (img) {
-      img.hidden = false;
-      img.src = `/api/fs/raw?path=${encodeURIComponent(path)}`;
-      img.alt = path;
-    }
-    updateFileEditorStatus(panel, state);
-    return;
-  }
-
-  const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
-  const isMarkdown = ext === '.md' || ext === '.markdown';
-  const previewing = fileEditorPreviewMode.get(path) === true && isMarkdown;
-  if (previewBtn) {
-    previewBtn.hidden = !isMarkdown;
-    previewBtn.textContent = previewing ? 'Edit' : 'Preview';
-    previewBtn.classList.toggle('active', previewing);
-  }
-  if (saveBtn) saveBtn.hidden = readOnlyMode;
-  if (img) img.hidden = true;
-
-  if (previewing && preview) {
-    if (textarea) textarea.hidden = true;
-    preview.hidden = false;
-    renderMarkdownInto(preview, state.content);
-  } else {
-    if (preview) preview.hidden = true;
-    if (textarea) {
-      textarea.hidden = false;
-      textarea.readOnly = readOnlyMode;
-      if (textarea.value !== state.content) textarea.value = state.content;
-    }
-  }
-  updateFileEditorStatus(panel, state);
-}
-
-async function loadFileIntoState(path) {
-  const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
-  if (IMAGE_EXTENSIONS.has(ext)) {
-    const state = { mtime: 0, kind: 'image', original: '', content: '', dirty: false };
-    openFiles.set(path, state);
-    renderSessionButtons();
-    return state;
-  }
-  try {
-    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      console.warn('fs read failed', path, payload);
-      return null;
-    }
-    const payload = await response.json();
-    const state = { mtime: payload.mtime, kind: 'text', original: payload.content, content: payload.content, dirty: false };
-    openFiles.set(path, state);
-    renderSessionButtons();
-    return state;
-  } catch (err) {
-    console.warn('fs read error', err);
-    return null;
-  }
-}
-
-function updateFileEditorStatus(panel, state) {
-  const status = panel.querySelector('.file-editor-meta-status');
-  if (!status) return;
-  if (!state) { status.textContent = ''; return; }
-  if (state.kind === 'image') { status.textContent = ''; return; }
-  status.textContent = state.dirty ? 'modified' : `${state.original.length} chars`;
-  status.dataset.level = state.dirty ? 'dirty' : '';
-}
-
-async function saveFileEditorPanel(panel, item) {
-  if (readOnlyMode) return;
-  const path = fileEditorPath(item);
-  const state = openFiles.get(path);
-  if (!state || state.kind !== 'text') return;
-  const textarea = panel.querySelector('.file-editor-textarea-panel');
-  const status = panel.querySelector('.file-editor-meta-status');
-  if (status) { status.textContent = 'saving…'; status.dataset.level = ''; }
-  try {
-    const body = JSON.stringify({ path, content: textarea.value, expected_mtime: state.mtime });
-    const response = await apiFetch('/api/fs/write', { method: 'POST', headers: {'Content-Type': 'application/json'}, body });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      if (status) { status.textContent = `save failed: ${payload.error || response.status}`; status.dataset.level = 'error'; }
-      return;
-    }
-    const payload = await response.json();
-    state.mtime = payload.mtime;
-    state.original = textarea.value;
-    state.content = textarea.value;
-    state.dirty = false;
-    if (status) { status.textContent = `saved (${payload.size} bytes)`; status.dataset.level = 'ok'; }
-    renderSessionButtons();
-  } catch (err) {
-    if (status) { status.textContent = `save failed: ${err}`; status.dataset.level = 'error'; }
-  }
-}
-
-function renderMarkdownInto(target, text) {
-  if (typeof window.marked === 'undefined') {
-    target.textContent = 'marked.js not loaded (offline?)';
-    return;
-  }
-  target.innerHTML = window.marked.parse(text || '', { gfm: true, breaks: true });
-  if (typeof window.hljs !== 'undefined') {
-    target.querySelectorAll('pre code').forEach(block => {
-      try { window.hljs.highlightElement(block); } catch (_) {}
-    });
-  }
 }
 
 function panelControlsHtml(session, options = {}) {

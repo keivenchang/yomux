@@ -103,6 +103,28 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
   </div>
 </header>
 <div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>
+<aside id="fileExplorer" class="file-explorer" hidden aria-label="File Explorer">
+  <div class="file-explorer-tree-col">
+    <div class="file-explorer-head">
+      <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle" title="Show hidden files (dotfiles)" aria-pressed="false">.*</button>
+      <div class="file-explorer-path" id="fileExplorerPath">/</div>
+      <button type="button" id="fileExplorerClose" class="file-explorer-close" title="Close File Explorer" aria-label="Close"></button>
+    </div>
+    <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>
+  </div>
+  <div class="file-editor" id="fileEditor" hidden>
+    <div class="file-editor-head">
+      <div class="file-editor-path" id="fileEditorPath"></div>
+      <button type="button" id="fileEditorPreview" class="file-editor-preview" title="Toggle Markdown preview" hidden>Preview</button>
+      <button type="button" id="fileEditorSave" class="file-editor-save" title="Save (Ctrl/Cmd+S)">Save</button>
+      <button type="button" id="fileEditorClose" class="file-editor-close" title="Close current file" aria-label="Close"></button>
+    </div>
+    <textarea id="fileEditorTextarea" class="file-editor-textarea" spellcheck="false" wrap="off"></textarea>
+    <div id="fileEditorPreviewPane" class="file-editor-preview-pane markdown-body" hidden></div>
+    <pre id="fileEditorHighlight" class="file-editor-highlight" hidden><code id="fileEditorHighlightCode"></code></pre>
+    <div id="fileEditorStatus" class="file-editor-status"></div>
+  </div>
+</aside>
 <main id="grid" class="grid"></main>
 <div id="panelPool" class="panel-pool" aria-hidden="true"></div>
 <section id="modal" class="modal">
