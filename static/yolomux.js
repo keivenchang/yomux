@@ -2221,12 +2221,12 @@ function updateSessionButtonStates() {
     const item = wrapper.dataset.session;
     const button = wrapper.querySelector('.session-button');
     if (!button) continue;
-    const isInfo = isInfoItem(item);
+    const isVirtual = isVirtualItem(item);
     const info = transcriptMeta.sessions?.[item];
-    const state = isInfo ? null : sessionState(item, info);
+    const state = isVirtual ? null : sessionState(item, info);
     const autoPayload = autoApproveStates.get(item);
-    const auto = autoApproveEnabledHere(autoPayload);
-    const locked = autoApproveEnabledElsewhere(autoPayload);
+    const auto = autoApproveEnabledHere(autoPayload) && !isVirtual;
+    const locked = autoApproveEnabledElsewhere(autoPayload) && !isVirtual;
     button.classList.toggle('auto', auto);
     button.classList.toggle('auto-elsewhere', locked);
     applySessionStateClasses(button, state);
@@ -2235,21 +2235,26 @@ function updateSessionButtonStates() {
 
 function createTopSessionButton(item) {
   const isInfo = isInfoItem(item);
+  const isFiles = isFileExplorerItem(item);
+  const isVirtual = isInfo || isFiles;
   const info = transcriptMeta.sessions?.[item];
   const autoPayload = autoApproveStates.get(item);
   const auto = autoApproveEnabledHere(autoPayload);
   const locked = autoApproveEnabledElsewhere(autoPayload);
-  const state = isInfo ? null : sessionState(item, info);
-  const agentKind = isInfo ? '' : sessionAgentKind(item);
+  const state = isVirtual ? null : sessionState(item, info);
+  const agentKind = isVirtual ? '' : sessionAgentKind(item);
   const wrapper = document.createElement('div');
-  wrapper.className = `session-button-wrap ${isInfo ? 'info' : ''}`;
+  const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : '';
+  wrapper.className = `session-button-wrap ${virtualClass}`;
   wrapper.dataset.session = item;
   const button = document.createElement('button');
-  button.className = `session-button ${isInfo ? 'info' : ''} ${auto ? 'auto' : ''} ${locked ? 'auto-elsewhere' : ''}`;
+  button.className = `session-button ${virtualClass} ${auto && !isVirtual ? 'auto' : ''} ${locked && !isVirtual ? 'auto-elsewhere' : ''}`;
   button.type = 'button';
   button.draggable = true;
   applySessionStateClasses(button, state);
-  button.innerHTML = isInfo ? infoButtonHtml() : sessionButtonHtml(item, info, state, auto);
+  if (isInfo) button.innerHTML = infoButtonHtml();
+  else if (isFiles) button.innerHTML = fileExplorerButtonHtml();
+  else button.innerHTML = sessionButtonHtml(item, info, state, auto);
   button.removeAttribute('title');
   button.addEventListener('click', async event => {
     const autoTarget = event.target.closest('[data-auto-session]');
@@ -2265,11 +2270,15 @@ function createTopSessionButton(item) {
   button.addEventListener('dragstart', event => startSessionDrag(event, item, null));
   button.addEventListener('dragend', endSessionDrag);
   wrapper.appendChild(button);
-  if (!isInfo) {
+  if (!isVirtual) {
     wrapper.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindTopSessionPopover(wrapper);
   }
   return wrapper;
+}
+
+function fileExplorerButtonHtml() {
+  return '<span class="session-button-text"><span class="agent-icon file" aria-hidden="true">📁</span><span class="session-button-dir">Files</span></span>';
 }
 
 function createAddSessionButton(agent) {
@@ -3043,6 +3052,15 @@ async function selectSession(session) {
     activateWindowSession(windowSlot, session);
     return;
   }
+  // The Files panel defaults to a brand-new leftmost slot, splitting off
+  // any existing slot rather than sharing tabs with a terminal.
+  if (isFileExplorerItem(session)) {
+    const slots = layoutSlotKeys();
+    if (slots.length) {
+      await splitSessionAtSlot(session, slots[0], 'left', null);
+      return;
+    }
+  }
   await moveSessionToSlot(session, slotForNewSession(), null);
 }
 
@@ -3386,7 +3404,7 @@ function focusPanel(session) {
   const panel = document.getElementById(`panel-${session}`);
   if (!panel) return;
   panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
-  if (isInfoItem(session)) {
+  if (isVirtualItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session);
     return;
@@ -3857,25 +3875,30 @@ function updateWindowTabStrip(panel, side) {
 
 function createWindowSessionTab(side, item) {
   const isInfo = isInfoItem(item);
+  const isFiles = isFileExplorerItem(item);
+  const isVirtual = isInfo || isFiles;
   const info = transcriptMeta.sessions?.[item];
-  const auto = autoApproveStates.get(item)?.enabled === true;
-  const state = isInfo ? null : sessionState(item, info);
-  const agentKind = isInfo ? '' : sessionAgentKind(item);
+  const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
+  const state = isVirtual ? null : sessionState(item, info);
+  const agentKind = isVirtual ? '' : sessionAgentKind(item);
   const active = item === activeItemForSide(side);
   const tab = document.createElement('div');
   tab.role = 'button';
   tab.tabIndex = 0;
-  tab.className = `window-session-tab ${active ? 'active' : ''}`;
+  const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : '';
+  tab.className = `window-session-tab ${virtualClass} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.windowSessionTab = item;
-  tab.innerHTML = isInfo ? windowInfoTabHtml() : windowSessionTabHtml(item, info, state, auto);
+  if (isInfo) tab.innerHTML = windowInfoTabHtml();
+  else if (isFiles) tab.innerHTML = '<span class="window-tab-core"><span class="agent-icon file" aria-hidden="true">📁</span><span class="session-button-dir">Files</span></span>';
+  else tab.innerHTML = windowSessionTabHtml(item, info, state, auto);
   tab.insertAdjacentHTML('beforeend', `<button type="button" class="window-tab-close" data-window-tab-close title="move ${esc(itemLabel(item))} to top strip" aria-label="Move ${esc(itemLabel(item))} to top strip"></button>`);
-  if (!isInfo) {
+  if (!isVirtual) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindWindowSessionPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? 'Files' : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-window-tab-close]')) {
       event.stopPropagation();
@@ -4185,12 +4208,16 @@ function setPanelDetailsCollapsed(panel, collapsed) {
 
 function terminalTabLabel(session, info) {
   if (isInfoItem(session)) return 'Term';
+  if (isFileExplorerItem(session)) return 'Files';
+  if (isFileEditorItem(session)) return 'Edit';
   const label = terminalProcessLabel(info);
   return shortText(label || 'Term', 16);
 }
 
 function terminalTabTitle(session, info) {
   if (isInfoItem(session)) return 'unavailable for Branch Info';
+  if (isFileExplorerItem(session)) return 'unavailable for Files';
+  if (isFileEditorItem(session)) return 'unavailable for file editor';
   return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
 }
 
