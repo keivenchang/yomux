@@ -4361,19 +4361,12 @@ function createFileExplorerPanel() {
   panel.id = `panel-${fileExplorerItemId}`;
   const initialPath = fileExplorerRoot || homePath || '/';
   panel.innerHTML = `
-      <div class="panel-head">
+      <div class="panel-head file-explorer-head">
         <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
-        ${panelControlsHtml(fileExplorerItemId, {disabled: true, unavailableLabel: 'Files'})}
-      </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
-          <div class="panel-session-label"><span class="session-button-dir">Files</span></div>
-          <div class="meta file-explorer-panel-meta">
-            <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-            <span class="file-explorer-path-inline">${esc(initialPath)}</span>
-          </div>
+        <div class="file-explorer-toolbar">
+          <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
+          <span class="file-explorer-path-inline">${esc(initialPath)}</span>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(fileExplorerItemId)}" title="hide details" aria-label="hide details"></button>
       </div>
       <div class="file-explorer-pane panel-overlay-root">
         <div id="panel-toasts-${fileExplorerItemId}" class="panel-toast-stack"></div>

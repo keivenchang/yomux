@@ -2904,12 +2904,30 @@ body.file-editor-open .file-explorer {
 }
 .file-editor-highlight[hidden] { display: none; }
 
-/* Draggable Files panel — first-class layout panel (steps 3a-4 of the
-   file-explorer promotion). Reuses standard .panel chrome; just styles
-   the panel-internal tree container. */
+/* Draggable Files panel — first-class layout panel. Compact head
+   (tab strip + .* toggle + path); no Term/Tx/AI/Log/Info — those
+   don't apply. Tree fills the rest. */
 .panel.file-explorer-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.file-explorer-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 6px;
+}
+.file-explorer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 8px;
+  min-width: 0;
+  flex: 1;
+}
+.file-explorer-toolbar .file-explorer-path-inline {
+  flex: 1;
+  min-width: 0;
 }
 .file-explorer-pane {
   display: flex;
