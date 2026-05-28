@@ -1,0 +1,130 @@
+:root {
+  color-scheme: dark;
+  --bg: #0c1016;
+  --panel: #151b24;
+  --panel-strong: #1d2632;
+  --text: #e7ecf3;
+  --muted: #9aa5b1;
+  --line: #344052;
+  --accent: #76b900;
+  --bad: #ff8a95;
+  --warn: #f5c542;
+}
+* { box-sizing: border-box; }
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--text);
+  background: var(--bg);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.login-shell {
+  width: min(420px, 100%);
+}
+.login-panel {
+  padding: 24px;
+  background: rgba(21, 27, 36, 0.96);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.42);
+}
+.login-brand {
+  margin-bottom: 18px;
+}
+.login-brand-title {
+  font-size: 26px;
+}
+h1 {
+  margin: 0 0 16px;
+  font-size: 20px;
+  line-height: 1.2;
+}
+.login-form {
+  display: grid;
+  gap: 14px;
+}
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+input {
+  width: 100%;
+  height: 38px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: #0d1219;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 14px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+input:focus {
+  outline: 0;
+  border-color: #9be33d;
+  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.18);
+}
+.password-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px;
+  align-items: stretch;
+}
+.password-field input {
+  border-radius: 6px 0 0 6px;
+}
+.password-toggle {
+  height: 38px;
+  margin: 0;
+  color: #dfe6ef;
+  background: #1d2632;
+  border: 1px solid var(--line);
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+  font: 700 12px/1 ui-sans-serif, system-ui, sans-serif;
+}
+.password-toggle:hover {
+  filter: brightness(1.12);
+}
+.password-toggle:focus {
+  outline: 0;
+  border-color: #9be33d;
+  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.18);
+}
+button {
+  height: 38px;
+  margin-top: 4px;
+  color: #071000;
+  background: var(--accent);
+  border: 1px solid #9be33d;
+  border-radius: 6px;
+  font: 800 13px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+button:hover {
+  filter: brightness(1.08);
+}
+.login-error,
+.login-warning {
+  margin: 0 0 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.login-error {
+  color: #ffd8dc;
+  background: rgba(180, 35, 50, 0.16);
+  border: 1px solid rgba(255, 138, 149, 0.55);
+}
+.login-warning {
+  color: #ffe7a3;
+  background: rgba(245, 197, 66, 0.13);
+  border: 1px solid rgba(245, 197, 66, 0.45);
+}
+.login-warning code {
+  color: #fff1bd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}

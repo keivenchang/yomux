@@ -325,7 +325,32 @@ def auth_setup_required() -> bool:
 
 
 AUTH_COOKIE_NAME = "yolomux_auth"
-AUTH_COOKIE_SECRET = os.urandom(32)
+AUTH_LOGOUT_COOKIE_NAME = "yolomux_logged_out"
+AUTH_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 60 * 60
+AUTH_COOKIE_SECRET_PATH = CONFIG_DIR / "auth-cookie-secret"
+
+
+def load_auth_cookie_secret(path: Path = AUTH_COOKIE_SECRET_PATH) -> bytes:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    if path.exists():
+        path.chmod(0o600)
+        raw = path.read_text(encoding="utf-8").strip()
+        try:
+            secret = bytes.fromhex(raw)
+        except ValueError:
+            secret = b""
+        if len(secret) == 32:
+            return secret
+    secret = os.urandom(32)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(f"{secret.hex()}\n")
+    path.chmod(0o600)
+    return secret
+
+
+AUTH_COOKIE_SECRET = load_auth_cookie_secret()
 
 
 def write_auth_config(path: Path, text: str) -> None:
@@ -349,6 +374,15 @@ def auth_cookie_value(username: str, password: str) -> str:
         f"{username}:{password}".encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+
+
+def auth_identity_for_credentials(username: str, password: str) -> AuthIdentity | None:
+    for user in current_auth_users():
+        username_matches = hmac.compare_digest(username, user.username)
+        password_matches = hmac.compare_digest(password, user.password)
+        if username_matches and password_matches:
+            return AuthIdentity(username=user.username, password=user.password, role=user.role)
+    return None
 
 
 AUTH_CONFIG = initialize_auth_config(AUTH_CONFIG_PATH)

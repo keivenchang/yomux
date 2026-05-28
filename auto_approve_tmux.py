@@ -408,7 +408,7 @@ def prompt_text(pane_text: str, prompt_type: str | None = None) -> str:
     return ""
 
 
-_WORKING_SPINNER_GLYPHS = "✢✣✤✥✦✧✩✱✲✳✴✵✶✷✸✹✺✻✽✾✿*"
+_WORKING_SPINNER_GLYPHS = "✢✣✤✥✦✧✩✱✲✳✴✵✶✷✸✹✺✻✽✾✿*+·•◦∙⋅"
 _WORKING_LINE_RE = re.compile(
     r"(?:"
     rf"[{re.escape(_WORKING_SPINNER_GLYPHS)}]\s+.+…\s*\("
@@ -539,6 +539,12 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if re.match(r"^\d+\s+tasks\s+\(", stripped):
         return True
     if stripped.startswith(("◼", "◻", "☑", "☒")):
+        return True
+    # Empty user-input prompt: bare "›" / "❯" / ">" with no command yet.
+    if re.fullmatch(r"[❯›>][\s█▉▊▋▌▍▎▏]*", stripped):
+        return True
+    # Claude footer/status: "▶▶ bypass permissions on · N shell · esc to interrupt · ↓ to ..."
+    if re.search(r"\b(?:bypass\s+permissions|esc\s+to\s+interrupt|\d+\s+shells?\b)", stripped, re.IGNORECASE):
         return True
     return False
 

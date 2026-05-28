@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import socket
 import ssl
+import sys
+from urllib.parse import parse_qsl
 
 from .app import TmuxWebtermApp
 from .core import *
 from .web import html_page
+from .web import login_html
 from .web import setup_auth_html
 from .web import static_asset_path
 from .web import static_content_type
@@ -20,16 +23,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def basic_auth_identity(self) -> AuthIdentity | None:
         header = self.headers.get("Authorization", "")
-        for user in current_auth_users():
-            expected = "Basic " + base64.b64encode(f"{user.username}:{user.password}".encode("utf-8")).decode("ascii")
-            if hmac.compare_digest(header, expected):
-                return AuthIdentity(username=user.username, password=user.password, role=user.role)
+        scheme, separator, encoded = header.partition(" ")
+        if not separator or scheme.lower() != "basic":
+            return None
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        username, separator, password = decoded.partition(":")
+        if not separator:
+            return None
+        identity = auth_identity_for_credentials(username, password)
+        if identity is not None:
+            return identity
         return None
 
     def cookie_auth_identity(self) -> AuthIdentity | None:
+        cookie_name = self.auth_cookie_name()
         for item in self.headers.get("Cookie", "").split(";"):
             name, separator, value = item.strip().partition("=")
-            if not separator or name != AUTH_COOKIE_NAME:
+            if not separator or name != cookie_name:
                 continue
             for user in current_auth_users():
                 expected = auth_cookie_value(user.username, user.password)
@@ -37,16 +50,57 @@ class Handler(BaseHTTPRequestHandler):
                     return AuthIdentity(username=user.username, password=user.password, role=user.role)
         return None
 
+    def has_logout_marker(self) -> bool:
+        for item in self.headers.get("Cookie", "").split(";"):
+            name, separator, value = item.strip().partition("=")
+            if separator and name == AUTH_LOGOUT_COOKIE_NAME and value == "1":
+                return True
+        return False
+
+    def auth_cookie_name(self) -> str:
+        return f"{AUTH_COOKIE_NAME}_{self.server.server_address[1]}"
+
+    def auth_cookie_suffix(self) -> str:
+        secure = "; Secure" if self.request_is_https() else ""
+        return f"; Path=/; Max-Age={AUTH_COOKIE_MAX_AGE_SECONDS}; HttpOnly; SameSite=Lax{secure}"
+
     def auth_cookie_header(self, identity: AuthIdentity) -> str:
         for user in current_auth_users():
             if user.username == identity.username and user.password == identity.password:
-                return f"{AUTH_COOKIE_NAME}={auth_cookie_value(user.username, user.password)}; Path=/; HttpOnly; SameSite=Lax"
-        return f"{AUTH_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+                return f"{self.auth_cookie_name()}={auth_cookie_value(user.username, user.password)}{self.auth_cookie_suffix()}"
+        return self.clear_auth_cookie_header()
+
+    def clear_auth_cookie_header(self, cookie_name: str | None = None, secure: bool | None = None) -> str:
+        name = cookie_name or self.auth_cookie_name()
+        use_secure = self.request_is_https() if secure is None else secure
+        secure_attr = "; Secure" if use_secure else ""
+        return f"{name}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax{secure_attr}"
+
+    def clear_auth_cookie_headers(self) -> list[str]:
+        names = [self.auth_cookie_name(), AUTH_COOKIE_NAME]
+        headers = []
+        for name in dict.fromkeys(names):
+            headers.append(self.clear_auth_cookie_header(name, secure=False))
+            if self.request_is_https():
+                headers.append(self.clear_auth_cookie_header(name, secure=True))
+        return headers
+
+    def logout_marker_cookie_header(self) -> str:
+        secure = "; Secure" if self.request_is_https() else ""
+        return f"{AUTH_LOGOUT_COOKIE_NAME}=1; Path=/; Max-Age={AUTH_COOKIE_MAX_AGE_SECONDS}; HttpOnly; SameSite=Lax{secure}"
+
+    def clear_logout_marker_cookie_header(self) -> str:
+        secure = "; Secure" if self.request_is_https() else ""
+        return f"{AUTH_LOGOUT_COOKIE_NAME}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax{secure}"
+
+    def request_is_https(self) -> bool:
+        return self.server.tls_context is not None
 
     def send_auth_cookie_if_needed(self) -> None:
         identity = getattr(self, "_auth_cookie_identity", None)
         if identity is not None:
             self.send_header("Set-Cookie", self.auth_cookie_header(identity))
+            self.send_header("Set-Cookie", self.clear_logout_marker_cookie_header())
 
     def request_has_unread_body(self) -> bool:
         return self.command in {"POST", "PUT", "PATCH"} and bool(self.headers.get("Content-Length"))
@@ -66,6 +120,44 @@ class Handler(BaseHTTPRequestHandler):
         self.close_after_unread_body()
         self.write_json({"error": f"{required_role} access required", "role": identity.role}, status=HTTPStatus.FORBIDDEN)
 
+    def safe_next_path(self, value: str | None) -> str:
+        text = str(value or "/").strip()
+        if not text.startswith("/") or text.startswith("//") or "\r" in text or "\n" in text:
+            return "/"
+        return text
+
+    def login_url(self, next_path: str | None = None) -> str:
+        next_value = self.safe_next_path(next_path or self.path)
+        return f"/login?{urlencode({'next': next_value})}"
+
+    def login_success_path(self, next_path: str | None) -> str:
+        safe = self.safe_next_path(next_path)
+        parsed = urlparse(safe)
+        params = parse_qsl(parsed.query, keep_blank_values=True)
+        if not any(key == "layout" and value.lower() == "empty" for key, value in params):
+            return safe
+        filtered = [(key, value) for key, value in params if key not in {"layout", "tabs"}]
+        query = urlencode(filtered)
+        path = parsed.path or "/"
+        return f"{path}?{query}" if query else path
+
+    def wants_html(self) -> bool:
+        parsed = urlparse(self.path)
+        if parsed.path in {"/", "/login"}:
+            return True
+        accept = self.headers.get("Accept", "")
+        return "text/html" in accept and "application/json" not in accept
+
+    def reject_unauthorized(self) -> None:
+        self.close_after_unread_body()
+        if self.wants_html():
+            self.write_redirect(self.login_url(), status=HTTPStatus.SEE_OTHER)
+            return
+        self.write_json(
+            {"error": "authentication required", "login_url": self.login_url("/")},
+            status=HTTPStatus.UNAUTHORIZED,
+        )
+
     def require_auth(self, required_role: str = "readonly") -> bool:
         if auth_setup_required():
             self.write_html(setup_auth_html())
@@ -73,10 +165,18 @@ class Handler(BaseHTTPRequestHandler):
         self._auth_cookie_identity = None
         identity = self.cookie_auth_identity()
         if identity is not None:
+            # Authenticate against the existing cookie but do not re-mint it.
+            # Re-minting here races with /logout: polling requests in flight when
+            # the user clicks logout would re-set the auth cookie and clear the
+            # logout marker, leaking the user back into the app on refresh.
             self._auth_identity = identity
             if self.role_allows(identity, required_role):
                 return True
             self.reject_forbidden(identity, required_role)
+            return False
+        if self.has_logout_marker():
+            self._auth_identity = None
+            self.reject_unauthorized()
             return False
         identity = self.basic_auth_identity()
         if identity is not None:
@@ -87,16 +187,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reject_forbidden(identity, required_role)
             return False
         self._auth_identity = None
-        self.close_after_unread_body()
-        self.send_response(HTTPStatus.UNAUTHORIZED)
-        self.send_header("WWW-Authenticate", 'Basic realm="YOLOmux"')
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len("authentication required\n")))
-        self.send_header("Cache-Control", "no-store")
-        if self.close_connection:
-            self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(b"authentication required\n")
+        self.reject_unauthorized()
         return False
 
     def auth_identity(self) -> AuthIdentity:
@@ -123,6 +214,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
         if parsed.path == "/api/auth-setup":
             self.write_json({"setup_required": auth_setup_required()})
+            return
+        if parsed.path == "/login":
+            self.handle_login_page(parsed)
+            return
+        if parsed.path == "/logout":
+            self.write_redirect("/login", clear_auth=True)
             return
         required_role = "admin" if parsed.path == "/api/summary-stream" else "readonly"
         if not self.require_auth(required_role):
@@ -202,6 +299,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/login":
+            self.handle_login_submit(parsed)
+            return
         if not self.require_auth_for_post(parsed.path):
             return
         if parsed.path == "/api/ensure-session":
@@ -245,6 +345,51 @@ class Handler(BaseHTTPRequestHandler):
             self.write_json(payload, status=status)
             return
         self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def handle_login_page(self, parsed: Any) -> None:
+        if auth_setup_required():
+            self.write_html(setup_auth_html())
+            return
+        qs = parse_qs(parsed.query)
+        next_path = self.safe_next_path(qs.get("next", ["/"])[0])
+        if not self.has_logout_marker() and self.cookie_auth_identity() is not None:
+            self.write_redirect(self.login_success_path(next_path))
+            return
+        self.write_html(login_html(next_path=next_path, secure=self.request_is_https()))
+
+    def handle_login_submit(self, parsed: Any) -> None:
+        if auth_setup_required():
+            self.write_html(setup_auth_html())
+            return
+        form = self.read_urlencoded_form()
+        next_path = self.safe_next_path(form.get("next", ["/"])[0])
+        username = form.get("username", [""])[0]
+        password = form.get("password", [""])[0]
+        identity = auth_identity_for_credentials(username, password)
+        if identity is None:
+            self.close_after_unread_body()
+            self.write_html(
+                login_html(next_path=next_path, error="Invalid username or password.", secure=self.request_is_https()),
+                status=HTTPStatus.UNAUTHORIZED,
+            )
+            return
+        self._auth_cookie_identity = identity
+        self.write_redirect(self.login_success_path(next_path))
+
+    def read_urlencoded_form(self) -> dict[str, list[str]]:
+        content_length_text = self.headers.get("Content-Length")
+        if not content_length_text:
+            return {}
+        try:
+            content_length = int(content_length_text)
+        except ValueError:
+            self.close_connection = True
+            return {}
+        if content_length > 16 * 1024:
+            self.close_connection = True
+            return {}
+        body = self.rfile.read(content_length).decode("utf-8", errors="replace")
+        return parse_qs(body, keep_blank_values=True)
 
     def handle_client_event(self) -> tuple[dict[str, Any], HTTPStatus]:
         content_length_text = self.headers.get("Content-Length")
@@ -528,9 +673,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"\n")
         self.wfile.flush()
 
-    def write_html(self, body: str) -> None:
+    def write_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = body.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
@@ -539,6 +684,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+
+    def write_redirect(self, location: str, status: HTTPStatus = HTTPStatus.SEE_OTHER, clear_auth: bool = False) -> None:
+        self.send_response(status)
+        self.send_header("Location", self.safe_next_path(location))
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        if clear_auth:
+            for header in self.clear_auth_cookie_headers():
+                self.send_header("Set-Cookie", header)
+            self.send_header("Set-Cookie", self.logout_marker_cookie_header())
+        else:
+            self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
 
     def write_static_asset(self, asset: str, content_type: str) -> None:
         path = static_asset_path(asset)
@@ -778,6 +938,8 @@ def https_redirect_response(request_bytes: bytes, fallback_host: str) -> bytes:
 
 class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 64
+    tls_peek_timeout_seconds = 0.05
 
     def __init__(self, server_address: tuple[str, int], app: TmuxWebtermApp, tls_context: ssl.SSLContext | None = None):
         super().__init__(server_address, Handler)
@@ -788,12 +950,19 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         request, client_address = self.socket.accept()
         if not self.tls_context:
             return request, client_address
+        request.settimeout(self.tls_peek_timeout_seconds)
         try:
-            request.settimeout(2.0)
             first = request.recv(1, socket.MSG_PEEK)
-            if first and first[0] in TLS_FIRST_BYTES:
-                request.settimeout(None)
-                return self.tls_context.wrap_socket(request, server_side=True), client_address
+        except (socket.timeout, BlockingIOError):
+            # Idle preconnect socket — client hasn't sent yet. Wrap as TLS and
+            # defer the handshake to the worker thread; closing here would
+            # surface as ERR_CONNECTION_CLOSED in remote browsers.
+            request.settimeout(None)
+            return self.tls_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False), client_address
+        if first and first[0] in TLS_FIRST_BYTES:
+            request.settimeout(None)
+            return self.tls_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False), client_address
+        try:
             request_bytes = request.recv(4096)
             response = https_redirect_response(request_bytes, self.server_name_with_port())
             request.sendall(response)
@@ -808,3 +977,12 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         if host in {"0.0.0.0", "::"}:
             host = "localhost"
         return f"{host}:{port}"
+
+    def handle_error(self, request: socket.socket, client_address: tuple[str, int]) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(error, ssl.SSLError):
+            host = client_address[0] if client_address else "unknown"
+            reason = getattr(error, "reason", None) or str(error)
+            sys.stderr.write(f"{host} - - TLS handshake closed: {reason}\n")
+            return
+        super().handle_error(request, client_address)

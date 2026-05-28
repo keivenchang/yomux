@@ -148,7 +148,7 @@ def print_auth_setup_error() -> None:
         file=sys.stderr,
     )
     print(
-        "Recommended for browser login: restart with HTTPS, for example --self-signed.",
+        "Highly recommend browser login with HTTPS, for example --self-signed.",
         file=sys.stderr,
     )
 
@@ -188,7 +188,7 @@ def main() -> int:
         print("YOLOmux created an inactive starter YAML file.")
         print("Leave users: as-is, then uncomment and edit one or more account entries before logging in.")
         if not tls_context:
-            print(f"Recommended: restart with HTTPS: python3 yolomux.py --port {args.port} --self-signed")
+            print(f"Highly recommend that you restart with HTTPS: python3 yolomux.py --port {args.port} --self-signed")
         print(f"YOLOmux is listening on {scheme}://{url_host}:{args.port}/ and will show this setup message in the browser.")
         print("After saving auth.yaml, refresh the browser. No restart is required.")
         print("=" * 78)

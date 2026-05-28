@@ -221,12 +221,81 @@ def print_startup() -> None:
         print_codex_startup()
         return
     width = terminal_width()
-    print(f"  ▐▛███▜▌   Mock {AGENT_PRODUCT_NAME} v{VERSION}")
-    print(f"▝▜█████▛▘  {MODEL_LINE}")
-    print(f"  ▘▘ ▝▝    {display_cwd()}")
+    if os.path.realpath(os.getcwd()) == os.path.realpath(os.path.expanduser("~")):
+        print_minimal_header()
+    else:
+        print_welcome_box()
     print()
     print_prompt_box(f'{PROMPT_GLYPH} Try "fix typecheck errors"', width)
     print()
+
+
+def print_minimal_header() -> None:
+    print(f"  ▐▛███▜▌  Mock {AGENT_PRODUCT_NAME} v{VERSION}")
+    print(f"▝▜█████▛▘  {MODEL_LINE}")
+    print(f"  ▘▘ ▝▝    {display_cwd()}")
+
+
+def centered_in(text: str, width: int) -> str:
+    if len(text) >= width:
+        return text[:width]
+    pad = width - len(text)
+    left = pad // 2
+    return (" " * left) + text + (" " * (pad - left))
+
+
+def print_welcome_box() -> None:
+    width = terminal_width()
+    inner = width - 2
+    left_w = 60
+    right_w = inner - left_w - 1
+    if right_w < 24:
+        print_minimal_header()
+        return
+
+    title = f" Mock {AGENT_PRODUCT_NAME} v{VERSION} "
+    head = "───" + title
+    fill = max(0, inner - len(head))
+    print("╭" + head + ("─" * fill) + "╮")
+
+    user_name = os.environ.get("USER") or "there"
+    user_name = user_name[:1].upper() + user_name[1:]
+    welcome = f"Welcome back {user_name}!"
+
+    left_lines = [
+        "",
+        centered_in(welcome, left_w),
+        "",
+        centered_in("▐▛███▜▌", left_w),
+        centered_in("▝▜█████▛▘", left_w),
+        centered_in("▘▘ ▝▝", left_w),
+        "",
+        " " + MODEL_LINE,
+        centered_in(display_cwd(), left_w),
+    ]
+
+    tip = f"Run /init to create a CLAUDE.md file with instructions for {AGENT_DISPLAY_NAME}"
+    notes = [
+        f"Mock build of {AGENT_PRODUCT_NAME} — every banner is hand-rendered text, not Ink",
+        "Try `exec <cmd>`, `!<cmd>`, `guess`, or `project rename` to see tool flows",
+        "/help lists all commands, including mock-only triggers",
+    ]
+    right_lines = [
+        "Tips for getting started",
+        tip,
+        "─" * (right_w - 2),
+        "What's new",
+        notes[0],
+        notes[1],
+        notes[2],
+        "/release-notes for more",
+        "",
+    ]
+
+    for left, right in zip(left_lines, right_lines):
+        print("│" + clipped(left, left_w) + "│" + clipped(" " + right, right_w) + "│")
+
+    print("╰" + ("─" * inner) + "╯")
 
 
 def print_codex_startup() -> None:

@@ -15,6 +15,18 @@ const latencyLine = document.getElementById('latencyLine');
 const latencyNumber = document.getElementById('latencyNumber');
 const notifyToggle = document.getElementById('notifyToggle');
 const refreshMeta = document.getElementById('refreshMeta');
+const tabMetaToggle = (() => {
+  const button = document.createElement('button');
+  button.id = 'tabMetaToggle';
+  button.className = 'tab-meta-toggle';
+  button.type = 'button';
+  button.textContent = '#';
+  button.title = 'Hide tab metadata';
+  button.setAttribute('aria-label', 'Hide tab metadata');
+  button.setAttribute('aria-pressed', 'true');
+  return button;
+})();
+const logoutButton = document.getElementById('logoutButton');
 const httpsWarning = document.getElementById('httpsWarning');
 const terminals = new Map();
 const panelNodes = new Map();
@@ -28,20 +40,21 @@ let uploadResultSequence = 0;
 const pasteCounters = new Map();
 const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
+const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 const transcriptPreviewMessages = 200;
-const remoteResizeDelayMs = 220;
-const metadataRefreshMs = 15000;
-const paneStateRefreshMs = 2000;
-const latencyRefreshMs = 3000;
-const eventLogRefreshMs = 5000;
-const redReminderMs = 1550;
-const yoloRotateMs = 20000;
+const remoteResizeDelayMs = 221;
+const metadataRefreshMs = 15001;
+const paneStateRefreshMs = 1257;
+const latencyRefreshMs = 3001;
+const eventLogRefreshMs = 5003;
+const redReminderMs = 1553;
+const yoloRotateMs = 20003;
 const latencySamplesMax = 24;
-const toastDurationMs = 10000;
+const toastDurationMs = 10003;
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
-const popoverShowDelayMs = 300;
-const popoverHideDelayMs = 300;
+const popoverShowDelayMs = 301;
+const popoverHideDelayMs = 307;
 const terminalFitBottomReservePx = 2;
 const terminalWheelScrollLines = 3;
 const terminalWheelPageFraction = 0.85;
@@ -84,6 +97,64 @@ let pasteUploadInFlight = false;
 let layoutResizeState = null;
 let responsiveLayoutPruneTimer = null;
 let latencySamples = [];
+let tabMetaVisible = readStoredTabMetaVisible();
+let authRedirectStarted = false;
+
+async function apiFetch(url, options = {}) {
+  const requestOptions = {...options};
+  if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
+  const response = await fetch(url, requestOptions);
+  if (response.status === 401) {
+    await redirectToLogin(response);
+    throw new Error('authentication required');
+  }
+  return response;
+}
+
+async function redirectToLogin(response) {
+  if (authRedirectStarted) return;
+  authRedirectStarted = true;
+  const nextPath = `${window.location.pathname}${window.location.search}`;
+  let loginUrl = `/login?next=${encodeURIComponent(nextPath || '/')}`;
+  try {
+    const payload = await response.clone().json();
+    if (payload?.login_url) loginUrl = payload.login_url;
+  } catch (_) {}
+  window.location.assign(loginUrl);
+}
+
+function readStoredTabMetaVisible() {
+  try {
+    const stored = window.localStorage?.getItem(tabMetaStorageKey);
+    return stored === null || stored === undefined ? true : stored !== '0';
+  } catch (_) {
+    return true;
+  }
+}
+
+function writeStoredTabMetaVisible(value) {
+  try {
+    window.localStorage?.setItem(tabMetaStorageKey, value ? '1' : '0');
+  } catch (_) {
+    // The toggle is still useful for the current page when storage is blocked.
+  }
+}
+
+function renderTabMetaToggle() {
+  document.body?.classList.toggle('tab-meta-hidden', !tabMetaVisible);
+  if (!tabMetaToggle) return;
+  tabMetaToggle.classList.toggle('active', tabMetaVisible);
+  tabMetaToggle.setAttribute('aria-pressed', tabMetaVisible ? 'true' : 'false');
+  const label = tabMetaVisible ? 'Hide tab metadata' : 'Show tab metadata';
+  tabMetaToggle.setAttribute('aria-label', label);
+  tabMetaToggle.title = label;
+}
+
+function toggleTabMetadata() {
+  tabMetaVisible = !tabMetaVisible;
+  writeStoredTabMetaVisible(tabMetaVisible);
+  renderTabMetaToggle();
+}
 
 function setFocusedTerminal(session) {
   focusedTerminal = session;
@@ -156,7 +227,7 @@ function renderTransportWarning() {
   const port = location.port || '9998';
   const selfSigned = `python3 yolomux.py --port ${port} --self-signed`;
   const cert = `python3 yolomux.py --port ${port} --cert /path/fullchain.pem --key /path/privkey.pem`;
-  httpsWarning.dataset.tip = `No HTTPS. Relaunch with ${selfSigned}. Or use ${cert}.`;
+  httpsWarning.dataset.tip = `No HTTPS. Highly recommend that you restart with ${selfSigned}. Or use ${cert}.`;
   httpsWarning.setAttribute('aria-label', httpsWarning.dataset.tip);
   httpsWarning.tabIndex = 0;
 }
@@ -807,13 +878,8 @@ function defaultLayoutSlots() {
   const next = emptyLayoutSlots();
   if (!sorted.length) {
     next.left = windowStateWithTabs([infoItemId], infoItemId);
-  } else if (sorted.length === 1) {
-    next.left = windowStateWithTabs([sorted[0], infoItemId], sorted[0]);
   } else {
-    const leftTabs = sorted.filter((_, index) => index % 2 === 0);
-    const rightTabs = sorted.filter((_, index) => index % 2 === 1);
-    next.left = windowStateWithTabs([...leftTabs, infoItemId], leftTabs[0]);
-    next.right = windowStateWithTabs(rightTabs, rightTabs[0]);
+    next.left = windowStateWithTabs(sorted, sorted[0]);
   }
   next[layoutTreeKey] = legacyLayoutTree(next);
   return compactLayoutSlots(next);
@@ -1125,7 +1191,7 @@ async function toggleNotifications() {
     browserPermission = Notification.permission;
   }
   try {
-    const response = await fetch(`/api/notify?enabled=${nextEnabled ? '1' : '0'}`, {method: 'POST'});
+    const response = await apiFetch(`/api/notify?enabled=${nextEnabled ? '1' : '0'}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || response.statusText || `HTTP ${response.status}`);
     notificationsEnabled = payload.enabled === true;
@@ -1147,7 +1213,7 @@ async function toggleNotifications() {
 
 async function loadNotifyStatus() {
   try {
-    const response = await fetch('/api/notify', {cache: 'no-store'});
+    const response = await apiFetch('/api/notify', {cache: 'no-store'});
     const payload = await response.json();
     notificationsEnabled = response.ok && payload.enabled === true;
   } catch (_) {
@@ -1525,6 +1591,10 @@ function updateActiveSessionParam() {
   history.replaceState(null, '', `${location.pathname}${query ? `?${query}` : ''}${location.hash}`);
 }
 
+function syncInitialLayoutUrl() {
+  updateActiveSessionParam();
+}
+
 function renderSessionButtons() {
   sessionButtons.innerHTML = '';
   sessionButtons.ondragover = event => {
@@ -1548,16 +1618,21 @@ function renderSessionButtons() {
   };
   sessionButtons.classList.remove('drag-over');
   const trayItems = sessionTrayItems();
-  if (trayItems.length) sessionButtons.appendChild(createTabListMenu(trayItems, {kind: 'tray'}));
+  if (shouldShowTabListMenu(trayItems)) sessionButtons.appendChild(createTabListMenu(trayItems, {kind: 'tray'}));
   for (const item of trayItems) {
     sessionButtons.appendChild(createTopSessionButton(item));
   }
+  if (tabMetaToggle) sessionButtons.appendChild(tabMetaToggle);
   if (!readOnlyMode && visibleSessions.length < maxSessionTabs) {
     for (const agent of ['claude', 'codex', 'term']) {
       if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
     }
   }
   scheduleTabStripOverflowCheck(sessionButtons);
+}
+
+function shouldShowTabListMenu(items) {
+  return Array.isArray(items) && items.length > 1;
 }
 
 function createTabListMenu(items, options = {}) {
@@ -2042,12 +2117,12 @@ function tabListDetailText(item, info = transcriptMeta.sessions?.[item]) {
   const path = panelFullPath(item, info);
   if (path) parts.push(compactHomePath(path));
   const pr = displayPullRequest(info);
+  const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
+  if (linear) parts.push(linear);
   if (pr?.number) {
     const status = pullRequestStatusLabel(pr);
     parts.push(`#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`);
   }
-  const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
-  if (linear) parts.push(linear);
   const desc = sessionWorkDescription(item, info, 180);
   if (desc && !parts.includes(desc)) parts.push(desc);
   return parts.join(' · ') || itemLabel(item);
@@ -2153,6 +2228,14 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {
     rows.push(popoverRow('git', gitStatusText(git)));
   }
+  let linearValue = '';
+  let linearDesc = '';
+  if (linear.length) {
+    linearValue = linearInlineHtml(linear);
+    linearDesc = linearDescriptionsInlineHtml(linear);
+    if (linearValue) rows.push(popoverRow('Linear', linearValue));
+    if (linearDesc) rows.push(popoverRow('details', linearDesc));
+  }
   let prDesc = '';
   if (pr?.number) {
     const prParts = [pullRequestLinkHtml(pr), pullRequestAuthorHtml(pr)].filter(Boolean);
@@ -2161,15 +2244,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     rows.push(popoverRow('PR', metaJoin(prParts)));
     prDesc = pullRequestDescriptionInlineHtml(pr);
   }
-  let linearValue = '';
-  let linearDesc = '';
-  if (linear.length) {
-    linearValue = linearInlineHtml(linear);
-    linearDesc = linearDescriptionsInlineHtml(linear);
-    if (prDesc) rows.push(popoverRow('desc', prDesc));
-    if (linearValue) rows.push(popoverRow('Linear', linearValue));
-    if (linearDesc) rows.push(popoverRow('details', linearDesc));
-  } else if (prDesc) {
+  if (prDesc) {
     rows.push(popoverRow('desc', prDesc));
   }
   const subject = currentBranchSubject(git);
@@ -2805,7 +2880,7 @@ function summaryContextLine(label, text, url = '', linkLabel = '', linkClass = '
 async function ensureSession(session) {
   if (readOnlyMode) return true;
   try {
-    const response = await fetch(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
+    const response = await apiFetch(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
       statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session create failed')}</span>`;
@@ -2829,7 +2904,7 @@ async function createNextSession(agent) {
   const agentLabel = agentName(agent) || 'agent';
   statusEl.textContent = `creating ${agentLabel} session...`;
   try {
-    const response = await fetch(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
+    const response = await apiFetch(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
       statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session create failed')}</span>`;
@@ -3316,7 +3391,8 @@ function updateWindowTabStrip(panel, side) {
   if (!strip) return;
   const stack = windowStack(side);
   strip.dataset.side = side;
-  strip.replaceChildren(createTabListMenu(stack, {kind: 'window', side}), ...stack.map(item => createWindowSessionTab(side, item)));
+  const children = shouldShowTabListMenu(stack) ? [createTabListMenu(stack, {kind: 'window', side})] : [];
+  strip.replaceChildren(...children, ...stack.map(item => createWindowSessionTab(side, item)));
   bindWindowTabStrip(strip, side);
   scheduleTabStripOverflowCheck(strip);
 }
@@ -3775,6 +3851,7 @@ function createInfoPanel() {
           <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">Branch Info</span></div>
           <div id="meta-${infoItemId}" class="meta">all branches sorted by recent activity</div>
         </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="hide details" aria-label="hide details"></button>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
@@ -3832,6 +3909,7 @@ function createPanel(session) {
           <div id="meta-${session}" class="meta">finding branch...</div>
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="hide details" aria-label="hide details"></button>
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
         <div id="term-${session}" class="terminal"></div>
@@ -4226,7 +4304,7 @@ async function uploadFiles(session, fileList, options = {}) {
     formData.append('files', file, file.name || 'upload.bin');
   }
   try {
-    const response = await fetch(`/api/upload?session=${encodeURIComponent(session)}`, {
+    const response = await apiFetch(`/api/upload?session=${encodeURIComponent(session)}`, {
       method: 'POST',
       credentials: 'same-origin',
       body: formData,
@@ -4668,7 +4746,7 @@ async function setAutoApprove(session, enabled) {
     return;
   }
   try {
-    const response = await fetch(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
+    const response = await apiFetch(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
       if (payload?.target || payload?.session) {
@@ -4702,7 +4780,7 @@ async function refreshAutoStatuses() {
 
 async function loadAutoStatuses() {
   try {
-    const response = await fetch('/api/auto-approve');
+    const response = await apiFetch('/api/auto-approve');
     const payload = await response.json();
     for (const session of sessions) {
       const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
@@ -4711,7 +4789,7 @@ async function loadAutoStatuses() {
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
-        const response = await fetch(`/api/auto-approve?session=${encodeURIComponent(session)}`);
+        const response = await apiFetch(`/api/auto-approve?session=${encodeURIComponent(session)}`);
         const payload = await response.json();
         autoApproveStates.set(session, payload);
       } catch (_) {}
@@ -4828,7 +4906,7 @@ function stopSummaryStream(session) {
 
 async function refreshTranscripts() {
   try {
-    const response = await fetch('/api/transcripts');
+    const response = await apiFetch('/api/transcripts');
     transcriptMeta = await response.json();
     updateMetadataBadgePulses(transcriptMeta);
     const previousActive = activeSessions.slice();
@@ -4919,7 +4997,7 @@ function renderSummaryContext(session, info, agent) {
 
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
-    const response = await fetch(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    const response = await apiFetch(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
     const payload = await response.json();
     if (payload.items) {
       renderTranscriptItems(preview, payload.path, payload.items, options);
@@ -5044,7 +5122,7 @@ async function refreshEventLog(session) {
   const node = document.getElementById(`events-${session}`);
   if (!node) return;
   try {
-    const response = await fetch(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
+    const response = await apiFetch(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
     const payload = await response.json();
     if (!response.ok) {
       node.innerHTML = `<div class="event-empty">${esc(payload.error || 'failed to load events')}</div>`;
@@ -5067,7 +5145,7 @@ function refreshOpenEventLogs() {
 }
 
 function postEvent(session, type, message, details = {}) {
-  fetch('/api/event', {
+  apiFetch('/api/event', {
     method: 'POST',
     credentials: 'same-origin',
     headers: {'Content-Type': 'application/json'},
@@ -5123,7 +5201,7 @@ function renderLatency(latestMs) {
 async function updateLatency() {
   const startedAt = performance.now();
   try {
-    const response = await fetch(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
+    const response = await apiFetch(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
     if (!response.ok) throw new Error(response.statusText || `HTTP ${response.status}`);
     await response.json();
     const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
@@ -5141,6 +5219,8 @@ function refreshAll() {
 
 async function boot() {
   renderTransportWarning();
+  renderTabMetaToggle();
+  syncInitialLayoutUrl();
   statusEl.textContent = 'loading YOLO status...';
   await loadNotifyStatus();
   await loadAutoStatuses();
@@ -5163,7 +5243,7 @@ async function showContext(session) {
   title.textContent = `${sessionLabel(session)} transcript tail`;
   body.textContent = 'loading...';
   modal.classList.add('open');
-  const response = await fetch(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+  const response = await apiFetch(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
   const payload = await response.json();
   if (payload.text) {
     body.textContent = `${payload.path}\n\n${payload.text}`;
@@ -5187,6 +5267,8 @@ if (refreshMeta) {
   ].join('\n');
   refreshMeta.onclick = refreshAll;
 }
+if (tabMetaToggle) tabMetaToggle.onclick = toggleTabMetadata;
+if (logoutButton) logoutButton.onclick = () => { window.location.href = '/logout'; };
 notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
 window.addEventListener('resize', () => {

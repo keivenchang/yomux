@@ -1,0 +1,263 @@
+import base64
+import json
+import threading
+from http import HTTPStatus
+from http.client import HTTPConnection
+from types import SimpleNamespace
+from urllib.parse import urlencode
+
+from yolomux_lib import common
+from yolomux_lib.server import TmuxWebtermHTTPServer
+
+
+def active_auth_yaml() -> str:
+    return """users:
+  - username: "keivenc"
+    password: "random-password"
+    role: "admin"
+  - username: "guest"
+    password: "guest"
+    role: "readonly"
+"""
+
+
+def request(port, method, path, body=None, headers=None):
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request(method, path, body=body, headers=headers or {})
+    response = conn.getresponse()
+    data = response.read()
+    result = response.status, dict(response.getheaders()), data
+    conn.close()
+    return result
+
+
+def request_header_list(port, method, path, body=None, headers=None):
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request(method, path, body=body, headers=headers or {})
+    response = conn.getresponse()
+    data = response.read()
+    result = response.status, response.getheaders(), data
+    conn.close()
+    return result
+
+
+def auth_header(username, password):
+    encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {encoded}"}
+
+
+def start_server(monkeypatch, tmp_path):
+    auth_path = tmp_path / "auth.yaml"
+    auth_path.write_text(active_auth_yaml(), encoding="utf-8")
+    monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
+    app = SimpleNamespace(sessions=[])
+    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def stop_server(server, thread):
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
+
+
+def test_login_page_sets_auth_cookie(monkeypatch, tmp_path):
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        status, headers, _body = request(port, "GET", "/", headers={"Accept": "text/html"})
+        assert status == HTTPStatus.SEE_OTHER
+        assert headers["Location"].startswith("/login?next=")
+
+        status, _headers, body = request(port, "GET", "/login")
+        assert status == HTTPStatus.OK
+        assert b'<form method="post" action="/login"' in body
+        assert b'id="togglePassword"' in body
+        assert b'aria-label="Show password"' in body
+
+        bad_body = urlencode({"username": "keivenc", "password": "wrong", "next": "/"})
+        status, _headers, body = request(
+            port,
+            "POST",
+            "/login",
+            body=bad_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert status == HTTPStatus.UNAUTHORIZED
+        assert b"Invalid username or password" in body
+
+        good_body = urlencode({"username": "keivenc", "password": "random-password", "next": "/api/ping"})
+        status, header_items, _body = request_header_list(
+            port,
+            "POST",
+            "/login",
+            body=good_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        headers = dict(header_items)
+        set_cookie_headers = [value for name, value in header_items if name.lower() == "set-cookie"]
+        assert status == HTTPStatus.SEE_OTHER
+        assert headers["Location"] == "/api/ping"
+        auth_cookie_header = next(value for value in set_cookie_headers if value.startswith(f"{common.AUTH_COOKIE_NAME}_{port}="))
+        assert "Max-Age=7776000" in auth_cookie_header
+        cookie = auth_cookie_header.split(";", 1)[0]
+
+        status, header_items, body = request_header_list(port, "GET", "/api/ping", headers={"Cookie": cookie})
+        set_cookie_headers = [value for name, value in header_items if name.lower() == "set-cookie"]
+        assert status == HTTPStatus.OK
+        # Cookie-auth must NOT re-mint the cookie. Re-minting here races with
+        # /logout: polling requests in flight when the user clicks logout would
+        # re-set the auth cookie and clear the logout marker.
+        auth_re_mints = [v for v in set_cookie_headers if v.startswith(f"{common.AUTH_COOKIE_NAME}_{port}=") and "Max-Age=0" not in v]
+        assert not auth_re_mints, f"cookie auth should not re-mint: {auth_re_mints}"
+        assert json.loads(body)["ok"] is True
+
+        wrong_port_cookie = cookie.replace(f"{common.AUTH_COOKIE_NAME}_{port}=", f"{common.AUTH_COOKIE_NAME}_{port + 1}=")
+        status, _headers, body = request(port, "GET", "/api/ping", headers={"Cookie": wrong_port_cookie})
+        assert status == HTTPStatus.UNAUTHORIZED
+        assert json.loads(body)["error"] == "authentication required"
+
+        empty_layout_body = urlencode({"username": "keivenc", "password": "random-password", "next": "/?layout=empty"})
+        status, headers, _body = request(
+            port,
+            "POST",
+            "/login",
+            body=empty_layout_body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert status == HTTPStatus.SEE_OTHER
+        assert headers["Location"] == "/"
+    finally:
+        stop_server(server, thread)
+
+
+def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path):
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        status, headers, body = request(port, "GET", "/api/ping")
+        assert status == HTTPStatus.UNAUTHORIZED
+        assert "WWW-Authenticate" not in headers
+        assert json.loads(body)["login_url"] == "/login?next=%2F"
+
+        status, headers, body = request(port, "GET", "/api/ping", headers=auth_header("guest", "guest"))
+        assert status == HTTPStatus.OK
+        assert "Set-Cookie" in headers
+        assert json.loads(body)["ok"] is True
+    finally:
+        stop_server(server, thread)
+
+
+def test_logout_clears_current_and_legacy_auth_cookies(monkeypatch, tmp_path):
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        body = urlencode({"username": "keivenc", "password": "random-password", "next": "/"})
+        status, headers, _body = request(
+            port,
+            "POST",
+            "/login",
+            body=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        assert status == HTTPStatus.SEE_OTHER
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+
+        status, header_items, _body = request_header_list(port, "GET", "/logout", headers={"Cookie": cookie})
+        set_cookie_headers = [value for name, value in header_items if name.lower() == "set-cookie"]
+
+        assert status == HTTPStatus.SEE_OTHER
+        assert dict(header_items)["Location"] == "/login"
+        assert any(value.startswith(f"{common.AUTH_COOKIE_NAME}_{port}=") for value in set_cookie_headers)
+        assert any(value.startswith(f"{common.AUTH_COOKIE_NAME}=") for value in set_cookie_headers)
+        assert any(value.startswith(f"{common.AUTH_LOGOUT_COOKIE_NAME}=1;") for value in set_cookie_headers)
+        clear_headers = [value for value in set_cookie_headers if not value.startswith(f"{common.AUTH_LOGOUT_COOKIE_NAME}=1;")]
+        assert all("Max-Age=0" in value for value in clear_headers)
+        assert all("Expires=Thu, 01 Jan 1970 00:00:00 GMT" in value for value in clear_headers)
+    finally:
+        stop_server(server, thread)
+
+
+def _login_and_extract_auth_cookie(port: int) -> str:
+    body = urlencode({"username": "keivenc", "password": "random-password", "next": "/"})
+    status, header_items, _body = request_header_list(
+        port,
+        "POST",
+        "/login",
+        body=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert status == HTTPStatus.SEE_OTHER
+    set_cookies = [v for k, v in header_items if k.lower() == "set-cookie"]
+    auth_cookie_header = next(v for v in set_cookies if v.startswith(f"{common.AUTH_COOKIE_NAME}_{port}=") and "Max-Age=0" not in v)
+    return auth_cookie_header.split(";", 1)[0]
+
+
+def test_cookie_auth_does_not_remint_to_avoid_logout_race(monkeypatch, tmp_path):
+    # Regression: a polling request that arrives at the server while the user
+    # is clicking logout used to re-mint the auth cookie and clear the logout
+    # marker. The /logout response's clear-cookie headers got overwritten by
+    # the polling response, leaking the user back into the app on the next
+    # /login visit. Cookie auth must validate without re-issuing the cookie.
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        cookie = _login_and_extract_auth_cookie(port)
+        status, header_items, _body = request_header_list(port, "GET", "/api/ping", headers={"Cookie": cookie})
+        set_cookie_headers = [value for name, value in header_items if name.lower() == "set-cookie"]
+        assert status == HTTPStatus.OK
+        live_auth_cookies = [v for v in set_cookie_headers if v.startswith(f"{common.AUTH_COOKIE_NAME}_{port}=") and "Max-Age=0" not in v]
+        assert not live_auth_cookies, f"cookie auth re-minted: {live_auth_cookies}"
+        marker_clears = [v for v in set_cookie_headers if v.startswith(f"{common.AUTH_LOGOUT_COOKIE_NAME}=;")]
+        assert not marker_clears, f"cookie auth cleared the logout marker: {marker_clears}"
+    finally:
+        stop_server(server, thread)
+
+
+def test_login_page_with_marker_ignores_stale_cookie(monkeypatch, tmp_path):
+    # Defense in depth: if a stale auth cookie somehow survives logout AND the
+    # logout marker is present, /login must still show the form rather than
+    # redirecting into the app.
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        cookie = _login_and_extract_auth_cookie(port)
+        combined_cookie = f"{cookie}; {common.AUTH_LOGOUT_COOKIE_NAME}=1"
+        status, _headers, body = request(port, "GET", "/login", headers={"Cookie": combined_cookie})
+        assert status == HTTPStatus.OK
+        assert b'<form method="post" action="/login"' in body
+    finally:
+        stop_server(server, thread)
+
+
+def test_logout_marker_blocks_cached_basic_auth_until_form_login(monkeypatch, tmp_path):
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        logout_cookie = f"{common.AUTH_LOGOUT_COOKIE_NAME}=1"
+        status, _headers, body = request(
+            port,
+            "GET",
+            "/api/ping",
+            headers={**auth_header("keivenc", "random-password"), "Cookie": logout_cookie},
+        )
+        assert status == HTTPStatus.UNAUTHORIZED
+        assert json.loads(body)["error"] == "authentication required"
+
+        body = urlencode({"username": "keivenc", "password": "random-password", "next": "/"})
+        status, header_items, _body = request_header_list(
+            port,
+            "POST",
+            "/login",
+            body=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Cookie": logout_cookie},
+        )
+        set_cookie_headers = [value for name, value in header_items if name.lower() == "set-cookie"]
+
+        assert status == HTTPStatus.SEE_OTHER
+        assert any(value.startswith(f"{common.AUTH_COOKIE_NAME}_{port}=") for value in set_cookie_headers)
+        assert any(value.startswith(f"{common.AUTH_LOGOUT_COOKIE_NAME}=;") for value in set_cookie_headers)
+    finally:
+        stop_server(server, thread)

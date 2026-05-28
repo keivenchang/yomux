@@ -158,14 +158,18 @@ globalThis.__layoutTestApi = {
   bindWindowTabStrip,
   clearWindowTabDropPreview,
   createTabListMenu,
+  defaultLayoutSlots,
   dedentSelectionText,
   infoBranchRows,
   pullRequestStatusLabel,
   renderTransportWarning,
+  sessionPopoverHtml,
   sessionButtonHtml,
   setInfoBranchSort,
   showWindowTabDropPreview,
+  shouldShowTabListMenu,
   startSessionDrag,
+  syncInitialLayoutUrl,
   tabListDetailText,
   tabListEntryBodyHtml,
   terminalWrappedLineLinks,
@@ -204,8 +208,15 @@ globalThis.__layoutTestApi = {
     updateActiveSessionParam();
     return globalThis.__lastUrl;
   },
+  syncInitialLayoutUrlForTest() {
+    syncInitialLayoutUrl();
+    return globalThis.__lastUrl;
+  },
   setGridPreviewNodesForTest(nodes) {
     grid.querySelectorAll = () => nodes;
+  },
+  defaultLayoutForTest() {
+    return globalThis.__layoutTestApi.serialize(defaultLayoutSlots());
   },
   customDragPreviewForTest() {
     return customDragPreview;
@@ -302,12 +313,24 @@ function canonical(value) {
   api.renderTransportWarning();
   const warning = api.httpsWarningForTest();
   assert.equal(warning.hidden, false);
+  assert.ok(warning.dataset.tip.includes('Highly recommend that you restart with'));
   assert.ok(warning.dataset.tip.includes('--port 7777 --self-signed'));
   assert.equal(warning.dataset.tip.includes('--host 0.0.0.0'), false);
 
   const secureApi = loadYolomux('', ['1'], 'https:');
   secureApi.renderTransportWarning();
   assert.equal(secureApi.httpsWarningForTest().hidden, true);
+}
+
+{
+  const api = loadYolomux('', ['1', '2', '3']);
+  const layout = api.defaultLayoutForTest();
+  assert.deepStrictEqual(canonical(layout.windows), {left: {tabs: ['1', '2', '3'], active: '1'}});
+  const url = api.syncInitialLayoutUrlForTest();
+  const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
+  assert.equal(params.get('sessions'), '1');
+  assert.equal(params.get('layout'), 'left');
+  assert.equal(params.get('tabs'), 'left:1,2,3');
 }
 
 {
@@ -451,6 +474,8 @@ function canonical(value) {
   assert.ok(detail.includes('~/project/project3'), 'tab list detail includes compact path');
   assert.ok(detail.includes('#9981 CI failing'), 'tab list detail includes PR and status');
   assert.ok(detail.includes('GH-2132'), 'tab list detail includes Linear identifier');
+  const linearIndex = detail.indexOf('GH-2132', detail.indexOf('~/project/project3'));
+  assert.ok(linearIndex < detail.indexOf('#9981 CI failing'), 'tab list detail lists Linear before PR');
 
   const html = api.tabListEntryBodyHtml('4');
   assert.ok(html.includes('session-yolo-marker inactive'), 'tab list entry shows inactive YO indicator');
@@ -460,6 +485,9 @@ function canonical(value) {
   assert.ok(html.includes('~/project/project3'), 'tab list entry includes compact path inline');
   assert.ok(html.includes('GH-2132'), 'tab list entry includes Linear detail inline');
   assert.equal(html.includes('tab-list-entry-detail'), false, 'tab list entry is a single visible line');
+
+  const popover = api.sessionPopoverHtml('4', info, 'codex', true);
+  assert.ok(popover.indexOf('popover-label">Linear') < popover.indexOf('popover-label">PR'), 'tab popover lists Linear before PR');
 }
 
 {
@@ -468,6 +496,10 @@ function canonical(value) {
   slots[api.layoutTreeKey] = api.leafNode('left');
   slots.left = api.windowStateWithTabs(['4', '5'], '4');
   api.setLayoutSlotsForTest(slots);
+
+  assert.equal(api.shouldShowTabListMenu([]), false);
+  assert.equal(api.shouldShowTabListMenu(['4']), false);
+  assert.equal(api.shouldShowTabListMenu(['4', '5']), true);
 
   const windowMenu = api.createTabListMenu(['4', '5'], {kind: 'window', side: 'left'});
   assert.equal(windowMenu.children[0].textContent, '');

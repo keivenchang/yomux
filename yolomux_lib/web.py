@@ -5,6 +5,7 @@ from .core import *
 
 STATIC_CONTENT_TYPES = {
     "brand.css": "text/css; charset=utf-8",
+    "login.css": "text/css; charset=utf-8",
     "setup-auth.css": "text/css; charset=utf-8",
     "setup-auth.js": "application/javascript; charset=utf-8",
     "xterm.css": "text/css; charset=utf-8",
@@ -94,6 +95,7 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
     </div>
     <button id="notifyToggle" class="notify-toggle" title="notify when a session needs attention">Notify</button>
     <button id="refreshMeta">Refresh</button>
+    <button id="logoutButton" title="Log out" aria-label="Log out">Log out</button>
     <span id="status" class="sub">starting</span>
   </div>
 </header>
@@ -109,6 +111,63 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
 </section>
 <script id="yolomux-bootstrap" type="application/json">{bootstrap_json}</script>
 <script src="{static_asset_url("yolomux.js")}"></script>
+</body>
+</html>
+    """
+
+
+def login_html(next_path: str = "/", error: str = "", secure: bool = True) -> str:
+    safe_next = html.escape(next_path if next_path.startswith("/") else "/", quote=True)
+    error_html = f'<div class="login-error" role="alert">{html.escape(error)}</div>' if error else ""
+    security_html = "" if secure else '<div class="login-warning">No HTTPS. Highly recommend that you restart with <code>python3 yolomux.py --port 9998 --self-signed</code>.</div>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YOLOmux login</title>
+<link rel="stylesheet" href="{static_asset_url("brand.css")}">
+<link rel="stylesheet" href="{static_asset_url("login.css")}">
+</head>
+<body>
+<main class="login-shell">
+  <section class="login-panel">
+    <div class="login-brand">{brand_html("brand-title login-brand-title", "div")}</div>
+    <h1>Sign in</h1>
+    {security_html}
+    {error_html}
+    <form method="post" action="/login" class="login-form">
+      <input type="hidden" name="next" value="{safe_next}">
+      <label>
+        <span>Username</span>
+        <input name="username" autocomplete="username" autofocus required>
+      </label>
+      <label>
+        <span>Password</span>
+        <span class="password-field">
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+          <button id="togglePassword" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false">Show</button>
+        </span>
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
+  </section>
+</main>
+<script>
+(() => {{
+  const password = document.getElementById('loginPassword');
+  const toggle = document.getElementById('togglePassword');
+  if (!password || !toggle) return;
+  toggle.addEventListener('click', () => {{
+    const show = password.type === 'password';
+    password.type = show ? 'text' : 'password';
+    toggle.textContent = show ? 'Hide' : 'Show';
+    toggle.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    toggle.setAttribute('aria-pressed', show ? 'true' : 'false');
+    password.focus();
+  }});
+}})();
+</script>
 </body>
 </html>
 """
@@ -129,7 +188,7 @@ def setup_auth_html() -> str:
 <body>
 <main>
   <h1>Set up {brand_html("brand-title setup-brand setup-brand-waiting")}</h1>
-  <p id="setupSecurity" class="setup-security">Recommended: restart with HTTPS: <code>python3 yolomux.py --port 9998 --self-signed</code></p>
+  <p id="setupSecurity" class="setup-security">Highly recommend that you restart with HTTPS: <code>python3 yolomux.py --port 9998 --self-signed</code></p>
   <p>Edit <code>{auth_path}</code></p>
   <pre>users:
   - username: "{login}"

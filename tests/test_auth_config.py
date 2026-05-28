@@ -76,6 +76,39 @@ def test_uncommented_auth_yaml_is_active(monkeypatch, tmp_path):
     assert auth_path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_auth_cookie_secret_persists(tmp_path):
+    secret_path = tmp_path / "auth-cookie-secret"
+
+    first = common.load_auth_cookie_secret(secret_path)
+    second = common.load_auth_cookie_secret(secret_path)
+
+    assert len(first) == 32
+    assert second == first
+    assert secret_path.stat().st_mode & 0o777 == 0o600
+    assert secret_path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_auth_cookie_value_survives_secret_reload(monkeypatch, tmp_path):
+    secret_path = tmp_path / "auth-cookie-secret"
+
+    monkeypatch.setattr(common, "AUTH_COOKIE_SECRET", common.load_auth_cookie_secret(secret_path))
+    first = common.auth_cookie_value("keivenc", "random-password")
+    monkeypatch.setattr(common, "AUTH_COOKIE_SECRET", common.load_auth_cookie_secret(secret_path))
+
+    assert common.auth_cookie_value("keivenc", "random-password") == first
+
+
+def test_invalid_auth_cookie_secret_is_rewritten(tmp_path):
+    secret_path = tmp_path / "auth-cookie-secret"
+    secret_path.write_text("not-hex\n", encoding="utf-8")
+
+    secret = common.load_auth_cookie_secret(secret_path)
+
+    assert len(secret) == 32
+    assert secret_path.read_text(encoding="utf-8").strip() == secret.hex()
+    assert secret_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_commit_time_display_uses_pt(monkeypatch):
     class GitResult:
         stdout = "2026-01-15T12:34:56+00:00\n"
@@ -91,7 +124,14 @@ def test_setup_auth_page_recommends_https(monkeypatch):
 
     setup_html = web.setup_auth_html()
 
-    assert "Recommended: restart with HTTPS" in setup_html
+    assert "Highly recommend that you restart with HTTPS" in setup_html
     assert "--self-signed" in setup_html
     assert "--host 0.0.0.0" not in setup_html
-    assert setup_html.index("Recommended: restart with HTTPS") < setup_html.index("Edit <code>")
+    assert setup_html.index("Highly recommend that you restart with HTTPS") < setup_html.index("Edit <code>")
+
+
+def test_main_page_has_logout_button():
+    page = web.html_page([])
+
+    assert 'id="logoutButton"' in page
+    assert 'aria-label="Log out"' in page
