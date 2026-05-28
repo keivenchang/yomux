@@ -7,6 +7,8 @@ from urllib.parse import parse_qsl
 
 from .app import TmuxWebtermApp
 from .core import *
+from . import filesystem
+from .filesystem import FilesystemError
 from .web import html_page
 from .web import login_html
 from .web import setup_auth_html
@@ -292,10 +294,72 @@ class Handler(BaseHTTPRequestHandler):
             payload, status = self.server.app.summary(session)
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/fs/list":
+            self.handle_fs_list(parsed)
+            return
+        if parsed.path == "/api/fs/read":
+            self.handle_fs_read(parsed)
+            return
         if parsed.path == "/ws":
             self.websocket(parsed)
             return
         self.write_text("not found\n", status=HTTPStatus.NOT_FOUND)
+
+    def handle_fs_list(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", ["/"])[0]
+        try:
+            payload = filesystem.list_directory(raw_path)
+        except FilesystemError as exc:
+            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
+            return
+        self.write_json(payload)
+
+    def handle_fs_read(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", [""])[0]
+        try:
+            payload = filesystem.read_file(raw_path)
+        except FilesystemError as exc:
+            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
+            return
+        self.write_json(payload)
+
+    def handle_fs_write(self, parsed: Any) -> None:
+        length_text = self.headers.get("Content-Length", "")
+        try:
+            length = int(length_text)
+        except ValueError:
+            self.write_json({"error": "missing or invalid Content-Length"}, status=HTTPStatus.LENGTH_REQUIRED)
+            return
+        if length <= 0 or length > filesystem.MAX_WRITE_BYTES + 4096:
+            self.write_json({"error": "content too large"}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+        try:
+            body = self.rfile.read(length).decode("utf-8")
+        except UnicodeDecodeError:
+            self.write_json({"error": "request body must be utf-8 JSON"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            self.write_json({"error": f"invalid JSON: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        raw_path = payload.get("path", "")
+        content = payload.get("content", "")
+        expected_mtime = payload.get("expected_mtime")
+        if expected_mtime is not None:
+            try:
+                expected_mtime = int(expected_mtime)
+            except (TypeError, ValueError):
+                self.write_json({"error": "expected_mtime must be an integer"}, status=HTTPStatus.BAD_REQUEST)
+                return
+        try:
+            result = filesystem.write_file(raw_path, content, expected_mtime=expected_mtime)
+        except FilesystemError as exc:
+            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
+            return
+        self.write_json(result)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -343,6 +407,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/event":
             payload, status = self.handle_client_event()
             self.write_json(payload, status=status)
+            return
+        if parsed.path == "/api/fs/write":
+            self.handle_fs_write(parsed)
             return
         self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
