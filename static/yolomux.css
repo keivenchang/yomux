@@ -1297,6 +1297,7 @@ body.layout-resizing {
   color: #5e6878;
 }
 .window-session-tabs {
+  position: relative;
   min-height: 28px;
   min-width: 0;
   max-width: 100%;
@@ -1316,6 +1317,29 @@ body.layout-resizing {
   outline: 1px dashed #f5c542;
   outline-offset: 2px;
   border-radius: 6px;
+}
+.window-session-tabs.tab-drop-preview::after {
+  content: "";
+  position: absolute;
+  left: var(--tab-drop-x, 2px);
+  bottom: 0;
+  z-index: 45;
+  width: 10px;
+  height: 27px;
+  border: 0;
+  border-radius: 4px 4px 0 0;
+  background: rgba(245, 197, 66, 0.18);
+  transform: translateX(-50%);
+  pointer-events: none;
+  background-image:
+    linear-gradient(90deg, #f5c542 50%, transparent 0),
+    linear-gradient(90deg, #f5c542 50%, transparent 0),
+    linear-gradient(0deg, #f5c542 50%, transparent 0),
+    linear-gradient(0deg, #f5c542 50%, transparent 0);
+  background-position: left top, left bottom, left top, right top;
+  background-repeat: repeat-x, repeat-x, repeat-y, repeat-y;
+  background-size: 5px 2px, 5px 2px, 2px 5px, 2px 5px;
+  box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.25), 0 0 12px rgba(245, 197, 66, 0.82);
 }
 .window-session-tab {
   flex: 1 1 0;

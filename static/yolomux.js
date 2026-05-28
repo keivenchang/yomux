@@ -1305,6 +1305,7 @@ function renderSessionButtons() {
     if (!payload?.session || !itemInLayout(payload.session)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
+    clearDropPreview();
     sessionButtons.classList.add('drag-over');
   };
   sessionButtons.ondragleave = event => {
@@ -2557,8 +2558,9 @@ function dropIntentForEvent(event) {
 }
 
 function clearDropPreview() {
-  grid.querySelectorAll('.drag-over, .tab-drag-over, .drop-preview, .drop-preview-top, .drop-preview-bottom, .drop-preview-left, .drop-preview-right, .drop-preview-middle').forEach(node => {
-    node.classList.remove('drag-over', 'tab-drag-over', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle');
+  grid.querySelectorAll('.drag-over, .tab-drag-over, .tab-drop-preview, .drop-preview, .drop-preview-top, .drop-preview-bottom, .drop-preview-left, .drop-preview-right, .drop-preview-middle').forEach(node => {
+    node.classList.remove('drag-over', 'tab-drag-over', 'tab-drop-preview', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle');
+    node.style?.removeProperty('--tab-drop-x');
     if (node.dataset) delete node.dataset.dropLabel;
   });
 }
@@ -3011,15 +3013,16 @@ function bindWindowTabStrip(strip, side) {
     event.preventDefault();
     event.stopImmediatePropagation();
     event.dataTransfer.dropEffect = 'move';
-    strip.classList.add('drag-over');
+    clearDropPreview();
+    showWindowTabDropPreview(strip, event, payload.session);
   };
   strip.ondragleave = event => {
     event.stopImmediatePropagation();
-    if (!strip.contains(event.relatedTarget)) strip.classList.remove('drag-over');
+    if (!strip.contains(event.relatedTarget)) clearWindowTabDropPreview(strip);
   };
   strip.ondrop = event => {
     const payload = dragPayload(event);
-    strip.classList.remove('drag-over');
+    clearWindowTabDropPreview(strip);
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -3027,14 +3030,35 @@ function bindWindowTabStrip(strip, side) {
   };
 }
 
-function windowTabDropIndex(strip, event, movingSession) {
+function showWindowTabDropPreview(strip, event, movingSession) {
+  const placement = windowTabDropPlacement(strip, event, movingSession);
+  strip.style.setProperty('--tab-drop-x', `${Math.round(placement.x)}px`);
+  strip.classList.add('drag-over', 'tab-drop-preview');
+}
+
+function clearWindowTabDropPreview(strip) {
+  strip.classList.remove('drag-over', 'tab-drop-preview');
+  strip.style.removeProperty('--tab-drop-x');
+}
+
+function windowTabDropPlacement(strip, event, movingSession) {
   const tabs = Array.from(strip.querySelectorAll('.window-session-tab'))
     .filter(tab => tab.dataset.windowSessionTab !== movingSession);
+  const stripRect = strip.getBoundingClientRect();
+  const clampX = value => Math.max(2, Math.min(stripRect.width - 2, value));
+  if (!tabs.length) return {index: 0, x: clampX(event.clientX - stripRect.left)};
   for (let index = 0; index < tabs.length; index += 1) {
     const rect = tabs[index].getBoundingClientRect();
-    if (event.clientX < rect.left + rect.width / 2) return index;
+    if (event.clientX < rect.left + rect.width / 2) {
+      return {index, x: clampX(rect.left - stripRect.left)};
+    }
   }
-  return tabs.length;
+  const lastRect = tabs[tabs.length - 1].getBoundingClientRect();
+  return {index: tabs.length, x: clampX(lastRect.right - stripRect.left)};
+}
+
+function windowTabDropIndex(strip, event, movingSession) {
+  return windowTabDropPlacement(strip, event, movingSession).index;
 }
 
 function getOrCreatePanel(session) {
