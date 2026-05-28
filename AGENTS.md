@@ -30,19 +30,34 @@ Rationale: UI durations are perceived by users and read as deliberate at round v
 
 ### Dev server restart workflow
 
-When restarting the YOLOmux dev server (port `7778`) during development, chain `pkill`, `sleep`, and `python3` in a single shell invocation. Splitting them across separate calls in the Claude harness has consistently orphaned the relaunch (exit code 144 from the parent shell wrapper).
+When restarting the YOLOmux dev server (port `7778`) during development, always chain `pkill`, `sleep`, and the relaunch in a single shell invocation, and detach the new python3 from the parent shell with `& disown`:
 
 ```bash
-cd ~/yolomux.dev && (pkill -f "yolomux\.py.*--port 7778" || true) && sleep 2 && \
-  python3 -u yolomux.py --host 0.0.0.0 --port 7778 --dangerously-yolo --self-signed >> /tmp/yolomux-dev-7778.log 2>&1
+cd ~/yolomux.dev && \
+  (pkill -f "python3 -u yolomux\.py.*--port 7778" || true) && \
+  sleep 2 && \
+  nohup python3 -u yolomux.py --host 0.0.0.0 --port 7778 --dangerously-yolo --self-signed \
+    >> /tmp/yolomux-dev-7778.log 2>&1 < /dev/null & disown $!
 ```
 
-The `|| true` matters: `pkill` returns 1 when nothing matches, and without it the chain exits before the relaunch ever runs. Verify the restart with:
+Why every piece matters:
+
+- `pkill -f "python3 -u yolomux\.py.*--port 7778"` — the pattern is anchored on `python3 -u` so it matches only the real server process, not the harness shell wrapper that contains the same substring in its argv.
+- `|| true` — `pkill` returns 1 when nothing matches. Without this, the `&&` chain short-circuits and the relaunch never runs.
+- `sleep 2` — gives the kernel time to release port 7778 before the new bind.
+- `nohup … & disown $!` — detaches python3 from the launching shell. The shell exits immediately while python3 keeps running, reparented to init. Without this, when the launching shell or any background-runner wrapper exits, python3 may be torn down with it.
+- `< /dev/null` — keeps python3 from inheriting an interactive stdin.
+
+**Always verify after every restart.** The chain returning success is not proof the server is healthy:
 
 ```bash
-ps -ef | grep "yolomux\.py.*7778" | grep -v grep
-curl -sk -o /dev/null -w "ping: %{http_code}\n" https://localhost:7778/api/ping
+ps -ef | grep "python3 -u yolomux\.py.*7778" | grep -v grep
+ss -tlnp 2>/dev/null | grep ":7778 "
+curl -sk -o /dev/null -w "ping: %{http_code} %{time_total}s\n" https://localhost:7778/api/ping
+curl -sk -u <user>:<pass> https://localhost:7778/ | grep -oE 'YOLOmux [0-9.]+' | head -1
 ```
+
+Expected: one `python3 -u yolomux.py` process, `LISTEN` on `:7778`, `ping: 401` in under ~100ms, and the rendered version matches `YOLOMUX_VERSION` in the just-committed code. If anything fails, `tail -30 /tmp/yolomux-dev-7778.log` shows what python3 printed.
 
 ### Production sync (`cps`)
 

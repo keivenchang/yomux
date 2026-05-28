@@ -1619,10 +1619,10 @@ function renderSessionButtons() {
   sessionButtons.classList.remove('drag-over');
   const trayItems = sessionTrayItems();
   if (shouldShowTabListMenu(trayItems)) sessionButtons.appendChild(createTabListMenu(trayItems, {kind: 'tray'}));
+  if (tabMetaToggle) sessionButtons.appendChild(tabMetaToggle);
   for (const item of trayItems) {
     sessionButtons.appendChild(createTopSessionButton(item));
   }
-  if (tabMetaToggle) sessionButtons.appendChild(tabMetaToggle);
   if (!readOnlyMode && visibleSessions.length < maxSessionTabs) {
     for (const agent of ['claude', 'codex', 'term']) {
       if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
