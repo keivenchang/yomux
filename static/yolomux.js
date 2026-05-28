@@ -38,7 +38,7 @@ const latencySamplesMax = 24;
 const toastDurationMs = 10000;
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
-const popoverShowDelayMs = 1600;
+const popoverShowDelayMs = 300;
 const popoverHideDelayMs = 300;
 const terminalFitBottomReservePx = 2;
 const terminalWheelScrollLines = 3;
@@ -1403,12 +1403,22 @@ function stopPopoverEvent(event) {
   event.stopPropagation();
 }
 
+function popoverStillActive(anchor, popover) {
+  const focused = document.activeElement;
+  return Boolean(
+    anchor.matches(':hover')
+      || popover?.matches(':hover')
+      || (focused && (anchor.contains(focused) || popover?.contains(focused)))
+  );
+}
+
 function bindPopoverHover(anchor, popover, handlers) {
   const queueOpen = handlers.queueOpen || handlers.keepOpen;
   const keepOpen = handlers.keepOpen || queueOpen;
   const closeSoon = handlers.closeSoon;
   const closeIfOutside = event => {
-    if (event?.relatedTarget && anchor.contains(event.relatedTarget)) return;
+    const next = event?.relatedTarget;
+    if (next && (anchor.contains(next) || popover?.contains(next))) return;
     closeSoon(event);
   };
 
@@ -2547,8 +2557,8 @@ function dropIntentForEvent(event) {
 }
 
 function clearDropPreview() {
-  grid.querySelectorAll('.drag-over, .drop-preview, .drop-preview-top, .drop-preview-bottom, .drop-preview-left, .drop-preview-right, .drop-preview-middle').forEach(node => {
-    node.classList.remove('drag-over', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle');
+  grid.querySelectorAll('.drag-over, .tab-drag-over, .drop-preview, .drop-preview-top, .drop-preview-bottom, .drop-preview-left, .drop-preview-right, .drop-preview-middle').forEach(node => {
+    node.classList.remove('drag-over', 'tab-drag-over', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle');
     if (node.dataset) delete node.dataset.dropLabel;
   });
 }
@@ -2565,6 +2575,12 @@ function showDropPreview(intent) {
 function dropSessionAtEvent(event) {
   const payload = dragPayload(event);
   if (!payload?.session) return;
+  if (event.target.closest('.panel-head')) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearDropPreview();
+    return;
+  }
   event.preventDefault();
   event.stopPropagation();
   const intent = dropIntentForEvent(event);
@@ -2578,6 +2594,10 @@ function handleDropDragOver(event) {
   event.preventDefault();
   event.stopPropagation();
   event.dataTransfer.dropEffect = 'move';
+  if (event.target.closest('.panel-head')) {
+    clearDropPreview();
+    return;
+  }
   showDropPreview(dropIntentForEvent(event));
 }
 
@@ -2901,6 +2921,10 @@ function bindWindowSessionPopover(tab, session) {
     clearShowTimer();
     clearHideTimer();
     hideTimer = setTimeout(() => {
+      if (popoverStillActive(tab, popover)) {
+        hideTimer = null;
+        return;
+      }
       tab.classList.remove('popover-open');
       hideTimer = null;
     }, popoverHideDelayMs);
@@ -2939,6 +2963,10 @@ function bindTopSessionPopover(wrapper) {
     clearShowTimer();
     clearHideTimer();
     hideTimer = setTimeout(() => {
+      if (popoverStillActive(wrapper, popover)) {
+        hideTimer = null;
+        return;
+      }
       wrapper.classList.remove('popover-open');
       hideTimer = null;
     }, popoverHideDelayMs);
@@ -2951,7 +2979,7 @@ function positionWindowSessionPopover(tab) {
   const width = Math.min(640, Math.max(320, window.innerWidth - 16));
   const maxLeft = Math.max(8, window.innerWidth - width - 8);
   const left = Math.min(Math.max(8, Math.floor(rect.left)), maxLeft);
-  document.documentElement.style.setProperty('--window-tab-popover-top', `${Math.ceil(rect.bottom + 4)}px`);
+  document.documentElement.style.setProperty('--window-tab-popover-top', `${Math.ceil(rect.bottom + 1)}px`);
   document.documentElement.style.setProperty('--window-tab-popover-left', `${left}px`);
 }
 
@@ -2960,7 +2988,7 @@ function positionTopSessionPopover(wrapper) {
   const width = Math.min(640, Math.max(320, window.innerWidth - 16));
   const maxLeft = Math.max(8, window.innerWidth - width - 8);
   const left = Math.min(Math.max(8, Math.floor(rect.left)), maxLeft);
-  document.documentElement.style.setProperty('--top-button-popover-top', `${Math.ceil(rect.bottom + 4)}px`);
+  document.documentElement.style.setProperty('--top-button-popover-top', `${Math.ceil(rect.bottom + 1)}px`);
   document.documentElement.style.setProperty('--top-button-popover-left', `${left}px`);
 }
 
@@ -2986,6 +3014,7 @@ function bindWindowTabStrip(strip, side) {
     strip.classList.add('drag-over');
   };
   strip.ondragleave = event => {
+    event.stopImmediatePropagation();
     if (!strip.contains(event.relatedTarget)) strip.classList.remove('drag-over');
   };
   strip.ondrop = event => {
@@ -3027,6 +3056,29 @@ function bindPanelShell(panel, session) {
     head.dataset.dragSession = session;
     head.addEventListener('dragstart', event => startSessionDrag(event, session, head.dataset.dragSlot || null));
     head.addEventListener('dragend', endSessionDrag);
+    head.addEventListener('dragover', event => {
+      const payload = dragPayload(event);
+      if (!payload?.session) return;
+      event.preventDefault();
+      event.stopPropagation();
+      clearDropPreview();
+      if (event.target.closest('.window-session-tabs')) return;
+      event.dataTransfer.dropEffect = 'move';
+      head.classList.add('tab-drag-over');
+    });
+    head.addEventListener('dragleave', event => {
+      if (!head.contains(event.relatedTarget)) head.classList.remove('tab-drag-over');
+    });
+    head.addEventListener('drop', event => {
+      const payload = dragPayload(event);
+      head.classList.remove('tab-drag-over');
+      if (!payload?.session || event.target.closest('.window-session-tabs')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const targetSlot = head.dataset.dragSlot || slotForSession(session);
+      if (!targetSlot) return;
+      moveSessionToSlot(payload.session, targetSlot, payload.sourceSlot || slotForSession(payload.session), windowStack(targetSlot).length);
+    });
   }
   panel.querySelector('[data-detail-toggle]')?.addEventListener('click', event => {
     event.preventDefault();
@@ -3057,6 +3109,10 @@ function closePanelPopoverSoon(zone) {
   const existing = panelPopoverHideTimers.get(zone);
   clearTimer(existing);
   const timer = setTimeout(() => {
+    if (popoverStillActive(zone, zone.querySelector(':scope > .session-popover'))) {
+      panelPopoverHideTimers.delete(zone);
+      return;
+    }
     zone.classList.remove('popover-open');
     panelPopoverHideTimers.delete(zone);
   }, popoverHideDelayMs);
