@@ -8,8 +8,28 @@ def test_visible_agent_working_detects_codex_working_footer():
     assert auto_approve_tmux.agent_screen_state(visible_text)["key"] == "working"
 
 
+def test_visible_agent_working_detects_codex_bullet_working_footer():
+    visible_text = "• Working (6m 38s • esc to interrupt)\n"
+
+    assert auto_approve_tmux.visible_agent_working(visible_text) is True
+    assert auto_approve_tmux.agent_screen_state(visible_text)["key"] == "working"
+
+
 def test_visible_agent_working_detects_esc_to_interrupt_without_working_word():
     visible_text = "◦ Reviewing files (24s • esc to interrupt)\n"
+
+    assert auto_approve_tmux.visible_agent_working(visible_text) is True
+    assert auto_approve_tmux.agent_screen_state(visible_text)["key"] == "working"
+
+
+def test_visible_agent_working_detects_codex_working_with_input_prompt_below():
+    visible_text = "\n".join([
+        "○ Working (4m 09s • esc to interrupt)",
+        "",
+        "› Implement {feature}",
+        "",
+        "  gpt-5.5 xhigh · ~",
+    ])
 
     assert auto_approve_tmux.visible_agent_working(visible_text) is True
     assert auto_approve_tmux.agent_screen_state(visible_text)["key"] == "working"

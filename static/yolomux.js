@@ -1565,6 +1565,7 @@ function createTabListEntry(item, options = {}) {
   entry.dataset.tabListItem = item;
   entry.innerHTML = tabListEntryBodyHtml(item);
   entry.setAttribute('aria-label', `${itemLabel(item)} ${tabListDetailText(item)}`.trim());
+  entry.title = tabListDetailText(item);
   const activate = () => {
     closeOtherSessionPopovers(null);
     if (side) {
@@ -1573,7 +1574,24 @@ function createTabListEntry(item, options = {}) {
       selectSession(item);
     }
   };
-  bindTabActivation(entry, activate, {stopPropagation: true});
+  entry.addEventListener('pointerdown', event => {
+    const autoTarget = event.target.closest('[data-auto-session]');
+    if (!autoTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  entry.addEventListener('click', async event => {
+    const autoTarget = event.target.closest('[data-auto-session]');
+    if (!autoTarget) return;
+    event.preventDefault();
+    event.stopPropagation();
+    await toggleAutoApprove(autoTarget.dataset.autoSession);
+    entry.closest('.tab-list-menu-wrap')?.classList.add('popover-open');
+  });
+  bindTabActivation(entry, activate, {
+    stopPropagation: true,
+    ignore: event => Boolean(event.target.closest('[data-auto-session]')),
+  });
   entry.addEventListener('dragstart', event => {
     event.stopPropagation();
     startSessionDrag(event, item, side);
@@ -2004,21 +2022,40 @@ function tabListDetailText(item, info = transcriptMeta.sessions?.[item]) {
   return parts.join(' · ') || itemLabel(item);
 }
 
+function stripPullRequestSuffixText(value) {
+  return String(value || '').replace(/\s+\(#\d+\)\s*$/, '').trim();
+}
+
+function tabListEntryDescription(item, info = transcriptMeta.sessions?.[item]) {
+  if (isInfoItem(item)) return itemLabel(item);
+  const project = info?.project || {};
+  const pr = displayPullRequest(info);
+  const title = pr?.title || pr?.description || '';
+  if (title) return shortText(stripPullRequestSuffixText(title), 110);
+  const linear = project.linear || [];
+  const issue = linear.find(value => value.title);
+  if (issue?.title) return shortText(`${issue.identifier}: ${issue.title}`, 110);
+  const subject = currentBranchSubject(project.git);
+  if (subject) return shortText(stripPullRequestSuffixText(subject), 110);
+  if (project.git?.branch) return shortText(shortBranch(project.git.branch), 110);
+  return shortText(projectDirName(item, info), 110);
+}
+
 function tabListEntryBodyHtml(item) {
   if (isInfoItem(item)) {
-    return `<span class="tab-list-entry-main">${windowInfoTabHtml()}</span><span class="tab-list-entry-detail">${esc(tabListDetailText(item))}</span>`;
+    return `<span class="tab-list-entry-main">${windowInfoTabHtml()}</span>`;
   }
   const info = transcriptMeta.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true;
   const state = sessionState(item, info);
   const pr = displayPullRequest(info);
-  const desc = sessionWorkDescription(item, info, 180);
+  const desc = tabListEntryDescription(item, info);
   const descHtml = desc ? `<span class="session-button-dir">${esc(desc)}</span>` : '';
   return `<span class="tab-list-entry-main">
-    ${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: false, yoloWorking: sessionYoloIsWorking(item)})}
+    ${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(item)})}
     <span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${descHtml}</span>
-  </span><span class="tab-list-entry-detail">${esc(tabListDetailText(item, info))}</span>`;
+  </span>`;
 }
 
 function infoButtonHtml() {
@@ -2083,9 +2120,8 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   if (linear.length) {
     linearValue = linearInlineHtml(linear);
     linearDesc = linearDescriptionsInlineHtml(linear);
-    if (prDesc && linearValue) rows.push(popoverPairRow('desc', prDesc, 'Linear', linearValue));
-    else if (prDesc) rows.push(popoverRow('desc', prDesc));
-    else if (linearValue) rows.push(popoverRow('Linear', linearValue));
+    if (prDesc) rows.push(popoverRow('desc', prDesc));
+    if (linearValue) rows.push(popoverRow('Linear', linearValue));
     if (linearDesc) rows.push(popoverRow('details', linearDesc));
   } else if (prDesc) {
     rows.push(popoverRow('desc', prDesc));

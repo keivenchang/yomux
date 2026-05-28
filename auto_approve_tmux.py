@@ -439,9 +439,10 @@ def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool
         if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
             continue
         if re.match(r"^[❯›>]\s+\S", stripped):
-            return True
+            continue
         if re.search(r"[@:][^@\s]+[$#]\s*$", stripped):
             return True
+        return True
     return False
 
 
@@ -530,6 +531,10 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if not stripped:
         return True
     if _WORKING_LINE_RE.search(line):
+        return True
+    if re.match(r"^[⎿└]\s+Tip:", stripped, re.IGNORECASE):
+        return True
+    if re.match(r"^(?:gpt|claude|opus|sonnet)[A-Za-z0-9_.-]*\s+.+\s·\s", stripped, re.IGNORECASE):
         return True
     if re.match(r"^\d+\s+tasks\s+\(", stripped):
         return True

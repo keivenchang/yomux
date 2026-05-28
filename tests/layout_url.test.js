@@ -432,7 +432,9 @@ function canonical(value) {
 
   const html = api.tabListEntryBodyHtml('4');
   assert.ok(html.includes('session-yolo-marker inactive'), 'tab list entry shows inactive YO indicator');
+  assert.ok(html.includes('data-auto-session="4"'), 'tab list YO indicator is clickable');
   assert.ok(html.includes('fix(parser): parse dangling reasoning end markers'), 'tab list entry includes long PR title');
+  assert.equal(html.includes('tab-list-entry-detail'), false, 'tab list entry is a single visible line');
 }
 
 {

@@ -835,10 +835,9 @@ body {
 .tab-list-entry {
   width: 100%;
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 4px;
-  padding: 6px 7px;
+  display: flex;
+  align-items: center;
+  padding: 5px 7px;
   color: #dfe6ef;
   background: #273140;
   border: 1px solid #4e5a6c;
@@ -862,6 +861,7 @@ body {
   border-color: #9be33d;
 }
 .tab-list-entry-main {
+  flex: 1 1 auto;
   min-width: 0;
   display: inline-flex;
   align-items: center;
