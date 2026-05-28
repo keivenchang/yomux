@@ -30,25 +30,41 @@ Rationale: UI durations are perceived by users and read as deliberate at round v
 
 ### Dev server restart workflow
 
-When restarting the YOLOmux dev server (port `7778`) during development, always chain `pkill`, `sleep`, and the relaunch in a single shell invocation, and detach the new python3 from the parent shell with `& disown`:
+Restarts of the YOLOmux dev server (port `7778`) must delegate the `(pkill, sleep, relaunch)` chain to **systemd-run as a transient user unit**. Running the chain directly in a Claude-harness `Bash` call does not work: the harness places each Bash invocation in a process container (cgroup/pid-namespace), and when the Bash exits, everything spawned inside — including processes detached with `nohup`, `disown`, or `setsid` — is reaped along with it. Only a process owned by an *external* daemon escapes. The user-mode systemd manager (`user@<uid>.service`) is that daemon.
+
+The setup has two pieces:
+
+**1) Local-only restart scripts** at `~/.local/bin/yolomux-restart-{dev,prod}.sh`. These are **not committed** to the repo because they hardcode local paths and port choices. Recreate them on every machine. Both must be `chmod +x`. Reference template:
 
 ```bash
-cd ~/yolomux.dev && \
-  (pkill -f "python3 -u yolomux\.py.*--port 7778" || true) && \
-  sleep 2 && \
-  nohup python3 -u yolomux.py --host 0.0.0.0 --port 7778 --dangerously-yolo --self-signed \
-    >> /tmp/yolomux-dev-7778.log 2>&1 < /dev/null & disown $!
+#!/bin/bash
+# ~/.local/bin/yolomux-restart-dev.sh
+set -u
+cd /home/keivenc/yolomux.dev
+pkill -f "python3 -u yolomux\.py.*--port 7778" 2>/dev/null
+sleep 2
+exec python3 -u yolomux.py --host 0.0.0.0 --port 7778 --dangerously-yolo --self-signed \
+  >> /tmp/yolomux-dev-7778.log 2>&1 < /dev/null
 ```
 
-Why every piece matters:
+The prod script is the same shape with port `7777` and cwd `~/yolomux` and log `/tmp/yolomux-prod-7777.log`.
 
-- `pkill -f "python3 -u yolomux\.py.*--port 7778"` — the pattern is anchored on `python3 -u` so it matches only the real server process, not the harness shell wrapper that contains the same substring in its argv.
-- `|| true` — `pkill` returns 1 when nothing matches. Without this, the `&&` chain short-circuits and the relaunch never runs.
-- `sleep 2` — gives the kernel time to release port 7778 before the new bind.
-- `nohup … & disown $!` — detaches python3 from the launching shell. The shell exits immediately while python3 keeps running, reparented to init. Without this, when the launching shell or any background-runner wrapper exits, python3 may be torn down with it.
-- `< /dev/null` — keeps python3 from inheriting an interactive stdin.
+The `exec` matters: it replaces the script shell with python3 in the systemd unit's main-PID slot, so systemd treats python3 as the unit's primary process.
 
-**Always verify after every restart.** The chain returning success is not proof the server is healthy:
+**2) Idempotent invocation** from a Claude `Bash` call. Both commands return in milliseconds; the actual `pkill+sleep+exec` chain runs inside the systemd unit's own cgroup, independent of the harness:
+
+```bash
+systemctl --user stop yolomux-dev-7778 2>/dev/null
+systemd-run --user --quiet --collect --unit=yolomux-dev-7778 ~/.local/bin/yolomux-restart-dev.sh
+```
+
+Notes:
+- `--collect` garbage-collects the unit after exit, keeping the name reusable.
+- `--unit=yolomux-dev-7778` gives a stable name so subsequent restarts can `systemctl stop` it cleanly.
+- Without the `stop` first, `systemd-run` refuses to start if the unit is still active.
+- For prod, swap `dev`/`7778` for `prod`/`7777` in both lines.
+
+**Always verify after restart** (these are read-only and fast):
 
 ```bash
 ps -ef | grep "python3 -u yolomux\.py.*7778" | grep -v grep
@@ -57,7 +73,14 @@ curl -sk -o /dev/null -w "ping: %{http_code} %{time_total}s\n" https://localhost
 curl -sk -u <user>:<pass> https://localhost:7778/ | grep -oE 'YOLOmux [0-9.]+' | head -1
 ```
 
-Expected: one `python3 -u yolomux.py` process, `LISTEN` on `:7778`, `ping: 401` in under ~100ms, and the rendered version matches `YOLOMUX_VERSION` in the just-committed code. If anything fails, `tail -30 /tmp/yolomux-dev-7778.log` shows what python3 printed.
+Expected: one `python3 -u yolomux.py` process under `user@.service/app.slice/yolomux-dev-7778.service`, `LISTEN` on `:7778`, `ping: 401` in under ~100ms, and the rendered version matches `YOLOMUX_VERSION` in the just-committed code. The version check is what catches the case where the running server is still on stale bytecode.
+
+If a verification step fails, inspect the unit and the log:
+
+```bash
+systemctl --user status yolomux-dev-7778 --no-pager
+tail -30 /tmp/yolomux-dev-7778.log
+```
 
 ### Production sync (`cps`)
 
