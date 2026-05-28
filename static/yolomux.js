@@ -71,6 +71,9 @@ let focusedTerminal = null;
 let focusedPanelItem = null;
 let dragSession = null;
 let dragSourceSlot = null;
+let customDragPreview = null;
+let customDragPreviewOffset = {x: 0, y: 0};
+let transparentDragImage = null;
 const panelPopoverHideTimers = new WeakMap();
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
@@ -1320,7 +1323,9 @@ function renderSessionButtons() {
     removeSessionFromLayout(payload.session);
   };
   sessionButtons.classList.remove('drag-over');
-  for (const item of sessionTrayItems()) {
+  const trayItems = sessionTrayItems();
+  if (trayItems.length) sessionButtons.appendChild(createTabListMenu(trayItems, {kind: 'tray'}));
+  for (const item of trayItems) {
     sessionButtons.appendChild(createTopSessionButton(item));
   }
   if (!readOnlyMode && visibleSessions.length < maxSessionTabs) {
@@ -1329,6 +1334,107 @@ function renderSessionButtons() {
     }
   }
   scheduleTabStripOverflowCheck(sessionButtons);
+}
+
+function createTabListMenu(items, options = {}) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'tab-list-menu-wrap';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'tab-list-menu-button';
+  button.title = options.kind === 'tray' ? 'show inactive tabs' : 'show all tabs in this window';
+  button.setAttribute('aria-label', button.title);
+  wrapper.appendChild(button);
+  const popover = document.createElement('div');
+  popover.className = 'tab-list-menu-popover';
+  popover.setAttribute('role', 'menu');
+  popover.innerHTML = `<div class="tab-list-menu-title">${options.kind === 'tray' ? 'Inactive tabs' : 'Window tabs'}</div>`;
+  for (const item of items) {
+    popover.appendChild(createTabListEntry(item, options));
+  }
+  wrapper.appendChild(popover);
+  bindTabListMenuPopover(wrapper);
+  return wrapper;
+}
+
+function createTabListEntry(item, options = {}) {
+  const side = options.side || null;
+  const active = side ? item === activeItemForSide(side) : false;
+  const entry = document.createElement('div');
+  entry.role = 'button';
+  entry.tabIndex = 0;
+  entry.draggable = true;
+  entry.className = `tab-list-entry ${active ? 'active' : ''}`;
+  entry.dataset.tabListItem = item;
+  entry.innerHTML = tabListEntryBodyHtml(item);
+  entry.setAttribute('aria-label', `${itemLabel(item)} ${tabListDetailText(item)}`.trim());
+  const activate = () => {
+    closeOtherSessionPopovers(null);
+    if (side) {
+      activateWindowSession(side, item);
+    } else {
+      selectSession(item);
+    }
+  };
+  bindTabActivation(entry, activate, {stopPropagation: true});
+  entry.addEventListener('dragstart', event => {
+    event.stopPropagation();
+    startSessionDrag(event, item, side);
+  });
+  entry.addEventListener('dragend', endSessionDrag);
+  return entry;
+}
+
+function bindTabListMenuPopover(wrapper) {
+  let showTimer = null;
+  let hideTimer = null;
+  const popover = wrapper.querySelector(':scope > .tab-list-menu-popover');
+  if (!popover) return;
+  const clearShowTimer = () => {
+    showTimer = clearTimer(showTimer);
+  };
+  const clearHideTimer = () => {
+    hideTimer = clearTimer(hideTimer);
+  };
+  const openNow = () => {
+    clearShowTimer();
+    clearHideTimer();
+    positionTabListPopover(wrapper);
+    closeOtherSessionPopovers(wrapper);
+    wrapper.classList.add('popover-open');
+  };
+  const queueOpen = () => {
+    clearHideTimer();
+    if (wrapper.classList.contains('popover-open')) return;
+    clearShowTimer();
+    positionTabListPopover(wrapper);
+    showTimer = setTimeout(openNow, popoverShowDelayMs);
+  };
+  const closeSoon = () => {
+    clearShowTimer();
+    clearHideTimer();
+    hideTimer = setTimeout(() => {
+      if (popoverStillActive(wrapper, popover)) {
+        hideTimer = null;
+        return;
+      }
+      wrapper.classList.remove('popover-open');
+      hideTimer = null;
+    }, popoverHideDelayMs);
+  };
+  bindPopoverHover(wrapper, popover, {queueOpen, keepOpen: openNow, closeSoon});
+}
+
+function positionTabListPopover(wrapper) {
+  const rect = wrapper.getBoundingClientRect();
+  const container = wrapper.closest('.panel') || wrapper.closest('.session-buttons') || wrapper.parentElement || wrapper;
+  const containerRect = container.getBoundingClientRect();
+  const width = Math.min(Math.max(320, containerRect.width), window.innerWidth - 16);
+  const maxLeft = Math.max(8, window.innerWidth - width - 8);
+  const left = Math.min(Math.max(8, Math.floor(containerRect.left)), maxLeft);
+  document.documentElement.style.setProperty('--tab-list-popover-top', `${Math.ceil(rect.bottom + 1)}px`);
+  document.documentElement.style.setProperty('--tab-list-popover-left', `${left}px`);
+  document.documentElement.style.setProperty('--tab-list-popover-width', `${Math.floor(width)}px`);
 }
 
 function updateSessionButtonStates() {
@@ -1402,6 +1508,12 @@ function clearTimer(timer) {
 
 function stopPopoverEvent(event) {
   event.stopPropagation();
+}
+
+function closeOtherSessionPopovers(current) {
+  for (const other of document.querySelectorAll('.session-button-wrap.popover-open, .window-session-tab.popover-open, .tab-list-menu-wrap.popover-open')) {
+    if (other !== current) other.classList.remove('popover-open');
+  }
 }
 
 function popoverStillActive(anchor, popover) {
@@ -1665,6 +1777,43 @@ function sessionTabDescription(session, info) {
   return sessionWorkDescription(session, info, 72);
 }
 
+function tabListDetailText(item, info = transcriptMeta.sessions?.[item]) {
+  if (isInfoItem(item)) return 'all branches sorted by recent activity';
+  const project = info?.project || {};
+  const git = project.git;
+  const parts = [];
+  if (git?.branch) parts.push(git.branch);
+  const path = panelFullPath(item, info);
+  if (path) parts.push(compactHomePath(path));
+  const pr = displayPullRequest(info);
+  if (pr?.number) {
+    const status = pullRequestStatusLabel(pr);
+    parts.push(`#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`);
+  }
+  const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
+  if (linear) parts.push(linear);
+  const desc = sessionWorkDescription(item, info, 180);
+  if (desc && !parts.includes(desc)) parts.push(desc);
+  return parts.join(' · ') || itemLabel(item);
+}
+
+function tabListEntryBodyHtml(item) {
+  if (isInfoItem(item)) {
+    return `<span class="tab-list-entry-main">${windowInfoTabHtml()}</span><span class="tab-list-entry-detail">${esc(tabListDetailText(item))}</span>`;
+  }
+  const info = transcriptMeta.sessions?.[item];
+  const auto = autoApproveStates.get(item)?.enabled === true;
+  const state = sessionState(item, info);
+  const pr = displayPullRequest(info);
+  const desc = sessionWorkDescription(item, info, 180);
+  const descHtml = desc ? `<span class="session-button-dir">${esc(desc)}</span>` : '';
+  return `<span class="tab-list-entry-main">
+    ${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: false, yoloWorking: sessionYoloIsWorking(item)})}
+    <span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${descHtml}</span>
+  </span><span class="tab-list-entry-detail">${esc(tabListDetailText(item, info))}</span>`;
+}
+
 function infoButtonHtml() {
   return '<span class="session-button-prefix"><span class="session-button-number">0</span></span><span class="session-button-text"><span class="session-button-dir">Branch Info</span></span>';
 }
@@ -1868,6 +2017,63 @@ function dragPayload(event) {
   }
 }
 
+function transparentNativeDragImage() {
+  if (transparentDragImage) return transparentDragImage;
+  const node = document.createElement('div');
+  node.className = 'transparent-drag-image';
+  node.style.position = 'fixed';
+  node.style.left = '-10000px';
+  node.style.top = '-10000px';
+  node.style.width = '1px';
+  node.style.height = '1px';
+  node.style.opacity = '0';
+  node.style.pointerEvents = 'none';
+  document.body.appendChild(node);
+  transparentDragImage = node;
+  return node;
+}
+
+function moveCustomDragPreview(event) {
+  if (!customDragPreview || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+  customDragPreview.style.left = `${Math.round(event.clientX - customDragPreviewOffset.x)}px`;
+  customDragPreview.style.top = `${Math.round(event.clientY - customDragPreviewOffset.y)}px`;
+}
+
+function stopCustomDragPreview() {
+  document.removeEventListener?.('dragover', moveCustomDragPreview, true);
+  document.removeEventListener?.('drag', moveCustomDragPreview, true);
+  document.removeEventListener?.('drop', stopCustomDragPreview, true);
+  customDragPreview?.remove();
+  customDragPreview = null;
+}
+
+function startCustomDragPreview(event) {
+  const source = event.currentTarget;
+  if (!source || !source.cloneNode) return;
+  stopCustomDragPreview();
+  const rect = source.getBoundingClientRect();
+  const clone = source.cloneNode(true);
+  clone.classList?.remove('popover-open', 'dragging');
+  clone.classList?.add('drag-image');
+  clone.querySelectorAll?.('.session-popover, .tab-list-menu-popover').forEach(node => node.remove());
+  clone.style.position = 'fixed';
+  clone.style.width = `${Math.max(1, Math.round(rect.width || 1))}px`;
+  clone.style.height = `${Math.max(1, Math.round(rect.height || 1))}px`;
+  clone.style.opacity = '0.50';
+  clone.style.pointerEvents = 'none';
+  clone.style.zIndex = '99999';
+  document.body.appendChild(clone);
+  customDragPreview = clone;
+  const offsetX = Math.max(0, Math.min(rect.width || 0, event.clientX - rect.left)) || Math.max(1, (rect.width || 1) / 2);
+  const offsetY = Math.max(0, Math.min(rect.height || 0, event.clientY - rect.top)) || Math.max(1, (rect.height || 1) / 2);
+  customDragPreviewOffset = {x: offsetX, y: offsetY};
+  moveCustomDragPreview(event);
+  document.addEventListener?.('dragover', moveCustomDragPreview, true);
+  document.addEventListener?.('drag', moveCustomDragPreview, true);
+  document.addEventListener?.('drop', stopCustomDragPreview, true);
+  event.dataTransfer?.setDragImage?.(transparentNativeDragImage(), 0, 0);
+}
+
 function startSessionDrag(event, session, sourceSlot = null) {
   dragSession = session;
   dragSourceSlot = sourceSlot;
@@ -1875,13 +2081,13 @@ function startSessionDrag(event, session, sourceSlot = null) {
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-session', payload);
   event.dataTransfer.setData('text/plain', session);
-  event.currentTarget?.classList.add('dragging');
+  startCustomDragPreview(event);
 }
 
 function endSessionDrag(event) {
   dragSession = null;
   dragSourceSlot = null;
-  event.currentTarget?.classList.remove('dragging');
+  stopCustomDragPreview();
   sessionButtons.classList.remove('drag-over');
   clearDropPreview();
 }
@@ -2818,7 +3024,7 @@ function updateWindowTabStrip(panel, side) {
   if (!strip) return;
   const stack = windowStack(side);
   strip.dataset.side = side;
-  strip.replaceChildren(...stack.map(item => createWindowSessionTab(side, item)));
+  strip.replaceChildren(createTabListMenu(stack, {kind: 'window', side}), ...stack.map(item => createWindowSessionTab(side, item)));
   bindWindowTabStrip(strip, side);
   scheduleTabStripOverflowCheck(strip);
 }
@@ -2904,9 +3110,7 @@ function bindWindowSessionPopover(tab, session) {
     clearShowTimer();
     clearHideTimer();
     positionWindowSessionPopover(tab);
-    for (const other of document.querySelectorAll('.session-button-wrap.popover-open, .window-session-tab.popover-open')) {
-      if (other !== tab) other.classList.remove('popover-open');
-    }
+    closeOtherSessionPopovers(tab);
     tab.classList.add('popover-open');
   };
   const queueOpen = () => {
@@ -2949,9 +3153,7 @@ function bindTopSessionPopover(wrapper) {
     clearShowTimer();
     clearHideTimer();
     positionTopSessionPopover(wrapper);
-    for (const other of document.querySelectorAll('.session-button-wrap.popover-open, .window-session-tab.popover-open')) {
-      if (other !== wrapper) other.classList.remove('popover-open');
-    }
+    closeOtherSessionPopovers(wrapper);
     wrapper.classList.add('popover-open');
   };
   const queueOpen = () => {

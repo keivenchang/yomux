@@ -2,6 +2,59 @@ const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
 
+class TestClassList {
+  constructor() {
+    this.names = new Set();
+  }
+
+  add(...names) {
+    names.forEach(name => this.names.add(name));
+  }
+
+  remove(...names) {
+    names.forEach(name => this.names.delete(name));
+  }
+
+  toggle(name, force) {
+    if (force === true) {
+      this.names.add(name);
+      return true;
+    }
+    if (force === false) {
+      this.names.delete(name);
+      return false;
+    }
+    if (this.names.has(name)) {
+      this.names.delete(name);
+      return false;
+    }
+    this.names.add(name);
+    return true;
+  }
+
+  contains(name) {
+    return this.names.has(name);
+  }
+}
+
+class TestStyle {
+  constructor() {
+    this.properties = new Map();
+  }
+
+  setProperty(name, value) {
+    this.properties.set(name, value);
+  }
+
+  removeProperty(name) {
+    this.properties.delete(name);
+  }
+
+  getPropertyValue(name) {
+    return this.properties.get(name) || '';
+  }
+}
+
 class TestElement {
   constructor(id = '') {
     this.id = id;
@@ -9,24 +62,30 @@ class TestElement {
     this.dataset = {};
     this.innerHTML = '';
     this.textContent = '';
-    this.style = {setProperty() {}};
-    this.classList = {
-      add() {},
-      remove() {},
-      toggle() {},
-      contains() { return false; },
-    };
+    this.removed = false;
+    this.rect = {width: 1200, height: 800, left: 0, top: 0, right: 1200, bottom: 800};
+    this.style = new TestStyle();
+    this.classList = new TestClassList();
   }
 
   addEventListener() {}
   removeEventListener() {}
   append(...nodes) { this.children.push(...nodes); }
   appendChild(node) { this.children.push(node); return node; }
-  contains() { return false; }
-  getBoundingClientRect() { return {width: 1200, height: 800, left: 0, top: 0}; }
+  cloneNode() {
+    const clone = new TestElement(`${this.id}-clone`);
+    clone.dataset = {...this.dataset};
+    clone.innerHTML = this.innerHTML;
+    clone.textContent = this.textContent;
+    clone.rect = {...this.rect};
+    return clone;
+  }
+  contains(node) { return node === this || this.children.includes(node); }
+  getBoundingClientRect() { return this.rect; }
   insertAdjacentHTML() {}
   querySelector() { return null; }
   querySelectorAll() { return []; }
+  remove() { this.removed = true; }
   removeAttribute() {}
   replaceChildren(...nodes) { this.children = nodes; }
   setAttribute() {}
@@ -59,10 +118,12 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6']) {
     clearInterval() {},
     clearTimeout() {},
     document: {
+      addEventListener() {},
       body: element('body'),
       createElement: tag => new TestElement(tag),
       getElementById: element,
       querySelectorAll: () => [],
+      removeEventListener() {},
     },
     fetch() { return Promise.reject(new Error('fetch disabled in layout URL tests')); },
     history: {
@@ -94,16 +155,28 @@ globalThis.__layoutTestApi = {
   layoutTreeKey,
   leafNode,
   normalizeLayoutSlots,
+  bindWindowTabStrip,
+  clearWindowTabDropPreview,
+  createTabListMenu,
   pullRequestStatusLabel,
   sessionButtonHtml,
+  showWindowTabDropPreview,
+  startSessionDrag,
+  tabListDetailText,
+  tabListEntryBodyHtml,
   splitNode,
   updateActiveSessionParam,
+  windowTabDropIndex,
+  windowTabDropPlacement,
   windowSessionTabHtml,
   windowStack,
   windowStateWithTabs,
   currentSlots() { return layoutSlots; },
   setAutoApproveStateForTest(session, payload) {
     autoApproveStates.set(session, payload);
+  },
+  setTranscriptInfoForTest(session, info) {
+    transcriptMeta.sessions = {...(transcriptMeta.sessions || {}), [session]: info};
   },
   applyServerMetadataPulsesForTest(session, pulses) {
     updateMetadataBadgePulses({sessions: {[session]: {metadata_badge_pulse_remaining_ms: pulses}}});
@@ -123,8 +196,62 @@ globalThis.__layoutTestApi = {
     updateActiveSessionParam();
     return globalThis.__lastUrl;
   },
+  setGridPreviewNodesForTest(nodes) {
+    grid.querySelectorAll = () => nodes;
+  },
+  customDragPreviewForTest() {
+    return customDragPreview;
+  },
 };`, context);
   return context.__layoutTestApi;
+}
+
+function tabElement(session, left, width) {
+  const tab = new TestElement(session);
+  tab.dataset.windowSessionTab = session;
+  tab.rect = {left, right: left + width, top: 0, bottom: 27, width, height: 27};
+  return tab;
+}
+
+function tabStrip(tabs) {
+  const strip = new TestElement('strip');
+  strip.children = tabs;
+  strip.rect = {left: 100, right: 406, top: 0, bottom: 28, width: 306, height: 28};
+  strip.querySelectorAll = selector => {
+    assert.equal(selector, '.window-session-tab');
+    return tabs;
+  };
+  return strip;
+}
+
+function dragEvent(clientX, session = '9') {
+  return {
+    clientX,
+    clientY: 8,
+    dataTransfer: {
+      dropEffect: '',
+      effectAllowed: '',
+      dragImage: null,
+      getData(type) {
+        if (type === 'application/x-yolomux-session') return JSON.stringify({session, sourceSlot: 'right'});
+        return '';
+      },
+      setData(type, value) {
+        this[type] = value;
+      },
+      setDragImage(node, x, y) {
+        this.dragImage = {node, x, y};
+      },
+    },
+    defaultPrevented: false,
+    propagationStopped: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    stopImmediatePropagation() {
+      this.propagationStopped = true;
+    },
+  };
 }
 
 function nestedSlots(api) {
@@ -258,4 +385,146 @@ function canonical(value) {
   api.applyServerMetadataPulsesForTest('9', {ci: 20000});
   const ciPulseHtml = api.windowSessionTabHtml('9', ciInfo, {key: 'idle'}, true);
   assert.ok(ciPulseHtml.includes('pr-status-failing metadata-pulse'), 'CI badge is marked after CI change');
+}
+
+{
+  const api = loadYolomux();
+  const info = {
+    selected_pane: {current_path: '/home/test/dynamo/dynamo3'},
+    project: {
+      git: {branch: 'keivenc/DIS-2132__reasoning-dangling-end-marker', root: '/home/test/dynamo/dynamo3'},
+      pull_request: {
+        number: 9981,
+        title: 'fix(parser): parse dangling reasoning end markers',
+        status_label: 'CI failing',
+        checks: {state: 'failure'},
+      },
+      linear: [{identifier: 'DIS-2132', title: 'DeepSeek V4 validation'}],
+    },
+  };
+  api.setTranscriptInfoForTest('4', info);
+
+  const detail = api.tabListDetailText('4', info);
+  assert.ok(detail.includes('DIS-2132__reasoning-dangling-end-marker'), 'tab list detail includes fuller branch name');
+  assert.ok(detail.includes('~/dynamo/dynamo3'), 'tab list detail includes compact path');
+  assert.ok(detail.includes('#9981 CI failing'), 'tab list detail includes PR and status');
+  assert.ok(detail.includes('DIS-2132'), 'tab list detail includes Linear identifier');
+
+  const html = api.tabListEntryBodyHtml('4');
+  assert.ok(html.includes('session-yolo-marker inactive'), 'tab list entry shows inactive YO indicator');
+  assert.ok(html.includes('fix(parser): parse dangling reasoning end markers'), 'tab list entry includes long PR title');
+}
+
+{
+  const api = loadYolomux();
+  const slots = api.emptyLayoutSlots();
+  slots[api.layoutTreeKey] = api.leafNode('left');
+  slots.left = api.windowStateWithTabs(['4', '5'], '4');
+  api.setLayoutSlotsForTest(slots);
+
+  const windowMenu = api.createTabListMenu(['4', '5'], {kind: 'window', side: 'left'});
+  assert.equal(windowMenu.children[0].textContent, '');
+  assert.equal(windowMenu.children[1].innerHTML.includes('Window tabs'), true);
+  assert.equal(windowMenu.children[1].children.length, 2);
+  assert.ok(windowMenu.children[1].children[0].className.includes('active'), 'active window tab is marked in show-all menu');
+  assert.equal(windowMenu.children[1].children[0].draggable, true);
+
+  const trayMenu = api.createTabListMenu(['1', '2'], {kind: 'tray'});
+  assert.equal(trayMenu.children[0].textContent, '');
+  assert.equal(trayMenu.children[1].innerHTML.includes('Inactive tabs'), true);
+  assert.equal(trayMenu.children[1].children.length, 2);
+  assert.equal(trayMenu.children[1].children[0].draggable, true);
+}
+
+{
+  const api = loadYolomux();
+  const strip = tabStrip([
+    tabElement('1', 100, 100),
+    tabElement('2', 203, 100),
+    tabElement('3', 306, 100),
+  ]);
+
+  assert.deepStrictEqual(canonical(api.windowTabDropPlacement(strip, {clientX: 110}, '9')), {index: 0, x: 2});
+  assert.deepStrictEqual(canonical(api.windowTabDropPlacement(strip, {clientX: 225}, '9')), {index: 1, x: 103});
+  assert.deepStrictEqual(canonical(api.windowTabDropPlacement(strip, {clientX: 390}, '9')), {index: 3, x: 304});
+  assert.deepStrictEqual(canonical(api.windowTabDropPlacement(strip, {clientX: 225}, '2')), {index: 1, x: 206});
+  assert.deepStrictEqual(canonical(api.windowTabDropPlacement(tabStrip([]), {clientX: 180}, '9')), {index: 0, x: 80});
+  assert.equal(api.windowTabDropIndex(strip, {clientX: 225}, '9'), 1);
+}
+
+{
+  const api = loadYolomux();
+  const strip = tabStrip([
+    tabElement('1', 100, 100),
+    tabElement('2', 203, 100),
+    tabElement('3', 306, 100),
+  ]);
+
+  api.showWindowTabDropPreview(strip, {clientX: 225}, '9');
+
+  assert.ok(strip.classList.contains('drag-over'), 'tab strip shows drag target outline');
+  assert.ok(strip.classList.contains('tab-drop-preview'), 'tab strip shows insertion preview');
+  assert.equal(strip.style.getPropertyValue('--tab-drop-x'), '103px');
+
+  api.clearWindowTabDropPreview(strip);
+
+  assert.equal(strip.classList.contains('drag-over'), false);
+  assert.equal(strip.classList.contains('tab-drop-preview'), false);
+  assert.equal(strip.style.getPropertyValue('--tab-drop-x'), '');
+}
+
+{
+  const api = loadYolomux();
+  const source = tabElement('4', 100, 140);
+  source.rect = {left: 100, right: 240, top: 20, bottom: 47, width: 140, height: 27};
+  source.classList.add('window-session-tab');
+  const event = dragEvent(125, '4');
+  event.currentTarget = source;
+  event.clientY = 31;
+
+  api.startSessionDrag(event, '4', 'left');
+
+  assert.equal(source.classList.contains('dragging'), false, 'source tab is not dimmed while dragging');
+  assert.equal(event.dataTransfer.effectAllowed, 'move');
+  assert.equal(event.dataTransfer['application/x-yolomux-session'], JSON.stringify({session: '4', sourceSlot: 'left'}));
+  assert.equal(event.dataTransfer['text/plain'], '4');
+  assert.ok(event.dataTransfer.dragImage, 'transparent native drag image is installed');
+  assert.equal(event.dataTransfer.dragImage.node.className, 'transparent-drag-image');
+  assert.equal(event.dataTransfer.dragImage.x, 0);
+  assert.equal(event.dataTransfer.dragImage.y, 0);
+  const preview = api.customDragPreviewForTest();
+  assert.ok(preview, 'custom drag preview is installed');
+  assert.equal(preview.style.opacity, '0.50');
+  assert.ok(preview.classList.contains('drag-image'));
+  assert.equal(preview.style.left, '100px');
+  assert.equal(preview.style.top, '20px');
+}
+
+{
+  const api = loadYolomux();
+  const strip = tabStrip([
+    tabElement('1', 100, 100),
+    tabElement('2', 203, 100),
+    tabElement('3', 306, 100),
+  ]);
+  const stalePanePreview = new TestElement('pane');
+  stalePanePreview.classList.add('drag-over', 'drop-preview', 'drop-preview-top');
+  stalePanePreview.dataset.dropLabel = 'top';
+  stalePanePreview.style.setProperty('--tab-drop-x', 'old');
+  api.setGridPreviewNodesForTest([stalePanePreview]);
+  api.bindWindowTabStrip(strip, 'left');
+
+  const event = dragEvent(225, '4');
+  strip.ondragover(event);
+
+  assert.ok(event.defaultPrevented, 'tab-strip dragover accepts the session drag');
+  assert.ok(event.propagationStopped, 'tab-strip dragover does not bubble into pane split handling');
+  assert.equal(event.dataTransfer.dropEffect, 'move');
+  assert.equal(stalePanePreview.classList.contains('drag-over'), false);
+  assert.equal(stalePanePreview.classList.contains('drop-preview'), false);
+  assert.equal(stalePanePreview.classList.contains('drop-preview-top'), false);
+  assert.equal('dropLabel' in stalePanePreview.dataset, false);
+  assert.equal(stalePanePreview.style.getPropertyValue('--tab-drop-x'), '');
+  assert.ok(strip.classList.contains('tab-drop-preview'), 'tab strip owns the active preview');
+  assert.equal(strip.style.getPropertyValue('--tab-drop-x'), '103px');
 }

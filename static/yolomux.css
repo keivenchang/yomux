@@ -25,9 +25,12 @@
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
   --inactive-window-overlay: rgba(178, 190, 210, 0.20);
-  --inactive-tab-green: #285a2f;
-  --inactive-tab-green-hover: #336d3a;
-  --inactive-tab-green-border: #9bd480;
+  --inactive-tab-bg: #293240;
+  --inactive-tab-bg-hover: #354052;
+  --inactive-tab-border: #667286;
+  --window-inactive-tab-bg: #285a2f;
+  --window-inactive-tab-bg-hover: #336d3a;
+  --window-inactive-tab-border: #9bd480;
   --popover-show-delay: 300ms;
   --popover-hide-delay: 300ms;
   --ui-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -168,12 +171,12 @@ body {
   padding-bottom: 0;
   scrollbar-width: none;
 }
-.session-buttons.tabs-overflowing .session-yolo-marker,
-.window-session-tabs.tabs-overflowing .session-yolo-marker {
+.session-buttons.tabs-overflowing > .session-button-wrap > .session-button .session-yolo-marker,
+.window-session-tabs.tabs-overflowing > .window-session-tab .session-yolo-marker {
   display: none;
 }
-.session-buttons.tabs-overflowing .session-button,
-.window-session-tabs.tabs-overflowing .window-session-tab {
+.session-buttons.tabs-overflowing > .session-button-wrap > .session-button,
+.window-session-tabs.tabs-overflowing > .window-session-tab {
   gap: 2px;
 }
 .session-buttons.tabs-overflowing .session-button-wrap {
@@ -182,18 +185,17 @@ body {
 .session-buttons.tabs-overflowing .session-button-wrap.info {
   min-width: 28px;
 }
-.session-buttons.tabs-overflowing .session-button-text,
-.window-session-tabs.tabs-overflowing .session-button-text {
+.session-buttons.tabs-overflowing > .session-button-wrap > .session-button .session-button-text,
+.window-session-tabs.tabs-overflowing > .window-session-tab .session-button-text {
   display: none;
 }
-.session-buttons.tabs-overflowing .session-button.add-session > span:last-child {
+.session-buttons.tabs-overflowing > .session-button-wrap > .session-button.add-session > span:last-child {
   display: none;
 }
-.session-buttons.tabs-overflowing .window-tab-close,
-.window-session-tabs.tabs-overflowing .window-tab-close {
+.window-session-tabs.tabs-overflowing > .window-session-tab .window-tab-close {
   display: none;
 }
-.window-session-tabs.tabs-overflowing .window-session-tab {
+.window-session-tabs.tabs-overflowing > .window-session-tab {
   min-width: 36px;
 }
 .session-buttons::-webkit-scrollbar {
@@ -226,6 +228,57 @@ body {
   min-width: 38px;
   max-width: 72px;
 }
+.tab-list-menu-wrap {
+  position: relative;
+  flex: 0 0 28px;
+  min-width: 28px;
+}
+.session-buttons > .tab-list-menu-wrap {
+  max-width: 28px;
+}
+.window-session-tabs > .tab-list-menu-wrap {
+  align-self: flex-end;
+}
+.tab-list-menu-button {
+  height: 26px;
+  width: 28px;
+  min-width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: #dfe6ef;
+  background: #1d2531;
+  border: 1px solid #5e6878;
+  border-radius: 6px 6px 0 0;
+  font-family: var(--tab-font);
+  font-size: 11px;
+  font-stretch: condensed;
+  font-weight: 600;
+  line-height: 1;
+}
+.tab-list-menu-button::before {
+  content: "";
+  width: 14px;
+  height: 11px;
+  background:
+    linear-gradient(currentColor, currentColor) 0 0 / 3px 3px no-repeat,
+    linear-gradient(currentColor, currentColor) 6px 0 / 8px 2px no-repeat,
+    linear-gradient(currentColor, currentColor) 0 4px / 3px 3px no-repeat,
+    linear-gradient(currentColor, currentColor) 6px 5px / 8px 2px no-repeat,
+    linear-gradient(currentColor, currentColor) 0 8px / 3px 3px no-repeat,
+    linear-gradient(currentColor, currentColor) 6px 9px / 8px 2px no-repeat;
+  opacity: 0.92;
+}
+.session-buttons > .tab-list-menu-wrap .tab-list-menu-button {
+  border-radius: 7px;
+}
+.tab-list-menu-button:hover,
+.tab-list-menu-wrap.popover-open > .tab-list-menu-button {
+  color: #f4ffe8;
+  background: #2d3747;
+  border-color: #f5c542;
+}
 .session-button {
   width: 100%;
   max-width: 100%;
@@ -244,17 +297,17 @@ body {
   font-weight: 500;
   overflow: hidden;
   border-radius: 7px;
-  background: var(--inactive-tab-green);
-  border: 1px solid var(--inactive-tab-green-border);
-  border-bottom-color: var(--inactive-tab-green-border);
+  background: var(--inactive-tab-bg);
+  border: 1px solid var(--inactive-tab-border);
+  border-bottom-color: var(--inactive-tab-border);
 }
 .session-button:not(.active):not(.needs-attention) {
-  border-color: var(--inactive-tab-green-border);
-  border-bottom-color: var(--inactive-tab-green-border);
+  border-color: var(--inactive-tab-border);
+  border-bottom-color: var(--inactive-tab-border);
   box-shadow: none;
 }
 .session-button:hover {
-  background: var(--inactive-tab-green-hover);
+  background: var(--inactive-tab-bg-hover);
   border-color: rgba(255, 255, 255, 0.92);
 }
 .session-button.add-session {
@@ -407,9 +460,6 @@ body {
   color: #d9e5f5;
   background: #273244;
   border-color: #58667b;
-}
-.session-button.dragging {
-  opacity: 0.55;
 }
 .session-button.active {
   color: #081205;
@@ -742,6 +792,110 @@ body {
 }
 .session-button-wrap > .session-popover::before {
   display: none;
+}
+.tab-list-menu-popover {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  position: fixed;
+  top: var(--tab-list-popover-top, 42px);
+  left: var(--tab-list-popover-left, 8px);
+  z-index: 82;
+  width: var(--tab-list-popover-width, min(560px, calc(100vw - 16px)));
+  max-height: min(70vh, 620px);
+  overflow: auto;
+  padding: 7px;
+  color: #e7ecf3;
+  background: rgba(17, 24, 32, 0.98);
+  border: 1px solid #5e6878;
+  border-radius: 8px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  transform: translateY(-2px);
+  transition:
+    opacity 90ms ease var(--popover-hide-delay),
+    transform 90ms ease var(--popover-hide-delay),
+    visibility 0s linear calc(var(--popover-hide-delay) + 90ms);
+}
+.tab-list-menu-wrap.popover-open > .tab-list-menu-popover {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition-delay: 0s;
+}
+.tab-list-menu-title {
+  padding: 2px 4px 6px;
+  color: #aeb8c7;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.tab-list-entry {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  padding: 6px 7px;
+  color: #dfe6ef;
+  background: #273140;
+  border: 1px solid #4e5a6c;
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+.tab-list-entry + .tab-list-entry {
+  margin-top: 5px;
+}
+.tab-list-entry:hover,
+.tab-list-entry:focus-visible {
+  outline: 0;
+  background: #333f51;
+  border-color: #f5c542;
+}
+.tab-list-entry.active {
+  color: #081205;
+  background: var(--GPU-green);
+  border-color: #9be33d;
+}
+.tab-list-entry-main {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.tab-list-entry .session-button-text {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+}
+.tab-list-entry .session-button-dir {
+  flex: 1 1 auto;
+  max-width: none;
+}
+.tab-list-entry-detail {
+  min-width: 0;
+  color: #aeb8c7;
+  font: 11px/1.25 var(--mono-font);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab-list-entry.active .session-button-name,
+.tab-list-entry.active .session-button-dir,
+.tab-list-entry.active .session-button-detail,
+.tab-list-entry.active .tab-list-entry-detail,
+.tab-list-entry.active .session-yolo-marker.active {
+  color: #081205;
+}
+.drag-image {
+  opacity: 0.50 !important;
+  pointer-events: none !important;
 }
 .state-legend {
   display: flex;
@@ -1351,10 +1505,10 @@ body.layout-resizing {
   gap: 3px;
   padding: 2px 6px;
   color: #dfe6ef;
-  background: var(--inactive-tab-green);
-  border: 1px solid var(--inactive-tab-green-border);
+  background: var(--window-inactive-tab-bg);
+  border: 1px solid var(--window-inactive-tab-border);
   border-radius: 6px 6px 0 0;
-  border-bottom-color: #45703c;
+  border-bottom-color: var(--window-inactive-tab-border);
   line-height: var(--tab-line-height);
   white-space: nowrap;
   text-align: left;
@@ -1367,8 +1521,8 @@ body.layout-resizing {
   user-select: none;
 }
 .window-session-tab:hover {
-  border-color: #578948;
-  background: var(--inactive-tab-green-hover);
+  border-color: rgba(255, 255, 255, 0.92);
+  background: var(--window-inactive-tab-bg-hover);
 }
 .window-session-tab.active {
   color: #081205;
@@ -1388,9 +1542,6 @@ body.layout-resizing {
   color: #d7dde5;
   background: #384356;
   border-color: #5d6878;
-}
-.window-session-tab.dragging {
-  opacity: 0.55;
 }
 .window-tab-close {
   position: relative;
