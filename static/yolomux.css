@@ -32,7 +32,7 @@
   --window-inactive-tab-bg-hover: #336d3a;
   --window-inactive-tab-border: #9bd480;
   --popover-show-delay: 300ms;
-  --popover-hide-delay: 1000ms;
+  --popover-hide-delay: 300ms;
   --ui-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --control-font: "Arial Narrow", "Aptos Narrow", "Liberation Sans Narrow", "Roboto Condensed", var(--ui-font);
@@ -251,14 +251,31 @@ body {
 .window-session-tabs.tabs-overflowing > .window-session-tab .session-button-dir {
   display: none;
 }
+.session-buttons.tabs-overflowing > .session-button-wrap.file-editor-item > .session-button .session-button-dir,
+.window-session-tabs.tabs-overflowing > .window-session-tab.file-editor-item .session-button-dir {
+  display: inline-block;
+}
 .session-buttons.tabs-overflowing > .session-button-wrap > .session-button.add-session > span:last-child {
   display: none;
+}
+.session-buttons.tabs-overflowing > .session-button-wrap > .session-button.add-session.file > span:last-child {
+  display: inline-flex;
 }
 .window-session-tabs.tabs-overflowing > .window-session-tab .window-tab-close {
   display: none;
 }
+.window-session-tabs.tabs-overflowing > .window-session-tab.file-editor-item .window-tab-close {
+  display: inline-flex;
+}
 .window-session-tabs.tabs-overflowing > .window-session-tab {
-  min-width: 36px;
+  flex: 0 0 auto;
+  min-width: 112px;
+}
+.window-session-tabs.tabs-overflowing > .window-session-tab.file-editor-item {
+  min-width: 118px;
+}
+.window-session-tabs.tabs-overflowing > .window-session-tab.file-explorer {
+  min-width: 62px;
 }
 .session-buttons::-webkit-scrollbar {
   display: none;
@@ -289,6 +306,10 @@ body {
   flex: 0 1 auto;
   min-width: 38px;
   max-width: 72px;
+}
+.session-button-wrap.file-editor-item {
+  min-width: 72px;
+  max-width: 210px;
 }
 .tab-list-menu-wrap {
   position: relative;
@@ -832,6 +853,16 @@ body.tab-meta-hidden .window-session-tab .session-button-text {
   overflow-wrap: anywhere;
   font-weight: 400;
 }
+.popover-value:has(.popover-copy-value) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.popover-copy-value {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
 .popover-row.compact .popover-value {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -964,6 +995,64 @@ body.tab-meta-hidden .window-session-tab .session-button-text {
 .drag-image {
   opacity: 0.50 !important;
   pointer-events: none !important;
+}
+.file-drag-image.drag-image {
+  width: min(720px, calc(100vw - 28px));
+  max-width: 720px;
+  padding: 8px 10px;
+  color: #eefbe6;
+  background: rgba(8, 31, 8, 0.96);
+  border: 1px solid rgba(118, 185, 0, 0.72);
+  border-radius: 7px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.46);
+  opacity: 0.94 !important;
+}
+.file-drag-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+.file-drag-thumb {
+  flex: 0 0 46px;
+  width: 46px;
+  height: 46px;
+  object-fit: contain;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(180, 230, 140, 0.26);
+}
+.file-drag-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #eaf6df;
+  font-family: var(--tab-font);
+  font-size: 24px;
+  font-weight: 700;
+}
+.file-drag-copy {
+  min-width: 0;
+  flex: 1;
+}
+.file-drag-title {
+  margin-bottom: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #f6ffe8;
+  font: 600 12px/1.25 var(--ui-font);
+}
+.file-drag-path,
+.file-drag-more {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: #bddcaf;
+  font: 11px/1.3 var(--mono-font);
+}
+.file-drag-more {
+  color: #9fc68f;
 }
 .state-legend {
   display: flex;
@@ -1162,6 +1251,12 @@ button:disabled:hover { border-color: var(--line); }
   grid-template-rows: minmax(0, 1fr);
   gap: 5px;
 }
+.layout-column.file-explorer-column {
+  min-width: 260px;
+}
+.layout-column.file-editor-column {
+  min-width: 380px;
+}
 .layout-resizer {
   position: relative;
   z-index: 6;
@@ -1300,6 +1395,14 @@ body.layout-resizing {
   border-radius: 8px;
   font-weight: 700;
   pointer-events: none;
+}
+.terminal.path-drag-over {
+  outline: 2px dashed rgba(245, 197, 66, 0.92);
+  outline-offset: -5px;
+}
+.panel.path-drag-over {
+  outline: 2px dashed rgba(245, 197, 66, 0.92);
+  outline-offset: -5px;
 }
 .panel-head {
   position: relative;
@@ -1941,6 +2044,15 @@ body.layout-resizing {
   outline: 0;
   color: #081205;
   background: var(--brand-green);
+}
+.terminal-context-menu button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+.terminal-context-menu button:disabled:hover,
+.terminal-context-menu button:disabled:focus-visible {
+  color: inherit;
+  background: transparent;
 }
 .terminal-error {
   height: 100%;
@@ -2591,6 +2703,16 @@ body.file-explorer-open #grid {
   background: rgba(255, 255, 255, 0.04);
 }
 .file-tree-row.selected {
+  color: #f4ffe8;
+  background: rgba(82, 210, 115, 0.22);
+  box-shadow: inset 3px 0 0 var(--brand-green);
+}
+.file-tree-row.current-file:not(.selected) {
+  color: #eaf6df;
+  background: rgba(144, 196, 82, 0.12);
+  box-shadow: inset 3px 0 0 rgba(118, 185, 0, 0.55);
+}
+.file-tree-row.renaming {
   background: rgba(82, 210, 115, 0.18);
 }
 .file-tree-row.kind-dir {
@@ -2619,7 +2741,7 @@ body.file-explorer-open #grid {
 }
 .session-button.add-session.file .agent-icon.file {
   font-size: 12px;
-  margin-right: 2px;
+  margin-right: 0;
 }
 
 /* File Explorer now contains a tree column (left) and an editor column
@@ -2774,37 +2896,6 @@ body.file-editor-open .file-explorer {
 .file-editor-status[data-level="error"] { color: #ff8a95; }
 .file-editor-status[data-level="ok"]    { color: var(--good); }
 
-/* File tabs in the session strip — render like session-buttons but
-   without a YO marker; have a built-in close (X) and a dirty dot. */
-.file-tab-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 0;
-  position: relative;
-}
-.session-button.file-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 6px 0 8px;
-  min-width: 0;
-  max-width: 180px;
-  border-color: rgba(120, 180, 255, 0.4);
-}
-.session-button.file-tab.active {
-  border-color: rgba(120, 180, 255, 0.95);
-  background: rgba(40, 60, 100, 0.6);
-}
-.session-button.file-tab .file-tab-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--mono-font);
-  font-size: 11px;
-}
-.session-button.file-tab.dirty .file-tab-name::after {
-  /* Reserved for future style; the dot is rendered explicitly. */
-}
 .file-tab-dirty {
   display: inline-block;
   width: 6px;
@@ -2814,34 +2905,6 @@ body.file-editor-open .file-explorer {
   background: #f5c542;
   flex: 0 0 6px;
 }
-.file-tab-close {
-  width: 16px;
-  height: 18px;
-  margin-left: -2px;
-  padding: 0;
-  border: 1px solid rgba(120, 180, 255, 0.25);
-  border-left: 0;
-  border-top-right-radius: 5px;
-  border-bottom-right-radius: 5px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  position: relative;
-}
-.file-tab-close::before,
-.file-tab-close::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 7px;
-  height: 1.2px;
-  border-radius: 999px;
-  background: currentColor;
-}
-.file-tab-close::before { transform: translate(-50%, -50%) rotate(45deg); }
-.file-tab-close::after  { transform: translate(-50%, -50%) rotate(-45deg); }
-.file-tab-close:hover { color: #ff8a95; }
 
 /* Preview / Edit toggle button in editor head */
 .file-editor-preview {
@@ -2905,29 +2968,115 @@ body.file-editor-open .file-explorer {
 .file-editor-highlight[hidden] { display: none; }
 
 /* Draggable Files panel — first-class layout panel. Compact head
-   (tab strip + .* toggle + path); no Term/Tx/AI/Log/Info — those
-   don't apply. Tree fills the rest. */
+   (window tabs + .* toggle + path); no Term/Tx/AI/Log/Info controls. */
 .panel.file-explorer-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
 }
-.file-explorer-head {
-  display: flex;
+.panel.file-explorer-panel .file-explorer-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 31px;
+  padding: 3px 6px;
+}
+.panel.file-explorer-panel .window-session-tabs {
+  flex: 0 0 auto;
+  width: auto;
+  align-self: end;
+}
+.panel.file-explorer-panel .window-session-tabs[hidden] {
+  display: none;
+}
+.panel.file-explorer-panel .window-session-tabs[hidden] + .file-explorer-toolbar {
+  grid-column: 1 / -1;
+}
+.panel.file-explorer-panel.active-window .file-explorer-head {
+  background: var(--panel2);
+  color: var(--text);
+}
+.file-explorer-title {
+  min-width: 0;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding-right: 6px;
+  color: var(--text);
+  font-family: var(--tab-font);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.file-tree-name {
+  min-width: 0;
+}
+.file-tree-rename-input {
+  width: min(280px, 100%);
+  min-width: 90px;
+  height: 20px;
+  padding: 1px 5px;
+  color: var(--text);
+  font: inherit;
+  line-height: 18px;
+  background: rgba(10, 14, 20, 0.98);
+  border: 1px solid var(--brand-green);
+  border-radius: 3px;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.18);
 }
 .file-explorer-toolbar {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 4px 0 8px;
+  justify-content: flex-end;
+  padding: 0;
   min-width: 0;
-  flex: 1;
+}
+.path-copy-button {
+  position: relative;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+.path-copy-button:hover {
+  color: var(--text);
+  border-color: rgba(118, 185, 0, 0.55);
+  background: rgba(118, 185, 0, 0.12);
+}
+.path-copy-button::before,
+.path-copy-button::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 9px;
+  border: 1.5px solid currentColor;
+  border-radius: 1px;
+}
+.path-copy-button::before {
+  left: 6px;
+  top: 7px;
+  opacity: 0.7;
+}
+.path-copy-button::after {
+  left: 9px;
+  top: 4px;
+  background: inherit;
+}
+.popover-copy-button {
+  width: 20px;
+  height: 20px;
+  border-color: rgba(180, 230, 140, 0.34);
 }
 .file-explorer-toolbar .file-explorer-path-inline {
   flex: 1;
   min-width: 0;
+  max-width: none;
 }
 .file-explorer-pane {
   display: flex;
@@ -2973,9 +3122,390 @@ body.file-editor-open .file-explorer {
 }
 .file-explorer-hidden-toggle-panel:hover { color: var(--text); border-color: var(--text); }
 .file-explorer-hidden-toggle-panel.active { color: var(--good); border-color: var(--good); }
-/* Tray + window-tab styling for the Files virtual item so it doesn't try
-   to display state/YO markers it doesn't have. */
+.file-explorer-panel-close {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  position: relative;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.file-explorer-panel-close:hover,
+.file-explorer-panel-close:focus-visible {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+.file-explorer-panel-close::before,
+.file-explorer-panel-close::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.file-explorer-panel-close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.file-explorer-panel-close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+/* Draggable file editor panels. These are layout siblings of terminals and
+   Files, not the old left-edge overlay editor. */
+.panel.file-editor-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.panel.file-editor-panel .file-editor-panel-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 31px;
+  padding: 3px 6px;
+}
+.panel.file-editor-panel .window-session-tabs {
+  align-self: end;
+}
+.panel.file-editor-panel.active-window .file-editor-panel-head {
+  background: var(--panel2);
+  color: var(--text);
+}
+.file-editor-title {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-family: var(--tab-font);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.file-editor-title-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-editor-panel-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.file-editor-preview-panel,
+.file-editor-save-panel {
+  height: 20px;
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.file-editor-save-panel {
+  color: var(--good);
+  border-color: var(--good);
+}
+.file-editor-save-panel:disabled {
+  opacity: 0.44;
+  cursor: default;
+}
+.file-editor-preview-panel:hover,
+.file-editor-preview-panel.active {
+  color: #9fd8ff;
+  border-color: #9fd8ff;
+}
+.file-editor-save-panel:not(:disabled):hover {
+  background: rgba(82, 210, 115, 0.18);
+}
+.file-editor-panel-close {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  position: relative;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.file-editor-panel-close:hover,
+.file-editor-panel-close:focus-visible {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+.file-editor-panel-close::before,
+.file-editor-panel-close::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.file-editor-panel-close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.file-editor-panel-close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+.file-editor-panel-body {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  background: var(--panel);
+  overflow: hidden;
+}
+.file-editor-content {
+  min-height: 0;
+  position: relative;
+  display: block;
+  background: var(--bg);
+  overflow: hidden;
+}
+.file-editor-textarea-panel,
+.file-editor-highlight-panel,
+.file-editor-preview-pane-panel,
+.file-editor-image-panel {
+  position: absolute;
+  inset: 0;
+}
+.file-editor-textarea-panel[hidden],
+.file-editor-highlight-panel[hidden],
+.file-editor-preview-pane-panel[hidden],
+.file-editor-image-panel[hidden] {
+  display: none;
+}
+.file-editor-textarea-panel {
+  z-index: 3;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  resize: none;
+  outline: none;
+  padding: 8px 10px;
+  background: var(--bg);
+  color: var(--text);
+  caret-color: var(--text);
+  font-family: var(--mono-font);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 4;
+}
+.file-editor-panel.syntax-highlighted .file-editor-textarea-panel {
+  background: transparent;
+  color: transparent;
+}
+.file-editor-highlight-panel {
+  z-index: 2;
+  margin: 0;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono-font);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+  tab-size: 4;
+}
+.file-editor-highlight-panel::-webkit-scrollbar {
+  display: none;
+}
+.file-editor-highlight-panel {
+  scrollbar-width: none;
+}
+.file-editor-highlight-panel code {
+  display: block;
+  min-width: max-content;
+  min-height: 100%;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: pre;
+}
+.file-editor-highlight-panel .md-heading {
+  color: #9be33d;
+  font-weight: 700;
+}
+.file-editor-highlight-panel .md-heading-1 {
+  color: #b7f36b;
+}
+.file-editor-highlight-panel .md-bold {
+  color: #f8dfa3;
+  font-weight: 700;
+}
+.file-editor-highlight-panel .md-italic {
+  color: #c7d2fe;
+  font-style: italic;
+}
+.file-editor-highlight-panel .md-code,
+.file-editor-highlight-panel .md-codeblock,
+.file-editor-highlight-panel .md-fence {
+  color: #7dd3fc;
+}
+.file-editor-highlight-panel .md-link {
+  color: #93c5fd;
+}
+.file-editor-highlight-panel .md-html {
+  color: #f0abfc;
+}
+.file-editor-highlight-panel .md-blockquote,
+.file-editor-highlight-panel .md-list-marker,
+.file-editor-highlight-panel .code-comment {
+  color: #8b95a5;
+}
+.file-editor-highlight-panel .code-keyword {
+  color: #c4b5fd;
+  font-weight: 700;
+}
+.file-editor-highlight-panel .code-string {
+  color: #86efac;
+}
+.file-editor-highlight-panel .code-number {
+  color: #f8dfa3;
+}
+.file-editor-highlight-panel .code-constant,
+.file-editor-highlight-panel .code-variable {
+  color: #fca5a5;
+}
+.file-editor-highlight-panel .code-builtin,
+.file-editor-highlight-panel .code-function {
+  color: #93c5fd;
+}
+.file-editor-highlight-panel .code-type,
+.file-editor-highlight-panel .code-attr {
+  color: #67e8f9;
+}
+.file-editor-highlight-panel .code-tag {
+  color: #f0abfc;
+}
+.file-editor-preview-pane-panel {
+  z-index: 4;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--ui-font);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.file-editor-image-panel {
+  z-index: 4;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 10px;
+  background-color: #151a22;
+  background-image:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.10) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.10) 75%);
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+  background-size: 24px 24px;
+  overflow: auto;
+}
+.file-editor-image-panel.fit-size {
+  place-items: center;
+}
+.file-editor-image-panel.original-size {
+  place-items: start;
+  align-content: start;
+  justify-content: start;
+}
+.file-editor-image-panel .file-editor-image {
+  position: relative;
+  display: block;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  cursor: zoom-in;
+  filter: drop-shadow(0 0 0.5px rgba(255, 255, 255, 0.85)) drop-shadow(0 10px 24px rgba(0, 0, 0, 0.45));
+}
+.file-editor-image-panel .file-editor-image.original-size {
+  cursor: zoom-out;
+}
+.file-editor-empty-state {
+  position: relative;
+  z-index: 1;
+  max-width: min(520px, 100%);
+  padding: 16px;
+  color: #dfe6ef;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.file-editor-empty-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+.file-editor-empty-detail {
+  margin-top: 6px;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.file-editor-status-panel {
+  min-height: 18px;
+  padding: 3px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--panel2);
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: 10px;
+}
+.file-editor-status-panel[data-level="error"] {
+  color: #ff8a95;
+}
+.file-editor-status-panel[data-level="ok"] {
+  color: var(--good);
+}
+/* Files is the only virtual item that keeps a distinct compact tab; file
+   editor tabs use the same tab base as tmux sessions. */
 .session-button-wrap.file-explorer .session-button,
 .window-session-tab.file-explorer {
   border-color: rgba(120, 180, 255, 0.4);
+}
+.window-session-tab.file-explorer {
+  flex: 0 0 auto;
+  min-width: 68px;
+  max-width: 82px;
+  padding-inline: 8px;
+}
+.window-session-tab.file-explorer .window-tab-core {
+  justify-content: center;
+}
+.session-button-wrap.file-editor-item .session-button-dir,
+.window-session-tab.file-editor-item .session-button-dir {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+.window-session-tab.file-editor-item {
+  flex: 0 0 154px;
+  min-width: 118px;
+  max-width: 154px;
 }

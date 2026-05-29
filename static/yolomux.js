@@ -31,6 +31,7 @@ const httpsWarning = document.getElementById('httpsWarning');
 const fileExplorer = document.getElementById('fileExplorer');
 const fileExplorerTree = document.getElementById('fileExplorerTree');
 const fileExplorerPath = document.getElementById('fileExplorerPath');
+const fileExplorerPathCopy = document.getElementById('fileExplorerPathCopy');
 const fileExplorerClose = document.getElementById('fileExplorerClose');
 const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenToggle');
 const fileEditor = document.getElementById('fileEditor');
@@ -46,6 +47,7 @@ const fileEditorStatus = document.getElementById('fileEditorStatus');
 const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
+const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
   '.md': 'markdown', '.markdown': 'markdown',
   '.html': 'xml', '.htm': 'xml', '.xml': 'xml', '.svg': 'xml',
@@ -66,6 +68,7 @@ let fileExplorerShowHidden = (() => {
   catch (_) { return false; }
 })();
 const fileEditorPreviewMode = new Map();  // path -> true when previewing markdown
+const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -92,7 +95,7 @@ const toastDurationMs = 10000;
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
 const popoverShowDelayMs = 300;
-const popoverHideDelayMs = 1000;
+const popoverHideDelayMs = 300;
 const terminalFitBottomReservePx = 2;
 const terminalWheelScrollLines = 3;
 const terminalWheelPageFraction = 0.85;
@@ -105,6 +108,8 @@ const layoutTreeParamPrefix = 'tree:';
 const minSplitPaneWidthPx = 320;
 const minSplitPaneHeightPx = 220;
 const defaultSplitPercent = 50;
+const fileExplorerSplitPercent = 22;
+const fileEditorSplitPercent = 42;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
@@ -114,6 +119,29 @@ function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
 function isFileExplorerItem(item) { return item === fileExplorerItemId; }
 function isFileEditorItem(item) { return typeof item === 'string' && item.startsWith(fileEditorItemPrefix); }
 function fileItemPath(item) { return isFileEditorItem(item) ? item.slice(fileEditorItemPrefix.length) : null; }
+const syntaxLanguageByExtension = new Map([
+  ['.cjs', 'javascript'],
+  ['.css', 'css'],
+  ['.html', 'xml'],
+  ['.htm', 'xml'],
+  ['.js', 'javascript'],
+  ['.json', 'json'],
+  ['.jsx', 'javascript'],
+  ['.md', 'markdown'],
+  ['.markdown', 'markdown'],
+  ['.mjs', 'javascript'],
+  ['.py', 'python'],
+  ['.pyw', 'python'],
+  ['.rs', 'rust'],
+  ['.sh', 'bash'],
+  ['.svg', 'xml'],
+  ['.toml', 'ini'],
+  ['.ts', 'typescript'],
+  ['.tsx', 'typescript'],
+  ['.xml', 'xml'],
+  ['.yaml', 'yaml'],
+  ['.yml', 'yaml'],
+]);
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [infoItemId, fileExplorerItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
@@ -135,6 +163,10 @@ let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
 let transparentDragImage = null;
 let terminalContextMenu = null;
+let fileContextMenu = null;
+const fileExplorerSelectedPaths = new Set();
+let fileExplorerSelectionAnchor = null;
+let fileTreeRenamePath = null;
 const panelPopoverHideTimers = new WeakMap();
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
@@ -437,12 +469,13 @@ function dedentSelectionText(value) {
 
 async function copyTextToClipboard(text) {
   const clipboard = globalThis.navigator?.clipboard;
+  const value = String(text ?? '');
   if (clipboard?.writeText) {
-    await clipboard.writeText(text);
+    await clipboard.writeText(value);
     return;
   }
   const textarea = document.createElement('textarea');
-  textarea.value = text;
+  textarea.value = value;
   textarea.setAttribute('readonly', '');
   textarea.style.position = 'fixed';
   textarea.style.left = '-10000px';
@@ -472,7 +505,41 @@ function terminalContextMenuKeydown(event) {
   if (event.key === 'Escape') closeTerminalContextMenu();
 }
 
-function positionTerminalContextMenu(menu, x, y) {
+function closeFileContextMenu() {
+  if (!fileContextMenu) return;
+  fileContextMenu.remove();
+  fileContextMenu = null;
+  document.removeEventListener('pointerdown', fileContextMenuPointerdown, true);
+  document.removeEventListener('keydown', fileContextMenuKeydown, true);
+  window.removeEventListener('blur', closeFileContextMenu);
+}
+
+function fileContextMenuPointerdown(event) {
+  if (fileContextMenu?.contains(event.target)) return;
+  closeFileContextMenu();
+}
+
+function fileContextMenuKeydown(event) {
+  if (event.key === 'Escape') closeFileContextMenu();
+}
+
+function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.setAttribute('role', 'menuitem');
+  button.textContent = label;
+  button.disabled = options.disabled === true;
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!button.disabled) handler();
+    closeMenu();
+  });
+  menu.appendChild(button);
+  return button;
+}
+
+function positionContextMenu(menu, x, y) {
   const rect = menu.getBoundingClientRect();
   const left = Math.min(Math.max(6, x), Math.max(6, window.innerWidth - rect.width - 6));
   const top = Math.min(Math.max(6, y), Math.max(6, window.innerHeight - rect.height - 6));
@@ -505,22 +572,12 @@ function showTerminalContextMenu(session, term, x, y) {
     ['Copy without indent', true],
   ];
   for (const [label, dedent] of items) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.setAttribute('role', 'menuitem');
-    button.textContent = label;
-    button.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      copyTerminalSelection(session, term, {dedent});
-      closeTerminalContextMenu();
-    });
-    menu.appendChild(button);
+    appendContextMenuButton(menu, label, () => copyTerminalSelection(session, term, {dedent}), closeTerminalContextMenu);
   }
   menu.addEventListener('pointerdown', event => event.stopPropagation());
   document.body.appendChild(menu);
   terminalContextMenu = menu;
-  positionTerminalContextMenu(menu, x, y);
+  positionContextMenu(menu, x, y);
   document.addEventListener('pointerdown', terminalContextMenuPointerdown, true);
   document.addEventListener('keydown', terminalContextMenuKeydown, true);
   window.addEventListener('blur', closeTerminalContextMenu);
@@ -940,6 +997,18 @@ function layoutWithItems(value, items, preferredSlot = null) {
     next[layoutTreeKey] = leafNode(slot);
     next[slot] = emptyWindowState();
   }
+  if (!preferredSlot
+    && activeItemForSide(slot, next) === fileExplorerItemId
+    && windowStack(slot, next).length === 1
+    && missing.some(isTmuxSession)) {
+    const sessionTabs = missing.filter(isTmuxSession);
+    const otherTabs = missing.filter(item => !isTmuxSession(item));
+    const newSlot = nextLayoutSlot(next);
+    next[newSlot] = windowStateWithTabs(sessionTabs, sessionTabs[0] || null);
+    next[slot] = windowStateWithTabs([...windowStack(slot, next), ...otherTabs], activeItemForSide(slot, next));
+    next[layoutTreeKey] = splitNode('row', leafNode(slot), leafNode(newSlot), fileExplorerSplitPercent);
+    return compactLayoutSlots(next);
+  }
   const tabs = [...windowStack(slot, next), ...missing];
   const active = activeItemForSide(slot, next) || tabs.find(isTmuxSession) || tabs[0] || null;
   next[slot] = windowStateWithTabs(tabs, active);
@@ -1027,9 +1096,27 @@ function isLayoutItem(item) {
   return layoutItems.includes(item);
 }
 
+function registerFileEditorLayoutItem(path) {
+  if (!path || !path.startsWith('/')) return null;
+  if (!openFiles.has(path)) {
+    openFiles.set(path, {
+      mtime: 0,
+      kind: 'loading',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+  }
+  syncFileLayoutItems();
+  return fileEditorItemFor(path);
+}
+
 function resolveLayoutItem(value) {
   if (value === 'info') return infoItemId;
+  if (value === 'files' || value === fileExplorerItemId) return fileExplorerItemId;
   const text = String(value || '');
+  if (isFileEditorItem(text)) return registerFileEditorLayoutItem(fileItemPath(text)) || text;
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
   if (Number.isInteger(ordinal) && ordinal > 0) return sessionForLabel(String(ordinal));
@@ -1222,7 +1309,7 @@ function sessionStateHtml(state) {
 
 function sessionTrayItems() {
   const inWindow = new Set(windowedItems());
-  return [infoItemId, ...visibleSessions]
+  return [infoItemId, ...openFileEditorItems(), ...visibleSessions]
     .filter(item => !inWindow.has(item))
     .sort((left, right) => itemSortNumber(left) - itemSortNumber(right) || itemLabel(left).localeCompare(itemLabel(right)));
 }
@@ -1692,46 +1779,7 @@ function renderSessionButtons() {
     }
   }
   sessionButtons.appendChild(createFileExplorerButton());
-  for (const path of openFiles.keys()) {
-    sessionButtons.appendChild(createFileTabButton(path));
-  }
   scheduleTabStripOverflowCheck(sessionButtons);
-}
-
-function createFileTabButton(path) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'session-button-wrap file-tab-wrap';
-  wrapper.dataset.filePath = path;
-  const isActive = path === activeFile;
-  const state = openFiles.get(path) || {};
-  const dirty = !!state.dirty;
-  const button = document.createElement('button');
-  button.className = `session-button file-tab ${isActive ? 'active' : ''} ${dirty ? 'dirty' : ''}`;
-  button.type = 'button';
-  button.title = path;
-  const dot = dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
-  button.innerHTML = `${dot}<span class="agent-icon file" aria-hidden="true">📄</span><span class="file-tab-name">${esc(basenameOf(path))}</span>`;
-  button.addEventListener('click', event => {
-    if (event.target.closest('.file-tab-close')) return;
-    event.preventDefault();
-    activeFile = path;
-    renderEditorForActive();
-    renderSessionButtons();
-  });
-  const closeBtn = document.createElement('button');
-  closeBtn.type = 'button';
-  closeBtn.className = 'file-tab-close';
-  closeBtn.title = dirty ? 'Discard changes and close' : 'Close';
-  closeBtn.setAttribute('aria-label', 'Close');
-  closeBtn.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (dirty && !window.confirm(`Discard unsaved changes to ${basenameOf(path)}?`)) return;
-    closeFileTab(path);
-  });
-  wrapper.appendChild(button);
-  wrapper.appendChild(closeBtn);
-  return wrapper;
 }
 
 function createFileExplorerButton() {
@@ -1741,7 +1789,8 @@ function createFileExplorerButton() {
   button.className = 'session-button add-session file';
   button.type = 'button';
   button.title = 'Open Files panel';
-  button.innerHTML = '<span class="add-plus">+</span><span class="agent-icon file" aria-hidden="true">📁</span><span>File</span>';
+  button.setAttribute('aria-label', 'Open Files panel');
+  button.innerHTML = '<span class="add-plus">+</span><span class="agent-icon file" aria-hidden="true">📁</span>';
   button.addEventListener('click', () => selectSession(fileExplorerItemId));
   wrapper.appendChild(button);
   return wrapper;
@@ -1795,17 +1844,111 @@ function renderTreeChildren(container, parentPath, entries, depth) {
     row.dataset.kind = entry.kind;
     row.style.paddingLeft = `${8 + depth * 14}px`;
     row.setAttribute('role', 'treeitem');
+    row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
+    row.draggable = entry.kind === 'file' || entry.kind === 'dir';
+    row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
+    row.classList.toggle('current-file', entry.kind === 'file' && fullPath === activeFile);
+    if (entry.kind === 'file' && fullPath === activeFile) row.setAttribute('aria-current', 'true');
     const icon = entry.kind === 'dir' ? '▸' : (entry.kind === 'file' ? '📄' : '·');
     row.innerHTML = `<span class="file-tree-icon">${icon}</span><span class="file-tree-name">${esc(entry.name)}</span>`;
     row.addEventListener('click', event => {
       event.stopPropagation();
-      onFileTreeRowClick(row, fullPath, entry);
+      if (event.detail > 1) return;
+      onFileTreeRowClick(row, fullPath, entry, event);
     });
+    row.addEventListener('dblclick', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      beginFileTreeRename(row, fullPath, entry);
+    });
+    row.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
+    });
+    row.addEventListener('dragstart', event => startFileTreeDrag(event, row, fullPath, entry));
     container.appendChild(row);
   }
 }
 
-async function onFileTreeRowClick(row, fullPath, entry) {
+function selectableFileTreeRows(container = document) {
+  return Array.from(container.querySelectorAll('.file-tree-row[data-path]'))
+    .filter(row => row.dataset.kind === 'file' || row.dataset.kind === 'dir');
+}
+
+function updateFileExplorerCurrentFileHighlight() {
+  document.querySelectorAll('.file-tree-row').forEach(row => {
+    const selected = fileExplorerSelectedPaths.has(row.dataset.path);
+    const currentFile = row.dataset.kind === 'file' && row.dataset.path === activeFile;
+    row.classList.toggle('selected', selected);
+    row.classList.toggle('current-file', currentFile);
+    row.setAttribute('aria-selected', selected ? 'true' : 'false');
+    if (currentFile) row.setAttribute('aria-current', 'true');
+    else row.removeAttribute('aria-current');
+  });
+}
+
+function selectFileTreePath(fullPath, options = {}) {
+  if (options.clear !== false) fileExplorerSelectedPaths.clear();
+  if (options.toggle) {
+    if (fileExplorerSelectedPaths.has(fullPath)) fileExplorerSelectedPaths.delete(fullPath);
+    else fileExplorerSelectedPaths.add(fullPath);
+  } else {
+    fileExplorerSelectedPaths.add(fullPath);
+  }
+  if (options.anchor !== false) fileExplorerSelectionAnchor = fullPath;
+  updateFileExplorerCurrentFileHighlight();
+}
+
+function selectFileTreeRange(row, fullPath, options = {}) {
+  const rows = selectableFileTreeRows(row.closest('[role="tree"]') || document);
+  const targetIndex = rows.findIndex(item => item.dataset.path === fullPath);
+  const anchorIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionAnchor);
+  if (options.clear !== false) fileExplorerSelectedPaths.clear();
+  if (targetIndex < 0) {
+    selectFileTreePath(fullPath, {clear: false});
+    return;
+  }
+  if (anchorIndex < 0) {
+    fileExplorerSelectedPaths.add(fullPath);
+    fileExplorerSelectionAnchor = fullPath;
+    updateFileExplorerCurrentFileHighlight();
+    return;
+  }
+  const start = Math.min(anchorIndex, targetIndex);
+  const end = Math.max(anchorIndex, targetIndex);
+  for (const selectedRow of rows.slice(start, end + 1)) {
+    fileExplorerSelectedPaths.add(selectedRow.dataset.path);
+  }
+  updateFileExplorerCurrentFileHighlight();
+}
+
+function updateFileTreeSelectionFromClick(row, fullPath, event) {
+  if (event.shiftKey) {
+    selectFileTreeRange(row, fullPath, {clear: !(event.metaKey || event.ctrlKey)});
+    return true;
+  }
+  if (event.metaKey || event.ctrlKey) {
+    selectFileTreePath(fullPath, {clear: false, toggle: true});
+    return true;
+  }
+  selectFileTreePath(fullPath);
+  return false;
+}
+
+function fileTreeActionPaths(fullPath) {
+  if (fileExplorerSelectedPaths.has(fullPath)) return Array.from(fileExplorerSelectedPaths);
+  return [fullPath];
+}
+
+function compactNestedPaths(paths) {
+  const sorted = Array.from(new Set(paths)).sort((left, right) => left.localeCompare(right));
+  return sorted.filter((path, index) => !sorted.some((other, otherIndex) => otherIndex !== index && path.startsWith(`${other}/`)));
+}
+
+async function onFileTreeRowClick(row, fullPath, entry, event) {
+  const selectionOnly = updateFileTreeSelectionFromClick(row, fullPath, event);
+  if (selectionOnly) return;
   if (entry.kind === 'dir') {
     if (fileExplorerExpanded.has(fullPath)) {
       collapseDirectoryRow(row, fullPath);
@@ -1815,10 +1958,216 @@ async function onFileTreeRowClick(row, fullPath, entry) {
     return;
   }
   if (entry.kind === 'file') {
-    document.querySelectorAll('.file-tree-row.selected').forEach(el => el.classList.remove('selected'));
-    row.classList.add('selected');
-    await openFileInEditor(fullPath, entry.name);
+    activeFile = fullPath;
+    updateFileExplorerCurrentFileHighlight();
+    await openFileInEditor(fullPath, entry);
   }
+}
+
+function startFileTreeDrag(event, row, fullPath, entry) {
+  if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
+  const paths = fileTreeActionPaths(fullPath);
+  const payload = JSON.stringify({path: fullPath, paths, kind: entry.kind, name: entry.name});
+  event.dataTransfer.effectAllowed = 'copy';
+  event.dataTransfer.setData('application/x-yolomux-file', payload);
+  event.dataTransfer.setData('text/plain', paths.join('\n'));
+  startFileDragPreview(event, paths, entry);
+}
+
+async function fetchFilePathInfo(path) {
+  const response = await apiFetch(`/api/fs/info?path=${encodeURIComponent(path)}`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
+  return payload;
+}
+
+async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
+  closeFileContextMenu();
+  if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
+  const selectedPaths = fileTreeActionPaths(fullPath);
+  const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
+    console.warn('fs info failed', path, error);
+    return null;
+  })));
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu file-context-menu';
+  menu.setAttribute('role', 'menu');
+  const relativePaths = infos.map(info => info?.relative_path || '').filter(Boolean);
+  const multiple = selectedPaths.length > 1;
+  appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'full'), closeFileContextMenu);
+  appendContextMenuButton(menu, multiple ? 'Copy raw paths' : 'Copy raw path', () => copyFilePath(selectedPaths.join('\n'), 'full', {raw: true}), closeFileContextMenu);
+  appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: relativePaths.length !== selectedPaths.length});
+  appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: multiple});
+  appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu);
+  menu.addEventListener('pointerdown', event => event.stopPropagation());
+  document.body.appendChild(menu);
+  fileContextMenu = menu;
+  positionContextMenu(menu, x, y);
+  document.addEventListener('pointerdown', fileContextMenuPointerdown, true);
+  document.addEventListener('keydown', fileContextMenuKeydown, true);
+  window.addEventListener('blur', closeFileContextMenu);
+}
+
+function shellQuotePathText(pathText) {
+  return String(pathText || '')
+    .split('\n')
+    .filter(path => path.length > 0)
+    .map(shellQuote)
+    .join('\n');
+}
+
+async function copyFilePath(path, label, options = {}) {
+  const text = options.raw === true ? path : shellQuotePathText(path);
+  try {
+    await copyTextToClipboard(text);
+    const prefix = options.raw === true ? 'raw ' : '';
+    statusEl.textContent = label === 'relative' ? `copied ${prefix}relative path` : `copied ${prefix}full path`;
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`;
+  }
+}
+
+function copyCurrentFileExplorerPath() {
+  copyFilePath(fileExplorerRoot || homePath || '/', 'full');
+}
+
+async function deleteFileTreePath(fullPath, entry, paths = null) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot delete files</span>';
+    return;
+  }
+  const deletePaths = compactNestedPaths(paths || fileTreeActionPaths(fullPath));
+  const kind = entry.kind === 'dir' ? 'directory and all contents' : 'file';
+  const confirmText = deletePaths.length === 1
+    ? `Delete ${kind}?\n${deletePaths[0]}`
+    : `Delete ${deletePaths.length} selected items?\n${deletePaths.join('\n')}`;
+  if (!window.confirm(confirmText)) return;
+  try {
+    for (const path of deletePaths) {
+      const response = await apiFetch('/api/fs/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
+    }
+    for (const path of Array.from(openFiles.keys())) {
+      if (deletePaths.some(deletedPath => path === deletedPath || path.startsWith(`${deletedPath}/`))) {
+        removeOpenFile(path, {confirmDirty: false, render: false});
+      }
+    }
+    for (const path of deletePaths) fileExplorerSelectedPaths.delete(path);
+    if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
+    statusEl.textContent = deletePaths.length === 1 ? `deleted ${basenameOf(deletePaths[0])}` : `deleted ${deletePaths.length} items`;
+    await refreshFileExplorerTrees();
+    renderSessionButtons();
+    renderWindowTabStrips();
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">delete failed: ${esc(error)}</span>`;
+  }
+}
+
+function beginFileTreeRename(row, fullPath, entry) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot rename files</span>';
+    return;
+  }
+  closeFileContextMenu();
+  const targetRow = row || document.querySelector(`.file-tree-row[data-path="${cssEscape(fullPath)}"]`);
+  const nameNode = targetRow?.querySelector('.file-tree-name');
+  if (!targetRow || !nameNode) return;
+  fileTreeRenamePath = fullPath;
+  selectFileTreePath(fullPath);
+  targetRow.classList.add('renaming');
+  targetRow.draggable = false;
+  const currentName = entry?.name || basenameOf(fullPath);
+  const input = document.createElement('input');
+  input.className = 'file-tree-rename-input';
+  input.value = currentName;
+  input.setAttribute('aria-label', `Rename ${currentName}`);
+  nameNode.replaceChildren(input);
+  let finished = false;
+  let commitInFlight = false;
+  const finish = async commit => {
+    if (finished || commitInFlight) return;
+    if (!commit) {
+      finished = true;
+      fileTreeRenamePath = null;
+      targetRow.classList.remove('renaming');
+      targetRow.draggable = entry.kind === 'file' || entry.kind === 'dir';
+      nameNode.textContent = currentName;
+      return;
+    }
+    const nextName = input.value.trim();
+    if (!nextName || nextName === currentName) {
+      finish(false);
+      return;
+    }
+    commitInFlight = true;
+    const renamed = await renameFileTreePath(fullPath, entry, nextName);
+    if (renamed) finished = true;
+    else {
+      commitInFlight = false;
+      input.focus();
+    }
+  };
+  input.addEventListener('click', event => event.stopPropagation());
+  input.addEventListener('dblclick', event => event.stopPropagation());
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+  setTimeout(() => {
+    input.focus();
+    const dot = currentName.lastIndexOf('.');
+    const selectEnd = dot > 0 ? dot : currentName.length;
+    input.setSelectionRange(0, selectEnd);
+  }, 0);
+}
+
+async function renameFileTreePath(fullPath, entry, newName) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot rename files</span>';
+    return false;
+  }
+  const currentName = entry?.name || basenameOf(fullPath);
+  const trimmed = newName.trim();
+  if (!trimmed || trimmed === currentName) return false;
+  try {
+    const response = await apiFetch('/api/fs/rename', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: fullPath, new_name: trimmed}),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
+    const newPath = payload.path;
+    if (fileExplorerSelectedPaths.delete(fullPath)) fileExplorerSelectedPaths.add(newPath);
+    if (fileExplorerSelectionAnchor === fullPath) fileExplorerSelectionAnchor = newPath;
+    if (fileTreeRenamePath === fullPath) fileTreeRenamePath = null;
+    for (const path of Array.from(openFiles.keys())) {
+      if (path === fullPath) renameOpenFilePath(path, newPath);
+      else if (path.startsWith(`${fullPath}/`)) renameOpenFilePath(path, `${newPath}${path.slice(fullPath.length)}`);
+    }
+    statusEl.textContent = `renamed ${currentName} to ${trimmed}`;
+    await refreshFileExplorerTrees();
+    return true;
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">rename failed: ${esc(error)}</span>`;
+    return false;
+  }
+}
+
+async function refreshFileExplorerTrees() {
+  if (fileExplorerRoot) await openFileExplorerAt(fileExplorerRoot);
+  document.querySelectorAll('.panel.file-explorer-panel').forEach(panel => refreshFileExplorerPanelTree(panel));
 }
 
 function fileExtensionOf(name) {
@@ -1832,44 +2181,185 @@ function basenameOf(path) {
   return idx === -1 ? path : path.slice(idx + 1) || '/';
 }
 
-async function openFileInEditor(fullPath, name) {
+function dirnameOf(path) {
+  if (!path || path === '/') return '/';
+  const idx = path.lastIndexOf('/');
+  if (idx <= 0) return '/';
+  return path.slice(0, idx);
+}
+
+async function fetchFileEntry(path) {
+  const entries = await fetchDirectory(dirnameOf(path));
+  if (!Array.isArray(entries)) return null;
+  const name = basenameOf(path);
+  return entries.find(entry => entry.name === name) || null;
+}
+
+function syncFileLayoutItems() {
+  layoutItems = computeLayoutItems();
+}
+
+function showFileOpenError(path, message) {
+  showToast('File open failed', `${path}\n${message}`, {
+    container: displayToastContainer(fileExplorerItemId),
+    className: 'attention-alert toast',
+  });
+}
+
+function formatFileSize(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let amount = value;
+  let index = 0;
+  while (amount >= 1024 && index < units.length - 1) {
+    amount /= 1024;
+    index += 1;
+  }
+  const decimals = amount >= 10 || index === 0 ? 0 : 1;
+  return `${amount.toFixed(decimals)} ${units[index]}`;
+}
+
+function tooLargeFileState(size = null, message = '') {
+  return {
+    mtime: 0,
+    kind: 'too-large',
+    original: '',
+    content: '',
+    dirty: false,
+    size,
+    maxBytes: MAX_FILE_PREVIEW_BYTES,
+    error: message,
+  };
+}
+
+function fileErrorState(message) {
+  return {
+    mtime: 0,
+    kind: 'error',
+    original: '',
+    content: '',
+    dirty: false,
+    error: String(message || 'failed to load file'),
+  };
+}
+
+function openFilesSetAndShow(path, state) {
+  openFiles.set(path, state);
+  activeFile = path;
+  syncFileLayoutItems();
+  updateFileExplorerCurrentFileHighlight();
+  return openFileEditorWindow(path);
+}
+
+async function openFileInEditor(fullPath, entryOrName) {
+  const entry = typeof entryOrName === 'object' && entryOrName ? entryOrName : null;
+  const name = entry?.name || String(entryOrName || basenameOf(fullPath));
   const ext = fileExtensionOf(name);
   const kind = IMAGE_EXTENSIONS.has(ext) ? 'image' : 'text';
   if (openFiles.has(fullPath)) {
     activeFile = fullPath;
-    renderEditorForActive();
-    renderSessionButtons();
+    syncFileLayoutItems();
+    updateFileExplorerCurrentFileHighlight();
+    await openFileEditorWindow(fullPath);
+    return;
+  }
+  if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
+    await openFilesSetAndShow(fullPath, tooLargeFileState(Number(entry.size)));
     return;
   }
   if (kind === 'image') {
-    openFiles.set(fullPath, { mtime: 0, kind: 'image', original: '', content: '', dirty: false });
-    activeFile = fullPath;
-    renderEditorForActive();
-    renderSessionButtons();
+    await openFilesSetAndShow(fullPath, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
     return;
   }
   try {
     const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
-      setEditorStatus(`error: ${payload.error || response.status}`, 'error');
-      ensureEditorVisible();
+      const message = payload.error || response.status;
+      const state = response.status === 413 ? tooLargeFileState(entry?.size ?? null, String(message)) : fileErrorState(message);
+      await openFilesSetAndShow(fullPath, state);
       return;
     }
     const payload = await response.json();
-    openFiles.set(fullPath, {
+    await openFilesSetAndShow(fullPath, {
       mtime: payload.mtime,
       kind: 'text',
       original: payload.content,
       content: payload.content,
       dirty: false,
     });
-    activeFile = fullPath;
-    renderEditorForActive();
-    renderSessionButtons();
   } catch (err) {
-    setEditorStatus(`error: ${err}`, 'error');
+    showFileOpenError(fullPath, err);
   }
+}
+
+function slotForNewFileEditorTab() {
+  const focusedSlot = isFileEditorItem(focusedPanelItem) ? slotForSession(focusedPanelItem) : null;
+  if (focusedSlot) return focusedSlot;
+  return layoutSlotKeys().find(slot => windowStack(slot).some(isFileEditorItem)) || null;
+}
+
+function layoutColumnNode(slot) {
+  return grid?.querySelector(`.layout-column[data-slot="${cssEscape(slot)}"]`) || null;
+}
+
+function largestWindowSlot(exclude = new Set()) {
+  let best = null;
+  for (const slot of layoutSlotKeys()) {
+    if (exclude.has(slot) || !windowStack(slot).length) continue;
+    const rect = layoutColumnNode(slot)?.getBoundingClientRect();
+    const area = rect ? Math.max(0, rect.width) * Math.max(0, rect.height) : 0;
+    if (!best || area > best.area) best = {slot, area};
+  }
+  return best?.slot || null;
+}
+
+function largestWindowSlotForFileEditor() {
+  const filesSlot = slotForSession(fileExplorerItemId);
+  const filesRect = filesSlot ? layoutColumnNode(filesSlot)?.getBoundingClientRect() : null;
+  let fallback = null;
+  let best = null;
+  for (const slot of layoutSlotKeys()) {
+    if (slot === filesSlot || !windowStack(slot).length) continue;
+    const rect = layoutColumnNode(slot)?.getBoundingClientRect();
+    const area = rect ? Math.max(0, rect.width) * Math.max(0, rect.height) : 0;
+    const candidate = {slot, area};
+    if (!fallback || area > fallback.area) fallback = candidate;
+    if (filesRect && rect && rect.left < filesRect.right - 1) continue;
+    if (!best || area > best.area) best = candidate;
+  }
+  return (best || fallback)?.slot || null;
+}
+
+async function openFileEditorWindow(path) {
+  const item = fileEditorItemFor(path);
+  syncFileLayoutItems();
+  renderSessionButtons();
+  const existingSlot = slotForSession(item);
+  if (existingSlot) {
+    activateWindowSession(existingSlot, item);
+    return;
+  }
+  const editorSlot = slotForNewFileEditorTab();
+  if (editorSlot) {
+    await moveSessionToSlot(item, editorSlot, null, windowStack(editorSlot).length);
+    return;
+  }
+  const largestSlot = largestWindowSlotForFileEditor();
+  if (largestSlot) {
+    await moveSessionToSlot(item, largestSlot, null, windowStack(largestSlot).length);
+    return;
+  }
+  const filesSlot = slotForSession(fileExplorerItemId);
+  const targetSlot = layoutSlotKeys().find(slot => slot !== filesSlot) || filesSlot;
+  if (targetSlot) {
+    const zone = targetSlot === filesSlot ? 'right' : 'left';
+    const pct = targetSlot === filesSlot ? fileExplorerSplitPercent : fileEditorSplitPercent;
+    await splitSessionAtSlot(item, targetSlot, zone, null, pct);
+    return;
+  }
+  await moveSessionToSlot(item, slotForNewSession(), null);
 }
 
 function ensureEditorVisible() {
@@ -1889,6 +2379,7 @@ function hideEditor() {
   const img = fileEditor.querySelector('.file-editor-image');
   if (img) img.remove();
   setEditorStatus('');
+  updateFileExplorerCurrentFileHighlight();
 }
 
 function setEditorStatus(msg, level) {
@@ -1897,19 +2388,79 @@ function setEditorStatus(msg, level) {
   fileEditorStatus.dataset.level = level || '';
 }
 
-function closeFileTab(path) {
+function removeOpenFile(path, options = {}) {
+  const confirmDirty = options.confirmDirty !== false;
+  const shouldRender = options.render !== false;
+  if (!path || !openFiles.has(path)) return;
+  const state = openFiles.get(path);
+  if (confirmDirty && state?.dirty && !window.confirm(`Discard unsaved changes to ${basenameOf(path)}?`)) return false;
+  const item = fileEditorItemFor(path);
+  const nextSlots = layoutWithoutItem(item);
+  const wasInLayout = itemInLayout(item);
+  const panel = panelNodes.get(item);
   openFiles.delete(path);
   fileEditorPreviewMode.delete(path);
+  fileEditorImageMode.delete(path);
+  syncFileLayoutItems();
+  if (panel) {
+    panel.remove();
+    panelNodes.delete(item);
+  }
   if (activeFile === path) {
     const remaining = Array.from(openFiles.keys());
     activeFile = remaining[remaining.length - 1] || null;
   }
-  if (!activeFile) {
-    hideEditor();
-  } else {
-    renderEditorForActive();
+  updateFileExplorerCurrentFileHighlight();
+  if (!activeFile) hideEditor();
+  if (wasInLayout) applyLayoutSlots(nextSlots);
+  if (shouldRender) renderSessionButtons();
+  return true;
+}
+
+function closeFileTab(path) {
+  return removeOpenFile(path);
+}
+
+function layoutWithReplacedItem(oldItem, newItem) {
+  const next = emptyLayoutSlots();
+  next[layoutTreeKey] = layoutSlots[layoutTreeKey];
+  for (const side of layoutSlotKeys()) {
+    const tabs = windowStack(side).map(item => item === oldItem ? newItem : item);
+    const active = activeItemForSide(side) === oldItem ? newItem : activeItemForSide(side);
+    next[side] = windowStateWithTabs(tabs, active);
   }
-  renderSessionButtons();
+  return compactLayoutSlots(next);
+}
+
+function renameOpenFilePath(oldPath, newPath) {
+  if (!oldPath || !newPath || oldPath === newPath || !openFiles.has(oldPath)) return;
+  const oldItem = fileEditorItemFor(oldPath);
+  const newItem = fileEditorItemFor(newPath);
+  const state = openFiles.get(oldPath);
+  const wasInLayout = itemInLayout(oldItem);
+  const panel = panelNodes.get(oldItem);
+  openFiles.delete(oldPath);
+  openFiles.set(newPath, state);
+  if (fileEditorPreviewMode.has(oldPath)) {
+    fileEditorPreviewMode.set(newPath, fileEditorPreviewMode.get(oldPath));
+    fileEditorPreviewMode.delete(oldPath);
+  }
+  if (fileEditorImageMode.has(oldPath)) {
+    fileEditorImageMode.set(newPath, fileEditorImageMode.get(oldPath));
+    fileEditorImageMode.delete(oldPath);
+  }
+  if (panel) {
+    panel.remove();
+    panelNodes.delete(oldItem);
+  }
+  if (activeFile === oldPath) activeFile = newPath;
+  syncFileLayoutItems();
+  if (wasInLayout) applyLayoutSlots(layoutWithReplacedItem(oldItem, newItem), {focusSession: newItem});
+  else {
+    renderSessionButtons();
+    renderWindowTabStrips();
+    updateFileExplorerCurrentFileHighlight();
+  }
 }
 
 function renderEditorForActive() {
@@ -2058,6 +2609,7 @@ function collapseDirectoryRow(row, fullPath) {
 }
 
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
+if (fileExplorerPathCopy) fileExplorerPathCopy.addEventListener('click', copyCurrentFileExplorerPath);
 if (fileExplorerHiddenToggle) {
   fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
   fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
@@ -2236,7 +2788,8 @@ function updateSessionButtonStates() {
 function createTopSessionButton(item) {
   const isInfo = isInfoItem(item);
   const isFiles = isFileExplorerItem(item);
-  const isVirtual = isInfo || isFiles;
+  const isEditor = isFileEditorItem(item);
+  const isVirtual = isInfo || isFiles || isEditor;
   const info = transcriptMeta.sessions?.[item];
   const autoPayload = autoApproveStates.get(item);
   const auto = autoApproveEnabledHere(autoPayload);
@@ -2244,7 +2797,7 @@ function createTopSessionButton(item) {
   const state = isVirtual ? null : sessionState(item, info);
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
   const wrapper = document.createElement('div');
-  const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : '';
+  const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : isEditor ? 'file-editor-item' : '';
   wrapper.className = `session-button-wrap ${virtualClass}`;
   wrapper.dataset.session = item;
   const button = document.createElement('button');
@@ -2254,6 +2807,7 @@ function createTopSessionButton(item) {
   applySessionStateClasses(button, state);
   if (isInfo) button.innerHTML = infoButtonHtml();
   else if (isFiles) button.innerHTML = fileExplorerButtonHtml();
+  else if (isEditor) button.innerHTML = fileEditorButtonHtml(item);
   else button.innerHTML = sessionButtonHtml(item, info, state, auto);
   button.removeAttribute('title');
   button.addEventListener('click', async event => {
@@ -2270,7 +2824,11 @@ function createTopSessionButton(item) {
   button.addEventListener('dragstart', event => startSessionDrag(event, item, null));
   button.addEventListener('dragend', endSessionDrag);
   wrapper.appendChild(button);
-  if (!isVirtual) {
+  if (isEditor) {
+    wrapper.insertAdjacentHTML('beforeend', filePopoverHtml(item));
+    bindFilePopoverActions(wrapper);
+    bindTopSessionPopover(wrapper);
+  } else if (!isVirtual) {
     wrapper.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindTopSessionPopover(wrapper);
   }
@@ -2279,6 +2837,23 @@ function createTopSessionButton(item) {
 
 function fileExplorerButtonHtml() {
   return '<span class="session-button-text"><span class="agent-icon file" aria-hidden="true">📁</span><span class="session-button-dir">Files</span></span>';
+}
+
+function fileEditorButtonHtml(item) {
+  const path = fileItemPath(item);
+  const state = openFiles.get(path) || {};
+  const dirty = state.dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
+  return `<span class="session-button-text">${dirty}<span class="session-button-dir">${esc(basenameOf(path))}</span></span>`;
+}
+
+function bindFilePopoverActions(container) {
+  container.querySelectorAll('[data-copy-popover-path]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      copyFilePath(button.dataset.copyPopoverPath || '', 'full');
+    });
+  });
 }
 
 function createAddSessionButton(agent) {
@@ -2673,6 +3248,31 @@ function pathBasename(path) {
   return parts[parts.length - 1] || '';
 }
 
+function filePopoverHtml(item) {
+  const path = fileItemPath(item);
+  const state = openFiles.get(path) || {};
+  const kind = state.kind === 'image' ? 'image viewer' : state.kind === 'text' ? 'file editor' : state.kind || 'file';
+  const status = state.dirty ? 'modified' : state.loading ? 'loading' : state.error ? String(state.error) : kind;
+  const rows = [
+    popoverRow('path', filePopoverPathHtml(path)),
+    popoverPairRow('type', esc(kind), 'status', esc(status)),
+  ];
+  if (Number.isFinite(state.size)) rows.push(popoverRow('size', formatFileSize(state.size)));
+  return `<div class="session-popover" role="tooltip">
+    <div class="popover-head">
+      <div>
+        <div class="popover-title">${esc(basenameOf(path))}</div>
+        <div class="popover-subtitle">${esc(path)}</div>
+      </div>
+    </div>
+    ${rows.join('')}
+  </div>`;
+}
+
+function filePopoverPathHtml(path) {
+  return `<span class="popover-copy-value">${esc(path)}</span><button type="button" class="path-copy-button popover-copy-button" data-copy-popover-path="${esc(path)}" title="Copy path" aria-label="Copy path"></button>`;
+}
+
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
   const project = info?.project || {};
   const git = project.git;
@@ -2838,9 +3438,7 @@ function otherBranchesHtml(git) {
 }
 
 function dragPayload(event) {
-  const raw = event.dataTransfer?.getData('application/x-yolomux-session')
-    || event.dataTransfer?.getData('text/plain')
-    || '';
+  const raw = event.dataTransfer?.getData('application/x-yolomux-session') || '';
   if (!raw && dragSession) return {session: dragSession, sourceSlot: dragSourceSlot};
   if (!raw) return null;
   try {
@@ -2849,6 +3447,48 @@ function dragPayload(event) {
   } catch (_) {
     return isLayoutItem(raw) ? {session: raw, sourceSlot: null} : null;
   }
+}
+
+function fileDragPayload(event) {
+  const raw = event.dataTransfer?.getData('application/x-yolomux-file') || '';
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed?.path && !Array.isArray(parsed?.paths)) return null;
+    const paths = Array.isArray(parsed.paths) ? parsed.paths.filter(Boolean) : [parsed.path].filter(Boolean);
+    return paths.length ? {...parsed, path: parsed.path || paths[0], paths} : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function hasYolomuxFileDrag(event) {
+  return Array.from(event.dataTransfer?.types || []).includes('application/x-yolomux-file');
+}
+
+function terminalCurrentPath(session) {
+  const info = transcriptMeta.sessions?.[session];
+  return terminalDisplayPane(info)?.current_path || info?.selected_pane?.current_path || '';
+}
+
+function pathRelativeToDirectory(path, directory) {
+  const fullPath = String(path || '');
+  const rawBase = String(directory || '');
+  const base = rawBase === '/' ? '/' : rawBase.replace(/\/+$/, '');
+  if (!fullPath || !base || !fullPath.startsWith('/')) return fullPath;
+  if (fullPath === base) return '.';
+  if (base === '/') return fullPath.slice(1);
+  if (!fullPath.startsWith(`${base}/`)) return fullPath;
+  return fullPath.slice(base.length + 1);
+}
+
+function terminalFileReference(session, path) {
+  return pathRelativeToDirectory(path, terminalCurrentPath(session));
+}
+
+function terminalFileReferences(session, payload) {
+  const paths = Array.isArray(payload?.paths) ? payload.paths : [payload?.path].filter(Boolean);
+  return paths.map(path => terminalFileReference(session, path));
 }
 
 function transparentNativeDragImage() {
@@ -2906,6 +3546,48 @@ function startCustomDragPreview(event) {
   document.addEventListener?.('drag', moveCustomDragPreview, true);
   document.addEventListener?.('drop', stopCustomDragPreview, true);
   event.dataTransfer?.setDragImage?.(transparentNativeDragImage(), 0, 0);
+}
+
+function startFileDragPreview(event, paths, entry) {
+  stopCustomDragPreview();
+  const normalizedPaths = Array.from(new Set((paths || []).filter(Boolean)));
+  const firstPath = normalizedPaths[0] || '';
+  const preview = document.createElement('div');
+  preview.className = 'file-drag-image drag-image';
+  const title = normalizedPaths.length === 1 ? basenameOf(firstPath) : `${normalizedPaths.length} items`;
+  const pathRows = normalizedPaths.slice(0, 4)
+    .map(path => `<div class="file-drag-path">${esc(path)}</div>`)
+    .join('');
+  const more = normalizedPaths.length > 4 ? `<div class="file-drag-more">+ ${normalizedPaths.length - 4} more</div>` : '';
+  preview.innerHTML = `
+    <div class="file-drag-main">
+      ${fileDragPreviewMedia(firstPath, entry)}
+      <div class="file-drag-copy">
+        <div class="file-drag-title">${esc(title)}</div>
+        ${pathRows}${more}
+      </div>
+    </div>`;
+  preview.style.position = 'fixed';
+  preview.style.pointerEvents = 'none';
+  preview.style.zIndex = '99999';
+  document.body.appendChild(preview);
+  customDragPreview = preview;
+  customDragPreviewOffset = {x: -14, y: -14};
+  moveCustomDragPreview(event);
+  document.addEventListener?.('dragover', moveCustomDragPreview, true);
+  document.addEventListener?.('drag', moveCustomDragPreview, true);
+  document.addEventListener?.('drop', stopCustomDragPreview, true);
+  preview.getBoundingClientRect();
+  event.dataTransfer?.setDragImage?.(preview, 18, 18);
+}
+
+function fileDragPreviewMedia(path, entry) {
+  const kind = entry?.kind || 'file';
+  if (kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(path))) {
+    return `<img class="file-drag-thumb" src="/api/fs/raw?path=${encodeURIComponent(path)}" alt="">`;
+  }
+  const icon = kind === 'dir' ? '▸' : '📄';
+  return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
 }
 
 function startSessionDrag(event, session, sourceSlot = null) {
@@ -2974,6 +3656,22 @@ function slotForNewSession() {
   return 'left';
 }
 
+function filesOnlySlotForSession(session) {
+  const filesSlot = slotForSession(fileExplorerItemId);
+  if (!filesSlot) return null;
+  const stack = windowStack(filesSlot).filter(item => item !== session);
+  return stack.length === 1 && stack[0] === fileExplorerItemId ? filesSlot : null;
+}
+
+async function placeTmuxSession(session) {
+  const filesSlot = filesOnlySlotForSession(session);
+  if (filesSlot) {
+    await splitSessionAtSlot(session, filesSlot, 'right', null, fileExplorerSplitPercent);
+    return;
+  }
+  await moveSessionToSlot(session, slotForNewSession(), null);
+}
+
 async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0) {
   if (!isLayoutItem(session) || !targetSlot) return;
   if (isTmuxSession(session)) {
@@ -2998,7 +3696,18 @@ async function dropSessionWithIntent(session, intent, sourceSlot = null) {
   await splitSessionAtSlot(session, intent.targetSlot, intent.zone, sourceSlot);
 }
 
-async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null) {
+function splitPercentForNewItem(session, zone, pct = null) {
+  if (Number.isFinite(Number(pct))) return pct;
+  if (isFileExplorerItem(session) && (zone === 'left' || zone === 'right')) {
+    return zone === 'left' ? fileExplorerSplitPercent : 100 - fileExplorerSplitPercent;
+  }
+  if (isFileEditorItem(session) && (zone === 'left' || zone === 'right')) {
+    return zone === 'left' ? fileEditorSplitPercent : 100 - fileEditorSplitPercent;
+  }
+  return defaultSplitPercent;
+}
+
+async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, pct = null) {
   if (!isLayoutItem(session) || !targetSlot || !['top', 'bottom', 'left', 'right'].includes(zone)) return;
   if (isTmuxSession(session)) {
     const ensured = await ensureSession(session);
@@ -3015,9 +3724,10 @@ async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null) 
   const direction = zone === 'left' || zone === 'right' ? 'row' : 'column';
   const existingNode = leafNode(targetSlot);
   const newNode = leafNode(newSlot);
+  const splitPct = splitPercentForNewItem(session, zone, pct);
   const replacement = zone === 'right' || zone === 'bottom'
-    ? splitNode(direction, existingNode, newNode)
-    : splitNode(direction, newNode, existingNode);
+    ? splitNode(direction, existingNode, newNode, splitPct)
+    : splitNode(direction, newNode, existingNode, splitPct);
   next[layoutTreeKey] = replaceLayoutLeaf(next[layoutTreeKey], targetSlot, replacement);
   applyLayoutSlots(next, {focusSession: session});
 }
@@ -3031,6 +3741,10 @@ function replaceLayoutLeaf(node, slot, replacement) {
 
 function activateWindowSession(side, session) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  if (isFileEditorItem(session)) {
+    activeFile = fileItemPath(session);
+    updateFileExplorerCurrentFileHighlight();
+  }
   if (activeItemForSide(side) === session) {
     focusPanel(session);
     return;
@@ -3043,23 +3757,35 @@ function activateWindowSession(side, session) {
 }
 
 async function selectSession(session) {
+  if (isFileEditorItem(session)) {
+    activeFile = fileItemPath(session);
+    updateFileExplorerCurrentFileHighlight();
+  }
   if (activeSessions.includes(session)) {
     focusPanel(session);
     return;
   }
   const windowSlot = slotForSession(session);
+  if (isTmuxSession(session) && windowSlot && filesOnlySlotForSession(session)) {
+    await placeTmuxSession(session);
+    return;
+  }
   if (windowSlot) {
     activateWindowSession(windowSlot, session);
     return;
   }
   // The Files panel defaults to a brand-new leftmost slot, splitting off
-  // any existing slot rather than sharing tabs with a terminal.
+  // the largest existing slot rather than sharing tabs with a terminal.
   if (isFileExplorerItem(session)) {
-    const slots = layoutSlotKeys();
-    if (slots.length) {
-      await splitSessionAtSlot(session, slots[0], 'left', null);
+    const targetSlot = largestWindowSlot(new Set([slotForSession(fileExplorerItemId)].filter(Boolean)));
+    if (targetSlot) {
+      await splitSessionAtSlot(session, targetSlot, 'left', null, fileExplorerSplitPercent);
       return;
     }
+  }
+  if (isTmuxSession(session)) {
+    await placeTmuxSession(session);
+    return;
   }
   await moveSessionToSlot(session, slotForNewSession(), null);
 }
@@ -3390,7 +4116,7 @@ async function createNextSession(agent) {
     updateSessionList(payload.sessions || []);
     renderSessionButtons();
     renderPanels(previousActive);
-    await moveSessionToSlot(payload.session, slotForNewSession(), null);
+    await placeTmuxSession(payload.session);
     await ensureTerminalRunning(payload.session);
     refreshTranscripts();
     renderAutoApproveButtons();
@@ -3818,17 +4544,41 @@ function pruneSmallLayoutSlots() {
   });
 }
 
+function minWidthForLayoutSlot(slot) {
+  const item = activeItemForSide(slot);
+  if (isFileExplorerItem(item)) return 260;
+  if (isFileEditorItem(item)) return 320;
+  return minSplitPaneWidthPx;
+}
+
+function prunePriorityForLayoutSlot(slot) {
+  const item = activeItemForSide(slot);
+  if (isFileExplorerItem(item) || isInfoItem(item)) return 0;
+  if (isFileEditorItem(item)) return 1;
+  return 2;
+}
+
 function smallLayoutSlotCandidate() {
   let candidate = null;
+  let virtualCandidate = null;
   for (const column of grid.querySelectorAll('.layout-column[data-slot]')) {
     const slot = column.dataset.slot;
     if (!slot || !windowStack(slot).length) continue;
     const rect = column.getBoundingClientRect();
-    const tooSmall = rect.width < minSplitPaneWidthPx || rect.height < minSplitPaneHeightPx;
-    if (!tooSmall) continue;
     const area = Math.max(0, rect.width) * Math.max(0, rect.height);
-    if (!candidate || area < candidate.area) candidate = {slot, area};
+    const priority = prunePriorityForLayoutSlot(slot);
+    const item = activeItemForSide(slot);
+    if (isVirtualItem(item) && (!virtualCandidate || area < virtualCandidate.area)) {
+      virtualCandidate = {slot, area, priority};
+    }
+    const tooSmall = rect.width < minWidthForLayoutSlot(slot) || rect.height < minSplitPaneHeightPx;
+    if (!tooSmall) continue;
+    const nextCandidate = {slot, area, priority};
+    if (!candidate || priority < candidate.priority || (priority === candidate.priority && area < candidate.area)) {
+      candidate = nextCandidate;
+    }
   }
+  if (candidate && prunePriorityForLayoutSlot(candidate.slot) >= 2 && virtualCandidate) return virtualCandidate;
   return candidate;
 }
 
@@ -3836,6 +4586,8 @@ function renderLayoutColumn(side) {
   const column = document.createElement('section');
   const session = activeItemForSide(side);
   column.className = 'layout-column';
+  if (isFileExplorerItem(session)) column.classList.add('file-explorer-column');
+  if (isFileEditorItem(session)) column.classList.add('file-editor-column');
   column.dataset.slot = side;
   column.dataset.side = slotSide(side);
   column.appendChild(renderDropSlot(side, session));
@@ -3867,6 +4619,12 @@ function updateWindowTabStrip(panel, side) {
   if (!strip) return;
   const stack = windowStack(side);
   strip.dataset.side = side;
+  if (isFileExplorerItem(activeItemForSide(side)) && stack.length === 1 && stack[0] === fileExplorerItemId) {
+    strip.hidden = true;
+    strip.replaceChildren();
+    return;
+  }
+  strip.hidden = false;
   const children = shouldShowTabListMenu(stack) ? [createTabListMenu(stack, {kind: 'window', side})] : [];
   strip.replaceChildren(...children, ...stack.map(item => createWindowSessionTab(side, item)));
   bindWindowTabStrip(strip, side);
@@ -3876,7 +4634,8 @@ function updateWindowTabStrip(panel, side) {
 function createWindowSessionTab(side, item) {
   const isInfo = isInfoItem(item);
   const isFiles = isFileExplorerItem(item);
-  const isVirtual = isInfo || isFiles;
+  const isEditor = isFileEditorItem(item);
+  const isVirtual = isInfo || isFiles || isEditor;
   const info = transcriptMeta.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
   const state = isVirtual ? null : sessionState(item, info);
@@ -3885,20 +4644,29 @@ function createWindowSessionTab(side, item) {
   const tab = document.createElement('div');
   tab.role = 'button';
   tab.tabIndex = 0;
-  const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : '';
+  const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : isEditor ? 'file-editor-item' : '';
   tab.className = `window-session-tab ${virtualClass} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.windowSessionTab = item;
   if (isInfo) tab.innerHTML = windowInfoTabHtml();
-  else if (isFiles) tab.innerHTML = '<span class="window-tab-core"><span class="agent-icon file" aria-hidden="true">📁</span><span class="session-button-dir">Files</span></span>';
+  else if (isFiles) tab.innerHTML = fileExplorerWindowTabHtml();
+  else if (isEditor) tab.innerHTML = fileEditorWindowTabHtml(item);
   else tab.innerHTML = windowSessionTabHtml(item, info, state, auto);
-  tab.insertAdjacentHTML('beforeend', `<button type="button" class="window-tab-close" data-window-tab-close title="move ${esc(itemLabel(item))} to top strip" aria-label="Move ${esc(itemLabel(item))} to top strip"></button>`);
-  if (!isVirtual) {
+  if (!isFiles) {
+    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `move ${itemLabel(item)} to top strip`;
+    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Move ${itemLabel(item)} to top strip`;
+    tab.insertAdjacentHTML('beforeend', `<button type="button" class="window-tab-close" data-window-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
+  }
+  if (isEditor) {
+    tab.insertAdjacentHTML('beforeend', filePopoverHtml(item));
+    bindFilePopoverActions(tab);
+    bindWindowSessionPopover(tab, item);
+  } else if (!isVirtual) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindWindowSessionPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? 'Files' : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? 'Files' : isEditor ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-window-tab-close]')) {
       event.stopPropagation();
@@ -3914,7 +4682,8 @@ function createWindowSessionTab(side, item) {
     if (event.target.closest('[data-window-tab-close]')) {
       event.preventDefault();
       event.stopPropagation();
-      removeSessionFromLayout(item);
+      if (isEditor) closeFileTab(fileItemPath(item));
+      else removeSessionFromLayout(item);
       return;
     }
     const autoTarget = event.target.closest('[data-auto-session]');
@@ -4049,6 +4818,17 @@ function windowInfoTabHtml() {
   return '<span class="window-tab-core"><span class="window-tab-info-label">Branch Info</span></span>';
 }
 
+function fileExplorerWindowTabHtml() {
+  return '<span class="window-tab-core"><span class="session-button-dir">Files</span></span>';
+}
+
+function fileEditorWindowTabHtml(item) {
+  const path = fileItemPath(item);
+  const state = openFiles.get(path) || {};
+  const dirty = state.dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
+  return `<span class="window-tab-core"><span class="session-button-text">${dirty}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
+}
+
 function windowSessionTabHtml(session, info, state, auto) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(session, info);
@@ -4117,6 +4897,7 @@ function getOrCreatePanel(session) {
   if (panel) return panel;
   if (isInfoItem(session)) panel = createInfoPanel();
   else if (isFileExplorerItem(session)) panel = createFileExplorerPanel();
+  else if (isFileEditorItem(session)) panel = createFileEditorPanel(session);
   else panel = createPanel(session);
   panelNodes.set(session, panel);
   panelPool.appendChild(panel);
@@ -4311,6 +5092,10 @@ function updatePanelControlLabels(session, info) {
 }
 
 function installPanelInactiveOverlays(panel, session) {
+  if (isVirtualItem(session)) {
+    panel.querySelectorAll('.panel-inactive-overlay').forEach(node => node.remove());
+    return;
+  }
   for (const root of panel.querySelectorAll('.panel-overlay-root')) {
     if (root.querySelector(':scope > .panel-inactive-overlay')) continue;
     const overlay = document.createElement('div');
@@ -4366,6 +5151,8 @@ function createFileExplorerPanel() {
         <div class="file-explorer-toolbar">
           <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
           <span class="file-explorer-path-inline">${esc(initialPath)}</span>
+          <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
+          <button type="button" class="file-explorer-panel-close" title="Move Files to top strip" aria-label="Move Files to top strip"></button>
         </div>
       </div>
       <div class="file-explorer-pane panel-overlay-root">
@@ -4377,7 +5164,26 @@ function createFileExplorerPanel() {
   if (hiddenBtn) {
     hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
     hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
-    hiddenBtn.addEventListener('click', () => refreshFileExplorerPanelTree(panel));
+    hiddenBtn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleHiddenFiles();
+      refreshFileExplorerPanelTree(panel);
+    });
+  }
+  const closeBtn = panel.querySelector('.file-explorer-panel-close');
+  panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    copyCurrentFileExplorerPath();
+  });
+  if (closeBtn) {
+    closeBtn.addEventListener('pointerdown', event => event.stopPropagation());
+    closeBtn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      removeSessionFromLayout(fileExplorerItemId);
+    });
   }
   refreshFileExplorerPanelTree(panel);
   return panel;
@@ -4386,17 +5192,596 @@ function createFileExplorerPanel() {
 function refreshFileExplorerPanelTree(panel) {
   const treeEl = panel.querySelector('.file-explorer-tree-panel');
   const pathEl = panel.querySelector('.file-explorer-path-inline');
+  const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
   if (!treeEl) return;
   const root = fileExplorerRoot || homePath || '/';
   if (pathEl) pathEl.textContent = root;
+  if (hiddenBtn) {
+    hiddenBtn.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
+    hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
+    hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+  }
   treeEl.replaceChildren();
   apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`)
     .then(resp => resp.ok ? resp.json() : null)
     .then(payload => {
       if (!payload) return;
       renderTreeChildren(treeEl, root, payload.entries || [], 0);
+      updateFileExplorerCurrentFileHighlight();
     })
     .catch(err => console.warn('fs list (panel) failed', err));
+}
+
+function createFileEditorPanel(item) {
+  const path = fileItemPath(item);
+  const panel = document.createElement('article');
+  panel.className = 'panel file-editor-panel';
+  panel.dataset.filePath = path;
+  panel.innerHTML = `
+      <div class="panel-head file-editor-panel-head">
+        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="file-editor-panel-actions">
+          <button type="button" class="file-editor-preview-panel" title="Toggle Markdown preview" hidden>Preview</button>
+          <button type="button" class="file-editor-save-panel" title="Save" ${readOnlyMode ? 'hidden' : ''}>Save</button>
+          <button type="button" class="file-editor-panel-close" title="Close" aria-label="Close"></button>
+        </div>
+      </div>
+      <div class="file-editor-panel-body panel-overlay-root">
+        <div id="panel-toasts-${item}" class="panel-toast-stack"></div>
+        <div class="file-editor-content">
+          <pre class="file-editor-highlight-panel" aria-hidden="true" hidden><code></code></pre>
+          <textarea class="file-editor-textarea-panel" spellcheck="false" wrap="off"></textarea>
+          <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
+          <div class="file-editor-image-panel" hidden></div>
+        </div>
+        <div class="file-editor-status-panel"></div>
+      </div>`;
+  bindPanelShell(panel, item);
+  panel.querySelectorAll('button').forEach(button => {
+    button.addEventListener('pointerdown', event => event.stopPropagation());
+  });
+  panel.querySelector('.file-editor-panel-close')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeFileTab(path);
+  });
+  panel.querySelector('.file-editor-save-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    saveFileEditor(path, panel);
+  });
+  panel.querySelector('.file-editor-preview-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    fileEditorPreviewMode.set(path, fileEditorPreviewMode.get(path) !== true);
+    renderFileEditorPanel(panel, item);
+  });
+  const textarea = panel.querySelector('.file-editor-textarea-panel');
+  textarea?.addEventListener('input', () => {
+    const state = openFiles.get(path);
+    if (!state || state.kind !== 'text') return;
+    state.content = textarea.value;
+    const dirty = state.content !== state.original;
+    const dirtyChanged = dirty !== state.dirty;
+    state.dirty = dirty;
+    updateFileEditorPanelChrome(panel, path);
+    setFileEditorPanelStatus(panel, dirty ? 'modified' : `${state.original.length} chars`, '');
+    renderSyntaxHighlight(panel, path, state.content);
+    syncSyntaxHighlightScroll(panel);
+    if (dirtyChanged) {
+      renderSessionButtons();
+      renderWindowTabStrips();
+    }
+  });
+  textarea?.addEventListener('scroll', () => syncSyntaxHighlightScroll(panel));
+  textarea?.addEventListener('keydown', event => {
+    const isSave = (event.ctrlKey || event.metaKey) && event.key === 's' && !event.shiftKey;
+    if (!isSave) return;
+    event.preventDefault();
+    saveFileEditor(path, panel);
+  });
+  renderFileEditorPanel(panel, item);
+  return panel;
+}
+
+function hideFileEditorContent(textarea, highlightPane, previewPane, imagePane) {
+  if (textarea) textarea.hidden = true;
+  if (highlightPane) highlightPane.hidden = true;
+  if (previewPane) previewPane.hidden = true;
+  if (imagePane) {
+    disconnectFileEditorImageObserver(imagePane);
+    imagePane.hidden = true;
+    imagePane.replaceChildren();
+  }
+}
+
+function fileEditorEmptyState(title, detail = '') {
+  const node = document.createElement('div');
+  node.className = 'file-editor-empty-state';
+  const titleNode = document.createElement('div');
+  titleNode.className = 'file-editor-empty-title';
+  titleNode.textContent = title;
+  node.appendChild(titleNode);
+  if (detail) {
+    const detailNode = document.createElement('div');
+    detailNode.className = 'file-editor-empty-detail';
+    detailNode.textContent = detail;
+    node.appendChild(detailNode);
+  }
+  return node;
+}
+
+function disconnectFileEditorImageObserver(imagePane) {
+  if (imagePane?._imageResizeObserver) {
+    imagePane._imageResizeObserver.disconnect();
+    imagePane._imageResizeObserver = null;
+  }
+}
+
+function fittedFileEditorImageSize(imagePane, img) {
+  const naturalWidth = img.naturalWidth || 0;
+  const naturalHeight = img.naturalHeight || 0;
+  if (!naturalWidth || !naturalHeight) return null;
+  const availableWidth = Math.max(1, imagePane.clientWidth - 20);
+  const availableHeight = Math.max(1, imagePane.clientHeight - 20);
+  const scale = Math.min(1, availableWidth / naturalWidth, availableHeight / naturalHeight);
+  return {
+    width: Math.max(1, Math.floor(naturalWidth * scale)),
+    height: Math.max(1, Math.floor(naturalHeight * scale)),
+  };
+}
+
+function applyFileEditorImageMode(imagePane, img, path) {
+  const original = fileEditorImageMode.get(path) === 'original';
+  imagePane.classList.toggle('original-size', original);
+  imagePane.classList.toggle('fit-size', !original);
+  img.classList.toggle('original-size', original);
+  img.classList.toggle('fit-size', !original);
+  const size = original
+    ? {width: img.naturalWidth || img.width, height: img.naturalHeight || img.height}
+    : fittedFileEditorImageSize(imagePane, img);
+  if (size?.width && size?.height) {
+    img.style.width = `${size.width}px`;
+    img.style.height = `${size.height}px`;
+  }
+  img.title = original ? 'Click to fit image' : 'Click to view original size';
+}
+
+function renderFileEditorPanel(panel, item) {
+  const path = fileItemPath(item);
+  activeFile = path;
+  updateFileExplorerCurrentFileHighlight();
+  const state = openFiles.get(path);
+  updateFileEditorPanelChrome(panel, path);
+  const textarea = panel.querySelector('.file-editor-textarea-panel');
+  const highlightPane = panel.querySelector('.file-editor-highlight-panel');
+  const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
+  const imagePane = panel.querySelector('.file-editor-image-panel');
+  const previewButton = panel.querySelector('.file-editor-preview-panel');
+  if (!state) {
+    if (previewButton) previewButton.hidden = true;
+    panel.classList.remove('syntax-highlighted');
+    hideFileEditorContent(textarea, highlightPane, previewPane, imagePane);
+    setFileEditorPanelStatus(panel, 'file closed', '');
+    return;
+  }
+  if (state.loading) {
+    if (previewButton) previewButton.hidden = true;
+    panel.classList.remove('syntax-highlighted');
+    hideFileEditorContent(textarea, highlightPane, previewPane, imagePane);
+    setFileEditorPanelStatus(panel, 'loading...', '');
+    loadFileEditorState(path, panel, item);
+    return;
+  }
+  if (state.kind === 'error' || state.kind === 'too-large') {
+    if (previewButton) previewButton.hidden = true;
+    panel.classList.remove('syntax-highlighted');
+    if (textarea) textarea.hidden = true;
+    if (highlightPane) highlightPane.hidden = true;
+    if (previewPane) previewPane.hidden = true;
+    if (imagePane) {
+      imagePane.hidden = false;
+      const limit = formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES);
+      const size = formatFileSize(state.size);
+      const title = state.kind === 'too-large' ? 'File is too large to preview' : 'File could not be opened';
+      const detail = state.kind === 'too-large'
+        ? (state.error || `${size ? `${size}; ` : ''}limit is ${limit}`)
+        : String(state.error || 'failed to load file');
+      imagePane.replaceChildren(fileEditorEmptyState(title, detail));
+    }
+    const status = state.kind === 'too-large' ? `too large; limit ${formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)}` : state.error || 'failed to load file';
+    setFileEditorPanelStatus(panel, status, 'error');
+    return;
+  }
+  const isMarkdown = path.toLowerCase().endsWith('.md') || path.toLowerCase().endsWith('.markdown');
+  if (previewButton) {
+    previewButton.hidden = !(state.kind === 'text' && isMarkdown);
+    previewButton.classList.toggle('active', fileEditorPreviewMode.get(path) === true);
+    previewButton.textContent = fileEditorPreviewMode.get(path) ? 'Edit' : 'Preview';
+  }
+  if (state.kind === 'image') {
+    if (textarea) textarea.hidden = true;
+    if (highlightPane) highlightPane.hidden = true;
+    if (previewPane) previewPane.hidden = true;
+    panel.classList.remove('syntax-highlighted');
+    if (imagePane) {
+      imagePane.hidden = false;
+      disconnectFileEditorImageObserver(imagePane);
+      imagePane.replaceChildren();
+      const img = document.createElement('img');
+      img.className = 'file-editor-image';
+      const version = state.mtime || state.size || 0;
+      img.src = `/api/fs/raw?path=${encodeURIComponent(path)}&v=${encodeURIComponent(version)}`;
+      img.alt = path;
+      applyFileEditorImageMode(imagePane, img, path);
+      img.addEventListener('click', () => {
+        const nextMode = fileEditorImageMode.get(path) === 'original' ? 'fit' : 'original';
+        fileEditorImageMode.set(path, nextMode);
+        applyFileEditorImageMode(imagePane, img, path);
+      });
+      const resizeObserver = new ResizeObserver(() => applyFileEditorImageMode(imagePane, img, path));
+      imagePane._imageResizeObserver = resizeObserver;
+      resizeObserver.observe(imagePane);
+      img.onload = () => {
+        applyFileEditorImageMode(imagePane, img, path);
+        setFileEditorPanelStatus(panel, `${img.naturalWidth}x${img.naturalHeight}`, '');
+      };
+      img.onerror = () => {
+        disconnectFileEditorImageObserver(imagePane);
+        imagePane.replaceChildren(fileEditorEmptyState('Image could not be loaded', `The file may be unreadable, unsupported, or over ${formatFileSize(MAX_FILE_PREVIEW_BYTES)}.`));
+        setFileEditorPanelStatus(panel, 'failed to load image', 'error');
+      };
+      imagePane.appendChild(img);
+      setFileEditorPanelStatus(panel, 'loading...', '');
+    }
+    return;
+  }
+  if (imagePane) {
+    disconnectFileEditorImageObserver(imagePane);
+    imagePane.hidden = true;
+    imagePane.replaceChildren();
+  }
+  const previewing = isMarkdown && fileEditorPreviewMode.get(path) === true;
+  if (previewing) {
+    if (textarea) textarea.hidden = true;
+    if (highlightPane) highlightPane.hidden = true;
+    panel.classList.remove('syntax-highlighted');
+    if (previewPane) {
+      previewPane.hidden = false;
+      renderMarkdownPreviewInto(previewPane, state.content);
+    }
+  } else {
+    if (previewPane) previewPane.hidden = true;
+    if (textarea) {
+      textarea.hidden = false;
+      textarea.readOnly = readOnlyMode;
+      if (textarea.value !== state.content) textarea.value = state.content;
+      renderSyntaxHighlight(panel, path, state.content);
+      syncSyntaxHighlightScroll(panel);
+      textarea.focus({preventScroll: true});
+    }
+  }
+  setFileEditorPanelStatus(panel, state.dirty ? 'modified' : `${state.original.length} chars`, state.dirty ? '' : '');
+}
+
+function loadFileEditorState(path, panel, item) {
+  const state = openFiles.get(path);
+  if (!state || state.loadingPromise) return;
+  state.loadingPromise = (async () => {
+    const ext = fileExtensionOf(basenameOf(path));
+    if (IMAGE_EXTENSIONS.has(ext)) {
+      const entry = await fetchFileEntry(path);
+      if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
+        openFiles.set(path, tooLargeFileState(Number(entry.size)));
+      } else {
+        openFiles.set(path, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
+      }
+      renderFileEditorPanel(panel, item);
+      renderSessionButtons();
+      renderWindowTabStrips();
+      return;
+    }
+    try {
+      const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const message = String(payload.error || response.status);
+        openFiles.set(path, response.status === 413 ? tooLargeFileState(null, message) : fileErrorState(message));
+      } else {
+        const payload = await response.json();
+        openFiles.set(path, {
+          mtime: payload.mtime,
+          kind: 'text',
+          original: payload.content,
+          content: payload.content,
+          dirty: false,
+        });
+      }
+    } catch (err) {
+      openFiles.set(path, fileErrorState(err));
+    }
+    renderFileEditorPanel(panel, item);
+    renderSessionButtons();
+    renderWindowTabStrips();
+  })();
+}
+
+function updateFileEditorPanelChrome(panel, path) {
+  const state = openFiles.get(path);
+  panel.classList.toggle('dirty', !!state?.dirty);
+  const dirtyDot = panel.querySelector('.file-editor-title .file-tab-dirty');
+  if (dirtyDot) dirtyDot.hidden = !state?.dirty;
+  const nameNode = panel.querySelector('.file-editor-title-name');
+  if (nameNode) nameNode.textContent = basenameOf(path);
+  const saveButton = panel.querySelector('.file-editor-save-panel');
+  if (saveButton) {
+    saveButton.hidden = readOnlyMode || state?.kind !== 'text';
+    saveButton.disabled = !state?.dirty;
+  }
+}
+
+function setFileEditorPanelStatus(panel, message, level) {
+  const status = panel.querySelector('.file-editor-status-panel');
+  if (!status) return;
+  status.textContent = message || '';
+  status.dataset.level = level || '';
+}
+
+function renderMarkdownPreviewInto(container, text) {
+  if (typeof window.marked === 'undefined') {
+    container.textContent = 'marked.js not loaded (offline CDN?)';
+    return;
+  }
+  container.innerHTML = window.marked.parse(text, {gfm: true, breaks: true});
+  if (typeof window.hljs !== 'undefined') {
+    container.querySelectorAll('pre code').forEach(block => {
+      try { window.hljs.highlightElement(block); } catch (_) {}
+    });
+  }
+}
+
+function markdownInlineHighlightHtml(escaped) {
+  return escaped
+    .replace(/(`[^`]+`)/g, '<span class="md-code">$1</span>')
+    .replace(/(\*\*[^*]+\*\*|__[^_]+__)/g, '<span class="md-bold">$1</span>')
+    .replace(/(\[[^\]]+\]\([^)]+\))/g, '<span class="md-link">$1</span>')
+    .replace(/(&lt;\/?[A-Za-z][^&]*?&gt;)/g, '<span class="md-html">$1</span>')
+    .replace(/(^|[^\w*])(\*[^*\s][^*]*\*|_[^_\s][^_]*_)/g, '$1<span class="md-italic">$2</span>');
+}
+
+function markdownSyntaxHtml(text) {
+  let inFence = false;
+  return String(text || '').split('\n').map(line => {
+    const escaped = esc(line);
+    const fence = /^\s*(```|~~~)/.test(line);
+    if (fence) {
+      inFence = !inFence;
+      return `<span class="md-fence">${escaped}</span>`;
+    }
+    if (inFence) return `<span class="md-codeblock">${escaped}</span>`;
+    const heading = line.match(/^(\s{0,3})(#{1,6})(\s+.*)$/);
+    if (heading) return `<span class="md-heading md-heading-${heading[2].length}">${escaped}</span>`;
+    const quote = escaped.match(/^(\s*&gt;\s?)(.*)$/);
+    if (quote) return `<span class="md-blockquote">${escaped}</span>`;
+    const list = escaped.match(/^(\s*(?:[-*+]|\d+\.)\s+)(.*)$/);
+    if (list) return `<span class="md-list-marker">${list[1]}</span>${markdownInlineHighlightHtml(list[2])}`;
+    return markdownInlineHighlightHtml(escaped);
+  }).join('\n');
+}
+
+function simpleTokenHighlightHtml(raw, rules) {
+  const text = String(raw || '');
+  let html = '';
+  let index = 0;
+  while (index < text.length) {
+    let best = null;
+    for (let ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
+      const rule = rules[ruleIndex];
+      rule.regex.lastIndex = index;
+      const match = rule.regex.exec(text);
+      if (!match || !match[0]) continue;
+      const candidate = {rule, ruleIndex, index: match.index, text: match[0]};
+      if (!best
+        || candidate.index < best.index
+        || (candidate.index === best.index && candidate.ruleIndex < best.ruleIndex)) {
+        best = candidate;
+      }
+    }
+    if (!best) {
+      html += esc(text.slice(index));
+      break;
+    }
+    html += esc(text.slice(index, best.index));
+    html += `<span class="${best.rule.className}">${esc(best.text)}</span>`;
+    index = best.index + best.text.length;
+  }
+  return html;
+}
+
+function simpleCodeSyntaxHtml(language, text) {
+  if (language === 'markdown') return markdownSyntaxHtml(text);
+  const stringRule = {regex: /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, className: 'code-string'};
+  const numberRule = {regex: /\b\d+(?:\.\d+)?\b/g, className: 'code-number'};
+  const shellRules = [
+    stringRule,
+    {regex: /#[^\n]*/g, className: 'code-comment'},
+    {regex: /\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\$[0-9@#?*!-]/g, className: 'code-variable'},
+    {regex: /\b(?:if|then|else|elif|fi|for|in|do|done|while|case|esac|function|export|local|readonly|return|exit|set|unset|trap|source)\b/g, className: 'code-keyword'},
+    {regex: /\b(?:awk|cat|cd|chmod|chown|cp|curl|docker|echo|find|git|grep|head|jq|ls|mkdir|mv|node|npm|python|python3|rg|rm|sed|ssh|tail|tar|tee|test|touch|xargs)\b/g, className: 'code-builtin'},
+    numberRule,
+  ];
+  const pythonRules = [
+    stringRule,
+    {regex: /#[^\n]*/g, className: 'code-comment'},
+    {regex: /@\w+/g, className: 'code-function'},
+    {regex: /\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b/g, className: 'code-keyword'},
+    {regex: /\b(?:False|None|True|self|cls)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const jsRules = [
+    {regex: /`(?:\\.|[^`\\])*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, className: 'code-string'},
+    {regex: /\/\/[^\n]*|\/\*.*?\*\//g, className: 'code-comment'},
+    {regex: /\b(?:async|await|break|case|catch|class|const|continue|default|delete|do|else|export|extends|finally|for|from|function|if|import|in|instanceof|let|new|of|return|switch|throw|try|typeof|var|void|while|yield)\b/g, className: 'code-keyword'},
+    {regex: /\b(?:false|null|true|undefined|this|super)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const rustRules = [
+    stringRule,
+    {regex: /\/\/[^\n]*|\/\*.*?\*\//g, className: 'code-comment'},
+    {regex: /\b(?:as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while)\b/g, className: 'code-keyword'},
+    {regex: /\b(?:bool|char|f32|f64|i8|i16|i32|i64|i128|isize|str|u8|u16|u32|u64|u128|usize|String|Vec|Option|Result)\b/g, className: 'code-type'},
+    {regex: /\b[A-Za-z_][A-Za-z0-9_]*!/g, className: 'code-function'},
+    numberRule,
+  ];
+  const xmlRules = [
+    {regex: /<!--.*?-->/g, className: 'code-comment'},
+    {regex: /<\/?[A-Za-z][^>]*?>/g, className: 'code-tag'},
+    stringRule,
+  ];
+  const jsonRules = [
+    {regex: /"(?:\\.|[^"\\])*"(?=\s*:)/g, className: 'code-attr'},
+    stringRule,
+    {regex: /\b(?:false|null|true)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const cssRules = [
+    {regex: /\/\*.*?\*\//g, className: 'code-comment'},
+    stringRule,
+    {regex: /#[0-9A-Fa-f]{3,8}\b/g, className: 'code-number'},
+    {regex: /[A-Za-z-]+(?=\s*:)/g, className: 'code-attr'},
+    {regex: /\b(?:auto|block|flex|grid|hidden|inline|none|relative|absolute|fixed|solid|transparent|inherit|initial|unset)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const yamlRules = [
+    {regex: /#[^\n]*/g, className: 'code-comment'},
+    stringRule,
+    {regex: /^[\s-]*[A-Za-z0-9_.-]+(?=\s*:)/gm, className: 'code-attr'},
+    {regex: /\b(?:false|null|true|yes|no|on|off)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const rulesByLanguage = new Map([
+    ['bash', shellRules],
+    ['css', cssRules],
+    ['ini', yamlRules],
+    ['javascript', jsRules],
+    ['json', jsonRules],
+    ['python', pythonRules],
+    ['rust', rustRules],
+    ['typescript', jsRules],
+    ['xml', xmlRules],
+    ['yaml', yamlRules],
+  ]);
+  const rules = rulesByLanguage.get(language);
+  if (!rules) return null;
+  return String(text || '').split('\n').map(line => simpleTokenHighlightHtml(line, rules)).join('\n');
+}
+
+function syntaxLanguageForPath(path) {
+  const name = basenameOf(path).toLowerCase();
+  const dot = name.lastIndexOf('.');
+  const ext = dot === -1 ? '' : name.slice(dot);
+  if (syntaxLanguageByExtension.has(ext)) return syntaxLanguageByExtension.get(ext);
+  if (name === 'dockerfile') return 'dockerfile';
+  if (name === 'makefile') return 'makefile';
+  return '';
+}
+
+function highlightLanguageAvailable(language) {
+  if (!language || typeof window.hljs === 'undefined') return false;
+  if (typeof window.hljs.getLanguage !== 'function') return true;
+  return Boolean(window.hljs.getLanguage(language));
+}
+
+function renderSyntaxHighlight(panel, path, content) {
+  const highlightPane = panel.querySelector('.file-editor-highlight-panel');
+  const code = highlightPane?.querySelector('code');
+  if (!highlightPane || !code) return false;
+  const language = syntaxLanguageForPath(path);
+  const simpleHtml = simpleCodeSyntaxHtml(language, content);
+  if (simpleHtml !== null) {
+    code.className = `language-${language || 'text'}`;
+    code.innerHTML = simpleHtml;
+    highlightPane.hidden = false;
+    panel.classList.add('syntax-highlighted');
+    return true;
+  }
+  if (!highlightLanguageAvailable(language)) {
+    highlightPane.hidden = true;
+    panel.classList.remove('syntax-highlighted');
+    code.textContent = '';
+    code.className = '';
+    return false;
+  }
+  try {
+    code.className = `language-${language}`;
+    code.innerHTML = window.hljs.highlight(String(content || ''), {language, ignoreIllegals: true}).value || '\n';
+    highlightPane.hidden = false;
+    panel.classList.add('syntax-highlighted');
+    return true;
+  } catch (_) {
+    highlightPane.hidden = true;
+    panel.classList.remove('syntax-highlighted');
+    code.textContent = '';
+    code.className = '';
+    return false;
+  }
+}
+
+function syncSyntaxHighlightScroll(panel) {
+  const textarea = panel.querySelector('.file-editor-textarea-panel');
+  const highlightPane = panel.querySelector('.file-editor-highlight-panel');
+  if (!textarea || !highlightPane || highlightPane.hidden) return;
+  highlightPane.scrollTop = textarea.scrollTop;
+  highlightPane.scrollLeft = textarea.scrollLeft;
+}
+
+function refreshEditorSyntaxHighlights() {
+  for (const [item, panel] of panelNodes.entries()) {
+    if (!isFileEditorItem(item)) continue;
+    const path = fileItemPath(item);
+    const state = openFiles.get(path);
+    if (state?.kind === 'text') {
+      renderSyntaxHighlight(panel, path, state.content);
+      syncSyntaxHighlightScroll(panel);
+    }
+  }
+}
+
+window.addEventListener('load', refreshEditorSyntaxHighlights);
+
+async function saveFileEditor(path, panel) {
+  if (readOnlyMode) return;
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return;
+  const textarea = panel.querySelector('.file-editor-textarea-panel');
+  if (textarea) state.content = textarea.value;
+  setFileEditorPanelStatus(panel, 'saving...', '');
+  try {
+    const response = await apiFetch('/api/fs/write', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        path,
+        content: state.content,
+        expected_mtime: state.mtime,
+      }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      setFileEditorPanelStatus(panel, `save failed: ${payload.error || response.status}`, 'error');
+      return;
+    }
+    const payload = await response.json();
+    state.mtime = payload.mtime;
+    state.original = state.content;
+    state.dirty = false;
+    updateFileEditorPanelChrome(panel, path);
+    setFileEditorPanelStatus(panel, `saved (${payload.size} bytes)`, 'ok');
+    renderSessionButtons();
+    renderWindowTabStrips();
+  } catch (err) {
+    setFileEditorPanelStatus(panel, `save failed: ${err}`, 'error');
+  }
 }
 
 function panelControlsHtml(session, options = {}) {
@@ -4473,6 +5858,7 @@ function createPanel(session) {
         </div>
       </div>`;
   bindPanelShell(panel, session);
+  installFilePathDropTarget(session, panel);
   bindPanelControls(panel, session);
   return panel;
 }
@@ -4682,6 +6068,43 @@ function bindFileUpload(panel, session) {
     panel.classList.remove('file-drag-over');
     uploadFiles(session, event.dataTransfer?.files || []);
   });
+}
+
+function insertFileDragPayloadIntoTerminal(session, payload) {
+  const references = terminalFileReferences(session, payload);
+  if (!references.length) return;
+  const inserted = insertIntoTerminal(session, `${references.map(shellQuote).join(' ')} `);
+  const label = references.length === 1 ? references[0] : `${references.length} paths`;
+  statusEl.innerHTML = inserted
+    ? `<span class="ok">inserted ${esc(label)} into ${esc(sessionLabel(session))}</span>`
+    : `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
+}
+
+function installFilePathDropTarget(session, target) {
+  if (readOnlyMode) return;
+  target.addEventListener('dragover', event => {
+    if (!hasYolomuxFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    target.classList.add('path-drag-over');
+  });
+  target.addEventListener('dragleave', event => {
+    if (target.contains(event.relatedTarget)) return;
+    target.classList.remove('path-drag-over');
+  });
+  target.addEventListener('drop', event => {
+    const payload = fileDragPayload(event);
+    if (!payload?.path) return;
+    event.preventDefault();
+    event.stopPropagation();
+    target.classList.remove('path-drag-over');
+    insertFileDragPayloadIntoTerminal(session, payload);
+  });
+}
+
+function installTerminalFileDrop(session, container) {
+  installFilePathDropTarget(session, container);
 }
 
 function bindClipboardPaste() {
@@ -5166,6 +6589,7 @@ function startTerminal(session) {
   term.open(container);
   installTerminalLinkProvider(term);
   installTerminalContextMenu(session, term, container);
+  installTerminalFileDrop(session, container);
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
     term.resize(openedSize.cols, openedSize.rows);

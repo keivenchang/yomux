@@ -300,6 +300,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/fs/read":
             self.handle_fs_read(parsed)
             return
+        if parsed.path == "/api/fs/info":
+            self.handle_fs_info(parsed)
+            return
         if parsed.path == "/api/fs/raw":
             self.handle_fs_raw(parsed)
             return
@@ -311,18 +314,21 @@ class Handler(BaseHTTPRequestHandler):
     def handle_fs_list(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", ["/"])[0]
-        try:
-            payload = filesystem.list_directory(raw_path)
-        except FilesystemError as exc:
-            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
-            return
-        self.write_json(payload)
+        self.write_filesystem_json(raw_path, lambda: filesystem.list_directory(raw_path))
 
     def handle_fs_read(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
+        self.write_filesystem_json(raw_path, lambda: filesystem.read_file(raw_path))
+
+    def handle_fs_info(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", [""])[0]
+        self.write_filesystem_json(raw_path, lambda: filesystem.path_info(raw_path))
+
+    def write_filesystem_json(self, raw_path: str, build_payload: Any) -> None:
         try:
-            payload = filesystem.read_file(raw_path)
+            payload = build_payload()
         except FilesystemError as exc:
             self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
             return
@@ -346,25 +352,34 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def handle_fs_write(self, parsed: Any) -> None:
+    def read_json_body(self, max_length: int) -> dict[str, Any] | None:
         length_text = self.headers.get("Content-Length", "")
         try:
             length = int(length_text)
         except ValueError:
             self.write_json({"error": "missing or invalid Content-Length"}, status=HTTPStatus.LENGTH_REQUIRED)
-            return
-        if length <= 0 or length > filesystem.MAX_WRITE_BYTES + 4096:
+            return None
+        if length <= 0 or length > max_length:
             self.write_json({"error": "content too large"}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-            return
+            return None
         try:
             body = self.rfile.read(length).decode("utf-8")
         except UnicodeDecodeError:
             self.write_json({"error": "request body must be utf-8 JSON"}, status=HTTPStatus.BAD_REQUEST)
-            return
+            return None
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as exc:
             self.write_json({"error": f"invalid JSON: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+            return None
+        if not isinstance(payload, dict):
+            self.write_json({"error": "request body must be a JSON object"}, status=HTTPStatus.BAD_REQUEST)
+            return None
+        return payload
+
+    def handle_fs_write(self, parsed: Any) -> None:
+        payload = self.read_json_body(filesystem.MAX_WRITE_BYTES + 4096)
+        if payload is None:
             return
         raw_path = payload.get("path", "")
         content = payload.get("content", "")
@@ -375,12 +390,22 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self.write_json({"error": "expected_mtime must be an integer"}, status=HTTPStatus.BAD_REQUEST)
                 return
-        try:
-            result = filesystem.write_file(raw_path, content, expected_mtime=expected_mtime)
-        except FilesystemError as exc:
-            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
+        self.write_filesystem_json(raw_path, lambda: filesystem.write_file(raw_path, content, expected_mtime=expected_mtime))
+
+    def handle_fs_delete(self, parsed: Any) -> None:
+        payload = self.read_json_body(4096)
+        if payload is None:
             return
-        self.write_json(result)
+        raw_path = payload.get("path", "")
+        self.write_filesystem_json(raw_path, lambda: filesystem.delete_path(raw_path))
+
+    def handle_fs_rename(self, parsed: Any) -> None:
+        payload = self.read_json_body(4096)
+        if payload is None:
+            return
+        raw_path = payload.get("path", "")
+        new_name = payload.get("new_name", "")
+        self.write_filesystem_json(raw_path, lambda: filesystem.rename_path(raw_path, new_name))
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -431,6 +456,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/fs/write":
             self.handle_fs_write(parsed)
+            return
+        if parsed.path == "/api/fs/delete":
+            self.handle_fs_delete(parsed)
+            return
+        if parsed.path == "/api/fs/rename":
+            self.handle_fs_rename(parsed)
             return
         self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 

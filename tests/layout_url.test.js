@@ -148,9 +148,13 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
 globalThis.__layoutTestApi = {
   activeItemForSide,
   emptyLayoutSlots,
+  fileEditorButtonHtml,
+  fileEditorWindowTabHtml,
+  fileExplorerWindowTabHtml,
   layoutFromParam,
   layoutParamValue,
   layoutSlotKeys,
+  layoutWithItems,
   layoutTabsParamValue,
   layoutTreeKey,
   leafNode,
@@ -165,6 +169,7 @@ globalThis.__layoutTestApi = {
   renderTransportWarning,
   sessionPopoverHtml,
   sessionButtonHtml,
+  simpleCodeSyntaxHtml,
   setInfoBranchSort,
   showWindowTabDropPreview,
   shouldShowTabListMenu,
@@ -180,6 +185,8 @@ globalThis.__layoutTestApi = {
   windowSessionTabHtml,
   windowStack,
   windowStateWithTabs,
+  markdownSyntaxHtml,
+  pathRelativeToDirectory,
   currentSlots() { return layoutSlots; },
   setAutoApproveStateForTest(session, payload) {
     autoApproveStates.set(session, payload);
@@ -385,6 +392,66 @@ function canonical(value) {
       left: {tabs: ['3', '2'], active: '3'},
     },
   });
+}
+
+{
+  const search = '?sessions=files,file%3A%2Fhome%2Fkeivenc%2FAGENTS.md,5&layout=row@20.7(slot2,row@42(slot3,slot1))&tabs=slot2:files;slot3:file%3A%2Fhome%2Fkeivenc%2FAGENTS.md;slot1:5';
+  const api = loadYolomux(search, ['5']);
+  const serialized = api.serialize(api.currentSlots());
+  assert.deepStrictEqual(canonical(serialized.windows), {
+    slot1: {tabs: ['5'], active: '5'},
+    slot2: {tabs: ['__files__'], active: '__files__'},
+    slot3: {tabs: ['file:/home/keivenc/AGENTS.md'], active: 'file:/home/keivenc/AGENTS.md'},
+  });
+  const url = api.syncInitialLayoutUrlForTest();
+  const params = parseUrl(url);
+  assert.equal(params.get('layout'), 'row@20.7(slot2,row@42(slot3,slot1))');
+  assert.equal(params.get('tabs'), 'slot2:files;slot3:file:/home/keivenc/AGENTS.md;slot1:5');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const item = 'file:/home/keivenc/review.json';
+  const windowTab = api.fileEditorWindowTabHtml(item);
+  const topTab = api.fileEditorButtonHtml(item);
+  assert.ok(windowTab.includes('review.json'));
+  assert.ok(topTab.includes('review.json'));
+  assert.equal(windowTab.includes('agent-icon file'), false);
+  assert.equal(topTab.includes('agent-icon file'), false);
+
+  assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-heading-1'));
+  assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-bold'));
+  assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-comment'));
+  assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-variable'));
+  assert.ok(api.simpleCodeSyntaxHtml('json', '{"name": "yolomux", "ok": true}').includes('code-attr'));
+  assert.ok(api.simpleCodeSyntaxHtml('json', '{"name": "yolomux", "ok": true}').includes('code-constant'));
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const filesTab = api.fileExplorerWindowTabHtml();
+  assert.ok(filesTab.includes('Files'));
+  assert.equal(filesTab.includes('agent-icon file'), false);
+
+  const slots = api.emptyLayoutSlots();
+  slots[api.layoutTreeKey] = api.leafNode('slot2');
+  slots.slot2 = api.windowStateWithTabs(['__files__'], '__files__');
+  const next = api.layoutWithItems(slots, ['1']);
+  assert.deepStrictEqual(canonical(api.serialize(next).windows), {
+    slot2: {tabs: ['__files__'], active: '__files__'},
+    slot1: {tabs: ['1'], active: '1'},
+  });
+  assert.equal(next[api.layoutTreeKey].split, 'row');
+  assert.equal(next[api.layoutTreeKey].pct, 22);
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  assert.equal(api.pathRelativeToDirectory('/repo/app/file.txt', '/repo/app'), 'file.txt');
+  assert.equal(api.pathRelativeToDirectory('/repo/app/src/file.txt', '/repo/app'), 'src/file.txt');
+  assert.equal(api.pathRelativeToDirectory('/repo/app', '/repo/app'), '.');
+  assert.equal(api.pathRelativeToDirectory('/repo/app/file.txt', '/'), 'repo/app/file.txt');
+  assert.equal(api.pathRelativeToDirectory('/other/file.txt', '/repo/app'), '/other/file.txt');
 }
 
 {

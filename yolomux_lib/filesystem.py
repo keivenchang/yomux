@@ -9,12 +9,14 @@ chose to navigate to them). No sandbox root — the explorer's FS scope is "/"
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-MAX_READ_BYTES = 5 * 1024 * 1024  # 5 MB cap on file read
+MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
 MAX_WRITE_BYTES = 5 * 1024 * 1024  # 5 MB cap on file write
 BINARY_SNIFF_BYTES = 8 * 1024  # bytes inspected for NUL when classifying
 
@@ -37,7 +39,7 @@ IMAGE_EXTENSIONS = {
     ".bmp": "image/bmp",
 }
 
-MAX_RAW_BYTES = 25 * 1024 * 1024  # 25 MB cap on raw (image) reads
+MAX_RAW_BYTES = 20 * 1024 * 1024  # 20 MB cap on raw (image) reads
 
 
 class FilesystemError(Exception):
@@ -176,6 +178,91 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
         "size": len(data),
         "mtime": int(path.stat().st_mtime),
     }
+
+
+def _validated_child_name(raw_name: str) -> str:
+    if not isinstance(raw_name, str):
+        raise FilesystemError("name must be a string")
+    name = raw_name.strip()
+    if not name:
+        raise FilesystemError("name is required")
+    if name in {".", ".."} or "/" in name or "\x00" in name or "\n" in name or "\r" in name:
+        raise FilesystemError("name contains illegal characters")
+    return name
+
+
+def delete_path(raw_path: str) -> dict[str, Any]:
+    path = _validated_path(raw_path)
+    if not path.exists() and not path.is_symlink():
+        raise FilesystemError(f"path not found: {path}", status=404)
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+            kind = "dir"
+        else:
+            path.unlink()
+            kind = "file"
+    except PermissionError as exc:
+        raise FilesystemError(str(exc), status=403)
+    except OSError as exc:
+        raise FilesystemError(str(exc), status=500)
+    return {"path": str(path), "deleted": True, "kind": kind}
+
+
+def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
+    path = _validated_path(raw_path)
+    if not path.exists() and not path.is_symlink():
+        raise FilesystemError(f"path not found: {path}", status=404)
+    name = _validated_child_name(new_name)
+    target = path.with_name(name)
+    if target.exists() or target.is_symlink():
+        raise FilesystemError(f"target already exists: {target}", status=409)
+    try:
+        path.rename(target)
+    except PermissionError as exc:
+        raise FilesystemError(str(exc), status=403)
+    except OSError as exc:
+        raise FilesystemError(str(exc), status=500)
+    return {"path": str(target), "old_path": str(path), "name": name}
+
+
+def path_info(raw_path: str) -> dict[str, Any]:
+    path = _validated_path(raw_path)
+    if not path.exists() and not path.is_symlink():
+        raise FilesystemError(f"path not found: {path}", status=404)
+    kind = "dir" if path.is_dir() else "file"
+    repo_root = git_root_for_path(path)
+    relative_path = ""
+    if repo_root:
+        try:
+            relative_path = path.relative_to(Path(repo_root)).as_posix()
+        except ValueError:
+            relative_path = ""
+    return {
+        "path": str(path),
+        "name": path.name,
+        "kind": kind,
+        "repo_root": repo_root,
+        "relative_path": relative_path,
+    }
+
+
+def git_root_for_path(path: Path) -> str:
+    cwd = path if path.is_dir() else path.parent
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=1.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    root = result.stdout.strip()
+    return root if root.startswith("/") else ""
 
 
 def is_text_path(raw_path: str) -> bool:

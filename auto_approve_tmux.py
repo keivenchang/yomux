@@ -13,6 +13,7 @@ Supports both Claude Code and Codex CLI prompts:
 
   Claude:                              Codex:
     Do you want to proceed?              Would you like to run the following command?
+    Do you want to make this edit?        Would you like to make the following edits?
     ❯ 1. Yes                             › 1. Yes, proceed (y)
       2. No                                2. Yes, and don't ask again ... (p)
                                            3. No, and tell Codex ... (esc)
@@ -22,7 +23,8 @@ Detected prompt patterns:
   2. "Would you like to run the following command" (Codex bash)
   3. "Do you want to make this edit"               (Claude file edit)
   4. "Do you want to create"                       (Claude file create)
-  5. "Do you want to allow"                        (Claude tool, e.g. WebFetch)
+  5. "Would you like to make the following edits"  (Codex file edit)
+  6. "Do you want to allow"                        (Claude tool, e.g. WebFetch)
 
 Usage:
   ./auto_approve_tmux.py project1                  # single session
@@ -274,7 +276,10 @@ def _find_full_path(pane_text: str, short_name: str) -> str:
 
 # Matches any file-related prompt: edit, create, overwrite, replace, etc.
 _FILE_PROMPT_RE = re.compile(
-    r"Do you want to (?:make this )?(edit|create|overwrite|replace|rename|move)\b[^?]*\?",
+    r"(?:"
+    r"Do you want to (?:make this )?(?:edit|create|overwrite|replace|rename|move)\b[^?]*\?"
+    r"|Would you like to make the following edits\?"
+    r")",
     re.IGNORECASE,
 )
 
@@ -1194,6 +1199,19 @@ def _self_test() -> bool:
               "   3. No\n"
           ),
           "file")
+
+    # Real: Codex file edit prompt
+    codex_edit_pane = (
+        "Would you like to make the following edits?\n"
+        "\n"
+        "› 1. Yes, proceed (y)\n"
+        "  2. Yes, and don't ask again for these files (a)\n"
+        "  3. No, and tell Codex what to do differently (esc)\n"
+        "\n"
+        "  Press enter to confirm or esc to cancel\n"
+    )
+    check("codex file: Would you like to make edits", detect_prompt(codex_edit_pane), "file")
+    check("codex file: › selector recognized", yes_is_selected(codex_edit_pane), True)
 
     # Real: Codex bash prompt — "Would you like to run the following command?"
     codex_pane = (

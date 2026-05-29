@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,53 @@ def test_write_file_mtime_conflict(tmp_path):
     with pytest.raises(FilesystemError) as info:
         filesystem.write_file(str(target), "b", expected_mtime=stale_mtime)
     assert info.value.status == 409
+
+
+def test_rename_path_same_directory(tmp_path):
+    target = tmp_path / "old.txt"
+    target.write_text("hello", encoding="utf-8")
+
+    result = filesystem.rename_path(str(target), "new.txt")
+
+    assert result["old_path"] == str(target)
+    assert result["path"] == str(tmp_path / "new.txt")
+    assert not target.exists()
+    assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "hello"
+
+
+def test_rename_path_rejects_nested_name(tmp_path):
+    target = tmp_path / "old.txt"
+    target.write_text("hello", encoding="utf-8")
+
+    with pytest.raises(FilesystemError) as info:
+        filesystem.rename_path(str(target), "nested/new.txt")
+
+    assert info.value.status == 400
+
+
+def test_delete_path_removes_directory_tree(tmp_path):
+    target = tmp_path / "dir"
+    (target / "nested").mkdir(parents=True)
+    (target / "nested" / "file.txt").write_text("hello", encoding="utf-8")
+
+    result = filesystem.delete_path(str(target))
+
+    assert result["deleted"] is True
+    assert result["kind"] == "dir"
+    assert not target.exists()
+
+
+def test_path_info_returns_git_relative_path(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "src" / "main.py"
+    target.parent.mkdir()
+    target.write_text("print('hi')\n", encoding="utf-8")
+
+    result = filesystem.path_info(str(target))
+
+    assert result["repo_root"] == str(tmp_path)
+    assert result["relative_path"] == "src/main.py"
+    assert result["kind"] == "file"
 
 
 def test_is_text_path_recognizes_known_extensions():
