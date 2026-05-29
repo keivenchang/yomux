@@ -175,8 +175,16 @@ def test_path_info_returns_git_relative_path(tmp_path):
 
 
 def test_is_text_path_recognizes_known_extensions():
-    assert filesystem.is_text_path("/tmp/foo.py")
-    assert filesystem.is_text_path("/tmp/foo.json")
-    assert filesystem.is_text_path("/tmp/foo.md")
+    for extension in filesystem.TEXT_EXTENSIONS:
+        assert filesystem.is_text_path(f"/tmp/foo{extension}")
+    assert filesystem.is_text_path("/tmp/.gitignore")
+    assert filesystem.is_text_path("/tmp/.dockerignore")
+    assert filesystem.is_text_path("/tmp/.dockerfile")
+    assert filesystem.is_text_path("/tmp/Dockerfile")
+    assert filesystem.is_text_path("/tmp/Makefile")
+    assert filesystem.is_text_path("/tmp/LICENSE")
+    assert filesystem.is_text_path("/tmp/README")
+    assert filesystem.is_text_path("/tmp/foo.PY")
     assert not filesystem.is_text_path("/tmp/foo.png")
+    assert not filesystem.is_text_path("/tmp/foo.PNG")
     assert not filesystem.is_text_path("/tmp/foo.exe")

@@ -261,3 +261,23 @@ def test_logout_marker_blocks_cached_basic_auth_until_form_login(monkeypatch, tm
         assert any(value.startswith(f"{common.AUTH_LOGOUT_COOKIE_NAME}=;") for value in set_cookie_headers)
     finally:
         stop_server(server, thread)
+
+
+def test_fs_raw_download_sets_attachment_header(monkeypatch, tmp_path):
+    target = tmp_path / 'report "a";.txt'
+    target.write_bytes(b"hello")
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        status, headers, body = request(
+            port,
+            "GET",
+            f"/api/fs/raw?{urlencode({'path': str(target), 'download': '1'})}",
+            headers=auth_header("keivenc", "random-password"),
+        )
+
+        assert status == HTTPStatus.OK
+        assert body == b"hello"
+        assert headers["Content-Disposition"] == 'attachment; filename="report _a__.txt"'
+    finally:
+        stop_server(server, thread)

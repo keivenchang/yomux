@@ -88,7 +88,7 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
     {brand_html("brand brand-title title", "div")}
     <span id="httpsWarning" class="transport-warning" hidden aria-label="No HTTPS"></span>
   </div>
-  <div id="sessionButtons" class="session-buttons" aria-label="Sessions"></div>
+  <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
   <div class="actions">
     <div id="latencyMeter" class="latency-meter" title="Browser to YOLOmux latency">
       <svg class="latency-graph" viewBox="0 0 44 18" aria-hidden="true">
@@ -117,6 +117,7 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
     <div class="file-editor-head">
       <div class="file-editor-path" id="fileEditorPath"></div>
       <button type="button" id="fileEditorPreview" class="file-editor-preview" title="Toggle Markdown preview" hidden>Preview</button>
+      <button type="button" id="fileEditorWrap" class="file-editor-wrap" title="Toggle word wrap" hidden>Wrap</button>
       <button type="button" id="fileEditorSave" class="file-editor-save" title="Save (Ctrl/Cmd+S)">Save</button>
       <button type="button" id="fileEditorClose" class="file-editor-close" title="Close current file" aria-label="Close"></button>
     </div>

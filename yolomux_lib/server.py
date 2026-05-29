@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import ssl
 import sys
+from pathlib import Path
 from urllib.parse import parse_qsl
 
 from .app import TmuxWebtermApp
@@ -14,6 +15,12 @@ from .web import login_html
 from .web import setup_auth_html
 from .web import static_asset_path
 from .web import static_content_type
+
+
+def content_disposition_attachment(raw_path: str) -> str:
+    name = Path(str(raw_path or "")).name or "download"
+    safe = "".join(char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";", "/"} else "_" for char in name).strip()
+    return f'attachment; filename="{safe or "download"}"'
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -337,6 +344,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_fs_raw(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
+        download = qs.get("download", [""])[0] in {"1", "true", "yes"}
         try:
             data, mime = filesystem.read_raw(raw_path)
         except FilesystemError as exc:
@@ -346,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        if download:
+            self.send_header("Content-Disposition", content_disposition_attachment(raw_path))
         self.send_auth_cookie_if_needed()
         if self.close_connection:
             self.send_header("Connection", "close")

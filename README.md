@@ -148,7 +148,7 @@ sudo firewall-cmd --reload
 
 ### Daily use
 
-Open YOLOmux, edit `~/.config/yolomux/auth.yaml` if the setup page asks for credentials, then refresh. Existing tmux sessions appear as tabs inside window tab bars. Click a tab to focus that pane. Click `X` on a tab to minimize it into the top strip. Click the top-strip button to restore it into a window. Drag tabs between window tab bars or onto a pane to split the layout. Use the pane toolbar to switch tmux windows, show transcripts, ask for an AI summary, inspect the event log, or collapse the info row.
+Open YOLOmux, edit `~/.config/yolomux/auth.yaml` if the setup page asks for credentials, then refresh. Existing tmux sessions appear as tabs inside panes. Click a tab to show it in that pane. A tab that is inside a pane but not currently shown is a background tab. A tab that is not assigned to any pane is inactive. Use the `Panes` menu to activate background or inactive tabs. Drag tabs between pane tab bars or onto a pane to split the layout. Use the pane toolbar to switch tmux windows, show transcripts, ask for an AI summary, inspect the event log, or collapse the info row.
 
 The `YO` button toggles YOLO auto-approval for that tmux session. YOLO state is stored in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts. The red `QUES?` and `EXEC?` badges come from visible tmux screen detection, not transcript scraping.
 
@@ -207,14 +207,16 @@ Prompt detection intentionally uses the visible tmux screen for presence checks.
 ## Webterm features
 
 - The page title is `YOLOmux`.
+- Terminology follows terminal apps such as iTerm2: a pane is a visible split region, and a tab is a tmux session or virtual item shown inside a pane.
 - By default, YOLOmux shows the existing tmux sessions, capped at nine visible session tabs. Tabs are numbered by display order from `1` through `9`, so tab `1` is the first tmux session, tab `2` is the second, and so on.
+- The `Panes` menu groups tabs into Active, Background tabs, and Inactive. Active tabs are the bright green tabs currently shown in panes. Background tabs are in a pane's tab stack but not currently shown. Inactive tabs are not assigned to any pane.
 - The `+ Claude` and `+ Codex` tabs create the next numbered tmux session with the selected agent, such as `7` when six sessions already exist. Each create tab appears only when that CLI is available on the YOLOmux server PATH. If neither CLI is available, YOLOmux shows `+ Term` and creates a plain shell session. YOLOmux does not create default `yolomuxN` sessions.
 - The visible workspace has left and right sides. Each side can show one full-height pane or two stacked panes, for up to four visible panes total.
 - Session panels are created once at page boot. Hidden sessions live in an off-screen panel pool instead of being destroyed, so drag/drop and quick switching do not restart unchanged terminals.
 - The layout is stored in the page URL through readable `sessions`, `layout`, and `tabs` query parameters. Split positions are recorded as percentages in `layout`, so reloads preserve the layout without browser storage.
 - YOLO state is stored server-side in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
-- Drag a pane tab or pane header into a visible slot. Dropping a pane in the middle of another pane moves it into that window tab bar. Dropping near the top, bottom, left, or right splits the target pane when there is enough room.
-- Each pane tab has its own `YO` button, status badges, session label, compact work description, and `X` minimize button. Minimized sessions appear in the top strip as compact buttons.
+- Drag a tab or pane header into a visible slot. Dropping a tab in the middle of another pane moves it into that pane's tab bar. Dropping near the top, bottom, left, or right splits the target pane when there is enough room.
+- Each tmux-session tab has its own `YO` button, status badges, session label, compact work description, and `X` hide button. Hidden tabs appear under the `Panes` menu as background or inactive tabs.
 - Each pane toolbar has previous/next tmux-window controls, a terminal button labeled from the active tmux window process such as `bash`, `codex`, or `mock/mock_codex.py`, plus `Tx`, `AI`, `Log`, and `Info`.
 - The terminal border turns yellow only for the pane that is currently focused and ready for typing.
 - Browser resize fits xterm immediately, but the tmux resize message is debounced so tmux is resized after the browser resize settles.

@@ -39,6 +39,7 @@ const fileEditor = document.getElementById('fileEditor');
 const fileEditorPath = document.getElementById('fileEditorPath');
 const fileEditorTextarea = document.getElementById('fileEditorTextarea');
 const fileEditorPreviewBtn = document.getElementById('fileEditorPreview');
+const fileEditorWrapBtn = document.getElementById('fileEditorWrap');
 const fileEditorPreviewPane = document.getElementById('fileEditorPreviewPane');
 const fileEditorHighlight = document.getElementById('fileEditorHighlight');
 const fileEditorHighlightCode = document.getElementById('fileEditorHighlightCode');
@@ -47,6 +48,7 @@ const fileEditorClose = document.getElementById('fileEditorClose');
 const fileEditorStatus = document.getElementById('fileEditorStatus');
 const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
+const fileEditorWrapStorageKey = 'yolomux.editorWrap';
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
@@ -70,6 +72,7 @@ let fileExplorerShowHidden = (() => {
 })();
 const fileEditorPreviewMode = new Map();  // path -> true when previewing markdown
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
+let fileEditorWrapEnabled = readStoredEditorWrap();
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -96,14 +99,18 @@ const toastDurationMs = 10000;
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
 const popoverShowDelayMs = 300;
-const popoverHideDelayMs = 300;
+const hoverCloseDelayMs = 300;
+const popoverHideDelayMs = hoverCloseDelayMs;
+const menuHoverOpenDelayMs = 800;
+const menuHoverCloseDelayMs = hoverCloseDelayMs;
+const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelScrollLines = 3;
 const terminalWheelPageFraction = 0.85;
 const maxSessionTabs = bootstrap.maxSessionTabs;
-const baseWindowKeys = ['left', 'right'];
-const splitWindowKeys = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'];
-const windowKeys = [...baseWindowKeys, ...splitWindowKeys];
+const basePaneKeys = ['left', 'right'];
+const splitPaneKeys = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'];
+const paneKeys = [...basePaneKeys, ...splitPaneKeys];
 const layoutTreeKey = '__tree';
 const layoutTreeParamPrefix = 'tree:';
 const minSplitPaneWidthPx = 320;
@@ -114,11 +121,29 @@ const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
 const fileExplorerItemId = '__files__';
+const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
 function isFileExplorerItem(item) { return item === fileExplorerItemId; }
 function isFileEditorItem(item) { return typeof item === 'string' && item.startsWith(fileEditorItemPrefix); }
 function fileItemPath(item) { return isFileEditorItem(item) ? item.slice(fileEditorItemPrefix.length) : null; }
+function browserPlatformText() {
+  if (typeof navigator === 'undefined') return '';
+  return [
+    navigator.userAgentData?.platform,
+    navigator.platform,
+    navigator.userAgent,
+  ].filter(Boolean).join(' ');
+}
+function fileExplorerLabel() {
+  return /(Macintosh|MacIntel|Mac OS|macOS|\bMac\b)/i.test(browserPlatformText()) ? 'Finder' : 'File Explorer';
+}
+
+function applyFileExplorerStaticLabels() {
+  const label = fileExplorerLabel();
+  fileExplorer?.setAttribute('aria-label', label);
+  fileExplorerClose?.setAttribute('title', `Close ${label}`);
+}
 const syntaxLanguageByExtension = new Map([
   ['.cjs', 'javascript'],
   ['.css', 'css'],
@@ -176,6 +201,11 @@ let topbarResizeObserver = null;
 let latencySamples = [];
 let tabMetaVisible = readStoredTabMetaVisible();
 let authRedirectStarted = false;
+let openAppMenuId = null;
+let openAppMenuPinned = false;
+let openAppMenuOpenedAt = 0;
+let appMenuHoverTimer = null;
+let appMenuCloseTimer = null;
 
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
@@ -217,6 +247,20 @@ function writeStoredTabMetaVisible(value) {
   }
 }
 
+function readStoredEditorWrap() {
+  try {
+    return window.localStorage?.getItem(fileEditorWrapStorageKey) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function writeStoredEditorWrap(value) {
+  try {
+    window.localStorage?.setItem(fileEditorWrapStorageKey, value ? '1' : '0');
+  } catch (_) {}
+}
+
 function renderTabMetaToggle() {
   document.body?.classList.toggle('tab-meta-hidden', !tabMetaVisible);
   if (!tabMetaToggle) return;
@@ -231,6 +275,7 @@ function toggleTabMetadata() {
   tabMetaVisible = !tabMetaVisible;
   writeStoredTabMetaVisible(tabMetaVisible);
   renderTabMetaToggle();
+  renderSessionButtons();
   scheduleTopbarMetricsUpdate();
 }
 
@@ -283,8 +328,8 @@ function selectPanelOnHover(item) {
 
 function updatePanelInactiveOverlays() {
   for (const [item, panel] of panelNodes.entries()) {
-    panel.classList.toggle('focused-window', item === focusedPanelItem);
-    panel.classList.toggle('active-window', item === focusedPanelItem);
+    panel.classList.toggle('focused-pane', item === focusedPanelItem);
+    panel.classList.toggle('active-pane', item === focusedPanelItem);
   }
 }
 
@@ -599,8 +644,19 @@ function emptyLayoutSlots() {
   return {[layoutTreeKey]: null};
 }
 
-function emptyWindowState() {
+function emptyPaneState() {
   return {active: null, tabs: []};
+}
+
+function emptyPlaceholderPaneState() {
+  return {active: null, tabs: [], placeholder: true};
+}
+
+function emptyPlaceholderLayoutSlots(slot = 'left') {
+  const next = emptyLayoutSlots();
+  next[slot] = emptyPlaceholderPaneState();
+  next[layoutTreeKey] = leafNode(slot);
+  return next;
 }
 
 function leafNode(slot) {
@@ -632,7 +688,7 @@ function layoutLeafSlots(node) {
 function layoutSlotKeys(slots = layoutSlots) {
   const treeSlots = layoutLeafSlots(slots?.[layoutTreeKey]);
   if (treeSlots.length) return treeSlots;
-  return Object.keys(slots || {}).filter(key => key !== layoutTreeKey && windowStack(key, slots).length);
+  return Object.keys(slots || {}).filter(key => key !== layoutTreeKey && paneHasLayoutContent(key, slots));
 }
 
 function nextLayoutSlot(slots = layoutSlots) {
@@ -642,11 +698,15 @@ function nextLayoutSlot(slots = layoutSlots) {
   return `slot${index}`;
 }
 
-function normalizeWindowState(raw, seen) {
-  const state = emptyWindowState();
+function normalizePaneState(raw, seen, options = {}) {
+  const state = emptyPaneState();
   const items = Array.isArray(raw) ? raw : Array.isArray(raw?.tabs) ? raw.tabs : [];
+  const preserveRemovedItems = new Set(options.preserveRemovedItems || []);
+  let hadPreservedRemovedItem = false;
   for (const value of items) {
+    if (preserveRemovedItems.has(String(value))) hadPreservedRemovedItem = true;
     const item = resolveLayoutItem(value);
+    if (preserveRemovedItems.has(item)) hadPreservedRemovedItem = true;
     if (isLayoutItem(item) && !seen.has(item)) {
       state.tabs.push(item);
       seen.add(item);
@@ -654,70 +714,74 @@ function normalizeWindowState(raw, seen) {
   }
   const active = resolveLayoutItem(raw?.active);
   state.active = state.tabs.includes(active) ? active : state.tabs[0] || null;
+  if (!state.tabs.length && !Array.isArray(raw) && raw?.placeholder === true) state.placeholder = true;
+  if (!state.tabs.length && options.preserveRemovedSlots === true && hadPreservedRemovedItem) state.placeholder = true;
   return state;
 }
 
-function normalizeLayoutSlots(value) {
-  if (!value || typeof value !== 'object') return emptyLayoutSlots();
-  if (value[layoutTreeKey]) return normalizeTreeLayout(value);
-  return normalizeLegacyLayoutSlots(value);
+function normalizeLayoutSlots(value, options = {}) {
+  if (!value || typeof value !== 'object') return emptyPlaceholderLayoutSlots();
+  if (value[layoutTreeKey]) return normalizeTreeLayout(value, options);
+  return normalizeLegacyLayoutSlots(value, options);
 }
 
-function normalizeTreeLayout(value) {
+function normalizeTreeLayout(value, options = {}) {
   const next = emptyLayoutSlots();
   const seen = new Set();
-  next[layoutTreeKey] = normalizeLayoutNode(value[layoutTreeKey], value, next, seen);
+  next[layoutTreeKey] = normalizeLayoutNode(value[layoutTreeKey], value, next, seen, options);
   return compactLayoutSlots(next);
 }
 
-function normalizeLayoutNode(node, value, next, seen) {
+function normalizeLayoutNode(node, value, next, seen, options = {}) {
   if (!node || typeof node !== 'object') return null;
   if (typeof node.slot === 'string') {
-    next[node.slot] = normalizeWindowState(value[node.slot], seen);
+    next[node.slot] = normalizePaneState(value[node.slot], seen, options);
     return leafNode(node.slot);
   }
   const direction = node.split === 'column' ? 'column' : 'row';
-  const children = (node.children || []).map(child => normalizeLayoutNode(child, value, next, seen)).filter(Boolean);
+  const children = (node.children || []).map(child => normalizeLayoutNode(child, value, next, seen, options)).filter(Boolean);
   if (children.length >= 2) return splitNode(direction, children[0], children[1], node.pct);
   return children[0] || null;
 }
 
-function normalizeLegacyLayoutSlots(value) {
+function normalizeLegacyLayoutSlots(value, options = {}) {
   const next = emptyLayoutSlots();
   const seen = new Set();
-  for (const side of windowKeys) {
-    next[side] = normalizeWindowState(value[side], seen);
+  for (const side of paneKeys) {
+    next[side] = normalizePaneState(value[side], seen, options);
   }
   next[layoutTreeKey] = legacyLayoutTree(next);
   return compactLayoutSlots(next);
 }
 
 function legacyLayoutTree(slots) {
-  const columns = baseWindowKeys.map(column => legacyColumnTree(column, slots)).filter(Boolean);
+  const columns = basePaneKeys.map(column => legacyColumnTree(column, slots)).filter(Boolean);
   if (columns.length >= 2) return splitNode('row', columns[0], columns[1]);
   return columns[0] || null;
 }
 
 function legacyColumnTree(column, slots) {
-  if (windowStack(column, slots).length) return leafNode(column);
+  if (paneHasLayoutContent(column, slots)) return leafNode(column);
   const top = verticalSplitSlot(column, 'top');
   const bottom = verticalSplitSlot(column, 'bottom');
-  const topNode = windowStack(top, slots).length ? leafNode(top) : null;
-  const bottomNode = windowStack(bottom, slots).length ? leafNode(bottom) : null;
+  const topNode = paneHasLayoutContent(top, slots) ? leafNode(top) : null;
+  const bottomNode = paneHasLayoutContent(bottom, slots) ? leafNode(bottom) : null;
   if (topNode && bottomNode) return splitNode('column', topNode, bottomNode);
   return topNode || bottomNode;
 }
 
 function compactLayoutSlots(slots) {
   const next = emptyLayoutSlots();
-  for (const key of layoutSlotKeys(slots)) next[key] = windowStateWithTabs(windowStack(key, slots), activeItemForSide(key, slots));
+  for (const key of layoutSlotKeys(slots)) next[key] = paneStateForLayoutSlot(key, slots);
   next[layoutTreeKey] = compactLayoutNode(slots[layoutTreeKey], next);
-  return next;
+  const keys = layoutSlotKeys(next);
+  if (keys.length && keys.every(key => paneIsPlaceholder(key, next))) return emptyPlaceholderLayoutSlots(keys[0] || 'left');
+  return next[layoutTreeKey] ? next : emptyPlaceholderLayoutSlots();
 }
 
 function compactLayoutNode(node, slots) {
   if (!node) return null;
-  if (node.slot) return windowStack(node.slot, slots).length ? leafNode(node.slot) : null;
+  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? leafNode(node.slot) : null;
   const children = (node.children || []).map(child => compactLayoutNode(child, slots)).filter(Boolean);
   if (children.length >= 2) return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
   return children[0] || null;
@@ -725,17 +789,15 @@ function compactLayoutNode(node, slots) {
 
 function layoutFromSessionList(values) {
   const next = emptyLayoutSlots();
-  let index = 0;
   const seen = new Set();
   for (const raw of values) {
     const item = resolveLayoutItem(raw);
-    if (!isLayoutItem(item) || seen.has(item) || index >= baseWindowKeys.length) continue;
-    const state = next[baseWindowKeys[index]] || emptyWindowState();
+    if (!isLayoutItem(item) || seen.has(item)) continue;
+    const state = next.left || emptyPaneState();
     state.tabs.push(item);
-    state.active = item;
-    next[baseWindowKeys[index]] = state;
+    if (!state.active) state.active = item;
+    next.left = state;
     seen.add(item);
-    index += 1;
   }
   next[layoutTreeKey] = legacyLayoutTree(next);
   return compactLayoutSlots(next);
@@ -744,7 +806,7 @@ function layoutFromSessionList(values) {
 function layoutFromParam(raw, tabsRaw = '') {
   const text = String(raw || '').trim();
   if (!text) return null;
-  if (text.toLowerCase() === 'empty') return emptyLayoutSlots();
+  if (text.toLowerCase() === 'empty') return emptyPlaceholderLayoutSlots();
   if (text.startsWith(layoutTreeParamPrefix)) return treeLayoutFromParam(text.slice(layoutTreeParamPrefix.length));
   if (compactLayoutParamLooksLikeTree(text)) return compactTreeLayoutFromParam(text, tabsRaw);
   const namedSlotLayout = namedSlotLayoutFromParam(text, tabsRaw);
@@ -753,13 +815,13 @@ function layoutFromParam(raw, tabsRaw = '') {
   if (!sides.some(value => value.trim())) return null;
   const next = emptyLayoutSlots();
   const seen = new Set();
-  for (let index = 0; index < baseWindowKeys.length; index += 1) {
-    const side = baseWindowKeys[index];
+  for (let index = 0; index < basePaneKeys.length; index += 1) {
+    const side = basePaneKeys[index];
     for (const value of (sides[index] || '').split('+')) {
       if (!value.trim()) continue;
       const item = resolveLayoutItem(value.trim());
       if (isLayoutItem(item) && !seen.has(item)) {
-        if (!next[side]) next[side] = emptyWindowState();
+        if (!next[side]) next[side] = emptyPaneState();
         next[side].tabs.push(item);
         if (!next[side].active) next[side].active = item;
         seen.add(item);
@@ -785,14 +847,14 @@ function namedSlotLayoutFromParam(raw, tabsRaw) {
     if (seen.has(slot)) continue;
     seen.add(slot);
     const state = tabStates.get(slot);
-    if (!state || !windowStack(slot, {[slot]: state}).length) continue;
+    if (!state || !paneHasLayoutContent(slot, {[slot]: state})) continue;
     next[slot] = state;
     leaves.push(leafNode(slot));
   }
   if (!leaves.length) return null;
   next[layoutTreeKey] = leaves.reduce((tree, leaf) => (tree ? splitNode('row', tree, leaf) : leaf), null);
   const normalized = normalizeLayoutSlots(next);
-  return sessionsFromSlots(normalized).length ? normalized : null;
+  return sessionsFromSlots(normalized).length || layoutSlotKeys(normalized).some(slot => paneIsPlaceholder(slot, normalized)) ? normalized : null;
 }
 
 function treeLayoutFromParam(raw) {
@@ -807,7 +869,9 @@ function treeLayoutFromParam(raw) {
       const rawState = slots[slot];
       const tabs = Array.isArray(rawState?.tabs) ? rawState.tabs : Array.isArray(rawState) ? rawState : [];
       const active = resolveLayoutItem(rawState?.active);
-      next[slot] = windowStateWithTabs(tabs.map(resolveLayoutItem), active);
+      next[slot] = rawState?.placeholder === true && !tabs.length
+        ? emptyPlaceholderPaneState()
+        : paneStateWithTabs(tabs.map(resolveLayoutItem), active);
     }
     const normalized = normalizeLayoutSlots(next);
     return sessionsFromSlots(normalized).length ? normalized : null;
@@ -829,7 +893,7 @@ function compactTreeLayoutFromParam(raw, tabsRaw) {
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = tree;
   for (const slot of layoutLeafSlots(tree)) {
-    next[slot] = tabStates.get(slot) || emptyWindowState();
+    next[slot] = tabStates.get(slot) || emptyPlaceholderPaneState();
   }
   const normalized = normalizeLayoutSlots(next);
   return sessionsFromSlots(normalized).length ? normalized : null;
@@ -895,7 +959,7 @@ function layoutParamValue(slots) {
   if (tree) return compactLayoutTreeParam(tree);
   const keys = layoutSlotKeys(slots);
   if (!keys.length) return 'empty';
-  return keys.map(side => windowStack(side, slots).map(readableItemParam).join('+')).join(',');
+  return keys.map(side => paneTabs(side, slots).map(readableItemParam).join('+')).join(',');
 }
 
 function compactLayoutTreeParam(node) {
@@ -908,8 +972,12 @@ function compactLayoutTreeParam(node) {
 function layoutTabsParamValue(slots) {
   const slotValues = [];
   for (const slot of layoutSlotKeys(slots)) {
+    if (paneIsPlaceholder(slot, slots)) {
+      slotValues.push(`${readableParamComponent(slot)}:${emptyPaneParam}`);
+      continue;
+    }
     const active = activeItemForSide(slot, slots);
-    const tabs = windowStack(slot, slots).map((item, index) => {
+    const tabs = paneTabs(slot, slots).map((item, index) => {
       const marker = item === active && index > 0 ? '*' : '';
       return `${readableItemParam(item)}${marker}`;
     });
@@ -928,18 +996,24 @@ function layoutTabStatesFromParam(raw) {
     if (!slot) continue;
     const tabs = [];
     let active = null;
+    let placeholder = false;
     for (const rawItem of part.slice(separator + 1).split(',')) {
       let token = rawItem.trim();
       if (!token) continue;
       const activeToken = token.endsWith('*');
       if (activeToken) token = token.slice(0, -1);
-      const item = resolveLayoutItem(readableParamComponentDecode(token));
+      const decoded = readableParamComponentDecode(token);
+      if (decoded === emptyPaneParam) {
+        placeholder = true;
+        continue;
+      }
+      const item = resolveLayoutItem(decoded);
       if (isLayoutItem(item) && !tabs.includes(item)) {
         tabs.push(item);
         if (activeToken) active = item;
       }
     }
-    result.set(slot, windowStateWithTabs(tabs, active));
+    result.set(slot, placeholder && !tabs.length ? emptyPlaceholderPaneState() : paneStateWithTabs(tabs, active));
   }
   return result;
 }
@@ -971,7 +1045,6 @@ function initialLayoutSlots() {
     if (!value) continue;
     const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
-    if (selected.length >= baseWindowKeys.length) break;
   }
   if (selected.length) return layoutFromSessionList(selected);
   return defaultLayoutSlots();
@@ -981,9 +1054,9 @@ function defaultLayoutSlots() {
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
   const next = emptyLayoutSlots();
   if (!sorted.length) {
-    next.left = windowStateWithTabs([infoItemId], infoItemId);
+    next.left = emptyPlaceholderPaneState();
   } else {
-    next.left = windowStateWithTabs(sorted, sorted[0]);
+    next.left = paneStateWithTabs(sorted, sorted[0]);
   }
   next[layoutTreeKey] = legacyLayoutTree(next);
   return compactLayoutSlots(next);
@@ -991,37 +1064,52 @@ function defaultLayoutSlots() {
 
 function layoutWithItems(value, items, preferredSlot = null) {
   const next = normalizeLayoutSlots(value);
-  const present = new Set(windowedItems(next));
+  const present = new Set(paneItems(next));
   const missing = items.filter(item => isLayoutItem(item) && !present.has(item));
   if (!missing.length) return next;
-  let slot = preferredSlot && layoutSlotKeys(next).includes(preferredSlot) ? preferredSlot : layoutSlotKeys(next)[0];
+  let slot = preferredSlot && layoutSlotKeys(next).includes(preferredSlot) ? preferredSlot : firstEmptyPane(next) || layoutSlotKeys(next)[0];
   if (!slot) {
     slot = 'left';
     next[layoutTreeKey] = leafNode(slot);
-    next[slot] = emptyWindowState();
+    next[slot] = emptyPlaceholderPaneState();
   }
   if (!preferredSlot
     && activeItemForSide(slot, next) === fileExplorerItemId
-    && windowStack(slot, next).length === 1
+    && paneTabs(slot, next).length === 1
     && missing.some(isTmuxSession)) {
     const sessionTabs = missing.filter(isTmuxSession);
     const otherTabs = missing.filter(item => !isTmuxSession(item));
     const newSlot = nextLayoutSlot(next);
-    next[newSlot] = windowStateWithTabs(sessionTabs, sessionTabs[0] || null);
-    next[slot] = windowStateWithTabs([...windowStack(slot, next), ...otherTabs], activeItemForSide(slot, next));
+    next[newSlot] = paneStateWithTabs(sessionTabs, sessionTabs[0] || null);
+    next[slot] = paneStateWithTabs([...paneTabs(slot, next), ...otherTabs], activeItemForSide(slot, next));
     next[layoutTreeKey] = splitNode('row', leafNode(slot), leafNode(newSlot), fileExplorerSplitPercent);
     return compactLayoutSlots(next);
   }
-  const tabs = [...windowStack(slot, next), ...missing];
+  const tabs = [...paneTabs(slot, next), ...missing];
   const active = activeItemForSide(slot, next) || tabs.find(isTmuxSession) || tabs[0] || null;
-  next[slot] = windowStateWithTabs(tabs, active);
+  next[slot] = paneStateWithTabs(tabs, active);
   return compactLayoutSlots(next);
 }
 
-function windowStack(side, slots = layoutSlots) {
+function paneTabs(side, slots = layoutSlots) {
   const state = slots?.[side];
   if (Array.isArray(state)) return state;
   return Array.isArray(state?.tabs) ? state.tabs : [];
+}
+
+function paneIsPlaceholder(side, slots = layoutSlots) {
+  const state = slots?.[side];
+  return Boolean(!Array.isArray(state) && state?.placeholder === true && !paneTabs(side, slots).length);
+}
+
+function paneHasLayoutContent(side, slots = layoutSlots) {
+  return paneTabs(side, slots).length > 0 || paneIsPlaceholder(side, slots);
+}
+
+function paneStateForLayoutSlot(side, slots = layoutSlots) {
+  return paneIsPlaceholder(side, slots)
+    ? emptyPlaceholderPaneState()
+    : paneStateWithTabs(paneTabs(side, slots), activeItemForSide(side, slots));
 }
 
 function slotColumn(slot) {
@@ -1034,13 +1122,14 @@ function verticalSplitSlot(column, position) {
 }
 
 function activeItemForSide(side, slots = layoutSlots) {
-  const stack = windowStack(side, slots);
+  if (paneIsPlaceholder(side, slots)) return null;
+  const stack = paneTabs(side, slots);
   const state = slots?.[side];
   const active = !Array.isArray(state) ? state?.active : null;
   return stack.includes(active) ? active : stack[0] || null;
 }
 
-function windowStateWithTabs(tabs, active = null) {
+function paneStateWithTabs(tabs, active = null) {
   const unique = [];
   for (const item of tabs) {
     if (isLayoutItem(item) && !unique.includes(item)) unique.push(item);
@@ -1048,18 +1137,50 @@ function windowStateWithTabs(tabs, active = null) {
   return {tabs: unique, active: unique.includes(active) ? active : unique[0] || null};
 }
 
-function windowedItems(slots = layoutSlots) {
+function paneItems(slots = layoutSlots) {
   const result = [];
   for (const side of layoutSlotKeys(slots)) {
-    for (const item of windowStack(side, slots)) {
+    for (const item of paneTabs(side, slots)) {
       if (!result.includes(item)) result.push(item);
     }
   }
   return result;
 }
 
+function activePaneItems(slots = layoutSlots) {
+  const result = [];
+  for (const side of layoutSlotKeys(slots)) {
+    const item = activeItemForSide(side, slots);
+    if (item && !result.includes(item)) result.push(item);
+  }
+  return result;
+}
+
 function itemInLayout(item, slots = layoutSlots) {
-  return windowedItems(slots).includes(item);
+  return paneItems(slots).includes(item);
+}
+
+function itemIsActivePaneTab(item, slots = layoutSlots) {
+  return activePaneItems(slots).includes(item);
+}
+
+function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
+  return itemInLayout(item, slots) && !itemIsActivePaneTab(item, slots);
+}
+
+function allTabItems() {
+  return [infoItemId, ...openFileEditorItems(), ...visibleSessions];
+}
+
+function sortTabItems(items) {
+  return items
+    .slice()
+    .sort((left, right) => itemSortNumber(left) - itemSortNumber(right) || itemLabel(left).localeCompare(itemLabel(right)));
+}
+
+function backgroundTabItems(slots = layoutSlots) {
+  const activeItems = new Set(activePaneItems(slots));
+  return sortTabItems(paneItems(slots).filter(item => !activeItems.has(item)));
 }
 
 function sessionsFromSlots(slots) {
@@ -1128,7 +1249,7 @@ function resolveLayoutItem(value) {
 
 function itemLabel(item) {
   if (isInfoItem(item)) return 'Branch Info';
-  if (isFileExplorerItem(item)) return 'Files';
+  if (isFileExplorerItem(item)) return fileExplorerLabel();
   if (isFileEditorItem(item)) return basenameOf(fileItemPath(item));
   return sessionLabel(item);
 }
@@ -1231,7 +1352,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
     return stateValue('needs-input', 'agent is waiting for input');
   }
-  if (agents.some(agent => agent.error) || /blocked|error|failed|failure|stuck/.test(agentText)) {
+  if (agents.some(agent => agentErrorIsBlocking(agent.error)) || /blocked|error|failed|failure|stuck/.test(agentText)) {
     return stateValue('blocked', 'agent reported an error or blocker');
   }
   if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
@@ -1247,6 +1368,12 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
     return stateValue('working', 'agent or active pane detected');
   }
   return stateValue('idle', 'no active agent state detected');
+}
+
+function agentErrorIsBlocking(error) {
+  const text = String(error || '').toLowerCase();
+  if (!text) return false;
+  return !/transcript not found/.test(text);
 }
 
 function stateValue(key, reason, extra = {}) {
@@ -1310,11 +1437,9 @@ function sessionStateHtml(state) {
   return stateBadgeHtml(state.key, state.short, `${state.label}: ${state.reason}`);
 }
 
-function sessionTrayItems() {
-  const inWindow = new Set(windowedItems());
-  return [infoItemId, ...openFileEditorItems(), ...visibleSessions]
-    .filter(item => !inWindow.has(item))
-    .sort((left, right) => itemSortNumber(left) - itemSortNumber(right) || itemLabel(left).localeCompare(itemLabel(right)));
+function inactiveTabItems() {
+  const inPane = new Set(paneItems());
+  return sortTabItems(allTabItems().filter(item => !inPane.has(item)));
 }
 
 function renderNotifyToggle() {
@@ -1353,6 +1478,7 @@ async function toggleNotifications() {
     return;
   }
   renderNotifyToggle();
+  renderSessionButtons();
   if (notificationsEnabled) {
     if (browserPermission !== 'granted') {
       statusEl.innerHTML = `<span class="ok">in-page alerts on; browser notifications ${esc(browserPermission)}</span>`;
@@ -1686,7 +1812,7 @@ function bindTopbarMetrics() {
 
 function scheduleTabStripOverflowCheck(strip) {
   if (!strip) return;
-  if (strip === sessionButtons || strip.classList?.contains('window-session-tabs')) {
+  if (strip === sessionButtons || strip.classList?.contains('pane-tabs')) {
     strip.classList.remove('tabs-overflowing');
     scheduleTopbarMetricsUpdate();
     return;
@@ -1699,25 +1825,27 @@ function scheduleTabStripOverflowCheck(strip) {
 
 function scheduleAllTabStripOverflowChecks() {
   scheduleTabStripOverflowCheck(sessionButtons);
-  for (const strip of document.querySelectorAll('.window-session-tabs')) {
+  for (const strip of document.querySelectorAll('.pane-tabs')) {
     scheduleTabStripOverflowCheck(strip);
   }
 }
 
 function updateSessionList(nextSessions) {
   if (!Array.isArray(nextSessions)) return false;
-  const previousItems = new Set(layoutItems);
   const next = [];
   for (const session of nextSessions) {
     if (typeof session === 'string' && session && !next.includes(session)) next.push(session);
   }
   const changed = next.length !== sessions.length || next.some((session, index) => session !== sessions[index]);
   if (!changed) return false;
+  const removedSessions = visibleSessions.filter(session => !next.includes(session));
   sessions = next;
   visibleSessions = sessions.slice(0, maxSessionTabs);
   layoutItems = [infoItemId, fileExplorerItemId, ...openFileEditorItems(), ...visibleSessions];
-  const newItems = layoutItems.filter(item => !previousItems.has(item));
-  layoutSlots = newItems.length ? layoutWithItems(layoutSlots, newItems) : normalizeLayoutSlots(layoutSlots);
+  layoutSlots = normalizeLayoutSlots(layoutSlots, {
+    preserveRemovedItems: removedSessions,
+    preserveRemovedSlots: true,
+  });
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
@@ -1731,7 +1859,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
   renderSessionButtons();
-  renderPanels(previousActive);
+  renderPanels(previousActive, {prune: options.prune});
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
   refreshTranscripts();
   renderAutoApproveButtons();
@@ -1751,8 +1879,8 @@ function updateActiveSessionParam() {
   params.delete('layout');
   params.delete('tabs');
   const queryParts = [];
-  const minimizedItems = sessionTrayItems();
-  if (activeSessions.length || minimizedItems.length) {
+  const inactiveItems = inactiveTabItems();
+  if (activeSessions.length || inactiveItems.length) {
     if (activeSessions.length) {
       queryParts.push(`sessions=${activeSessions.map(readableItemParam).join(',')}`);
     }
@@ -1770,7 +1898,254 @@ function syncInitialLayoutUrl() {
   updateActiveSessionParam();
 }
 
-function renderSessionButtons() {
+function menuCommand(label, action, options = {}) {
+  return {type: 'command', label, action, ...options};
+}
+
+function menuSubmenu(label, items, options = {}) {
+  return {type: 'submenu', label, items, ...options};
+}
+
+function menuSection(label) {
+  return {type: 'section', label};
+}
+
+function menuSeparator() {
+  return {type: 'separator'};
+}
+
+function currentActiveMenuItem() {
+  if (focusedPanelItem && itemIsActivePaneTab(focusedPanelItem)) return focusedPanelItem;
+  if (focusedTerminal && itemIsActivePaneTab(focusedTerminal)) return focusedTerminal;
+  return activePaneItems()[0] || null;
+}
+
+function currentActiveTmuxSession() {
+  const current = currentActiveMenuItem();
+  if (isTmuxSession(current)) return current;
+  return activePaneItems().find(isTmuxSession)
+    || visibleSessions.find(itemIsActivePaneTab)
+    || visibleSessions[0]
+    || null;
+}
+
+function orderedPaneItems(items = activePaneItems()) {
+  const unique = [];
+  for (const group of [
+    items.filter(isTmuxSession),
+    items.filter(isFileEditorItem),
+    items.filter(item => !isTmuxSession(item) && !isFileEditorItem(item)),
+  ]) {
+    for (const item of group) {
+      if (!unique.includes(item)) unique.push(item);
+    }
+  }
+  return unique;
+}
+
+function menuTabDetail(item) {
+  if (isFileEditorItem(item)) return compactHomePath(fileItemPath(item));
+  if (isFileExplorerItem(item)) return compactHomePath(fileExplorerRoot || homePath || '/');
+  if (isInfoItem(item)) return 'Branch and repo metadata';
+  return tabListEntryLineText(item, transcriptMeta.sessions?.[item]);
+}
+
+function menuTabRowHtml(item, options = {}) {
+  if (isInfoItem(item)) return paneInfoTabHtml();
+  if (isFileExplorerItem(item)) return fileExplorerPaneTabHtml();
+  if (isFileEditorItem(item)) return fileEditorPaneTabHtml(item);
+  const info = transcriptMeta.sessions?.[item];
+  const auto = autoApproveStates.get(item)?.enabled === true;
+  const state = sessionState(item, info);
+  const pr = displayPullRequest(info);
+  const desc = sessionTabDescription(item, info);
+  const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
+  return `<span class="pane-tab-core">${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: options.toggleYolo === true, yoloWorking: sessionYoloIsWorking(item)})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
+    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
+}
+
+function menuTabCommand(item, options = {}) {
+  const slot = slotForSession(item);
+  const visible = itemIsActivePaneTab(item);
+  const active = item === currentActiveMenuItem();
+  const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? 'Background tab: in a pane, not shown' : 'Inactive: not in a pane'));
+  return menuCommand(itemLabel(item), () => {
+    if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item);
+    return selectSession(item);
+  }, {
+    checked: options.checked ?? active,
+    detail,
+    html: menuTabRowHtml(item),
+    className: 'app-menu-tab-command',
+  });
+}
+
+function newTmuxSessionItems() {
+  return ['claude', 'codex', 'term'].map(agent => {
+    const available = availableAgents.has(agent);
+    const capped = visibleSessions.length >= maxSessionTabs;
+    return menuCommand(`+ ${agentName(agent)}`, () => createNextSession(agent), {
+      iconHtml: agentIcon(agent),
+      disabled: readOnlyMode || !available || capped,
+      detail: readOnlyMode
+        ? 'Requires admin access'
+        : (!available ? `${agentName(agent)} is not available on the server PATH` : (capped ? 'Visible session limit reached' : 'Create the next numbered tmux session')),
+    });
+  });
+}
+
+function backgroundTabMenuItems() {
+  const items = backgroundTabItems();
+  if (!items.length) return [menuCommand('No background tabs', null, {disabled: true})];
+  return items.map(item => menuTabCommand(item, {
+    checked: false,
+    detail: 'In a pane, not shown',
+    openAsPane: true,
+  }));
+}
+
+function inactiveTabMenuItems() {
+  const items = inactiveTabItems();
+  if (!items.length) return [menuCommand('No inactive tabs', null, {disabled: true})];
+  return items.map(item => menuTabCommand(item, {
+    checked: false,
+    detail: 'Not in a pane',
+    openAsPane: true,
+  }));
+}
+
+function appMenuTree() {
+  const activeTmux = currentActiveTmuxSession();
+  const autoPayload = activeTmux ? autoApproveStates.get(activeTmux) : null;
+  const autoHere = activeTmux ? autoApproveEnabledHere(autoPayload) : false;
+  const openItems = orderedPaneItems(activePaneItems());
+  return [
+    {
+      id: 'file',
+      label: 'File',
+      items: [
+        menuSubmenu('New tmux session', newTmuxSessionItems()),
+        menuSeparator(),
+        menuCommand(fileExplorerLabel(), () => selectSession(fileExplorerItemId), {
+          checked: itemInLayout(fileExplorerItemId),
+          detail: 'Browse files and open editors',
+        }),
+        menuCommand('Open file...', null, {
+          disabled: true,
+          detail: `Use ${fileExplorerLabel()} for now`,
+        }),
+        menuSeparator(),
+        menuCommand('Log out', () => { window.location.href = '/logout'; }, {
+          detail: 'End this browser session',
+        }),
+      ],
+    },
+    {
+      id: 'view',
+      label: 'View',
+      items: [
+        menuCommand(tabMetaVisible ? 'Hide tab metadata' : 'Show tab metadata', toggleTabMetadata, {
+          checked: tabMetaVisible,
+          detail: 'Controls branch, state, PR, and cwd text in tabs',
+        }),
+        menuTabCommand(infoItemId, {
+          checked: itemIsActivePaneTab(infoItemId),
+          detail: 'Open the repository overview panel',
+        }),
+        menuSubmenu('Layout', [
+          menuCommand('Single pane', null, {disabled: true, detail: 'Coming after menu navigation is stable'}),
+          menuCommand('Grid', null, {disabled: true, detail: 'Current layout can still be changed by dragging panes'}),
+          menuCommand('Wall', null, {disabled: true}),
+        ]),
+      ],
+    },
+    {
+      id: 'panes',
+      label: 'Panes',
+      items: [
+        menuSection('Active'),
+        ...(openItems.length ? openItems.map(item => menuTabCommand(item)) : [menuCommand('No active tabs', null, {disabled: true})]),
+        menuSeparator(),
+        menuSection('Background tabs'),
+        ...backgroundTabMenuItems(),
+        menuSeparator(),
+        menuSection('Inactive'),
+        ...inactiveTabMenuItems(),
+      ],
+    },
+    {
+      id: 'yolo',
+      label: 'YOLO',
+      items: [
+        menuCommand(activeTmux && autoHere ? `Disable YOLO for ${sessionLabel(activeTmux)}` : `Enable YOLO for ${activeTmux ? sessionLabel(activeTmux) : 'session'}`, async () => {
+          if (!activeTmux) return;
+          await toggleAutoApprove(activeTmux);
+          renderSessionButtons();
+          renderPaneTabStrips();
+        }, {
+          checked: autoHere,
+          disabled: readOnlyMode || !activeTmux,
+          detail: activeTmux ? menuTabDetail(activeTmux) : 'Focus a tmux session first',
+        }),
+        menuCommand('Open event log', () => {
+          if (activeTmux) activateTab(activeTmux, 'events');
+        }, {
+          disabled: !activeTmux || !activeSessions.includes(activeTmux),
+          detail: activeTmux ? `Events for ${sessionLabel(activeTmux)}` : 'Focus a tmux session first',
+        }),
+      ],
+    },
+    {
+      id: 'settings',
+      label: 'Settings',
+      items: [
+        menuCommand(notificationsEnabled ? 'Disable Notify' : 'Enable Notify', toggleNotifications, {
+          checked: notificationsEnabled,
+          disabled: readOnlyMode,
+          detail: readOnlyMode ? 'Requires admin access' : 'Mirror of the top-right Notify button',
+        }),
+        menuCommand('Refresh', refreshAll, {
+          detail: 'Mirror of the top-right Refresh button',
+        }),
+      ],
+    },
+    {
+      id: 'help',
+      label: 'Help',
+      items: [
+        menuCommand(`YOLOmux ${bootstrap.version || ''}`.trim(), null, {
+          disabled: true,
+          detail: bootstrap.versionCommitTime ? `Last commit: ${bootstrap.versionCommitTime}` : '',
+        }),
+        menuCommand('Keyboard shortcuts', null, {
+          disabled: true,
+          detail: 'Use tmux and terminal shortcuts inside each pane',
+        }),
+      ],
+    },
+  ];
+}
+
+function appMenuIsOpen() {
+  return Boolean(sessionButtons?.querySelector('.app-menu.open'));
+}
+
+function renderSessionButtons(options = {}) {
+  if (!sessionButtons) return;
+  if (!options.force && appMenuIsOpen()) {
+    scheduleTopbarMetricsUpdate();
+    return;
+  }
+  const openMenu = sessionButtons.querySelector('.app-menu.open');
+  if (openMenu) {
+    openAppMenuId = openMenu.dataset.appMenu || null;
+  } else {
+    openAppMenuId = null;
+    openAppMenuPinned = false;
+    openAppMenuOpenedAt = 0;
+  }
+  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
+  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
   sessionButtons.innerHTML = '';
   sessionButtons.ondragover = event => {
     const payload = dragPayload(event);
@@ -1792,33 +2167,260 @@ function renderSessionButtons() {
     removeSessionFromLayout(payload.session);
   };
   sessionButtons.classList.remove('drag-over');
-  const trayItems = sessionTrayItems();
-  if (shouldShowTabListMenu(trayItems)) sessionButtons.appendChild(createTabListMenu(trayItems, {kind: 'tray'}));
-  if (tabMetaToggle) sessionButtons.appendChild(tabMetaToggle);
-  for (const item of trayItems) {
-    sessionButtons.appendChild(createTopSessionButton(item));
-  }
-  if (!readOnlyMode && visibleSessions.length < maxSessionTabs) {
-    for (const agent of ['claude', 'codex', 'term']) {
-      if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
-    }
-  }
-  sessionButtons.appendChild(createFileExplorerButton());
-  scheduleTabStripOverflowCheck(sessionButtons);
+  sessionButtons.appendChild(createAppMenuBar());
+  scheduleTopbarMetricsUpdate();
 }
 
-function createFileExplorerButton() {
+function createAppMenuBar() {
+  const bar = document.createElement('nav');
+  bar.className = 'app-menu-bar';
+  bar.setAttribute('aria-label', 'Application menu');
+  bar.setAttribute('role', 'menubar');
+  for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
+  return bar;
+}
+
+function createAppMenu(menu) {
   const wrapper = document.createElement('div');
-  wrapper.className = 'session-button-wrap add-session';
+  wrapper.className = 'app-menu';
+  wrapper.dataset.appMenu = menu.id;
   const button = document.createElement('button');
-  button.className = 'session-button add-session file';
   button.type = 'button';
-  button.title = 'Open Files panel';
-  button.setAttribute('aria-label', 'Open Files panel');
-  button.innerHTML = '<span class="add-plus">+</span><span class="agent-icon file" aria-hidden="true">📁</span>';
-  button.addEventListener('click', () => selectSession(fileExplorerItemId));
-  wrapper.appendChild(button);
+  button.className = 'app-menu-button';
+  button.setAttribute('aria-haspopup', 'true');
+  button.setAttribute('aria-expanded', openAppMenuId === menu.id ? 'true' : 'false');
+  button.setAttribute('role', 'menuitem');
+  button.textContent = menu.label;
+  const popover = document.createElement('div');
+  popover.className = 'app-menu-popover';
+  popover.setAttribute('role', 'menu');
+  popover.setAttribute('aria-label', menu.label);
+  for (const item of menu.items) popover.appendChild(createAppMenuItem(item));
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (wrapper.classList.contains('open')) {
+      const openMs = Date.now() - openAppMenuOpenedAt;
+      if (openAppMenuPinned && openMs >= menuClickCloseGraceMs) closeAppMenus();
+      else openAppMenu(wrapper, {focusFirst: false, pinned: true});
+      return;
+    }
+    openAppMenu(wrapper, {focusFirst: false, pinned: true});
+  });
+  button.addEventListener('keydown', event => handleAppMenuButtonKeydown(event, wrapper));
+  wrapper.addEventListener('pointerenter', () => {
+    appMenuCloseTimer = clearTimer(appMenuCloseTimer);
+    queueAppMenuHoverOpen(wrapper);
+  });
+  wrapper.addEventListener('pointerleave', () => {
+    if (wrapper.classList.contains('open')) queueAppMenuHoverClose(wrapper);
+    else appMenuHoverTimer = clearTimer(appMenuHoverTimer);
+  });
+  wrapper.append(button, popover);
+  if (openAppMenuId === menu.id) wrapper.classList.add('open');
   return wrapper;
+}
+
+function createAppMenuItem(item) {
+  if (item.type === 'separator') {
+    const node = document.createElement('div');
+    node.className = 'app-menu-separator';
+    node.role = 'separator';
+    return node;
+  }
+  if (item.type === 'section') {
+    const node = document.createElement('div');
+    node.className = 'app-menu-section';
+    node.textContent = item.label;
+    return node;
+  }
+  if (item.type === 'submenu') return createAppSubmenu(item);
+  return createAppMenuCommand(item);
+}
+
+function createAppSubmenu(item) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'app-menu-submenu-wrap open';
+  const button = createAppMenuCommand({
+    label: item.label,
+    disabled: item.disabled,
+    detail: item.detail,
+    className: 'app-menu-submenu-button',
+  }, {asSubmenu: true});
+  const submenu = document.createElement('div');
+  submenu.className = 'app-submenu-popover';
+  submenu.setAttribute('role', 'menu');
+  submenu.setAttribute('aria-label', item.label);
+  for (const child of item.items || []) submenu.appendChild(createAppMenuItem(child));
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (button.disabled) return;
+    wrapper.classList.add('open');
+  });
+  button.addEventListener('keydown', event => {
+    if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      wrapper.classList.add('open');
+      focusFirstAppMenuCommand(submenu);
+    }
+  });
+  wrapper.append(button, submenu);
+  return wrapper;
+}
+
+function createAppMenuCommand(item, options = {}) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' ');
+  button.setAttribute('role', 'menuitem');
+  if (item.checked) button.dataset.checked = 'true';
+  if (item.disabled) button.disabled = true;
+  const title = [item.label, item.detail].filter(Boolean).join('\n');
+  if (title) button.title = title;
+  const contentHtml = item.html
+    ? `<span class="app-menu-rich">${item.html}</span>`
+    : `<span class="app-menu-line">${item.iconHtml ? `<span class="app-menu-icon">${item.iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
+  const detailHtml = item.detail ? `<span class="app-menu-detail">${esc(item.detail)}</span>` : '';
+  button.innerHTML = `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`;
+  if (!options.asSubmenu) {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      runAppMenuCommand(item);
+    });
+  }
+  button.addEventListener('keydown', event => handleAppMenuCommandKeydown(event, button, item, options));
+  return button;
+}
+
+function runAppMenuCommand(item) {
+  if (item.disabled || typeof item.action !== 'function') return;
+  closeAppMenus();
+  try {
+    Promise.resolve(item.action()).catch(error => {
+      statusEl.innerHTML = `<span class="err">menu command failed: ${esc(error)}</span>`;
+    });
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">menu command failed: ${esc(error)}</span>`;
+  }
+}
+
+function appMenuCommands(container) {
+  const scope = container.classList?.contains('app-menu')
+    ? container.querySelector(':scope > .app-menu-popover')
+    : container;
+  if (!scope) return [];
+  return Array.from(scope.querySelectorAll('.app-menu-command'))
+    .filter(button => !button.disabled && button.closest('.app-menu-popover, .app-submenu-popover') === scope);
+}
+
+function focusFirstAppMenuCommand(container) {
+  appMenuCommands(container)[0]?.focus();
+}
+
+function focusAdjacentAppMenuCommand(button, direction) {
+  const popover = button.closest('.app-menu-popover, .app-submenu-popover');
+  if (!popover) return;
+  const commands = appMenuCommands(popover);
+  const index = commands.indexOf(button);
+  if (!commands.length || index < 0) return;
+  const next = commands[(index + direction + commands.length) % commands.length];
+  next.focus();
+}
+
+function focusAdjacentTopMenu(wrapper, direction) {
+  const menus = Array.from(sessionButtons.querySelectorAll('.app-menu'));
+  const index = menus.indexOf(wrapper);
+  if (index < 0 || !menus.length) return;
+  const next = menus[(index + direction + menus.length) % menus.length];
+  openAppMenu(next, {focusFirst: false});
+  next.querySelector('.app-menu-button')?.focus();
+}
+
+function handleAppMenuButtonKeydown(event, wrapper) {
+  if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    openAppMenu(wrapper, {focusFirst: true, pinned: true});
+  } else if (event.key === 'ArrowRight') {
+    event.preventDefault();
+    focusAdjacentTopMenu(wrapper, 1);
+  } else if (event.key === 'ArrowLeft') {
+    event.preventDefault();
+    focusAdjacentTopMenu(wrapper, -1);
+  } else if (event.key === 'Escape') {
+    closeAppMenus();
+  }
+}
+
+function handleAppMenuCommandKeydown(event, button, item, options = {}) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    focusAdjacentAppMenuCommand(button, 1);
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    focusAdjacentAppMenuCommand(button, -1);
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    closeAppMenus();
+    button.closest('.app-menu')?.querySelector('.app-menu-button')?.focus();
+  } else if (!options.asSubmenu && (event.key === 'Enter' || event.key === ' ')) {
+    event.preventDefault();
+    runAppMenuCommand(item);
+  }
+}
+
+function queueAppMenuHoverOpen(wrapper) {
+  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
+  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
+  if (!wrapper || wrapper.classList.contains('open')) return;
+  appMenuHoverTimer = setTimeout(() => {
+    appMenuHoverTimer = null;
+    openAppMenu(wrapper, {focusFirst: false, pinned: false});
+  }, menuHoverOpenDelayMs);
+}
+
+function queueAppMenuHoverClose(wrapper) {
+  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
+  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
+  appMenuCloseTimer = setTimeout(() => {
+    appMenuCloseTimer = null;
+    if (!wrapper?.matches?.(':hover')) closeAppMenus();
+  }, menuHoverCloseDelayMs);
+}
+
+function openAppMenu(wrapper, options = {}) {
+  if (!wrapper) return;
+  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
+  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
+  closeOtherSessionPopovers(null);
+  closeAppMenus(wrapper);
+  wrapper.classList.add('open');
+  wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => submenu.classList.add('open'));
+  openAppMenuId = wrapper.dataset.appMenu || null;
+  openAppMenuPinned = options.pinned === true;
+  openAppMenuOpenedAt = Date.now();
+  wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
+  if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
+}
+
+function closeAppMenus(keepOpen = null) {
+  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
+  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
+  for (const menu of document.querySelectorAll('.app-menu.open')) {
+    if (menu === keepOpen) continue;
+    menu.classList.remove('open');
+    menu.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'false');
+  }
+  for (const submenu of document.querySelectorAll('.app-menu-submenu-wrap.open')) {
+    if (keepOpen?.contains(submenu)) continue;
+    submenu.classList.remove('open');
+  }
+  openAppMenuId = keepOpen?.dataset?.appMenu || null;
+  if (!openAppMenuId) {
+    openAppMenuPinned = false;
+    openAppMenuOpenedAt = 0;
+  }
 }
 
 function toggleFileExplorer() {
@@ -2022,6 +2624,7 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'full'), closeFileContextMenu);
   appendContextMenuButton(menu, multiple ? 'Copy raw paths' : 'Copy raw path', () => copyFilePath(selectedPaths.join('\n'), 'full', {raw: true}), closeFileContextMenu);
   appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: relativePaths.length !== selectedPaths.length});
+  appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: multiple || entry.kind !== 'file'});
   appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: multiple});
   appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu);
   menu.addEventListener('pointerdown', event => event.stopPropagation());
@@ -2050,6 +2653,22 @@ async function copyFilePath(path, label, options = {}) {
   } catch (error) {
     statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`;
   }
+}
+
+function rawFileDownloadUrl(path) {
+  return `/api/fs/raw?path=${encodeURIComponent(path)}&download=1`;
+}
+
+function triggerFileDownload(path) {
+  if (!path) return;
+  const link = document.createElement('a');
+  link.href = rawFileDownloadUrl(path);
+  link.download = basenameOf(path) || 'download';
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  statusEl.textContent = `download started: ${basenameOf(path) || path}`;
 }
 
 function copyCurrentFileExplorerPath() {
@@ -2087,7 +2706,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     statusEl.textContent = deletePaths.length === 1 ? `deleted ${basenameOf(deletePaths[0])}` : `deleted ${deletePaths.length} items`;
     await refreshFileExplorerTrees();
     renderSessionButtons();
-    renderWindowTabStrips();
+    renderPaneTabStrips();
   } catch (error) {
     statusEl.innerHTML = `<span class="err">delete failed: ${esc(error)}</span>`;
   }
@@ -2274,7 +2893,7 @@ function openFilesSetAndShow(path, state) {
   activeFile = path;
   syncFileLayoutItems();
   updateFileExplorerCurrentFileHighlight();
-  return openFileEditorWindow(path);
+  return openFileEditorPane(path);
 }
 
 async function openFileInEditor(fullPath, entryOrName) {
@@ -2286,7 +2905,7 @@ async function openFileInEditor(fullPath, entryOrName) {
     activeFile = fullPath;
     syncFileLayoutItems();
     updateFileExplorerCurrentFileHighlight();
-    await openFileEditorWindow(fullPath);
+    await openFileEditorPane(fullPath);
     return;
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
@@ -2322,17 +2941,17 @@ async function openFileInEditor(fullPath, entryOrName) {
 function slotForNewFileEditorTab() {
   const focusedSlot = isFileEditorItem(focusedPanelItem) ? slotForSession(focusedPanelItem) : null;
   if (focusedSlot) return focusedSlot;
-  return layoutSlotKeys().find(slot => windowStack(slot).some(isFileEditorItem)) || null;
+  return layoutSlotKeys().find(slot => paneTabs(slot).some(isFileEditorItem)) || null;
 }
 
 function layoutColumnNode(slot) {
   return grid?.querySelector(`.layout-column[data-slot="${cssEscape(slot)}"]`) || null;
 }
 
-function largestWindowSlot(exclude = new Set()) {
+function largestPaneSlot(exclude = new Set()) {
   let best = null;
   for (const slot of layoutSlotKeys()) {
-    if (exclude.has(slot) || !windowStack(slot).length) continue;
+    if (exclude.has(slot) || !paneTabs(slot).length) continue;
     const rect = layoutColumnNode(slot)?.getBoundingClientRect();
     const area = rect ? Math.max(0, rect.width) * Math.max(0, rect.height) : 0;
     if (!best || area > best.area) best = {slot, area};
@@ -2340,13 +2959,24 @@ function largestWindowSlot(exclude = new Set()) {
   return best?.slot || null;
 }
 
-function largestWindowSlotForFileEditor() {
+function largestNonFileExplorerPaneSlot(exclude = new Set()) {
+  let best = null;
+  for (const slot of layoutSlotKeys()) {
+    if (exclude.has(slot) || !paneTabs(slot).length || isFileExplorerItem(activeItemForSide(slot))) continue;
+    const rect = layoutColumnNode(slot)?.getBoundingClientRect();
+    const area = rect ? Math.max(0, rect.width) * Math.max(0, rect.height) : 0;
+    if (!best || area > best.area) best = {slot, area};
+  }
+  return best?.slot || null;
+}
+
+function largestPaneSlotForFileEditor() {
   const filesSlot = slotForSession(fileExplorerItemId);
   const filesRect = filesSlot ? layoutColumnNode(filesSlot)?.getBoundingClientRect() : null;
   let fallback = null;
   let best = null;
   for (const slot of layoutSlotKeys()) {
-    if (slot === filesSlot || !windowStack(slot).length) continue;
+    if (slot === filesSlot || !paneTabs(slot).length) continue;
     const rect = layoutColumnNode(slot)?.getBoundingClientRect();
     const area = rect ? Math.max(0, rect.width) * Math.max(0, rect.height) : 0;
     const candidate = {slot, area};
@@ -2357,23 +2987,23 @@ function largestWindowSlotForFileEditor() {
   return (best || fallback)?.slot || null;
 }
 
-async function openFileEditorWindow(path) {
+async function openFileEditorPane(path) {
   const item = fileEditorItemFor(path);
   syncFileLayoutItems();
   renderSessionButtons();
   const existingSlot = slotForSession(item);
   if (existingSlot) {
-    activateWindowSession(existingSlot, item);
+    activatePaneTab(existingSlot, item);
     return;
   }
   const editorSlot = slotForNewFileEditorTab();
   if (editorSlot) {
-    await moveSessionToSlot(item, editorSlot, null, windowStack(editorSlot).length);
+    await moveSessionToSlot(item, editorSlot, null, paneTabs(editorSlot).length);
     return;
   }
-  const largestSlot = largestWindowSlotForFileEditor();
+  const largestSlot = largestPaneSlotForFileEditor();
   if (largestSlot) {
-    await moveSessionToSlot(item, largestSlot, null, windowStack(largestSlot).length);
+    await moveSessionToSlot(item, largestSlot, null, paneTabs(largestSlot).length);
     return;
   }
   const filesSlot = slotForSession(fileExplorerItemId);
@@ -2420,7 +3050,7 @@ function removeOpenFile(path, options = {}) {
   const state = openFiles.get(path);
   if (confirmDirty && state?.dirty && !window.confirm(`Discard unsaved changes to ${basenameOf(path)}?`)) return false;
   const item = fileEditorItemFor(path);
-  const nextSlots = layoutWithoutItem(item);
+  const nextSlots = layoutWithoutItem(item, {preserveRemovedSlot: true});
   const wasInLayout = itemInLayout(item);
   const panel = panelNodes.get(item);
   openFiles.delete(path);
@@ -2450,9 +3080,13 @@ function layoutWithReplacedItem(oldItem, newItem) {
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
   for (const side of layoutSlotKeys()) {
-    const tabs = windowStack(side).map(item => item === oldItem ? newItem : item);
+    if (paneIsPlaceholder(side)) {
+      next[side] = emptyPlaceholderPaneState();
+      continue;
+    }
+    const tabs = paneTabs(side).map(item => item === oldItem ? newItem : item);
     const active = activeItemForSide(side) === oldItem ? newItem : activeItemForSide(side);
-    next[side] = windowStateWithTabs(tabs, active);
+    next[side] = paneStateWithTabs(tabs, active);
   }
   return compactLayoutSlots(next);
 }
@@ -2483,7 +3117,7 @@ function renameOpenFilePath(oldPath, newPath) {
   if (wasInLayout) applyLayoutSlots(layoutWithReplacedItem(oldItem, newItem), {focusSession: newItem});
   else {
     renderSessionButtons();
-    renderWindowTabStrips();
+    renderPaneTabStrips();
     updateFileExplorerCurrentFileHighlight();
   }
 }
@@ -2501,6 +3135,10 @@ function renderEditorForActive() {
     fileEditorPreviewBtn.hidden = !(isMarkdown && state.kind === 'text');
     fileEditorPreviewBtn.classList.toggle('active', fileEditorPreviewMode.get(activeFile) === true);
     fileEditorPreviewBtn.textContent = fileEditorPreviewMode.get(activeFile) ? 'Edit' : 'Preview';
+  }
+  if (fileEditorWrapBtn) {
+    fileEditorWrapBtn.hidden = state.kind !== 'text';
+    updateEditorWrapButton(fileEditorWrapBtn);
   }
   // Clear any image from a previous tab
   const oldImg = fileEditor.querySelector('.file-editor-image');
@@ -2534,6 +3172,7 @@ function renderEditorForActive() {
       fileEditorTextarea.hidden = false;
       fileEditorTextarea.value = state.content;
       fileEditorTextarea.readOnly = readOnlyMode;
+      applyEditorWrapToTextarea(fileEditorTextarea);
     }
     if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = true;
     if (fileEditorHighlight) fileEditorHighlight.hidden = true;
@@ -2554,6 +3193,47 @@ function renderMarkdownPreview(text) {
       try { window.hljs.highlightElement(block); } catch (_) {}
     });
   }
+}
+
+function editorWrapValue(enabled = fileEditorWrapEnabled) {
+  return enabled ? 'soft' : 'off';
+}
+
+function applyEditorWrapToTextarea(textarea) {
+  if (!textarea) return;
+  const value = editorWrapValue();
+  textarea.wrap = value;
+  textarea.setAttribute('wrap', value);
+  textarea.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+}
+
+function updateEditorWrapButton(button) {
+  if (!button) return;
+  button.classList.toggle('active', fileEditorWrapEnabled);
+  button.setAttribute('aria-pressed', fileEditorWrapEnabled ? 'true' : 'false');
+  button.title = fileEditorWrapEnabled ? 'Disable word wrap' : 'Enable word wrap';
+  button.textContent = 'Wrap';
+}
+
+function applyEditorWrapPreference() {
+  applyEditorWrapToTextarea(fileEditorTextarea);
+  updateEditorWrapButton(fileEditorWrapBtn);
+  document.querySelectorAll('.file-editor-panel').forEach(panel => {
+    panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+    applyEditorWrapToTextarea(panel.querySelector('.file-editor-textarea-panel'));
+    updateEditorWrapButton(panel.querySelector('.file-editor-wrap-panel'));
+    syncSyntaxHighlightScroll(panel);
+  });
+}
+
+function setEditorWrapEnabled(enabled) {
+  fileEditorWrapEnabled = enabled === true;
+  writeStoredEditorWrap(fileEditorWrapEnabled);
+  applyEditorWrapPreference();
+}
+
+function toggleEditorWrap() {
+  setEditorWrapEnabled(!fileEditorWrapEnabled);
 }
 
 function togglePreview() {
@@ -2646,6 +3326,7 @@ if (fileEditorClose) fileEditorClose.addEventListener('click', () => {
 });
 if (fileEditorSave) fileEditorSave.addEventListener('click', saveCurrentEditor);
 if (fileEditorPreviewBtn) fileEditorPreviewBtn.addEventListener('click', togglePreview);
+if (fileEditorWrapBtn) fileEditorWrapBtn.addEventListener('click', toggleEditorWrap);
 if (fileEditorTextarea) {
   fileEditorTextarea.addEventListener('input', () => {
     if (!activeFile) return;
@@ -2704,7 +3385,7 @@ function createTabListEntry(item, options = {}) {
   const activate = () => {
     closeOtherSessionPopovers(null);
     if (side) {
-      activateWindowSession(side, item);
+      activatePaneTab(side, item);
     } else {
       selectSession(item);
     }
@@ -2736,49 +3417,15 @@ function createTabListEntry(item, options = {}) {
 }
 
 function bindTabListMenuPopover(wrapper) {
-  let showTimer = null;
-  let hideTimer = null;
   const popover = wrapper.querySelector(':scope > .tab-list-menu-popover');
   if (!popover) return;
-  const clearShowTimer = () => {
-    showTimer = clearTimer(showTimer);
-  };
-  const clearHideTimer = () => {
-    hideTimer = clearTimer(hideTimer);
-  };
-  const openNow = () => {
-    clearShowTimer();
-    clearHideTimer();
-    positionTabListPopover(wrapper);
-    closeOtherSessionPopovers(wrapper);
-    wrapper.classList.add('popover-open');
-  };
-  const queueOpen = () => {
-    clearHideTimer();
-    if (wrapper.classList.contains('popover-open')) return;
-    clearShowTimer();
-    positionTabListPopover(wrapper);
-    showTimer = setTimeout(openNow, popoverShowDelayMs);
-  };
-  const closeSoon = () => {
-    clearShowTimer();
-    clearHideTimer();
-    hideTimer = setTimeout(() => {
-      if (popoverStillActive(wrapper, popover)) {
-        hideTimer = null;
-        return;
-      }
-      wrapper.classList.remove('popover-open');
-      hideTimer = null;
-    }, popoverHideDelayMs);
-  };
-  bindPopoverHover(wrapper, popover, {queueOpen, keepOpen: openNow, closeSoon});
+  bindDelayedSessionPopover(wrapper, popover, () => positionTabListPopover(wrapper));
 }
 
 function positionTabListPopover(wrapper) {
   const rect = wrapper.getBoundingClientRect();
   const panel = wrapper.closest('.panel');
-  const container = panel || wrapper.closest('.session-buttons') || wrapper.parentElement || wrapper;
+  const container = panel || wrapper.closest('.app-menu-area') || wrapper.parentElement || wrapper;
   const containerRect = container.getBoundingClientRect();
   const width = Math.min(Math.max(320, containerRect.width), window.innerWidth - 16);
   const maxLeft = Math.max(8, window.innerWidth - width - 8);
@@ -2794,74 +3441,8 @@ function positionTabListPopover(wrapper) {
 }
 
 function updateSessionButtonStates() {
-  for (const wrapper of sessionButtons.querySelectorAll('.session-button-wrap[data-session]')) {
-    const item = wrapper.dataset.session;
-    const button = wrapper.querySelector('.session-button');
-    if (!button) continue;
-    const isVirtual = isVirtualItem(item);
-    const info = transcriptMeta.sessions?.[item];
-    const state = isVirtual ? null : sessionState(item, info);
-    const autoPayload = autoApproveStates.get(item);
-    const auto = autoApproveEnabledHere(autoPayload) && !isVirtual;
-    const locked = autoApproveEnabledElsewhere(autoPayload) && !isVirtual;
-    button.classList.toggle('auto', auto);
-    button.classList.toggle('auto-elsewhere', locked);
-    applySessionStateClasses(button, state);
-  }
-}
-
-function createTopSessionButton(item) {
-  const isInfo = isInfoItem(item);
-  const isFiles = isFileExplorerItem(item);
-  const isEditor = isFileEditorItem(item);
-  const isVirtual = isInfo || isFiles || isEditor;
-  const info = transcriptMeta.sessions?.[item];
-  const autoPayload = autoApproveStates.get(item);
-  const auto = autoApproveEnabledHere(autoPayload);
-  const locked = autoApproveEnabledElsewhere(autoPayload);
-  const state = isVirtual ? null : sessionState(item, info);
-  const agentKind = isVirtual ? '' : sessionAgentKind(item);
-  const wrapper = document.createElement('div');
-  const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : isEditor ? 'file-editor-item' : '';
-  wrapper.className = `session-button-wrap ${virtualClass}`;
-  wrapper.dataset.session = item;
-  const button = document.createElement('button');
-  button.className = `session-button ${virtualClass} ${auto && !isVirtual ? 'auto' : ''} ${locked && !isVirtual ? 'auto-elsewhere' : ''}`;
-  button.type = 'button';
-  button.draggable = true;
-  applySessionStateClasses(button, state);
-  if (isInfo) button.innerHTML = infoButtonHtml();
-  else if (isFiles) button.innerHTML = fileExplorerButtonHtml();
-  else if (isEditor) button.innerHTML = fileEditorButtonHtml(item);
-  else button.innerHTML = sessionButtonHtml(item, info, state, auto);
-  button.removeAttribute('title');
-  button.addEventListener('click', async event => {
-    const autoTarget = event.target.closest('[data-auto-session]');
-    if (!autoTarget) {
-      event.preventDefault();
-      await selectSession(item);
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    await toggleAutoApprove(autoTarget.dataset.autoSession);
-  });
-  button.addEventListener('dragstart', event => startSessionDrag(event, item, null));
-  button.addEventListener('dragend', endSessionDrag);
-  wrapper.appendChild(button);
-  if (isEditor) {
-    wrapper.insertAdjacentHTML('beforeend', filePopoverHtml(item));
-    bindFilePopoverActions(wrapper);
-    bindTopSessionPopover(wrapper);
-  } else if (!isVirtual) {
-    wrapper.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
-    bindTopSessionPopover(wrapper);
-  }
-  return wrapper;
-}
-
-function fileExplorerButtonHtml() {
-  return '<span class="session-button-text"><span class="agent-icon file" aria-hidden="true">📁</span><span class="session-button-dir">Files</span></span>';
+  // Top navigation is menu-based now; per-session state lives in pane tabs
+  // and menu rows, which are rebuilt by their normal render paths.
 }
 
 function fileEditorButtonHtml(item) {
@@ -2881,19 +3462,6 @@ function bindFilePopoverActions(container) {
   });
 }
 
-function createAddSessionButton(agent) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'session-button-wrap add-session';
-  const button = document.createElement('button');
-  button.className = `session-button add-session ${agent}`;
-  button.type = 'button';
-  button.innerHTML = `<span class="add-plus">+</span>${agentIcon(agent)}<span>${esc(agentName(agent))}</span>`;
-  button.title = `create next numbered tmux session with ${agentName(agent)}`;
-  button.addEventListener('click', () => createNextSession(agent));
-  wrapper.appendChild(button);
-  return wrapper;
-}
-
 function clearTimer(timer) {
   if (timer) clearTimeout(timer);
   return null;
@@ -2904,7 +3472,7 @@ function stopPopoverEvent(event) {
 }
 
 function closeOtherSessionPopovers(current) {
-  for (const other of document.querySelectorAll('.session-button-wrap.popover-open, .window-session-tab.popover-open, .tab-list-menu-wrap.popover-open')) {
+  for (const other of document.querySelectorAll('.pane-tab.popover-open, .tab-list-menu-wrap.popover-open')) {
     if (other !== current) other.classList.remove('popover-open');
   }
 }
@@ -3201,6 +3769,8 @@ function stripPullRequestSuffixText(value) {
 
 function tabListEntryLineText(item, info = transcriptMeta.sessions?.[item]) {
   if (isInfoItem(item)) return itemLabel(item);
+  if (isFileExplorerItem(item)) return compactHomePath(fileExplorerRoot || homePath || '/');
+  if (isFileEditorItem(item)) return compactHomePath(fileItemPath(item));
   const project = info?.project || {};
   const git = project.git || {};
   const pr = displayPullRequest(info);
@@ -3231,7 +3801,13 @@ function tabListEntryLineText(item, info = transcriptMeta.sessions?.[item]) {
 
 function tabListEntryBodyHtml(item) {
   if (isInfoItem(item)) {
-    return `<span class="tab-list-entry-main">${windowInfoTabHtml()}</span>`;
+    return `<span class="tab-list-entry-main">${paneInfoTabHtml()}</span>`;
+  }
+  if (isFileExplorerItem(item)) {
+    return `<span class="tab-list-entry-main">${fileExplorerPaneTabHtml()}</span>`;
+  }
+  if (isFileEditorItem(item)) {
+    return `<span class="tab-list-entry-main">${fileEditorPaneTabHtml(item)}</span>`;
   }
   const info = transcriptMeta.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true;
@@ -3244,10 +3820,6 @@ function tabListEntryBodyHtml(item) {
     <span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${descHtml}</span>
   </span>`;
-}
-
-function infoButtonHtml() {
-  return '<span class="session-button-text"><span class="session-button-dir">Branch Info</span></span>';
 }
 
 function sessionButtonHtml(session, info, state, auto) {
@@ -3276,22 +3848,27 @@ function pathBasename(path) {
 function filePopoverHtml(item) {
   const path = fileItemPath(item);
   const state = openFiles.get(path) || {};
-  const kind = state.kind === 'image' ? 'image viewer' : state.kind === 'text' ? 'file editor' : state.kind || 'file';
-  const status = state.dirty ? 'modified' : state.loading ? 'loading' : state.error ? String(state.error) : kind;
-  const rows = [
-    popoverRow('path', filePopoverPathHtml(path)),
-    popoverPairRow('type', esc(kind), 'status', esc(status)),
-  ];
-  if (Number.isFinite(state.size)) rows.push(popoverRow('size', formatFileSize(state.size)));
+  const rows = filePopoverRows(path, state);
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">
       <div>
         <div class="popover-title">${esc(basenameOf(path))}</div>
-        <div class="popover-subtitle">${esc(path)}</div>
       </div>
     </div>
     ${rows.join('')}
   </div>`;
+}
+
+function filePopoverRows(path, state = {}) {
+  const kind = state.kind === 'image' ? 'image viewer' : state.kind === 'text' ? 'file editor' : state.kind || 'file';
+  const status = state.dirty ? 'modified' : state.loading ? 'loading' : state.error ? String(state.error) : kind;
+  const rows = [
+    popoverRow('path', filePopoverPathHtml(path)),
+  ];
+  if (status && status !== kind) rows.push(popoverPairRow('type', esc(kind), 'status', esc(status)));
+  else rows.push(popoverRow('type', esc(kind)));
+  if (Number.isFinite(state.size)) rows.push(popoverRow('size', formatFileSize(state.size)));
+  return rows;
 }
 
 function filePopoverPathHtml(path) {
@@ -3633,29 +4210,44 @@ function endSessionDrag(event) {
   clearDropPreview();
 }
 
-function layoutWithoutItem(item) {
+function layoutWithoutItem(item, options = {}) {
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
+  const preserveEmptySlot = options.preserveEmptySlot || null;
+  const preserveRemovedSlot = options.preserveRemovedSlot === true;
+  const preservePlaceholders = options.preservePlaceholders !== false;
   for (const side of layoutSlotKeys()) {
+    if (paneIsPlaceholder(side)) {
+      if (preservePlaceholders) next[side] = emptyPlaceholderPaneState();
+      continue;
+    }
+    const hadItem = paneTabs(side).includes(item);
     const active = activeItemForSide(side);
-    next[side] = windowStateWithTabs(windowStack(side).filter(value => value !== item), active === item ? null : active);
+    const tabs = paneTabs(side).filter(value => value !== item);
+    next[side] = !tabs.length && (side === preserveEmptySlot || (preserveRemovedSlot && hadItem))
+      ? emptyPlaceholderPaneState()
+      : paneStateWithTabs(tabs, active === item ? null : active);
   }
   return next;
 }
 
 function removeSessionFromLayout(item) {
   if (!itemInLayout(item)) return;
-  applyLayoutSlots(layoutWithoutItem(item), {
-    message: `${itemLabel(item)} moved to top strip`,
+  const isFiles = isFileExplorerItem(item);
+  applyLayoutSlots(layoutWithoutItem(item, {
+    preserveRemovedSlot: !isFiles,
+    preservePlaceholders: !isFiles,
+  }), {
+    message: `${itemLabel(item)} hidden from layout`,
   });
 }
 
-function removeWindowFromLayout(item) {
+function removePaneFromLayout(item) {
   const slot = slotForSession(item);
   if (!slot) return;
-  const moved = windowStack(slot);
+  const moved = paneTabs(slot);
   applyLayoutSlots(layoutWithoutSlot(slot), {
-    message: moved.length ? `${moved.map(itemLabel).join(', ')} moved to top strip` : '',
+    message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
   });
 }
 
@@ -3664,37 +4256,133 @@ function layoutWithoutSlot(slot) {
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
   for (const side of layoutSlotKeys()) {
     if (side === slot) continue;
-    next[side] = windowStateWithTabs(windowStack(side), activeItemForSide(side));
+    next[side] = paneStateForLayoutSlot(side);
   }
   return next;
 }
 
-function firstEmptyWindow() {
-  return layoutSlotKeys().length ? null : 'left';
+function firstEmptyPane(slots = layoutSlots) {
+  const placeholderSlot = layoutSlotKeys(slots).find(slot => paneIsPlaceholder(slot, slots));
+  if (placeholderSlot) return placeholderSlot;
+  return layoutSlotKeys(slots).length ? null : 'left';
 }
 
 function slotForNewSession() {
-  const empty = firstEmptyWindow();
+  const empty = firstEmptyPane();
   if (empty) return empty;
   const focusedSlot = focusedPanelItem ? slotForSession(focusedPanelItem) : null;
   if (focusedSlot) return focusedSlot;
   return 'left';
 }
 
+function slotForTabActivation(item) {
+  if (isTmuxSession(item)) return slotForNewTmuxSession(item);
+  return slotForSession(item) || firstEmptyPane() || largestNonFileExplorerPaneSlot() || largestPaneSlot() || slotForNewSession();
+}
+
+async function activateTabInExistingPane(item) {
+  if (!isLayoutItem(item)) return;
+  if (isTmuxSession(item)) {
+    const ensured = await ensureSession(item);
+    if (!ensured) return;
+  }
+  const targetSlot = slotForTabActivation(item);
+  if (!targetSlot) return;
+  const currentSlot = slotForSession(item);
+  if (currentSlot === targetSlot) {
+    activatePaneTab(targetSlot, item);
+    return;
+  }
+  await moveSessionToSlot(item, targetSlot, currentSlot, paneTabs(targetSlot).length);
+}
+
 function filesOnlySlotForSession(session) {
   const filesSlot = slotForSession(fileExplorerItemId);
   if (!filesSlot) return null;
-  const stack = windowStack(filesSlot).filter(item => item !== session);
+  const stack = paneTabs(filesSlot).filter(item => item !== session);
   return stack.length === 1 && stack[0] === fileExplorerItemId ? filesSlot : null;
 }
 
+function slotForNewTmuxSession(session) {
+  const currentSlot = slotForSession(session);
+  if (currentSlot) return currentSlot;
+  const empty = firstEmptyPane();
+  if (empty) return empty;
+  const targetSlot = largestNonFileExplorerPaneSlot();
+  if (targetSlot) return targetSlot;
+  return filesOnlySlotForSession(session) || largestPaneSlot() || slotForNewSession();
+}
+
 async function placeTmuxSession(session) {
-  const filesSlot = filesOnlySlotForSession(session);
-  if (filesSlot) {
-    await splitSessionAtSlot(session, filesSlot, 'right', null, fileExplorerSplitPercent);
+  const currentSlot = slotForSession(session);
+  if (currentSlot) {
+    activatePaneTab(currentSlot, session);
     return;
   }
-  await moveSessionToSlot(session, slotForNewSession(), null);
+  const targetSlot = slotForNewTmuxSession(session);
+  if (!targetSlot) return;
+  if (paneIsPlaceholder(targetSlot) || !paneTabs(targetSlot).length) {
+    await moveSessionToSlot(session, targetSlot, null);
+    return;
+  }
+  if (isFileExplorerItem(activeItemForSide(targetSlot))) {
+    await splitSessionAtSlot(session, targetSlot, 'right', null, fileExplorerSplitPercent);
+    return;
+  }
+  await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
+}
+
+async function openFileExplorerPane() {
+  const currentSlot = slotForSession(fileExplorerItemId);
+  if (currentSlot) {
+    if (paneTabs(currentSlot).length === 1) {
+      activatePaneTab(currentSlot, fileExplorerItemId);
+      return;
+    }
+    await splitSessionAtSlot(fileExplorerItemId, currentSlot, 'left', currentSlot, fileExplorerSplitPercent);
+    return;
+  }
+  const empty = firstEmptyPane();
+  if (empty) {
+    if (layoutSlotKeys().includes(empty) && paneIsPlaceholder(empty)) {
+      await splitSessionBesidePlaceholder(fileExplorerItemId, empty, 'left', fileExplorerSplitPercent);
+    } else {
+      await moveSessionToSlot(fileExplorerItemId, empty, null);
+    }
+    return;
+  }
+  const targetSlot = largestPaneSlot();
+  if (targetSlot && paneTabs(targetSlot).length) {
+    await splitSessionAtSlot(fileExplorerItemId, targetSlot, 'left', null, fileExplorerSplitPercent);
+    return;
+  }
+  await moveSessionToSlot(fileExplorerItemId, slotForNewSession(), null);
+}
+
+async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = defaultSplitPercent) {
+  if (!isLayoutItem(session) || !targetSlot || !['top', 'bottom', 'left', 'right'].includes(zone)) return;
+  if (!paneIsPlaceholder(targetSlot)) {
+    await splitSessionAtSlot(session, targetSlot, zone, null, pct);
+    return;
+  }
+  if (isTmuxSession(session)) {
+    const ensured = await ensureSession(session);
+    if (!ensured) return;
+  }
+  const next = layoutWithoutItem(session);
+  if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(targetSlot);
+  if (!next[targetSlot]) next[targetSlot] = emptyPlaceholderPaneState();
+  const newSlot = nextLayoutSlot(next);
+  next[newSlot] = paneStateWithTabs([session], session);
+  const direction = zone === 'left' || zone === 'right' ? 'row' : 'column';
+  const existingNode = leafNode(targetSlot);
+  const newNode = leafNode(newSlot);
+  const splitPct = splitPercentForNewItem(session, zone, pct);
+  const replacement = zone === 'right' || zone === 'bottom'
+    ? splitNode(direction, existingNode, newNode, splitPct)
+    : splitNode(direction, newNode, existingNode, splitPct);
+  next[layoutTreeKey] = replaceLayoutLeaf(next[layoutTreeKey], targetSlot, replacement);
+  applyLayoutSlots(next, {focusSession: session, prune: false});
 }
 
 async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0) {
@@ -3705,15 +4393,19 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   }
   const next = layoutWithoutItem(session);
   if (!next[layoutTreeKey]) next[layoutTreeKey] = leafNode(targetSlot);
-  if (!next[targetSlot]) next[targetSlot] = emptyWindowState();
+  if (!next[targetSlot]) next[targetSlot] = emptyPaneState();
   const tabs = next[targetSlot].tabs;
   const index = Math.max(0, Math.min(Number.isFinite(insertIndex) ? insertIndex : 0, tabs.length));
   tabs.splice(index, 0, session);
-  next[targetSlot] = windowStateWithTabs(tabs, session);
-  applyLayoutSlots(next, {focusSession: session});
+  next[targetSlot] = paneStateWithTabs(tabs, session);
+  applyLayoutSlots(next, {focusSession: session, prune: false});
 }
 
 async function dropSessionWithIntent(session, intent, sourceSlot = null) {
+  if (isFileExplorerItem(session)) {
+    await openFileExplorerPane();
+    return;
+  }
   if (!intent?.targetSlot || intent.zone === 'middle') {
     await moveSessionToSlot(session, intent?.targetSlot || slotForNewSession(), sourceSlot);
     return;
@@ -3729,20 +4421,24 @@ function splitPercentForNewItem(session, zone, pct = null) {
   return defaultSplitPercent;
 }
 
+function shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot) {
+  return Boolean(sourceSlot && sourceSlot !== targetSlot && isFileExplorerItem(activeItemForSide(targetSlot)));
+}
+
 async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, pct = null) {
   if (!isLayoutItem(session) || !targetSlot || !['top', 'bottom', 'left', 'right'].includes(zone)) return;
   if (isTmuxSession(session)) {
     const ensured = await ensureSession(session);
     if (!ensured) return;
   }
-  const next = layoutWithoutItem(session);
-  const targetTabs = windowStack(targetSlot, next);
+  const next = layoutWithoutItem(session, {preserveEmptySlot: shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot) ? sourceSlot : null});
+  const targetTabs = paneTabs(targetSlot, next);
   if (!targetTabs.length) {
     await moveSessionToSlot(session, targetSlot, sourceSlot);
     return;
   }
   const newSlot = nextLayoutSlot(next);
-  next[newSlot] = windowStateWithTabs([session], session);
+  next[newSlot] = paneStateWithTabs([session], session);
   const direction = zone === 'left' || zone === 'right' ? 'row' : 'column';
   const existingNode = leafNode(targetSlot);
   const newNode = leafNode(newSlot);
@@ -3751,7 +4447,7 @@ async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, 
     ? splitNode(direction, existingNode, newNode, splitPct)
     : splitNode(direction, newNode, existingNode, splitPct);
   next[layoutTreeKey] = replaceLayoutLeaf(next[layoutTreeKey], targetSlot, replacement);
-  applyLayoutSlots(next, {focusSession: session});
+  applyLayoutSlots(next, {focusSession: session, prune: false});
 }
 
 function replaceLayoutLeaf(node, slot, replacement) {
@@ -3761,7 +4457,7 @@ function replaceLayoutLeaf(node, slot, replacement) {
   return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
 }
 
-function activateWindowSession(side, session) {
+function activatePaneTab(side, session) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
@@ -3773,7 +4469,7 @@ function activateWindowSession(side, session) {
   }
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
-  for (const key of layoutSlotKeys()) next[key] = windowStateWithTabs(windowStack(key), activeItemForSide(key));
+  for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
   next[side].active = session;
   applyLayoutSlots(next, {focusSession: session});
 }
@@ -3783,33 +4479,19 @@ async function selectSession(session) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
+  if (isFileExplorerItem(session)) {
+    await openFileExplorerPane();
+    return;
+  }
   if (activeSessions.includes(session)) {
     focusPanel(session);
     return;
   }
-  const windowSlot = slotForSession(session);
-  if (isTmuxSession(session) && windowSlot && filesOnlySlotForSession(session)) {
+  if (isTmuxSession(session) && filesOnlySlotForSession(session)) {
     await placeTmuxSession(session);
     return;
   }
-  if (windowSlot) {
-    activateWindowSession(windowSlot, session);
-    return;
-  }
-  // The Files panel defaults to a brand-new leftmost slot, splitting off
-  // the largest existing slot rather than sharing tabs with a terminal.
-  if (isFileExplorerItem(session)) {
-    const targetSlot = largestWindowSlot(new Set([slotForSession(fileExplorerItemId)].filter(Boolean)));
-    if (targetSlot) {
-      await splitSessionAtSlot(session, targetSlot, 'left', null, fileExplorerSplitPercent);
-      return;
-    }
-  }
-  if (isTmuxSession(session)) {
-    await placeTmuxSession(session);
-    return;
-  }
-  await moveSessionToSlot(session, slotForNewSession(), null);
+  await activateTabInExistingPane(session);
 }
 
 function sessionAgentKind(session) {
@@ -4326,7 +5008,7 @@ function slotSide(slot) {
 }
 
 function slotForSession(session) {
-  return layoutSlotKeys().find(side => windowStack(side).includes(session)) || null;
+  return layoutSlotKeys().find(side => paneTabs(side).includes(session)) || null;
 }
 
 function slotForDropEvent(event) {
@@ -4354,10 +5036,22 @@ function dropIntentForEvent(event) {
   return {targetSlot: slotForDropEvent(event), zone: 'middle', previewNode: null};
 }
 
+function slotIsFileExplorerPane(slot) {
+  return isFileExplorerItem(activeItemForSide(slot));
+}
+
+function dropIntentAllowsSession(session, intent) {
+  if (!isLayoutItem(session) || !intent?.targetSlot) return false;
+  if (!slotIsFileExplorerPane(intent.targetSlot)) return true;
+  return intent.zone === 'top' || intent.zone === 'bottom';
+}
+
 function clearDropPreview() {
   grid.querySelectorAll('.drag-over, .tab-drag-over, .tab-drop-preview, .drop-preview, .drop-preview-top, .drop-preview-bottom, .drop-preview-left, .drop-preview-right, .drop-preview-middle').forEach(node => {
     node.classList.remove('drag-over', 'tab-drag-over', 'tab-drop-preview', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle');
     node.style?.removeProperty('--tab-drop-x');
+    node.style?.removeProperty('--tab-drop-y');
+    node.style?.removeProperty('--tab-drop-height');
     if (node.dataset) delete node.dataset.dropLabel;
   });
 }
@@ -4384,20 +5078,30 @@ function dropSessionAtEvent(event) {
   event.stopPropagation();
   const intent = dropIntentForEvent(event);
   clearDropPreview();
+  if (!dropIntentAllowsSession(payload.session, intent)) return;
   dropSessionWithIntent(payload.session, intent, payload.sourceSlot || slotForSession(payload.session));
 }
 
 function handleDropDragOver(event) {
   const payload = dragPayload(event);
   if (!payload?.session) return;
-  event.preventDefault();
-  event.stopPropagation();
-  event.dataTransfer.dropEffect = 'move';
   if (event.target.closest('.panel-head')) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'none';
     clearDropPreview();
     return;
   }
-  showDropPreview(dropIntentForEvent(event));
+  const intent = dropIntentForEvent(event);
+  event.preventDefault();
+  event.stopPropagation();
+  if (!dropIntentAllowsSession(payload.session, intent)) {
+    event.dataTransfer.dropEffect = 'none';
+    clearDropPreview();
+    return;
+  }
+  event.dataTransfer.dropEffect = 'move';
+  showDropPreview(intent);
 }
 
 function handleDropDragLeave(event) {
@@ -4408,8 +5112,8 @@ function handleDropDragLeave(event) {
 
 function renderPanels(previousActive = [], options = {}) {
   movePanelsToPool();
-  const activeWindowCount = layoutSlotKeys().filter(side => activeItemForSide(side)).length;
-  grid.className = `grid ${activeWindowCount === 1 ? 'full' : ''} ${activeWindowCount === 0 ? 'empty' : ''}`.trim();
+  const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
+  grid.className = `grid ${activePaneCount === 1 ? 'full' : ''} ${activePaneCount === 0 ? 'empty' : ''}`.trim();
   grid.innerHTML = '';
   const tree = layoutSlots[layoutTreeKey];
   if (tree) grid.appendChild(renderLayoutRoot(tree));
@@ -4417,12 +5121,19 @@ function renderPanels(previousActive = [], options = {}) {
   bindDropTargets();
   syncPanelVisibility(previousActive);
   renderAutoApproveButtons();
-  if (options.prune !== false) scheduleResponsiveLayoutPrune();
+  if (options.prune === false) {
+    if (responsiveLayoutPruneTimer) {
+      clearTimeout(responsiveLayoutPruneTimer);
+      responsiveLayoutPruneTimer = null;
+    }
+  } else {
+    scheduleResponsiveLayoutPrune();
+  }
 }
 
 function movePanelsToPool() {
   for (const panel of panelNodes.values()) {
-    panel.classList.remove('active-window');
+    panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
   }
@@ -4560,9 +5271,9 @@ function pruneSmallLayoutSlots() {
   if (layoutResizeState || activeSessions.length <= 1) return;
   const candidate = smallLayoutSlotCandidate();
   if (!candidate) return;
-  const moved = windowStack(candidate.slot);
+  const moved = paneTabs(candidate.slot);
   applyLayoutSlots(layoutWithoutSlot(candidate.slot), {
-    message: moved.length ? `${moved.map(itemLabel).join(', ')} moved to top strip: not enough room` : '',
+    message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout: not enough room` : '',
   });
 }
 
@@ -4580,12 +5291,17 @@ function prunePriorityForLayoutSlot(slot) {
   return 2;
 }
 
+function slotCanAutoPrune(slot) {
+  return !isFileExplorerItem(activeItemForSide(slot));
+}
+
 function smallLayoutSlotCandidate() {
   let candidate = null;
   let virtualCandidate = null;
   for (const column of grid.querySelectorAll('.layout-column[data-slot]')) {
     const slot = column.dataset.slot;
-    if (!slot || !windowStack(slot).length) continue;
+    if (!slot || !paneTabs(slot).length) continue;
+    if (!slotCanAutoPrune(slot)) continue;
     const rect = column.getBoundingClientRect();
     const area = Math.max(0, rect.width) * Math.max(0, rect.height);
     const priority = prunePriorityForLayoutSlot(slot);
@@ -4610,6 +5326,7 @@ function renderLayoutColumn(side) {
   column.className = 'layout-column';
   if (isFileExplorerItem(session)) column.classList.add('file-explorer-column');
   if (isFileEditorItem(session)) column.classList.add('file-editor-column');
+  if (!session && paneIsPlaceholder(side)) column.classList.add('empty-pane-column');
   column.dataset.slot = side;
   column.dataset.side = slotSide(side);
   column.appendChild(renderDropSlot(side, session));
@@ -4621,39 +5338,55 @@ function renderDropSlot(slot, session) {
   node.className = 'drop-slot';
   node.dataset.slot = slot;
   node.dataset.side = slotSide(slot);
+  if (!session && paneIsPlaceholder(slot)) {
+    node.appendChild(renderEmptyPane(slot));
+    return node;
+  }
   const panel = getOrCreatePanel(session);
   updatePanelSlot(panel, session, slot);
   node.appendChild(panel);
   return node;
 }
 
-function renderWindowTabStrips() {
+function renderEmptyPane(slot) {
+  const panel = document.createElement('article');
+  panel.className = 'panel empty-pane-panel';
+  panel.dataset.slot = slot;
+  panel.setAttribute('aria-label', 'Empty pane');
+  panel.appendChild(document.createElement('div'));
+  panel.children[0].className = 'empty-pane-fill';
+  return panel;
+}
+
+function renderPaneTabStrips() {
   for (const side of layoutSlotKeys()) {
     const session = activeItemForSide(side);
     if (!session) continue;
     const panel = panelNodes.get(session);
-    if (panel) updateWindowTabStrip(panel, side);
+    if (panel) updatePaneTabStrip(panel, side);
   }
 }
 
-function updateWindowTabStrip(panel, side) {
-  const strip = panel.querySelector('.window-session-tabs');
+function updatePaneTabStrip(panel, side) {
+  const strip = panel.querySelector('.pane-tabs');
   if (!strip) return;
-  const stack = windowStack(side);
+  const stack = paneTabs(side);
   strip.dataset.side = side;
-  if (isFileExplorerItem(activeItemForSide(side)) && stack.length === 1 && stack[0] === fileExplorerItemId) {
+  if (isFileExplorerItem(activeItemForSide(side))) {
     strip.hidden = true;
     strip.replaceChildren();
     return;
   }
   strip.hidden = false;
-  const children = shouldShowTabListMenu(stack) ? [createTabListMenu(stack, {kind: 'window', side})] : [];
-  strip.replaceChildren(...children, ...stack.map(item => createWindowSessionTab(side, item)));
-  bindWindowTabStrip(strip, side);
+  const activeItem = activeItemForSide(side);
+  const children = stack.map(item => createPaneTab(side, item));
+  if (activeItem && !stack.includes(activeItem)) children.push(createPaneTab(side, activeItem));
+  strip.replaceChildren(...children);
+  bindPaneTabStrip(strip, side);
   scheduleTabStripOverflowCheck(strip);
 }
 
-function createWindowSessionTab(side, item) {
+function createPaneTab(side, item) {
   const isInfo = isInfoItem(item);
   const isFiles = isFileExplorerItem(item);
   const isEditor = isFileEditorItem(item);
@@ -4667,30 +5400,30 @@ function createWindowSessionTab(side, item) {
   tab.role = 'button';
   tab.tabIndex = 0;
   const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : isEditor ? 'file-editor-item' : '';
-  tab.className = `window-session-tab ${virtualClass} ${active ? 'active' : ''}`;
+  tab.className = `pane-tab ${virtualClass} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
-  tab.dataset.windowSessionTab = item;
-  if (isInfo) tab.innerHTML = windowInfoTabHtml();
-  else if (isFiles) tab.innerHTML = fileExplorerWindowTabHtml();
-  else if (isEditor) tab.innerHTML = fileEditorWindowTabHtml(item);
-  else tab.innerHTML = windowSessionTabHtml(item, info, state, auto);
+  tab.dataset.paneTab = item;
+  if (isInfo) tab.innerHTML = paneInfoTabHtml();
+  else if (isFiles) tab.innerHTML = fileExplorerPaneTabHtml();
+  else if (isEditor) tab.innerHTML = fileEditorPaneTabHtml(item);
+  else tab.innerHTML = tmuxPaneTabHtml(item, info, state, auto);
   if (!isFiles) {
-    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `move ${itemLabel(item)} to top strip`;
-    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Move ${itemLabel(item)} to top strip`;
-    tab.insertAdjacentHTML('beforeend', `<button type="button" class="window-tab-close" data-window-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
+    const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
+    const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
+    tab.insertAdjacentHTML('beforeend', `<button type="button" class="pane-tab-close" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
   }
   if (isEditor) {
     tab.insertAdjacentHTML('beforeend', filePopoverHtml(item));
     bindFilePopoverActions(tab);
-    bindWindowSessionPopover(tab, item);
+    bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
-    bindWindowSessionPopover(tab, item);
+    bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? 'Files' : isEditor ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? fileExplorerLabel() : isEditor ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
-    if (event.target.closest('[data-window-tab-close]')) {
+    if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
       return;
     }
@@ -4701,7 +5434,7 @@ function createWindowSessionTab(side, item) {
     if (item === activeItemForSide(side)) setFocusedPanelItem(item);
   });
   tab.addEventListener('click', async event => {
-    if (event.target.closest('[data-window-tab-close]')) {
+    if (event.target.closest('[data-pane-tab-close]')) {
       event.preventDefault();
       event.stopPropagation();
       if (isEditor) closeFileTab(fileItemPath(item));
@@ -4721,11 +5454,11 @@ function createWindowSessionTab(side, item) {
   tab.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
-    activateWindowSession(side, item);
+    activatePaneTab(side, item);
   });
-  bindTabActivation(tab, () => activateWindowSession(side, item), {
+  bindTabActivation(tab, () => activatePaneTab(side, item), {
     stopPropagation: true,
-    ignore: event => Boolean(event.target.closest('[data-auto-session], [data-window-tab-close]')),
+    ignore: event => Boolean(event.target.closest('[data-auto-session], [data-pane-tab-close]')),
   });
   tab.addEventListener('dragstart', event => {
     event.stopPropagation();
@@ -4735,54 +5468,15 @@ function createWindowSessionTab(side, item) {
   return tab;
 }
 
-function bindWindowSessionPopover(tab, session) {
-  let showTimer = null;
-  let hideTimer = null;
+function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector(':scope > .session-popover');
   if (!popover) return;
-  const clearShowTimer = () => {
-    showTimer = clearTimer(showTimer);
-  };
-  const clearHideTimer = () => {
-    hideTimer = clearTimer(hideTimer);
-  };
-  const openNow = () => {
-    clearShowTimer();
-    clearHideTimer();
-    positionWindowSessionPopover(tab);
-    closeOtherSessionPopovers(tab);
-    tab.classList.add('popover-open');
-  };
-  const queueOpen = () => {
-    clearHideTimer();
-    if (tab.classList.contains('popover-open')) return;
-    clearShowTimer();
-    positionWindowSessionPopover(tab);
-    showTimer = setTimeout(openNow, popoverShowDelayMs);
-  };
-  const keepOpen = () => {
-    openNow();
-  };
-  const closeSoon = () => {
-    clearShowTimer();
-    clearHideTimer();
-    hideTimer = setTimeout(() => {
-      if (popoverStillActive(tab, popover)) {
-        hideTimer = null;
-        return;
-      }
-      tab.classList.remove('popover-open');
-      hideTimer = null;
-    }, popoverHideDelayMs);
-  };
-  bindPopoverHover(tab, popover, {queueOpen, keepOpen, closeSoon});
+  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab));
 }
 
-function bindTopSessionPopover(wrapper) {
+function bindDelayedSessionPopover(anchor, popover, position) {
   let showTimer = null;
   let hideTimer = null;
-  const popover = wrapper.querySelector(':scope > .session-popover');
-  if (!popover) return;
   const clearShowTimer = () => {
     showTimer = clearTimer(showTimer);
   };
@@ -4792,126 +5486,169 @@ function bindTopSessionPopover(wrapper) {
   const openNow = () => {
     clearShowTimer();
     clearHideTimer();
-    positionTopSessionPopover(wrapper);
-    closeOtherSessionPopovers(wrapper);
-    wrapper.classList.add('popover-open');
+    position();
+    closeOtherSessionPopovers(anchor);
+    anchor.classList.add('popover-open');
   };
   const queueOpen = () => {
     clearHideTimer();
-    if (wrapper.classList.contains('popover-open')) return;
+    if (anchor.classList.contains('popover-open')) return;
     clearShowTimer();
-    positionTopSessionPopover(wrapper);
+    position();
     showTimer = setTimeout(openNow, popoverShowDelayMs);
   };
   const closeSoon = () => {
     clearShowTimer();
     clearHideTimer();
     hideTimer = setTimeout(() => {
-      if (popoverStillActive(wrapper, popover)) {
+      if (popoverStillActive(anchor, popover)) {
         hideTimer = null;
         return;
       }
-      wrapper.classList.remove('popover-open');
+      anchor.classList.remove('popover-open');
       hideTimer = null;
     }, popoverHideDelayMs);
   };
-  bindPopoverHover(wrapper, popover, {queueOpen, keepOpen: openNow, closeSoon});
+  bindPopoverHover(anchor, popover, {queueOpen, keepOpen: openNow, closeSoon});
 }
 
-function positionWindowSessionPopover(tab) {
+function positionPaneTabPopover(tab) {
   const rect = tab.getBoundingClientRect();
   const width = Math.min(640, Math.max(320, window.innerWidth - 16));
   const maxLeft = Math.max(8, window.innerWidth - width - 8);
   const left = Math.min(Math.max(8, Math.floor(rect.left)), maxLeft);
-  document.documentElement.style.setProperty('--window-tab-popover-top', `${Math.ceil(rect.bottom + 1)}px`);
-  document.documentElement.style.setProperty('--window-tab-popover-left', `${left}px`);
+  document.documentElement.style.setProperty('--pane-tab-popover-top', `${Math.ceil(rect.bottom + 1)}px`);
+  document.documentElement.style.setProperty('--pane-tab-popover-left', `${left}px`);
 }
 
-function positionTopSessionPopover(wrapper) {
-  const rect = wrapper.getBoundingClientRect();
-  const width = Math.min(640, Math.max(320, window.innerWidth - 16));
-  const maxLeft = Math.max(8, window.innerWidth - width - 8);
-  const left = Math.min(Math.max(8, Math.floor(rect.left)), maxLeft);
-  document.documentElement.style.setProperty('--top-button-popover-top', `${Math.ceil(rect.bottom + 1)}px`);
-  document.documentElement.style.setProperty('--top-button-popover-left', `${left}px`);
+function paneInfoTabHtml() {
+  return '<span class="pane-tab-core"><span class="pane-tab-info-label">Branch Info</span></span>';
 }
 
-function windowInfoTabHtml() {
-  return '<span class="window-tab-core"><span class="window-tab-info-label">Branch Info</span></span>';
+function fileExplorerPaneTabHtml() {
+  return `<span class="pane-tab-core"><span class="session-button-dir">${esc(fileExplorerLabel())}</span></span>`;
 }
 
-function fileExplorerWindowTabHtml() {
-  return '<span class="window-tab-core"><span class="session-button-dir">Files</span></span>';
-}
-
-function fileEditorWindowTabHtml(item) {
+function fileEditorPaneTabHtml(item) {
   const path = fileItemPath(item);
   const state = openFiles.get(path) || {};
   const dirty = state.dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
-  return `<span class="window-tab-core"><span class="session-button-text">${dirty}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
+  return `<span class="pane-tab-core"><span class="session-button-text">${dirty}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
 }
 
-function windowSessionTabHtml(session, info, state, auto) {
+function tmuxPaneTabHtml(session, info, state, auto) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(session, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="window-tab-core">${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(session)})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
+  return `<span class="pane-tab-core">${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(session)})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}${detailHtml}</span></span>`;
 }
 
-function bindWindowTabStrip(strip, side) {
+function bindPaneTabStrip(strip, side) {
   strip.ondragover = event => {
     const payload = dragPayload(event);
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
+    if (slotIsFileExplorerPane(side)) {
+      event.dataTransfer.dropEffect = 'none';
+      clearPaneTabDropPreview(strip);
+      return;
+    }
     event.dataTransfer.dropEffect = 'move';
     clearDropPreview();
-    showWindowTabDropPreview(strip, event, payload.session);
+    showPaneTabDropPreview(strip, event, payload.session);
   };
   strip.ondragleave = event => {
     event.stopImmediatePropagation();
-    if (!strip.contains(event.relatedTarget)) clearWindowTabDropPreview(strip);
+    if (!strip.contains(event.relatedTarget)) clearPaneTabDropPreview(strip);
   };
   strip.ondrop = event => {
     const payload = dragPayload(event);
-    clearWindowTabDropPreview(strip);
+    clearPaneTabDropPreview(strip);
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session), windowTabDropIndex(strip, event, payload.session));
+    if (slotIsFileExplorerPane(side)) return;
+    moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session), paneTabDropIndex(strip, event, payload.session));
   };
 }
 
-function showWindowTabDropPreview(strip, event, movingSession) {
-  const placement = windowTabDropPlacement(strip, event, movingSession);
+function showPaneTabDropPreview(strip, event, movingSession) {
+  const placement = paneTabDropPlacement(strip, event, movingSession);
   strip.style.setProperty('--tab-drop-x', `${Math.round(placement.x)}px`);
+  strip.style.setProperty('--tab-drop-y', `${Math.round(placement.y)}px`);
+  strip.style.setProperty('--tab-drop-height', `${Math.round(placement.height)}px`);
   strip.classList.add('drag-over', 'tab-drop-preview');
 }
 
-function clearWindowTabDropPreview(strip) {
+function clearPaneTabDropPreview(strip) {
   strip.classList.remove('drag-over', 'tab-drop-preview');
   strip.style.removeProperty('--tab-drop-x');
+  strip.style.removeProperty('--tab-drop-y');
+  strip.style.removeProperty('--tab-drop-height');
 }
 
-function windowTabDropPlacement(strip, event, movingSession) {
-  const tabs = Array.from(strip.querySelectorAll('.window-session-tab'))
-    .filter(tab => tab.dataset.windowSessionTab !== movingSession);
+function paneTabDropPlacement(strip, event, movingSession) {
+  const tabs = Array.from(strip.querySelectorAll('.pane-tab'))
+    .filter(tab => tab.dataset.paneTab !== movingSession);
   const stripRect = strip.getBoundingClientRect();
   const clampX = value => Math.max(2, Math.min(stripRect.width - 2, value));
-  if (!tabs.length) return {index: 0, x: clampX(event.clientX - stripRect.left)};
-  for (let index = 0; index < tabs.length; index += 1) {
-    const rect = tabs[index].getBoundingClientRect();
+  const clampY = (value, height) => Math.max(0, Math.min(Math.max(0, stripRect.height - height), value));
+  const defaultHeight = Math.min(32, Math.max(24, stripRect.height || 27));
+  if (!tabs.length) {
+    return {
+      index: 0,
+      x: clampX(event.clientX - stripRect.left),
+      y: clampY(event.clientY - stripRect.top - defaultHeight / 2, defaultHeight),
+      height: defaultHeight,
+    };
+  }
+  const rows = paneTabRows(tabs);
+  const row = rows.reduce((best, item) => {
+    const distance = Math.abs(event.clientY - item.centerY);
+    return !best || distance < best.distance ? {row: item, distance} : best;
+  }, null)?.row || rows[0];
+  const rowTabs = row.items.slice().sort((left, right) => left.rect.left - right.rect.left);
+  for (const item of rowTabs) {
+    const rect = item.rect;
     if (event.clientX < rect.left + rect.width / 2) {
-      return {index, x: clampX(rect.left - stripRect.left)};
+      return {
+        index: item.index,
+        x: clampX(rect.left - stripRect.left),
+        y: clampY(row.top - stripRect.top, row.height),
+        height: row.height,
+      };
     }
   }
-  const lastRect = tabs[tabs.length - 1].getBoundingClientRect();
-  return {index: tabs.length, x: clampX(lastRect.right - stripRect.left)};
+  const last = rowTabs[rowTabs.length - 1];
+  return {
+    index: last.index + 1,
+    x: clampX(last.rect.right - stripRect.left),
+    y: clampY(row.top - stripRect.top, row.height),
+    height: row.height,
+  };
 }
 
-function windowTabDropIndex(strip, event, movingSession) {
-  return windowTabDropPlacement(strip, event, movingSession).index;
+function paneTabRows(tabs) {
+  const rows = [];
+  tabs.forEach((tab, index) => {
+    const rect = tab.getBoundingClientRect();
+    const centerY = rect.top + rect.height / 2;
+    const row = rows.find(item => Math.abs(centerY - item.centerY) <= Math.max(4, item.height / 2));
+    const target = row || {items: [], top: rect.top, bottom: rect.bottom, centerY, height: rect.height};
+    target.items.push({index, rect});
+    target.top = Math.min(target.top, rect.top);
+    target.bottom = Math.max(target.bottom, rect.bottom);
+    target.height = Math.max(1, target.bottom - target.top);
+    target.centerY = target.top + target.height / 2;
+    if (!row) rows.push(target);
+  });
+  return rows.sort((left, right) => left.top - right.top);
+}
+
+function paneTabDropIndex(strip, event, movingSession) {
+  return paneTabDropPlacement(strip, event, movingSession).index;
 }
 
 function getOrCreatePanel(session) {
@@ -4942,7 +5679,12 @@ function bindPanelShell(panel, session) {
       event.preventDefault();
       event.stopPropagation();
       clearDropPreview();
-      if (event.target.closest('.window-session-tabs')) return;
+      if (event.target.closest('.pane-tabs')) return;
+      const targetSlot = head.dataset.dragSlot || slotForSession(session);
+      if (slotIsFileExplorerPane(targetSlot)) {
+        event.dataTransfer.dropEffect = 'none';
+        return;
+      }
       event.dataTransfer.dropEffect = 'move';
       head.classList.add('tab-drag-over');
     });
@@ -4952,12 +5694,17 @@ function bindPanelShell(panel, session) {
     head.addEventListener('drop', event => {
       const payload = dragPayload(event);
       head.classList.remove('tab-drag-over');
-      if (!payload?.session || event.target.closest('.window-session-tabs')) return;
+      if (!payload?.session || event.target.closest('.pane-tabs')) return;
       event.preventDefault();
       event.stopPropagation();
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
       if (!targetSlot) return;
-      moveSessionToSlot(payload.session, targetSlot, payload.sourceSlot || slotForSession(payload.session), windowStack(targetSlot).length);
+      if (slotIsFileExplorerPane(targetSlot)) return;
+      if (isFileExplorerItem(payload.session)) {
+        splitSessionAtSlot(fileExplorerItemId, targetSlot, 'left', payload.sourceSlot || slotForSession(fileExplorerItemId), fileExplorerSplitPercent);
+        return;
+      }
+      moveSessionToSlot(payload.session, targetSlot, payload.sourceSlot || slotForSession(payload.session), paneTabs(targetSlot).length);
     });
   }
   panel.querySelector('[data-detail-toggle]')?.addEventListener('click', event => {
@@ -5011,7 +5758,7 @@ function setPanelDetailsCollapsed(panel, collapsed) {
 
 function terminalTabLabel(session, info) {
   if (isInfoItem(session)) return 'Term';
-  if (isFileExplorerItem(session)) return 'Files';
+  if (isFileExplorerItem(session)) return fileExplorerLabel();
   if (isFileEditorItem(session)) return 'Edit';
   const label = terminalProcessLabel(info);
   return shortText(label || 'Term', 16);
@@ -5019,7 +5766,7 @@ function terminalTabLabel(session, info) {
 
 function terminalTabTitle(session, info) {
   if (isInfoItem(session)) return 'unavailable for Branch Info';
-  if (isFileExplorerItem(session)) return 'unavailable for Files';
+  if (isFileExplorerItem(session)) return `unavailable for ${fileExplorerLabel()}`;
   if (isFileEditorItem(session)) return 'unavailable for file editor';
   return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
 }
@@ -5048,25 +5795,38 @@ function tmuxWindowNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function previewTmuxWindowInfo(info, key) {
-  const panes = Array.isArray(info?.panes) ? info.panes : [];
-  if (panes.length < 2) return null;
+function tmuxWindowIndices(panes) {
   const windows = [];
   const seen = new Set();
-  for (const pane of panes) {
+  for (const pane of Array.isArray(panes) ? panes : []) {
     const index = tmuxWindowNumber(pane.window);
     if (index === null || seen.has(index)) continue;
     seen.add(index);
-    windows.push({index, pane});
+    windows.push(index);
   }
-  windows.sort((left, right) => left.index - right.index);
+  return windows.sort((left, right) => left - right);
+}
+
+function windowStepVisibility(panes) {
+  const windows = tmuxWindowIndices(panes);
+  if (windows.length <= 1) return {prev: false, next: false};
+  const activeIndex = tmuxWindowNumber((Array.isArray(panes) ? panes : []).find(pane => pane.window_active)?.window) ?? windows[0];
+  return {
+    prev: windows.some(index => index < activeIndex),
+    next: windows.some(index => index > activeIndex),
+  };
+}
+
+function previewTmuxWindowInfo(info, key) {
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const windows = tmuxWindowIndices(panes);
   if (windows.length < 2) return null;
   const activePane = terminalDisplayPane(info);
   const activeIndex = tmuxWindowNumber(activePane?.window);
-  const current = Math.max(0, windows.findIndex(item => item.index === activeIndex));
+  const current = Math.max(0, windows.findIndex(index => index === activeIndex));
   const delta = key === 'p' ? -1 : 1;
   const target = windows[(current + delta + windows.length) % windows.length];
-  const nextPanes = panes.map(pane => ({...pane, window_active: tmuxWindowNumber(pane.window) === target.index}));
+  const nextPanes = panes.map(pane => ({...pane, window_active: tmuxWindowNumber(pane.window) === target}));
   return {
     ...info,
     panes: nextPanes,
@@ -5091,6 +5851,54 @@ function previewTmuxWindowLabel(session, key) {
   updatePanelControlLabels(session, nextInfo);
 }
 
+function handleWindowStepButtonClick(event) {
+  const button = event.currentTarget;
+  const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
+  const label = button.dataset.windowDir === 'prev' ? 'previous window' : 'next window';
+  tmuxWindow(button.dataset.windowSession, key, label);
+}
+
+function createWindowStepButton(session, dir) {
+  const label = windowStepButtonLabel(dir);
+  const button = document.createElement('button');
+  button.className = 'tab tmux-window-step';
+  button.dataset.windowStepButton = dir;
+  button.textContent = dir === 'prev' ? '<' : '>';
+  if (readOnlyMode) {
+    button.type = 'button';
+    button.disabled = true;
+    button.title = `${label} tmux window requires admin access`;
+    return button;
+  }
+  button.dataset.windowDir = dir;
+  button.dataset.windowSession = session;
+  button.title = `${label} tmux window`;
+  button.addEventListener('click', handleWindowStepButtonClick);
+  return button;
+}
+
+function syncWindowStepButton(controls, terminalButton, session, dir, visible) {
+  const selector = `[data-window-step-button="${dir}"]`;
+  const existing = controls.querySelector(selector);
+  if (!visible) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  const button = createWindowStepButton(session, dir);
+  if (dir === 'prev') controls.insertBefore(button, terminalButton);
+  else controls.insertBefore(button, terminalButton.nextSibling || null);
+}
+
+function updatePanelWindowStepButtons(session, info) {
+  const controls = document.getElementById(`panel-${session}`)?.querySelector('.tabs');
+  const terminalButton = controls?.querySelector('.terminal-tab');
+  if (!controls || !terminalButton) return;
+  const steps = windowStepVisibility(info?.panes);
+  syncWindowStepButton(controls, terminalButton, session, 'prev', steps.prev);
+  syncWindowStepButton(controls, terminalButton, session, 'next', steps.next);
+}
+
 function agentForPane(info, pane) {
   if (!pane || !Array.isArray(info?.agents)) return null;
   return info.agents.find(agent => agent.pane_target === pane.target) || null;
@@ -5108,6 +5916,7 @@ function processLabelFromCommand(command) {
 
 function updatePanelControlLabels(session, info) {
   const button = document.querySelector(`[data-tab="${cssEscape(session)}"][data-tab-name="terminal"]`);
+  updatePanelWindowStepButtons(session, info);
   if (!button) return;
   button.textContent = terminalTabLabel(session, info);
   button.title = terminalTabTitle(session, info);
@@ -5137,7 +5946,7 @@ function createInfoPanel() {
   panel.id = `panel-${infoItemId}`;
   panel.innerHTML = `
       <div class="panel-head">
-        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         ${panelControlsHtml(infoItemId, {disabled: true, unavailableLabel: 'Branch Info'})}
       </div>
       <div class="panel-detail-row">
@@ -5167,14 +5976,15 @@ function createFileExplorerPanel() {
   panel.className = 'panel file-explorer-panel';
   panel.id = `panel-${fileExplorerItemId}`;
   const initialPath = fileExplorerRoot || homePath || '/';
+  const label = fileExplorerLabel();
   panel.innerHTML = `
       <div class="panel-head file-explorer-head">
-        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         <div class="file-explorer-toolbar">
           <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
           <span class="file-explorer-path-inline">${esc(initialPath)}</span>
           <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
-          <button type="button" class="file-explorer-panel-close" title="Move Files to top strip" aria-label="Move Files to top strip"></button>
+          <button type="button" class="file-explorer-panel-close" title="Hide ${esc(label)} from layout" aria-label="Hide ${esc(label)} from layout"></button>
         </div>
       </div>
       <div class="file-explorer-pane panel-overlay-root">
@@ -5241,9 +6051,10 @@ function createFileEditorPanel(item) {
   panel.dataset.filePath = path;
   panel.innerHTML = `
       <div class="panel-head file-editor-panel-head">
-        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         <div class="file-editor-panel-actions">
           <button type="button" class="file-editor-preview-panel" title="Toggle Markdown preview" hidden>Preview</button>
+          <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" hidden>Wrap</button>
           <button type="button" class="file-editor-save-panel" title="Save" ${readOnlyMode ? 'hidden' : ''}>Save</button>
           <button type="button" class="file-editor-panel-close" title="Close" aria-label="Close"></button>
         </div>
@@ -5278,6 +6089,11 @@ function createFileEditorPanel(item) {
     fileEditorPreviewMode.set(path, fileEditorPreviewMode.get(path) !== true);
     renderFileEditorPanel(panel, item);
   });
+  panel.querySelector('.file-editor-wrap-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleEditorWrap();
+  });
   const textarea = panel.querySelector('.file-editor-textarea-panel');
   textarea?.addEventListener('input', () => {
     const state = openFiles.get(path);
@@ -5292,7 +6108,7 @@ function createFileEditorPanel(item) {
     syncSyntaxHighlightScroll(panel);
     if (dirtyChanged) {
       renderSessionButtons();
-      renderWindowTabStrips();
+      renderPaneTabStrips();
     }
   });
   textarea?.addEventListener('scroll', () => syncSyntaxHighlightScroll(panel));
@@ -5380,8 +6196,10 @@ function renderFileEditorPanel(panel, item) {
   const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
   const imagePane = panel.querySelector('.file-editor-image-panel');
   const previewButton = panel.querySelector('.file-editor-preview-panel');
+  const wrapButton = panel.querySelector('.file-editor-wrap-panel');
   if (!state) {
     if (previewButton) previewButton.hidden = true;
+    if (wrapButton) wrapButton.hidden = true;
     panel.classList.remove('syntax-highlighted');
     hideFileEditorContent(textarea, highlightPane, previewPane, imagePane);
     setFileEditorPanelStatus(panel, 'file closed', '');
@@ -5389,6 +6207,7 @@ function renderFileEditorPanel(panel, item) {
   }
   if (state.loading) {
     if (previewButton) previewButton.hidden = true;
+    if (wrapButton) wrapButton.hidden = true;
     panel.classList.remove('syntax-highlighted');
     hideFileEditorContent(textarea, highlightPane, previewPane, imagePane);
     setFileEditorPanelStatus(panel, 'loading...', '');
@@ -5397,6 +6216,7 @@ function renderFileEditorPanel(panel, item) {
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
     if (previewButton) previewButton.hidden = true;
+    if (wrapButton) wrapButton.hidden = true;
     panel.classList.remove('syntax-highlighted');
     if (textarea) textarea.hidden = true;
     if (highlightPane) highlightPane.hidden = true;
@@ -5420,6 +6240,10 @@ function renderFileEditorPanel(panel, item) {
     previewButton.hidden = !(state.kind === 'text' && isMarkdown);
     previewButton.classList.toggle('active', fileEditorPreviewMode.get(path) === true);
     previewButton.textContent = fileEditorPreviewMode.get(path) ? 'Edit' : 'Preview';
+  }
+  if (wrapButton) {
+    wrapButton.hidden = state.kind !== 'text';
+    updateEditorWrapButton(wrapButton);
   }
   if (state.kind === 'image') {
     if (textarea) textarea.hidden = true;
@@ -5478,6 +6302,8 @@ function renderFileEditorPanel(panel, item) {
       textarea.hidden = false;
       textarea.readOnly = readOnlyMode;
       if (textarea.value !== state.content) textarea.value = state.content;
+      panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+      applyEditorWrapToTextarea(textarea);
       renderSyntaxHighlight(panel, path, state.content);
       syncSyntaxHighlightScroll(panel);
       textarea.focus({preventScroll: true});
@@ -5500,7 +6326,7 @@ function loadFileEditorState(path, panel, item) {
       }
       renderFileEditorPanel(panel, item);
       renderSessionButtons();
-      renderWindowTabStrips();
+      renderPaneTabStrips();
       return;
     }
     try {
@@ -5524,7 +6350,7 @@ function loadFileEditorState(path, panel, item) {
     }
     renderFileEditorPanel(panel, item);
     renderSessionButtons();
-    renderWindowTabStrips();
+    renderPaneTabStrips();
   })();
 }
 
@@ -5800,10 +6626,27 @@ async function saveFileEditor(path, panel) {
     updateFileEditorPanelChrome(panel, path);
     setFileEditorPanelStatus(panel, `saved (${payload.size} bytes)`, 'ok');
     renderSessionButtons();
-    renderWindowTabStrips();
+    renderPaneTabStrips();
   } catch (err) {
     setFileEditorPanelStatus(panel, `save failed: ${err}`, 'error');
   }
+}
+
+function windowStepButtonLabel(dir) {
+  return dir === 'prev' ? 'previous' : 'next';
+}
+
+function windowStepButtonHtml(session, dir, visible, disabled) {
+  if (!visible) return '';
+  const label = windowStepButtonLabel(dir);
+  const glyph = dir === 'prev' ? '&lt;' : '&gt;';
+  if (disabled) {
+    return `<button type="button" class="tab tmux-window-step" data-window-step-button="${dir}" disabled title="unavailable for ${esc(itemLabel(session))}">${glyph}</button>`;
+  }
+  if (readOnlyMode) {
+    return `<button type="button" class="tab tmux-window-step" data-window-step-button="${dir}" disabled title="${label} tmux window requires admin access">${glyph}</button>`;
+  }
+  return `<button class="tab tmux-window-step" data-window-step-button="${dir}" data-window-dir="${dir}" data-window-session="${esc(session)}" title="${label} tmux window">${glyph}</button>`;
 }
 
 function panelControlsHtml(session, options = {}) {
@@ -5811,29 +6654,26 @@ function panelControlsHtml(session, options = {}) {
   const unavailableLabel = options.unavailableLabel || itemLabel(session);
   const disabledAttrs = disabled ? ` type="button" disabled title="unavailable for ${esc(unavailableLabel)}"` : '';
   const readonlyAttrs = label => ` type="button" disabled title="${esc(label)} requires admin access"`;
-  const stepAttrs = dir => {
-    if (disabled) return disabledAttrs;
-    if (readOnlyMode) return readonlyAttrs(`${dir === 'prev' ? 'previous' : 'next'} tmux window`);
-    return ` data-window-dir="${dir}" data-window-session="${esc(session)}" title="${dir === 'prev' ? 'previous' : 'next'} tmux window"`;
-  };
   const tabAttrs = name => {
     if (disabled) return disabledAttrs;
     if (readOnlyMode && name === 'summary') return readonlyAttrs('AI summary');
     return ` data-tab="${esc(session)}" data-tab-name="${name}"`;
   };
   const infoAttrs = disabled ? disabledAttrs : ` data-detail-toggle="${esc(session)}" title="hide details"`;
-  const terminalAttrs = disabled ? disabledAttrs : `${tabAttrs('terminal')} title="${esc(terminalTabTitle(session, transcriptMeta.sessions?.[session]))}"`;
-  const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, transcriptMeta.sessions?.[session]);
-  const closeAttrs = ` type="button" data-window-close="${esc(session)}" title="move all tabs in this window to top strip" aria-label="Move all tabs in this window to top strip"`;
+  const info = transcriptMeta.sessions?.[session];
+  const terminalAttrs = disabled ? disabledAttrs : `${tabAttrs('terminal')} title="${esc(terminalTabTitle(session, info))}"`;
+  const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, info);
+  const steps = disabled ? {prev: false, next: false} : windowStepVisibility(info?.panes);
+  const closeAttrs = ` type="button" data-pane-close="${esc(session)}" title="hide all tabs in this pane from layout" aria-label="Hide all tabs in this pane from layout"`;
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
-          <button class="tab window-step" ${stepAttrs('prev')}>&lt;</button>
+          ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
           <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
-          <button class="tab window-step" ${stepAttrs('next')}>&gt;</button>
+          ${windowStepButtonHtml(session, 'next', steps.next, disabled)}
           <button class="tab" ${tabAttrs('transcript')}>Tx</button>
           <button class="tab" ${tabAttrs('summary')}>AI</button>
           <button class="tab" ${tabAttrs('events')}>Log</button>
           <button class="tab panel-detail-toggle active" ${infoAttrs}>Info</button>
-          <button class="tab window-close" ${closeAttrs}></button>
+          <button class="tab pane-close" ${closeAttrs}></button>
         </div>`;
 }
 
@@ -5843,7 +6683,7 @@ function createPanel(session) {
   panel.id = `panel-${session}`;
   panel.innerHTML = `
       <div class="panel-head">
-        <div class="window-session-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         ${panelControlsHtml(session)}
       </div>
       <div class="panel-detail-row">
@@ -6034,16 +6874,12 @@ function bindPanelControls(panel, session) {
     });
   });
   panel.querySelectorAll('[data-window-dir]').forEach(button => {
-    button.addEventListener('click', () => {
-      const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
-      const label = button.dataset.windowDir === 'prev' ? 'previous window' : 'next window';
-      tmuxWindow(button.dataset.windowSession, key, label);
-    });
+    button.addEventListener('click', handleWindowStepButtonClick);
   });
-  panel.querySelector('[data-window-close]')?.addEventListener('click', event => {
+  panel.querySelector('[data-pane-close]')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    removeWindowFromLayout(event.currentTarget.dataset.windowClose);
+    removePaneFromLayout(event.currentTarget.dataset.paneClose);
   });
   panel.querySelector('[data-context]')?.addEventListener('click', () => showContext(session));
   panel.addEventListener('click', event => {
@@ -6492,7 +7328,7 @@ function updatePanelSlot(panel, session, slot) {
   panel.dataset.slot = slot;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  updateWindowTabStrip(panel, slot);
+  updatePaneTabStrip(panel, slot);
   updatePanelInactiveOverlays();
 }
 
@@ -6686,8 +7522,8 @@ function updateTypingIndicator(session) {
     && pane?.classList.contains('active')
   );
   container?.classList.toggle('typing-ready', ready);
-  panel?.classList.toggle('typing-ready-window', ready);
-  panel?.classList.toggle('yolo-ready-window', ready && autoApproveStates.get(session)?.enabled === true);
+  panel?.classList.toggle('typing-ready-pane', ready);
+  panel?.classList.toggle('yolo-ready-pane', ready && autoApproveStates.get(session)?.enabled === true);
 }
 
 function updateStatus() {
@@ -6764,10 +7600,13 @@ async function loadAutoStatuses() {
   try {
     const response = await apiFetch('/api/auto-approve');
     const payload = await response.json();
+    const previousActive = activeSessions.slice();
+    const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
     for (const session of sessions) {
       const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
       autoApproveStates.set(session, state);
     }
+    if (sessionsChanged) renderPanels(previousActive);
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
@@ -6811,7 +7650,7 @@ function renderAutoApproveButton(session, payload) {
     } else {
       button.style.removeProperty('--yolo-rotate-delay');
     }
-    button.closest('.session-button, .window-session-tab')?.classList.remove('is-working');
+    button.closest('.session-button, .pane-tab')?.classList.remove('is-working');
     button.textContent = 'YO';
     const action = payload?.last_action ? `; ${payload.last_action}` : '';
     button.title = enabled
@@ -6917,7 +7756,7 @@ async function refreshTranscripts() {
         preview.textContent = 'no agent transcript found';
       }
     }
-    renderWindowTabStrips();
+    renderPaneTabStrips();
     trackSessionStateChanges();
     refreshOpenEventLogs();
   } catch (error) {
@@ -6950,9 +7789,9 @@ function updatePanelHeader(session, info) {
     wrapper.innerHTML = sessionPopoverHtml(session, info, agentKind, auto, state);
     popover.replaceWith(wrapper.firstElementChild);
   }
-  panel?.classList.toggle('needs-input-window', state.key === 'needs-input');
-  panel?.classList.toggle('needs-exec-window', state.key === 'needs-approval');
-  panel?.classList.toggle('needs-blocked-window', state.key === 'blocked');
+  panel?.classList.toggle('needs-input-pane', state.key === 'needs-input');
+  panel?.classList.toggle('needs-exec-pane', state.key === 'needs-approval');
+  panel?.classList.toggle('needs-blocked-pane', state.key === 'blocked');
 }
 
 function refreshSessionChrome(session) {
@@ -7200,6 +8039,7 @@ function refreshAll() {
 }
 
 async function boot() {
+  applyFileExplorerStaticLabels();
   renderTransportWarning();
   renderTabMetaToggle();
   bindTopbarMetrics();
@@ -7250,10 +8090,21 @@ if (refreshMeta) {
   ].join('\n');
   refreshMeta.onclick = refreshAll;
 }
-if (tabMetaToggle) tabMetaToggle.onclick = toggleTabMetadata;
+if (tabMetaToggle) {
+  tabMetaToggle.onclick = toggleTabMetadata;
+  // Restore the `#` tab-metadata toggle to the top-right cluster, just left of Notify.
+  notifyToggle?.parentElement?.insertBefore(tabMetaToggle, notifyToggle);
+}
 if (logoutButton) logoutButton.onclick = () => { window.location.href = '/logout'; };
 notifyToggle.onclick = toggleNotifications;
 document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
+document.addEventListener('click', event => {
+  if (event.target?.closest?.('.app-menu')) return;
+  closeAppMenus();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeAppMenus();
+});
 window.addEventListener('resize', () => {
   scheduleResponsiveLayoutPrune();
   scheduleAllTabStripOverflowChecks();

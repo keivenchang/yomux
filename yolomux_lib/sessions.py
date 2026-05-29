@@ -212,15 +212,41 @@ def agent_error(session: str, kind: str, pane: PaneInfo, process: ProcessInfo, e
     )
 
 
-def find_recent_codex_transcript(cwd: str | None) -> Path | None:
-    root = Path.home() / ".codex" / "sessions"
+def codex_transcript_header_cwd(path: Path) -> str | None:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            line = handle.readline()
+    except OSError:
+        return None
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    payload = record.get("payload")
+    candidates = [
+        record.get("cwd"),
+        payload.get("cwd") if isinstance(payload, dict) else None,
+    ]
+    for value in candidates:
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> Path | None:
+    root = root or Path.home() / ".codex" / "sessions"
     if not root.exists():
         return None
     files = sorted(root.glob("**/rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
-    needle = json.dumps(cwd) if cwd else None
+    if not cwd:
+        return files[0] if files else None
     for path in files[:80]:
-        if not needle:
+        if codex_transcript_header_cwd(path) == cwd:
             return path
+    needle = json.dumps(cwd)
+    for path in files[:80]:
         try:
             tail = tail_file_lines(path, 300)
         except OSError:

@@ -832,7 +832,12 @@ class TmuxWebtermApp:
             self.persist_auto_sessions()
         if session is not None:
             return self.auto_approve_session_status(session), HTTPStatus.OK
-        return {"sessions": {name: self.auto_approve_session_status(name) for name in self.sessions}}, HTTPStatus.OK
+        refresh_errors = self.refresh_sessions()
+        return {
+            "session_order": self.sessions,
+            "sessions": {name: self.auto_approve_session_status(name) for name in self.sessions},
+            "errors": refresh_errors,
+        }, HTTPStatus.OK
 
     def stop_auto_approve_all(self) -> None:
         with self.auto_workers_lock:

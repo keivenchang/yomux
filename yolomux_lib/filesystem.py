@@ -28,6 +28,11 @@ TEXT_EXTENSIONS = {
     ".log", ".gitignore", ".dockerignore", ".dockerfile",
 }
 
+EXTENSIONLESS_TEXT_NAMES = {
+    "dockerfile", "makefile", "license", "readme", "gemfile", "rakefile",
+    "justfile", "procfile",
+}
+
 IMAGE_EXTENSIONS = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -270,7 +275,12 @@ def is_text_path(raw_path: str) -> bool:
         path = _validated_path(raw_path)
     except FilesystemError:
         return False
-    return path.suffix.lower() in TEXT_EXTENSIONS
+    name = path.name.lower()
+    return (
+        path.suffix.lower() in TEXT_EXTENSIONS
+        or name in TEXT_EXTENSIONS
+        or name in EXTENSIONLESS_TEXT_NAMES
+    )
 
 
 def read_raw(raw_path: str) -> tuple[bytes, str]:
