@@ -432,10 +432,14 @@ body {
   gap: 6px;
 }
 .app-menu-icon {
-  flex: 0 0 16px;
-  width: 16px;
-  height: 16px;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 18px;
   display: inline-flex;
+  justify-content: center;
+}
+.app-menu-icon .agent-icon {
+  margin: 0;
 }
 .app-menu-label,
 .app-menu-detail {
@@ -1153,14 +1157,18 @@ body.tab-meta-hidden .pane-tab .session-button-text {
   align-items: center;
   justify-content: center;
   margin-left: 4px;
-  width: 18px;
+  width: 24px;
+  min-width: 24px;
   height: 18px;
+  padding: 0 3px;
+  box-sizing: border-box;
   border: 0;
   background: transparent;
   vertical-align: -4px;
-  overflow: hidden;
+  overflow: visible;
 }
 .agent-icon svg {
+  flex: 0 0 18px;
   width: 18px;
   height: 18px;
   display: block;
@@ -1956,7 +1964,7 @@ body.layout-resizing {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 1px 2px;
+  padding: 1px 3px;
   color: var(--muted);
   background: transparent;
   white-space: nowrap;
@@ -1973,19 +1981,20 @@ body.layout-resizing {
   display: none !important;
 }
 .tmux-window-step {
-  flex: 0 0 12px;
-  min-width: 12px;
-  padding: 1px 0;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 1px 3px;
 }
 .terminal-tab {
-  flex: 0 1 64px;
-  max-width: 68px;
-  min-width: 34px;
+  flex: 0 1 auto;
+  max-width: 72px;
+  min-width: 0;
+  padding-inline: 3px;
 }
 .tabs .tab:not(.tmux-window-step):not(.terminal-tab):not(.pane-close):not(.pane-minimize):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
-  padding-inline: 2px;
+  padding-inline: 3px;
 }
 .tabs .panel-detail-toggle {
   min-width: 0;
@@ -2423,7 +2432,7 @@ body.layout-resizing {
   min-height: 0;
   background: #11151d;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 .transcript-head {
   padding: 6px 8px;
@@ -2431,6 +2440,41 @@ body.layout-resizing {
   background: #171d27;
   border-bottom: 1px solid var(--line);
   font-size: 12px;
+}
+.transcript-path-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  color: var(--muted);
+  background: #141b25;
+  border-bottom: 1px solid var(--line);
+  font: 11px/1.25 var(--mono-font);
+}
+.transcript-path-label {
+  flex: 0 0 auto;
+  color: #8ca0b6;
+  text-transform: uppercase;
+  font: 700 10px/1 var(--ui-font);
+}
+.transcript-path-value {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #dfe6ef;
+}
+.transcript-path-missing {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.transcript-path-copy {
+  width: 20px;
+  height: 20px;
 }
 .transcript-preview {
   min-height: 0;
@@ -3094,6 +3138,7 @@ body.file-editor-open .file-explorer {
 }
 .file-editor-status[data-level="error"] { color: #ff8a95; }
 .file-editor-status[data-level="ok"]    { color: var(--good); }
+.file-editor-status[data-level="warn"]  { color: #f5c542; }
 
 .file-tab-dirty {
   display: inline-block;
@@ -3623,6 +3668,9 @@ body.file-editor-open .file-explorer {
 }
 .file-editor-status-panel[data-level="ok"] {
   color: var(--good);
+}
+.file-editor-status-panel[data-level="warn"] {
+  color: #f5c542;
 }
 /* Files is the only virtual item that keeps a distinct compact tab; file
    editor tabs use the same tab base as tmux sessions. */

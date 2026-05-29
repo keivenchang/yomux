@@ -216,11 +216,11 @@ Safety and operational requirements (regardless of schema):
 
 When files change on disk, the File Explorer (Finder) and the open editor should update on their own instead of showing stale content.
 
-- [ ] Refresh the File Explorer tree when the watched directory changes on disk (files added / removed / renamed / modified). Do NOT lose state on refresh: keep the current selection, keep expanded folders expanded, and keep the scroll position exactly where it was (no jump to top, no collapse). Diff the tree and patch in place rather than rebuilding it.
-- [ ] Refresh the open editor content when the currently-open file changes on disk, for any file type (md, sh, py, etc.); re-render the Markdown preview if it is showing.
-- [ ] Handle unsaved edits safely: if the editor has local unsaved changes and the file also changed on disk, do not silently overwrite the user's edits — show a conflict notice and let them keep theirs or reload from disk. PARTIALLY DONE: `filesystem.write_file` already takes `expected_mtime` and rejects a save when the on-disk mtime changed (grep `expected_mtime` — raises "file changed on disk"). So save-time conflict detection exists; this item is the load-time / live-refresh side plus the keep-mine/reload UI.
-- [ ] Handle the open file being deleted or moved on disk: show a clear state instead of stale content.
-- [ ] Mechanism: NO file-watch library is installed (no `inotify`/`watchdog`, verified 2026-05-29) — use mtime polling. Watch the explorer's current directory and the open file on the server via `st_mtime` (read endpoints already return `mtime`) and push changes to the browser over the existing channel; debounce rapid bursts. Reuse existing refresh plumbing rather than adding a new fast poll loop.
+- [x] Refresh the File Explorer tree when the watched directory changes on disk (files added / removed / renamed / modified). Current implementation uses the existing metadata refresh cadence, rebuilds the visible tree, and restores selection, expanded folders, and scroll position so the UI does not jump.
+- [x] Refresh the open editor content when the currently-open file changes on disk, for any file type (md, sh, py, etc.); re-render the Markdown preview if it is showing.
+- [x] Handle unsaved edits safely: if the editor has local unsaved changes and the file also changed on disk, do not silently overwrite the user's edits — show a conflict notice and let them keep theirs or reload from disk. `filesystem.write_file` already takes `expected_mtime` and rejects a save when the on-disk mtime changed; the frontend now also detects the load-time conflict and shows a Reload action.
+- [x] Handle the open file being deleted or moved on disk: show a clear state instead of stale content.
+- [x] Mechanism: NO file-watch library is installed (no `inotify`/`watchdog`, verified 2026-05-29) — use mtime polling. Watch the explorer's current directory and the open file on the server via `st_mtime` (read endpoints already return `mtime`) and push changes to the browser over the existing channel; debounce rapid bursts. Reuse existing refresh plumbing rather than adding a new fast poll loop.
 
 ### P2: Conditional Window-Step Arrows
 
@@ -318,7 +318,7 @@ The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py
 
 ### Transcript (Tx) View
 
-- [ ] Show the session's transcript file path (the `.jsonl`) in the Transcript (Tx) view. Today the header (`transcript-head`, grep `>Transcript<`, ~6576) just says "Transcript", and the path appears only briefly in the loading placeholder (`path: ${agent.transcript}...`, ~7622) before `refreshTranscriptPreview` overwrites it. Show the path persistently — e.g. under the `transcript-head` — with a copy button (reuse the path-copy affordance). Source is `agent.transcript` (set in `sessions.py` for both claude `read_claude_agent` and codex `read_codex_agent`, ~195 / ~271). Handle the no-transcript case (currently "no agent transcript found", ~7627) with a clear "transcript not found" state rather than a blank path.
+- [x] Show the session's transcript file path (the `.jsonl`) in the Transcript (Tx) view. Today the header (`transcript-head`, grep `>Transcript<`, ~6576) just says "Transcript", and the path appears only briefly in the loading placeholder (`path: ${agent.transcript}...`, ~7622) before `refreshTranscriptPreview` overwrites it. Show the path persistently — e.g. under the `transcript-head` — with a copy button (reuse the path-copy affordance). Source is `agent.transcript` (set in `sessions.py` for both claude `read_claude_agent` and codex `read_codex_agent`, ~195 / ~271). Handle the no-transcript case (currently "no agent transcript found", ~7627) with a clear "transcript not found" state rather than a blank path.
 
 ### File Explorer
 

@@ -63,9 +63,11 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.toml': 'ini', '.ini': 'ini', '.cfg': 'ini',
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
-const openFiles = new Map();  // path -> {mtime, kind, original, content, dirty}
+const openFiles = new Map();  // path -> {mtime, size, kind, original, content, dirty}
+const fileExplorerDirectorySignatures = new Map();
 let activeFile = null;
 let fileExplorerRoot = null;
+let filesystemRefreshInFlight = false;
 let fileExplorerShowHidden = (() => {
   try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
   catch (_) { return false; }
@@ -2578,32 +2580,61 @@ function toggleFileExplorer() {
 }
 
 async function openFileExplorerAt(path, options = {}) {
-  const entries = await fetchDirectory(path);
+  const root = normalizeDirectoryPath(path);
+  const entries = await fetchDirectory(root);
   if (!entries) return false;
-  fileExplorerRoot = normalizeDirectoryPath(path);
+  const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
+  const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
+  fileExplorerRoot = root;
   if (fileExplorerPath) fileExplorerPath.textContent = fileExplorerRoot;
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
     fileExplorerTree.replaceChildren();
     renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0);
   }
-  if (options.refreshPanels !== false) refreshFileExplorerPanelTrees();
+  if (options.refreshPanels !== false) {
+    await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false});
+  }
+  if (previousExpanded.length) await restoreFileExplorerExpandedPaths(previousExpanded, fileExplorerRoot);
+  if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
+  updateFileExplorerCurrentFileHighlight();
   return true;
 }
 
-async function fetchDirectory(path) {
+async function fetchDirectory(path, options = {}) {
+  const root = normalizeDirectoryPath(path);
   try {
-    const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(path)}`);
+    const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`);
     if (!response.ok) {
-      console.warn('fs list failed', path, response.status);
+      console.warn('fs list failed', root, response.status);
       return null;
     }
     const payload = await response.json();
-    return payload.entries || [];
+    const entries = payload.entries || [];
+    if (options.recordSignature !== false) recordDirectorySignature(root, entries);
+    return entries;
   } catch (err) {
-    console.warn('fs list error', path, err);
+    console.warn('fs list error', root, err);
     return null;
   }
+}
+
+function directoryEntriesSignature(entries) {
+  if (!Array.isArray(entries)) return '';
+  return entries
+    .map(entry => [
+      entry?.name || '',
+      entry?.kind || '',
+      Number.isFinite(Number(entry?.size)) ? Number(entry.size) : '',
+      Number.isFinite(Number(entry?.mtime)) ? Number(entry.mtime) : '',
+      entry?.is_symlink ? '1' : '0',
+    ].join('\x1f'))
+    .sort()
+    .join('\x1e');
+}
+
+function recordDirectorySignature(path, entries) {
+  fileExplorerDirectorySignatures.set(normalizeDirectoryPath(path), directoryEntriesSignature(entries));
 }
 
 function normalizeDirectoryPath(path) {
@@ -2632,13 +2663,12 @@ function childPathParts(root, path) {
 
 function finderDirectoryForItem(item) {
   if (isFileEditorItem(item)) return normalizeDirectoryPath(dirnameOf(fileItemPath(item)));
-  if (!isTmuxSession(item)) return '';
-  return normalizeDirectoryPath(panelFullPath(item, transcriptMeta.sessions?.[item]));
+  return '';
 }
 
 function finderTargetPathForItem(item) {
   if (isFileEditorItem(item)) return fileItemPath(item) || '';
-  return finderDirectoryForItem(item);
+  return '';
 }
 
 function finderCandidateItems(preferredItem = null) {
@@ -2705,6 +2735,18 @@ function fileExplorerTreeContainers() {
   return containers;
 }
 
+function captureFileExplorerScrollPositions() {
+  return fileExplorerTreeContainers().map(container => container.scrollTop || 0);
+}
+
+function restoreFileExplorerScrollPositions(positions) {
+  requestAnimationFrame(() => {
+    fileExplorerTreeContainers().forEach((container, index) => {
+      if (positions[index] != null) container.scrollTop = positions[index];
+    });
+  });
+}
+
 function directFileTreeRow(container, fullPath) {
   return Array.from(container?.children || []).find(node => (
     node.classList?.contains('file-tree-row') && node.dataset?.path === fullPath
@@ -2764,7 +2806,7 @@ function scrollFileTreeRowIntoView(container, row) {
   return true;
 }
 
-async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncGeneration) {
+async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncGeneration, options = {}) {
   const parts = childPathParts(root, path);
   if (!parts.length) return false;
   const rendered = await ensureFileTreeRootRendered(container, root);
@@ -2791,20 +2833,32 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
   }
   await nextAnimationFrame();
   if (generation !== fileExplorerSyncGeneration) return false;
-  scrollFileTreeRowIntoView(container, row);
+  if (options.scrollIntoView !== false) scrollFileTreeRowIntoView(container, row);
   updateFileExplorerCurrentFileHighlight();
   return Boolean(row);
 }
 
-async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoot(), generation = fileExplorerSyncGeneration) {
+async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoot(), generation = fileExplorerSyncGeneration, options = {}) {
   let expanded = false;
   if (!fileExplorerRoot) fileExplorerRoot = root;
   if (fileExplorerPath) fileExplorerPath.textContent = root;
   for (const container of fileExplorerTreeContainers()) {
     if (generation !== fileExplorerSyncGeneration) return false;
-    expanded = await expandFileTreeContainerToPath(container, root, path, generation) || expanded;
+    expanded = await expandFileTreeContainerToPath(container, root, path, generation, options) || expanded;
   }
   return expanded;
+}
+
+async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplorerRoot()) {
+  const expandedPaths = Array.from(new Set(paths))
+    .filter(path => pathIsInsideDirectory(path, root) && path !== root)
+    .sort((left, right) => childPathParts(root, left).length - childPathParts(root, right).length);
+  const generation = ++fileExplorerSyncGeneration;
+  for (const path of expandedPaths) {
+    if (generation !== fileExplorerSyncGeneration) return false;
+    await expandFileExplorerTreesToPath(path, root, generation, {scrollIntoView: false});
+  }
+  return true;
 }
 
 function renderTreeChildren(container, parentPath, entries, depth) {
@@ -2974,13 +3028,14 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   menu.className = 'terminal-context-menu file-context-menu';
   menu.setAttribute('role', 'menu');
   const relativePaths = infos.map(info => info?.relative_path || '').filter(Boolean);
+  const menuState = fileContextMenuState(entry, selectedPaths, relativePaths);
   const multiple = selectedPaths.length > 1;
   appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'full'), closeFileContextMenu);
   appendContextMenuButton(menu, multiple ? 'Copy raw paths' : 'Copy raw path', () => copyFilePath(selectedPaths.join('\n'), 'full', {raw: true}), closeFileContextMenu);
-  appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: relativePaths.length !== selectedPaths.length});
-  appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: multiple || entry.kind !== 'file'});
-  appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: multiple});
-  appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu);
+  appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
+  appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
+  appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
+  appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
   menu.addEventListener('pointerdown', event => event.stopPropagation());
   document.body.appendChild(menu);
   fileContextMenu = menu;
@@ -2988,6 +3043,16 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   document.addEventListener('pointerdown', fileContextMenuPointerdown, true);
   document.addEventListener('keydown', fileContextMenuKeydown, true);
   window.addEventListener('blur', closeFileContextMenu);
+}
+
+function fileContextMenuState(entry, selectedPaths, relativePaths) {
+  const multiple = selectedPaths.length > 1;
+  return {
+    copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
+    downloadDisabled: multiple || entry?.kind !== 'file',
+    renameDisabled: readOnlyMode || multiple,
+    deleteDisabled: readOnlyMode,
+  };
 }
 
 function shellQuotePathText(pathText) {
@@ -3163,13 +3228,21 @@ async function renameFileTreePath(fullPath, entry, newName) {
   }
 }
 
-async function refreshFileExplorerTrees() {
-  if (fileExplorerRoot) await openFileExplorerAt(fileExplorerRoot);
-  else refreshFileExplorerPanelTrees();
+async function refreshFileExplorerTrees(options = {}) {
+  const refreshOptions = {preserveExpanded: true, preserveScroll: true, ...options};
+  if (fileExplorerRoot) await openFileExplorerAt(fileExplorerRoot, refreshOptions);
+  else await refreshFileExplorerPanelTrees(refreshOptions);
 }
 
-function refreshFileExplorerPanelTrees() {
-  document.querySelectorAll('.panel.file-explorer-panel').forEach(panel => refreshFileExplorerPanelTree(panel));
+async function refreshFileExplorerPanelTrees(options = {}) {
+  const panels = Array.from(document.querySelectorAll('.panel.file-explorer-panel'));
+  if (!panels.length) return;
+  const shouldRestore = options.restoreState !== false && (options.preserveExpanded || options.preserveScroll);
+  const previousExpanded = shouldRestore && options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
+  const scrollPositions = shouldRestore && options.preserveScroll ? captureFileExplorerScrollPositions() : null;
+  await Promise.all(panels.map(panel => refreshFileExplorerPanelTree(panel, options)));
+  if (previousExpanded.length) await restoreFileExplorerExpandedPaths(previousExpanded, currentFileExplorerRoot());
+  if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
 }
 
 function fileExtensionOf(name) {
@@ -3195,6 +3268,15 @@ async function fetchFileEntry(path) {
   if (!Array.isArray(entries)) return null;
   const name = basenameOf(path);
   return entries.find(entry => entry.name === name) || null;
+}
+
+function fileEntryChanged(state, entry) {
+  if (!state || !entry) return true;
+  const stateMtime = Number(state.mtime || 0);
+  const entryMtime = Number(entry.mtime || 0);
+  if (stateMtime !== entryMtime) return true;
+  if (state.size == null || entry.size == null) return false;
+  return Number(state.size) !== Number(entry.size);
 }
 
 function syncFileLayoutItems() {
@@ -3246,6 +3328,32 @@ function fileErrorState(message) {
   };
 }
 
+function clearOpenFileExternalState(state) {
+  if (!state) return state;
+  delete state.externalChanged;
+  delete state.externalMissing;
+  return state;
+}
+
+function openFileStatus(state) {
+  if (!state) return {message: '', level: ''};
+  if (state.externalMissing) return {message: 'deleted on disk; unsaved edits kept', level: 'warn'};
+  if (state.externalChanged) return {message: 'changed on disk; unsaved edits kept', level: 'warn'};
+  if (state.dirty) return {message: 'modified', level: ''};
+  if (state.kind === 'text') return {message: `${state.original.length} chars`, level: ''};
+  return {message: '', level: ''};
+}
+
+function renderOpenFilePath(path) {
+  const item = fileEditorItemFor(path);
+  const slot = slotForSession(item);
+  const panel = panelNodes.get(item);
+  if (panel && slot && activeItemForSide(slot) === item) renderFileEditorPanel(panel, item);
+  if (activeFile === path) renderEditorForActive();
+  renderSessionButtons();
+  renderPaneTabStrips();
+}
+
 function showFileEditorPaneForPath(path) {
   activeFile = path;
   syncFileLayoutItems();
@@ -3268,7 +3376,9 @@ async function openFileInEditor(fullPath, entryOrName) {
     return;
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
-    await openFilesSetAndShow(fullPath, tooLargeFileState(Number(entry.size)));
+    const state = tooLargeFileState(Number(entry.size));
+    state.mtime = entry?.mtime || 0;
+    await openFilesSetAndShow(fullPath, state);
     return;
   }
   if (kind === 'image') {
@@ -3287,6 +3397,7 @@ async function openFileInEditor(fullPath, entryOrName) {
     const payload = await response.json();
     await openFilesSetAndShow(fullPath, {
       mtime: payload.mtime,
+      size: payload.size,
       kind: 'text',
       original: payload.content,
       content: payload.content,
@@ -3294,6 +3405,150 @@ async function openFileInEditor(fullPath, entryOrName) {
     });
   } catch (err) {
     showFileOpenError(fullPath, err);
+  }
+}
+
+async function openFileStateFromDisk(path, entry = null) {
+  const fileEntry = entry || await fetchFileEntry(path);
+  if (!fileEntry) return {missing: true};
+  if (Number(fileEntry.size) > MAX_FILE_PREVIEW_BYTES) {
+    const state = tooLargeFileState(Number(fileEntry.size));
+    state.mtime = fileEntry.mtime || 0;
+    return {state};
+  }
+  const ext = fileExtensionOf(fileEntry.name || basenameOf(path));
+  if (IMAGE_EXTENSIONS.has(ext)) {
+    return {state: {
+      mtime: fileEntry.mtime || 0,
+      size: fileEntry.size ?? null,
+      kind: 'image',
+      original: '',
+      content: '',
+      dirty: false,
+    }};
+  }
+  try {
+    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      const message = String(payload.error || response.status);
+      const state = response.status === 413 ? tooLargeFileState(fileEntry.size ?? null, message) : fileErrorState(message);
+      state.mtime = fileEntry.mtime || 0;
+      state.size = fileEntry.size ?? null;
+      return {state};
+    }
+    const payload = await response.json();
+    return {state: {
+      mtime: payload.mtime,
+      size: payload.size,
+      kind: 'text',
+      original: payload.content,
+      content: payload.content,
+      dirty: false,
+    }};
+  } catch (error) {
+    return {state: fileErrorState(error)};
+  }
+}
+
+function markOpenFileMissing(path) {
+  const state = openFiles.get(path);
+  if (!state) return;
+  if (state.dirty) {
+    state.externalMissing = true;
+    delete state.externalChanged;
+  } else {
+    openFiles.set(path, fileErrorState('file deleted or moved on disk'));
+  }
+  renderOpenFilePath(path);
+}
+
+async function replaceOpenFileStateFromDisk(path, entry = null) {
+  const loaded = await openFileStateFromDisk(path, entry);
+  if (loaded.missing) {
+    markOpenFileMissing(path);
+    return false;
+  }
+  openFiles.set(path, clearOpenFileExternalState(loaded.state));
+  renderOpenFilePath(path);
+  return true;
+}
+
+async function reloadOpenFileFromDisk(path, options = {}) {
+  const state = openFiles.get(path);
+  if (!state) return false;
+  if (state.dirty && options.force !== true) {
+    const confirmed = window.confirm(`Reload ${basenameOf(path)} from disk and discard unsaved changes?`);
+    if (!confirmed) return false;
+  }
+  return replaceOpenFileStateFromDisk(path);
+}
+
+async function refreshOpenFilesIfChanged() {
+  for (const [path, state] of Array.from(openFiles.entries())) {
+    if (!state || state.loading) continue;
+    const entry = await fetchFileEntry(path);
+    if (!entry) {
+      if (state.externalMissing) continue;
+      markOpenFileMissing(path);
+      continue;
+    }
+    if (!fileEntryChanged(state, entry)) {
+      if (state.externalChanged || state.externalMissing) {
+        delete state.externalMissing;
+        if (!state.dirty) delete state.externalChanged;
+        renderOpenFilePath(path);
+      }
+      continue;
+    }
+    if (state.dirty) {
+      const externalChanged = {mtime: entry.mtime || 0, size: entry.size ?? null};
+      if (state.externalChanged
+        && state.externalChanged.mtime === externalChanged.mtime
+        && state.externalChanged.size === externalChanged.size) {
+        continue;
+      }
+      state.externalChanged = externalChanged;
+      delete state.externalMissing;
+      renderOpenFilePath(path);
+      continue;
+    }
+    await replaceOpenFileStateFromDisk(path, entry);
+  }
+}
+
+function watchedFileExplorerDirectories() {
+  const root = currentFileExplorerRoot();
+  const directories = new Set();
+  if (fileExplorerRoot || fileExplorerPaneIsOpen()) directories.add(root);
+  for (const path of fileExplorerExpanded) {
+    if (pathIsInsideDirectory(path, root)) directories.add(normalizeDirectoryPath(path));
+  }
+  return Array.from(directories);
+}
+
+async function refreshFileExplorerIfChanged() {
+  const directories = watchedFileExplorerDirectories();
+  let changed = false;
+  for (const directory of directories) {
+    const entries = await fetchDirectory(directory, {recordSignature: false});
+    if (!entries) continue;
+    const signature = directoryEntriesSignature(entries);
+    const previous = fileExplorerDirectorySignatures.get(normalizeDirectoryPath(directory));
+    fileExplorerDirectorySignatures.set(normalizeDirectoryPath(directory), signature);
+    if (previous !== undefined && previous !== signature) changed = true;
+  }
+  if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+}
+
+async function refreshWatchedFilesystem() {
+  if (filesystemRefreshInFlight) return;
+  filesystemRefreshInFlight = true;
+  try {
+    await refreshFileExplorerIfChanged();
+    await refreshOpenFilesIfChanged();
+  } finally {
+    filesystemRefreshInFlight = false;
   }
 }
 
@@ -3509,7 +3764,8 @@ function renderEditorForActive() {
     if (fileEditorSave) fileEditorSave.hidden = true;
     const img = document.createElement('img');
     img.className = 'file-editor-image';
-    img.src = `/api/fs/raw?path=${encodeURIComponent(activeFile)}`;
+    const version = state.mtime || state.size || 0;
+    img.src = `/api/fs/raw?path=${encodeURIComponent(activeFile)}&v=${encodeURIComponent(version)}`;
     img.alt = activeFile;
     img.onload = () => setEditorStatus(`${img.naturalWidth}×${img.naturalHeight}`, '');
     img.onerror = () => setEditorStatus('failed to load image', 'error');
@@ -3536,7 +3792,8 @@ function renderEditorForActive() {
     if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = true;
     if (fileEditorHighlight) fileEditorHighlight.hidden = true;
   }
-  setEditorStatus(state.dirty ? 'modified' : `${state.original.length} chars`, state.dirty ? '' : '');
+  const status = openFileStatus(state);
+  setEditorStatus(status.message, status.level);
 }
 
 function renderMarkdownPreview(text) {
@@ -3625,9 +3882,11 @@ async function saveCurrentEditor() {
     }
     const payload = await response.json();
     state.mtime = payload.mtime;
+    state.size = payload.size;
     state.original = fileEditorTextarea.value;
     state.content = fileEditorTextarea.value;
     state.dirty = false;
+    clearOpenFileExternalState(state);
     setEditorStatus(`saved (${payload.size} bytes)`, 'ok');
     renderSessionButtons();
   } catch (err) {
@@ -3644,7 +3903,7 @@ function toggleHiddenFiles() {
     fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
     fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
   }
-  if (fileExplorerRoot) openFileExplorerAt(fileExplorerRoot);
+  if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
 
 async function expandDirectoryRow(row, fullPath) {
@@ -3694,7 +3953,8 @@ if (fileEditorTextarea) {
     state.content = fileEditorTextarea.value;
     const wasDirty = state.dirty;
     state.dirty = state.content !== state.original;
-    setEditorStatus(state.dirty ? 'modified' : `${state.original.length} chars`, '');
+    const status = openFileStatus(state);
+    setEditorStatus(status.message, status.level);
     if (wasDirty !== state.dirty) renderSessionButtons();
   });
   fileEditorTextarea.addEventListener('keydown', event => {
@@ -6387,7 +6647,6 @@ function createFileExplorerPanel() {
       event.preventDefault();
       event.stopPropagation();
       toggleHiddenFiles();
-      refreshFileExplorerPanelTree(panel);
     });
   }
   const closeBtn = panel.querySelector('.file-explorer-panel-close');
@@ -6408,12 +6667,12 @@ function createFileExplorerPanel() {
   return panel;
 }
 
-function refreshFileExplorerPanelTree(panel) {
+async function refreshFileExplorerPanelTree(panel, options = {}) {
   const treeEl = panel.querySelector('.file-explorer-tree-panel');
   const pathEl = panel.querySelector('.file-explorer-path-inline');
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
   if (!treeEl) return;
-  const root = fileExplorerRoot || homePath || '/';
+  const root = normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
   if (pathEl) pathEl.textContent = root;
   if (hiddenBtn) {
     hiddenBtn.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
@@ -6421,14 +6680,12 @@ function refreshFileExplorerPanelTree(panel) {
     hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
   }
   treeEl.replaceChildren();
-  apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`)
-    .then(resp => resp.ok ? resp.json() : null)
-    .then(payload => {
-      if (!payload) return;
-      renderTreeChildren(treeEl, root, payload.entries || [], 0);
-      updateFileExplorerCurrentFileHighlight();
-    })
-    .catch(err => console.warn('fs list (panel) failed', err));
+  const entries = options.root === root && Array.isArray(options.entries)
+    ? options.entries
+    : await fetchDirectory(root);
+  if (!entries) return;
+  renderTreeChildren(treeEl, root, entries, 0);
+  updateFileExplorerCurrentFileHighlight();
 }
 
 function createFileEditorPanel(item) {
@@ -6442,6 +6699,7 @@ function createFileEditorPanel(item) {
         <div class="file-editor-panel-actions">
           <button type="button" class="file-editor-preview-panel" title="Toggle Markdown preview" hidden>Preview</button>
           <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" hidden>Wrap</button>
+          <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
           <button type="button" class="file-editor-save-panel" title="Save" ${readOnlyMode ? 'hidden' : ''}>Save</button>
           <button type="button" class="${fileEditorPanelCloseClass()}" title="Close" aria-label="Close"></button>
         </div>
@@ -6470,6 +6728,11 @@ function createFileEditorPanel(item) {
     event.stopPropagation();
     saveFileEditor(path, panel);
   });
+  panel.querySelector('.file-editor-reload-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    reloadOpenFileFromDisk(path);
+  });
   panel.querySelector('.file-editor-preview-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -6490,7 +6753,8 @@ function createFileEditorPanel(item) {
     const dirtyChanged = dirty !== state.dirty;
     state.dirty = dirty;
     updateFileEditorPanelChrome(panel, path);
-    setFileEditorPanelStatus(panel, dirty ? 'modified' : `${state.original.length} chars`, '');
+    const status = openFileStatus(state);
+    setFileEditorPanelStatus(panel, status.message, status.level);
     renderSyntaxHighlight(panel, path, state.content);
     syncSyntaxHighlightScroll(panel);
     if (dirtyChanged) {
@@ -6584,9 +6848,11 @@ function renderFileEditorPanel(panel, item) {
   const imagePane = panel.querySelector('.file-editor-image-panel');
   const previewButton = panel.querySelector('.file-editor-preview-panel');
   const wrapButton = panel.querySelector('.file-editor-wrap-panel');
+  const reloadButton = panel.querySelector('.file-editor-reload-panel');
   if (!state) {
     if (previewButton) previewButton.hidden = true;
     if (wrapButton) wrapButton.hidden = true;
+    if (reloadButton) reloadButton.hidden = true;
     panel.classList.remove('syntax-highlighted');
     hideFileEditorContent(textarea, highlightPane, previewPane, imagePane);
     setFileEditorPanelStatus(panel, 'file closed', '');
@@ -6595,6 +6861,7 @@ function renderFileEditorPanel(panel, item) {
   if (state.loading) {
     if (previewButton) previewButton.hidden = true;
     if (wrapButton) wrapButton.hidden = true;
+    if (reloadButton) reloadButton.hidden = true;
     panel.classList.remove('syntax-highlighted');
     hideFileEditorContent(textarea, highlightPane, previewPane, imagePane);
     setFileEditorPanelStatus(panel, 'loading...', '');
@@ -6604,6 +6871,7 @@ function renderFileEditorPanel(panel, item) {
   if (state.kind === 'error' || state.kind === 'too-large') {
     if (previewButton) previewButton.hidden = true;
     if (wrapButton) wrapButton.hidden = true;
+    if (reloadButton) reloadButton.hidden = true;
     panel.classList.remove('syntax-highlighted');
     if (textarea) textarea.hidden = true;
     if (highlightPane) highlightPane.hidden = true;
@@ -6696,7 +6964,8 @@ function renderFileEditorPanel(panel, item) {
       textarea.focus({preventScroll: true});
     }
   }
-  setFileEditorPanelStatus(panel, state.dirty ? 'modified' : `${state.original.length} chars`, state.dirty ? '' : '');
+  const status = openFileStatus(state);
+  setFileEditorPanelStatus(panel, status.message, status.level);
 }
 
 function loadFileEditorState(path, panel, item) {
@@ -6707,7 +6976,9 @@ function loadFileEditorState(path, panel, item) {
     if (IMAGE_EXTENSIONS.has(ext)) {
       const entry = await fetchFileEntry(path);
       if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
-        openFiles.set(path, tooLargeFileState(Number(entry.size)));
+        const state = tooLargeFileState(Number(entry.size));
+        state.mtime = entry?.mtime || 0;
+        openFiles.set(path, state);
       } else {
         openFiles.set(path, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
       }
@@ -6726,6 +6997,7 @@ function loadFileEditorState(path, panel, item) {
         const payload = await response.json();
         openFiles.set(path, {
           mtime: payload.mtime,
+          size: payload.size,
           kind: 'text',
           original: payload.content,
           content: payload.content,
@@ -6752,6 +7024,10 @@ function updateFileEditorPanelChrome(panel, path) {
   if (saveButton) {
     saveButton.hidden = readOnlyMode || state?.kind !== 'text';
     saveButton.disabled = !state?.dirty;
+  }
+  const reloadButton = panel.querySelector('.file-editor-reload-panel');
+  if (reloadButton) {
+    reloadButton.hidden = !(state?.externalChanged || state?.externalMissing);
   }
 }
 
@@ -7008,8 +7284,10 @@ async function saveFileEditor(path, panel) {
     }
     const payload = await response.json();
     state.mtime = payload.mtime;
+    state.size = payload.size;
     state.original = state.content;
     state.dirty = false;
+    clearOpenFileExternalState(state);
     updateFileEditorPanelChrome(panel, path);
     setFileEditorPanelStatus(panel, `saved (${payload.size} bytes)`, 'ok');
     renderSessionButtons();
@@ -7101,6 +7379,7 @@ function createPanel(session) {
       <div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
           <div class="transcript-head">Transcript</div>
+          <div id="transcript-path-${session}" class="transcript-path-row">finding transcript...</div>
           <div id="transcript-${session}" class="transcript-preview">finding transcript...</div>
         </div>
       </div>
@@ -7296,6 +7575,17 @@ function bindPanelControls(panel, session) {
     event.preventDefault();
     event.stopPropagation();
     toggleAutoApprove(target.dataset.autoSession || session);
+  });
+  panel.addEventListener('click', event => {
+    const target = event.target.closest('[data-copy-transcript-path]');
+    if (!target || !panel.contains(target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const path = target.dataset.copyTranscriptPath || '';
+    if (!path) return;
+    copyTextToClipboard(path)
+      .then(() => { statusEl.textContent = 'copied transcript path'; })
+      .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
   });
   panel.querySelector('.meta')?.addEventListener('click', event => event.stopPropagation());
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
@@ -7736,6 +8026,7 @@ function updatePanelSlot(panel, session, slot) {
   panel.dataset.slot = slot;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
+  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session);
   updatePaneExpandButton(panel, session);
   updatePaneTabStrip(panel, slot);
   updatePanelInactiveOverlays();
@@ -8162,16 +8453,20 @@ async function refreshTranscripts() {
       }
       renderSummaryContext(session, info, agent);
       if (agent?.transcript) {
-        preview.textContent = `path: ${agent.transcript}\nsession_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
+        updateTranscriptPathRow(session, agent.transcript);
+        preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
         refreshTranscriptPreview(session, preview, {preserveScroll: false});
       } else if (agent?.error) {
+        updateTranscriptPathRow(session, '', agent.error);
         preview.textContent = agent.error;
       } else {
+        updateTranscriptPathRow(session, '', 'no agent transcript found');
         preview.textContent = 'no agent transcript found';
       }
     }
     renderPaneTabStrips();
     scheduleFileExplorerActiveTabSync();
+    refreshWatchedFilesystem();
     trackSessionStateChanges();
     refreshOpenEventLogs();
   } catch (error) {
@@ -8179,6 +8474,7 @@ async function refreshTranscripts() {
       const meta = document.getElementById(`meta-${session}`);
       const preview = document.getElementById(`transcript-${session}`);
       if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
+      updateTranscriptPathRow(session, '', 'transcript lookup failed');
       if (preview) preview.textContent = `transcript lookup failed: ${error}`;
     }
   }
@@ -8231,11 +8527,23 @@ function renderSummaryContext(session, info, agent) {
   node.innerHTML = summaryContextHtml(session, info, agent);
 }
 
+function transcriptPathRowHtml(path, fallback = 'no transcript path') {
+  if (!path) return `<span class="transcript-path-missing">${esc(fallback)}</span>`;
+  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span><button type="button" class="path-copy-button transcript-path-copy" data-copy-transcript-path="${esc(path)}" title="Copy transcript path" aria-label="Copy transcript path"></button>`;
+}
+
+function updateTranscriptPathRow(session, path, fallback = 'no transcript path') {
+  const row = document.getElementById(`transcript-path-${session}`);
+  if (!row) return;
+  row.innerHTML = transcriptPathRowHtml(path, fallback);
+}
+
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
     const response = await apiFetch(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
     const payload = await response.json();
     if (payload.items) {
+      updateTranscriptPathRow(session, payload.path);
       renderTranscriptItems(preview, payload.path, payload.items, options);
     } else {
       preview.textContent = JSON.stringify(payload, null, 2);
@@ -8254,6 +8562,7 @@ function startTranscriptStream(session, options = {}) {
   transcriptStreams.set(session, source);
   source.addEventListener('reset', event => {
     const payload = JSON.parse(event.data);
+    updateTranscriptPathRow(session, payload.path);
     renderTranscriptItems(preview, payload.path, payload.items || [], {scrollBottom: options.scrollBottom === true});
   });
   source.addEventListener('items', event => {
@@ -8288,9 +8597,8 @@ function renderTranscriptItems(container, path, items, options = {}) {
   const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 32;
   const oldTop = container.scrollTop;
   const oldHeight = container.scrollHeight;
-  const pathBlock = `<div class="transcript-item system"><div class="transcript-role">transcript</div><div class="transcript-text">${esc(path)}</div></div>`;
   const blocks = items.map(item => transcriptItemHtml(item));
-  container.innerHTML = pathBlock + blocks.join('');
+  container.innerHTML = blocks.join('');
   if (shouldScrollBottom) {
     requestAnimationFrame(() => {
       container.scrollTop = container.scrollHeight;
@@ -8451,6 +8759,7 @@ async function updateLatency() {
 function refreshAll() {
   refreshTranscripts();
   refreshAutoStatuses();
+  refreshWatchedFilesystem();
 }
 
 async function boot() {

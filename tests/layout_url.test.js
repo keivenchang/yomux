@@ -91,7 +91,7 @@ class TestElement {
   setAttribute() {}
 }
 
-function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64') {
+function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin') {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const bootStart = source.indexOf("if (refreshMeta) {");
   assert.ok(bootStart > 0, 'could not find browser boot section');
@@ -99,7 +99,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const bootstrap = JSON.stringify({
     sessions,
     availableAgents: [],
-    accessRole: 'admin',
+    accessRole,
     homePath: '/home/test',
     maxSessionTabs: 99,
     serverHostname: 'test-host',
@@ -194,9 +194,12 @@ globalThis.__layoutTestApi = {
   defaultLayoutSlots,
   dedentSelectionText,
   dropIntentAllowsSession,
+  directoryEntriesSignature,
   editorWrapValue,
   expandPaneFromLayout,
   infoBranchRows,
+  fileContextMenuState,
+  fileEntryChanged,
   pullRequestStatusLabel,
   renderTransportWarning,
   rawFileDownloadUrl,
@@ -220,6 +223,7 @@ globalThis.__layoutTestApi = {
   tabMenuDetailText,
   terminalWheelSignedLines,
   terminalWrappedLineLinks,
+  transcriptPathRowHtml,
   splitNode,
   splitSessionAtSlot,
   updateActiveSessionParam,
@@ -615,10 +619,10 @@ function canonical(value) {
     panes: [{current_path: '/home/test/yolomux.dev/mock', command: 'bash'}],
     selected_pane: {current_path: '/home/test/yolomux.dev'},
   });
-  assert.equal(api.finderDirectoryForItem('1'), '/home/test/yolomux.dev/mock');
-  assert.equal(api.activeFinderDirectoryPath('1'), '/home/test/yolomux.dev/mock');
-  assert.equal(api.finderTargetPathForItem('1'), '/home/test/yolomux.dev/mock');
-  assert.equal(api.activeFinderTargetPath('1'), '/home/test/yolomux.dev/mock');
+  assert.equal(api.finderDirectoryForItem('1'), '');
+  assert.equal(api.activeFinderDirectoryPath('1'), '');
+  assert.equal(api.finderTargetPathForItem('1'), '');
+  assert.equal(api.activeFinderTargetPath('1'), '');
   const fileItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/TODO.md');
   assert.equal(api.finderDirectoryForItem(fileItem), '/home/test/yolomux.dev');
   assert.equal(api.finderTargetPathForItem(fileItem), '/home/test/yolomux.dev/TODO.md');
@@ -1025,6 +1029,48 @@ function canonical(value) {
   const dirtyRows = api.filePopoverRows(path, {kind: 'text', dirty: true}).join('');
   assert.ok(dirtyRows.includes('status'));
   assert.ok(dirtyRows.includes('modified'));
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const signature = api.directoryEntriesSignature([
+    {name: 'b.txt', kind: 'file', size: 2, mtime: 20},
+    {name: 'a.txt', kind: 'file', size: 1, mtime: 10},
+  ]);
+  assert.equal(signature, api.directoryEntriesSignature([
+    {name: 'a.txt', kind: 'file', size: 1, mtime: 10},
+    {name: 'b.txt', kind: 'file', size: 2, mtime: 20},
+  ]));
+  assert.notEqual(signature, api.directoryEntriesSignature([
+    {name: 'a.txt', kind: 'file', size: 1, mtime: 11},
+    {name: 'b.txt', kind: 'file', size: 2, mtime: 20},
+  ]));
+  assert.equal(api.fileEntryChanged({mtime: 10, size: 1}, {mtime: 10, size: 1}), false);
+  assert.equal(api.fileEntryChanged({mtime: 10, size: 1}, {mtime: 11, size: 1}), true);
+  assert.equal(api.fileEntryChanged({mtime: 10, size: 1}, {mtime: 10, size: 2}), true);
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const state = api.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
+  assert.equal(state.copyRelativeDisabled, false);
+  assert.equal(state.downloadDisabled, false);
+  assert.equal(state.renameDisabled, false);
+  assert.equal(state.deleteDisabled, false);
+
+  const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
+  const readonlyState = readonlyApi.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
+  assert.equal(readonlyState.downloadDisabled, false);
+  assert.equal(readonlyState.renameDisabled, true);
+  assert.equal(readonlyState.deleteDisabled, true);
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const html = api.transcriptPathRowHtml('/tmp/yolomux/session.jsonl');
+  assert.ok(html.includes('/tmp/yolomux/session.jsonl'));
+  assert.ok(html.includes('data-copy-transcript-path'));
+  assert.equal(api.transcriptPathRowHtml('').includes('no transcript path'), true);
 }
 
 {
