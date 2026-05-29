@@ -22,6 +22,81 @@ Borrow from other tools only when the feature improves the local control loop: k
 - [x] Detect state from tmux pane output, agent process status, recent terminal activity, YOLO worker status, PR/CI metadata, and known prompt patterns.
 - [x] Keep LLM classification optional and delayed until a session is quiet; first ship deterministic heuristics.
 
+### P0: Menu-Bar Navigation (replace top tabs with real dropdown menus)
+
+Goal: replace the always-visible top session-tab strip with a proper application menu bar — top-level menus that open dropdowns, the way a real program does. New session (Claude and Codex) moves INTO the menu; there are no more persistent top tabs. Only the active session stays shown inline.
+
+DESIGN GATE (do this first, do not write code yet):
+
+- [ ] Confirm decision: remove the always-on top session-tab strip (`#sessionButtons`); New session for Claude AND Codex lives inside the Tmux Session menu, not as top tabs.
+- [ ] Review and sign off the menu tree below before any implementation. Iterate on labels, grouping, and which existing controls move where. Implementation starts only after the structure is approved.
+
+Current controls to be reorganized (inventory):
+
+- Top bar today: brand + version, session-tab strip (`#sessionButtons`), latency meter, `Notify`, `Refresh`, `Log out`, `status`, tab-metadata toggle (`#`), HTTPS warning.
+- Per-pane tab strip today: `<` / `>` window step, `Terminal`, `Tx` (transcript), `AI` (summary), `Log` (events), `Info` (detail toggle), window-close.
+- Other surfaces: File Explorer (tree + editor), Files panel, layout (single / grid / wall), inactive-tabs tray menu, per-session state badges (`RUN`/`EXEC?`/`YOLO?`/`QUES?`/`BLK`/`OFF`/`TEST`/`PR`/`IDLE`/`DONE`).
+
+Menu naming follows the macOS / iTerm convention: `File` (create/manage), `View` (display options), `Windows` (navigate every open window/view, like iTerm's Window menu), plus app-specific `YOLO` and `Settings`, and `Help`.
+
+Proposed top-bar layout (left to right): `YOLOmux ver` · `[File ▾] [View ▾] [Windows ▾] [YOLO ▾] [Settings ▾] [Help ▾]` · active-session chip (label + state badge) · latency · `Notify` · `Refresh` · status · `Log out`.
+
+KEEP AS DEDICATED TOP-RIGHT BUTTONS: `Notify`, `Refresh`, `Log out`. These stay as one-click buttons on the right of the top bar exactly as today (same icons, same behavior). The menus absorb the session tabs and the lower-frequency controls; these three high-use buttons remain visible.
+
+ALSO MIRROR THEM IN THE SETTINGS MENU: the same `Notify`, `Refresh`, and `Log out` (identical icons and behavior) also appear as items inside the `Settings ▾` menu, in addition to the top-right buttons. They are duplicated, not moved — both surfaces stay in sync (e.g. Notify shows the same on/off state in both). This keeps them reachable when the top-right buttons collapse on narrow/mobile widths and improves discoverability.
+
+Proposed menu tree (PROPOSAL — review before building):
+
+- [ ] File ▾  (create / manage)
+  - New tmux session ▸ : `+ Claude`, `+ Codex`, `+ Term` (each opens the P4 launch dialog: cwd, model/profile, permission mode, initial prompt, optional name)
+  - Rename tmux session
+  - Kill tmux session
+  - Resume ▸ : recent Claude/Codex conversations scoped to cwd (P4)
+  - --- (separator)
+  - File Explorer (open)
+  - Open file…
+  - NOTE: no Attach / Detach item. YOLOmux streams every pane over WebSocket and is always "attached"; switching sessions only changes which stream is shown. tmux attach/detach is a terminal-client concept that does not map to this UI, so it is intentionally omitted.
+- [ ] View ▾  (display options)
+  - Layout ▸ : Single / Grid / Wall
+  - Filter / Sort ▸ : Needs me, by state, by repo, by PR status
+  - Tab metadata: show / hide (the current `#` toggle)
+  - Inactive tabs: show all / tray
+  - Panel tabs ▸ : toggle Terminal / Tx / AI / Log / Info visibility
+  - Branch Info: show — opens the Branch Info viewer for the active session (also still available as the per-pane `Info` tab; once open it appears in the Windows list)
+- [ ] Windows ▾  (navigate — iTerm-style; a FLAT list of only the windows that are currently open, checkmark/highlight on the active one, click/Enter to focus, type-to-filter)
+  - Just lists the currently-open windows, nothing to "launch" from here — opening windows happens in File / View. Ordering, top to bottom:
+  - tmux windows first : each open session/terminal window
+  - then editors : each open File Editor window
+  - then other open viewers : File Explorer, Branch Info, Transcript, AI Summary, Event Log (only the ones currently open)
+  - Each row carries the SAME rich info already shown in the existing tab-metadata view, but packed more compactly so it reads like a real dropdown menu (one tight row per window): agent badge (`YO`/`BL`/… + session number), state badge (`RUN`/`BLK`/…), PR number, commit-style title, branch, repo path (e.g. `dynamo2 -> dynamo3`), and dirty count. The active window's row is highlighted (green) like the current selection.
+  - This is a denser re-layout of the existing rich rows, not new data — reuse the metadata that already feeds the tab strip.
+- [ ] Per-window left dropdown (the caret on the LEFT of each panel's tab strip): looks IDENTICAL to the Windows ▾ menu above (same compact rich-row format), but scoped to just THAT window's tabs — i.e. only the tabs/views belonging to that one panel (its tmux windows + Terminal / Tx / AI / Log / Info), not every window in the app. Same row styling, same active-row highlight.
+- [ ] YOLO ▾
+  - Auto-approve: on / off (global)
+  - Policy ▸ : off / prompt-only / safe / edit / full (default for new sessions + per-session override) — ties to P1 policy modes
+  - Open rule file (YAML)… — ties to "YOLO Rule Engine" below
+  - Approval queue (P1)
+  - Audit log
+  - Risk labels legend (`read` / `edit` / `network` / `process` / `delete` / `credential` / `unknown`)
+- [ ] Settings ▾
+  - Global settings… (opens the Settings panel: System/General, Notifications, Appearance, Performance, YOLO, Terminal, Advanced)
+  - --- (separator)
+  - `Notify` (same icon + on/off state as the top-right button — mirrored, not moved)
+  - `Refresh` (same icon + behavior as the top-right button — mirrored)
+  - `Log out` (same icon + behavior as the top-right button — mirrored)
+- [ ] Help ▾
+  - Keyboard shortcuts
+  - About / version
+  - Docs link
+- [ ] Per-pane kebab (`…`) on each panel head (keep the existing Term/Tx/AI/Log/Info strip): YOLO policy for this session, peek / reply, run summary, rename, kill. (No "attach" item — see the Tmux Session note above.)
+- [ ] Right-click context menu on a session tab (the `window-session-tab` / panel header): `Rename session` (inline edit, same affordance as the file-tree rename at `static/yolomux.js:2076`), plus `Kill session` and `YOLO policy`. This is the expected shortcut so users do not have to open the Tmux Session menu just to rename.
+
+Cross-cutting requirements for all menus:
+
+- [ ] Keyboard accessible (open/close, arrow navigation, Esc), ARIA menu roles, click-outside to close, one menu open at a time (reuse the existing popover-open machinery).
+- [ ] Mobile: menus collapse into a single hamburger (ties to P7).
+- [ ] Read-only mode disables mutating items (New, Kill, Settings writes, YOLO toggles) the same way the current `Notify`/buttons do.
+
 ### P1: YOLO Event Log, Audit, And Queue
 
 - [x] Add a persistent YOLO event log under `~/.local/state/yolomux/events.jsonl`, while keeping compact app state in `~/.config/yolomux/state.json`.
@@ -30,6 +105,91 @@ Borrow from other tools only when the feature improves the local control loop: k
 - [ ] Add an approval queue view for pending high-risk actions. Start read-only first if live interception is hard.
 - [ ] Add per-session YOLO policy. Initial modes: `off`, `prompt-only`, `safe`, `edit`, `full`. Make policy visible on the YOLO button.
 - [ ] Risk labels should be boring and concrete: `read`, `edit`, `network`, `process`, `delete`, `credential`, `unknown`.
+
+### P1: YOLO Rule Engine (user-configurable matching via YAML)
+
+Today YOLO matching is hardcoded in `auto_approve_tmux.py`: a fixed `DANGEROUS_COMMANDS` set + `DANGEROUS_PATTERNS` denylist, with a binary outcome (press Enter to approve, or leave the prompt for manual action). Goal: let users declare, in a YAML file, what input patterns map to what action — so the same engine can auto-approve safe commands, auto-decline dangerous ones, or just notify, without editing Python.
+
+DESIGN GATE: propose the schema and decide the options below before implementing. Do not write code until the rule shape is signed off.
+
+- [ ] Decide file location and precedence. Proposal: `~/.config/yolomux/yolo-rules.yaml` (shared default) plus optional per-repo `.yolomux.yaml` that overlays it; per-session override via the YOLO menu.
+- [ ] Decide the action verbs. Proposal: `approve` (press Enter / select Yes), `decline` (select No / option2), `block` (leave for manual, current behavior), `ask` (notify + wait), `notify` (log only, take no action).
+- [ ] Decide match types. Proposal: `contains` (substring), `regex`, `glob`, and `command` (argv-aware parse so `echo "rm"` is data, not a delete). Argv-aware matching is the main upgrade over today's whole-line regex.
+- [ ] Decide scoping dimensions: global vs per-repo vs per-session, per-agent (`claude` / `codex`), and per prompt-type (`bash` / `file` / `tool`).
+
+Schema options to choose between (PROPOSAL — pick one or blend):
+
+- [ ] Option A — ordered rule list, first match wins:
+
+```yaml
+default: ask            # off | approve | decline | block | ask
+rules:
+  - name: block destructive
+    type: command       # command | regex | glob | contains
+    match: ['rm', 'rmdir', 'shred', 'dd', 'mkfs']
+    action: block
+    risk: delete
+  - name: safe reads
+    type: regex
+    match: '^(ls|cat|grep|git (status|log|diff))\b'
+    action: approve
+    risk: read
+```
+
+- [ ] Option B — risk-class map (patterns assign a risk, risk maps to an action):
+
+```yaml
+risk_actions:
+  read: approve
+  edit: approve
+  network: ask
+  process: approve
+  delete: block
+  credential: block
+  unknown: ask
+patterns:
+  delete:  ['\brm\b', '\bdd\b', '\bmkfs']
+  network: ['curl', 'wget', 'ssh', 'scp']
+  credential: ['~/.ssh', 'HF_TOKEN', 'GH_TOKEN']
+```
+
+- [ ] Option C — profiles + scope overrides (layer on top of A or B):
+
+```yaml
+profiles:
+  default: { bash: safe, file: approve, tool: ask }
+  codex:   { file: approve }
+sessions:
+  '6': { bash: full }
+```
+
+Safety and operational requirements (regardless of schema):
+
+- [ ] Deny always beats allow. Keep a hard floor (`rm -rf /`, `dd` to a block device, fork bomb, `mkfs`, redirect to `/dev/sd*`) that the YAML cannot relax unless YOLOmux was started with `--dangerously-yolo`.
+- [ ] Dry-run / shadow mode: evaluate rules and log what WOULD happen (matched rule + action) without acting, so a new ruleset can be validated against real prompts first.
+- [ ] Hot-reload on file change; validate the schema on load and surface errors in the UI instead of silently falling back.
+- [ ] Ship today's hardcoded denylist AS the default `yolo-rules.yaml` so behavior is unchanged out of the box; the hardcoded version becomes the fallback when no file exists.
+- [ ] Record the matched rule name in every audit event (the audit panel already shows a "matched rule" column).
+- [ ] Add an "Open rule file" + "Reload rules" action in the YOLO menu, and show the active ruleset path/source in Settings.
+
+### P1: File Explorer & Editor Live Refresh
+
+When files change on disk, the File Explorer (Finder) and the open editor should update on their own instead of showing stale content.
+
+- [ ] Refresh the File Explorer tree when the watched directory changes on disk (files added / removed / renamed / modified). Do NOT lose state on refresh: keep the current selection, keep expanded folders expanded, and keep the scroll position exactly where it was (no jump to top, no collapse). Diff the tree and patch in place rather than rebuilding it.
+- [ ] Refresh the open editor content when the currently-open file changes on disk, for any file type (md, sh, py, etc.); re-render the Markdown preview if it is showing.
+- [ ] Handle unsaved edits safely: if the editor has local unsaved changes and the file also changed on disk, do not silently overwrite the user's edits — show a conflict notice and let them keep theirs or reload from disk.
+- [ ] Handle the open file being deleted or moved on disk: show a clear state instead of stale content.
+- [ ] Mechanism: watch the explorer's current directory and the open file on the server (inotify, fall back to mtime poll) and push changes to the browser over the existing channel; debounce rapid bursts. Reuse existing refresh plumbing rather than adding a new fast poll loop.
+
+### P2: Conditional Window-Step Arrows
+
+The per-pane window-step buttons (`<` / `>`, the `window-step` controls in `static/yolomux.js` that page through `[Codex, Claude, bash, ...]` tmux windows in the current session) currently always show. Make them appear only when there is somewhere to step to.
+
+- [ ] Show `<` only when a tmux window exists BEFORE the current window in this session.
+- [ ] Show `>` only when a tmux window exists AFTER the current window in this session.
+- [ ] When the session has only one window, hide BOTH arrows.
+- [ ] Edge cases: recompute on window create/close/move and on session switch; do not reserve empty space when an arrow is hidden (the label should not jump). Decide whether ordering follows tmux window index or the current display order.
 
 ### P2: Notifications
 
@@ -43,6 +203,17 @@ Borrow from other tools only when the feature improves the local control loop: k
 - [ ] Add a read-only changed-files list and unified diff panel using the session cwd.
 - [ ] Make PR/CI/issue links clickable, but keep local branch names as text unless a real remote branch/PR exists.
 - [ ] Add an explicit refresh button for repo metadata plus background polling with sane intervals.
+- [ ] Remove redundant info in the file-viewer detail/info panel. Today it repeats itself: the filename shows up as both the tab label AND the bold heading, and the full path shows up twice — once as the subtitle line under the heading and again in the `path` row (with the copy button). Show the filename once and the full path once. Keep the path row (it has the copy affordance) and drop the duplicate subtitle, or vice-versa. Also collapse `type: loading` / `status: loading` so a viewer that has no meaningful type/status does not show two placeholder "loading" rows.
+
+### P3: Editor — Wrap, Preview, Split-Preview
+
+The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py:119`) and a textarea hardcoded to `wrap="off"` (`web.py:123`). Make these first-class view modes plus a wrap toggle.
+
+- [ ] Word-wrap toggle: switch the editor textarea between `wrap="off"` (current) and soft word-wrap, so long lines wrap to the pane width instead of scrolling horizontally. Persist the preference (Settings → Terminal/Editor).
+- [ ] Three explicit view modes for the editor: `Edit`, `Preview`, `Split-Preview` (a small segmented control in the editor head). Edit = textarea only; Preview = rendered view only (reuse the existing `#fileEditorPreviewPane`).
+- [ ] Split-Preview: split the current editor window in half — left = editor (textarea), right = rendered preview — side by side in the same panel.
+- [ ] Split-Preview synced scroll: the two halves scroll together (scrolling the editor scrolls the preview to the matching position, and vice-versa). Map by source line / proportional offset so headings and code blocks stay roughly aligned.
+- [ ] Preview content by type: Markdown renders to formatted HTML (existing marked.js path); non-Markdown (sh, py, etc.) shows the syntax-highlighted read view (reuse `#fileEditorHighlight`) so Split-Preview is useful for code too, not just `.md`.
 
 ### P4: Launch And Resume
 
@@ -81,6 +252,32 @@ Borrow from other tools only when the feature improves the local control loop: k
 - [ ] Defer until the local product is stable. This changes auth, networking, logging, and failure modes.
 - [ ] If built, use a small remote agent that reports tmux sessions, metadata, vitals, and WebSocket terminal streams back to one YOLOmux instance.
 - [ ] Keep local-only as the default.
+
+### Settings Panel
+
+- [ ] Add a Settings panel, reachable from the menu (Tools ▾ → Settings…). Today the tunables are hardcoded in `static/yolomux.js:85-97` and on the server, with no UI.
+- [ ] Persistent storage: write settings to a single human-readable file, `~/.config/yolomux/settings.yaml`. Use YAML specifically so it is easy to read and hand-edit, WITH inline comments documenting each key, its units, default, and allowed range. Keep machine state (badge pulses, auto-approve-enabled session list) in the existing `state.json`; `settings.yaml` is for user preferences only.
+- [ ] Live propagation to ALL running servers: a settings change made in one YOLOmux instance must take effect in every other launched server (e.g. the `:7777` and `:7778` instances) without a restart. Since `settings.yaml` is the shared source of truth, each server watches the file (mtime/inotify) and reloads on change, and each open browser is pushed the new values over the existing WebSocket/poll channel so live pages update too. Writes must be atomic (temp file + rename) and last-write-wins; preserve comments on rewrite (round-trip YAML, e.g. ruamel) so hand-added notes survive a UI save.
+- [ ] Notifications: Notify on/off (already a toggle); choose which state transitions notify (`needs input`, `needs approval`, `YOLO blocked`, `terminal disconnected`, `PR ready`); per-session mute; notify throttle interval.
+- [ ] Toast duration (`toastDurationMs`, default 10000 ms).
+- [ ] Refresh frequencies: metadata (`metadataRefreshMs`, 15001 ms), pane/agent state (`paneStateRefreshMs`, 1257 ms), latency meter (`latencyRefreshMs`, 3001 ms), event log (`eventLogRefreshMs`, 5003 ms).
+- [ ] Blinking RED attention-reminder cycle frequency (`redReminderMs`, 1550 ms), plus an off switch.
+- [ ] YO rotation cycle frequency (`yoloRotateMs`, 20000 ms), plus off.
+- [ ] Metadata-badge pulse duration (`METADATA_BADGE_PULSE_SECONDS`, 20 s, server-side).
+- [ ] Popover show/hide delay (`popoverShowDelayMs` / `popoverHideDelayMs`, 300 ms); remote resize debounce (`remoteResizeDelayMs`, 220 ms).
+- [ ] Auto-approve poll interval (auto_approve `--interval`, default 0.5 s) and default YOLO policy for new sessions (ties to P1 policy modes).
+- [ ] Tab metadata visibility (the existing show/hide tab-metadata toggle), default layout (single/grid/wall), and default sessions on load.
+- [ ] Terminal preferences: font size and scrollback limit.
+- [ ] Each numeric setting needs a sane min/max clamp and a Reset-to-default button so a bad value cannot freeze the refresh loop.
+
+### File Explorer
+
+- [ ] Add a `Download` item to the file right-click context menu (`file-context-menu`, `static/yolomux.js:1993`), alongside the existing Copy full path / Copy relative path / Rename / Delete. Downloads the file to the browser. Backend `filesystem.read_raw` already streams bytes; add (or reuse) a raw-file endpoint that sets `Content-Disposition: attachment; filename=...` so the browser saves instead of previewing. For a directory, either disable Download or offer a zip. Support multi-select (download each, or a single zip). Respect read-only mode rules and the `MAX_RAW_BYTES` cap.
+- [ ] When opening a text file, group it into the EXISTING editor window instead of spawning a new editor panel. If an editor window is already open, add the file as a new tab in that window and focus it (and just focus the tab if the file is already open there). Only create a new editor window when none exists yet. Avoids one-editor-panel-per-file sprawl in the layout.
+
+### Bug Fixes And Tech Debt
+
+- [ ] Fix `tests/test_filesystem.py:177` `test_is_text_path_recognizes_known_extensions`. It passes but only spot-checks 5 extensions and hides a real bug: `filesystem.is_text_path` matches on `Path(...).suffix`, which is `''` for dotfiles and extensionless names. So `.gitignore`, `.dockerignore`, and `.dockerfile` in `TEXT_EXTENSIONS` are unreachable, and `Dockerfile` / `Makefile` / `LICENSE` / `README` return False. Fix `is_text_path` to also match on the basename for those cases, then expand the test to cover the full `TEXT_EXTENSIONS` set, dotfiles, extensionless names, and uppercase extensions (`.PY`, `.PNG`).
 
 ---
 
