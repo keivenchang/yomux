@@ -121,6 +121,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       addEventListener() {},
       body: element('body'),
       createElement: tag => new TestElement(tag),
+      documentElement: element('html'),
       getElementById: element,
       querySelector: () => null,
       querySelectorAll: () => [],
@@ -141,6 +142,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     setTimeout() {},
     window: {
       addEventListener() {},
+      innerWidth: 1200,
       removeEventListener() {},
     },
   };
@@ -150,63 +152,78 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
 globalThis.__layoutTestApi = {
   activeItemForSide,
   agentErrorIsBlocking,
+  appMenuTree,
   backgroundTabItems,
   emptyPlaceholderPaneState,
   emptyLayoutSlots,
-  fileEditorButtonHtml,
   fileEditorPaneTabHtml,
+  finderDirectoryForItem,
+  finderTargetPathForItem,
+  activeFinderDirectoryPath,
+  activeFinderTargetPath,
   fileExplorerLabel,
+  fileExplorerPanelCloseClass,
+  fileEditorPanelCloseClass,
+  fileExplorerNeedsLeftDock,
   fileExplorerPaneTabHtml,
   firstEmptyPane,
   filePopoverRows,
+  childPathParts,
   inactiveTabItems,
   itemIsBackgroundPaneTab,
   layoutFromParam,
   layoutParamValue,
   layoutSlotKeys,
+  layoutWithFileExplorerDockedLeft,
   layoutWithoutItem,
   layoutWithItems,
   layoutTabsParamValue,
   layoutTreeKey,
   leafNode,
+  menuTabCommand,
   normalizeLayoutSlots,
   paneIsPlaceholder,
+  panelControlsHtml,
+  platformWindowControlClass,
+  positionPaneTabPopover,
+  pathIsInsideDirectory,
+  scrollFileTreeRowIntoView,
   bindPaneTabStrip,
   clearPaneTabDropPreview,
-  createTabListMenu,
   defaultLayoutSlots,
   dedentSelectionText,
   dropIntentAllowsSession,
   editorWrapValue,
+  expandPaneFromLayout,
   infoBranchRows,
   pullRequestStatusLabel,
   renderTransportWarning,
   rawFileDownloadUrl,
   registerFileEditorLayoutItem,
+  minimizePaneFromLayout,
+  removePaneFromLayout,
   removeSessionFromLayout,
   sessionPopoverHtml,
   sessionState,
   slotForNewFileEditorTab,
   slotForNewTmuxSession,
   slotForTabActivation,
-  sessionButtonHtml,
   simpleCodeSyntaxHtml,
   smallLayoutSlotCandidate,
   splitPercentForNewItem,
   setInfoBranchSort,
   showPaneTabDropPreview,
-  shouldShowTabListMenu,
   shouldPreserveSourceSlotForSplit,
   startSessionDrag,
   syncInitialLayoutUrl,
-  tabListDetailText,
-  tabListEntryBodyHtml,
+  tabMenuDetailText,
   terminalWrappedLineLinks,
   splitNode,
   splitSessionAtSlot,
   updateActiveSessionParam,
   paneTabDropIndex,
   paneTabDropPlacement,
+  tabMenuItems,
   tmuxPaneTabHtml,
   paneTabs,
   paneStateWithTabs,
@@ -261,6 +278,9 @@ globalThis.__layoutTestApi = {
   },
   httpsWarningForTest() {
     return document.getElementById('httpsWarning');
+  },
+  documentElementStyleForTest() {
+    return document.documentElement.style;
   },
 };`, context);
   return context.__layoutTestApi;
@@ -461,11 +481,8 @@ function canonical(value) {
   const api = loadYolomux('', ['1', '2']);
   const item = 'file:/home/keivenc/review.json';
   const paneTab = api.fileEditorPaneTabHtml(item);
-  const topTab = api.fileEditorButtonHtml(item);
   assert.ok(paneTab.includes('review.json'));
-  assert.ok(topTab.includes('review.json'));
   assert.equal(paneTab.includes('agent-icon file'), false);
-  assert.equal(topTab.includes('agent-icon file'), false);
 
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-heading-1'));
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-bold'));
@@ -476,14 +493,128 @@ function canonical(value) {
 }
 
 {
-  const api = loadYolomux('', ['1']);
+  const api = loadYolomux('', ['1', '2']);
   const filesTab = api.fileExplorerPaneTabHtml();
   assert.equal(api.fileExplorerLabel(), 'File Explorer');
   assert.ok(filesTab.includes('File Explorer'));
   assert.equal(filesTab.includes('agent-icon file'), false);
+  assert.equal(api.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
+  assert.equal(api.platformWindowControlClass('close'), 'pc-window-control pc-close');
+  assert.equal(api.platformWindowControlClass('zoom'), 'pc-window-control pc-zoom');
+  assert.equal(api.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
+  assert.equal(api.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
+  const pcPaneControls = api.panelControlsHtml('1');
+  assert.ok(pcPaneControls.includes('pane-minimize pc-window-control pc-minimize'));
+  assert.ok(pcPaneControls.includes('pane-expand pc-window-control pc-zoom'));
 
   const macApi = loadYolomux('', ['1'], 'http:', 'MacIntel');
   assert.equal(macApi.fileExplorerLabel(), 'Finder');
+  assert.equal(macApi.platformWindowControlClass('minimize'), 'mac-window-control mac-minimize');
+  assert.equal(macApi.platformWindowControlClass('close'), 'mac-window-control mac-minimize');
+  assert.equal(macApi.platformWindowControlClass('zoom'), 'mac-window-control mac-zoom');
+  assert.equal(macApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close mac-window-control mac-minimize');
+  assert.equal(macApi.fileEditorPanelCloseClass(), 'file-editor-panel-close mac-window-control mac-minimize');
+  const macPaneControls = macApi.panelControlsHtml('1');
+  assert.ok(macPaneControls.includes('data-pane-minimize="1"'));
+  assert.ok(macPaneControls.includes('pane-minimize mac-window-control mac-minimize'));
+  assert.ok(macPaneControls.includes('data-pane-expand="1"'));
+  assert.ok(macPaneControls.includes('pane-expand mac-window-control mac-zoom'));
+  const macFinderControls = macApi.panelControlsHtml('__files__');
+  assert.ok(macFinderControls.includes('data-pane-close="__files__"'));
+  assert.ok(macFinderControls.includes('pane-close mac-window-control mac-minimize'));
+  assert.equal(macFinderControls.includes('data-pane-expand'), false);
+
+  const forcedPcApi = loadYolomux('?platform=pc', ['1'], 'http:', 'MacIntel');
+  assert.equal(forcedPcApi.fileExplorerLabel(), 'File Explorer');
+  assert.equal(forcedPcApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
+  assert.equal(forcedPcApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
+  assert.equal(forcedPcApi.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
+
+  const forcedMacApi = loadYolomux('?platform=mac', ['1'], 'http:', 'Linux x86_64');
+  assert.equal(forcedMacApi.fileExplorerLabel(), 'Finder');
+  assert.equal(forcedMacApi.platformWindowControlClass('close'), 'mac-window-control mac-minimize');
+  assert.equal(forcedMacApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close mac-window-control mac-minimize');
+  assert.equal(forcedMacApi.fileEditorPanelCloseClass(), 'file-editor-panel-close mac-window-control mac-minimize');
+
+  const panelForPopover = {
+    getBoundingClientRect() {
+      return {left: 10, right: 500, top: 0, bottom: 500, width: 490, height: 500};
+    },
+  };
+  api.positionPaneTabPopover({
+    getBoundingClientRect() {
+      return {left: 34, right: 274, top: 40, bottom: 68, width: 240, height: 28};
+    },
+    closest(selector) {
+      assert.equal(selector, '.panel');
+      return panelForPopover;
+    },
+  });
+  const popoverStyle = api.documentElementStyleForTest();
+  const popoverLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
+  const popoverWidth = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-width'), 10);
+  assert.equal(popoverLeft, 34);
+  assert.equal(popoverWidth, 560);
+  assert.ok(popoverLeft + popoverWidth <= 1192);
+  assert.ok(popoverWidth > panelForPopover.getBoundingClientRect().width);
+  const tabMenuCommand = api.menuTabCommand('1', {detail: 'Minimized'});
+  assert.equal(tabMenuCommand.title, undefined);
+  assert.equal(tabMenuCommand.detail, '');
+  assert.equal(tabMenuCommand.ariaLabel, '1 - Minimized');
+  assert.equal(tabMenuCommand.html.includes(' title='), false);
+  const noMinimizedSlots = api.emptyLayoutSlots();
+  noMinimizedSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
+  noMinimizedSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  noMinimizedSlots.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(noMinimizedSlots);
+  const tabMenu = api.appMenuTree().find(menu => menu.id === 'tab');
+  const tabMenuLabels = tabMenu.items.map(item => item.label).filter(Boolean);
+  assert.ok(tabMenuLabels.includes('Active'));
+  assert.ok(tabMenuLabels.includes('Inactive'));
+  assert.equal(tabMenuLabels.includes('Minimized'), false);
+  assert.equal(tabMenuLabels.some(label => label.startsWith('No ')), false);
+  assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1);
+  api.setTranscriptInfoForTest('1', {
+    project: {git: {cwd: '/home/test/yolomux.dev', root: '/home/test/yolomux.dev'}},
+    panes: [{current_path: '/home/test/yolomux.dev/mock', command: 'bash'}],
+    selected_pane: {current_path: '/home/test/yolomux.dev'},
+  });
+  assert.equal(api.finderDirectoryForItem('1'), '/home/test/yolomux.dev/mock');
+  assert.equal(api.activeFinderDirectoryPath('1'), '/home/test/yolomux.dev/mock');
+  assert.equal(api.finderTargetPathForItem('1'), '/home/test/yolomux.dev/mock');
+  assert.equal(api.activeFinderTargetPath('1'), '/home/test/yolomux.dev/mock');
+  const fileItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/TODO.md');
+  assert.equal(api.finderDirectoryForItem(fileItem), '/home/test/yolomux.dev');
+  assert.equal(api.finderTargetPathForItem(fileItem), '/home/test/yolomux.dev/TODO.md');
+  assert.equal(api.activeFinderTargetPath(fileItem), '/home/test/yolomux.dev/TODO.md');
+  assert.equal(api.pathIsInsideDirectory('/home/test/yolomux.dev/mock', '/home/test'), true);
+  assert.equal(api.pathIsInsideDirectory('/home/test2/yolomux.dev/mock', '/home/test'), false);
+  assert.deepStrictEqual(canonical(api.childPathParts('/home/test', '/home/test/yolomux.dev/mock')), ['yolomux.dev', 'mock']);
+  assert.deepStrictEqual(canonical(api.childPathParts('/home/test/yolomux.dev', '/home/test/yolomux.dev/TODO.md')), ['TODO.md']);
+  const scrollContainer = {
+    clientHeight: 100,
+    isConnected: true,
+    scrollTop: 0,
+    getBoundingClientRect() {
+      return {top: 0, bottom: 100, height: 100};
+    },
+  };
+  const targetRow = {
+    isConnected: true,
+    getBoundingClientRect() {
+      return {top: 420, bottom: 440, height: 20};
+    },
+  };
+  assert.equal(api.scrollFileTreeRowIntoView(scrollContainer, targetRow), true);
+  assert.equal(scrollContainer.scrollTop, 380);
+  const visibleRow = {
+    isConnected: true,
+    getBoundingClientRect() {
+      return {top: 40, bottom: 60, height: 20};
+    },
+  };
+  assert.equal(api.scrollFileTreeRowIntoView(scrollContainer, visibleRow), true);
+  assert.equal(scrollContainer.scrollTop, 380);
 
   const slots = api.emptyLayoutSlots();
   slots[api.layoutTreeKey] = api.leafNode('slot2');
@@ -522,6 +653,174 @@ function canonical(value) {
   api.setLayoutSlotsForTest(finderAndTmux);
   assert.equal(api.slotForNewTmuxSession('2'), 'slot1');
   assert.equal(api.slotForTabActivation('2'), 'slot1');
+  api.removePaneFromLayout('1');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+    left: {tabs: ['__files__'], active: '__files__'},
+    slot1: {tabs: [], active: null, placeholder: true},
+  });
+  const normalSplit = api.emptyLayoutSlots();
+  normalSplit[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+  normalSplit.left = api.paneStateWithTabs(['1'], '1');
+  normalSplit.slot1 = api.paneStateWithTabs(['2'], '2');
+  api.setLayoutSlotsForTest(normalSplit);
+  api.removePaneFromLayout('2');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+    left: {tabs: ['1'], active: '1'},
+  });
+
+  const tmuxAndFinder = api.emptyLayoutSlots();
+  tmuxAndFinder[api.layoutTreeKey] = api.splitNode('row', api.leafNode('slot1'), api.leafNode('left'), 78);
+  tmuxAndFinder.slot1 = api.paneStateWithTabs(['1'], '1');
+  tmuxAndFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+  api.setLayoutSlotsForTest(tmuxAndFinder);
+  api.removeSessionFromLayout('1');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+    slot1: {tabs: [], active: null, placeholder: true},
+    left: {tabs: ['__files__'], active: '__files__'},
+  });
+
+  const tmuxAboveFinder = api.emptyLayoutSlots();
+  tmuxAboveFinder[api.layoutTreeKey] = api.splitNode('column', api.leafNode('slot1'), api.leafNode('left'), 48);
+  tmuxAboveFinder.slot1 = api.paneStateWithTabs(['1'], '1');
+  tmuxAboveFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+  api.setLayoutSlotsForTest(tmuxAboveFinder);
+  api.removeSessionFromLayout('1');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {slot: 'left'},
+    panes: {left: {tabs: ['__files__'], active: '__files__'}},
+  });
+
+  const finderAboveTmux = api.emptyLayoutSlots();
+  finderAboveTmux[api.layoutTreeKey] = api.splitNode('column', api.leafNode('left'), api.leafNode('slot1'), 52);
+  finderAboveTmux.left = api.paneStateWithTabs(['__files__'], '__files__');
+  finderAboveTmux.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(finderAboveTmux);
+  api.removePaneFromLayout('1');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {slot: 'left'},
+    panes: {left: {tabs: ['__files__'], active: '__files__'}},
+  });
+
+  const activationSlots = api.emptyLayoutSlots();
+  activationSlots[api.layoutTreeKey] = api.splitNode(
+    'row',
+    api.splitNode('column', api.leafNode('slot2'), api.leafNode('left'), 50),
+    api.leafNode('slot1'),
+    28,
+  );
+  activationSlots.slot2 = api.emptyPlaceholderPaneState();
+  activationSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  activationSlots.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(activationSlots);
+  assert.equal(api.slotForTabActivation('2'), 'slot1');
+
+  const middleFinderSlots = api.emptyLayoutSlots();
+  middleFinderSlots[api.layoutTreeKey] = api.splitNode(
+    'row',
+    api.leafNode('left'),
+    api.splitNode('row', api.leafNode('slot2'), api.leafNode('slot1'), 22),
+    35,
+  );
+  middleFinderSlots.left = api.paneStateWithTabs(['1'], '1');
+  middleFinderSlots.slot2 = api.paneStateWithTabs(['__files__'], '__files__');
+  middleFinderSlots.slot1 = api.paneStateWithTabs(['2'], '2');
+  assert.equal(api.fileExplorerNeedsLeftDock(middleFinderSlots), true);
+  const dockedFinder = api.normalizeLayoutSlots(middleFinderSlots);
+  assert.deepStrictEqual(canonical(api.serialize(dockedFinder)), {
+    tree: {
+      split: 'row',
+      pct: 22,
+      children: [
+        {slot: 'slot2'},
+        {split: 'row', pct: 35, children: [{slot: 'left'}, {slot: 'slot1'}]},
+      ],
+    },
+    panes: {
+      slot2: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: ['1'], active: '1'},
+      slot1: {tabs: ['2'], active: '2'},
+    },
+  });
+  api.setLayoutSlotsForTest(dockedFinder);
+  assert.equal(api.fileExplorerNeedsLeftDock(), false);
+
+  const verticalFinderBranch = api.emptyLayoutSlots();
+  verticalFinderBranch[api.layoutTreeKey] = api.splitNode(
+    'row',
+    api.splitNode('column', api.leafNode('slot2'), api.leafNode('left'), 50),
+    api.leafNode('slot1'),
+    22,
+  );
+  verticalFinderBranch.slot2 = api.paneStateWithTabs(['__info__'], '__info__');
+  verticalFinderBranch.left = api.paneStateWithTabs(['__files__'], '__files__');
+  verticalFinderBranch.slot1 = api.paneStateWithTabs(['1'], '1');
+  assert.equal(api.fileExplorerNeedsLeftDock(verticalFinderBranch), false);
+  api.setLayoutSlotsForTest(verticalFinderBranch);
+  assert.equal(api.fileExplorerNeedsLeftDock(), false);
+
+  const noFinderSplit = api.emptyLayoutSlots();
+  noFinderSplit[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+  noFinderSplit.left = api.paneStateWithTabs(['1'], '1');
+  noFinderSplit.slot1 = api.paneStateWithTabs(['2'], '2');
+  api.setLayoutSlotsForTest(noFinderSplit);
+  assert.deepStrictEqual(canonical(api.serialize(api.layoutWithFileExplorerDockedLeft())), {
+    tree: {
+      split: 'row',
+      pct: 22,
+      children: [
+        {slot: 'slot2'},
+        {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'slot1'}]},
+      ],
+    },
+    panes: {
+      slot2: {tabs: ['__files__'], active: '__files__'},
+      left: {tabs: ['1'], active: '1'},
+      slot1: {tabs: ['2'], active: '2'},
+    },
+  });
+
+  const expandedNormal = api.emptyLayoutSlots();
+  expandedNormal[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+  expandedNormal.left = api.paneStateWithTabs(['1'], '1');
+  expandedNormal.slot1 = api.paneStateWithTabs(['2'], '2');
+  api.setLayoutSlotsForTest(expandedNormal);
+  api.expandPaneFromLayout('2');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {slot: 'slot1'},
+    panes: {slot1: {tabs: ['2', '1'], active: '2'}},
+  });
+
+  const expandedBesideFinder = api.emptyLayoutSlots();
+  expandedBesideFinder[api.layoutTreeKey] = api.splitNode(
+    'row',
+    api.leafNode('left'),
+    api.splitNode('column', api.leafNode('slot1'), api.leafNode('slot2'), 50),
+    22,
+  );
+  expandedBesideFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+  expandedBesideFinder.slot1 = api.paneStateWithTabs(['1'], '1');
+  expandedBesideFinder.slot2 = api.paneStateWithTabs(['2'], '2');
+  api.setLayoutSlotsForTest(expandedBesideFinder);
+  api.expandPaneFromLayout('2');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot2: {tabs: ['2', '1'], active: '2'},
+    },
+  });
+
+  const minimizedNormal = api.emptyLayoutSlots();
+  minimizedNormal[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+  minimizedNormal.left = api.paneStateWithTabs(['1'], '1');
+  minimizedNormal.slot1 = api.paneStateWithTabs(['2'], '2');
+  api.setLayoutSlotsForTest(minimizedNormal);
+  api.minimizePaneFromLayout('2');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {slot: 'left'},
+    panes: {left: {tabs: ['1', '2'], active: '1'}},
+  });
+
   const finderOnly = api.emptyLayoutSlots();
   finderOnly[api.layoutTreeKey] = api.leafNode('left');
   finderOnly.left = api.paneStateWithTabs(['__files__'], '__files__');
@@ -615,6 +914,19 @@ function canonical(value) {
   assert.deepStrictEqual(canonical(killedApi.serialize(killedNormalized).panes), {
     left: {tabs: ['__files__'], active: '__files__'},
     slot1: {tabs: [], active: null, placeholder: true},
+  });
+
+  const killedVerticalSlots = killedApi.emptyLayoutSlots();
+  killedVerticalSlots[killedApi.layoutTreeKey] = killedApi.splitNode('column', killedApi.leafNode('slot1'), killedApi.leafNode('left'), 50);
+  killedVerticalSlots.slot1 = {tabs: ['1'], active: '1'};
+  killedVerticalSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+  const killedVerticalNormalized = killedApi.normalizeLayoutSlots(killedVerticalSlots, {
+    preserveRemovedItems: ['1'],
+    preserveRemovedSlots: true,
+  });
+  assert.deepStrictEqual(canonical(killedApi.serialize(killedVerticalNormalized)), {
+    tree: {slot: 'left'},
+    panes: {left: {tabs: ['__files__'], active: '__files__'}},
   });
 
   api.setLayoutSlotsForTest(finderOnly);
@@ -757,8 +1069,6 @@ function canonical(value) {
   api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'working'}});
   const workingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
   assert.ok(workingHtml.includes('session-yolo-marker active working'), 'visible screen working pulses active YO marker');
-  const workingTopHtml = api.sessionButtonHtml('4', info, {key: 'idle'}, true);
-  assert.ok(workingTopHtml.includes('session-yolo-marker active working'), 'visible screen working pulses top YO marker');
 
   api.setAutoApproveStateForTest('4', {enabled: false, enabled_elsewhere: true, locked: true, lock_owner: {pid: 1234}, screen: {key: 'working'}});
   const externalHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
@@ -809,50 +1119,25 @@ function canonical(value) {
   };
   api.setTranscriptInfoForTest('4', info);
 
-  const detail = api.tabListDetailText('4', info);
-  assert.ok(detail.includes('GH-2132__reasoning-dangling-end-marker'), 'tab list detail includes fuller branch name');
-  assert.ok(detail.includes('~/project/project3'), 'tab list detail includes compact path');
-  assert.ok(detail.includes('#9981 CI failing'), 'tab list detail includes PR and status');
-  assert.ok(detail.includes('GH-2132'), 'tab list detail includes Linear identifier');
+  const detail = api.tabMenuDetailText('4', info);
+  assert.ok(detail.includes('GH-2132__reasoning-dangling-end-marker'), 'tab menu detail includes fuller branch name');
+  assert.ok(detail.includes('~/project/project3'), 'tab menu detail includes compact path');
+  assert.ok(detail.includes('#9981 CI failing'), 'tab menu detail includes PR and status');
+  assert.ok(detail.includes('GH-2132'), 'tab menu detail includes Linear identifier');
   const linearIndex = detail.indexOf('GH-2132', detail.indexOf('~/project/project3'));
-  assert.ok(linearIndex < detail.indexOf('#9981 CI failing'), 'tab list detail lists Linear before PR');
+  assert.ok(linearIndex < detail.indexOf('#9981 CI failing'), 'tab menu detail lists Linear before PR');
 
-  const html = api.tabListEntryBodyHtml('4');
-  assert.ok(html.includes('session-yolo-marker inactive'), 'tab list entry shows inactive YO indicator');
-  assert.ok(html.includes('data-auto-session="4"'), 'tab list YO indicator is clickable');
-  assert.ok(html.includes('fix(parser): parse dangling reasoning end markers'), 'tab list entry includes long PR title');
-  assert.ok(html.includes('dangling-end-marker'), 'tab list entry includes branch detail inline');
-  assert.ok(html.includes('~/project/project3'), 'tab list entry includes compact path inline');
-  assert.ok(html.includes('GH-2132'), 'tab list entry includes Linear detail inline');
-  assert.equal(html.includes('tab-list-entry-detail'), false, 'tab list entry is a single visible line');
+  const slots = api.emptyLayoutSlots();
+  slots[api.layoutTreeKey] = api.leafNode('left');
+  slots.left = api.paneStateWithTabs(['4'], '4');
+  api.setLayoutSlotsForTest(slots);
+  const command = api.menuTabCommand('4');
+  assert.ok(command.ariaLabel.includes('GH-2132__reasoning-dangling-end-marker'), 'tab menu row aria label carries detail');
+  assert.ok(command.html.includes('fix(parser): parse dangling reasoning end markers'), 'tab menu row includes long PR title');
+  assert.ok(command.html.includes('pane-tab-core'), 'tab menu row uses pane tab markup');
 
   const popover = api.sessionPopoverHtml('4', info, 'codex', true);
   assert.ok(popover.indexOf('popover-label">Linear') < popover.indexOf('popover-label">PR'), 'tab popover lists Linear before PR');
-}
-
-{
-  const api = loadYolomux();
-  const slots = api.emptyLayoutSlots();
-  slots[api.layoutTreeKey] = api.leafNode('left');
-  slots.left = api.paneStateWithTabs(['4', '5'], '4');
-  api.setLayoutSlotsForTest(slots);
-
-  assert.equal(api.shouldShowTabListMenu([]), false);
-  assert.equal(api.shouldShowTabListMenu(['4']), false);
-  assert.equal(api.shouldShowTabListMenu(['4', '5']), true);
-
-  const paneMenu = api.createTabListMenu(['4', '5'], {kind: 'pane', side: 'left'});
-  assert.equal(paneMenu.children[0].textContent, '');
-  assert.equal(paneMenu.children[1].innerHTML.includes('Pane tabs'), false);
-  assert.equal(paneMenu.children[1].children.length, 2);
-  assert.ok(paneMenu.children[1].children[0].className.includes('active'), 'active pane tab is marked in show-all menu');
-  assert.equal(paneMenu.children[1].children[0].draggable, true);
-
-  const trayMenu = api.createTabListMenu(['1', '2'], {kind: 'tray'});
-  assert.equal(trayMenu.children[0].textContent, '');
-  assert.equal(trayMenu.children[1].innerHTML.includes('Inactive tabs'), true);
-  assert.equal(trayMenu.children[1].children.length, 2);
-  assert.equal(trayMenu.children[1].children[0].draggable, true);
 }
 
 {

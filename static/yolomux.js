@@ -135,14 +135,70 @@ function browserPlatformText() {
     navigator.userAgent,
   ].filter(Boolean).join(' ');
 }
+
+const platformOverrideParamNames = ['platform', 'uiPlatform', 'ui_platform'];
+const pcPlatformOverrideValues = new Set(['pc', 'win', 'windows', 'linux']);
+const macPlatformOverrideValues = new Set(['mac', 'macos', 'darwin']);
+const platformWindowControlClasses = {
+  mac: {
+    close: 'mac-window-control mac-minimize',
+    minimize: 'mac-window-control mac-minimize',
+    zoom: 'mac-window-control mac-zoom',
+  },
+  pc: {
+    close: 'pc-window-control pc-close',
+    minimize: 'pc-window-control pc-minimize',
+    zoom: 'pc-window-control pc-zoom',
+  },
+};
+
+function platformOverride() {
+  const params = new URLSearchParams(location.search || '');
+  const value = String(platformOverrideParamNames.map(name => params.get(name)).find(Boolean) || '').toLowerCase();
+  if (pcPlatformOverrideValues.has(value)) return 'pc';
+  if (macPlatformOverrideValues.has(value)) return 'mac';
+  return '';
+}
+
+function isMacPlatform() {
+  const override = platformOverride();
+  if (override) return override === 'mac';
+  return /(Macintosh|MacIntel|Mac OS|macOS|\bMac\b)/i.test(browserPlatformText());
+}
+
+function platformWindowControlClass(kind) {
+  const platform = isMacPlatform() ? 'mac' : 'pc';
+  const classes = platformWindowControlClasses[platform];
+  return classes[kind] || classes.minimize;
+}
+
+function platformCloseButtonClass(baseClass) {
+  return `${baseClass} ${platformWindowControlClass('close')}`;
+}
+
+function fileExplorerPanelCloseClass() {
+  return platformCloseButtonClass('file-explorer-panel-close');
+}
+
+function fileEditorPanelCloseClass() {
+  return platformCloseButtonClass('file-editor-panel-close');
+}
+
+function applyPlatformControlClass(element, kind) {
+  if (!element) return;
+  element.classList.add(...platformWindowControlClass(kind).split(' '));
+}
+
 function fileExplorerLabel() {
-  return /(Macintosh|MacIntel|Mac OS|macOS|\bMac\b)/i.test(browserPlatformText()) ? 'Finder' : 'File Explorer';
+  return isMacPlatform() ? 'Finder' : 'File Explorer';
 }
 
 function applyFileExplorerStaticLabels() {
   const label = fileExplorerLabel();
   fileExplorer?.setAttribute('aria-label', label);
   fileExplorerClose?.setAttribute('title', `Close ${label}`);
+  applyPlatformControlClass(fileExplorerClose, 'close');
+  applyPlatformControlClass(fileEditorClose, 'close');
 }
 const syntaxLanguageByExtension = new Map([
   ['.cjs', 'javascript'],
@@ -206,6 +262,8 @@ let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
 let appMenuHoverTimer = null;
 let appMenuCloseTimer = null;
+let fileExplorerSyncPathInFlight = '';
+let fileExplorerSyncGeneration = 0;
 
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
@@ -286,6 +344,7 @@ function setFocusedTerminal(session) {
   updateSessionButtonStates();
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
+  scheduleFileExplorerActiveTabSync(session);
 }
 
 function clearFocusedTerminal(session) {
@@ -303,6 +362,7 @@ function setFocusedPanelItem(item) {
   if (isTmuxSession(item)) dismissAttentionAlertsForSession(item);
   updateSessionButtonStates();
   updatePanelInactiveOverlays();
+  scheduleFileExplorerActiveTabSync(item);
 }
 
 function clearFocusForInactiveLayout() {
@@ -720,9 +780,11 @@ function normalizePaneState(raw, seen, options = {}) {
 }
 
 function normalizeLayoutSlots(value, options = {}) {
-  if (!value || typeof value !== 'object') return emptyPlaceholderLayoutSlots();
-  if (value[layoutTreeKey]) return normalizeTreeLayout(value, options);
-  return normalizeLegacyLayoutSlots(value, options);
+  let normalized;
+  if (!value || typeof value !== 'object') normalized = emptyPlaceholderLayoutSlots();
+  else if (value[layoutTreeKey]) normalized = normalizeTreeLayout(value, options);
+  else normalized = normalizeLegacyLayoutSlots(value, options);
+  return normalizeFileExplorerDock(normalized);
 }
 
 function normalizeTreeLayout(value, options = {}) {
@@ -780,11 +842,75 @@ function compactLayoutSlots(slots) {
 }
 
 function compactLayoutNode(node, slots) {
+  return compactLayoutNodeInfo(node, slots)?.node || null;
+}
+
+function compactLayoutNodeInfo(node, slots) {
   if (!node) return null;
-  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? leafNode(node.slot) : null;
-  const children = (node.children || []).map(child => compactLayoutNode(child, slots)).filter(Boolean);
-  if (children.length >= 2) return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
-  return children[0] || null;
+  if (node.slot) {
+    if (!paneHasLayoutContent(node.slot, slots)) return null;
+    const placeholderOnly = paneIsPlaceholder(node.slot, slots);
+    return {
+      node: leafNode(node.slot),
+      containsFileExplorer: paneTabs(node.slot, slots).includes(fileExplorerItemId),
+      placeholderOnly,
+    };
+  }
+  const direction = node.split === 'column' ? 'column' : 'row';
+  const children = (node.children || []).map(child => compactLayoutNodeInfo(child, slots)).filter(Boolean);
+  if (!children.length) return null;
+  if (children.length === 1) return children[0];
+  const hasFileExplorer = children.some(child => child.containsFileExplorer);
+  const kept = direction === 'row' && hasFileExplorer
+    ? children
+    : children.filter(child => !child.placeholderOnly);
+  const compacted = kept.length ? kept : [children[0]];
+  if (compacted.length < 2) return compacted[0];
+  const nextNode = splitNode(direction, compacted[0].node, compacted[1].node, node.pct);
+  return {
+    node: nextNode,
+    containsFileExplorer: compacted.some(child => child.containsFileExplorer),
+    placeholderOnly: compacted.every(child => child.placeholderOnly),
+  };
+}
+
+function layoutNodeHasContent(node, slots = layoutSlots) {
+  if (!node) return false;
+  if (node.slot) return paneHasLayoutContent(node.slot, slots);
+  return (node.children || []).some(child => layoutNodeHasContent(child, slots));
+}
+
+function layoutNodeContainsItem(node, item, slots = layoutSlots) {
+  if (!node) return false;
+  if (node.slot) return paneTabs(node.slot, slots).includes(item);
+  return (node.children || []).some(child => layoutNodeContainsItem(child, item, slots));
+}
+
+function layoutHasHorizontalContentBeforeItem(node, item, slots = layoutSlots) {
+  if (!node || node.slot) return false;
+  const children = node.children || [];
+  if (node.split === 'row') {
+    let hasContentBefore = false;
+    for (const child of children) {
+      if (layoutNodeContainsItem(child, item, slots)) {
+        return hasContentBefore || layoutHasHorizontalContentBeforeItem(child, item, slots);
+      }
+      if (layoutNodeHasContent(child, slots)) hasContentBefore = true;
+    }
+    return false;
+  }
+  return children.some(child => (
+    layoutNodeContainsItem(child, item, slots)
+    && layoutHasHorizontalContentBeforeItem(child, item, slots)
+  ));
+}
+
+function fileExplorerNeedsLeftDock(slots = layoutSlots) {
+  return layoutHasHorizontalContentBeforeItem(slots?.[layoutTreeKey], fileExplorerItemId, slots);
+}
+
+function normalizeFileExplorerDock(slots) {
+  return fileExplorerNeedsLeftDock(slots) ? layoutWithFileExplorerDockedLeft(slots) : slots;
 }
 
 function layoutFromSessionList(values) {
@@ -1947,7 +2073,7 @@ function menuTabDetail(item) {
   if (isFileEditorItem(item)) return compactHomePath(fileItemPath(item));
   if (isFileExplorerItem(item)) return compactHomePath(fileExplorerRoot || homePath || '/');
   if (isInfoItem(item)) return 'Branch and repo metadata';
-  return tabListEntryLineText(item, transcriptMeta.sessions?.[item]);
+  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
 }
 
 function menuTabRowHtml(item, options = {}) {
@@ -1968,14 +2094,15 @@ function menuTabCommand(item, options = {}) {
   const slot = slotForSession(item);
   const visible = itemIsActivePaneTab(item);
   const active = item === currentActiveMenuItem();
-  const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? 'Background tab: in a pane, not shown' : 'Inactive: not in a pane'));
+  const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? 'Minimized: in a pane, not shown' : 'Inactive: not in a pane'));
   return menuCommand(itemLabel(item), () => {
     if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item);
     return selectSession(item);
   }, {
     checked: options.checked ?? active,
-    detail,
-    html: menuTabRowHtml(item),
+    detail: '',
+    ariaLabel: [itemLabel(item), detail].filter(Boolean).join(' - '),
+    html: stripTitleAttrs(menuTabRowHtml(item)),
     className: 'app-menu-tab-command',
   });
 }
@@ -1994,24 +2121,38 @@ function newTmuxSessionItems() {
   });
 }
 
+function tabCommandsForItems(items, options) {
+  return items.map(item => menuTabCommand(item, options));
+}
+
 function backgroundTabMenuItems() {
-  const items = backgroundTabItems();
-  if (!items.length) return [menuCommand('No background tabs', null, {disabled: true})];
-  return items.map(item => menuTabCommand(item, {
+  return tabCommandsForItems(backgroundTabItems(), {
     checked: false,
-    detail: 'In a pane, not shown',
+    detail: 'Minimized',
     openAsPane: true,
-  }));
+  });
 }
 
 function inactiveTabMenuItems() {
-  const items = inactiveTabItems();
-  if (!items.length) return [menuCommand('No inactive tabs', null, {disabled: true})];
-  return items.map(item => menuTabCommand(item, {
+  return tabCommandsForItems(inactiveTabItems(), {
     checked: false,
     detail: 'Not in a pane',
     openAsPane: true,
-  }));
+  });
+}
+
+function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
+  const groups = [
+    ['Active', openItems.map(item => menuTabCommand(item))],
+    ['Minimized', backgroundTabMenuItems()],
+    ['Inactive', inactiveTabMenuItems()],
+  ].filter(([, items]) => items.length);
+  const items = [];
+  for (const [index, [label, commands]] of groups.entries()) {
+    if (index) items.push(menuSeparator());
+    items.push(menuSection(label), ...commands);
+  }
+  return items;
 }
 
 function appMenuTree() {
@@ -2060,18 +2201,9 @@ function appMenuTree() {
       ],
     },
     {
-      id: 'panes',
-      label: 'Panes',
-      items: [
-        menuSection('Active'),
-        ...(openItems.length ? openItems.map(item => menuTabCommand(item)) : [menuCommand('No active tabs', null, {disabled: true})]),
-        menuSeparator(),
-        menuSection('Background tabs'),
-        ...backgroundTabMenuItems(),
-        menuSeparator(),
-        menuSection('Inactive'),
-        ...inactiveTabMenuItems(),
-      ],
+      id: 'tab',
+      label: 'Tab',
+      items: tabMenuItems(openItems),
     },
     {
       id: 'yolo',
@@ -2276,7 +2408,8 @@ function createAppMenuCommand(item, options = {}) {
   button.setAttribute('role', 'menuitem');
   if (item.checked) button.dataset.checked = 'true';
   if (item.disabled) button.disabled = true;
-  const title = [item.label, item.detail].filter(Boolean).join('\n');
+  if (item.ariaLabel) button.setAttribute('aria-label', item.ariaLabel);
+  const title = item.title || [item.label, item.detail].filter(Boolean).join('\n');
   if (title) button.title = title;
   const contentHtml = item.html
     ? `<span class="app-menu-rich">${item.html}</span>`
@@ -2374,9 +2507,16 @@ function queueAppMenuHoverOpen(wrapper) {
   appMenuHoverTimer = clearTimer(appMenuHoverTimer);
   appMenuCloseTimer = clearTimer(appMenuCloseTimer);
   if (!wrapper || wrapper.classList.contains('open')) return;
+  const menuId = wrapper.dataset.appMenu || '';
+  const currentWrapper = () => document.querySelector(`.app-menu[data-app-menu="${cssEscape(menuId)}"]`);
+  if (appMenuIsOpen()) {
+    openAppMenu(currentWrapper() || wrapper, {focusFirst: false, pinned: false});
+    return;
+  }
   appMenuHoverTimer = setTimeout(() => {
     appMenuHoverTimer = null;
-    openAppMenu(wrapper, {focusFirst: false, pinned: false});
+    const target = currentWrapper() || wrapper;
+    if (!target.classList.contains('open')) openAppMenu(target, {focusFirst: false, pinned: false});
   }, menuHoverOpenDelayMs);
 }
 
@@ -2436,14 +2576,18 @@ function toggleFileExplorer() {
   }
 }
 
-async function openFileExplorerAt(path) {
-  fileExplorerRoot = path;
-  if (fileExplorerPath) fileExplorerPath.textContent = path;
-  if (fileExplorerTree) fileExplorerTree.replaceChildren();
-  fileExplorerExpanded.clear();
+async function openFileExplorerAt(path, options = {}) {
   const entries = await fetchDirectory(path);
-  if (!entries) return;
-  renderTreeChildren(fileExplorerTree, path, entries, 0);
+  if (!entries) return false;
+  fileExplorerRoot = normalizeDirectoryPath(path);
+  if (fileExplorerPath) fileExplorerPath.textContent = fileExplorerRoot;
+  fileExplorerExpanded.clear();
+  if (fileExplorerTree) {
+    fileExplorerTree.replaceChildren();
+    renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0);
+  }
+  if (options.refreshPanels !== false) refreshFileExplorerPanelTrees();
+  return true;
 }
 
 async function fetchDirectory(path) {
@@ -2461,8 +2605,211 @@ async function fetchDirectory(path) {
   }
 }
 
+function normalizeDirectoryPath(path) {
+  const text = String(path || '').replace(/\/+$/, '');
+  return text || '/';
+}
+
+function currentFileExplorerRoot() {
+  return normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
+}
+
+function pathIsInsideDirectory(path, root) {
+  const child = normalizeDirectoryPath(path);
+  const parent = normalizeDirectoryPath(root);
+  if (parent === '/') return child.startsWith('/');
+  return child === parent || child.startsWith(`${parent}/`);
+}
+
+function childPathParts(root, path) {
+  const parent = normalizeDirectoryPath(root);
+  const child = normalizeDirectoryPath(path);
+  if (!pathIsInsideDirectory(child, parent) || child === parent) return [];
+  const relative = parent === '/' ? child.slice(1) : child.slice(parent.length + 1);
+  return relative.split('/').filter(Boolean);
+}
+
+function finderDirectoryForItem(item) {
+  if (isFileEditorItem(item)) return normalizeDirectoryPath(dirnameOf(fileItemPath(item)));
+  if (!isTmuxSession(item)) return '';
+  return normalizeDirectoryPath(panelFullPath(item, transcriptMeta.sessions?.[item]));
+}
+
+function finderTargetPathForItem(item) {
+  if (isFileEditorItem(item)) return fileItemPath(item) || '';
+  return finderDirectoryForItem(item);
+}
+
+function finderCandidateItems(preferredItem = null) {
+  const candidates = [];
+  for (const item of [preferredItem, focusedPanelItem, focusedTerminal, currentActiveMenuItem(), ...activePaneItems()]) {
+    if (item && !candidates.includes(item)) candidates.push(item);
+  }
+  return candidates.filter(item => !isFileExplorerItem(item) && !isInfoItem(item));
+}
+
+function firstFinderPath(preferredItem, pathForItem, options = {}) {
+  const normalize = options.normalize === true;
+  for (const item of finderCandidateItems(preferredItem)) {
+    const path = pathForItem(item);
+    if (path) return normalize ? normalizeDirectoryPath(path) : path;
+  }
+  return '';
+}
+
+function activeFinderDirectoryPath(preferredItem = null) {
+  return firstFinderPath(preferredItem, finderDirectoryForItem);
+}
+
+function activeFinderTargetPath(preferredItem = null) {
+  return firstFinderPath(preferredItem, finderTargetPathForItem, {normalize: true});
+}
+
+function fileExplorerPaneIsOpen() {
+  return itemInLayout(fileExplorerItemId);
+}
+
+function scheduleFileExplorerActiveTabSync(preferredItem = null) {
+  if (!fileExplorerPaneIsOpen()) return;
+  const path = activeFinderTargetPath(preferredItem);
+  if (!path || fileExplorerSyncPathInFlight === path) return;
+  requestAnimationFrame(() => {
+    syncFileExplorerToActiveTab(preferredItem).catch(error => {
+      console.warn('Finder sync failed', error);
+    });
+  });
+}
+
+async function syncFileExplorerToActiveTab(preferredItem = null) {
+  if (!fileExplorerPaneIsOpen()) return false;
+  const path = activeFinderTargetPath(preferredItem);
+  if (!path || fileExplorerSyncPathInFlight === path) return false;
+  const root = currentFileExplorerRoot();
+  if (!pathIsInsideDirectory(path, root) || path === root) return false;
+  fileExplorerSyncPathInFlight = path;
+  const generation = ++fileExplorerSyncGeneration;
+  try {
+    return await expandFileExplorerTreesToPath(path, root, generation);
+  } finally {
+    if (fileExplorerSyncPathInFlight === path) fileExplorerSyncPathInFlight = '';
+  }
+}
+
+function fileExplorerTreeContainers() {
+  const containers = [];
+  if (fileExplorerTree) containers.push(fileExplorerTree);
+  document.querySelectorAll('.file-explorer-tree-panel').forEach(tree => {
+    if (!containers.includes(tree)) containers.push(tree);
+  });
+  return containers;
+}
+
+function directFileTreeRow(container, fullPath) {
+  return Array.from(container?.children || []).find(node => (
+    node.classList?.contains('file-tree-row') && node.dataset?.path === fullPath
+  )) || null;
+}
+
+function childContainerForRow(row, fullPath) {
+  const next = row?.nextElementSibling;
+  return next?.classList?.contains('file-tree-children') && next.dataset?.parent === fullPath ? next : null;
+}
+
+async function ensureFileTreeRootRendered(container, root) {
+  if (!container) return false;
+  const firstRow = container.querySelector?.('.file-tree-row[data-path]');
+  if (firstRow) {
+    if (pathIsInsideDirectory(firstRow.dataset.path, root) && childPathParts(root, firstRow.dataset.path).length === 1) return true;
+    container.replaceChildren();
+  }
+  const entries = await fetchDirectory(root);
+  if (!entries) return false;
+  container.replaceChildren();
+  renderTreeChildren(container, root, entries, 0);
+  return true;
+}
+
+function childPath(parent, name) {
+  return parent === '/' ? `/${name}` : `${parent}/${name}`;
+}
+
+async function ensureDirectoryRowExpanded(row, fullPath) {
+  if (!row || row.dataset?.kind !== 'dir') return null;
+  const existing = childContainerForRow(row, fullPath);
+  if (existing) return existing;
+  await expandDirectoryRow(row, fullPath);
+  return childContainerForRow(row, fullPath);
+}
+
+function nextAnimationFrame() {
+  return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+function scrollFileTreeRowIntoView(container, row) {
+  if (!container || !row || container.isConnected === false || row.isConnected === false) return false;
+  const containerRect = container.getBoundingClientRect?.();
+  const rowRect = row.getBoundingClientRect?.();
+  const containerHeight = container.clientHeight || containerRect?.height || 0;
+  if (!containerRect || !rowRect || !containerHeight || !rowRect.height) return false;
+  const currentTop = container.scrollTop || 0;
+  const rowTop = currentTop + rowRect.top - containerRect.top;
+  const rowBottom = rowTop + rowRect.height;
+  const margin = 8;
+  const visibleTop = currentTop + margin;
+  const visibleBottom = currentTop + containerHeight - margin;
+  if (rowTop >= visibleTop && rowBottom <= visibleBottom) return true;
+  const centeredTop = rowTop - Math.max(0, (containerHeight - rowRect.height) / 2);
+  container.scrollTop = Math.max(0, centeredTop);
+  return true;
+}
+
+async function expandFileTreeContainerToPath(container, root, path, generation = fileExplorerSyncGeneration) {
+  const parts = childPathParts(root, path);
+  if (!parts.length) return false;
+  const rendered = await ensureFileTreeRootRendered(container, root);
+  if (!rendered) return false;
+  if (generation !== fileExplorerSyncGeneration) return false;
+  let scope = container;
+  let parent = root;
+  let row = null;
+  for (const part of parts) {
+    const fullPath = childPath(parent, part);
+    row = directFileTreeRow(scope, fullPath);
+    if (!row) return false;
+    if (row.dataset?.kind === 'dir') {
+      const childScope = await ensureDirectoryRowExpanded(row, fullPath);
+      if (generation !== fileExplorerSyncGeneration) return false;
+      if (fullPath !== path) {
+        if (!childScope) return false;
+        scope = childScope;
+      }
+    } else if (fullPath !== path) {
+      return false;
+    }
+    parent = fullPath;
+  }
+  await nextAnimationFrame();
+  if (generation !== fileExplorerSyncGeneration) return false;
+  scrollFileTreeRowIntoView(container, row);
+  updateFileExplorerCurrentFileHighlight();
+  return Boolean(row);
+}
+
+async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoot(), generation = fileExplorerSyncGeneration) {
+  let expanded = false;
+  if (!fileExplorerRoot) fileExplorerRoot = root;
+  if (fileExplorerPath) fileExplorerPath.textContent = root;
+  for (const container of fileExplorerTreeContainers()) {
+    if (generation !== fileExplorerSyncGeneration) return false;
+    expanded = await expandFileTreeContainerToPath(container, root, path, generation) || expanded;
+  }
+  return expanded;
+}
+
 function renderTreeChildren(container, parentPath, entries, depth) {
+  if (!container) return;
   const visible = entries.filter(e => fileExplorerShowHidden || !e.name.startsWith('.'));
+  const currentDirectory = activeFinderDirectoryPath();
   for (const entry of visible) {
     const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
     const row = document.createElement('div');
@@ -2474,8 +2821,11 @@ function renderTreeChildren(container, parentPath, entries, depth) {
     row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
     row.draggable = entry.kind === 'file' || entry.kind === 'dir';
     row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
-    row.classList.toggle('current-file', entry.kind === 'file' && fullPath === activeFile);
-    if (entry.kind === 'file' && fullPath === activeFile) row.setAttribute('aria-current', 'true');
+    const currentFile = entry.kind === 'file' && fullPath === activeFile;
+    const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
+    row.classList.toggle('current-file', currentFile);
+    row.classList.toggle('current-directory', currentDirectoryRow);
+    if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
     const icon = entry.kind === 'dir' ? '▸' : (entry.kind === 'file' ? '📄' : '·');
     row.innerHTML = `<span class="file-tree-icon">${icon}</span><span class="file-tree-name">${esc(entry.name)}</span>`;
     row.addEventListener('click', event => {
@@ -2504,13 +2854,16 @@ function selectableFileTreeRows(container = document) {
 }
 
 function updateFileExplorerCurrentFileHighlight() {
+  const currentDirectory = activeFinderDirectoryPath();
   document.querySelectorAll('.file-tree-row').forEach(row => {
     const selected = fileExplorerSelectedPaths.has(row.dataset.path);
     const currentFile = row.dataset.kind === 'file' && row.dataset.path === activeFile;
+    const currentDirectoryRow = !currentFile && row.dataset.kind === 'dir' && row.dataset.path === currentDirectory;
     row.classList.toggle('selected', selected);
     row.classList.toggle('current-file', currentFile);
+    row.classList.toggle('current-directory', currentDirectoryRow);
     row.setAttribute('aria-selected', selected ? 'true' : 'false');
-    if (currentFile) row.setAttribute('aria-current', 'true');
+    if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
     else row.removeAttribute('aria-current');
   });
 }
@@ -2811,6 +3164,10 @@ async function renameFileTreePath(fullPath, entry, newName) {
 
 async function refreshFileExplorerTrees() {
   if (fileExplorerRoot) await openFileExplorerAt(fileExplorerRoot);
+  else refreshFileExplorerPanelTrees();
+}
+
+function refreshFileExplorerPanelTrees() {
   document.querySelectorAll('.panel.file-explorer-panel').forEach(panel => refreshFileExplorerPanelTree(panel));
 }
 
@@ -2888,12 +3245,16 @@ function fileErrorState(message) {
   };
 }
 
-function openFilesSetAndShow(path, state) {
-  openFiles.set(path, state);
+function showFileEditorPaneForPath(path) {
   activeFile = path;
   syncFileLayoutItems();
   updateFileExplorerCurrentFileHighlight();
   return openFileEditorPane(path);
+}
+
+function openFilesSetAndShow(path, state) {
+  openFiles.set(path, state);
+  return showFileEditorPaneForPath(path);
 }
 
 async function openFileInEditor(fullPath, entryOrName) {
@@ -2902,10 +3263,7 @@ async function openFileInEditor(fullPath, entryOrName) {
   const ext = fileExtensionOf(name);
   const kind = IMAGE_EXTENSIONS.has(ext) ? 'image' : 'text';
   if (openFiles.has(fullPath)) {
-    activeFile = fullPath;
-    syncFileLayoutItems();
-    updateFileExplorerCurrentFileHighlight();
-    await openFileEditorPane(fullPath);
+    await showFileEditorPaneForPath(fullPath);
     return;
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
@@ -3347,109 +3705,9 @@ if (fileEditorTextarea) {
   });
 }
 
-function shouldShowTabListMenu(items) {
-  return Array.isArray(items) && items.length > 1;
-}
-
-function createTabListMenu(items, options = {}) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'tab-list-menu-wrap';
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'tab-list-menu-button';
-  button.setAttribute('aria-label', options.kind === 'tray' ? 'show inactive tabs' : 'show all tabs');
-  wrapper.appendChild(button);
-  const popover = document.createElement('div');
-  popover.className = 'tab-list-menu-popover';
-  popover.setAttribute('role', 'menu');
-  popover.innerHTML = options.kind === 'tray' ? '<div class="tab-list-menu-title">Inactive tabs</div>' : '';
-  for (const item of items) {
-    popover.appendChild(createTabListEntry(item, options));
-  }
-  wrapper.appendChild(popover);
-  bindTabListMenuPopover(wrapper);
-  return wrapper;
-}
-
-function createTabListEntry(item, options = {}) {
-  const side = options.side || null;
-  const active = side ? item === activeItemForSide(side) : false;
-  const entry = document.createElement('div');
-  entry.role = 'button';
-  entry.tabIndex = 0;
-  entry.draggable = true;
-  entry.className = `tab-list-entry ${active ? 'active' : ''}`;
-  entry.dataset.tabListItem = item;
-  entry.innerHTML = tabListEntryBodyHtml(item);
-  entry.setAttribute('aria-label', `${itemLabel(item)} ${tabListDetailText(item)}`.trim());
-  const activate = () => {
-    closeOtherSessionPopovers(null);
-    if (side) {
-      activatePaneTab(side, item);
-    } else {
-      selectSession(item);
-    }
-  };
-  entry.addEventListener('pointerdown', event => {
-    const autoTarget = event.target.closest('[data-auto-session]');
-    if (!autoTarget) return;
-    event.preventDefault();
-    event.stopPropagation();
-  });
-  entry.addEventListener('click', async event => {
-    const autoTarget = event.target.closest('[data-auto-session]');
-    if (!autoTarget) return;
-    event.preventDefault();
-    event.stopPropagation();
-    await toggleAutoApprove(autoTarget.dataset.autoSession);
-    entry.closest('.tab-list-menu-wrap')?.classList.add('popover-open');
-  });
-  bindTabActivation(entry, activate, {
-    stopPropagation: true,
-    ignore: event => Boolean(event.target.closest('[data-auto-session]')),
-  });
-  entry.addEventListener('dragstart', event => {
-    event.stopPropagation();
-    startSessionDrag(event, item, side);
-  });
-  entry.addEventListener('dragend', endSessionDrag);
-  return entry;
-}
-
-function bindTabListMenuPopover(wrapper) {
-  const popover = wrapper.querySelector(':scope > .tab-list-menu-popover');
-  if (!popover) return;
-  bindDelayedSessionPopover(wrapper, popover, () => positionTabListPopover(wrapper));
-}
-
-function positionTabListPopover(wrapper) {
-  const rect = wrapper.getBoundingClientRect();
-  const panel = wrapper.closest('.panel');
-  const container = panel || wrapper.closest('.app-menu-area') || wrapper.parentElement || wrapper;
-  const containerRect = container.getBoundingClientRect();
-  const width = Math.min(Math.max(320, containerRect.width), window.innerWidth - 16);
-  const maxLeft = Math.max(8, window.innerWidth - width - 8);
-  const left = Math.min(Math.max(8, Math.floor(containerRect.left)), maxLeft);
-  const panelHead = panel?.querySelector('.panel-head');
-  const topBase = panelHead ? panelHead.getBoundingClientRect().bottom : rect.bottom;
-  const top = Math.min(Math.ceil(topBase + 1), Math.max(8, window.innerHeight - 80));
-  const maxHeight = Math.max(120, window.innerHeight - top - 8);
-  document.documentElement.style.setProperty('--tab-list-popover-top', `${top}px`);
-  document.documentElement.style.setProperty('--tab-list-popover-left', `${left}px`);
-  document.documentElement.style.setProperty('--tab-list-popover-width', `${Math.floor(width)}px`);
-  document.documentElement.style.setProperty('--tab-list-popover-max-height', `${Math.floor(maxHeight)}px`);
-}
-
 function updateSessionButtonStates() {
   // Top navigation is menu-based now; per-session state lives in pane tabs
   // and menu rows, which are rebuilt by their normal render paths.
-}
-
-function fileEditorButtonHtml(item) {
-  const path = fileItemPath(item);
-  const state = openFiles.get(path) || {};
-  const dirty = state.dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
-  return `<span class="session-button-text">${dirty}<span class="session-button-dir">${esc(basenameOf(path))}</span></span>`;
 }
 
 function bindFilePopoverActions(container) {
@@ -3472,7 +3730,7 @@ function stopPopoverEvent(event) {
 }
 
 function closeOtherSessionPopovers(current) {
-  for (const other of document.querySelectorAll('.pane-tab.popover-open, .tab-list-menu-wrap.popover-open')) {
+  for (const other of document.querySelectorAll('.pane-tab.popover-open')) {
     if (other !== current) other.classList.remove('popover-open');
   }
 }
@@ -3743,7 +4001,7 @@ function sessionTabDescription(session, info) {
   return sessionWorkDescription(session, info, 72);
 }
 
-function tabListDetailText(item, info = transcriptMeta.sessions?.[item]) {
+function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
   if (isInfoItem(item)) return 'all branches sorted by recent activity';
   const project = info?.project || {};
   const git = project.git;
@@ -3765,69 +4023,6 @@ function tabListDetailText(item, info = transcriptMeta.sessions?.[item]) {
 
 function stripPullRequestSuffixText(value) {
   return String(value || '').replace(/\s+\(#\d+\)\s*$/, '').trim();
-}
-
-function tabListEntryLineText(item, info = transcriptMeta.sessions?.[item]) {
-  if (isInfoItem(item)) return itemLabel(item);
-  if (isFileExplorerItem(item)) return compactHomePath(fileExplorerRoot || homePath || '/');
-  if (isFileEditorItem(item)) return compactHomePath(fileItemPath(item));
-  const project = info?.project || {};
-  const git = project.git || {};
-  const pr = displayPullRequest(info);
-  const parts = [];
-  const title = pr?.title || pr?.description || '';
-  if (title) parts.push(stripPullRequestSuffixText(title));
-  else {
-    const issue = (project.linear || []).find(value => value.title);
-    const subject = currentBranchSubject(git);
-    if (issue?.title) parts.push(`${issue.identifier}: ${issue.title}`);
-    else if (subject) parts.push(stripPullRequestSuffixText(subject));
-  }
-  if (git.branch) parts.push(shortBranch(git.branch));
-  const path = panelFullPath(item, info);
-  if (path) parts.push(compactHomePath(path));
-  const linear = project.linear || [];
-  const linearText = linear
-    .map(issue => [issue.identifier, issue.state].filter(Boolean).join(' '))
-    .filter(Boolean)
-    .join(', ');
-  if (linearText) parts.push(linearText);
-  const gitText = gitStatusText(git);
-  if (gitText && gitText !== 'clean') parts.push(gitText);
-  if (!parts.length && git.branch) parts.push(shortBranch(git.branch));
-  if (!parts.length) parts.push(projectDirName(item, info));
-  return shortText(parts.filter(Boolean).join(' · '), 220);
-}
-
-function tabListEntryBodyHtml(item) {
-  if (isInfoItem(item)) {
-    return `<span class="tab-list-entry-main">${paneInfoTabHtml()}</span>`;
-  }
-  if (isFileExplorerItem(item)) {
-    return `<span class="tab-list-entry-main">${fileExplorerPaneTabHtml()}</span>`;
-  }
-  if (isFileEditorItem(item)) {
-    return `<span class="tab-list-entry-main">${fileEditorPaneTabHtml(item)}</span>`;
-  }
-  const info = transcriptMeta.sessions?.[item];
-  const auto = autoApproveStates.get(item)?.enabled === true;
-  const state = sessionState(item, info);
-  const pr = displayPullRequest(info);
-  const desc = tabListEntryLineText(item, info);
-  const descHtml = desc ? `<span class="session-button-dir">${esc(desc)}</span>` : '';
-  return `<span class="tab-list-entry-main">
-    ${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(item)})}
-    <span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${descHtml}</span>
-  </span>`;
-}
-
-function sessionButtonHtml(session, info, state, auto) {
-  const pr = displayPullRequest(info);
-  const desc = sessionTabDescription(session, info);
-  const detailHtml = desc ? `<span class="session-button-dir">${esc(desc)}</span>` : '';
-  return `${yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: true, yoloWorking: sessionYoloIsWorking(session)})}<span class="session-button-prefix">${sessionNumberNameHtml(session)}</span>
-    <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(session, info)}${pullRequestCompactBadgesHtml(session, pr)}${detailHtml}</span>`;
 }
 
 function projectDirName(session, info) {
@@ -4131,7 +4326,7 @@ function startCustomDragPreview(event) {
   const clone = source.cloneNode(true);
   clone.classList?.remove('popover-open', 'dragging');
   clone.classList?.add('drag-image');
-  clone.querySelectorAll?.('.session-popover, .tab-list-menu-popover').forEach(node => node.remove());
+  clone.querySelectorAll?.('.session-popover').forEach(node => node.remove());
   clone.style.position = 'fixed';
   clone.style.width = `${Math.max(1, Math.round(rect.width || 1))}px`;
   clone.style.height = `${Math.max(1, Math.round(rect.height || 1))}px`;
@@ -4210,25 +4405,29 @@ function endSessionDrag(event) {
   clearDropPreview();
 }
 
-function layoutWithoutItem(item, options = {}) {
+function layoutWithoutItemFromSlots(item, slots = layoutSlots, options = {}) {
   const next = emptyLayoutSlots();
-  next[layoutTreeKey] = layoutSlots[layoutTreeKey];
+  next[layoutTreeKey] = slots?.[layoutTreeKey] || null;
   const preserveEmptySlot = options.preserveEmptySlot || null;
   const preserveRemovedSlot = options.preserveRemovedSlot === true;
   const preservePlaceholders = options.preservePlaceholders !== false;
-  for (const side of layoutSlotKeys()) {
-    if (paneIsPlaceholder(side)) {
+  for (const side of layoutSlotKeys(slots)) {
+    if (paneIsPlaceholder(side, slots)) {
       if (preservePlaceholders) next[side] = emptyPlaceholderPaneState();
       continue;
     }
-    const hadItem = paneTabs(side).includes(item);
-    const active = activeItemForSide(side);
-    const tabs = paneTabs(side).filter(value => value !== item);
+    const hadItem = paneTabs(side, slots).includes(item);
+    const active = activeItemForSide(side, slots);
+    const tabs = paneTabs(side, slots).filter(value => value !== item);
     next[side] = !tabs.length && (side === preserveEmptySlot || (preserveRemovedSlot && hadItem))
       ? emptyPlaceholderPaneState()
       : paneStateWithTabs(tabs, active === item ? null : active);
   }
   return next;
+}
+
+function layoutWithoutItem(item, options = {}) {
+  return layoutWithoutItemFromSlots(item, layoutSlots, options);
 }
 
 function removeSessionFromLayout(item) {
@@ -4246,19 +4445,125 @@ function removePaneFromLayout(item) {
   const slot = slotForSession(item);
   if (!slot) return;
   const moved = paneTabs(slot);
-  applyLayoutSlots(layoutWithoutSlot(slot), {
+  applyLayoutSlots(layoutWithoutSlot(slot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(slot)}), {
     message: moved.length ? `${moved.map(itemLabel).join(', ')} hidden from layout` : '',
   });
 }
 
-function layoutWithoutSlot(slot) {
+function shouldPreserveClosedPaneSlot(slot) {
+  if (!slot || isFileExplorerItem(activeItemForSide(slot))) return false;
+  return layoutSlotKeys().some(side => side !== slot && isFileExplorerItem(activeItemForSide(side)));
+}
+
+function layoutWithoutSlot(slot, options = {}) {
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = layoutSlots[layoutTreeKey];
   for (const side of layoutSlotKeys()) {
-    if (side === slot) continue;
+    if (side === slot) {
+      if (options.preserveRemovedSlot === true) next[side] = emptyPlaceholderPaneState();
+      continue;
+    }
     next[side] = paneStateForLayoutSlot(side);
   }
   return next;
+}
+
+function appendUniqueItems(target, items) {
+  for (const item of items) {
+    if (isLayoutItem(item) && !target.includes(item)) target.push(item);
+  }
+  return target;
+}
+
+function paneTabsWithoutFinder(slot, slots = layoutSlots) {
+  return paneTabs(slot, slots).filter(item => !isFileExplorerItem(item));
+}
+
+function minimizePaneFromLayout(item) {
+  const sourceSlot = slotForSession(item);
+  if (!sourceSlot) return;
+  if (isFileExplorerItem(activeItemForSide(sourceSlot))) {
+    removePaneFromLayout(item);
+    return;
+  }
+  const minimizedTabs = paneTabsWithoutFinder(sourceSlot);
+  const targetSlot = largestNonFileExplorerPaneSlot(new Set([sourceSlot]));
+  if (!targetSlot || !minimizedTabs.length) {
+    removePaneFromLayout(item);
+    return;
+  }
+  const targetActive = activeItemForSide(targetSlot);
+  const next = layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
+  const targetTabs = appendUniqueItems(paneTabsWithoutFinder(targetSlot, next), minimizedTabs);
+  next[targetSlot] = paneStateWithTabs(targetTabs, targetActive);
+  applyLayoutSlots(next, {
+    focusSession: targetActive || targetTabs[0],
+    prune: false,
+    message: `${minimizedTabs.map(itemLabel).join(', ')} minimized`,
+  });
+}
+
+function finderLeadsExpandedPane(finderSlot, targetSlot) {
+  const finderRect = layoutColumnNode(finderSlot)?.getBoundingClientRect();
+  const targetRect = layoutColumnNode(targetSlot)?.getBoundingClientRect();
+  if (finderRect && targetRect && Math.abs(finderRect.left - targetRect.left) > 1) return finderRect.left < targetRect.left;
+  const leaves = layoutLeafSlots(layoutSlots[layoutTreeKey]);
+  const finderIndex = leaves.indexOf(finderSlot);
+  const targetIndex = leaves.indexOf(targetSlot);
+  if (finderIndex !== -1 && targetIndex !== -1) return finderIndex < targetIndex;
+  return true;
+}
+
+function expandPaneFromLayout(item) {
+  const targetSlot = slotForSession(item);
+  if (!targetSlot || isFileExplorerItem(activeItemForSide(targetSlot))) return;
+  const active = activeItemForSide(targetSlot);
+  if (!active) return;
+  const finderSlot = slotForSession(fileExplorerItemId);
+  const targetTabs = appendUniqueItems([], paneTabsWithoutFinder(targetSlot));
+  for (const slot of layoutSlotKeys()) {
+    if (slot === targetSlot) continue;
+    appendUniqueItems(targetTabs, paneTabsWithoutFinder(slot));
+  }
+  const next = emptyLayoutSlots();
+  next[targetSlot] = paneStateWithTabs(targetTabs, active);
+  if (finderSlot && finderSlot !== targetSlot) {
+    next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
+    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
+    next[layoutTreeKey] = finderFirst
+      ? splitNode('row', leafNode(finderSlot), leafNode(targetSlot), fileExplorerSplitPercent)
+      : splitNode('row', leafNode(targetSlot), leafNode(finderSlot), 100 - fileExplorerSplitPercent);
+  } else {
+    next[layoutTreeKey] = leafNode(targetSlot);
+  }
+  applyLayoutSlots(next, {
+    focusSession: active,
+    prune: false,
+    message: `${itemLabel(active)} expanded`,
+  });
+}
+
+function layoutWithFileExplorerDockedLeft(slots = layoutSlots) {
+  const right = compactLayoutSlots(layoutWithoutItemFromSlots(fileExplorerItemId, slots, {preservePlaceholders: true}));
+  const rightSlots = layoutSlotKeys(right).filter(slot => paneHasLayoutContent(slot, right));
+  const next = emptyLayoutSlots();
+  for (const slot of rightSlots) next[slot] = paneStateForLayoutSlot(slot, right);
+  const used = new Set(rightSlots);
+  const currentSlot = slotForItem(fileExplorerItemId, slots);
+  let finderSlot = currentSlot && !used.has(currentSlot) ? currentSlot : null;
+  if (!finderSlot) finderSlot = !used.has('left') ? 'left' : nextLayoutSlot(next);
+  next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
+  next[layoutTreeKey] = rightSlots.length
+    ? splitNode('row', leafNode(finderSlot), right[layoutTreeKey], fileExplorerSplitPercent)
+    : leafNode(finderSlot);
+  return compactLayoutSlots(next);
+}
+
+function dockFileExplorerPane() {
+  applyLayoutSlots(layoutWithFileExplorerDockedLeft(), {
+    focusSession: fileExplorerItemId,
+    prune: false,
+  });
 }
 
 function firstEmptyPane(slots = layoutSlots) {
@@ -4276,8 +4581,9 @@ function slotForNewSession() {
 }
 
 function slotForTabActivation(item) {
-  if (isTmuxSession(item)) return slotForNewTmuxSession(item);
-  return slotForSession(item) || firstEmptyPane() || largestNonFileExplorerPaneSlot() || largestPaneSlot() || slotForNewSession();
+  const currentSlot = slotForSession(item);
+  if (currentSlot) return currentSlot;
+  return largestNonFileExplorerPaneSlot() || firstEmptyPane() || largestPaneSlot() || slotForNewSession();
 }
 
 async function activateTabInExistingPane(item) {
@@ -4335,11 +4641,11 @@ async function placeTmuxSession(session) {
 async function openFileExplorerPane() {
   const currentSlot = slotForSession(fileExplorerItemId);
   if (currentSlot) {
-    if (paneTabs(currentSlot).length === 1) {
+    if (paneTabs(currentSlot).length === 1 && !fileExplorerNeedsLeftDock()) {
       activatePaneTab(currentSlot, fileExplorerItemId);
       return;
     }
-    await splitSessionAtSlot(fileExplorerItemId, currentSlot, 'left', currentSlot, fileExplorerSplitPercent);
+    dockFileExplorerPane();
     return;
   }
   const empty = firstEmptyPane();
@@ -4353,7 +4659,7 @@ async function openFileExplorerPane() {
   }
   const targetSlot = largestPaneSlot();
   if (targetSlot && paneTabs(targetSlot).length) {
-    await splitSessionAtSlot(fileExplorerItemId, targetSlot, 'left', null, fileExplorerSplitPercent);
+    dockFileExplorerPane();
     return;
   }
   await moveSessionToSlot(fileExplorerItemId, slotForNewSession(), null);
@@ -4481,6 +4787,7 @@ async function selectSession(session) {
   }
   if (isFileExplorerItem(session)) {
     await openFileExplorerPane();
+    scheduleFileExplorerActiveTabSync();
     return;
   }
   if (activeSessions.includes(session)) {
@@ -5007,8 +5314,12 @@ function slotSide(slot) {
   return slotColumn(slot);
 }
 
+function slotForItem(item, slots = layoutSlots) {
+  return layoutSlotKeys(slots).find(side => paneTabs(side, slots).includes(item)) || null;
+}
+
 function slotForSession(session) {
-  return layoutSlotKeys().find(side => paneTabs(side).includes(session)) || null;
+  return slotForItem(session);
 }
 
 function slotForDropEvent(event) {
@@ -5378,12 +5689,33 @@ function updatePaneTabStrip(panel, side) {
     return;
   }
   strip.hidden = false;
+  const restorePopoverItem = paneTabPopoverItemToRestore(strip);
   const activeItem = activeItemForSide(side);
   const children = stack.map(item => createPaneTab(side, item));
   if (activeItem && !stack.includes(activeItem)) children.push(createPaneTab(side, activeItem));
   strip.replaceChildren(...children);
   bindPaneTabStrip(strip, side);
+  restorePaneTabPopover(strip, restorePopoverItem);
   scheduleTabStripOverflowCheck(strip);
+}
+
+function paneTabPopoverItemToRestore(strip) {
+  for (const tab of strip.querySelectorAll(':scope > .pane-tab')) {
+    const popover = tab.querySelector(':scope > .session-popover');
+    const openOrHovered = tab.classList.contains('popover-open') || tab.matches(':hover');
+    if (openOrHovered && popoverStillActive(tab, popover)) return tab.dataset.paneTab || null;
+  }
+  return null;
+}
+
+function restorePaneTabPopover(strip, item) {
+  if (!item) return;
+  const tab = strip.querySelector(`:scope > .pane-tab[data-pane-tab="${cssEscape(item)}"]`);
+  const popover = tab?.querySelector(':scope > .session-popover');
+  if (!tab || !popover) return;
+  positionPaneTabPopover(tab);
+  closeOtherSessionPopovers(tab);
+  tab.classList.add('popover-open');
 }
 
 function createPaneTab(side, item) {
@@ -5411,7 +5743,8 @@ function createPaneTab(side, item) {
   if (!isFiles) {
     const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
     const closeLabel = isEditor ? `Close ${itemLabel(item)}` : `Hide ${itemLabel(item)} from layout`;
-    tab.insertAdjacentHTML('beforeend', `<button type="button" class="pane-tab-close" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
+    const controlKind = isEditor ? 'close' : 'minimize';
+    tab.insertAdjacentHTML('beforeend', `<button type="button" class="pane-tab-close ${platformWindowControlClass(controlKind)}" data-pane-tab-close title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
   }
   if (isEditor) {
     tab.insertAdjacentHTML('beforeend', filePopoverHtml(item));
@@ -5486,12 +5819,14 @@ function bindDelayedSessionPopover(anchor, popover, position) {
   const openNow = () => {
     clearShowTimer();
     clearHideTimer();
+    if (anchor.isConnected === false) return;
     position();
     closeOtherSessionPopovers(anchor);
     anchor.classList.add('popover-open');
   };
   const queueOpen = () => {
     clearHideTimer();
+    if (anchor.isConnected === false) return;
     if (anchor.classList.contains('popover-open')) return;
     clearShowTimer();
     position();
@@ -5501,6 +5836,10 @@ function bindDelayedSessionPopover(anchor, popover, position) {
     clearShowTimer();
     clearHideTimer();
     hideTimer = setTimeout(() => {
+      if (anchor.isConnected === false) {
+        hideTimer = null;
+        return;
+      }
       if (popoverStillActive(anchor, popover)) {
         hideTimer = null;
         return;
@@ -5514,11 +5853,16 @@ function bindDelayedSessionPopover(anchor, popover, position) {
 
 function positionPaneTabPopover(tab) {
   const rect = tab.getBoundingClientRect();
-  const width = Math.min(640, Math.max(320, window.innerWidth - 16));
-  const maxLeft = Math.max(8, window.innerWidth - width - 8);
-  const left = Math.min(Math.max(8, Math.floor(rect.left)), maxLeft);
+  const viewportWidth = Math.max(0, window.innerWidth || document.documentElement?.clientWidth || 0);
+  const viewportLeft = 8;
+  const viewportRight = Math.max(viewportLeft, viewportWidth - 8);
+  const availableWidth = Math.max(1, viewportRight - viewportLeft);
+  const width = Math.min(560, availableWidth);
+  const maxLeft = Math.max(viewportLeft, viewportRight - width);
+  const left = Math.min(Math.max(viewportLeft, Math.floor(rect.left)), maxLeft);
   document.documentElement.style.setProperty('--pane-tab-popover-top', `${Math.ceil(rect.bottom + 1)}px`);
   document.documentElement.style.setProperty('--pane-tab-popover-left', `${left}px`);
+  document.documentElement.style.setProperty('--pane-tab-popover-width', `${Math.floor(width)}px`);
 }
 
 function paneInfoTabHtml() {
@@ -5701,7 +6045,7 @@ function bindPanelShell(panel, session) {
       if (!targetSlot) return;
       if (slotIsFileExplorerPane(targetSlot)) return;
       if (isFileExplorerItem(payload.session)) {
-        splitSessionAtSlot(fileExplorerItemId, targetSlot, 'left', payload.sourceSlot || slotForSession(fileExplorerItemId), fileExplorerSplitPercent);
+        dockFileExplorerPane();
         return;
       }
       moveSessionToSlot(payload.session, targetSlot, payload.sourceSlot || slotForSession(payload.session), paneTabs(targetSlot).length);
@@ -5917,9 +6261,10 @@ function processLabelFromCommand(command) {
 function updatePanelControlLabels(session, info) {
   const button = document.querySelector(`[data-tab="${cssEscape(session)}"][data-tab-name="terminal"]`);
   updatePanelWindowStepButtons(session, info);
-  if (!button) return;
-  button.textContent = terminalTabLabel(session, info);
-  button.title = terminalTabTitle(session, info);
+  if (button) {
+    button.textContent = terminalTabLabel(session, info);
+    button.title = terminalTabTitle(session, info);
+  }
 }
 
 function installPanelInactiveOverlays(panel, session) {
@@ -5946,8 +6291,8 @@ function createInfoPanel() {
   panel.id = `panel-${infoItemId}`;
   panel.innerHTML = `
       <div class="panel-head">
-        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         ${panelControlsHtml(infoItemId, {disabled: true, unavailableLabel: 'Branch Info'})}
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
@@ -5966,11 +6311,8 @@ function createInfoPanel() {
   return panel;
 }
 
-// Builds a draggable Files panel — a sibling of the InfoPanel. Self-contained:
-// owns its own tree element, doesn't reference the overlay-based fileExplorer
-// DOM constants. Clicking a folder expands inline; clicking a file delegates
-// to the existing openFileInEditor() which still drives the overlay editor.
-// (A later step swaps file-click to open a draggable editor panel instead.)
+// File Explorer pane content is self-contained so layout panes do not depend on
+// the older left-edge overlay tree.
 function createFileExplorerPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel file-explorer-panel';
@@ -5984,7 +6326,7 @@ function createFileExplorerPanel() {
           <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
           <span class="file-explorer-path-inline">${esc(initialPath)}</span>
           <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
-          <button type="button" class="file-explorer-panel-close" title="Hide ${esc(label)} from layout" aria-label="Hide ${esc(label)} from layout"></button>
+          <button type="button" class="${fileExplorerPanelCloseClass()}" title="Hide ${esc(label)} from layout" aria-label="Hide ${esc(label)} from layout"></button>
         </div>
       </div>
       <div class="file-explorer-pane panel-overlay-root">
@@ -6056,7 +6398,7 @@ function createFileEditorPanel(item) {
           <button type="button" class="file-editor-preview-panel" title="Toggle Markdown preview" hidden>Preview</button>
           <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" hidden>Wrap</button>
           <button type="button" class="file-editor-save-panel" title="Save" ${readOnlyMode ? 'hidden' : ''}>Save</button>
-          <button type="button" class="file-editor-panel-close" title="Close" aria-label="Close"></button>
+          <button type="button" class="${fileEditorPanelCloseClass()}" title="Close" aria-label="Close"></button>
         </div>
       </div>
       <div class="file-editor-panel-body panel-overlay-root">
@@ -6664,7 +7006,15 @@ function panelControlsHtml(session, options = {}) {
   const terminalAttrs = disabled ? disabledAttrs : `${tabAttrs('terminal')} title="${esc(terminalTabTitle(session, info))}"`;
   const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, info);
   const steps = disabled ? {prev: false, next: false} : windowStepVisibility(info?.panes);
-  const closeAttrs = ` type="button" data-pane-close="${esc(session)}" title="hide all tabs in this pane from layout" aria-label="Hide all tabs in this pane from layout"`;
+  const isFiles = isFileExplorerItem(session);
+  const minimizeAttrs = !isFiles
+    ? ` type="button" data-pane-minimize="${esc(session)}" title="minimize pane" aria-label="Minimize pane"`
+    : ` type="button" data-pane-close="${esc(session)}" title="close ${esc(fileExplorerLabel())}" aria-label="Close ${esc(fileExplorerLabel())}"`;
+  const minimizeClass = isFiles
+    ? `tab pane-close ${platformWindowControlClass('close')}`
+    : `tab pane-minimize ${platformWindowControlClass('minimize')}`;
+  const expandAttrs = ` type="button" data-pane-expand="${esc(session)}" title="expand pane" aria-label="Expand pane"`;
+  const expandHtml = isFiles ? '' : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`;
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
           <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
@@ -6673,7 +7023,8 @@ function panelControlsHtml(session, options = {}) {
           <button class="tab" ${tabAttrs('summary')}>AI</button>
           <button class="tab" ${tabAttrs('events')}>Log</button>
           <button class="tab panel-detail-toggle active" ${infoAttrs}>Info</button>
-          <button class="tab pane-close" ${closeAttrs}></button>
+          <button class="${minimizeClass}" ${minimizeAttrs}></button>
+          ${expandHtml}
         </div>`;
 }
 
@@ -6683,8 +7034,8 @@ function createPanel(session) {
   panel.id = `panel-${session}`;
   panel.innerHTML = `
       <div class="panel-head">
-        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         ${panelControlsHtml(session)}
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-popover-zone">
@@ -6880,6 +7231,16 @@ function bindPanelControls(panel, session) {
     event.preventDefault();
     event.stopPropagation();
     removePaneFromLayout(event.currentTarget.dataset.paneClose);
+  });
+  panel.querySelector('[data-pane-minimize]')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    minimizePaneFromLayout(event.currentTarget.dataset.paneMinimize);
+  });
+  panel.querySelector('[data-pane-expand]')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    expandPaneFromLayout(event.currentTarget.dataset.paneExpand);
   });
   panel.querySelector('[data-context]')?.addEventListener('click', () => showContext(session));
   panel.addEventListener('click', event => {
@@ -7650,7 +8011,7 @@ function renderAutoApproveButton(session, payload) {
     } else {
       button.style.removeProperty('--yolo-rotate-delay');
     }
-    button.closest('.session-button, .pane-tab')?.classList.remove('is-working');
+    button.closest('.pane-tab')?.classList.remove('is-working');
     button.textContent = 'YO';
     const action = payload?.last_action ? `; ${payload.last_action}` : '';
     button.title = enabled
@@ -7757,6 +8118,7 @@ async function refreshTranscripts() {
       }
     }
     renderPaneTabStrips();
+    scheduleFileExplorerActiveTabSync();
     trackSessionStateChanges();
     refreshOpenEventLogs();
   } catch (error) {

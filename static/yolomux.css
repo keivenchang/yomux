@@ -39,6 +39,31 @@
   --tab-font: var(--control-font);
   --tab-label-size: 13px;
   --tab-line-height: 1;
+  --pane-tab-width: 240px;
+  --window-control-size: 14px;
+  --window-control-offset: 1px;
+  --window-control-glyph-width: 8px;
+  --window-control-glyph-height: 2px;
+  --mac-minimize-bg: #ffbd2e;
+  --mac-minimize-border: #b87500;
+  --mac-minimize-glyph: #7a5200;
+  --mac-active-minimize-border: #9a6500;
+  --mac-active-minimize-glyph: #5c3a00;
+  --mac-control-text: rgba(58, 39, 0, 0.86);
+  --mac-zoom-bg: #32c84c;
+  --mac-zoom-border: #24a647;
+  --mac-zoom-glyph: #075a1b;
+  --pc-control-bg: #1b2432;
+  --pc-control-border: #536074;
+  --pc-control-hover-bg: #263247;
+  --pc-control-hover-border: #8fa1bc;
+  --pc-zoom-bg: #52d273;
+  --pc-zoom-border: #9befad;
+  --panel-close-size: 18px;
+  --panel-close-radius: 4px;
+  --panel-close-glyph-width: 9px;
+  --panel-close-glyph-height: 1.5px;
+  --panel-close-hover-bg: rgba(255, 255, 255, 0.08);
   --topbar-height: 38px;
   --red-reminder-duration: 1.55s;
   --red-reminder-easing: ease-in-out;
@@ -309,6 +334,10 @@ body {
   top: calc(100% + 5px);
   left: 0;
 }
+.app-menu[data-app-menu="tab"] > .app-menu-popover {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(82vh, 820px);
+}
 .app-submenu-popover {
   display: none;
   width: auto;
@@ -434,6 +463,73 @@ body {
 .app-menu-rich .session-button-text {
   min-width: 0;
 }
+.app-menu-tab-command {
+  min-height: 20px;
+  grid-template-columns: 12px minmax(0, 1fr);
+  gap: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+}
+.app-menu-tab-command + .app-menu-tab-command {
+  margin-top: 1px;
+}
+.app-menu-tab-command .app-menu-check::before {
+  width: 10px;
+}
+.app-menu-tab-command .app-menu-content {
+  gap: 0;
+}
+.app-menu-tab-command .app-menu-detail {
+  display: none;
+}
+.app-menu-tab-command .app-menu-rich,
+.app-menu-tab-command .pane-tab-core,
+.app-menu-tab-command .session-button-text {
+  min-width: 0;
+  height: 16px;
+  gap: 3px;
+}
+.app-menu-tab-command .session-button-prefix {
+  gap: 1px;
+}
+.app-menu-tab-command .pane-tab-core > .session-yolo-marker {
+  min-width: 16px;
+  height: 16px;
+  padding: 0;
+  font-size: 9px;
+}
+.app-menu-tab-command .agent-icon {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+}
+.app-menu-tab-command .session-button-number,
+.app-menu-tab-command .session-button-name,
+.app-menu-tab-command .session-button-dir {
+  font-size: 12px;
+  line-height: 1;
+}
+.app-menu-tab-command .session-button-name {
+  max-width: 48px;
+}
+.app-menu-tab-command .session-button-detail {
+  max-width: 56px;
+  font-size: 10px;
+}
+.app-menu-tab-command .session-state-badge {
+  min-width: 20px;
+  padding: 0 2px;
+  border-radius: 3px;
+  font-size: 8px;
+}
+.app-menu-tab-command .ci-indicator {
+  min-width: 15px;
+  height: 13px;
+  padding: 0 2px;
+  font-size: 8px;
+}
 .app-menu-submenu-arrow {
   color: #aeb8c7;
   font-weight: 700;
@@ -447,99 +543,6 @@ body {
   color: #082014;
   background: #52d273;
   border-color: #9befad;
-}
-.tab-list-menu-wrap {
-  position: relative;
-  flex: 0 0 28px;
-  min-width: 28px;
-}
-.pane-tabs > .tab-list-menu-wrap {
-  align-self: flex-end;
-}
-.tab-list-menu-button {
-  height: 26px;
-  width: 28px;
-  min-width: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  color: #dfe6ef;
-  background: #1d2531;
-  border: 1px solid #5e6878;
-  border-radius: 6px 6px 0 0;
-  font-family: var(--tab-font);
-  font-size: 11px;
-  font-stretch: condensed;
-  font-weight: 600;
-  line-height: 1;
-}
-.tab-list-menu-button::before {
-  content: "";
-  width: 14px;
-  height: 11px;
-  background:
-    linear-gradient(currentColor, currentColor) 0 0 / 3px 3px no-repeat,
-    linear-gradient(currentColor, currentColor) 6px 0 / 8px 2px no-repeat,
-    linear-gradient(currentColor, currentColor) 0 4px / 3px 3px no-repeat,
-    linear-gradient(currentColor, currentColor) 6px 5px / 8px 2px no-repeat,
-    linear-gradient(currentColor, currentColor) 0 8px / 3px 3px no-repeat,
-    linear-gradient(currentColor, currentColor) 6px 9px / 8px 2px no-repeat;
-  opacity: 0.92;
-}
-.tab-list-menu-button:hover,
-.tab-list-menu-wrap.popover-open > .tab-list-menu-button {
-  color: #f4ffe8;
-  background: #2d3747;
-  border-color: #f5c542;
-}
-.session-button {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
-  white-space: nowrap;
-  text-align: left;
-  line-height: var(--tab-line-height);
-  font-family: var(--tab-font);
-  font-size: var(--tab-label-size);
-  font-stretch: condensed;
-  font-weight: 500;
-  overflow: hidden;
-  border-radius: 7px;
-  background: var(--inactive-tab-bg);
-  border: 1px solid var(--inactive-tab-border);
-  border-bottom-color: var(--inactive-tab-border);
-}
-.session-button:not(.active):not(.needs-attention) {
-  border-color: var(--inactive-tab-border);
-  border-bottom-color: var(--inactive-tab-border);
-  box-shadow: none;
-}
-.session-button:hover {
-  background: var(--inactive-tab-bg-hover);
-  border-color: rgba(255, 255, 255, 0.92);
-}
-.session-button.add-session {
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  color: #dfe6ef;
-  background: #111820;
-  border-color: #456038;
-  font-size: var(--tab-label-size);
-  font-weight: 500;
-}
-.session-button.add-session .add-plus {
-  font-size: 18px;
-  line-height: 1;
-}
-.session-button.add-session .agent-icon {
-  margin-left: 0;
 }
 .session-button-number {
   flex: 0 0 auto;
@@ -675,30 +678,6 @@ body {
   background: #273244;
   border-color: #58667b;
 }
-.session-button.active {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: #9be33d;
-  border-bottom-color: #9be33d;
-  box-shadow: none;
-}
-.session-button.active .session-button-dir,
-.session-button.active .session-button-detail,
-.session-button.active .session-button-name,
-.session-button.active .session-yolo-marker.active {
-  color: #081205;
-}
-.session-button.needs-attention:not(.active) {
-  border-color: #b98c24;
-  box-shadow: inset 0 -2px 0 rgba(245, 197, 66, 0.45);
-}
-.session-button.needs-input,
-.session-button.needs-exec,
-.session-button.needs-blocked {
-  --attention-ring-border: 1px;
-  animation: attention-ring-fade var(--red-reminder-duration) var(--red-reminder-easing) infinite;
-  animation-delay: var(--attention-animation-delay, 0s);
-}
 @keyframes attention-ring-fade {
   0%, 100% {
     border-color: rgba(255, 51, 71, 0.56);
@@ -743,9 +722,6 @@ body {
   .session-state-blocked,
   .session-state-disconnected,
   .ci-indicator.pr-status-failing,
-  .session-button.needs-input,
-  .session-button.needs-exec,
-  .session-button.needs-blocked,
   .session-yolo-marker.active.working,
   .ci-indicator.metadata-pulse,
   .panel.needs-input-pane::after,
@@ -843,7 +819,6 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-body.tab-meta-hidden .session-button .session-button-text,
 body.tab-meta-hidden .pane-tab .session-button-text {
   display: none;
 }
@@ -916,7 +891,7 @@ body.tab-meta-hidden .pane-tab .session-button-text {
   font-stretch: normal;
   line-height: 1.25;
   font-weight: 400;
-  background: rgba(8, 31, 8, 0.98);
+  background: #081f08;
   border: 1px solid rgba(95, 150, 42, 0.64);
   border-radius: 8px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
@@ -934,7 +909,7 @@ body.tab-meta-hidden .pane-tab .session-button-text {
   width: 10px;
   height: 10px;
   transform: rotate(45deg);
-  background: rgba(8, 31, 8, 0.98);
+  background: #081f08;
   border-left: 1px solid rgba(95, 150, 42, 0.64);
   border-top: 1px solid rgba(95, 150, 42, 0.64);
 }
@@ -995,106 +970,6 @@ body.tab-meta-hidden .pane-tab .session-button-text {
 }
 .session-popover .meta-sep {
   color: #87aa76;
-}
-.tab-list-menu-popover {
-  visibility: hidden;
-  opacity: 0;
-  pointer-events: none;
-  position: fixed;
-  top: var(--tab-list-popover-top, 42px);
-  left: var(--tab-list-popover-left, 8px);
-  z-index: 82;
-  width: var(--tab-list-popover-width, min(560px, calc(100vw - 16px)));
-  max-height: var(--tab-list-popover-max-height, min(70vh, 620px));
-  overflow: auto;
-  padding: 7px;
-  color: #e7ecf3;
-  background: rgba(17, 24, 32, 0.98);
-  border: 1px solid #5e6878;
-  border-radius: 8px;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
-  transform: translateY(-2px);
-  transition:
-    opacity 90ms ease var(--popover-hide-delay),
-    transform 90ms ease var(--popover-hide-delay),
-    visibility 0s linear calc(var(--popover-hide-delay) + 90ms);
-}
-.tab-list-menu-wrap.popover-open > .tab-list-menu-popover {
-  visibility: visible;
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
-  transition-delay: 0s;
-}
-.tab-list-menu-title {
-  padding: 2px 4px 6px;
-  color: #aeb8c7;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-.tab-list-entry {
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  padding: 5px 7px;
-  color: #dfe6ef;
-  background: #273140;
-  border: 1px solid #4e5a6c;
-  border-radius: 6px;
-  text-align: left;
-  cursor: pointer;
-  user-select: none;
-}
-.tab-list-entry + .tab-list-entry {
-  margin-top: 5px;
-}
-.tab-list-entry:hover,
-.tab-list-entry:focus-visible {
-  outline: 0;
-  background: #333f51;
-  border-color: #f5c542;
-}
-.tab-list-entry.active {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: #9be33d;
-}
-.tab-list-entry-main {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.tab-list-entry .session-button-text {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  overflow: hidden;
-}
-.tab-list-entry .session-button-dir {
-  flex: 1 1 auto;
-  max-width: none;
-}
-.tab-list-entry-detail {
-  min-width: 0;
-  color: #aeb8c7;
-  font: 11px/1.25 var(--mono-font);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tab-list-entry.active .session-button-name,
-.tab-list-entry.active .session-button-dir,
-.tab-list-entry.active .session-button-detail,
-.tab-list-entry.active .tab-list-entry-detail,
-.tab-list-entry.active .session-yolo-marker.active {
-  color: #081205;
 }
 .drag-image {
   opacity: 0.50 !important;
@@ -1531,14 +1406,19 @@ body.layout-resizing {
 }
 .panel-head {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
   min-height: 30px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 5px;
+  display: block;
   padding: 3px 6px 0 7px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 0;
   background: var(--panel2-inactive);
+  overflow: hidden;
+}
+.panel-head:not(.file-explorer-head):not(.file-editor-panel-head)::after {
+  content: "";
+  display: block;
+  clear: both;
 }
 .panel-head.tab-drag-over {
   box-shadow: inset 0 -2px 0 rgba(245, 197, 66, 0.95);
@@ -1549,6 +1429,7 @@ body.layout-resizing {
   display: flex;
   align-items: center;
   min-width: 0;
+  max-width: 100%;
   padding: 2px 8px;
   color: #dfe6ef;
   background: #121823;
@@ -1788,13 +1669,9 @@ body.layout-resizing {
   min-height: 28px;
   min-width: 0;
   max-width: 100%;
-  flex: 1 1 auto;
-  align-self: end;
-  display: flex;
-  align-items: flex-end;
-  align-content: flex-end;
-  flex-wrap: wrap;
-  gap: 3px;
+  display: block;
+  line-height: 0;
+  white-space: normal;
   padding: 0;
   overflow: visible;
   scrollbar-width: none;
@@ -1831,13 +1708,17 @@ body.layout-resizing {
   box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.25), 0 0 12px rgba(245, 197, 66, 0.82);
 }
 .pane-tab {
-  flex: 1 1 min(220px, 100%);
-  min-width: min(120px, 100%);
-  max-width: min(420px, 100%);
-  height: 27px;
+  width: min(var(--pane-tab-width), 100%);
+  min-width: 0;
+  max-width: min(var(--pane-tab-width), 100%);
+  height: 28px;
   display: inline-flex;
+  position: relative;
+  z-index: 1;
+  vertical-align: top;
   align-items: center;
   gap: 3px;
+  margin: 0 3px 0 0;
   padding: 2px 6px;
   color: #dfe6ef;
   background: var(--pane-inactive-tab-bg);
@@ -1863,7 +1744,7 @@ body.layout-resizing {
   color: #081205;
   background: var(--brand-green);
   border-color: #9be33d;
-  border-bottom-color: #9be33d;
+  border-bottom-color: var(--brand-green);
   font-weight: 500;
 }
 .pane-tab.active .session-button-name,
@@ -1872,7 +1753,6 @@ body.layout-resizing {
 .pane-tab.active .session-yolo-marker.active {
   color: #081205;
 }
-.session-button.active .session-yolo-marker.inactive,
 .pane-tab.active .session-yolo-marker.inactive {
   color: #d7dde5;
   background: #384356;
@@ -1900,16 +1780,18 @@ body.layout-resizing {
 .pane-tab-close::after {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 8px;
   height: 1.4px;
   border-radius: 999px;
   background: currentColor;
 }
 .pane-tab-close::before {
-  transform: rotate(45deg);
+  transform: translate(-50%, -50%) rotate(45deg);
 }
 .pane-tab-close::after {
-  transform: rotate(-45deg);
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 .pane-tab-close:hover {
   opacity: 0.92;
@@ -1923,6 +1805,46 @@ body.layout-resizing {
 .pane-tab.active .pane-tab-close:hover {
   opacity: 0.92;
   background: rgba(8, 18, 5, 0.16);
+}
+/* Keep this selector list in sync with platformCloseButtonClass() callers in yolomux.js. */
+.pane-tab-close.pc-window-control,
+.file-explorer-close.pc-window-control,
+.file-explorer-panel-close.pc-window-control,
+.file-editor-close.pc-window-control,
+.file-editor-panel-close.pc-window-control {
+  border: 1px solid var(--pc-control-border);
+  border-radius: 3px;
+  background: var(--pc-control-bg);
+  color: #dfe6ef;
+  opacity: 0.82;
+}
+.pane-tab-close.pc-minimize::before,
+.file-explorer-close.pc-minimize::before,
+.file-explorer-panel-close.pc-minimize::before,
+.file-editor-close.pc-minimize::before,
+.file-editor-panel-close.pc-minimize::before {
+  transform: translate(-50%, -50%) rotate(0deg);
+}
+.pane-tab-close.pc-minimize::after,
+.file-explorer-close.pc-minimize::after,
+.file-explorer-panel-close.pc-minimize::after,
+.file-editor-close.pc-minimize::after,
+.file-editor-panel-close.pc-minimize::after {
+  display: none;
+}
+.pane-tab.active .pane-tab-close.pc-window-control {
+  color: #081205;
+  background: rgba(8, 18, 5, 0.08);
+  border-color: rgba(8, 18, 5, 0.34);
+}
+.pane-tab-close.pc-window-control:hover,
+.pane-tab.active .pane-tab-close.pc-window-control:hover,
+.file-explorer-close.pc-window-control:hover,
+.file-explorer-panel-close.pc-window-control:hover,
+.file-editor-close.pc-window-control:hover,
+.file-editor-panel-close.pc-window-control:hover {
+  opacity: 1;
+  background: var(--pc-control-hover-bg);
 }
 .pane-tab .session-button-prefix {
   flex: 0 0 auto;
@@ -1973,9 +1895,20 @@ body.layout-resizing {
   position: fixed;
   top: var(--pane-tab-popover-top, 72px);
   left: var(--pane-tab-popover-left, 8px);
-  width: min(640px, calc(100vw - 16px));
+  z-index: 220;
+  width: var(--pane-tab-popover-width, min(640px, calc(100vw - 16px)));
+  max-width: calc(100vw - 16px);
   max-height: min(65vh, 620px);
   white-space: normal;
+  box-shadow:
+    -22px 18px 34px rgba(0, 0, 0, 0.58),
+    22px 18px 34px rgba(0, 0, 0, 0.58),
+    0 34px 62px rgba(0, 0, 0, 0.66),
+    0 8px 16px rgba(0, 0, 0, 0.52),
+    0 0 0 1px rgba(154, 214, 98, 0.12);
+}
+.pane-tab.popover-open {
+  z-index: 220;
 }
 .pane-tab.popover-open > .session-popover {
   visibility: visible;
@@ -1997,18 +1930,20 @@ body.layout-resizing {
   font-weight: 500;
 }
 .tabs {
-  justify-self: end;
+  position: relative;
+  z-index: 4;
+  float: right;
   display: flex;
   align-items: center;
   gap: 1px;
-  min-width: max-content;
-  max-width: none;
-  margin-left: auto;
+  min-width: 0;
+  max-width: calc(100% - 4px);
+  margin: 0 0 0 6px;
   padding: 0;
   border-bottom: 0;
   background: transparent;
   box-shadow: none;
-  overflow-x: auto;
+  overflow: hidden;
   scrollbar-width: none;
 }
 .tabs::-webkit-scrollbar {
@@ -2040,37 +1975,192 @@ body.layout-resizing {
   padding: 1px 0;
 }
 .terminal-tab {
+  flex: 0 1 64px;
   max-width: 68px;
   min-width: 34px;
 }
-.tabs .tab:not(.tmux-window-step):not(.terminal-tab) {
+.tabs .tab:not(.tmux-window-step):not(.terminal-tab):not(.pane-close):not(.pane-minimize):not(.pane-expand) {
+  flex: 0 1 auto;
   min-width: 0;
   padding-inline: 2px;
 }
 .tabs .panel-detail-toggle {
   min-width: 0;
 }
-.tabs .pane-close {
+.tabs .pane-close,
+.tabs .pane-minimize,
+.tabs .pane-expand {
   position: relative;
-  flex: 0 0 22px;
-  min-width: 22px;
-  max-width: 22px;
+  flex: 0 0 20px;
+  min-width: 20px;
+  max-width: 20px;
   padding: 0;
 }
 .tabs .pane-close::before,
-.tabs .pane-close::after {
+.tabs .pane-close::after,
+.tabs .pane-minimize::before,
+.tabs .pane-minimize::after,
+.tabs .pane-expand::before,
+.tabs .pane-expand::after {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 8px;
   height: 1.4px;
   border-radius: 999px;
   background: currentColor;
 }
 .tabs .pane-close::before {
-  transform: rotate(45deg);
+  transform: translate(-50%, -50%) rotate(45deg);
 }
 .tabs .pane-close::after {
-  transform: rotate(-45deg);
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+.tabs .pane-minimize::before {
+  transform: translate(-50%, -50%) rotate(0deg);
+}
+.tabs .pane-minimize::after {
+  display: none;
+}
+.tabs .pane-expand::before {
+  transform: translate(-50%, -50%) rotate(0deg);
+}
+.tabs .pane-expand::after {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+.tabs .pc-window-control {
+  color: #dfe6ef;
+  background: var(--pc-control-bg);
+  border-color: var(--pc-control-border);
+}
+.tabs .pc-window-control:hover {
+  color: #ffffff;
+  background: var(--pc-control-hover-bg);
+  border-color: var(--pc-control-hover-border);
+}
+.tabs .pc-zoom {
+  color: #081205;
+  background: var(--pc-zoom-bg);
+  border-color: var(--pc-zoom-border);
+}
+/* Keep this selector list in sync with platformCloseButtonClass() callers in yolomux.js. */
+.tabs .mac-window-control,
+.pane-tab-close.mac-window-control,
+.file-explorer-close.mac-window-control,
+.file-explorer-panel-close.mac-window-control,
+.file-editor-close.mac-window-control,
+.file-editor-panel-close.mac-window-control {
+  flex: 0 0 var(--window-control-size);
+  width: var(--window-control-size);
+  min-width: var(--window-control-size);
+  max-width: var(--window-control-size);
+  height: var(--window-control-size);
+  padding: 0;
+  margin-left: var(--window-control-offset);
+  color: var(--mac-control-text);
+  opacity: 1;
+  border: 1px solid rgba(75, 50, 0, 0.72);
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.48),
+    0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+.tabs .mac-minimize,
+.pane-tab-close.mac-minimize,
+.file-explorer-close.mac-minimize,
+.file-explorer-panel-close.mac-minimize,
+.file-editor-close.mac-minimize,
+.file-editor-panel-close.mac-minimize {
+  background: var(--mac-minimize-bg);
+  border-color: var(--mac-minimize-border);
+}
+.tabs .mac-minimize::before,
+.pane-tab-close.mac-minimize::before,
+.file-explorer-close.mac-minimize::before,
+.file-explorer-panel-close.mac-minimize::before,
+.file-editor-close.mac-minimize::before,
+.file-editor-panel-close.mac-minimize::before {
+  width: var(--window-control-glyph-width);
+  height: var(--window-control-glyph-height);
+  background: var(--mac-minimize-glyph);
+  opacity: 0;
+  transform: translate(-50%, -50%) rotate(0deg);
+}
+.pane-tab.active .pane-tab-close.mac-window-control {
+  opacity: 1;
+  color: var(--mac-control-text);
+  background: var(--mac-minimize-bg);
+  border-color: var(--mac-active-minimize-border);
+}
+.pane-tab.active .pane-tab-close.mac-minimize::before {
+  background: var(--mac-active-minimize-glyph);
+}
+.tabs .mac-minimize::after,
+.pane-tab-close.mac-minimize::after,
+.file-explorer-close.mac-minimize::after,
+.file-explorer-panel-close.mac-minimize::after,
+.file-editor-close.mac-minimize::after,
+.file-editor-panel-close.mac-minimize::after {
+  display: none;
+}
+.tabs .mac-zoom,
+.pane-tab-close.mac-zoom {
+  color: rgba(0, 54, 16, 0.86);
+  background: var(--mac-zoom-bg);
+  border-color: var(--mac-zoom-border);
+}
+.tabs .mac-zoom::before,
+.tabs .mac-zoom::after,
+.pane-tab-close.mac-zoom::before,
+.pane-tab-close.mac-zoom::after {
+  background: var(--mac-zoom-glyph);
+  opacity: 0;
+}
+.tabs .mac-window-control:hover::before,
+.tabs .mac-window-control:hover::after,
+.pane-tab-close.mac-window-control:hover::before,
+.pane-tab-close.mac-window-control:hover::after,
+.file-explorer-close.mac-window-control:hover::before,
+.file-explorer-close.mac-window-control:hover::after,
+.file-explorer-close.mac-window-control:focus-visible::before,
+.file-explorer-close.mac-window-control:focus-visible::after,
+.file-explorer-panel-close.mac-window-control:hover::before,
+.file-explorer-panel-close.mac-window-control:hover::after,
+.file-explorer-panel-close.mac-window-control:focus-visible::before,
+.file-explorer-panel-close.mac-window-control:focus-visible::after,
+.file-editor-close.mac-window-control:hover::before,
+.file-editor-close.mac-window-control:hover::after,
+.file-editor-close.mac-window-control:focus-visible::before,
+.file-editor-close.mac-window-control:focus-visible::after,
+.file-editor-panel-close.mac-window-control:hover::before,
+.file-editor-panel-close.mac-window-control:hover::after,
+.file-editor-panel-close.mac-window-control:focus-visible::before,
+.file-editor-panel-close.mac-window-control:focus-visible::after {
+  opacity: 1;
+}
+.tabs .mac-window-control:hover,
+.pane-tab-close.mac-window-control:hover,
+.file-explorer-close.mac-window-control:hover,
+.file-explorer-close.mac-window-control:focus-visible,
+.file-explorer-panel-close.mac-window-control:hover,
+.file-explorer-panel-close.mac-window-control:focus-visible,
+.file-editor-close.mac-window-control:hover,
+.file-editor-close.mac-window-control:focus-visible,
+.file-editor-panel-close.mac-window-control:hover,
+.file-editor-panel-close.mac-window-control:focus-visible {
+  filter: brightness(1.08);
+}
+.file-explorer-panel-close.mac-minimize:hover,
+.file-explorer-panel-close.mac-minimize:focus-visible,
+.file-explorer-close.mac-minimize:hover,
+.file-explorer-close.mac-minimize:focus-visible,
+.file-editor-close.mac-minimize:hover,
+.file-editor-close.mac-minimize:focus-visible,
+.file-editor-panel-close.mac-minimize:hover,
+.file-editor-panel-close.mac-minimize:focus-visible {
+  color: var(--mac-control-text);
+  background: var(--mac-minimize-bg);
 }
 .tab.active {
   color: var(--text);
@@ -2097,6 +2187,8 @@ body.layout-resizing {
 }
 .tab-pane {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
   display: none;
   overflow: hidden;
@@ -2107,6 +2199,8 @@ body.layout-resizing {
 }
 .terminal {
   height: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
   padding: 2px 2px 0;
   overflow: hidden;
@@ -2615,10 +2709,6 @@ body.layout-resizing {
   .app-menu-button {
     padding-inline: 6px;
   }
-  .session-button {
-    gap: 3px;
-    padding-inline: 5px;
-  }
   .actions {
     gap: 4px;
   }
@@ -2744,38 +2834,64 @@ body.file-explorer-open #grid {
   direction: rtl;
   text-align: left;
 }
-.file-explorer-close {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
+.file-explorer-close,
+.file-editor-close,
+.file-explorer-panel-close,
+.file-editor-panel-close {
+  flex: 0 0 var(--panel-close-size);
+  width: var(--panel-close-size);
+  height: var(--panel-close-size);
   position: relative;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--panel-close-radius);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
 }
+.file-explorer-close,
+.file-editor-close {
+  --panel-close-glyph-width: 10px;
+  --panel-close-glyph-height: 1.4px;
+}
 .file-explorer-close:hover,
-.file-explorer-close:focus-visible {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.08);
+.file-explorer-close:focus-visible,
+.file-editor-close:hover,
+.file-editor-close:focus-visible,
+.file-explorer-panel-close:hover,
+.file-explorer-panel-close:focus-visible,
+.file-editor-panel-close:hover,
+.file-editor-panel-close:focus-visible {
+  color: #ffffff;
+  background: var(--panel-close-hover-bg);
 }
 .file-explorer-close::before,
-.file-explorer-close::after {
+.file-explorer-close::after,
+.file-editor-close::before,
+.file-editor-close::after,
+.file-explorer-panel-close::before,
+.file-explorer-panel-close::after,
+.file-editor-panel-close::before,
+.file-editor-panel-close::after {
   content: "";
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 10px;
-  height: 1.4px;
+  width: var(--panel-close-glyph-width);
+  height: var(--panel-close-glyph-height);
   border-radius: 999px;
   background: currentColor;
 }
-.file-explorer-close::before {
+.file-explorer-close::before,
+.file-editor-close::before,
+.file-explorer-panel-close::before,
+.file-editor-panel-close::before {
   transform: translate(-50%, -50%) rotate(45deg);
 }
-.file-explorer-close::after {
+.file-explorer-close::after,
+.file-editor-close::after,
+.file-explorer-panel-close::after,
+.file-editor-panel-close::after {
   transform: translate(-50%, -50%) rotate(-45deg);
 }
 .file-explorer-tree {
@@ -2807,6 +2923,11 @@ body.file-explorer-open #grid {
   background: rgba(144, 196, 82, 0.12);
   box-shadow: inset 3px 0 0 rgba(118, 185, 0, 0.55);
 }
+.file-tree-row.current-directory:not(.selected) {
+  color: #f2ffe8;
+  background: rgba(118, 185, 0, 0.16);
+  box-shadow: inset 3px 0 0 rgba(118, 185, 0, 0.72);
+}
 .file-tree-row.renaming {
   background: rgba(82, 210, 115, 0.18);
 }
@@ -2831,14 +2952,6 @@ body.file-explorer-open #grid {
 .file-tree-children {
   display: block;
 }
-.session-button.add-session.file {
-  border-color: rgba(120, 180, 255, 0.4);
-}
-.session-button.add-session.file .agent-icon.file {
-  font-size: 12px;
-  margin-right: 0;
-}
-
 /* File Explorer now contains a tree column (left) and an editor column
    that grows when a file is opened. Aside is a flex row of the two. */
 .file-explorer {
@@ -2942,32 +3055,6 @@ body.file-editor-open .file-explorer {
   color: #9fd8ff;
   border-color: #9fd8ff;
 }
-.file-editor-close {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-  position: relative;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.file-editor-close::before,
-.file-editor-close::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 10px;
-  height: 1.4px;
-  border-radius: 999px;
-  background: currentColor;
-}
-.file-editor-close::before { transform: translate(-50%, -50%) rotate(45deg); }
-.file-editor-close::after { transform: translate(-50%, -50%) rotate(-45deg); }
-.file-editor-close:hover { color: #fff; background: rgba(255, 255, 255, 0.08); }
 .file-editor-textarea {
   flex: 1;
   border: 0;
@@ -3231,43 +3318,7 @@ body.file-editor-open .file-explorer {
 }
 .file-explorer-hidden-toggle-panel:hover { color: var(--text); border-color: var(--text); }
 .file-explorer-hidden-toggle-panel.active { color: var(--good); border-color: var(--good); }
-.file-explorer-panel-close {
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
-  position: relative;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.file-explorer-panel-close:hover,
-.file-explorer-panel-close:focus-visible {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
-}
-.file-explorer-panel-close::before,
-.file-explorer-panel-close::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 9px;
-  height: 1.5px;
-  border-radius: 999px;
-  background: currentColor;
-}
-.file-explorer-panel-close::before {
-  transform: translate(-50%, -50%) rotate(45deg);
-}
-.file-explorer-panel-close::after {
-  transform: translate(-50%, -50%) rotate(-45deg);
-}
-
-/* Draggable file editor panels. These are layout siblings of terminals and
-   Files, not the old left-edge overlay editor. */
+/* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -3342,40 +3393,6 @@ body.file-editor-open .file-explorer {
 }
 .file-editor-save-panel:not(:disabled):hover {
   background: rgba(82, 210, 115, 0.18);
-}
-.file-editor-panel-close {
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
-  position: relative;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.file-editor-panel-close:hover,
-.file-editor-panel-close:focus-visible {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
-}
-.file-editor-panel-close::before,
-.file-editor-panel-close::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 9px;
-  height: 1.5px;
-  border-radius: 999px;
-  background: currentColor;
-}
-.file-editor-panel-close::before {
-  transform: translate(-50%, -50%) rotate(45deg);
-}
-.file-editor-panel-close::after {
-  transform: translate(-50%, -50%) rotate(-45deg);
 }
 .file-editor-panel-body {
   min-height: 0;
