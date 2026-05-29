@@ -4479,6 +4479,17 @@ function paneTabsWithoutFinder(slot, slots = layoutSlots) {
   return paneTabs(slot, slots).filter(item => !isFileExplorerItem(item));
 }
 
+function canPaneExpand(item, slots = layoutSlots) {
+  const targetSlot = slotForItem(item, slots);
+  if (!targetSlot || isFileExplorerItem(activeItemForSide(targetSlot, slots))) return false;
+  if (!activeItemForSide(targetSlot, slots)) return false;
+  return layoutSlotKeys(slots).some(slot => (
+    slot !== targetSlot
+    && !isFileExplorerItem(activeItemForSide(slot, slots))
+    && paneTabsWithoutFinder(slot, slots).length > 0
+  ));
+}
+
 function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
@@ -4516,7 +4527,7 @@ function finderLeadsExpandedPane(finderSlot, targetSlot) {
 
 function expandPaneFromLayout(item) {
   const targetSlot = slotForSession(item);
-  if (!targetSlot || isFileExplorerItem(activeItemForSide(targetSlot))) return;
+  if (!targetSlot || !canPaneExpand(item)) return;
   const active = activeItemForSide(targetSlot);
   if (!active) return;
   const finderSlot = slotForSession(fileExplorerItemId);
@@ -5674,7 +5685,10 @@ function renderPaneTabStrips() {
     const session = activeItemForSide(side);
     if (!session) continue;
     const panel = panelNodes.get(session);
-    if (panel) updatePaneTabStrip(panel, side);
+    if (panel) {
+      updatePaneExpandButton(panel, session);
+      updatePaneTabStrip(panel, side);
+    }
   }
 }
 
@@ -7013,8 +7027,10 @@ function panelControlsHtml(session, options = {}) {
   const minimizeClass = isFiles
     ? `tab pane-close ${platformWindowControlClass('close')}`
     : `tab pane-minimize ${platformWindowControlClass('minimize')}`;
-  const expandAttrs = ` type="button" data-pane-expand="${esc(session)}" title="expand pane" aria-label="Expand pane"`;
-  const expandHtml = isFiles ? '' : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`;
+  const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="expand pane" aria-label="Expand pane"`;
+  const expandHtml = isFiles || disabled
+    ? ''
+    : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`;
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
           <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
@@ -7689,8 +7705,14 @@ function updatePanelSlot(panel, session, slot) {
   panel.dataset.slot = slot;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
+  updatePaneExpandButton(panel, session);
   updatePaneTabStrip(panel, slot);
   updatePanelInactiveOverlays();
+}
+
+function updatePaneExpandButton(panel, session) {
+  const button = panel.querySelector('[data-pane-expand]');
+  if (button) button.hidden = !canPaneExpand(session);
 }
 
 function syncPanelVisibility(previousActive = []) {

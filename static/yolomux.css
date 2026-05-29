@@ -1969,6 +1969,9 @@ body.layout-resizing {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.tabs .tab[hidden] {
+  display: none !important;
+}
 .tmux-window-step {
   flex: 0 0 12px;
   min-width: 12px;

@@ -154,6 +154,7 @@ globalThis.__layoutTestApi = {
   agentErrorIsBlocking,
   appMenuTree,
   backgroundTabItems,
+  canPaneExpand,
   emptyPlaceholderPaneState,
   emptyLayoutSlots,
   fileEditorPaneTabHtml,
@@ -506,6 +507,22 @@ function canonical(value) {
   const pcPaneControls = api.panelControlsHtml('1');
   assert.ok(pcPaneControls.includes('pane-minimize pc-window-control pc-minimize'));
   assert.ok(pcPaneControls.includes('pane-expand pc-window-control pc-zoom'));
+  assert.ok(pcPaneControls.includes('hidden type="button" data-pane-expand="1"'));
+  const expandablePcSlots = api.emptyLayoutSlots();
+  expandablePcSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+  expandablePcSlots.left = api.paneStateWithTabs(['1'], '1');
+  expandablePcSlots.slot1 = api.paneStateWithTabs(['2'], '2');
+  api.setLayoutSlotsForTest(expandablePcSlots);
+  assert.equal(api.canPaneExpand('1'), true);
+  assert.ok(api.panelControlsHtml('1').includes('pane-expand pc-window-control pc-zoom'));
+  assert.equal(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'), false);
+  const placeholderPcSlots = api.emptyLayoutSlots();
+  placeholderPcSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+  placeholderPcSlots.left = api.paneStateWithTabs(['1'], '1');
+  placeholderPcSlots.slot1 = api.emptyPlaceholderPaneState();
+  api.setLayoutSlotsForTest(placeholderPcSlots);
+  assert.equal(api.canPaneExpand('1'), false);
+  assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
 
   const macApi = loadYolomux('', ['1'], 'http:', 'MacIntel');
   assert.equal(macApi.fileExplorerLabel(), 'Finder');
@@ -519,6 +536,7 @@ function canonical(value) {
   assert.ok(macPaneControls.includes('pane-minimize mac-window-control mac-minimize'));
   assert.ok(macPaneControls.includes('data-pane-expand="1"'));
   assert.ok(macPaneControls.includes('pane-expand mac-window-control mac-zoom'));
+  assert.ok(macPaneControls.includes('hidden type="button" data-pane-expand="1"'));
   const macFinderControls = macApi.panelControlsHtml('__files__');
   assert.ok(macFinderControls.includes('data-pane-close="__files__"'));
   assert.ok(macFinderControls.includes('pane-close mac-window-control mac-minimize'));
@@ -535,6 +553,23 @@ function canonical(value) {
   assert.equal(forcedMacApi.platformWindowControlClass('close'), 'mac-window-control mac-minimize');
   assert.equal(forcedMacApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close mac-window-control mac-minimize');
   assert.equal(forcedMacApi.fileEditorPanelCloseClass(), 'file-editor-panel-close mac-window-control mac-minimize');
+
+  const singlePaneUrlApi = loadYolomux('?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant', ['1', '2', '3', '4', '5', '6', 'ant']);
+  assert.deepStrictEqual(Array.from(singlePaneUrlApi.layoutSlotKeys(singlePaneUrlApi.currentSlots())), ['left']);
+  assert.deepStrictEqual(Array.from(singlePaneUrlApi.paneTabs('left')), ['1', '2', '3', '4', '5', '6', 'ant']);
+  assert.equal(singlePaneUrlApi.canPaneExpand('1'), false);
+  assert.ok(singlePaneUrlApi.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+
+  const finderBesideSinglePaneUrlApi = loadYolomux(
+    '?sessions=files,3&layout=row@22(slot1,left)&tabs=slot1:files;left:1,6,5,2,ant,4,3*',
+    ['1', '2', '3', '4', '5', '6', 'ant'],
+  );
+  assert.deepStrictEqual(Array.from(finderBesideSinglePaneUrlApi.layoutSlotKeys(finderBesideSinglePaneUrlApi.currentSlots())), ['slot1', 'left']);
+  assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('slot1'), '__files__');
+  assert.deepStrictEqual(Array.from(finderBesideSinglePaneUrlApi.paneTabs('left')), ['1', '6', '5', '2', 'ant', '4', '3']);
+  assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('left'), '3');
+  assert.equal(finderBesideSinglePaneUrlApi.canPaneExpand('3'), false);
+  assert.ok(finderBesideSinglePaneUrlApi.panelControlsHtml('3').includes('hidden type="button" data-pane-expand="3"'));
 
   const panelForPopover = {
     getBoundingClientRect() {
@@ -807,6 +842,38 @@ function canonical(value) {
     panes: {
       left: {tabs: ['__files__'], active: '__files__'},
       slot2: {tabs: ['2', '1'], active: '2'},
+    },
+  });
+
+  const singlePaneBesideFinder = api.emptyLayoutSlots();
+  singlePaneBesideFinder[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
+  singlePaneBesideFinder.left = api.paneStateWithTabs(['__files__'], '__files__');
+  singlePaneBesideFinder.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(singlePaneBesideFinder);
+  assert.equal(api.canPaneExpand('1'), false);
+  assert.ok(api.panelControlsHtml('1').includes('data-pane-expand'));
+  assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+  api.expandPaneFromLayout('1');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot1: {tabs: ['1'], active: '1'},
+    },
+  });
+
+  const placeholderBesideSinglePane = api.emptyLayoutSlots();
+  placeholderBesideSinglePane[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 40);
+  placeholderBesideSinglePane.left = api.paneStateWithTabs(['1'], '1');
+  placeholderBesideSinglePane.slot1 = api.emptyPlaceholderPaneState();
+  api.setLayoutSlotsForTest(placeholderBesideSinglePane);
+  assert.equal(api.canPaneExpand('1'), false);
+  assert.ok(api.panelControlsHtml('1').includes('hidden type="button" data-pane-expand="1"'));
+  api.expandPaneFromLayout('1');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {slot: 'left'},
+    panes: {
+      left: {tabs: ['1'], active: '1'},
     },
   });
 
