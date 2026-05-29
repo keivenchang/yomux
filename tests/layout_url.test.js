@@ -170,6 +170,7 @@ globalThis.__layoutTestApi = {
   sessionPopoverHtml,
   sessionButtonHtml,
   simpleCodeSyntaxHtml,
+  splitPercentForNewItem,
   setInfoBranchSort,
   showWindowTabDropPreview,
   shouldShowTabListMenu,
@@ -452,6 +453,17 @@ function canonical(value) {
   assert.equal(api.pathRelativeToDirectory('/repo/app', '/repo/app'), '.');
   assert.equal(api.pathRelativeToDirectory('/repo/app/file.txt', '/'), 'repo/app/file.txt');
   assert.equal(api.pathRelativeToDirectory('/other/file.txt', '/repo/app'), '/other/file.txt');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  assert.equal(api.splitPercentForNewItem('1', 'left'), 50);
+  assert.equal(api.splitPercentForNewItem('1', 'right'), 50);
+  assert.equal(api.splitPercentForNewItem('file:/repo/app/TODO.md', 'left'), 50);
+  assert.equal(api.splitPercentForNewItem('file:/repo/app/TODO.md', 'right'), 50);
+  assert.equal(api.splitPercentForNewItem('file:/repo/app/TODO.md', 'right', 42), 42);
+  assert.equal(api.splitPercentForNewItem('__files__', 'left'), 22);
+  assert.equal(api.splitPercentForNewItem('__files__', 'right'), 78);
 }
 
 {

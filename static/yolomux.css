@@ -39,6 +39,17 @@
   --tab-font: var(--control-font);
   --tab-label-size: 13px;
   --tab-line-height: 1;
+  --topbar-height: 38px;
+  --top-session-tab-min-width: 260px;
+  --top-session-tab-max-width: 260px;
+  --top-info-tab-min-width: 92px;
+  --top-info-tab-max-width: 116px;
+  --top-file-editor-tab-min-width: 260px;
+  --top-file-editor-tab-max-width: 260px;
+  --top-add-tab-width: 42px;
+  --window-session-tab-width: 154px;
+  --window-file-editor-tab-width: 154px;
+  --window-file-explorer-tab-width: 68px;
   --red-reminder-duration: 1.55s;
   --red-reminder-easing: ease-in-out;
   --yolo-reminder-duration: 2.8s;
@@ -64,13 +75,13 @@ body {
   z-index: 60;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
+  align-items: start;
   gap: 8px;
   padding: 3px 8px;
   border-bottom: 1px solid var(--line);
   background: #0b0d11;
-  overflow: hidden;
-  white-space: nowrap;
+  overflow: visible;
+  white-space: normal;
 }
 .title {
   font-size: 15px;
@@ -85,6 +96,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding-top: 1px;
 }
 .brand {
   min-width: 92px;
@@ -113,7 +125,7 @@ body {
 .transport-warning::after {
   content: attr(data-tip);
   position: fixed;
-  top: 36px;
+  top: calc(var(--topbar-height) - 2px);
   left: 8px;
   z-index: 160;
   width: min(520px, calc(100vw - 16px));
@@ -141,6 +153,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding-top: 1px;
 }
 .actions button {
   width: 32px;
@@ -225,57 +238,14 @@ body {
   min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
-  flex-wrap: nowrap;
+  align-content: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   gap: 4px;
   height: auto;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: visible;
   padding-bottom: 0;
   scrollbar-width: none;
-}
-.session-buttons.tabs-overflowing > .session-button-wrap > .session-button,
-.window-session-tabs.tabs-overflowing > .window-session-tab {
-  gap: 2px;
-}
-.session-buttons.tabs-overflowing .session-button-wrap {
-  min-width: 0;
-}
-.session-buttons.tabs-overflowing .session-button-wrap.info {
-  min-width: 0;
-}
-/* When tabs overflow, keep status badges (YO, MAIN, PR) visible — they are the
-   whole point of glancing at the tab strip. Hide only the wordy description
-   span; the strip already has overflow-x: auto for horizontal scroll. */
-.session-buttons.tabs-overflowing > .session-button-wrap > .session-button .session-button-dir,
-.window-session-tabs.tabs-overflowing > .window-session-tab .session-button-dir {
-  display: none;
-}
-.session-buttons.tabs-overflowing > .session-button-wrap.file-editor-item > .session-button .session-button-dir,
-.window-session-tabs.tabs-overflowing > .window-session-tab.file-editor-item .session-button-dir {
-  display: inline-block;
-}
-.session-buttons.tabs-overflowing > .session-button-wrap > .session-button.add-session > span:last-child {
-  display: none;
-}
-.session-buttons.tabs-overflowing > .session-button-wrap > .session-button.add-session.file > span:last-child {
-  display: inline-flex;
-}
-.window-session-tabs.tabs-overflowing > .window-session-tab .window-tab-close {
-  display: none;
-}
-.window-session-tabs.tabs-overflowing > .window-session-tab.file-editor-item .window-tab-close {
-  display: inline-flex;
-}
-.window-session-tabs.tabs-overflowing > .window-session-tab {
-  flex: 0 0 auto;
-  min-width: 112px;
-}
-.window-session-tabs.tabs-overflowing > .window-session-tab.file-editor-item {
-  min-width: 118px;
-}
-.window-session-tabs.tabs-overflowing > .window-session-tab.file-explorer {
-  min-width: 62px;
 }
 .session-buttons::-webkit-scrollbar {
   display: none;
@@ -292,24 +262,23 @@ body {
 }
 .session-button-wrap {
   position: relative;
-  flex: 0 1 auto;
-  width: auto;
-  min-width: 44px;
-  max-width: 180px;
+  flex: 0 0 auto;
+  width: max-content;
+  min-width: var(--top-session-tab-min-width);
+  max-width: var(--top-session-tab-max-width);
 }
 .session-button-wrap.info {
-  flex-basis: auto;
-  min-width: 44px;
-  max-width: 116px;
+  min-width: var(--top-info-tab-min-width);
+  max-width: var(--top-info-tab-max-width);
 }
 .session-button-wrap.add-session {
-  flex: 0 1 auto;
-  min-width: 38px;
-  max-width: 72px;
+  flex: 0 0 var(--top-add-tab-width);
+  min-width: var(--top-add-tab-width);
+  max-width: var(--top-add-tab-width);
 }
 .session-button-wrap.file-editor-item {
-  min-width: 72px;
-  max-width: 210px;
+  min-width: var(--top-file-editor-tab-min-width);
+  max-width: var(--top-file-editor-tab-max-width);
 }
 .tab-list-menu-wrap {
   position: relative;
@@ -318,6 +287,12 @@ body {
 }
 .session-buttons > .tab-list-menu-wrap {
   max-width: 28px;
+}
+.session-buttons > #tabMetaToggle {
+  flex: 0 0 32px;
+  width: 32px;
+  min-width: 32px;
+  max-width: 32px;
 }
 .window-session-tabs > .tab-list-menu-wrap {
   align-self: flex-end;
@@ -1409,7 +1384,7 @@ body.layout-resizing {
   min-height: 30px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  align-items: start;
   gap: 5px;
   padding: 3px 6px 0 7px;
   border-bottom: 1px solid var(--line);
@@ -1667,9 +1642,11 @@ body.layout-resizing {
   align-self: end;
   display: flex;
   align-items: flex-end;
+  align-content: flex-end;
+  flex-wrap: wrap;
   gap: 3px;
   padding: 0;
-  overflow-x: auto;
+  overflow: visible;
   scrollbar-width: none;
 }
 .window-session-tabs::-webkit-scrollbar {
@@ -1704,9 +1681,9 @@ body.layout-resizing {
   box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.25), 0 0 12px rgba(245, 197, 66, 0.82);
 }
 .window-session-tab {
-  flex: 1 1 0;
-  min-width: 104px;
-  max-width: 260px;
+  flex: 0 0 min(var(--window-session-tab-width), 100%);
+  min-width: min(118px, 100%);
+  max-width: var(--window-session-tab-width);
   height: 27px;
   display: inline-flex;
   align-items: center;
@@ -2483,14 +2460,12 @@ body.layout-resizing {
     min-width: 82px;
   }
   .session-button-wrap {
-    flex-basis: auto;
-    min-width: 38px;
-    max-width: 142px;
+    min-width: var(--top-session-tab-min-width);
+    max-width: var(--top-session-tab-max-width);
   }
   .session-button-wrap.info {
-    flex-basis: auto;
-    min-width: 38px;
-    max-width: 86px;
+    min-width: var(--top-info-tab-min-width);
+    max-width: var(--top-info-tab-max-width);
   }
   .session-button {
     gap: 3px;
@@ -2500,7 +2475,7 @@ body.layout-resizing {
     gap: 3px;
   }
   .session-buttons .session-button-dir {
-    max-width: 52px;
+    max-width: 86px;
   }
   .actions {
     gap: 4px;
@@ -2512,20 +2487,19 @@ body.layout-resizing {
     justify-content: flex-start;
   }
   .session-button-wrap {
-    flex-basis: auto;
-    min-width: 32px;
-    max-width: 94px;
+    min-width: var(--top-session-tab-min-width);
+    max-width: var(--top-session-tab-max-width);
   }
   .session-button-wrap.add-session {
-    flex-basis: auto;
-    min-width: 34px;
-    max-width: 48px;
+    flex-basis: var(--top-add-tab-width);
+    min-width: var(--top-add-tab-width);
+    max-width: var(--top-add-tab-width);
   }
   .session-buttons .session-button-dir {
-    display: none;
+    display: inline-block;
   }
   .session-buttons .session-button-text {
-    flex: 0 1 auto;
+    flex: 1 1 auto;
   }
   .latency-meter {
     min-width: 62px;
@@ -2549,20 +2523,19 @@ body.layout-resizing {
     font-size: 13px;
   }
   .session-button-wrap {
-    flex-basis: auto;
-    min-width: 28px;
-    max-width: 68px;
+    min-width: var(--top-session-tab-min-width);
+    max-width: var(--top-session-tab-max-width);
   }
   .session-button-wrap.add-session {
-    flex-basis: auto;
-    min-width: 30px;
-    max-width: 34px;
+    flex-basis: var(--top-add-tab-width);
+    min-width: var(--top-add-tab-width);
+    max-width: var(--top-add-tab-width);
   }
   .session-button.add-session > span:last-child {
     display: none;
   }
   .session-buttons .session-button-text {
-    display: none;
+    display: inline-flex;
   }
   .session-yolo-marker {
     min-width: 18px;
@@ -2590,7 +2563,7 @@ body.layout-resizing {
 @media (max-width: 980px) {
   .topbar {
     grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
+    align-items: start;
   }
   .actions { flex-wrap: nowrap; }
   .panel-head {
@@ -2608,7 +2581,7 @@ body.layout-resizing {
    Tall left-edge panel; the editor pane will sit to its right in Phase 3. */
 .file-explorer {
   position: fixed;
-  top: 38px;
+  top: var(--topbar-height);
   bottom: 0;
   left: 0;
   width: 340px;
@@ -3490,9 +3463,9 @@ body.file-editor-open .file-explorer {
   border-color: rgba(120, 180, 255, 0.4);
 }
 .window-session-tab.file-explorer {
-  flex: 0 0 auto;
-  min-width: 68px;
-  max-width: 82px;
+  flex: 0 0 var(--window-file-explorer-tab-width);
+  min-width: var(--window-file-explorer-tab-width);
+  max-width: var(--window-file-explorer-tab-width);
   padding-inline: 8px;
 }
 .window-session-tab.file-explorer .window-tab-core {
@@ -3505,7 +3478,7 @@ body.file-editor-open .file-explorer {
   max-width: none;
 }
 .window-session-tab.file-editor-item {
-  flex: 0 0 154px;
-  min-width: 118px;
-  max-width: 154px;
+  flex-basis: min(var(--window-file-editor-tab-width), 100%);
+  min-width: min(118px, 100%);
+  max-width: var(--window-file-editor-tab-width);
 }

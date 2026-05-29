@@ -8,6 +8,7 @@ const serverHostname = bootstrap.serverHostname;
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
 const sessionButtons = document.getElementById('sessionButtons');
+const topbar = sessionButtons?.closest?.('.topbar') || null;
 const statusEl = document.getElementById('status');
 const attentionAlerts = document.getElementById('attentionAlerts');
 const latencyMeter = document.getElementById('latencyMeter');
@@ -109,7 +110,6 @@ const minSplitPaneWidthPx = 320;
 const minSplitPaneHeightPx = 220;
 const defaultSplitPercent = 50;
 const fileExplorerSplitPercent = 22;
-const fileEditorSplitPercent = 42;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
@@ -172,6 +172,7 @@ let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
 let layoutResizeState = null;
 let responsiveLayoutPruneTimer = null;
+let topbarResizeObserver = null;
 let latencySamples = [];
 let tabMetaVisible = readStoredTabMetaVisible();
 let authRedirectStarted = false;
@@ -230,6 +231,7 @@ function toggleTabMetadata() {
   tabMetaVisible = !tabMetaVisible;
   writeStoredTabMetaVisible(tabMetaVisible);
   renderTabMetaToggle();
+  scheduleTopbarMetricsUpdate();
 }
 
 function setFocusedTerminal(session) {
@@ -610,6 +612,7 @@ function splitNode(direction, first, second, pct = defaultSplitPercent) {
 }
 
 function splitPercent(value) {
+  if (value === null || value === undefined || value === '') return defaultSplitPercent;
   const number = Number(value);
   if (!Number.isFinite(number)) return defaultSplitPercent;
   return Math.min(maxSplitPercent, Math.max(minSplitPercent, number));
@@ -1664,8 +1667,30 @@ function maybeNotifyState(session, state, options = {}) {
   }
 }
 
+function updateTopbarMetrics() {
+  if (!topbar) return;
+  const height = Math.ceil(topbar.getBoundingClientRect().height || 38);
+  document.documentElement?.style?.setProperty('--topbar-height', `${height}px`);
+}
+
+function scheduleTopbarMetricsUpdate() {
+  requestAnimationFrame(updateTopbarMetrics);
+}
+
+function bindTopbarMetrics() {
+  updateTopbarMetrics();
+  if (topbarResizeObserver || !topbar || !window.ResizeObserver) return;
+  topbarResizeObserver = new ResizeObserver(updateTopbarMetrics);
+  topbarResizeObserver.observe(topbar);
+}
+
 function scheduleTabStripOverflowCheck(strip) {
   if (!strip) return;
+  if (strip === sessionButtons || strip.classList?.contains('window-session-tabs')) {
+    strip.classList.remove('tabs-overflowing');
+    scheduleTopbarMetricsUpdate();
+    return;
+  }
   strip.classList.remove('tabs-overflowing');
   requestAnimationFrame(() => {
     strip.classList.toggle('tabs-overflowing', strip.scrollWidth > strip.clientWidth + 1);
@@ -2355,7 +2380,7 @@ async function openFileEditorWindow(path) {
   const targetSlot = layoutSlotKeys().find(slot => slot !== filesSlot) || filesSlot;
   if (targetSlot) {
     const zone = targetSlot === filesSlot ? 'right' : 'left';
-    const pct = targetSlot === filesSlot ? fileExplorerSplitPercent : fileEditorSplitPercent;
+    const pct = targetSlot === filesSlot ? fileExplorerSplitPercent : defaultSplitPercent;
     await splitSessionAtSlot(item, targetSlot, zone, null, pct);
     return;
   }
@@ -3697,12 +3722,9 @@ async function dropSessionWithIntent(session, intent, sourceSlot = null) {
 }
 
 function splitPercentForNewItem(session, zone, pct = null) {
-  if (Number.isFinite(Number(pct))) return pct;
+  if (pct !== null && pct !== undefined && pct !== '' && Number.isFinite(Number(pct))) return Number(pct);
   if (isFileExplorerItem(session) && (zone === 'left' || zone === 'right')) {
     return zone === 'left' ? fileExplorerSplitPercent : 100 - fileExplorerSplitPercent;
-  }
-  if (isFileEditorItem(session) && (zone === 'left' || zone === 'right')) {
-    return zone === 'left' ? fileEditorSplitPercent : 100 - fileEditorSplitPercent;
   }
   return defaultSplitPercent;
 }
@@ -7180,6 +7202,7 @@ function refreshAll() {
 async function boot() {
   renderTransportWarning();
   renderTabMetaToggle();
+  bindTopbarMetrics();
   syncInitialLayoutUrl();
   statusEl.textContent = 'loading YOLO status...';
   await loadNotifyStatus();
