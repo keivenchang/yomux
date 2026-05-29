@@ -105,8 +105,9 @@ const menuHoverOpenDelayMs = 800;
 const menuHoverCloseDelayMs = hoverCloseDelayMs;
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
-const terminalWheelScrollLines = 3;
 const terminalWheelPageFraction = 0.85;
+const terminalWheelPixelLinePx = 35;
+const terminalWheelMaxLinesPerEvent = 12;
 const maxSessionTabs = bootstrap.maxSessionTabs;
 const basePaneKeys = ['left', 'right'];
 const splitPaneKeys = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'];
@@ -5223,20 +5224,36 @@ function observeTerminalResize(session, container) {
 
 function enableTerminalScroll(session, term, container) {
   container.addEventListener('wheel', event => {
-    if (event.deltaY === 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const direction = event.deltaY < 0 ? -1 : 1;
-    const amount = event.shiftKey
-      ? Math.max(1, Math.floor(term.rows * terminalWheelPageFraction))
-      : terminalWheelScrollLines;
-    const item = terminals.get(session);
-    if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
-      queueTmuxScroll(item, direction * amount);
+    if (event.ctrlKey && event.deltaY !== 0) {
+      event.preventDefault();
+      event.stopPropagation();
       return;
     }
-    term.scrollLines(direction * amount);
+    const signedLines = terminalWheelSignedLines(event, term.rows);
+    if (!signedLines) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const item = terminals.get(session);
+    if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
+      queueTmuxScroll(item, signedLines);
+      return;
+    }
+    queueLocalTerminalScroll(term, signedLines);
   }, {capture: true, passive: false});
+}
+
+function terminalWheelSignedLines(event, rows = 0) {
+  const deltaY = Number(event?.deltaY);
+  if (!Number.isFinite(deltaY) || deltaY === 0 || event?.ctrlKey) return 0;
+  const direction = deltaY < 0 ? -1 : 1;
+  const pageLines = Math.max(1, Math.floor((Number(rows) || 0) * terminalWheelPageFraction));
+  if (event?.shiftKey) return direction * pageLines;
+  const magnitude = Math.abs(deltaY);
+  let lines;
+  if (event?.deltaMode === 1) lines = magnitude;
+  else if (event?.deltaMode === 2) lines = magnitude * pageLines;
+  else lines = magnitude / terminalWheelPixelLinePx;
+  return direction * Math.min(terminalWheelMaxLinesPerEvent, lines);
 }
 
 function queueTmuxScroll(item, signedLines) {
@@ -5250,6 +5267,20 @@ function queueTmuxScroll(item, signedLines) {
     const direction = signed < 0 ? 'up' : 'down';
     const lines = Math.max(1, Math.min(80, Math.ceil(Math.abs(signed))));
     item.socket.send(JSON.stringify({type: 'tmux-scroll', direction, lines}));
+  }, 30);
+}
+
+function queueLocalTerminalScroll(term, signedLines) {
+  term.pendingWheelScrollLines = (term.pendingWheelScrollLines || 0) + signedLines;
+  if (term.wheelScrollTimer) return;
+  term.wheelScrollTimer = setTimeout(() => {
+    term.wheelScrollTimer = null;
+    const signed = term.pendingWheelScrollLines || 0;
+    term.pendingWheelScrollLines = 0;
+    if (!signed) return;
+    const direction = signed < 0 ? -1 : 1;
+    const lines = Math.max(1, Math.min(80, Math.ceil(Math.abs(signed))));
+    term.scrollLines(direction * lines);
   }, 30);
 }
 

@@ -218,6 +218,7 @@ globalThis.__layoutTestApi = {
   startSessionDrag,
   syncInitialLayoutUrl,
   tabMenuDetailText,
+  terminalWheelSignedLines,
   terminalWrappedLineLinks,
   splitNode,
   splitSessionAtSlot,
@@ -1031,6 +1032,19 @@ function canonical(value) {
   assert.equal(api.editorWrapValue(false), 'off');
   assert.equal(api.editorWrapValue(true), 'soft');
   assert.equal(api.rawFileDownloadUrl('/repo/app/a b.txt'), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&download=1');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const pixelWheel = api.terminalWheelSignedLines({deltaY: 105, deltaMode: 0}, 40);
+  assert.ok(pixelWheel > 2.5 && pixelWheel < 3.5, 'mouse-like pixel wheel remains about three lines');
+  const touchpadTick = api.terminalWheelSignedLines({deltaY: 4, deltaMode: 0}, 40);
+  assert.ok(touchpadTick > 0 && touchpadTick < 0.2, 'small touchpad pixel deltas accumulate as fractions');
+  assert.equal(api.terminalWheelSignedLines({deltaY: -3, deltaMode: 1}, 40), -3);
+  assert.equal(api.terminalWheelSignedLines({deltaY: 1, deltaMode: 2}, 40), 12);
+  assert.equal(api.terminalWheelSignedLines({deltaY: 999, deltaMode: 0}, 40), 12);
+  assert.equal(api.terminalWheelSignedLines({deltaY: 4, deltaMode: 0, ctrlKey: true}, 40), 0);
+  assert.equal(api.terminalWheelSignedLines({deltaY: 4, deltaMode: 0, shiftKey: true}, 40), 34);
 }
 
 {
