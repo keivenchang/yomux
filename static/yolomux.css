@@ -307,6 +307,19 @@ body {
   font: 600 13px/1 var(--ui-font);
   white-space: nowrap;
 }
+.app-menu-button-badge {
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  color: #071000;
+  background: var(--brand-green);
+  border: 1px solid #b8ee5c;
+  border-radius: 999px;
+  font: 800 10px/1 var(--mono-font);
+}
 .app-menu-button::after {
   content: "";
   width: 0;

@@ -43,6 +43,7 @@ The `YO` button toggles YOLO auto-approval for a tmux session. It watches the vi
 
 - The menu bar contains `File`, `View`, `Tmux`, `Tab`, `Settings`, and `Help`. `File` opens the File Explorer / Finder and logout flow; `Tmux` creates and manages tmux sessions; `Tab` navigates active, minimized, and inactive tabs.
 - The `Tab` menu groups tabs into **Active** (bright green, shown in panes), **Minimized** (in a pane's tab stack but not shown), and **Inactive** (not assigned to any pane).
+- The `Tmux` menu shows a small count badge when YOLO is enabled for one or more sessions; its YOLO sessions submenu lists sessions and lets you toggle each one.
 - By default YOLOmux shows existing tmux sessions, capped at nine visible session tabs (`1`–`9`). It does not create default `yolomuxN` sessions.
 - `+ Claude` / `+ Codex` create the next numbered tmux session with that agent (e.g. `7` when six exist). Each appears only when that CLI is on the server `PATH`; if neither is, YOLOmux shows `+ Term` and creates a plain shell session.
 - Each session tab has its own `YO` button, status badges, session label, compact work description, and hide button.

@@ -143,7 +143,7 @@ Cross-cutting requirements for all menus:
 - [ ] Add an approval queue view for pending high-risk actions. Start read-only first if live interception is hard.
 - [ ] Add per-session YOLO policy. Initial modes: `off`, `prompt-only`, `safe`, `edit`, `full`. Make policy visible on the tmux-session YOLO control.
 - [ ] Risk labels should be boring and concrete: `read`, `edit`, `network`, `process`, `delete`, `credential`, `unknown`.
-- [ ] Replace the unhelpful top-right `YOLO on: 6` status string. A bare count is not actionable and does not say WHICH sessions are auto-approving. Move YOLO state to two better surfaces: (1) per-session — a small YOLO indicator on each session's badge/row (top bar + Tab menu) so you can see exactly which sessions have auto-approve on; (2) global — fold the count into Tmux as a badge/list, and clicking it lists/toggles the enabled sessions. Then drop the standalone red `YOLO on: N` text from the top-right cluster.
+- [x] Replace the unhelpful top-right `YOLO on: 6` status string. YOLO state now lives on the per-session `YO` markers and the Tmux menu: the menu shows a small enabled-session count badge and includes a YOLO sessions submenu for toggling sessions. The top-right status now reports the action as `enabled YOLO for <session>` / `disabled YOLO for <session>` instead of the old red `YOLO on: N` string.
 
 ### P1: YOLO Rule Engine (user-configurable matching via YAML)
 

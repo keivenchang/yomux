@@ -689,8 +689,18 @@ function canonical(value) {
   assert.ok(tmuxMenuLabels.includes('Kill session'));
   assert.ok(tmuxMenuLabels.includes("Enable YOLO for Tmux Session '1'"));
   assert.ok(tmuxMenuLabels.includes('Resume session'));
+  assert.equal(tmuxMenu.badgeText, '');
+  assert.ok(tmuxMenuLabels.includes('YOLO sessions'));
   assert.equal(tmuxMenu.items.find(item => item.label === 'Rename session').disabled, false);
   assert.equal(tmuxMenu.items.find(item => item.label === 'Rename session').detail, '');
+  api.setAutoApproveStateForTest('1', {enabled: true});
+  const yoloTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
+  assert.equal(yoloTmuxMenu.badgeText, '1');
+  assert.equal(yoloTmuxMenu.badgeTitle, '1 tmux session with YOLO enabled');
+  const yoloSubmenu = yoloTmuxMenu.items.find(item => item.label === 'YOLO sessions (1)');
+  assert.equal(yoloSubmenu.type, 'submenu');
+  assert.equal(yoloSubmenu.items.find(item => item.label === '1 on').checked, true);
+  api.setAutoApproveStateForTest('1', {enabled: false});
   assert.equal(api.currentSessionActionTarget(), '1');
   const filesOnlySlots = api.emptyLayoutSlots();
   filesOnlySlots[api.layoutTreeKey] = api.leafNode('left');

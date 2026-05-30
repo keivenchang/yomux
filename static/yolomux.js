@@ -1594,6 +1594,10 @@ function autoApproveEnabledForSession(payload) {
   return autoApproveEnabledHere(payload) || autoApproveEnabledElsewhere(payload);
 }
 
+function yoloEnabledSessions() {
+  return sessions.filter(session => autoApproveEnabledHere(autoApproveStates.get(session)));
+}
+
 function autoApproveScreenIsWorking(payload) {
   return String(payload?.screen?.key || '') === 'working';
 }
@@ -2257,6 +2261,30 @@ function tmuxSessionActionCommands(session, options = {}) {
   return commands;
 }
 
+function tmuxYoloSessionCommands() {
+  const ordered = [
+    ...sessions.filter(session => autoApproveEnabledHere(autoApproveStates.get(session))),
+    ...sessions.filter(session => !autoApproveEnabledHere(autoApproveStates.get(session))),
+  ];
+  if (!ordered.length) return [menuCommand('No tmux sessions', null, {disabled: true})];
+  return ordered.map(session => {
+    const payload = autoApproveStates.get(session);
+    const enabled = autoApproveEnabledHere(payload);
+    const elsewhere = autoApproveEnabledElsewhere(payload);
+    const label = `${sessionLabel(session)}${enabled ? ' on' : ''}`;
+    return menuCommand(label, async () => {
+      await setAutoApprove(session, !enabled);
+      renderSessionButtons({force: true});
+      renderPaneTabStrips();
+    }, {
+      checked: enabled,
+      disabled: readOnlyMode,
+      detail: elsewhere ? 'owned by another server' : (enabled ? 'YOLO enabled here' : 'YOLO off'),
+      ariaLabel: `${enabled ? 'Disable' : 'Enable'} YOLO for ${sessionLabel(session)}`,
+    });
+  });
+}
+
 function tmuxSessionViewCommands(session) {
   const hasSession = isTmuxSession(session);
   const active = hasSession && activeSessions.includes(session);
@@ -2347,6 +2375,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const openItems = orderedPaneItems(activePaneItems());
+  const yoloCount = yoloEnabledSessions().length;
   return [
     {
       id: 'file',
@@ -2388,8 +2417,11 @@ function appMenuTree() {
     {
       id: 'tmux',
       label: 'Tmux',
+      badgeText: yoloCount ? String(yoloCount) : '',
+      badgeTitle: yoloCount ? `${yoloCount} tmux session${yoloCount === 1 ? '' : 's'} with YOLO enabled` : '',
       items: [
         menuSubmenu('New tmux session', newTmuxSessionItems()),
+        menuSubmenu(`YOLO sessions${yoloCount ? ` (${yoloCount})` : ''}`, tmuxYoloSessionCommands()),
         menuSeparator(),
         ...tmuxSessionViewCommands(activeTmux),
         menuSeparator(),
@@ -2564,7 +2596,7 @@ function createAppMenu(menu) {
   button.setAttribute('aria-haspopup', 'true');
   button.setAttribute('aria-expanded', openAppMenuId === menu.id ? 'true' : 'false');
   button.setAttribute('role', 'menuitem');
-  button.textContent = menu.label;
+  button.innerHTML = `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`;
   const popover = document.createElement('div');
   popover.className = 'app-menu-popover';
   popover.setAttribute('role', 'menu');
@@ -8925,8 +8957,8 @@ async function setAutoApprove(session, enabled) {
     updateSessionButtonStates();
     renderAutoApproveButton(session, payload);
     statusEl.innerHTML = payload.enabled
-      ? `<span class="err">YOLO on: ${esc(sessionLabel(session))}</span>`
-      : `<span class="ok">YOLO off: ${esc(sessionLabel(session))}</span>`;
+      ? `<span class="ok">enabled YOLO for ${esc(sessionLabel(session))}</span>`
+      : `<span class="ok">disabled YOLO for ${esc(sessionLabel(session))}</span>`;
   } catch (error) {
     statusEl.innerHTML = `<span class="err">YOLO request failed: ${esc(error)}</span>`;
   }
