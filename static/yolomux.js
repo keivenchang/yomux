@@ -3222,8 +3222,13 @@ function renderTreeChildren(container, parentPath, entries, depth) {
   }
 }
 
-function rawFileUrl(path) {
-  return `/api/fs/raw?path=${encodeURIComponent(path)}`;
+function rawFileUrl(path, params = {}) {
+  const queryParts = [`path=${encodeURIComponent(path)}`];
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null || value === undefined || value === '') continue;
+    queryParts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+  }
+  return `/api/fs/raw?${queryParts.join('&')}`;
 }
 
 function closeFileImagePreview() {
@@ -3451,7 +3456,7 @@ async function copyFilePath(path, label, options = {}) {
 }
 
 function rawFileDownloadUrl(path) {
-  return `/api/fs/raw?path=${encodeURIComponent(path)}&download=1`;
+  return rawFileUrl(path, {download: 1});
 }
 
 function triggerFileDownload(path) {
@@ -4156,7 +4161,7 @@ function renderEditorForActive() {
     const img = document.createElement('img');
     img.className = 'file-editor-image';
     const version = state.mtime || state.size || 0;
-    img.src = `/api/fs/raw?path=${encodeURIComponent(activeFile)}&v=${encodeURIComponent(version)}`;
+    img.src = rawFileUrl(activeFile, {v: version});
     img.alt = activeFile;
     img.onload = () => setEditorStatus(`${img.naturalWidth}×${img.naturalHeight}`, '');
     img.onerror = () => setEditorStatus('failed to load image', 'error');
@@ -4189,17 +4194,7 @@ function renderEditorForActive() {
 
 function renderMarkdownPreview(text) {
   if (!fileEditorPreviewPane) return;
-  if (typeof window.marked === 'undefined') {
-    fileEditorPreviewPane.textContent = 'marked.js not loaded (offline CDN?)';
-    return;
-  }
-  const html = window.marked.parse(text, { gfm: true, breaks: true });
-  fileEditorPreviewPane.innerHTML = html;
-  if (typeof window.hljs !== 'undefined') {
-    fileEditorPreviewPane.querySelectorAll('pre code').forEach(block => {
-      try { window.hljs.highlightElement(block); } catch (_) {}
-    });
-  }
+  renderMarkdownPreviewInto(fileEditorPreviewPane, text);
 }
 
 function editorWrapValue(enabled = fileEditorWrapEnabled) {
@@ -5041,7 +5036,7 @@ function startFileDragPreview(event, paths, entry) {
 function fileDragPreviewMedia(path, entry) {
   const kind = entry?.kind || 'file';
   if (kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(path))) {
-    return `<img class="file-drag-thumb" src="/api/fs/raw?path=${encodeURIComponent(path)}" alt="">`;
+    return `<img class="file-drag-thumb" src="${rawFileUrl(path)}" alt="">`;
   }
   const icon = kind === 'dir' ? '▸' : '📄';
   return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
@@ -7536,7 +7531,7 @@ function renderFileEditorPanel(panel, item) {
       const img = document.createElement('img');
       img.className = 'file-editor-image';
       const version = state.mtime || state.size || 0;
-      img.src = `/api/fs/raw?path=${encodeURIComponent(path)}&v=${encodeURIComponent(version)}`;
+      img.src = rawFileUrl(path, {v: version});
       img.alt = path;
       applyFileEditorImageMode(imagePane, img, path);
       img.addEventListener('click', () => {

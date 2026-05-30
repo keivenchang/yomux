@@ -219,6 +219,7 @@ globalThis.__layoutTestApi = {
   fileEntryChanged,
   pullRequestStatusLabel,
   renderTransportWarning,
+  rawFileUrl,
   rawFileDownloadUrl,
   registerFileEditorLayoutItem,
   minimizePaneFromLayout,
@@ -1229,6 +1230,7 @@ function canonical(value) {
   const api = loadYolomux('', ['1']);
   assert.equal(api.editorWrapValue(false), 'off');
   assert.equal(api.editorWrapValue(true), 'soft');
+  assert.equal(api.rawFileUrl('/repo/app/a b.txt', {v: 7}), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&v=7');
   assert.equal(api.rawFileDownloadUrl('/repo/app/a b.txt'), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&download=1');
 }
 

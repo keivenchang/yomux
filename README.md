@@ -41,6 +41,7 @@ The `YO` button toggles YOLO auto-approval for a tmux session. It watches the vi
 
 ## UI features
 
+- The menu bar contains `File`, `View`, `Tmux`, `Tab`, `Settings`, and `Help`. `File` opens the File Explorer / Finder and logout flow; `Tmux` creates and manages tmux sessions; `Tab` navigates active, minimized, and inactive tabs.
 - The `Tab` menu groups tabs into **Active** (bright green, shown in panes), **Minimized** (in a pane's tab stack but not shown), and **Inactive** (not assigned to any pane).
 - By default YOLOmux shows existing tmux sessions, capped at nine visible session tabs (`1`–`9`). It does not create default `yolomuxN` sessions.
 - `+ Claude` / `+ Codex` create the next numbered tmux session with that agent (e.g. `7` when six exist). Each appears only when that CLI is on the server `PATH`; if neither is, YOLOmux shows `+ Term` and creates a plain shell session.
@@ -49,6 +50,16 @@ The `YO` button toggles YOLO auto-approval for a tmux session. It watches the vi
 - Mouse-wheel scrolling in a terminal sends tmux copy-mode scroll commands instead of scrolling the AI input area.
 - Browser resize fits xterm immediately; the tmux resize is debounced until the resize settles.
 - The pane window-control buttons (minimize / zoom / close) auto-detect your OS: macOS browsers get Mac traffic-light style, everything else (Windows, Linux) gets PC style. To force one, add a URL parameter: `?platform=pc` (also `win` / `windows` / `linux`) or `?platform=mac` (also `macos` / `darwin`) — for example `http://localhost:9998/?platform=pc`.
+
+## Files and editors
+
+Open `File` -> `File Explorer` (`Finder` on macOS) to browse the server filesystem. The root path field is editable: press Enter to jump to a typed path, use Escape to revert, and use the copy button to copy the current root path.
+
+Clicking a file opens it as a tab in the largest available pane, reusing an existing editor pane when one is already open. Text files can be edited and saved; Markdown can be previewed; Markdown, shell, Python, JavaScript/TypeScript, Rust, JSON, HTML/XML/SVG, CSS, TOML, and YAML get lightweight syntax coloring. Files over the configured raw-read cap show a too-large state instead of loading into the editor.
+
+Images open in the same tab system. Small images render at their original size; large images fit the available pane. Click the image to toggle between fit mode and original-size scroll mode.
+
+Right-click a file or directory for file actions: copy the full path, copy the raw path, copy a repo-relative path when one exists, download files, rename, or delete. Shift-click selects a range; Ctrl/Cmd-click toggles individual rows. Dragging file rows into terminals sends the shell-quoted path text.
 
 ## Running it
 
