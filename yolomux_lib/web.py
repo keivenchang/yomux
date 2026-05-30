@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .core import *
 from .settings import settings_payload
+from .yolo_rules import rules_status
 
 
 STATIC_CONTENT_TYPES = {
@@ -69,6 +70,7 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
         "version": YOLOMUX_VERSION,
         "versionCommitTime": yolomux_commit_time_pt(),
         "settingsPayload": settings_payload(),
+        "yoloRulesPayload": rules_status(),
     }
     bootstrap_json = html.escape(json.dumps(bootstrap, separators=(",", ":")), quote=False)
     return f"""<!doctype html>

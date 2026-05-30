@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from . import yolo_rules
 from .common import *
 
 
@@ -102,10 +103,18 @@ class AutoApproveProcessLock:
 
 
 class AutoApproveWorker:
-    def __init__(self, target: str, interval: float = 0.5, event_callback: Any = None, owner_extra: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        target: str,
+        interval: float = 0.5,
+        event_callback: Any = None,
+        owner_extra: dict[str, Any] | None = None,
+        dangerously_yolo: bool = False,
+    ):
         self.target = target
         self.interval = interval
         self.event_callback = event_callback
+        self.dangerously_yolo = dangerously_yolo
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name=f"auto-approve-{target}", daemon=True)
         self.lock = threading.Lock()
@@ -251,38 +260,66 @@ class AutoApproveWorker:
 
     def handle_bash_prompt(self, module: Any, pane_text: str, current_hash: str, action: str | None) -> bool:
         cmd = module.extract_command(pane_text)
-        if cmd is not None and module.is_dangerous(cmd):
+        desc = "bash command" if cmd is None else truncate_text(cmd, 180)
+        decision = yolo_rules.evaluate(cmd or "", "bash", "", self.target, dangerously_yolo=self.dangerously_yolo)
+        rule_action = decision.get("action") if isinstance(decision.get("action"), str) else "ask"
+        if rule_action not in yolo_rules.RULE_ACTIONS:
+            rule_action = "ask"
+        details = {
+            "command": truncate_text(cmd, 1000) if cmd else None,
+            "prompt_type": "bash",
+            "action": rule_action,
+            "rule_name": decision.get("rule_name") or "unknown",
+            "risk": decision.get("risk") or "unknown",
+            "ruleset_source": decision.get("source") or "",
+            "ruleset_path": decision.get("path") or "",
+            "dry_run": decision.get("dry_run") is True,
+            "would_action": decision.get("would_action") or "",
+        }
+        self.update(error=decision.get("error") if decision.get("error") else None)
+
+        if rule_action in {"approve", "decline"}:
+            send_value = "option2" if rule_action == "decline" else action
+            self.send_action(module, send_value)
+            self.last_hash = current_hash
+            self.last_hash_at = time.monotonic()
+            self.last_blocked_hash = ""
+            self.approved += 1
+            verb = "declined" if rule_action == "decline" else "approved"
+            self.update(last_action=f"{verb} bash: {desc}")
+            self.emit_event(
+                "approval_approved",
+                f"{verb} bash: {desc}",
+                **details,
+            )
+            self.stop_event.wait(3.0)
+            return True
+
+        if rule_action in yolo_rules.PASSIVE_RULE_ACTIONS:
             self.last_hash = current_hash
             self.last_hash_at = time.monotonic()
             self.last_blocked_hash = current_hash
             self.blocked += 1
-            self.update(last_action=f"blocked bash: {truncate_text(cmd, 180)}")
+            if decision.get("would_action"):
+                last_action = f"dry-run would {decision['would_action']} bash: {desc}"
+            elif rule_action == "block":
+                last_action = f"blocked bash: {desc}"
+            elif rule_action == "notify":
+                last_action = f"notified bash: {desc}"
+            elif rule_action == "off":
+                last_action = f"YOLO off by rule: {desc}"
+            else:
+                last_action = f"asked for manual bash approval: {desc}"
+            self.update(last_action=last_action)
             self.emit_event(
                 "approval_blocked",
-                "blocked bash command",
-                command=truncate_text(cmd, 1000),
-                risk="delete" if re.search(r"\brm\b|\brmdir\b", cmd) else "unknown",
-                prompt_type="bash",
+                last_action,
+                **details,
             )
             return True
 
-        self.send_action(module, action)
-        self.last_hash = current_hash
-        self.last_hash_at = time.monotonic()
-        self.last_blocked_hash = ""
-        self.approved += 1
-        desc = "bash command" if cmd is None else truncate_text(cmd, 180)
-        self.update(last_action=f"approved bash: {desc}")
-        self.emit_event(
-            "approval_approved",
-            f"approved bash: {desc}",
-            command=truncate_text(cmd, 1000) if cmd else None,
-            risk="process",
-            prompt_type="bash",
-            action=action or "option1",
-        )
-        self.stop_event.wait(3.0)
-        return True
+        self.update(last_action=f"unknown YOLO action {rule_action}; waiting for manual approval")
+        return False
 
     def approve_prompt(self, module: Any, current_hash: str, action: str | None, prompt_type: str) -> bool:
         self.send_action(module, action)

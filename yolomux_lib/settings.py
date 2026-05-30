@@ -106,7 +106,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("performance", "popover_show_delay_ms"): "Milliseconds, 0-3000. Hover delay before popovers open.",
     ("performance", "popover_hide_delay_ms"): "Milliseconds, 0-3000. Delay before popovers close after pointer leaves.",
     ("performance", "remote_resize_delay_ms"): "Milliseconds, 50-2000. Debounce for tmux remote resize.",
-    ("performance", "auto_approve_interval_seconds"): "Seconds, 0.1-10. Default for the standalone auto-approval poll loop.",
+    ("performance", "auto_approve_interval_seconds"): "Seconds, 0.1-10. Poll loop interval for newly enabled YOLO workers.",
     ("notifications", "toast_duration_ms"): "Milliseconds, 1000-60000. In-page toast lifetime.",
     ("notifications", "notify_transitions"): "State keys that may show notifications.",
     ("notifications", "throttle_seconds"): "Seconds, 0-600. Minimum time before repeating a notification signature.",

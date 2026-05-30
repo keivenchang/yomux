@@ -90,6 +90,7 @@ let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
+let yoloRulesPayload = bootstrap.yoloRulesPayload || {};
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -2365,6 +2366,84 @@ function tmuxYoloSessionCommands() {
   });
 }
 
+function yoloRulePath() {
+  return yoloRulesPayload.path
+    || nestedSetting(clientSettings, 'yolo.rule_file_path', nestedSetting(clientSettingsDefaults, 'yolo.rule_file_path', '~/.config/yolomux/yolo-rules.yaml'));
+}
+
+function yoloRuleStatusDetail() {
+  const source = yoloRulesPayload.source || 'unknown';
+  const count = Number(yoloRulesPayload.rule_count || 0);
+  const countText = `${count} rule${count === 1 ? '' : 's'}`;
+  const dryRun = yoloRulesPayload.dry_run ? ', dry run' : '';
+  return yoloRulesPayload.error
+    ? `error: ${yoloRulesPayload.error}`
+    : `${source}, ${countText}${dryRun}`;
+}
+
+async function openYoloRuleFile() {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot create YOLO rule files</span>';
+    return;
+  }
+  try {
+    const response = await apiFetch('/api/yolo-rules/open', {method: 'POST'});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    yoloRulesPayload = payload;
+    renderPreferencesPanels();
+    await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
+    statusEl.textContent = 'opened YOLO rule file';
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">open YOLO rule file failed: ${esc(error)}</span>`;
+  }
+}
+
+async function reloadYoloRules() {
+  try {
+    const response = await apiFetch('/api/yolo-rules/reload', {method: 'POST'});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    yoloRulesPayload = payload;
+    renderPreferencesPanels();
+    const level = payload.error ? 'error' : '';
+    statusEl.innerHTML = payload.error
+      ? `<span class="err">YOLO rule reload failed: ${esc(payload.error)}</span>`
+      : `<span class="ok">reloaded YOLO rules</span>`;
+    showToast('YOLO rules', payload.error || yoloRuleStatusDetail(), {level});
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">reload YOLO rules failed: ${esc(error)}</span>`;
+  }
+}
+
+async function refreshYoloRulesStatus(options = {}) {
+  try {
+    const response = await apiFetch('/api/yolo-rules');
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    yoloRulesPayload = payload;
+    renderPreferencesPanels();
+    return payload;
+  } catch (error) {
+    if (!options.silent) statusEl.innerHTML = `<span class="err">YOLO rule status failed: ${esc(error)}</span>`;
+    return null;
+  }
+}
+
+function tmuxYoloMenuItems(yoloCount) {
+  return [
+    menuCommand('Open rule file', openYoloRuleFile, {
+      disabled: readOnlyMode,
+      detail: compactHomePath(yoloRulePath()),
+    }),
+    menuCommand('Reload rules', reloadYoloRules, {
+      detail: yoloRuleStatusDetail(),
+    }),
+    menuSeparator(),
+    menuSubmenu(`Sessions${yoloCount ? ` (${yoloCount})` : ''}`, tmuxYoloSessionCommands()),
+  ];
+}
+
 function tmuxSessionViewCommands(session) {
   const hasSession = isTmuxSession(session);
   const active = hasSession && activeSessions.includes(session);
@@ -2501,7 +2580,7 @@ function appMenuTree() {
       badgeTitle: yoloCount ? `${yoloCount} tmux session${yoloCount === 1 ? '' : 's'} with YOLO enabled` : '',
       items: [
         menuSubmenu('New tmux session', newTmuxSessionItems()),
-        menuSubmenu(`YOLO sessions${yoloCount ? ` (${yoloCount})` : ''}`, tmuxYoloSessionCommands()),
+        menuSubmenu(`YOLO${yoloCount ? ` (${yoloCount})` : ''}`, tmuxYoloMenuItems(yoloCount)),
         menuSeparator(),
         ...tmuxSessionViewCommands(activeTmux),
         menuSeparator(),
@@ -4657,6 +4736,7 @@ async function refreshSettings(options = {}) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     const changed = applySettingsPayload(payload, {force: options.force === true});
+    if (changed) refreshYoloRulesStatus({silent: true});
     if (changed && !options.silent) statusEl.textContent = 'settings reloaded';
   } catch (error) {
     if (!options.silent) statusEl.innerHTML = `<span class="err">settings reload failed: ${esc(error)}</span>`;
@@ -7758,13 +7838,22 @@ function preferenceDefault(path) {
 
 function preferenceStatusText() {
   if (clientSettingsPayload.error) return `settings error: ${clientSettingsPayload.error}`;
+  if (yoloRulesPayload.error) return `YOLO rules error: ${yoloRulesPayload.error}`;
   const path = clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
   return `loaded ${compactHomePath(path)}`;
 }
 
-function preferencesPathRowHtml() {
-  const path = clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
-  return `<span class="preferences-path-label">settings</span><span class="preferences-path-value">${esc(path)}</span><button type="button" class="path-copy-button preferences-path-copy" data-copy-settings-path="${esc(path)}" title="Copy settings path" aria-label="Copy settings path"></button>`;
+function preferencesPathRowsHtml() {
+  const settingsPath = clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
+  const rulesPath = yoloRulePath();
+  const rulesDetail = yoloRulesPayload.source ? ` · ${yoloRuleStatusDetail()}` : '';
+  return `
+    <div class="preferences-path-row">
+      <span class="preferences-path-label">settings</span><span class="preferences-path-value">${esc(settingsPath)}</span><button type="button" class="path-copy-button preferences-path-copy" data-copy-path="${esc(settingsPath)}" title="Copy settings path" aria-label="Copy settings path"></button>
+    </div>
+    <div class="preferences-path-row">
+      <span class="preferences-path-label">YOLO rules</span><span class="preferences-path-value">${esc(rulesPath)}${esc(rulesDetail)}</span><button type="button" class="path-copy-button preferences-path-copy" data-copy-path="${esc(rulesPath)}" title="Copy YOLO rules path" aria-label="Copy YOLO rules path"></button>
+    </div>`;
 }
 
 function preferenceControlHtml(item) {
@@ -7799,8 +7888,8 @@ function preferencesPanelHtml() {
     </section>`).join('');
   const readonly = readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : '';
   return `
-    <div class="preferences-path-row">${preferencesPathRowHtml()}${readonly}</div>
-    <div class="preferences-status" data-level="${clientSettingsPayload.error ? 'error' : 'ok'}">${esc(preferenceStatusText())}</div>
+    <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
+    <div class="preferences-status" data-level="${clientSettingsPayload.error || yoloRulesPayload.error ? 'error' : 'ok'}">${esc(preferenceStatusText())}</div>
     <div class="preferences-sections">${sections}</div>`;
 }
 
@@ -7848,11 +7937,11 @@ function bindPreferencesPanel(panel) {
     savePreferenceControl(control);
   });
   panel.addEventListener('click', event => {
-    const copy = event.target.closest('[data-copy-settings-path]');
+    const copy = event.target.closest('[data-copy-path]');
     if (copy && panel.contains(copy)) {
       event.preventDefault();
-      copyTextToClipboard(copy.dataset.copySettingsPath || '')
-        .then(() => { statusEl.textContent = 'copied settings path'; })
+      copyTextToClipboard(copy.dataset.copyPath || '')
+        .then(() => { statusEl.textContent = 'copied path'; })
         .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
       return;
     }
@@ -7895,6 +7984,7 @@ async function saveSettingsPatch(patch) {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
   applySettingsPayload(payload, {force: true});
+  refreshYoloRulesStatus({silent: true});
 }
 
 function savePreferenceControl(control) {
@@ -9791,6 +9881,10 @@ async function loadAutoStatuses() {
     const payload = await response.json();
     const previousActive = activeSessions.slice();
     const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
+    if (payload.rules) {
+      yoloRulesPayload = payload.rules;
+      renderPreferencesPanels();
+    }
     for (const session of sessions) {
       const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
       autoApproveStates.set(session, state);

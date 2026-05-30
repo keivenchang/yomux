@@ -19,7 +19,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 - Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state + tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/sessions.py`; repo/PR/CI metadata `yolomux_lib/metadata.py`; file ops `yolomux_lib/filesystem.py`; shared helpers + paths `yolomux_lib/common.py`; server-rendered HTML `yolomux_lib/web.py`; all frontend logic `static/yolomux.js` (+ `static/yolomux.css`); YOLO approval detector `auto_approve_tmux.py` and worker `yolomux_lib/auto_approve_worker.py`.
 - State lives in `~/.config/yolomux/state.json`; the YOLO event log (great for confirming state-machine behavior) is `~/.local/state/yolomux/events.jsonl`.
 - NAVIGATION RULE: line numbers in this TODO drift because the source changes constantly. Always GREP THE NAMED SYMBOL (`function foo`, `def foo`, an `id=`/class string) rather than trusting a line number. Numbers here were last verified 2026-05-29.
-- START HERE: the old EF1-EF6 easy-fix list is complete. If `DOIT.4.md` is present, do that easy/fast batch first: lowercase `tmux` label, rename label with session name, YO icon in the YOLO menu item, trimmed tmux-tab right-click menu, file-tree triangle polish, whole-row/follow-cursor image preview, clickable YO in the `Tab` dropdown, `/` / `~` / `/tmp` quick-access buttons, and disconnected overlay. Then follow `DOIT.5.md` build order: relocate `YOLO on: N`, File Explorer root mode, editor Split-Preview, Preferences tab, then YOLO Rule Engine. If the DOIT files are gone, the same items are tracked below in this TODO.
+- START HERE: the old EF1-EF6 easy-fix list is complete. If `DOIT.4.md` is present, do that easy/fast batch first: lowercase `tmux` label, rename label with session name, YO icon in the YOLO menu item, trimmed tmux-tab right-click menu, file-tree triangle polish, whole-row/follow-cursor image preview, clickable YO in the `Tab` dropdown, `/` / `~` / `/tmp` quick-access buttons, and disconnected overlay. The `DOIT.5.md` build order is complete: relocate `YOLO on: N`, File Explorer root mode, editor Split-Preview, Preferences tab, then YOLO Rule Engine. The same items are tracked below in this TODO.
 
 ---
 
@@ -147,18 +147,18 @@ Cross-cutting requirements for all menus:
 
 ### P1: YOLO Rule Engine (user-configurable matching via YAML)
 
-Today YOLO matching is hardcoded in `auto_approve_tmux.py`: a fixed `DANGEROUS_COMMANDS` set + `DANGEROUS_PATTERNS` denylist, with a binary outcome (press Enter to approve, or leave the prompt for manual action). Goal: let users declare, in a YAML file, what input patterns map to what action — so the same engine can auto-approve safe commands, auto-decline dangerous ones, or just notify, without editing Python.
+YOLO matching now runs through `yolomux_lib/yolo_rules.py`. When `~/.config/yolomux/yolo-rules.yaml` exists, YOLOmux hot-reloads that ordered first-match-wins ruleset; when it does not, YOLOmux uses a built-in fallback equivalent to the previous dangerous-command denylist and keeps approving non-dangerous bash prompts. The remaining work here is policy/profile layering, not the base rule engine.
 
-DESIGN GATE: propose the schema and decide the options below before implementing. Do not write code until the rule shape is signed off.
+Schema A is implemented:
 
-- [ ] Decide file location and precedence. Proposal: `~/.config/yolomux/yolo-rules.yaml` (shared default) plus optional per-repo `.yolomux.yaml` that overlays it; per-session override via the Tmux menu.
-- [ ] Decide the action verbs. Proposal: `approve` (press Enter / select Yes), `decline` (select No / option2), `block` (leave for manual, current behavior), `ask` (notify + wait), `notify` (log only, take no action).
-- [ ] Decide match types. Proposal: `contains` (substring), `regex`, `glob`, and `command` (argv-aware parse so `echo "rm"` is data, not a delete). Argv-aware matching is the main upgrade over today's whole-line regex.
+- [x] Decide file location and precedence. Implemented shared file: `~/.config/yolomux/yolo-rules.yaml`; per-repo/session overlays remain future work.
+- [x] Decide the action verbs. Implemented: `approve` (press Enter / select Yes), `decline` (select No / option2), `block` (leave for manual, current behavior), `ask` (notify + wait), `notify` (log only, take no action), and `off`.
+- [x] Decide match types. Implemented: `contains` (substring), `regex`, `glob`, and `command` (argv-aware parse so `echo "rm"` is data, not a delete).
 - [ ] Decide scoping dimensions: global vs per-repo vs per-session, per-agent (`claude` / `codex`), and per prompt-type (`bash` / `file` / `tool`).
 
 Schema options to choose between (PROPOSAL — pick one or blend):
 
-- [ ] Option A — ordered rule list, first match wins:
+- [x] Option A — ordered rule list, first match wins:
 
 ```yaml
 default: ask            # off | approve | decline | block | ask
@@ -202,14 +202,14 @@ sessions:
   '6': { bash: full }
 ```
 
-Safety and operational requirements (regardless of schema):
+Safety and operational requirements:
 
-- [ ] Deny always beats allow. Keep a hard floor (`rm -rf /`, `dd` to a block device, fork bomb, `mkfs`, redirect to `/dev/sd*`) that the YAML cannot relax unless YOLOmux was started with `--dangerously-yolo`.
-- [ ] Dry-run / shadow mode: evaluate rules and log what WOULD happen (matched rule + action) without acting, so a new ruleset can be validated against real prompts first.
-- [ ] Hot-reload on file change; validate the schema on load and surface errors in the UI instead of silently falling back.
-- [ ] Ship today's hardcoded denylist AS the default `yolo-rules.yaml` so behavior is unchanged out of the box; the hardcoded version becomes the fallback when no file exists.
-- [ ] Record the matched rule name in every audit event (the audit panel already shows a "matched rule" column).
-- [ ] Add an "Open rule file" + "Reload rules" action in the Tmux menu, and show the active ruleset path/source in Settings.
+- [x] Deny always beats allow. Keep a hard floor (`rm -rf /`, `dd` to a block device, fork bomb, `mkfs`, redirect to `/dev/sd*`) that the YAML cannot relax unless YOLOmux was started with `--dangerously-yolo`.
+- [x] Dry-run / shadow mode: evaluate rules and log what WOULD happen (matched rule + action) without acting, so a new ruleset can be validated against real prompts first.
+- [x] Hot-reload on file change; validate the schema on load and surface errors in the UI instead of silently falling back.
+- [x] Ship today's hardcoded denylist as the built-in fallback when no file exists. The `Open rule file` action creates an editable starter `yolo-rules.yaml` from the same rules.
+- [x] Record the matched rule name in every audit event.
+- [x] Add an "Open rule file" + "Reload rules" action in the Tmux menu, and show the active ruleset path/source in Settings.
 
 ### P1: File Explorer & Editor Live Refresh
 

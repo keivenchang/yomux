@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from . import yolo_rules
 from .core import *
 from .settings import save_settings
 from .settings import settings_payload
@@ -85,6 +86,23 @@ class TmuxWebtermApp:
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         return save_settings(patch)
+
+    def yolo_rules_payload(self) -> dict[str, Any]:
+        return yolo_rules.rules_status()
+
+    def reload_yolo_rules(self) -> dict[str, Any]:
+        return yolo_rules.reload_rules()
+
+    def ensure_yolo_rules_file(self) -> dict[str, Any]:
+        yolo_rules.ensure_rule_file()
+        return yolo_rules.reload_rules()
+
+    def auto_approve_interval_seconds(self) -> float:
+        value = settings_payload().get("settings", {}).get("performance", {}).get("auto_approve_interval_seconds", 0.5)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.5
 
     def metadata_badge_pulse_seconds(self) -> float:
         value = settings_payload().get("settings", {}).get("appearance", {}).get("metadata_badge_pulse_seconds", METADATA_BADGE_PULSE_SECONDS)
@@ -795,13 +813,25 @@ class TmuxWebtermApp:
         return self.auto_approve_session_status(session), HTTPStatus.OK
 
     def start_auto_approve_worker(self, session: str, takeover: bool) -> tuple[AutoApproveWorker | None, dict[str, Any]]:
-        worker = AutoApproveWorker(session, event_callback=self.log_auto_event, owner_extra=self.control_server.owner_payload())
+        worker = AutoApproveWorker(
+            session,
+            interval=self.auto_approve_interval_seconds(),
+            event_callback=self.log_auto_event,
+            owner_extra=self.control_server.owner_payload(),
+            dangerously_yolo=self.dangerously_yolo,
+        )
         started, owner = worker.start()
         if started:
             return worker, worker.status()
         locked_owner = owner
         if takeover and self.request_auto_approve_release(session, owner):
-            worker = AutoApproveWorker(session, event_callback=self.log_auto_event, owner_extra=self.control_server.owner_payload())
+            worker = AutoApproveWorker(
+                session,
+                interval=self.auto_approve_interval_seconds(),
+                event_callback=self.log_auto_event,
+                owner_extra=self.control_server.owner_payload(),
+                dangerously_yolo=self.dangerously_yolo,
+            )
             started, owner = worker.start()
             if started:
                 self.log_event(session, "yolo_takeover", "YOLO moved from another server", {"owner": locked_owner or {}})
@@ -909,6 +939,7 @@ class TmuxWebtermApp:
             "session_order": self.sessions,
             "sessions": {name: self.auto_approve_session_status(name) for name in self.sessions},
             "errors": refresh_errors,
+            "rules": self.yolo_rules_payload(),
         }, HTTPStatus.OK
 
     def stop_auto_approve_all(self) -> None:

@@ -288,6 +288,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/settings":
             self.write_json(self.server.app.settings_payload())
             return
+        if parsed.path == "/api/yolo-rules":
+            self.write_json(self.server.app.yolo_rules_payload())
+            return
         if parsed.path == "/api/events":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [None])[0]
@@ -475,6 +478,12 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             self.write_json(self.server.app.save_settings(payload.get("settings", payload)))
+            return
+        if parsed.path == "/api/yolo-rules/reload":
+            self.write_json(self.server.app.reload_yolo_rules())
+            return
+        if parsed.path == "/api/yolo-rules/open":
+            self.write_json(self.server.app.ensure_yolo_rules_file())
             return
         if parsed.path == "/api/tmux-next":
             qs = parse_qs(parsed.query)
