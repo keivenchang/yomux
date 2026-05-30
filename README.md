@@ -54,7 +54,7 @@ The `YO` button toggles YOLO auto-approval for a tmux session. It watches the vi
 
 ## Files and editors
 
-Open `File` -> `File Explorer` (`Finder` on macOS) to browse the server filesystem. The root path field is editable: press Enter to jump to a typed path, use Escape to revert, and use the copy button to copy the current root path.
+Open `File` -> `File Explorer` (`Finder` on macOS) to browse the server filesystem. The root path field is editable: press Enter to jump to a typed path, use Escape to revert, and use the copy button to copy the current root path. The `Root` / `Sync` toggle chooses whether the explorer stays on a fixed root or follows the focused tmux session's current directory.
 
 Clicking a file opens it as a tab in the largest available pane, reusing an existing editor pane when one is already open. Text files can be edited and saved; Markdown can be previewed; Markdown, shell, Python, JavaScript/TypeScript, Rust, JSON, HTML/XML/SVG, CSS, TOML, and YAML get lightweight syntax coloring. Files over the configured raw-read cap show a too-large state instead of loading into the editor.
 

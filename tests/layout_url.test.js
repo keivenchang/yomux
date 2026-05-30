@@ -169,6 +169,10 @@ globalThis.__layoutTestApi = {
   finderTargetPathForItem,
   activeFinderDirectoryPath,
   activeFinderTargetPath,
+  activeTmuxDirectoryPath,
+  fileExplorerRootForOpen,
+  fileExplorerRootModeValue,
+  setFileExplorerRootMode,
   fileExplorerLabel,
   fileExplorerPanelCloseClass,
   fileEditorPanelCloseClass,
@@ -782,11 +786,19 @@ function canonical(value) {
     panes: [{current_path: '/home/test/yolomux.dev/mock', command: 'bash'}],
     selected_pane: {current_path: '/home/test/yolomux.dev'},
   });
+  assert.equal(api.fileExplorerRootModeValue(), 'fixed');
+  assert.equal(api.activeTmuxDirectoryPath('1'), '/home/test/yolomux.dev');
+  assert.equal(api.fileExplorerRootForOpen('1'), '/home/test');
+  api.setFileExplorerRootMode('sync', {sync: false});
+  assert.equal(api.fileExplorerRootModeValue(), 'sync');
+  assert.equal(api.fileExplorerRootForOpen('1'), '/home/test/yolomux.dev');
   assert.equal(api.finderDirectoryForItem('1'), '');
   assert.equal(api.activeFinderDirectoryPath('1'), '');
   assert.equal(api.finderTargetPathForItem('1'), '');
   assert.equal(api.activeFinderTargetPath('1'), '');
   const fileItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/TODO.md');
+  assert.equal(api.fileExplorerRootForOpen(fileItem), '/home/test');
+  api.setFileExplorerRootMode('fixed', {sync: false});
   assert.equal(api.finderDirectoryForItem(fileItem), '/home/test/yolomux.dev');
   assert.equal(api.finderTargetPathForItem(fileItem), '/home/test/yolomux.dev/TODO.md');
   assert.equal(api.activeFinderTargetPath(fileItem), '/home/test/yolomux.dev/TODO.md');

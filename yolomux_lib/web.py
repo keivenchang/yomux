@@ -108,6 +108,7 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
   <div class="file-explorer-tree-col">
     <div class="file-explorer-head">
       <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle" title="Show hidden files (dotfiles)" aria-pressed="false">.*</button>
+      <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle" title="Root mode: fixed" aria-pressed="false">Root</button>
       <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/" spellcheck="false" aria-label="File Explorer root path">
       <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy" title="Copy current path" aria-label="Copy current path"></button>
       <button type="button" id="fileExplorerClose" class="file-explorer-close" title="Close File Explorer" aria-label="Close"></button>

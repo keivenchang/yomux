@@ -36,6 +36,7 @@ const fileExplorerPath = document.getElementById('fileExplorerPath');
 const fileExplorerPathCopy = document.getElementById('fileExplorerPathCopy');
 const fileExplorerClose = document.getElementById('fileExplorerClose');
 const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenToggle');
+const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
 const fileEditor = document.getElementById('fileEditor');
 const fileEditorPath = document.getElementById('fileEditorPath');
 const fileEditorTextarea = document.getElementById('fileEditorTextarea');
@@ -49,6 +50,7 @@ const fileEditorClose = document.getElementById('fileEditorClose');
 const fileEditorStatus = document.getElementById('fileEditorStatus');
 const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
+const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
@@ -69,6 +71,7 @@ const fileExplorerDirectorySignatures = new Map();
 let activeFile = null;
 let fileExplorerRoot = null;
 let filesystemRefreshInFlight = false;
+let fileExplorerRootMode = readStoredFileExplorerRootMode();
 let fileExplorerShowHidden = (() => {
   try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
   catch (_) { return false; }
@@ -327,6 +330,20 @@ function readStoredEditorWrap() {
 function writeStoredEditorWrap(value) {
   try {
     window.localStorage?.setItem(fileEditorWrapStorageKey, value ? '1' : '0');
+  } catch (_) {}
+}
+
+function readStoredFileExplorerRootMode() {
+  try {
+    return window.localStorage?.getItem(fileExplorerRootModeStorageKey) === 'sync' ? 'sync' : 'fixed';
+  } catch (_) {
+    return 'fixed';
+  }
+}
+
+function writeStoredFileExplorerRootMode(mode) {
+  try {
+    window.localStorage?.setItem(fileExplorerRootModeStorageKey, mode === 'sync' ? 'sync' : 'fixed');
   } catch (_) {}
 }
 
@@ -2849,7 +2866,7 @@ function toggleFileExplorer() {
   if (opening) {
     fileExplorer.removeAttribute('hidden');
     document.body.classList.add('file-explorer-open');
-    if (!fileExplorerRoot) openFileExplorerAt(homePath || '/');
+    openFileExplorerAt(fileExplorerRootForOpen());
   } else {
     fileExplorer.setAttribute('hidden', '');
     document.body.classList.remove('file-explorer-open');
@@ -2867,6 +2884,7 @@ async function openFileExplorerAt(path, options = {}) {
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   fileExplorerRoot = root;
   setFileExplorerPathDisplay(fileExplorerRoot);
+  renderFileExplorerRootModeControls();
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
     fileExplorerTree.replaceChildren();
@@ -2935,6 +2953,67 @@ function normalizeDirectoryPath(path) {
 
 function currentFileExplorerRoot() {
   return normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
+}
+
+function fileExplorerIsOpen() {
+  return fileExplorerPaneIsOpen() || (fileExplorer && !fileExplorer.hasAttribute('hidden'));
+}
+
+function fileExplorerRootModeButtons() {
+  return [
+    fileExplorerRootModeButton,
+    ...Array.from(document.querySelectorAll('.file-explorer-root-mode-toggle-panel')),
+  ].filter(Boolean);
+}
+
+function renderFileExplorerRootModeControls() {
+  const sync = fileExplorerRootMode === 'sync';
+  const label = sync ? 'Sync' : 'Root';
+  const title = sync ? 'Root mode: sync to focused tmux session' : 'Root mode: fixed';
+  for (const button of fileExplorerRootModeButtons()) {
+    button.textContent = label;
+    button.title = title;
+    button.setAttribute('aria-pressed', sync ? 'true' : 'false');
+    button.classList.toggle('active', sync);
+  }
+}
+
+function setFileExplorerRootMode(mode, options = {}) {
+  fileExplorerRootMode = mode === 'sync' ? 'sync' : 'fixed';
+  writeStoredFileExplorerRootMode(fileExplorerRootMode);
+  renderFileExplorerRootModeControls();
+  if (fileExplorerRootMode === 'sync' && options.sync !== false) scheduleFileExplorerActiveTabSync();
+}
+
+function fileExplorerRootModeValue() {
+  return fileExplorerRootMode;
+}
+
+function toggleFileExplorerRootMode() {
+  setFileExplorerRootMode(fileExplorerRootMode === 'sync' ? 'fixed' : 'sync');
+}
+
+function tmuxDirectoryForItem(item) {
+  if (!isTmuxSession(item)) return '';
+  const path = terminalCurrentPath(item);
+  return path ? normalizeDirectoryPath(path) : '';
+}
+
+function activeTmuxDirectoryPath(preferredItem = null) {
+  if (preferredItem && !isTmuxSession(preferredItem)) return '';
+  for (const item of finderCandidateItems(preferredItem)) {
+    const path = tmuxDirectoryForItem(item);
+    if (path) return path;
+  }
+  return '';
+}
+
+function fileExplorerRootForOpen(preferredItem = null) {
+  if (fileExplorerRootMode === 'sync') {
+    const tmuxPath = activeTmuxDirectoryPath(preferredItem);
+    if (tmuxPath) return tmuxPath;
+  }
+  return fileExplorerRoot || homePath || '/';
 }
 
 function fileExplorerPathInputs() {
@@ -3048,7 +3127,18 @@ function fileExplorerPaneIsOpen() {
 }
 
 function scheduleFileExplorerActiveTabSync(preferredItem = null) {
-  if (!fileExplorerPaneIsOpen()) return;
+  if (!fileExplorerIsOpen()) return;
+  if ((preferredItem === null || isTmuxSession(preferredItem)) && fileExplorerRootMode === 'sync') {
+    const syncRoot = activeTmuxDirectoryPath(preferredItem);
+    if (syncRoot && syncRoot !== currentFileExplorerRoot() && fileExplorerSyncPathInFlight !== syncRoot) {
+      requestAnimationFrame(() => {
+        syncFileExplorerRootToActiveTmux(preferredItem).catch(error => {
+          console.warn('Finder root sync failed', error);
+        });
+      });
+      return;
+    }
+  }
   const path = activeFinderTargetPath(preferredItem);
   if (!path || fileExplorerSyncPathInFlight === path) return;
   requestAnimationFrame(() => {
@@ -3058,8 +3148,20 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null) {
   });
 }
 
+async function syncFileExplorerRootToActiveTmux(preferredItem = null) {
+  if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
+  const root = activeTmuxDirectoryPath(preferredItem);
+  if (!root || root === currentFileExplorerRoot()) return false;
+  fileExplorerSyncPathInFlight = root;
+  try {
+    return await openFileExplorerAt(root, {preserveExpanded: false, preserveScroll: false});
+  } finally {
+    if (fileExplorerSyncPathInFlight === root) fileExplorerSyncPathInFlight = '';
+  }
+}
+
 async function syncFileExplorerToActiveTab(preferredItem = null) {
-  if (!fileExplorerPaneIsOpen()) return false;
+  if (!fileExplorerIsOpen()) return false;
   const path = activeFinderTargetPath(preferredItem);
   if (!path || fileExplorerSyncPathInFlight === path) return false;
   const root = currentFileExplorerRoot();
@@ -4359,6 +4461,10 @@ function collapseDirectoryRow(row, fullPath) {
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
 if (fileExplorerPathCopy) fileExplorerPathCopy.addEventListener('click', copyCurrentFileExplorerPath);
 bindFileExplorerPathInput(fileExplorerPath);
+if (fileExplorerRootModeButton) {
+  fileExplorerRootModeButton.addEventListener('click', toggleFileExplorerRootMode);
+}
+renderFileExplorerRootModeControls();
 if (fileExplorerHiddenToggle) {
   fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
   fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
@@ -7278,6 +7384,7 @@ function createFileExplorerPanel() {
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         <div class="file-explorer-toolbar">
           <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
+          <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="Root mode: fixed" aria-pressed="false">Root</button>
           <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(label)} root path">
           <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
           <button type="button" class="${fileExplorerPanelCloseClass()}" title="Hide ${esc(label)} from layout" aria-label="Hide ${esc(label)} from layout"></button>
@@ -7289,6 +7396,7 @@ function createFileExplorerPanel() {
       </div>`;
   bindPanelShell(panel, fileExplorerItemId);
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
+  const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
   if (hiddenBtn) {
     hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
     hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
@@ -7298,6 +7406,13 @@ function createFileExplorerPanel() {
       toggleHiddenFiles();
     });
   }
+  if (rootModeBtn) {
+    rootModeBtn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleFileExplorerRootMode();
+    });
+  }
   const closeBtn = panel.querySelector('.file-explorer-panel-close');
   panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -7305,6 +7420,7 @@ function createFileExplorerPanel() {
     copyCurrentFileExplorerPath();
   });
   bindFileExplorerPathInput(panel.querySelector('.file-explorer-path-inline'));
+  renderFileExplorerRootModeControls();
   if (closeBtn) {
     closeBtn.addEventListener('pointerdown', event => event.stopPropagation());
     closeBtn.addEventListener('click', event => {
@@ -7325,6 +7441,7 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   const root = normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
   setFileExplorerPathElementValue(pathEl, root);
   setFileExplorerPathError(pathEl);
+  renderFileExplorerRootModeControls();
   if (hiddenBtn) {
     hiddenBtn.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
     hiddenBtn.classList.toggle('active', fileExplorerShowHidden);

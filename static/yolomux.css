@@ -3230,7 +3230,8 @@ body.file-explorer-open #grid {
   background: var(--panel);
   overflow: hidden;
 }
-.file-explorer-hidden-toggle {
+.file-explorer-hidden-toggle,
+.file-explorer-root-mode-toggle {
   width: 28px;
   height: 18px;
   flex: 0 0 28px;
@@ -3244,12 +3245,19 @@ body.file-explorer-open #grid {
   font-weight: 700;
   cursor: pointer;
 }
+.file-explorer-root-mode-toggle {
+  width: 38px;
+  flex-basis: 38px;
+}
 .file-explorer-hidden-toggle:hover,
-.file-explorer-hidden-toggle:focus-visible {
+.file-explorer-hidden-toggle:focus-visible,
+.file-explorer-root-mode-toggle:hover,
+.file-explorer-root-mode-toggle:focus-visible {
   color: var(--text);
   border-color: var(--text);
 }
-.file-explorer-hidden-toggle.active {
+.file-explorer-hidden-toggle.active,
+.file-explorer-root-mode-toggle.active {
   color: var(--good);
   border-color: var(--good);
 }
@@ -3602,7 +3610,8 @@ body.file-editor-open .file-explorer {
   padding: 1px 5px;
   max-width: 60%;
 }
-.file-explorer-hidden-toggle-panel {
+.file-explorer-hidden-toggle-panel,
+.file-explorer-root-mode-toggle-panel {
   width: 28px;
   height: 18px;
   flex: 0 0 28px;
@@ -3616,8 +3625,20 @@ body.file-editor-open .file-explorer {
   font-weight: 700;
   cursor: pointer;
 }
-.file-explorer-hidden-toggle-panel:hover { color: var(--text); border-color: var(--text); }
-.file-explorer-hidden-toggle-panel.active { color: var(--good); border-color: var(--good); }
+.file-explorer-root-mode-toggle-panel {
+  width: 38px;
+  flex-basis: 38px;
+}
+.file-explorer-hidden-toggle-panel:hover,
+.file-explorer-root-mode-toggle-panel:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+.file-explorer-hidden-toggle-panel.active,
+.file-explorer-root-mode-toggle-panel.active {
+  color: var(--good);
+  border-color: var(--good);
+}
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {
   display: grid;
