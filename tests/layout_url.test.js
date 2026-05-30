@@ -217,6 +217,9 @@ globalThis.__layoutTestApi = {
   dropIntentAllowsSession,
   directoryEntriesSignature,
   editorWrapValue,
+  editorViewModeFor,
+  editorVisualHighlightHtml,
+  editorVisualLineFragments,
   expandPaneFromLayout,
   infoBranchRows,
   fileContextMenuState,
@@ -518,6 +521,14 @@ function canonical(value) {
   assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-variable'));
   assert.ok(api.simpleCodeSyntaxHtml('json', '{"name": "yolomux", "ok": true}').includes('code-attr'));
   assert.ok(api.simpleCodeSyntaxHtml('json', '{"name": "yolomux", "ok": true}').includes('code-constant'));
+
+  assert.deepStrictEqual(Array.from(api.editorVisualLineFragments('abcdefghijkl', 5, true)), ['abcde', 'fghij', 'kl']);
+  assert.deepStrictEqual(Array.from(api.editorVisualLineFragments('abcdefghijkl', 5, false)), ['abcdefghijkl']);
+  const gutterHtml = api.editorVisualHighlightHtml('bash', 'echo 1\nabcdefghijkl', {wrap: true, lineNumbers: true, columnCount: 5});
+  assert.ok(gutterHtml.includes('editor-line-number">1</span'));
+  assert.ok(gutterHtml.includes('editor-line-number">2</span'));
+  assert.ok(gutterHtml.includes('editor-soft-wrap-marker">↪</span'));
+  assert.ok(gutterHtml.includes('code-number'));
 }
 
 {

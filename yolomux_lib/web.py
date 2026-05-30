@@ -118,14 +118,21 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
   <div class="file-editor" id="fileEditor" hidden>
     <div class="file-editor-head">
       <div class="file-editor-path" id="fileEditorPath"></div>
-      <button type="button" id="fileEditorPreview" class="file-editor-preview" title="Toggle Markdown preview" hidden>Preview</button>
+      <div id="fileEditorMode" class="file-editor-mode-control" role="group" aria-label="Editor mode" hidden>
+        <button type="button" data-editor-mode="edit">Edit</button>
+        <button type="button" data-editor-mode="preview">Preview</button>
+        <button type="button" data-editor-mode="split">Split</button>
+      </div>
+      <button type="button" id="fileEditorGutter" class="file-editor-gutter" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
       <button type="button" id="fileEditorWrap" class="file-editor-wrap" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
       <button type="button" id="fileEditorSave" class="file-editor-save" title="Save (Ctrl/Cmd+S)" aria-label="Save file"><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
       <button type="button" id="fileEditorClose" class="file-editor-close" title="Close current file" aria-label="Close"></button>
     </div>
-    <textarea id="fileEditorTextarea" class="file-editor-textarea" spellcheck="false" wrap="off"></textarea>
-    <div id="fileEditorPreviewPane" class="file-editor-preview-pane markdown-body" hidden></div>
-    <pre id="fileEditorHighlight" class="file-editor-highlight" hidden><code id="fileEditorHighlightCode"></code></pre>
+    <div id="fileEditorContent" class="file-editor-content file-editor-standalone-content">
+      <pre id="fileEditorHighlight" class="file-editor-highlight" aria-hidden="true" hidden><code id="fileEditorHighlightCode"></code></pre>
+      <textarea id="fileEditorTextarea" class="file-editor-textarea" spellcheck="false" wrap="off"></textarea>
+      <div id="fileEditorPreviewPane" class="file-editor-preview-pane markdown-body" hidden></div>
+    </div>
     <div id="fileEditorStatus" class="file-editor-status"></div>
   </div>
 </aside>

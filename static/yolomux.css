@@ -82,7 +82,7 @@
   --icon-refresh: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 12a9 9 0 0 1-9 9 9.5 9.5 0 0 1-6.7-2.7'/%3E%3Cpath d='M3 12a9 9 0 0 1 9-9 9.5 9.5 0 0 1 6.7 2.7'/%3E%3Cpath d='M3 3v6h6'/%3E%3Cpath d='M21 21v-6h-6'/%3E%3C/svg%3E");
   --icon-tab-meta: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 9h16'/%3E%3Cpath d='M4 15h16'/%3E%3Cpath d='M10 3 8 21'/%3E%3Cpath d='M16 3l-2 18'/%3E%3C/svg%3E");
   --icon-logout: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/%3E%3Cpath d='M16 17l5-5-5-5'/%3E%3Cpath d='M21 12H9'/%3E%3C/svg%3E");
-  --editor-preview-bg: #383124;
+  --editor-preview-bg: #252a32;
   --topbar-height: 38px;
   --red-reminder-duration: 1.55s;
   --red-reminder-easing: ease-in-out;
@@ -3301,7 +3301,8 @@ body.file-editor-open .file-explorer {
   text-align: left;
 }
 .file-editor-save,
-.file-editor-wrap {
+.file-editor-wrap,
+.file-editor-gutter {
   min-width: 24px;
   width: 24px;
   height: 20px;
@@ -3359,17 +3360,27 @@ body.file-editor-open .file-explorer {
 .file-editor-save:hover {
   background: rgba(82, 210, 115, 0.18);
 }
-.file-editor-wrap {
+.file-editor-wrap,
+.file-editor-gutter {
   border-color: var(--line);
   color: var(--muted);
 }
 .file-editor-wrap:hover,
-.file-editor-wrap.active {
+.file-editor-wrap.active,
+.file-editor-gutter:hover,
+.file-editor-gutter.active {
   color: #9fd8ff;
   border-color: #9fd8ff;
 }
-.file-editor-textarea {
+.file-editor-standalone-content {
   flex: 1;
+}
+.file-editor-textarea {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  width: 100%;
+  height: 100%;
   border: 0;
   resize: none;
   background: var(--bg);
@@ -3381,6 +3392,11 @@ body.file-editor-open .file-explorer {
   outline: none;
   white-space: pre;
   tab-size: 4;
+}
+.file-editor.syntax-highlighted .file-editor-textarea {
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
 }
 .file-editor-textarea.editor-wrap {
   white-space: pre-wrap;
@@ -3416,24 +3432,45 @@ body.file-editor-open .file-explorer {
   flex: 0 0 6px;
 }
 
-/* Preview / Edit toggle button in editor head */
-.file-editor-preview {
+.file-editor-mode-control {
+  display: inline-flex;
+  align-items: stretch;
+  flex: 0 0 auto;
   height: 20px;
-  padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 4px;
+  overflow: hidden;
+}
+.file-editor-mode-control[hidden] {
+  display: none;
+}
+.file-editor-mode-control button {
+  height: 20px;
+  min-width: 0;
+  padding: 0 7px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   cursor: pointer;
 }
-.file-editor-preview:hover { color: var(--text); border-color: var(--text); }
-.file-editor-preview.active { color: #9fd8ff; border-color: #9fd8ff; }
+.file-editor-mode-control button:last-child {
+  border-right: 0;
+}
+.file-editor-mode-control button:hover,
+.file-editor-mode-control button.active {
+  color: #9fd8ff;
+  background: rgba(159, 216, 255, 0.09);
+}
 
 /* Rendered markdown preview pane */
 .file-editor-preview-pane {
-  flex: 1;
+  position: absolute;
+  inset: 0;
+  z-index: 4;
   overflow: auto;
   padding: 12px 16px;
   background: var(--editor-preview-bg);
@@ -3466,16 +3503,27 @@ body.file-editor-open .file-explorer {
 
 /* Read-only highlight view (defer; pre/code remain hidden for now) */
 .file-editor-highlight {
-  flex: 1;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
   margin: 0;
   overflow: auto;
   padding: 8px 10px;
   background: var(--bg);
+  color: var(--text);
   font-family: var(--mono-font);
   font-size: 12px;
   line-height: 1.45;
+  pointer-events: none;
+  tab-size: 4;
 }
 .file-editor-highlight[hidden] { display: none; }
+.file-editor-highlight::-webkit-scrollbar {
+  display: none;
+}
+.file-editor-highlight {
+  scrollbar-width: none;
+}
 
 /* Draggable Files panel - first-class layout pane. Compact head
    (pane tabs + .* toggle + path); no Term/Tx/AI/Log/Info controls. */
@@ -3683,7 +3731,7 @@ body.file-editor-open .file-explorer {
   justify-content: flex-end;
   gap: 6px;
 }
-.file-editor-preview-panel,
+.file-editor-gutter-panel,
 .file-editor-wrap-panel,
 .file-editor-save-panel {
   height: 20px;
@@ -3706,7 +3754,8 @@ body.file-editor-open .file-explorer {
   color: var(--good);
   border-color: var(--good);
 }
-.file-editor-wrap-panel {
+.file-editor-wrap-panel,
+.file-editor-gutter-panel {
   min-width: 24px;
   width: 24px;
   display: grid;
@@ -3717,8 +3766,10 @@ body.file-editor-open .file-explorer {
   opacity: 0.44;
   cursor: default;
 }
-.file-editor-preview-panel:hover,
-.file-editor-preview-panel.active,
+.file-editor-mode-control-panel button:hover,
+.file-editor-mode-control-panel button.active,
+.file-editor-gutter-panel:hover,
+.file-editor-gutter-panel.active,
 .file-editor-wrap-panel:hover,
 .file-editor-wrap-panel.active {
   color: #9fd8ff;
@@ -3740,6 +3791,23 @@ body.file-editor-open .file-explorer {
   display: block;
   background: var(--bg);
   overflow: hidden;
+}
+.file-editor-content.split-preview .file-editor-textarea,
+.file-editor-content.split-preview .file-editor-highlight,
+.file-editor-content.split-preview .file-editor-textarea-panel,
+.file-editor-content.split-preview .file-editor-highlight-panel {
+  inset: 0 50% 0 0;
+  width: auto;
+  border-right: 1px solid var(--line);
+}
+.file-editor-content.split-preview .file-editor-preview-pane,
+.file-editor-content.split-preview .file-editor-preview-pane-panel {
+  inset: 0 0 0 50%;
+  border-left: 1px solid rgba(0, 0, 0, 0.2);
+}
+.file-editor-content.preview-mode .file-editor-preview-pane,
+.file-editor-content.preview-mode .file-editor-preview-pane-panel {
+  inset: 0;
 }
 .file-editor-textarea-panel,
 .file-editor-highlight-panel,
@@ -3811,65 +3879,176 @@ body.file-editor-open .file-explorer {
   font: inherit;
   white-space: pre;
 }
+.file-editor-highlight code,
+.file-editor-highlight-panel code,
+.file-editor-code-preview code {
+  display: block;
+  min-width: max-content;
+  min-height: 100%;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: pre;
+}
 .file-editor-panel.editor-wrap .file-editor-highlight-panel code {
   min-width: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
-.file-editor-highlight-panel .md-heading {
+.file-editor.editor-wrap .file-editor-highlight code,
+.file-editor-panel.editor-wrap .file-editor-highlight-panel code,
+.file-editor-code-preview code {
+  min-width: 0;
+}
+.editor-visual-line {
+  --editor-line-number-width: 0;
+  --editor-wrap-marker-width: 1.5ch;
+  display: grid;
+  grid-template-columns: var(--editor-line-number-width) var(--editor-wrap-marker-width) max-content;
+  min-height: 1.45em;
+}
+.file-editor.editor-line-numbers .editor-visual-line,
+.file-editor-panel.editor-line-numbers .editor-visual-line,
+.file-editor-code-preview .editor-visual-line {
+  --editor-line-number-width: 4.2ch;
+}
+.editor-line-number {
+  padding-right: 0.8ch;
+  color: #6f7b8c;
+  text-align: right;
+  user-select: none;
+}
+.file-editor:not(.editor-line-numbers) .editor-line-number,
+.file-editor-panel:not(.editor-line-numbers) .editor-line-number {
+  width: 0;
+  padding-right: 0;
+  overflow: hidden;
+}
+.editor-soft-wrap-marker {
+  color: #9fd8ff;
+  opacity: 0.86;
+  text-align: center;
+  user-select: none;
+}
+.editor-line-code {
+  min-width: max-content;
+  white-space: pre;
+}
+.editor-line-code:empty::after {
+  content: " ";
+}
+.editor-visual-line.continuation .editor-line-number {
+  color: transparent;
+}
+.file-editor-code-preview {
+  margin: 0;
+  min-height: 100%;
+  overflow: visible;
+  padding: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono-font);
+  font-size: 12px;
+  line-height: 1.45;
+  tab-size: 4;
+}
+.file-editor-highlight .md-heading,
+.file-editor-highlight-panel .md-heading,
+.file-editor-code-preview .md-heading {
   color: #9be33d;
   font-weight: 700;
 }
-.file-editor-highlight-panel .md-heading-1 {
+.file-editor-highlight .md-heading-1,
+.file-editor-highlight-panel .md-heading-1,
+.file-editor-code-preview .md-heading-1 {
   color: #b7f36b;
 }
-.file-editor-highlight-panel .md-bold {
+.file-editor-highlight .md-bold,
+.file-editor-highlight-panel .md-bold,
+.file-editor-code-preview .md-bold {
   color: #f8dfa3;
   font-weight: 700;
 }
-.file-editor-highlight-panel .md-italic {
+.file-editor-highlight .md-italic,
+.file-editor-highlight-panel .md-italic,
+.file-editor-code-preview .md-italic {
   color: #c7d2fe;
   font-style: italic;
 }
+.file-editor-highlight .md-code,
+.file-editor-highlight .md-codeblock,
+.file-editor-highlight .md-fence,
 .file-editor-highlight-panel .md-code,
 .file-editor-highlight-panel .md-codeblock,
-.file-editor-highlight-panel .md-fence {
+.file-editor-highlight-panel .md-fence,
+.file-editor-code-preview .md-code,
+.file-editor-code-preview .md-codeblock,
+.file-editor-code-preview .md-fence {
   color: #7dd3fc;
 }
-.file-editor-highlight-panel .md-link {
+.file-editor-highlight .md-link,
+.file-editor-highlight-panel .md-link,
+.file-editor-code-preview .md-link {
   color: #93c5fd;
 }
-.file-editor-highlight-panel .md-html {
+.file-editor-highlight .md-html,
+.file-editor-highlight-panel .md-html,
+.file-editor-code-preview .md-html {
   color: #f0abfc;
 }
+.file-editor-highlight .md-blockquote,
+.file-editor-highlight .md-list-marker,
+.file-editor-highlight .code-comment,
 .file-editor-highlight-panel .md-blockquote,
 .file-editor-highlight-panel .md-list-marker,
-.file-editor-highlight-panel .code-comment {
+.file-editor-highlight-panel .code-comment,
+.file-editor-code-preview .md-blockquote,
+.file-editor-code-preview .md-list-marker,
+.file-editor-code-preview .code-comment {
   color: #8b95a5;
 }
-.file-editor-highlight-panel .code-keyword {
+.file-editor-highlight .code-keyword,
+.file-editor-highlight-panel .code-keyword,
+.file-editor-code-preview .code-keyword {
   color: #c4b5fd;
   font-weight: 700;
 }
-.file-editor-highlight-panel .code-string {
+.file-editor-highlight .code-string,
+.file-editor-highlight-panel .code-string,
+.file-editor-code-preview .code-string {
   color: #86efac;
 }
-.file-editor-highlight-panel .code-number {
+.file-editor-highlight .code-number,
+.file-editor-highlight-panel .code-number,
+.file-editor-code-preview .code-number {
   color: #f8dfa3;
 }
+.file-editor-highlight .code-constant,
+.file-editor-highlight .code-variable,
 .file-editor-highlight-panel .code-constant,
-.file-editor-highlight-panel .code-variable {
+.file-editor-highlight-panel .code-variable,
+.file-editor-code-preview .code-constant,
+.file-editor-code-preview .code-variable {
   color: #fca5a5;
 }
+.file-editor-highlight .code-builtin,
+.file-editor-highlight .code-function,
 .file-editor-highlight-panel .code-builtin,
-.file-editor-highlight-panel .code-function {
+.file-editor-highlight-panel .code-function,
+.file-editor-code-preview .code-builtin,
+.file-editor-code-preview .code-function {
   color: #93c5fd;
 }
+.file-editor-highlight .code-type,
+.file-editor-highlight .code-attr,
 .file-editor-highlight-panel .code-type,
-.file-editor-highlight-panel .code-attr {
+.file-editor-highlight-panel .code-attr,
+.file-editor-code-preview .code-type,
+.file-editor-code-preview .code-attr {
   color: #67e8f9;
 }
-.file-editor-highlight-panel .code-tag {
+.file-editor-highlight .code-tag,
+.file-editor-highlight-panel .code-tag,
+.file-editor-code-preview .code-tag {
   color: #f0abfc;
 }
 .file-editor-preview-pane-panel {
@@ -3882,6 +4061,13 @@ body.file-editor-open .file-explorer {
   font-family: var(--ui-font);
   font-size: 13px;
   line-height: 1.55;
+}
+.file-editor-preview-pane.code-preview-body,
+.file-editor-preview-pane-panel.code-preview-body {
+  padding: 8px 10px;
+  font-family: var(--mono-font);
+  font-size: 12px;
+  line-height: 1.45;
 }
 .file-editor-image-panel {
   z-index: 4;

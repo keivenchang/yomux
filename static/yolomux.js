@@ -39,8 +39,10 @@ const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenTogg
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
 const fileEditor = document.getElementById('fileEditor');
 const fileEditorPath = document.getElementById('fileEditorPath');
+const fileEditorContent = document.getElementById('fileEditorContent');
 const fileEditorTextarea = document.getElementById('fileEditorTextarea');
-const fileEditorPreviewBtn = document.getElementById('fileEditorPreview');
+const fileEditorModeControl = document.getElementById('fileEditorMode');
+const fileEditorGutterBtn = document.getElementById('fileEditorGutter');
 const fileEditorWrapBtn = document.getElementById('fileEditorWrap');
 const fileEditorPreviewPane = document.getElementById('fileEditorPreviewPane');
 const fileEditorHighlight = document.getElementById('fileEditorHighlight');
@@ -52,6 +54,8 @@ const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
+const fileEditorLineNumbersStorageKey = 'yolomux.editorLineNumbers';
+const editorViewModes = new Set(['edit', 'preview', 'split']);
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
@@ -76,9 +80,11 @@ let fileExplorerShowHidden = (() => {
   try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
   catch (_) { return false; }
 })();
-const fileEditorPreviewMode = new Map();  // path -> true when previewing markdown
+const fileEditorPreviewMode = new Map();  // legacy map: path -> true when not in edit mode
+const fileEditorViewMode = new Map();  // path -> "edit" | "preview" | "split"
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
+let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -330,6 +336,20 @@ function readStoredEditorWrap() {
 function writeStoredEditorWrap(value) {
   try {
     window.localStorage?.setItem(fileEditorWrapStorageKey, value ? '1' : '0');
+  } catch (_) {}
+}
+
+function readStoredEditorLineNumbers() {
+  try {
+    return window.localStorage?.getItem(fileEditorLineNumbersStorageKey) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function writeStoredEditorLineNumbers(value) {
+  try {
+    window.localStorage?.setItem(fileEditorLineNumbersStorageKey, value ? '1' : '0');
   } catch (_) {}
 }
 
@@ -4172,6 +4192,9 @@ function hideEditor() {
   fileEditor.setAttribute('hidden', '');
   document.body.classList.remove('file-editor-open');
   activeFile = null;
+  setEditorContentMode(fileEditorContent, 'edit');
+  if (fileEditorContent) fileEditorContent.hidden = false;
+  fileEditor?.classList.remove('syntax-highlighted');
   if (fileEditorTextarea) { fileEditorTextarea.value = ''; fileEditorTextarea.hidden = false; }
   if (fileEditorPreviewPane) { fileEditorPreviewPane.hidden = true; fileEditorPreviewPane.innerHTML = ''; }
   if (fileEditorHighlight) fileEditorHighlight.hidden = true;
@@ -4199,6 +4222,7 @@ function removeOpenFile(path, options = {}) {
   const panel = panelNodes.get(item);
   openFiles.delete(path);
   fileEditorPreviewMode.delete(path);
+  fileEditorViewMode.delete(path);
   fileEditorImageMode.delete(path);
   syncFileLayoutItems();
   if (panel) {
@@ -4248,6 +4272,10 @@ function renameOpenFilePath(oldPath, newPath) {
     fileEditorPreviewMode.set(newPath, fileEditorPreviewMode.get(oldPath));
     fileEditorPreviewMode.delete(oldPath);
   }
+  if (fileEditorViewMode.has(oldPath)) {
+    fileEditorViewMode.set(newPath, fileEditorViewMode.get(oldPath));
+    fileEditorViewMode.delete(oldPath);
+  }
   if (fileEditorImageMode.has(oldPath)) {
     fileEditorImageMode.set(newPath, fileEditorImageMode.get(oldPath));
     fileEditorImageMode.delete(oldPath);
@@ -4274,11 +4302,10 @@ function renderEditorForActive() {
   ensureEditorVisible();
   const state = openFiles.get(activeFile);
   if (fileEditorPath) fileEditorPath.textContent = activeFile;
-  const isMarkdown = activeFile.toLowerCase().endsWith('.md') || activeFile.toLowerCase().endsWith('.markdown');
-  if (fileEditorPreviewBtn) {
-    fileEditorPreviewBtn.hidden = !(isMarkdown && state.kind === 'text');
-    fileEditorPreviewBtn.classList.toggle('active', fileEditorPreviewMode.get(activeFile) === true);
-    fileEditorPreviewBtn.textContent = fileEditorPreviewMode.get(activeFile) ? 'Edit' : 'Preview';
+  updateEditorModeControl(fileEditorModeControl, activeFile, state);
+  if (fileEditorGutterBtn) {
+    fileEditorGutterBtn.hidden = state.kind !== 'text';
+    updateEditorGutterButton(fileEditorGutterBtn);
   }
   if (fileEditorWrapBtn) {
     fileEditorWrapBtn.hidden = state.kind !== 'text';
@@ -4288,6 +4315,8 @@ function renderEditorForActive() {
   const oldImg = fileEditor.querySelector('.file-editor-image');
   if (oldImg) oldImg.remove();
   if (state.kind === 'image') {
+    setEditorContentMode(fileEditorContent, 'edit');
+    if (fileEditorContent) fileEditorContent.hidden = true;
     if (fileEditorTextarea) fileEditorTextarea.hidden = true;
     if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = true;
     if (fileEditorHighlight) fileEditorHighlight.hidden = true;
@@ -4304,13 +4333,16 @@ function renderEditorForActive() {
     return;
   }
   // text mode
+  if (fileEditorContent) fileEditorContent.hidden = false;
   if (fileEditorSave) fileEditorSave.hidden = readOnlyMode;
-  const ext = activeFile.slice(activeFile.lastIndexOf('.')).toLowerCase();
-  const previewing = fileEditorPreviewMode.get(activeFile) === true;
-  if (previewing && isMarkdown) {
-    renderMarkdownPreview(state.content);
+  const mode = editorViewModeFor(activeFile);
+  setEditorContentMode(fileEditorContent, mode);
+  if (fileEditor) fileEditor.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  if (mode === 'preview') {
+    renderEditorPreviewPane(fileEditorPreviewPane, activeFile, state.content);
     if (fileEditorTextarea) fileEditorTextarea.hidden = true;
     if (fileEditorHighlight) fileEditorHighlight.hidden = true;
+    fileEditor?.classList.remove('syntax-highlighted');
     if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = false;
   } else {
     if (fileEditorTextarea) {
@@ -4318,17 +4350,57 @@ function renderEditorForActive() {
       fileEditorTextarea.value = state.content;
       fileEditorTextarea.readOnly = readOnlyMode;
       applyEditorWrapToTextarea(fileEditorTextarea);
+      renderStandaloneSyntaxHighlight(activeFile, state.content);
+      syncStandaloneSyntaxHighlightScroll();
     }
-    if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = true;
-    if (fileEditorHighlight) fileEditorHighlight.hidden = true;
+    if (fileEditorPreviewPane) {
+      fileEditorPreviewPane.hidden = mode !== 'split';
+      if (mode === 'split') renderEditorPreviewPane(fileEditorPreviewPane, activeFile, state.content);
+    }
   }
   const status = openFileStatus(state);
   setEditorStatus(status.message, status.level);
 }
 
-function renderMarkdownPreview(text) {
-  if (!fileEditorPreviewPane) return;
-  renderMarkdownPreviewInto(fileEditorPreviewPane, text);
+function editorViewModeFor(path) {
+  const mode = fileEditorViewMode.get(path);
+  if (editorViewModes.has(mode)) return mode;
+  return fileEditorPreviewMode.get(path) === true ? 'preview' : 'edit';
+}
+
+function setFileEditorViewMode(path, mode) {
+  if (!path || !editorViewModes.has(mode)) return;
+  fileEditorViewMode.set(path, mode);
+  fileEditorPreviewMode.set(path, mode !== 'edit');
+}
+
+function updateEditorModeControl(control, path, state) {
+  if (!control) return;
+  const visible = state?.kind === 'text';
+  control.hidden = !visible;
+  if (!visible) return;
+  const mode = editorViewModeFor(path);
+  control.querySelectorAll('[data-editor-mode]').forEach(button => {
+    const active = button.dataset.editorMode === mode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function updateEditorGutterButton(button) {
+  if (!button) return;
+  button.classList.toggle('active', fileEditorLineNumbersEnabled);
+  button.setAttribute('aria-pressed', fileEditorLineNumbersEnabled ? 'true' : 'false');
+  const label = fileEditorLineNumbersEnabled ? 'Hide line numbers' : 'Show line numbers';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+}
+
+function setEditorContentMode(content, mode) {
+  if (!content) return;
+  content.classList.toggle('edit-mode', mode === 'edit');
+  content.classList.toggle('preview-mode', mode === 'preview');
+  content.classList.toggle('split-preview', mode === 'split');
 }
 
 function editorWrapValue(enabled = fileEditorWrapEnabled) {
@@ -4361,10 +4433,22 @@ function updateEditorWrapButton(button) {
 function applyEditorWrapPreference() {
   applyEditorWrapToTextarea(fileEditorTextarea);
   updateEditorWrapButton(fileEditorWrapBtn);
+  updateEditorGutterButton(fileEditorGutterBtn);
+  if (activeFile && openFiles.get(activeFile)?.kind === 'text') {
+    renderEditorForActive();
+  }
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+    panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
     applyEditorWrapToTextarea(panel.querySelector('.file-editor-textarea-panel'));
     updateEditorWrapButton(panel.querySelector('.file-editor-wrap-panel'));
+    updateEditorGutterButton(panel.querySelector('.file-editor-gutter-panel'));
+    const path = panel.dataset.filePath;
+    const state = openFiles.get(path);
+    if (path && state?.kind === 'text') {
+      renderSyntaxHighlight(panel, path, state.content);
+      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    }
     syncSyntaxHighlightScroll(panel);
   });
 }
@@ -4379,11 +4463,14 @@ function toggleEditorWrap() {
   setEditorWrapEnabled(!fileEditorWrapEnabled);
 }
 
-function togglePreview() {
-  if (!activeFile) return;
-  const wasPreviewing = fileEditorPreviewMode.get(activeFile) === true;
-  fileEditorPreviewMode.set(activeFile, !wasPreviewing);
-  renderEditorForActive();
+function setEditorLineNumbersEnabled(enabled) {
+  fileEditorLineNumbersEnabled = enabled === true;
+  writeStoredEditorLineNumbers(fileEditorLineNumbersEnabled);
+  applyEditorWrapPreference();
+}
+
+function toggleEditorLineNumbers() {
+  setEditorLineNumbersEnabled(!fileEditorLineNumbersEnabled);
 }
 
 async function saveCurrentEditor() {
@@ -4475,7 +4562,15 @@ if (fileEditorClose) fileEditorClose.addEventListener('click', () => {
   if (activeFile) closeFileTab(activeFile);
 });
 if (fileEditorSave) fileEditorSave.addEventListener('click', saveCurrentEditor);
-if (fileEditorPreviewBtn) fileEditorPreviewBtn.addEventListener('click', togglePreview);
+if (fileEditorModeControl) {
+  fileEditorModeControl.addEventListener('click', event => {
+    const mode = event.target?.closest?.('[data-editor-mode]')?.dataset?.editorMode;
+    if (!activeFile || !editorViewModes.has(mode)) return;
+    setFileEditorViewMode(activeFile, mode);
+    renderEditorForActive();
+  });
+}
+if (fileEditorGutterBtn) fileEditorGutterBtn.addEventListener('click', toggleEditorLineNumbers);
 if (fileEditorWrapBtn) fileEditorWrapBtn.addEventListener('click', toggleEditorWrap);
 if (fileEditorTextarea) {
   fileEditorTextarea.addEventListener('input', () => {
@@ -4487,7 +4582,14 @@ if (fileEditorTextarea) {
     state.dirty = state.content !== state.original;
     const status = openFileStatus(state);
     setEditorStatus(status.message, status.level);
+    renderStandaloneSyntaxHighlight(activeFile, state.content);
+    renderEditorPreviewPane(fileEditorPreviewPane, activeFile, state.content);
+    syncStandaloneSyntaxHighlightScroll();
     if (wasDirty !== state.dirty) renderSessionButtons();
+  });
+  fileEditorTextarea.addEventListener('scroll', () => {
+    syncStandaloneSyntaxHighlightScroll();
+    syncFileEditorSplitScroll(fileEditor, 'editor');
   });
   fileEditorTextarea.addEventListener('keydown', event => {
     const isSave = (event.ctrlKey || event.metaKey) && event.key === 's' && !event.shiftKey;
@@ -4496,6 +4598,9 @@ if (fileEditorTextarea) {
       saveCurrentEditor();
     }
   });
+}
+if (fileEditorPreviewPane) {
+  fileEditorPreviewPane.addEventListener('scroll', () => syncFileEditorSplitScroll(fileEditor, 'preview'));
 }
 
 function updateSessionButtonStates() {
@@ -7465,7 +7570,12 @@ function createFileEditorPanel(item) {
       <div class="panel-head file-editor-panel-head">
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         <div class="file-editor-panel-actions">
-          <button type="button" class="file-editor-preview-panel" title="Toggle Markdown preview" hidden>Preview</button>
+          <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="Editor mode" hidden>
+            <button type="button" data-editor-mode="edit">Edit</button>
+            <button type="button" data-editor-mode="preview">Preview</button>
+            <button type="button" data-editor-mode="split">Split</button>
+          </div>
+          <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
           <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
           <button type="button" class="file-editor-save-panel" title="Save" aria-label="Save file" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
@@ -7501,11 +7611,18 @@ function createFileEditorPanel(item) {
     event.stopPropagation();
     reloadOpenFileFromDisk(path);
   });
-  panel.querySelector('.file-editor-preview-panel')?.addEventListener('click', event => {
+  panel.querySelector('.file-editor-mode-control-panel')?.addEventListener('click', event => {
+    const mode = event.target?.closest?.('[data-editor-mode]')?.dataset?.editorMode;
+    if (!editorViewModes.has(mode)) return;
     event.preventDefault();
     event.stopPropagation();
-    fileEditorPreviewMode.set(path, fileEditorPreviewMode.get(path) !== true);
+    setFileEditorViewMode(path, mode);
     renderFileEditorPanel(panel, item);
+  });
+  panel.querySelector('.file-editor-gutter-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleEditorLineNumbers();
   });
   panel.querySelector('.file-editor-wrap-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -7524,13 +7641,19 @@ function createFileEditorPanel(item) {
     const status = openFileStatus(state);
     setFileEditorPanelStatus(panel, status.message, status.level);
     renderSyntaxHighlight(panel, path, state.content);
+    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     syncSyntaxHighlightScroll(panel);
+    syncFileEditorSplitScroll(panel, 'editor');
     if (dirtyChanged) {
       renderSessionButtons();
       renderPaneTabStrips();
     }
   });
-  textarea?.addEventListener('scroll', () => syncSyntaxHighlightScroll(panel));
+  textarea?.addEventListener('scroll', () => {
+    syncSyntaxHighlightScroll(panel);
+    syncFileEditorSplitScroll(panel, 'editor');
+  });
+  panel.querySelector('.file-editor-preview-pane-panel')?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'preview'));
   textarea?.addEventListener('keydown', event => {
     const isSave = (event.ctrlKey || event.metaKey) && event.key === 's' && !event.shiftKey;
     if (!isSave) return;
@@ -7614,11 +7737,14 @@ function renderFileEditorPanel(panel, item) {
   const highlightPane = panel.querySelector('.file-editor-highlight-panel');
   const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
   const imagePane = panel.querySelector('.file-editor-image-panel');
-  const previewButton = panel.querySelector('.file-editor-preview-panel');
+  const modeControl = panel.querySelector('.file-editor-mode-control-panel');
+  const gutterButton = panel.querySelector('.file-editor-gutter-panel');
   const wrapButton = panel.querySelector('.file-editor-wrap-panel');
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
+  const content = panel.querySelector('.file-editor-content');
   if (!state) {
-    if (previewButton) previewButton.hidden = true;
+    if (modeControl) modeControl.hidden = true;
+    if (gutterButton) gutterButton.hidden = true;
     if (wrapButton) wrapButton.hidden = true;
     if (reloadButton) reloadButton.hidden = true;
     panel.classList.remove('syntax-highlighted');
@@ -7627,7 +7753,8 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.loading) {
-    if (previewButton) previewButton.hidden = true;
+    if (modeControl) modeControl.hidden = true;
+    if (gutterButton) gutterButton.hidden = true;
     if (wrapButton) wrapButton.hidden = true;
     if (reloadButton) reloadButton.hidden = true;
     panel.classList.remove('syntax-highlighted');
@@ -7637,7 +7764,8 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
-    if (previewButton) previewButton.hidden = true;
+    if (modeControl) modeControl.hidden = true;
+    if (gutterButton) gutterButton.hidden = true;
     if (wrapButton) wrapButton.hidden = true;
     if (reloadButton) reloadButton.hidden = true;
     panel.classList.remove('syntax-highlighted');
@@ -7658,17 +7786,17 @@ function renderFileEditorPanel(panel, item) {
     setFileEditorPanelStatus(panel, status, 'error');
     return;
   }
-  const isMarkdown = path.toLowerCase().endsWith('.md') || path.toLowerCase().endsWith('.markdown');
-  if (previewButton) {
-    previewButton.hidden = !(state.kind === 'text' && isMarkdown);
-    previewButton.classList.toggle('active', fileEditorPreviewMode.get(path) === true);
-    previewButton.textContent = fileEditorPreviewMode.get(path) ? 'Edit' : 'Preview';
+  updateEditorModeControl(modeControl, path, state);
+  if (gutterButton) {
+    gutterButton.hidden = state.kind !== 'text';
+    updateEditorGutterButton(gutterButton);
   }
   if (wrapButton) {
     wrapButton.hidden = state.kind !== 'text';
     updateEditorWrapButton(wrapButton);
   }
   if (state.kind === 'image') {
+    setEditorContentMode(content, 'edit');
     if (textarea) textarea.hidden = true;
     if (highlightPane) highlightPane.hidden = true;
     if (previewPane) previewPane.hidden = true;
@@ -7710,17 +7838,23 @@ function renderFileEditorPanel(panel, item) {
     imagePane.hidden = true;
     imagePane.replaceChildren();
   }
-  const previewing = isMarkdown && fileEditorPreviewMode.get(path) === true;
-  if (previewing) {
+  const mode = editorViewModeFor(path);
+  setEditorContentMode(content, mode);
+  panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
+  if (mode === 'preview') {
     if (textarea) textarea.hidden = true;
     if (highlightPane) highlightPane.hidden = true;
     panel.classList.remove('syntax-highlighted');
     if (previewPane) {
       previewPane.hidden = false;
-      renderMarkdownPreviewInto(previewPane, state.content);
+      renderEditorPreviewPane(previewPane, path, state.content);
     }
   } else {
-    if (previewPane) previewPane.hidden = true;
+    if (previewPane) {
+      previewPane.hidden = mode !== 'split';
+      if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content);
+    }
     if (textarea) {
       textarea.hidden = false;
       textarea.readOnly = readOnlyMode;
@@ -7729,6 +7863,7 @@ function renderFileEditorPanel(panel, item) {
       applyEditorWrapToTextarea(textarea);
       renderSyntaxHighlight(panel, path, state.content);
       syncSyntaxHighlightScroll(panel);
+      syncFileEditorSplitScroll(panel, 'editor');
       textarea.focus({preventScroll: true});
     }
   }
@@ -7817,6 +7952,83 @@ function renderMarkdownPreviewInto(container, text) {
       try { window.hljs.highlightElement(block); } catch (_) {}
     });
   }
+}
+
+function isMarkdownPath(path) {
+  const lower = String(path || '').toLowerCase();
+  return lower.endsWith('.md') || lower.endsWith('.markdown');
+}
+
+function editorVisualLineFragments(line, columnCount, wrapEnabled = fileEditorWrapEnabled) {
+  const text = String(line ?? '');
+  const width = Math.floor(Number(columnCount) || 0);
+  if (!wrapEnabled || width <= 0 || text.length <= width) return [text];
+  const fragments = [];
+  for (let index = 0; index < text.length; index += width) {
+    fragments.push(text.slice(index, index + width));
+  }
+  return fragments.length ? fragments : [''];
+}
+
+function editorVisualColumnCount(textarea, lineNumbers = fileEditorLineNumbersEnabled) {
+  if (!textarea || !textarea.clientWidth || typeof window.getComputedStyle !== 'function') return 88;
+  const style = window.getComputedStyle(textarea);
+  const fontSize = parseFloat(style.fontSize) || 12;
+  const paddingLeft = parseFloat(style.paddingLeft) || 0;
+  const paddingRight = parseFloat(style.paddingRight) || 0;
+  const lineNumberReserve = lineNumbers ? Math.max(34, Math.min(70, String((textarea.value || '').split('\n').length).length * fontSize * 0.72 + 18)) : 0;
+  const markerReserve = fileEditorWrapEnabled ? fontSize * 1.4 : 0;
+  const charWidth = Math.max(5, fontSize * 0.62);
+  const available = Math.max(charWidth * 12, textarea.clientWidth - paddingLeft - paddingRight - lineNumberReserve - markerReserve);
+  return Math.max(12, Math.floor(available / charWidth));
+}
+
+function simpleLineSyntaxHtml(language, line) {
+  const highlighted = simpleCodeSyntaxHtml(language, line);
+  return highlighted === null ? esc(line) : highlighted;
+}
+
+function editorVisualHighlightHtml(language, text, options = {}) {
+  const source = String(text ?? '');
+  const wrapEnabled = options.wrap === true;
+  const lineNumbers = options.lineNumbers === true;
+  const columnCount = options.columnCount || 88;
+  const rows = source.split('\n');
+  return rows.map((line, lineIndex) => {
+    const fragments = editorVisualLineFragments(line, columnCount, wrapEnabled);
+    return fragments.map((fragment, fragmentIndex) => {
+      const sourceLine = lineIndex + 1;
+      const continuation = fragmentIndex > 0;
+      const rowClass = continuation ? 'editor-visual-line continuation' : 'editor-visual-line';
+      const lineNumber = lineNumbers && !continuation ? String(sourceLine) : '';
+      const marker = wrapEnabled && continuation ? '↪' : '';
+      const code = simpleLineSyntaxHtml(language, fragment);
+      return `<span class="${rowClass}" data-source-line="${sourceLine}"><span class="editor-line-number">${esc(lineNumber)}</span><span class="editor-soft-wrap-marker">${esc(marker)}</span><span class="editor-line-code">${code}</span></span>`;
+    }).join('\n');
+  }).join('\n') || '<span class="editor-visual-line" data-source-line="1"><span class="editor-line-number">1</span><span class="editor-soft-wrap-marker"></span><span class="editor-line-code"></span></span>';
+}
+
+function renderEditorCodePreviewInto(container, path, text) {
+  const language = syntaxLanguageForPath(path);
+  const pre = document.createElement('pre');
+  pre.className = 'file-editor-code-preview';
+  const code = document.createElement('code');
+  code.className = `language-${language || 'text'} editor-highlight-code`;
+  code.innerHTML = editorVisualHighlightHtml(language, text, {
+    wrap: true,
+    lineNumbers: fileEditorLineNumbersEnabled,
+    columnCount: 96,
+  });
+  pre.appendChild(code);
+  container.replaceChildren(pre);
+}
+
+function renderEditorPreviewPane(container, path, text) {
+  if (!container) return;
+  container.classList.toggle('markdown-body', isMarkdownPath(path));
+  container.classList.toggle('code-preview-body', !isMarkdownPath(path));
+  if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text);
+  else renderEditorCodePreviewInto(container, path, text);
 }
 
 function markdownInlineHighlightHtml(escaped) {
@@ -7971,22 +8183,26 @@ function highlightLanguageAvailable(language) {
   return Boolean(window.hljs.getLanguage(language));
 }
 
-function renderSyntaxHighlight(panel, path, content) {
-  const highlightPane = panel.querySelector('.file-editor-highlight-panel');
-  const code = highlightPane?.querySelector('code');
-  if (!highlightPane || !code) return false;
+function renderSyntaxHighlightInto(highlightPane, code, host, textarea, path, content) {
+  if (!highlightPane || !code || !host) return false;
   const language = syntaxLanguageForPath(path);
   const simpleHtml = simpleCodeSyntaxHtml(language, content);
-  if (simpleHtml !== null) {
+  const needsVisualOverlay = fileEditorWrapEnabled || fileEditorLineNumbersEnabled;
+  host.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
+  if (simpleHtml !== null || needsVisualOverlay) {
     code.className = `language-${language || 'text'}`;
-    code.innerHTML = simpleHtml;
+    code.innerHTML = editorVisualHighlightHtml(language, content, {
+      wrap: fileEditorWrapEnabled,
+      lineNumbers: fileEditorLineNumbersEnabled,
+      columnCount: editorVisualColumnCount(textarea, fileEditorLineNumbersEnabled),
+    });
     highlightPane.hidden = false;
-    panel.classList.add('syntax-highlighted');
+    host.classList.add('syntax-highlighted');
     return true;
   }
   if (!highlightLanguageAvailable(language)) {
     highlightPane.hidden = true;
-    panel.classList.remove('syntax-highlighted');
+    host.classList.remove('syntax-highlighted');
     code.textContent = '';
     code.className = '';
     return false;
@@ -7995,15 +8211,30 @@ function renderSyntaxHighlight(panel, path, content) {
     code.className = `language-${language}`;
     code.innerHTML = window.hljs.highlight(String(content || ''), {language, ignoreIllegals: true}).value || '\n';
     highlightPane.hidden = false;
-    panel.classList.add('syntax-highlighted');
+    host.classList.add('syntax-highlighted');
     return true;
   } catch (_) {
     highlightPane.hidden = true;
-    panel.classList.remove('syntax-highlighted');
+    host.classList.remove('syntax-highlighted');
     code.textContent = '';
     code.className = '';
     return false;
   }
+}
+
+function renderSyntaxHighlight(panel, path, content) {
+  return renderSyntaxHighlightInto(
+    panel.querySelector('.file-editor-highlight-panel'),
+    panel.querySelector('.file-editor-highlight-panel code'),
+    panel,
+    panel.querySelector('.file-editor-textarea-panel'),
+    path,
+    content,
+  );
+}
+
+function renderStandaloneSyntaxHighlight(path, content) {
+  return renderSyntaxHighlightInto(fileEditorHighlight, fileEditorHighlightCode, fileEditor, fileEditorTextarea, path, content);
 }
 
 function syncSyntaxHighlightScroll(panel) {
@@ -8014,6 +8245,31 @@ function syncSyntaxHighlightScroll(panel) {
   highlightPane.scrollLeft = textarea.scrollLeft;
 }
 
+function syncStandaloneSyntaxHighlightScroll() {
+  if (!fileEditorTextarea || !fileEditorHighlight || fileEditorHighlight.hidden) return;
+  fileEditorHighlight.scrollTop = fileEditorTextarea.scrollTop;
+  fileEditorHighlight.scrollLeft = fileEditorTextarea.scrollLeft;
+}
+
+function syncFileEditorSplitScroll(host, source) {
+  if (!host || host._splitScrollSyncing) return;
+  const content = host.querySelector?.('.file-editor-content') || fileEditorContent;
+  if (!content?.classList?.contains('split-preview')) return;
+  const textarea = host.querySelector?.('.file-editor-textarea-panel') || fileEditorTextarea;
+  const previewPane = host.querySelector?.('.file-editor-preview-pane-panel') || fileEditorPreviewPane;
+  if (!textarea || !previewPane || textarea.hidden || previewPane.hidden) return;
+  const from = source === 'preview' ? previewPane : textarea;
+  const to = source === 'preview' ? textarea : previewPane;
+  const maxFromTop = Math.max(1, from.scrollHeight - from.clientHeight);
+  const maxToTop = Math.max(0, to.scrollHeight - to.clientHeight);
+  const maxFromLeft = Math.max(1, from.scrollWidth - from.clientWidth);
+  const maxToLeft = Math.max(0, to.scrollWidth - to.clientWidth);
+  host._splitScrollSyncing = true;
+  to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
+  to.scrollLeft = Math.round((from.scrollLeft / maxFromLeft) * maxToLeft);
+  host._splitScrollSyncing = false;
+}
+
 function refreshEditorSyntaxHighlights() {
   for (const [item, panel] of panelNodes.entries()) {
     if (!isFileEditorItem(item)) continue;
@@ -8021,6 +8277,7 @@ function refreshEditorSyntaxHighlights() {
     const state = openFiles.get(path);
     if (state?.kind === 'text') {
       renderSyntaxHighlight(panel, path, state.content);
+      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       syncSyntaxHighlightScroll(panel);
     }
   }
