@@ -45,6 +45,7 @@ const fileEditorTextarea = document.getElementById('fileEditorTextarea');
 const fileEditorModeControl = document.getElementById('fileEditorMode');
 const fileEditorGutterBtn = document.getElementById('fileEditorGutter');
 const fileEditorWrapBtn = document.getElementById('fileEditorWrap');
+const fileEditorThemeBtn = document.getElementById('fileEditorTheme');
 const fileEditorPreviewPane = document.getElementById('fileEditorPreviewPane');
 const fileEditorHighlight = document.getElementById('fileEditorHighlight');
 const fileEditorHighlightCode = document.getElementById('fileEditorHighlightCode');
@@ -56,6 +57,7 @@ const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
 const fileEditorLineNumbersStorageKey = 'yolomux.editorLineNumbers';
+const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1';
 const editorViewModes = new Set(['edit', 'preview', 'split']);
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
@@ -73,6 +75,9 @@ const HIGHLIGHTABLE_EXTENSIONS = {
 };
 const openFiles = new Map();  // path -> {mtime, size, kind, original, content, dirty}
 const fileExplorerDirectorySignatures = new Map();
+const fileExplorerKnownEntryNames = new Map();
+const fileExplorerNewEntryUntil = new Map();
+const pendingFileEditorFocus = new Set();
 let activeFile = null;
 let fileExplorerRoot = null;
 let filesystemRefreshInFlight = false;
@@ -83,9 +88,18 @@ let fileExplorerShowHidden = (() => {
 })();
 const fileEditorPreviewMode = new Map();  // legacy map: path -> true when not in edit mode
 const fileEditorViewMode = new Map();  // path -> "edit" | "preview" | "split"
+const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
+const fileEditorThemeModes = ['dark', 'light'];
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
+let fileEditorThemeMode = readStoredEditorThemeMode();
+let preferencesSearchText = '';
+let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
+let commandPaletteNode = null;
+let commandPaletteQuery = '';
+let commandPaletteIndex = 0;
+let commandPaletteItemsCache = [];
 let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
@@ -116,12 +130,18 @@ const latencySamplesMax = 24;
 let toastDurationMs = initialSetting('notifications.toast_duration_ms', 10000);
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
-let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms', 300);
+let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms', 1000);
 let hoverCloseDelayMs = initialSetting('performance.popover_hide_delay_ms', 300);
 let popoverHideDelayMs = hoverCloseDelayMs;
-let menuHoverOpenDelayMs = popoverShowDelayMs;
+let menuHoverOpenDelayMs = initialSetting('performance.menu_hover_open_delay_ms', 800);
 let menuHoverCloseDelayMs = hoverCloseDelayMs;
+let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_ms', 1000);
+let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms', 120);
+let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3001);
+let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
+let editorFontSize = initialSetting('appearance.editor_font_size', 13);
+let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
 let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
 let autoFocusEnabled = initialSetting('general.auto_focus', true);
 const menuClickCloseGraceMs = 2000;
@@ -164,11 +184,6 @@ const platformOverrideParamNames = ['platform', 'uiPlatform', 'ui_platform'];
 const pcPlatformOverrideValues = new Set(['pc', 'win', 'windows', 'linux']);
 const macPlatformOverrideValues = new Set(['mac', 'macos', 'darwin']);
 const platformWindowControlClasses = {
-  mac: {
-    close: 'mac-window-control mac-minimize',
-    minimize: 'mac-window-control mac-minimize',
-    zoom: 'mac-window-control mac-zoom',
-  },
   pc: {
     close: 'pc-window-control pc-close',
     minimize: 'pc-window-control pc-minimize',
@@ -191,8 +206,7 @@ function isMacPlatform() {
 }
 
 function platformWindowControlClass(kind) {
-  const platform = isMacPlatform() ? 'mac' : 'pc';
-  const classes = platformWindowControlClasses[platform];
+  const classes = platformWindowControlClasses.pc;
   return classes[kind] || classes.minimize;
 }
 
@@ -364,6 +378,28 @@ function writeStoredEditorLineNumbers(value) {
   } catch (_) {}
 }
 
+function defaultCollapsedPreferenceSections() {
+  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder']);
+}
+
+function readStoredCollapsedPreferenceSections() {
+  try {
+    const raw = window.localStorage?.getItem(preferencesCollapsedStorageKey);
+    if (!raw) return defaultCollapsedPreferenceSections();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
+    return new Set(parsed.filter(item => typeof item === 'string' && item));
+  } catch (_) {
+    return defaultCollapsedPreferenceSections();
+  }
+}
+
+function writeStoredCollapsedPreferenceSections() {
+  try {
+    window.localStorage?.setItem(preferencesCollapsedStorageKey, JSON.stringify(Array.from(collapsedPreferenceSections)));
+  } catch (_) {}
+}
+
 function nestedSetting(source, path, fallback) {
   let current = source;
   for (const part of String(path || '').split('.')) {
@@ -405,6 +441,21 @@ function writeStoredFileExplorerRootMode(mode) {
   } catch (_) {}
 }
 
+function readStoredEditorThemeMode() {
+  try {
+    const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey) || 'dark';
+    return fileEditorThemeModes.includes(value) ? value : 'dark';
+  } catch (_) {
+    return 'dark';
+  }
+}
+
+function writeStoredEditorThemeMode(mode) {
+  try {
+    window.localStorage?.setItem(fileEditorThemeModeStorageKey, fileEditorThemeModes.includes(mode) ? mode : 'dark');
+  } catch (_) {}
+}
+
 function renderTabMetaToggle() {
   document.body?.classList.toggle('tab-meta-hidden', !tabMetaVisible);
   if (!tabMetaToggle) return;
@@ -426,6 +477,7 @@ function toggleTabMetadata() {
 function setFocusedTerminal(session) {
   focusedTerminal = session;
   focusedPanelItem = session;
+  clearPendingFileEditorFocusExcept(session);
   if (isTmuxSession(session)) lastFocusedTmuxSession = session;
   dismissAttentionAlertsForSession(session);
   updateSessionButtonStates();
@@ -446,6 +498,7 @@ function clearFocusedTerminal(session) {
 function setFocusedPanelItem(item) {
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
+  clearPendingFileEditorFocusExcept(item);
   if (isTmuxSession(item)) {
     lastFocusedTmuxSession = item;
     dismissAttentionAlertsForSession(item);
@@ -453,6 +506,12 @@ function setFocusedPanelItem(item) {
   updateSessionButtonStates();
   updatePanelInactiveOverlays();
   scheduleFileExplorerActiveTabSync(item);
+}
+
+function clearPendingFileEditorFocusExcept(item) {
+  for (const pendingItem of Array.from(pendingFileEditorFocus)) {
+    if (pendingItem !== item) pendingFileEditorFocus.delete(pendingItem);
+  }
 }
 
 function clearFocusForInactiveLayout() {
@@ -804,6 +863,26 @@ async function copyTerminalSelection(session, term, options = {}) {
   }
 }
 
+function installTerminalCopyShortcut(session, term) {
+  // Ctrl-C / Cmd-C copy the terminal selection. Plain Ctrl-C with NO selection
+  // must still send SIGINT to the PTY, so only swallow the keystroke when there
+  // is something selected. xterm paints the selection on a canvas, so the
+  // browser's native copy can't grab it — we copy explicitly.
+  term.attachCustomKeyEventHandler?.(event => {
+    if (event.type !== 'keydown') return true;
+    if (event.code !== 'KeyC' && event.key?.toLowerCase() !== 'c') return true;
+    const isCmdC = event.metaKey && !event.ctrlKey && !event.altKey;
+    const isCtrlC = event.ctrlKey && !event.metaKey && !event.altKey;
+    if (!isCmdC && !isCtrlC) return true;
+    const selected = term.getSelection?.() || '';
+    if (!selected) return true; // no selection: let Ctrl-C through as SIGINT
+    event.preventDefault();
+    copyTerminalSelection(session, term);
+    term.clearSelection?.(); // so a second Ctrl-C falls through to SIGINT
+    return false; // swallow: do not forward ^C to the PTY
+  });
+}
+
 function showTerminalContextMenu(session, term, x, y) {
   closeFileContextMenu();
   closeSessionContextMenu();
@@ -840,10 +919,6 @@ function showSessionContextMenu(session, x, y, options = {}) {
   menu.className = 'terminal-context-menu session-context-menu';
   menu.setAttribute('role', 'menu');
   const renameAction = options.tab ? () => beginPaneTabRename(options.tab, session) : () => renameTmuxSession(session);
-  for (const item of tmuxSessionViewCommands(session)) {
-    appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
-  }
-  appendContextMenuSeparator(menu);
   for (const item of tmuxSessionActionCommands(session, {renameAction})) {
     appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
   }
@@ -899,6 +974,24 @@ function layoutSlotKeys(slots = layoutSlots) {
   const treeSlots = layoutLeafSlots(slots?.[layoutTreeKey]);
   if (treeSlots.length) return treeSlots;
   return Object.keys(slots || {}).filter(key => key !== layoutTreeKey && paneHasLayoutContent(key, slots));
+}
+
+function cloneLayoutSlots(slots = layoutSlots) {
+  return JSON.parse(JSON.stringify(slots || emptyLayoutSlots()));
+}
+
+function layoutSlotsSignature(slots = layoutSlots) {
+  return JSON.stringify(normalizeLayoutSlots(cloneLayoutSlots(slots)));
+}
+
+function compactCurrentLayoutSlots(options = {}) {
+  const normalized = normalizeLayoutSlots(layoutSlots);
+  if (layoutSlotsSignature(normalized) === layoutSlotsSignature(layoutSlots)) return false;
+  applyLayoutSlots(normalized, {
+    focusSession: options.focusSession || focusedPanelItem || undefined,
+    prune: false,
+  });
+  return true;
 }
 
 function nextLayoutSlot(slots = layoutSlots) {
@@ -1000,9 +1093,11 @@ function compactLayoutNodeInfo(node, slots) {
   if (node.slot) {
     if (!paneHasLayoutContent(node.slot, slots)) return null;
     const placeholderOnly = paneIsPlaceholder(node.slot, slots);
+    const containsFileExplorer = paneTabs(node.slot, slots).includes(fileExplorerItemId);
     return {
       node: leafNode(node.slot),
-      containsFileExplorer: paneTabs(node.slot, slots).includes(fileExplorerItemId),
+      containsFileExplorer,
+      directFileExplorerLeaf: containsFileExplorer,
       placeholderOnly,
     };
   }
@@ -1011,7 +1106,8 @@ function compactLayoutNodeInfo(node, slots) {
   if (!children.length) return null;
   if (children.length === 1) return children[0];
   const hasFileExplorer = children.some(child => child.containsFileExplorer);
-  const kept = direction === 'row' && hasFileExplorer
+  const hasDirectFileExplorerLeaf = children.some(child => child.directFileExplorerLeaf);
+  const kept = direction === 'row' && hasDirectFileExplorerLeaf
     ? children
     : children.filter(child => !child.placeholderOnly);
   const compacted = kept.length ? kept : [children[0]];
@@ -1020,6 +1116,7 @@ function compactLayoutNodeInfo(node, slots) {
   return {
     node: nextNode,
     containsFileExplorer: compacted.some(child => child.containsFileExplorer),
+    directFileExplorerLeaf: false,
     placeholderOnly: compacted.every(child => child.placeholderOnly),
   };
 }
@@ -1445,7 +1542,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, fileExplorerItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -1809,6 +1906,7 @@ async function openProjectReadme() {
 
 function keyboardShortcutItems() {
   return [
+    menuCommand('Command palette', null, {disabled: true, detail: 'Ctrl/Cmd+K'}),
     menuCommand('Save active editor', null, {disabled: true, detail: 'Ctrl/Cmd+S'}),
     menuCommand('Close menu or dialog', null, {disabled: true, detail: 'Esc'}),
     menuCommand('Session actions', null, {disabled: true, detail: 'Right-click a tmux tab'}),
@@ -1816,8 +1914,156 @@ function keyboardShortcutItems() {
   ];
 }
 
+function commandPaletteAllTabItems() {
+  return Array.from(new Set([...activePaneItems(), ...backgroundTabItems(), ...inactiveTabItems()]));
+}
+
+function flattenMenuCommands(items, prefix = []) {
+  const result = [];
+  for (const item of items || []) {
+    if (item.type === 'submenu') {
+      result.push(...flattenMenuCommands(item.items, [...prefix, item.label]));
+    } else if (item.type === 'command' && item.action && !item.disabled) {
+      result.push({
+        group: 'Menu',
+        label: [...prefix, item.label].join(' / '),
+        detail: item.detail || '',
+        run: item.action,
+      });
+    }
+  }
+  return result;
+}
+
+function commandPaletteItems() {
+  const tabItems = commandPaletteAllTabItems().map(item => ({
+    group: 'Tabs',
+    label: itemLabel(item),
+    detail: menuTabDetail(item),
+    run: () => selectSession(item),
+  }));
+  const menuItems = appMenuTree().flatMap(menu => flattenMenuCommands(menu.items, [menu.label]));
+  const settingItems = preferenceSections().flatMap(section => section.items.map(item => ({
+    group: 'Settings',
+    label: `${section.title} / ${item.label}`,
+    detail: item.help || item.path,
+    run: () => {
+      preferencesSearchText = item.label;
+      collapsedPreferenceSections.delete(section.title);
+      writeStoredCollapsedPreferenceSections();
+      selectSession(prefsItemId);
+      requestAnimationFrame(() => {
+        renderPreferencesPanels({force: true});
+        const control = document.querySelector(`[data-setting-path="${cssEscape(item.path)}"]`);
+        control?.focus?.({preventScroll: false});
+        control?.scrollIntoView?.({block: 'center', inline: 'nearest'});
+      });
+    },
+  })));
+  return [...tabItems, ...menuItems, ...settingItems];
+}
+
+function commandPaletteMatches(item, query) {
+  if (!query) return true;
+  const haystack = `${item.group} ${item.label} ${item.detail}`.toLowerCase();
+  return query.split(/\s+/).filter(Boolean).every(token => haystack.includes(token));
+}
+
+function ensureCommandPalette() {
+  if (commandPaletteNode) return commandPaletteNode;
+  const node = document.createElement('div');
+  node.className = 'command-palette';
+  node.hidden = true;
+  node.innerHTML = `
+    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="Command palette">
+      <input type="search" class="command-palette-input" placeholder="Find tabs, commands, settings" aria-label="Find tabs, commands, settings">
+      <div class="command-palette-results" role="listbox"></div>
+    </div>`;
+  node.addEventListener('mousedown', event => {
+    if (event.target === node) closeCommandPalette();
+  });
+  const input = node.querySelector('.command-palette-input');
+  input.addEventListener('input', () => {
+    commandPaletteQuery = input.value || '';
+    commandPaletteIndex = 0;
+    renderCommandPaletteResults();
+  });
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeCommandPalette();
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      commandPaletteIndex = Math.min(commandPaletteItemsCache.length - 1, commandPaletteIndex + 1);
+      renderCommandPaletteResults();
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      commandPaletteIndex = Math.max(0, commandPaletteIndex - 1);
+      renderCommandPaletteResults();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      invokeCommandPaletteSelection();
+    }
+  });
+  node.querySelector('.command-palette-results').addEventListener('click', event => {
+    const row = event.target.closest('[data-command-index]');
+    if (!row || !node.contains(row)) return;
+    commandPaletteIndex = Number(row.dataset.commandIndex || 0);
+    invokeCommandPaletteSelection();
+  });
+  document.body.appendChild(node);
+  commandPaletteNode = node;
+  return node;
+}
+
+function renderCommandPaletteResults() {
+  const node = ensureCommandPalette();
+  const results = node.querySelector('.command-palette-results');
+  const query = commandPaletteQuery.trim().toLowerCase();
+  commandPaletteItemsCache = commandPaletteItems().filter(item => commandPaletteMatches(item, query)).slice(0, 60);
+  commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteItemsCache.length - 1));
+  if (!commandPaletteItemsCache.length) {
+    results.innerHTML = '<div class="command-palette-empty">No matches</div>';
+    return;
+  }
+  results.innerHTML = commandPaletteItemsCache.map((item, index) => `
+    <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}">
+      <span class="command-palette-group">${esc(item.group)}</span>
+      <span class="command-palette-main"><span class="command-palette-label">${esc(item.label)}</span><span class="command-palette-detail">${esc(item.detail || '')}</span></span>
+    </button>`).join('');
+  results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
+}
+
+function openCommandPalette() {
+  const node = ensureCommandPalette();
+  closeAppMenus();
+  commandPaletteQuery = '';
+  commandPaletteIndex = 0;
+  node.hidden = false;
+  node.classList.add('open');
+  const input = node.querySelector('.command-palette-input');
+  input.value = '';
+  renderCommandPaletteResults();
+  input.focus({preventScroll: true});
+}
+
+function closeCommandPalette() {
+  if (!commandPaletteNode) return;
+  commandPaletteNode.hidden = true;
+  commandPaletteNode.classList.remove('open');
+}
+
+function invokeCommandPaletteSelection() {
+  const item = commandPaletteItemsCache[commandPaletteIndex];
+  if (!item) return;
+  closeCommandPalette();
+  item.run?.();
+}
+
 function shouldNotifyState(state) {
-  return ['needs-approval', 'needs-input', 'blocked', 'ready-review'].includes(state.key);
+  const configured = initialSetting('notifications.notify_transitions', ['needs-input', 'needs-approval', 'blocked']);
+  const transitions = Array.isArray(configured) ? configured : ['needs-input', 'needs-approval', 'blocked'];
+  return transitions.includes(state.key);
 }
 
 function sendBrowserNotification(title, options = {}) {
@@ -2231,12 +2477,19 @@ function menuSubmenu(label, items, options = {}) {
   return {type: 'submenu', label, items, ...options};
 }
 
-function menuSection(label) {
-  return {type: 'section', label};
-}
-
 function menuSeparator() {
   return {type: 'separator'};
+}
+
+function menuGroups(...groups) {
+  const items = [];
+  for (const group of groups) {
+    const commands = (Array.isArray(group) ? group : [group]).filter(Boolean);
+    if (!commands.length) continue;
+    if (items.length) items.push(menuSeparator());
+    items.push(...commands);
+  }
+  return items;
 }
 
 function currentActiveMenuItem() {
@@ -2270,7 +2523,7 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   if (isFileEditorItem(item)) return compactHomePath(fileItemPath(item));
   if (isFileExplorerItem(item)) return compactHomePath(fileExplorerRoot || homePath || '/');
-  if (isPreferencesItem(item)) return compactHomePath(clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml');
+  if (isPreferencesItem(item)) return compactHomePath(settingsConfigPath());
   if (isInfoItem(item)) return 'Branch and repo metadata';
   return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
 }
@@ -2286,7 +2539,7 @@ function menuTabRowHtml(item, options = {}) {
   const pr = displayPullRequest(info);
   const desc = sessionTabDescription(item, info);
   const detailHtml = desc ? `<span class="session-button-dir tab-inline-detail">${esc(desc)}</span>` : '';
-  return `<span class="pane-tab-core">${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: options.toggleYolo === true, yoloWorking: sessionYoloIsWorking(item)})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
+  return `<span class="pane-tab-core">${yoloMarkerHtml(item, auto, {enabledOnly: false, toggle: options.toggleYolo === true && !readOnlyMode, yoloWorking: sessionYoloIsWorking(item)})}<span class="session-button-prefix">${sessionNumberNameHtml(item)}</span>
     <span class="session-button-text">${state ? sessionStateHtml(state) : ''}${defaultBranchBadgeHtml(item, info)}${pullRequestCompactBadgesHtml(item, pr)}${detailHtml}</span></span>`;
 }
 
@@ -2302,7 +2555,7 @@ function menuTabCommand(item, options = {}) {
     checked: options.checked ?? active,
     detail: '',
     ariaLabel: [itemLabel(item), detail].filter(Boolean).join(' - '),
-    html: stripTitleAttrs(menuTabRowHtml(item)),
+    html: stripTitleAttrs(menuTabRowHtml(item, options)),
     className: 'app-menu-tab-command',
   });
 }
@@ -2311,23 +2564,15 @@ function tmuxSessionActionCommands(session, options = {}) {
   const hasSession = isTmuxSession(session);
   const autoPayload = hasSession ? autoApproveStates.get(session) : null;
   const autoHere = hasSession ? autoApproveEnabledHere(autoPayload) : false;
+  const includeYolo = options.includeYolo !== false;
   const readonlyDetail = 'Admin only';
   const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
   const visibleDetail = readOnlyMode ? readonlyDetail : (hasSession ? '' : 'No tmux tab focused');
   const yoloLabel = `${autoHere ? 'Disable' : 'Enable'} YOLO for Tmux Session${hasSession ? ` '${session}'` : ''}`;
+  const renameLabel = hasSession ? `Rename tmux session '${session}'` : 'Rename tmux session';
   const renameAction = options.renameAction || (() => renameTmuxSession(session));
-  const commands = [
-    menuCommand('Rename session', renameAction, {
-      disabled: readOnlyMode || !hasSession,
-      detail: visibleDetail,
-      ariaLabel: ['Rename session', focusDetail].filter(Boolean).join(' - '),
-    }),
-    menuCommand('Kill session', () => killTmuxSession(session), {
-      disabled: readOnlyMode || !hasSession,
-      detail: visibleDetail,
-      ariaLabel: ['Kill session', focusDetail].filter(Boolean).join(' - '),
-    }),
-    menuCommand(yoloLabel, async () => {
+  const commands = [];
+  if (includeYolo) commands.push(menuCommand(yoloLabel, async () => {
       if (!hasSession) return;
       await toggleAutoApprove(session);
       renderSessionButtons();
@@ -2336,39 +2581,31 @@ function tmuxSessionActionCommands(session, options = {}) {
       checked: autoHere,
       disabled: readOnlyMode || !hasSession,
       detail: visibleDetail,
+      iconHtml: hasSession ? yoloMarkerHtml(session, autoHere, {enabledOnly: false, yoloWorking: sessionYoloIsWorking(session)}) : '',
       ariaLabel: [yoloLabel, hasSession ? focusDetail : 'Focus a tmux session first'].filter(Boolean).join(' - '),
+    }));
+  commands.push(
+    menuCommand(renameLabel, renameAction, {
+      disabled: readOnlyMode || !hasSession,
+      detail: visibleDetail,
+      ariaLabel: [renameLabel, focusDetail].filter(Boolean).join(' - '),
     }),
-  ];
+    menuCommand('Kill session', () => killTmuxSession(session), {
+      disabled: readOnlyMode || !hasSession,
+      detail: visibleDetail,
+      ariaLabel: ['Kill session', focusDetail].filter(Boolean).join(' - '),
+    }),
+  );
   return commands;
-}
-
-function tmuxYoloSessionCommands() {
-  const ordered = [
-    ...sessions.filter(session => autoApproveEnabledHere(autoApproveStates.get(session))),
-    ...sessions.filter(session => !autoApproveEnabledHere(autoApproveStates.get(session))),
-  ];
-  if (!ordered.length) return [menuCommand('No tmux sessions', null, {disabled: true})];
-  return ordered.map(session => {
-    const payload = autoApproveStates.get(session);
-    const enabled = autoApproveEnabledHere(payload);
-    const elsewhere = autoApproveEnabledElsewhere(payload);
-    const label = `${sessionLabel(session)}${enabled ? ' on' : ''}`;
-    return menuCommand(label, async () => {
-      await setAutoApprove(session, !enabled);
-      renderSessionButtons({force: true});
-      renderPaneTabStrips();
-    }, {
-      checked: enabled,
-      disabled: readOnlyMode,
-      detail: elsewhere ? 'owned by another server' : (enabled ? 'YOLO enabled here' : 'YOLO off'),
-      ariaLabel: `${enabled ? 'Disable' : 'Enable'} YOLO for ${sessionLabel(session)}`,
-    });
-  });
 }
 
 function yoloRulePath() {
   return yoloRulesPayload.path
     || nestedSetting(clientSettings, 'yolo.rule_file_path', nestedSetting(clientSettingsDefaults, 'yolo.rule_file_path', '~/.config/yolomux/yolo-rules.yaml'));
+}
+
+function settingsConfigPath() {
+  return clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
 }
 
 function yoloRuleStatusDetail() {
@@ -2430,7 +2667,7 @@ async function refreshYoloRulesStatus(options = {}) {
   }
 }
 
-function tmuxYoloMenuItems(yoloCount) {
+function tmuxYoloMenuItems() {
   return [
     menuCommand('Open rule file', openYoloRuleFile, {
       disabled: readOnlyMode,
@@ -2439,9 +2676,27 @@ function tmuxYoloMenuItems(yoloCount) {
     menuCommand('Reload rules', reloadYoloRules, {
       detail: yoloRuleStatusDetail(),
     }),
-    menuSeparator(),
-    menuSubmenu(`Sessions${yoloCount ? ` (${yoloCount})` : ''}`, tmuxYoloSessionCommands()),
   ];
+}
+
+function tmuxCurrentYoloCommand(session) {
+  const hasSession = isTmuxSession(session);
+  const payload = hasSession ? autoApproveStates.get(session) : null;
+  const enabled = hasSession ? autoApproveEnabledHere(payload) : false;
+  const elsewhere = hasSession ? autoApproveEnabledElsewhere(payload) : false;
+  const label = hasSession ? `YO ${enabled ? 'on' : elsewhere ? 'elsewhere' : 'off'}` : 'YO';
+  return menuCommand(label, async () => {
+    if (!hasSession) return;
+    await toggleAutoApprove(session);
+    renderSessionButtons({force: true});
+    renderPaneTabStrips();
+  }, {
+    disabled: readOnlyMode || !hasSession,
+    detail: hasSession ? `Tmux Session '${session}'` : 'Focus a tmux tab first',
+    iconHtml: hasSession ? yoloMarkerHtml(session, enabled, {enabledOnly: false, yoloWorking: sessionYoloIsWorking(session)}) : '',
+    keepOpen: true,
+    ariaLabel: hasSession ? `${enabled ? 'Disable' : 'Enable'} YOLO for Tmux Session '${session}'` : 'Focus a tmux tab first',
+  });
 }
 
 function tmuxSessionViewCommands(session) {
@@ -2506,6 +2761,7 @@ function backgroundTabMenuItems() {
     checked: false,
     detail: 'Minimized',
     openAsPane: true,
+    toggleYolo: true,
   });
 }
 
@@ -2514,21 +2770,16 @@ function inactiveTabMenuItems() {
     checked: false,
     detail: 'Not in a pane',
     openAsPane: true,
+    toggleYolo: true,
   });
 }
 
 function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
-  const groups = [
-    ['Active', openItems.map(item => menuTabCommand(item))],
-    ['Minimized', backgroundTabMenuItems()],
-    ['Inactive', inactiveTabMenuItems()],
-  ].filter(([, items]) => items.length);
-  const items = [];
-  for (const [index, [label, commands]] of groups.entries()) {
-    if (index) items.push(menuSeparator());
-    items.push(menuSection(label), ...commands);
-  }
-  return items;
+  return menuGroups(
+    openItems.map(item => menuTabCommand(item, {toggleYolo: true})),
+    backgroundTabMenuItems(),
+    inactiveTabMenuItems()
+  );
 }
 
 function appMenuTree() {
@@ -2539,20 +2790,27 @@ function appMenuTree() {
     {
       id: 'file',
       label: 'File',
-      items: [
-        menuCommand(fileExplorerLabel(), () => selectSession(fileExplorerItemId), {
-          checked: itemInLayout(fileExplorerItemId),
-          detail: 'Browse files',
-        }),
-        menuCommand('Open file', null, {
-          disabled: true,
-          detail: `Use ${fileExplorerLabel()} for now`,
-        }),
-        menuSeparator(),
-        menuCommand('Log out', logOut, {
-          detail: 'End this browser session',
-        }),
-      ],
+      items: menuGroups(
+        [
+          menuCommand(fileExplorerLabel(), () => selectSession(fileExplorerItemId), {
+            checked: itemInLayout(fileExplorerItemId),
+            detail: 'Browse files',
+          }),
+          menuCommand('Open file', null, {
+            disabled: true,
+            detail: `Use ${fileExplorerLabel()} for now`,
+          }),
+          menuCommand('Preferences', () => selectSession(prefsItemId), {
+            checked: itemInLayout(prefsItemId),
+            detail: compactHomePath(settingsConfigPath()),
+          }),
+        ],
+        [
+          menuCommand('Log out', logOut, {
+            detail: 'End this browser session',
+          }),
+        ]
+      ),
     },
     {
       id: 'view',
@@ -2561,6 +2819,16 @@ function appMenuTree() {
         menuCommand(tabMetaVisible ? 'Hide tab metadata' : 'Show tab metadata', toggleTabMetadata, {
           checked: tabMetaVisible,
           detail: 'Branch, state, PR, cwd',
+          iconHtml: appMenuUiIcon('tab-meta', tabMetaVisible),
+        }),
+        menuCommand('Alert', toggleNotifications, {
+          checked: notificationsEnabled,
+          disabled: readOnlyMode,
+          detail: readOnlyMode ? 'Requires admin access' : '',
+          iconHtml: appMenuUiIcon('notify', notificationsEnabled),
+        }),
+        menuCommand('Refresh', refreshAll, {
+          iconHtml: appMenuUiIcon('refresh'),
         }),
         menuTabCommand(infoItemId, {
           checked: itemIsActivePaneTab(infoItemId),
@@ -2575,63 +2843,49 @@ function appMenuTree() {
     },
     {
       id: 'tmux',
-      label: 'Tmux',
+      label: 'tmux',
+      items: menuGroups(
+        [tmuxCurrentYoloCommand(activeTmux)],
+        [
+          menuSubmenu('New tmux session', newTmuxSessionItems()),
+          menuSubmenu('YOLO', tmuxYoloMenuItems()),
+        ],
+        tmuxSessionViewCommands(activeTmux),
+        [
+          ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),
+          menuCommand('Resume session', null, {
+            disabled: true,
+            detail: 'Coming soon',
+          }),
+        ]
+      ),
+    },
+    {
+      id: 'windows',
+      label: 'Windows',
       badgeText: yoloCount ? String(yoloCount) : '',
       badgeTitle: yoloCount ? `${yoloCount} tmux session${yoloCount === 1 ? '' : 's'} with YOLO enabled` : '',
-      items: [
-        menuSubmenu('New tmux session', newTmuxSessionItems()),
-        menuSubmenu(`YOLO${yoloCount ? ` (${yoloCount})` : ''}`, tmuxYoloMenuItems(yoloCount)),
-        menuSeparator(),
-        ...tmuxSessionViewCommands(activeTmux),
-        menuSeparator(),
-        ...tmuxSessionActionCommands(activeTmux),
-        menuCommand('Resume session', null, {
-          disabled: true,
-          detail: 'Coming soon',
-        }),
-      ],
-    },
-    {
-      id: 'tab',
-      label: 'Tab',
       items: tabMenuItems(openItems),
-    },
-    {
-      id: 'settings',
-      label: 'Settings',
-      items: [
-        menuCommand('Preferences', () => selectSession(prefsItemId), {
-          checked: itemInLayout(prefsItemId),
-          detail: compactHomePath(clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml'),
-        }),
-        menuSeparator(),
-        menuCommand('Tab metadata', toggleTabMetadata, {
-          iconHtml: appMenuUiIcon('tab-meta', tabMetaVisible),
-        }),
-        menuCommand('Notify', toggleNotifications, {
-          disabled: readOnlyMode,
-          detail: readOnlyMode ? 'Requires admin access' : '',
-          iconHtml: appMenuUiIcon('notify', notificationsEnabled),
-        }),
-        menuCommand('Refresh', refreshAll, {
-          iconHtml: appMenuUiIcon('refresh'),
-        }),
-      ],
     },
     {
       id: 'help',
       label: 'Help',
-      items: [
-        menuCommand(`YOLOmux ${bootstrap.version || ''}`.trim(), null, {
-          disabled: true,
-          detail: bootstrap.versionCommitTime ? `Last commit: ${bootstrap.versionCommitTime}` : '',
-        }),
-        menuSubmenu('Keyboard shortcuts', keyboardShortcutItems()),
-        menuCommand('Open README', openProjectReadme, {
-          disabled: !projectReadmePath(),
-          detail: 'Local README',
-        }),
-      ],
+      items: menuGroups(
+        [menuCommand('Command palette', openCommandPalette, {
+          detail: 'Ctrl/Cmd+K',
+        })],
+        [
+          menuCommand(`YOLOmux ${bootstrap.version || ''}`.trim(), null, {
+            disabled: true,
+            detail: bootstrap.versionCommitTime ? `Last commit: ${bootstrap.versionCommitTime}` : '',
+          }),
+          menuSubmenu('Keyboard shortcuts', keyboardShortcutItems()),
+          menuCommand('Open README', openProjectReadme, {
+            disabled: !projectReadmePath(),
+            detail: 'Local README',
+          }),
+        ]
+      ),
     },
   ];
 }
@@ -2861,6 +3115,18 @@ function createAppMenuCommand(item, options = {}) {
     button.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
+      const autoTarget = event.target.closest('[data-auto-session]');
+      if (autoTarget && button.contains(autoTarget)) {
+        if (readOnlyMode) {
+          statusEl.textContent = 'YOLO changes require admin access';
+          return;
+        }
+        toggleAutoApprove(autoTarget.dataset.autoSession).then(() => {
+          renderSessionButtons({force: true});
+          renderPaneTabStrips();
+        });
+        return;
+      }
       runAppMenuCommand(item);
     });
   }
@@ -2870,7 +3136,7 @@ function createAppMenuCommand(item, options = {}) {
 
 function runAppMenuCommand(item) {
   if (item.disabled || typeof item.action !== 'function') return;
-  closeAppMenus();
+  if (!item.keepOpen) closeAppMenus();
   try {
     Promise.resolve(item.action()).catch(error => {
       statusEl.innerHTML = `<span class="err">menu command failed: ${esc(error)}</span>`;
@@ -2976,6 +3242,7 @@ function openAppMenu(wrapper, options = {}) {
   appMenuCloseTimer = clearTimer(appMenuCloseTimer);
   closeContextMenus();
   closeOtherSessionPopovers(null);
+  closeFileImagePreview();
   closeAppMenus(wrapper);
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
@@ -3034,7 +3301,6 @@ async function openFileExplorerAt(path, options = {}) {
   renderFileExplorerRootModeControls();
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
-    fileExplorerTree.replaceChildren();
     renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0);
   }
   if (options.refreshPanels !== false) {
@@ -3059,6 +3325,7 @@ async function fetchDirectory(path, options = {}) {
     const payload = await response.json();
     const entries = payload.entries || [];
     fileExplorerPathError = '';
+    markNewDirectoryEntries(root, entries);
     if (options.recordSignature !== false) recordDirectorySignature(root, entries);
     return entries;
   } catch (err) {
@@ -3091,6 +3358,46 @@ function directoryEntriesSignature(entries) {
 
 function recordDirectorySignature(path, entries) {
   fileExplorerDirectorySignatures.set(normalizeDirectoryPath(path), directoryEntriesSignature(entries));
+}
+
+function pruneExpiredNewFileEntries(now = Date.now()) {
+  for (const [path, until] of fileExplorerNewEntryUntil.entries()) {
+    if (!until || until <= now) fileExplorerNewEntryUntil.delete(path);
+  }
+}
+
+function markNewDirectoryEntries(path, entries) {
+  const root = normalizeDirectoryPath(path);
+  const names = new Set((Array.isArray(entries) ? entries : []).map(entry => entry?.name).filter(Boolean));
+  const previous = fileExplorerKnownEntryNames.get(root);
+  const now = Date.now();
+  pruneExpiredNewFileEntries(now);
+  if (previous && fileExplorerNewEntryHighlightMs > 0) {
+    for (const name of names) {
+      if (!previous.has(name)) fileExplorerNewEntryUntil.set(childPath(root, name), now + fileExplorerNewEntryHighlightMs);
+    }
+  }
+  fileExplorerKnownEntryNames.set(root, names);
+}
+
+function fileExplorerEntryIsNew(path) {
+  const until = fileExplorerNewEntryUntil.get(path);
+  if (!until) return false;
+  if (until <= Date.now()) {
+    fileExplorerNewEntryUntil.delete(path);
+    return false;
+  }
+  return true;
+}
+
+function scheduleNewEntryClassRemoval(row, path) {
+  const until = fileExplorerNewEntryUntil.get(path);
+  if (!row || !until) return;
+  const delay = Math.max(0, until - Date.now());
+  setTimeout(() => {
+    if (row.isConnected && fileExplorerEntryIsNew(path) === false) row.classList.remove('new-entry');
+    else if (row.isConnected && fileExplorerNewEntryUntil.get(path) <= Date.now()) row.classList.remove('new-entry');
+  }, delay + 50);
 }
 
 function normalizeDirectoryPath(path) {
@@ -3501,50 +3808,76 @@ async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplore
   return true;
 }
 
+function fileTreeDirectRows(container) {
+  return Array.from(container?.children || []).filter(node => node.classList?.contains('file-tree-row'));
+}
+
+function updateFileTreeRow(row, parentPath, entry, depth) {
+  const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
+  const currentDirectory = activeFinderDirectoryPath();
+  const expanded = entry.kind === 'dir' && fileExplorerExpanded.has(fullPath);
+  row.className = `file-tree-row kind-${entry.kind}`;
+  row.dataset.path = fullPath;
+  row.dataset.kind = entry.kind;
+  row.style.paddingLeft = `${8 + depth * 14}px`;
+  row.setAttribute('role', 'treeitem');
+  row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
+  if (entry.kind === 'dir') row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  else row.removeAttribute('aria-expanded');
+  row.draggable = entry.kind === 'file' || entry.kind === 'dir';
+  row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
+  row.classList.toggle('expanded', expanded);
+  row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
+  const newEntry = fileExplorerEntryIsNew(fullPath);
+  row.classList.toggle('new-entry', newEntry);
+  if (newEntry) scheduleNewEntryClassRemoval(row, fullPath);
+  const currentFile = entry.kind === 'file' && fullPath === activeFile;
+  const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
+  row.classList.toggle('current-file', currentFile);
+  row.classList.toggle('current-directory', currentDirectoryRow);
+  if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
+  else row.removeAttribute('aria-current');
+  const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
+  row.innerHTML = `<span class="file-tree-icon">${icon}</span><span class="file-tree-name">${esc(entry.name)}</span>`;
+  if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
+    bindFileImagePreview(row, fullPath, entry);
+  }
+  row.onclick = event => {
+    event.stopPropagation();
+    if (event.detail > 1) return;
+    onFileTreeRowClick(row, fullPath, entry, event);
+  };
+  row.ondblclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (entry.kind === 'dir') openFileExplorerAt(fullPath);
+    else openFileInEditor(fullPath, entry);
+  };
+  row.oncontextmenu = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
+  };
+  row.ondragstart = event => startFileTreeDrag(event, row, fullPath, entry);
+  return fullPath;
+}
+
 function renderTreeChildren(container, parentPath, entries, depth) {
   if (!container) return;
   const visible = entries.filter(e => fileExplorerShowHidden || !e.name.startsWith('.'));
-  const currentDirectory = activeFinderDirectoryPath();
+  const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
+  const nextNodes = [];
   for (const entry of visible) {
     const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
-    const row = document.createElement('div');
-    row.className = `file-tree-row kind-${entry.kind}`;
-    row.dataset.path = fullPath;
-    row.dataset.kind = entry.kind;
-    row.style.paddingLeft = `${8 + depth * 14}px`;
-    row.setAttribute('role', 'treeitem');
-    row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
-    row.draggable = entry.kind === 'file' || entry.kind === 'dir';
-    row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
-    row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
-    const currentFile = entry.kind === 'file' && fullPath === activeFile;
-    const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
-    row.classList.toggle('current-file', currentFile);
-    row.classList.toggle('current-directory', currentDirectoryRow);
-    if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
-    const icon = entry.kind === 'dir' ? '▸' : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-    row.innerHTML = `<span class="file-tree-icon">${icon}</span><span class="file-tree-name">${esc(entry.name)}</span>`;
-    if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
-      bindFileImagePreview(row.querySelector('.file-tree-icon'), fullPath, entry);
+    const row = existingRows.get(fullPath) || document.createElement('div');
+    updateFileTreeRow(row, parentPath, entry, depth);
+    nextNodes.push(row);
+    const childContainer = childContainerForRow(row, fullPath);
+    if (entry.kind === 'dir' && fileExplorerExpanded.has(fullPath) && childContainer) {
+      nextNodes.push(childContainer);
     }
-    row.addEventListener('click', event => {
-      event.stopPropagation();
-      if (event.detail > 1) return;
-      onFileTreeRowClick(row, fullPath, entry, event);
-    });
-    row.addEventListener('dblclick', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      beginFileTreeRename(row, fullPath, entry);
-    });
-    row.addEventListener('contextmenu', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
-    });
-    row.addEventListener('dragstart', event => startFileTreeDrag(event, row, fullPath, entry));
-    container.appendChild(row);
   }
+  container.replaceChildren(...nextNodes);
 }
 
 function rawFileUrl(path, params = {}) {
@@ -3563,23 +3896,24 @@ function closeFileImagePreview() {
   fileImagePreviewPopover = null;
 }
 
-function positionFileImagePreview(anchor, popover) {
+function positionFileImagePreview(anchor, popover, point = null) {
   const anchorRect = anchor.getBoundingClientRect();
   const rect = popover.getBoundingClientRect();
   const edgeGap = popoverEdgeGapPx();
-  const desiredLeft = anchorRect.right + 10;
-  const desiredTop = anchorRect.top - 8;
+  const desiredLeft = point ? point.x + 14 : anchorRect.right + 10;
+  const desiredTop = point ? point.y + 14 : anchorRect.top - 8;
   const left = Math.min(Math.max(edgeGap, desiredLeft), Math.max(edgeGap, window.innerWidth - rect.width - edgeGap));
   const top = Math.min(Math.max(edgeGap, desiredTop), Math.max(edgeGap, window.innerHeight - rect.height - edgeGap));
   popover.style.left = `${Math.round(left)}px`;
   popover.style.top = `${Math.round(top)}px`;
 }
 
-function openFileImagePreview(anchor, path, entry) {
+function openFileImagePreview(anchor, path, entry, point = null) {
   closeFileImagePreview();
   if (!anchor || !document.body) return;
   const popover = document.createElement('div');
   popover.className = 'file-image-preview-popover';
+  popover.dataset.previewPath = path;
   const img = document.createElement('img');
   img.src = rawFileUrl(path);
   img.alt = entry?.name || basenameOf(path);
@@ -3590,7 +3924,7 @@ function openFileImagePreview(anchor, path, entry) {
   popover.addEventListener('pointerleave', closeFileImagePreviewSoon);
   document.body.appendChild(popover);
   fileImagePreviewPopover = popover;
-  positionFileImagePreview(anchor, popover);
+  positionFileImagePreview(anchor, popover, point);
 }
 
 function closeFileImagePreviewSoon() {
@@ -3599,18 +3933,27 @@ function closeFileImagePreviewSoon() {
   fileImagePreviewHideTimer = setTimeout(closeFileImagePreview, popoverHideDelayMs);
 }
 
-function bindFileImagePreview(icon, path, entry) {
-  if (!icon || icon.dataset.imagePreviewBound === 'true') return;
-  icon.dataset.imagePreviewBound = 'true';
-  icon.addEventListener('pointerenter', () => {
+function bindFileImagePreview(anchor, path, entry) {
+  if (!anchor || anchor.dataset.imagePreviewBound === 'true') return;
+  anchor.dataset.imagePreviewBound = 'true';
+  let pointer = null;
+  const updatePointer = event => {
+    pointer = {x: event.clientX, y: event.clientY};
+    if (fileImagePreviewPopover?.dataset.previewPath === path) positionFileImagePreview(anchor, fileImagePreviewPopover, pointer);
+  };
+  anchor.addEventListener('pointerenter', event => {
+    if (appMenuIsOpen() || topbar?.matches?.(':hover')) return;
+    updatePointer(event);
     fileImagePreviewHideTimer = clearTimer(fileImagePreviewHideTimer);
     fileImagePreviewShowTimer = clearTimer(fileImagePreviewShowTimer);
     fileImagePreviewShowTimer = setTimeout(() => {
       fileImagePreviewShowTimer = null;
-      openFileImagePreview(icon, path, entry);
+      if (appMenuIsOpen() || topbar?.matches?.(':hover')) return;
+      openFileImagePreview(anchor, path, entry, pointer);
     }, popoverShowDelayMs);
   });
-  icon.addEventListener('pointerleave', closeFileImagePreviewSoon);
+  anchor.addEventListener('pointermove', updatePointer);
+  anchor.addEventListener('pointerleave', closeFileImagePreviewSoon);
 }
 
 function selectableFileTreeRows(container = document) {
@@ -4075,35 +4418,35 @@ function renderOpenFilePath(path) {
   renderPaneTabStrips();
 }
 
-function showFileEditorPaneForPath(path) {
+function showFileEditorPaneForPath(path, options = {}) {
   activeFile = path;
   syncFileLayoutItems();
   updateFileExplorerCurrentFileHighlight();
-  return openFileEditorPane(path);
+  return openFileEditorPane(path, options);
 }
 
-function openFilesSetAndShow(path, state) {
+function openFilesSetAndShow(path, state, options = {}) {
   openFiles.set(path, state);
-  return showFileEditorPaneForPath(path);
+  return showFileEditorPaneForPath(path, options);
 }
 
-async function openFileInEditor(fullPath, entryOrName) {
+async function openFileInEditor(fullPath, entryOrName, options = {}) {
   const entry = typeof entryOrName === 'object' && entryOrName ? entryOrName : null;
   const name = entry?.name || String(entryOrName || basenameOf(fullPath));
   const ext = fileExtensionOf(name);
   const kind = IMAGE_EXTENSIONS.has(ext) ? 'image' : 'text';
   if (openFiles.has(fullPath)) {
-    await showFileEditorPaneForPath(fullPath);
+    await showFileEditorPaneForPath(fullPath, options);
     return;
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(entry.size));
     state.mtime = entry?.mtime || 0;
-    await openFilesSetAndShow(fullPath, state);
+    await openFilesSetAndShow(fullPath, state, options);
     return;
   }
   if (kind === 'image') {
-    await openFilesSetAndShow(fullPath, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
+    await openFilesSetAndShow(fullPath, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null}, options);
     return;
   }
   try {
@@ -4112,7 +4455,7 @@ async function openFileInEditor(fullPath, entryOrName) {
       const payload = await response.json().catch(() => ({}));
       const message = payload.error || response.status;
       const state = response.status === 413 ? tooLargeFileState(entry?.size ?? null, String(message)) : fileErrorState(message);
-      await openFilesSetAndShow(fullPath, state);
+      await openFilesSetAndShow(fullPath, state, options);
       return;
     }
     const payload = await response.json();
@@ -4123,7 +4466,7 @@ async function openFileInEditor(fullPath, entryOrName) {
       original: payload.content,
       content: payload.content,
       dirty: false,
-    });
+    }, options);
   } catch (err) {
     showFileOpenError(fullPath, err);
   }
@@ -4322,11 +4665,23 @@ function largestPaneSlotForFileEditor() {
   return (best || fallback)?.slot || null;
 }
 
-async function openFileEditorPane(path) {
+async function openFileEditorPane(path, options = {}) {
   const item = fileEditorItemFor(path);
   syncFileLayoutItems();
+  compactCurrentLayoutSlots({focusSession: item});
   renderSessionButtons();
   const existingSlot = slotForSession(item);
+  const targetSlot = options.targetSlot && layoutSlotKeys().includes(options.targetSlot) ? options.targetSlot : null;
+  const targetZone = options.targetZone || 'middle';
+  const targetIndex = Number.isFinite(Number(options.targetIndex)) ? Number(options.targetIndex) : null;
+  if (targetSlot && targetZone !== 'middle') {
+    await splitSessionAtSlot(item, targetSlot, targetZone, existingSlot, options.pct || null);
+    return;
+  }
+  if (targetSlot && !slotIsFileExplorerPane(targetSlot)) {
+    await moveSessionToSlot(item, targetSlot, existingSlot, targetIndex ?? paneTabs(targetSlot).length);
+    return;
+  }
   if (existingSlot) {
     activatePaneTab(existingSlot, item);
     return;
@@ -4342,11 +4697,11 @@ async function openFileEditorPane(path) {
     return;
   }
   const filesSlot = slotForSession(fileExplorerItemId);
-  const targetSlot = layoutSlotKeys().find(slot => slot !== filesSlot) || filesSlot;
-  if (targetSlot) {
-    const zone = targetSlot === filesSlot ? 'right' : 'left';
-    const pct = targetSlot === filesSlot ? fileExplorerSplitPercent : defaultSplitPercent;
-    await splitSessionAtSlot(item, targetSlot, zone, null, pct);
+  const fallbackSlot = layoutSlotKeys().find(slot => slot !== filesSlot) || filesSlot;
+  if (fallbackSlot) {
+    const zone = fallbackSlot === filesSlot ? 'right' : 'left';
+    const pct = fallbackSlot === filesSlot ? fileExplorerSplitPercent : defaultSplitPercent;
+    await splitSessionAtSlot(item, fallbackSlot, zone, null, pct);
     return;
   }
   await moveSessionToSlot(item, slotForNewSession(), null);
@@ -4358,11 +4713,12 @@ function ensureEditorVisible() {
   document.body.classList.add('file-editor-open');
 }
 
-function hideEditor() {
+function hideEditor(options = {}) {
   if (!fileEditor) return;
+  const clearActiveFile = options.clearActiveFile !== false;
   fileEditor.setAttribute('hidden', '');
   document.body.classList.remove('file-editor-open');
-  activeFile = null;
+  if (clearActiveFile) activeFile = null;
   setEditorContentMode(fileEditorContent, 'edit');
   if (fileEditorContent) fileEditorContent.hidden = false;
   fileEditor?.classList.remove('syntax-highlighted');
@@ -4372,7 +4728,7 @@ function hideEditor() {
   const img = fileEditor.querySelector('.file-editor-image');
   if (img) img.remove();
   setEditorStatus('');
-  updateFileExplorerCurrentFileHighlight();
+  if (clearActiveFile) updateFileExplorerCurrentFileHighlight();
 }
 
 function setEditorStatus(msg, level) {
@@ -4470,6 +4826,14 @@ function renderEditorForActive() {
     hideEditor();
     return;
   }
+  const paneItem = fileEditorItemFor(activeFile);
+  const paneSlot = slotForSession(paneItem);
+  if (paneSlot) {
+    const panel = panelNodes.get(paneItem);
+    if (panel && activeItemForSide(paneSlot) === paneItem) renderFileEditorPanel(panel, paneItem);
+    hideEditor({clearActiveFile: false});
+    return;
+  }
   ensureEditorVisible();
   const state = openFiles.get(activeFile);
   if (fileEditorPath) fileEditorPath.textContent = activeFile;
@@ -4482,6 +4846,7 @@ function renderEditorForActive() {
     fileEditorWrapBtn.hidden = state.kind !== 'text';
     updateEditorWrapButton(fileEditorWrapBtn);
   }
+  updateEditorThemeButton(fileEditorThemeBtn);
   // Clear any image from a previous tab
   const oldImg = fileEditor.querySelector('.file-editor-image');
   if (oldImg) oldImg.remove();
@@ -4552,10 +4917,27 @@ function updateEditorModeControl(control, path, state) {
   if (!visible) return;
   const mode = editorViewModeFor(path);
   control.querySelectorAll('[data-editor-mode]').forEach(button => {
+    const nextMode = button.dataset.editorMode;
+    const label = editorModeLabel(nextMode);
     const active = button.dataset.editorMode === mode;
     button.classList.toggle('active', active);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    setFileEditorIcon(button, editorModeIconClass(nextMode));
   });
+}
+
+function editorModeLabel(mode) {
+  if (mode === 'preview') return 'Preview';
+  if (mode === 'split') return 'Split view';
+  return 'Edit';
+}
+
+function editorModeIconClass(mode) {
+  if (mode === 'preview') return 'file-editor-icon-eye';
+  if (mode === 'split') return 'file-editor-icon-split';
+  return 'file-editor-icon-edit';
 }
 
 function updateEditorGutterButton(button) {
@@ -4589,6 +4971,39 @@ function applyEditorWrapToTextarea(textarea) {
 function setFileEditorIcon(button, iconClass) {
   if (!button || button.querySelector(`.${iconClass}`)) return;
   button.innerHTML = `<span class="file-editor-icon ${iconClass}" aria-hidden="true"></span>`;
+}
+
+function editorThemeLabel(mode = fileEditorThemeMode) {
+  if (mode === 'dark') return 'Dark editor theme';
+  return 'White editor theme';
+}
+
+function updateEditorThemeButton(button) {
+  if (!button) return;
+  button.classList.toggle('theme-dark', fileEditorThemeMode === 'dark');
+  button.classList.toggle('theme-light', fileEditorThemeMode === 'light');
+  button.setAttribute('aria-pressed', fileEditorThemeMode === 'light' ? 'true' : 'false');
+  button.title = `${editorThemeLabel()}; click to cycle`;
+  button.setAttribute('aria-label', editorThemeLabel());
+  setFileEditorIcon(button, 'file-editor-icon-theme');
+}
+
+function applyEditorThemeMode() {
+  document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light');
+  document.body?.classList.add(`editor-theme-${fileEditorThemeMode}`);
+  updateEditorThemeButton(fileEditorThemeBtn);
+  document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
+}
+
+function setFileEditorThemeMode(mode) {
+  fileEditorThemeMode = fileEditorThemeModes.includes(mode) ? mode : 'dark';
+  writeStoredEditorThemeMode(fileEditorThemeMode);
+  applyEditorThemeMode();
+}
+
+function cycleEditorThemeMode() {
+  const currentIndex = Math.max(0, fileEditorThemeModes.indexOf(fileEditorThemeMode));
+  setFileEditorThemeMode(fileEditorThemeModes[(currentIndex + 1) % fileEditorThemeModes.length]);
 }
 
 function updateEditorWrapButton(button) {
@@ -4633,7 +5048,6 @@ function setEditorWrapEnabled(enabled) {
 function toggleEditorWrap() {
   const enabled = !fileEditorWrapEnabled;
   setEditorWrapEnabled(enabled);
-  if (!readOnlyMode) saveSettingsPatch(settingPatch('terminal_editor.word_wrap', enabled)).catch(() => {});
 }
 
 function setEditorLineNumbersEnabled(enabled) {
@@ -4645,7 +5059,6 @@ function setEditorLineNumbersEnabled(enabled) {
 function toggleEditorLineNumbers() {
   const enabled = !fileEditorLineNumbersEnabled;
   setEditorLineNumbersEnabled(enabled);
-  if (!readOnlyMode) saveSettingsPatch(settingPatch('terminal_editor.line_numbers', enabled)).catch(() => {});
 }
 
 function numberSetting(path, fallback) {
@@ -4662,6 +5075,8 @@ function applyCssSettings() {
   const root = document.documentElement?.style;
   if (!root) return;
   root.setProperty('--tab-label-size', `${numberSetting('appearance.ui_font_size', 13)}px`);
+  root.setProperty('--editor-font-size', `${editorFontSize}px`);
+  root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
   root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 240)}px`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
@@ -4707,16 +5122,24 @@ function applySettingsPayload(payload, options = {}) {
   redReminderMs = numberSetting('appearance.red_reminder_ms', 1550);
   yoloRotateMs = numberSetting('appearance.yolo_rotate_ms', 20000);
   toastDurationMs = numberSetting('notifications.toast_duration_ms', 10000);
-  popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms', 300);
+  popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms', 1000);
   hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms', 300);
   popoverHideDelayMs = hoverCloseDelayMs;
-  menuHoverOpenDelayMs = popoverShowDelayMs;
+  menuHoverOpenDelayMs = numberSetting('performance.menu_hover_open_delay_ms', 800);
   menuHoverCloseDelayMs = hoverCloseDelayMs;
+  tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
+  tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
+  fileExplorerRefreshMs = numberSetting('file_explorer.refresh_ms', 3001);
+  fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
+  editorFontSize = numberSetting('appearance.editor_font_size', 13);
+  fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 13);
   terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
   autoFocusEnabled = boolSetting('general.auto_focus', true);
-  fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
-  fileEditorLineNumbersEnabled = boolSetting('terminal_editor.line_numbers', fileEditorLineNumbersEnabled);
+  if (options.initial || options.applyEditorDefaults) {
+    fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
+    fileEditorLineNumbersEnabled = boolSetting('terminal_editor.line_numbers', fileEditorLineNumbersEnabled);
+  }
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
   applyCssSettings();
   applyTerminalRuntimeSettings();
@@ -4756,7 +5179,8 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('metadata', refreshTranscripts, metadataRefreshMs);
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
-  resetRuntimeInterval('settings', () => refreshSettings({silent: true}), Math.max(1003, Math.min(10003, eventLogRefreshMs)));
+  resetRuntimeInterval('filesystem', refreshWatchedFilesystem, fileExplorerRefreshMs);
+  resetRuntimeInterval('settings', () => refreshSettings({silent: true}), Math.max(1000, Math.min(10000, eventLogRefreshMs)));
 }
 
 async function saveCurrentEditor() {
@@ -4811,6 +5235,7 @@ async function expandDirectoryRow(row, fullPath) {
   if (!entries) return;
   fileExplorerExpanded.add(fullPath);
   row.classList.add('expanded');
+  row.setAttribute('aria-expanded', 'true');
   row.querySelector('.file-tree-icon').textContent = '▾';
   const children = document.createElement('div');
   children.className = 'file-tree-children';
@@ -4824,6 +5249,7 @@ async function expandDirectoryRow(row, fullPath) {
 function collapseDirectoryRow(row, fullPath) {
   fileExplorerExpanded.delete(fullPath);
   row.classList.remove('expanded');
+  row.setAttribute('aria-expanded', 'false');
   row.querySelector('.file-tree-icon').textContent = '▸';
   const next = row.nextElementSibling;
   if (next && next.classList.contains('file-tree-children') && next.dataset.parent === fullPath) {
@@ -4858,6 +5284,7 @@ if (fileEditorModeControl) {
 }
 if (fileEditorGutterBtn) fileEditorGutterBtn.addEventListener('click', toggleEditorLineNumbers);
 if (fileEditorWrapBtn) fileEditorWrapBtn.addEventListener('click', toggleEditorWrap);
+if (fileEditorThemeBtn) fileEditorThemeBtn.addEventListener('click', cycleEditorThemeMode);
 if (fileEditorTextarea) {
   fileEditorTextarea.addEventListener('input', () => {
     if (!activeFile) return;
@@ -4914,7 +5341,7 @@ function stopPopoverEvent(event) {
 }
 
 function closeOtherSessionPopovers(current) {
-  for (const other of document.querySelectorAll('.pane-tab.popover-open')) {
+  for (const other of document.querySelectorAll('.pane-tab.popover-open, .panel-popover-zone.popover-open')) {
     if (other !== current) other.classList.remove('popover-open');
   }
 }
@@ -5205,10 +5632,6 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
   return parts.join(' · ') || itemLabel(item);
 }
 
-function stripPullRequestSuffixText(value) {
-  return String(value || '').replace(/\s+\(#\d+\)\s*$/, '').trim();
-}
-
 function projectDirName(session, info) {
   if (!info) return 'loading';
   const project = info?.project || {};
@@ -5228,7 +5651,7 @@ function filePopoverHtml(item) {
   const path = fileItemPath(item);
   const state = openFiles.get(path) || {};
   const rows = filePopoverRows(path, state);
-  return `<div class="session-popover" role="tooltip">
+  return `<div class="session-popover file-popover" role="tooltip">
     <div class="popover-head">
       <div>
         <div class="popover-title">${esc(basenameOf(path))}</div>
@@ -5250,8 +5673,15 @@ function filePopoverRows(path, state = {}) {
   return rows;
 }
 
+function pathCopyButtonHtml(path, options = {}) {
+  const className = ['path-copy-button', options.className || ''].filter(Boolean).join(' ');
+  const dataAttr = options.dataAttr || 'data-copy-path';
+  const title = options.title || 'Copy path';
+  return `<button type="button" class="${esc(className)}" ${dataAttr}="${esc(path)}" title="${esc(title)}" aria-label="${esc(options.ariaLabel || title)}"></button>`;
+}
+
 function filePopoverPathHtml(path) {
-  return `<span class="popover-copy-value">${esc(path)}</span><button type="button" class="path-copy-button popover-copy-button" data-copy-popover-path="${esc(path)}" title="Copy path" aria-label="Copy path"></button>`;
+  return `<span class="popover-copy-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'popover-copy-button', dataAttr: 'data-copy-popover-path'})}`;
 }
 
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
@@ -5445,6 +5875,27 @@ function fileDragPayload(event) {
 
 function hasYolomuxFileDrag(event) {
   return Array.from(event.dataTransfer?.types || []).includes('application/x-yolomux-file');
+}
+
+async function openDraggedFilesInEditor(payload, options = {}) {
+  const paths = Array.from(new Set((payload?.paths || [payload?.path]).filter(Boolean)));
+  if (!paths.length) return;
+  let opened = 0;
+  for (const [index, path] of paths.entries()) {
+    try {
+      const info = await fetchFilePathInfo(path);
+      if (info.kind !== 'file') continue;
+      await openFileInEditor(path, info, {
+        targetSlot: options.targetSlot || null,
+        targetZone: options.targetZone || 'middle',
+        targetIndex: options.targetIndex == null ? null : Number(options.targetIndex) + index,
+      });
+      opened += 1;
+    } catch (error) {
+      showFileOpenError(path, error);
+    }
+  }
+  if (opened) statusEl.innerHTML = `<span class="ok">opened ${esc(opened === 1 ? basenameOf(paths[0]) : `${opened} files`)}</span>`;
 }
 
 function terminalCurrentPath(session) {
@@ -6542,6 +6993,13 @@ function focusPanel(session) {
   const panel = document.getElementById(`panel-${session}`);
   if (!panel) return;
   panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  if (isFileEditorItem(session)) {
+    focusedTerminal = null;
+    setFocusedPanelItem(session);
+    requestFileEditorPanelFocus(session);
+    focusFileEditorPanelIfReady(panel, session);
+    return;
+  }
   if (isVirtualItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session);
@@ -6652,7 +7110,7 @@ function queueTmuxScroll(item, signedLines) {
     item.scrollTimer = null;
     const signed = item.pendingScrollLines || 0;
     item.pendingScrollLines = 0;
-    if (!signed || item.socket.readyState !== WebSocket.OPEN) return;
+    if (!signed || item.socket?.readyState !== WebSocket.OPEN) return;
     const direction = signed < 0 ? 'up' : 'down';
     const lines = Math.max(1, Math.min(80, Math.ceil(Math.abs(signed))));
     item.socket.send(JSON.stringify({type: 'tmux-scroll', direction, lines}));
@@ -6687,15 +7145,41 @@ function closeTerminalItem(session, item) {
   try { item.term.dispose(); } catch (_) {}
 }
 
+function dismissTerminalConnectionToasts(session) {
+  for (const node of document.querySelectorAll('.toast[data-toast-kind="terminal-connection"]')) {
+    if (node.dataset.toastSession !== session) continue;
+    removeAttentionAlert(Number(node.dataset.alertId || 0));
+  }
+}
+
+function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
+  dismissTerminalConnectionToasts(session);
+  const node = showToast(
+    `YOLOmux - ${serverHostname}: ${sessionLabel(session)} terminal`,
+    text,
+    {
+      container: displayToastContainer(session),
+      countdownMs,
+      onClick: () => selectSession(session),
+    },
+  );
+  if (node) {
+    node.dataset.toastSession = session;
+    node.dataset.toastKind = 'terminal-connection';
+  }
+}
+
 function scheduleTerminalReconnect(session, item) {
   if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
   const delay = Math.min(8000, 1000 * 2 ** item.reconnectAttempt);
   item.reconnectAttempt += 1;
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
   statusEl.innerHTML = `<span class="err">${esc(sessionLabel(session))} disconnected; reconnecting in ${Math.round(delay / 1000)}s</span>`;
+  showTerminalConnectionToast(session, `Disconnected. Reconnecting in ${Math.round(delay / 1000)}s.`, delay);
   item.reconnectTimer = setTimeout(() => {
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
-    startTerminal(session);
+    item.reconnectTimer = null;
+    connectTerminalSocket(session, item);
   }, delay);
 }
 
@@ -6808,6 +7292,17 @@ function showDropPreview(intent) {
 }
 
 function dropSessionAtEvent(event) {
+  const filePayload = fileDragPayload(event);
+  if (filePayload?.path) {
+    event.preventDefault();
+    event.stopPropagation();
+    const intent = dropIntentForEvent(event);
+    clearDropPreview();
+    if (!intent?.targetSlot) return;
+    const zone = slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle' ? 'right' : intent.zone;
+    openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: zone});
+    return;
+  }
   const payload = dragPayload(event);
   if (!payload?.session) return;
   if (event.target.closest('.panel-head')) {
@@ -6825,6 +7320,15 @@ function dropSessionAtEvent(event) {
 }
 
 function handleDropDragOver(event) {
+  const filePayload = fileDragPayload(event);
+  if (filePayload?.path) {
+    const intent = dropIntentForEvent(event);
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    showDropPreview(intent);
+    return;
+  }
   const payload = dragPayload(event);
   if (!payload?.session) return;
   if (event.target.closest('.panel-head')) {
@@ -7275,6 +7779,7 @@ function bindDelayedSessionPopover(anchor, popover, position) {
     clearShowTimer();
     clearHideTimer();
     if (anchor.isConnected === false) return;
+    if (appMenuIsOpen() || topbar?.matches?.(':hover')) return;
     position();
     closeOtherSessionPopovers(anchor);
     anchor.classList.add('popover-open');
@@ -7282,10 +7787,12 @@ function bindDelayedSessionPopover(anchor, popover, position) {
   const queueOpen = () => {
     clearHideTimer();
     if (anchor.isConnected === false) return;
+    if (appMenuIsOpen() || topbar?.matches?.(':hover')) return;
     if (anchor.classList.contains('popover-open')) return;
     clearShowTimer();
     position();
-    showTimer = setTimeout(openNow, popoverShowDelayMs);
+    const anyTabPopoverOpen = Boolean(document.querySelector('.pane-tab.popover-open'));
+    showTimer = setTimeout(openNow, anyTabPopoverOpen ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs);
   };
   const closeSoon = () => {
     clearShowTimer();
@@ -7311,12 +7818,14 @@ function positionPaneTabPopover(tab) {
   const popover = tab.querySelector?.(':scope > .session-popover');
   const viewportWidth = Math.max(0, window.innerWidth || document.documentElement?.clientWidth || 0);
   const edgeGap = popoverEdgeGapPx();
+  const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
   const viewportLeft = edgeGap;
   const viewportRight = Math.max(viewportLeft, viewportWidth - edgeGap);
   const width = Math.ceil(popover?.getBoundingClientRect?.().width || rect.width || 0);
   const maxLeft = Math.max(viewportLeft, viewportRight - width);
   const left = Math.min(Math.max(viewportLeft, Math.floor(rect.left)), maxLeft);
-  document.documentElement.style.setProperty('--pane-tab-popover-top', `${Math.ceil(rect.bottom)}px`);
+  const top = Math.max(topbarBottom + edgeGap, Math.ceil(rect.bottom));
+  document.documentElement.style.setProperty('--pane-tab-popover-top', `${top}px`);
   document.documentElement.style.setProperty('--pane-tab-popover-left', `${left}px`);
 }
 
@@ -7349,6 +7858,20 @@ function tmuxPaneTabHtml(session, info, state, auto) {
 
 function bindPaneTabStrip(strip, side) {
   strip.ondragover = event => {
+    const filePayload = fileDragPayload(event);
+    if (filePayload?.path) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (slotIsFileExplorerPane(side)) {
+        event.dataTransfer.dropEffect = 'none';
+        clearPaneTabDropPreview(strip);
+        return;
+      }
+      event.dataTransfer.dropEffect = 'copy';
+      clearDropPreview();
+      showPaneTabDropPreview(strip, event, '');
+      return;
+    }
     const payload = dragPayload(event);
     if (!payload?.session) return;
     event.preventDefault();
@@ -7367,6 +7890,15 @@ function bindPaneTabStrip(strip, side) {
     if (!strip.contains(event.relatedTarget)) clearPaneTabDropPreview(strip);
   };
   strip.ondrop = event => {
+    const filePayload = fileDragPayload(event);
+    if (filePayload?.path) {
+      clearPaneTabDropPreview(strip);
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (slotIsFileExplorerPane(side)) return;
+      openDraggedFilesInEditor(filePayload, {targetSlot: side, targetIndex: paneTabDropIndex(strip, event, '')});
+      return;
+    }
     const payload = dragPayload(event);
     clearPaneTabDropPreview(strip);
     if (!payload?.session) return;
@@ -7471,6 +8003,12 @@ function bindPanelShell(panel, session) {
   installPanelInactiveOverlays(panel, session);
   bindPanelPopover(panel);
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
+  panel.addEventListener('pointerdown', () => {
+    if (!isTmuxSession(session)) setFocusedPanelItem(session);
+  }, {capture: true});
+  panel.addEventListener('focusin', () => {
+    if (!isTmuxSession(session)) setFocusedPanelItem(session);
+  });
   const head = panel.querySelector('.panel-head');
   if (head) {
     head.draggable = true;
@@ -7478,6 +8016,15 @@ function bindPanelShell(panel, session) {
     head.addEventListener('dragstart', event => startSessionDrag(event, session, head.dataset.dragSlot || null));
     head.addEventListener('dragend', endSessionDrag);
     head.addEventListener('dragover', event => {
+      const filePayload = fileDragPayload(event);
+      if (filePayload?.path) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearDropPreview();
+        event.dataTransfer.dropEffect = 'copy';
+        head.classList.add('tab-drag-over');
+        return;
+      }
       const payload = dragPayload(event);
       if (!payload?.session) return;
       event.preventDefault();
@@ -7496,6 +8043,15 @@ function bindPanelShell(panel, session) {
       if (!head.contains(event.relatedTarget)) head.classList.remove('tab-drag-over');
     });
     head.addEventListener('drop', event => {
+      const filePayload = fileDragPayload(event);
+      if (filePayload?.path && !event.target.closest('.pane-tabs')) {
+        head.classList.remove('tab-drag-over');
+        event.preventDefault();
+        event.stopPropagation();
+        const targetSlot = head.dataset.dragSlot || slotForSession(session);
+        if (targetSlot) openDraggedFilesInEditor(filePayload, {targetSlot});
+        return;
+      }
       const payload = dragPayload(event);
       head.classList.remove('tab-drag-over');
       if (!payload?.session || event.target.closest('.pane-tabs')) return;
@@ -7753,7 +8309,7 @@ function createInfoPanel() {
   panel.id = `panel-${infoItemId}`;
   panel.innerHTML = `
       <div class="panel-head">
-        ${panelControlsHtml(infoItemId, {disabled: true, unavailableLabel: 'Branch Info'})}
+        ${virtualPanelControlsHtml(infoItemId, 'Branch Info')}
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
       </div>
       <div class="panel-detail-row">
@@ -7775,47 +8331,53 @@ function createInfoPanel() {
 
 function preferenceSections() {
   return [
+    {title: 'YOLO', items: [
+      {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text', help: 'YAML file with ordered first-match YOLO rules.'},
+      {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean', help: 'Log matched rules and actions without pressing an approval key.'},
+    ]},
     {title: 'General', items: [
       {path: 'general.auto_focus', label: 'Auto-focus terminals', type: 'boolean', help: 'Focus a terminal after tab switches and layout moves.'},
-      {path: 'general.default_layout', label: 'Default layout', type: 'select', choices: ['single', 'grid', 'wall']},
-      {path: 'general.default_sessions', label: 'Default sessions', type: 'list', help: 'One tmux session name per line.'},
+      {path: 'general.default_layout', label: 'Default layout', type: 'select', choices: ['single', 'grid', 'wall'], help: 'Preferred starting pane layout for new browser visits.'},
+      {path: 'general.default_sessions', label: 'Default sessions', type: 'list', help: 'Preferred tmux sessions to open first, one session name per line.'},
     ]},
     {title: 'Appearance', items: [
-      {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 10, max: 20, step: 1, suffix: 'px'},
-      {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px'},
-      {path: 'appearance.tab_width', label: 'Tab width', type: 'number', min: 120, max: 420, step: 5, suffix: 'px'},
-      {path: 'appearance.red_reminder_ms', label: 'Red reminder', type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms'},
-      {path: 'appearance.yolo_rotate_ms', label: 'YO rotation', type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms'},
-      {path: 'appearance.metadata_badge_pulse_seconds', label: 'Badge pulse', type: 'number', min: 0, max: 120, step: 1, suffix: 's'},
+      {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 10, max: 20, step: 1, suffix: 'px', help: 'Font size for menus, tabs, and compact UI text. Values outside the range are clamped.'},
+      {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by xterm.js panes. Values outside the range are clamped.'},
+      {path: 'appearance.editor_font_size', label: 'Editor font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by editor text, code highlighting, and rendered previews.'},
+      {path: 'appearance.file_explorer_font_size', label: `${fileExplorerLabel()} font size`, type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: 'Font size used by Finder/File Explorer rows.'},
+      {path: 'appearance.tab_width', label: 'Tab width', type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: 'Target width for pane tabs before they wrap to additional rows.'},
+      {path: 'appearance.red_reminder_ms', label: 'Red reminder duration', type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: 'Duration of the red attention pulse for sessions that need input or approval. Set 0 to disable.'},
+      {path: 'appearance.yolo_rotate_ms', label: 'Active YO rotation period', type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: 'How often the active YO indicator completes a rotation. Set 0 to disable.'},
+      {path: 'appearance.metadata_badge_pulse_seconds', label: 'Badge pulse duration', type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: 'When branch, PR, status, or CI metadata changes, badges like PR and CI flash for this many seconds.'},
     ]},
     {title: 'Performance', items: [
-      {path: 'performance.metadata_refresh_ms', label: 'Metadata refresh', type: 'number', min: 3001, max: 120001, step: 250, suffix: 'ms'},
-      {path: 'performance.pane_state_refresh_ms', label: 'Pane state refresh', type: 'number', min: 503, max: 30001, step: 100, suffix: 'ms'},
-      {path: 'performance.latency_refresh_ms', label: 'Latency refresh', type: 'number', min: 1003, max: 30001, step: 100, suffix: 'ms'},
-      {path: 'performance.event_log_refresh_ms', label: 'Event log refresh', type: 'number', min: 1003, max: 60001, step: 250, suffix: 'ms'},
-      {path: 'performance.popover_show_delay_ms', label: 'Popover show delay', type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'},
-      {path: 'performance.popover_hide_delay_ms', label: 'Popover hide delay', type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'},
-      {path: 'performance.remote_resize_delay_ms', label: 'Remote resize debounce', type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms'},
-      {path: 'performance.auto_approve_interval_seconds', label: 'Auto-approve poll', type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's'},
+      {path: 'performance.metadata_refresh_ms', label: 'Metadata refresh interval', type: 'number', min: 3001, max: 120001, step: 100, suffix: 'ms', help: 'How often YOLOmux refreshes branch, PR, cwd, and process metadata. Odd values avoid synchronized polling.'},
+      {path: 'performance.pane_state_refresh_ms', label: 'Pane state refresh interval', type: 'number', min: 503, max: 30001, step: 100, suffix: 'ms', help: 'How often YOLOmux refreshes YOLO status, prompt state, and tmux session roster. Odd values avoid synchronized polling.'},
+      {path: 'performance.latency_refresh_ms', label: 'Latency refresh interval', type: 'number', min: 1003, max: 30001, step: 100, suffix: 'ms', help: 'How often the browser pings the server and updates the latency display. Odd values avoid synchronized polling.'},
+      {path: 'performance.event_log_refresh_ms', label: 'Event log refresh interval', type: 'number', min: 1003, max: 60001, step: 100, suffix: 'ms', help: 'How often open YOLO/event-log panes refresh. Odd values avoid synchronized polling.'},
+      {path: 'performance.popover_show_delay_ms', label: 'Help/preview hover delay', type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: 'Delay before regular hover help and image previews open.'},
+      {path: 'performance.popover_hide_delay_ms', label: 'Popover hide delay', type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: 'Delay before hover popovers close after the pointer leaves.'},
+      {path: 'performance.menu_hover_open_delay_ms', label: 'Menu hover open delay', type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: 'Delay before File, View, tmux, Windows, and Help open from hover.'},
+      {path: 'performance.tab_popover_show_delay_ms', label: 'Tab detail hover delay', type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: 'Initial delay before a tab details popup opens.'},
+      {path: 'performance.tab_popover_follow_delay_ms', label: 'Tab detail follow delay', type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: 'Shorter delay when moving between tabs after one tab details popup is already open.'},
+      {path: 'performance.remote_resize_delay_ms', label: 'Remote resize debounce', type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: 'Delay before sending a settled browser resize to tmux.'},
+      {path: 'performance.auto_approve_interval_seconds', label: 'YOLO worker poll interval', type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: 'How often newly enabled YOLO workers inspect visible tmux prompts.'},
     ]},
     {title: 'Notifications', items: [
-      {path: 'notifications.toast_duration_ms', label: 'Toast duration', type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms'},
-      {path: 'notifications.throttle_seconds', label: 'Notification throttle', type: 'number', min: 0, max: 600, step: 5, suffix: 's'},
-      {path: 'notifications.notify_transitions', label: 'Notify transitions', type: 'list', help: 'One transition key per line.'},
+      {path: 'notifications.toast_duration_ms', label: 'Notification popup duration', type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: 'How long in-page notification popups stay visible before auto-closing.'},
+      {path: 'notifications.throttle_seconds', label: 'Notification throttle', type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: 'Minimum time before repeating the same notification.'},
+      {path: 'notifications.notify_transitions', label: 'Notify transitions', type: 'list', help: 'Session state transitions that may trigger notifications, one transition key per line.'},
     ]},
     {title: 'Terminal / Editor', items: [
-      {path: 'terminal_editor.scrollback', label: 'Scrollback', type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines'},
-      {path: 'terminal_editor.word_wrap', label: 'Editor word wrap', type: 'boolean'},
-      {path: 'terminal_editor.line_numbers', label: 'Editor line numbers', type: 'boolean'},
+      {path: 'terminal_editor.scrollback', label: 'Terminal scrollback', type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: 'Number of terminal lines kept in browser memory.'},
+      {path: 'terminal_editor.word_wrap', label: 'Default editor word wrap', type: 'boolean', help: 'Initial word-wrap state for newly opened editor tabs.'},
+      {path: 'terminal_editor.line_numbers', label: 'Default editor line numbers', type: 'boolean', help: 'Initial line-number gutter state for newly opened editor tabs.'},
     ]},
     {title: fileExplorerLabel(), items: [
-      {path: 'file_explorer.root_mode', label: 'Root mode', type: 'select', choices: ['fixed', 'sync']},
-      {path: 'file_explorer.quick_access_paths', label: 'Quick paths', type: 'list', help: 'One path per line.'},
-    ]},
-    {title: 'YOLO', items: [
-      {path: 'yolo.default_policy', label: 'Default policy', type: 'select', choices: ['off', 'approve', 'decline', 'block', 'ask', 'notify']},
-      {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text'},
-      {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean'},
+      {path: 'file_explorer.root_mode', label: 'Root mode', type: 'select', choices: ['fixed', 'sync'], help: 'Fixed keeps the current root; Sync follows the focused tmux session directory.'},
+      {path: 'file_explorer.quick_access_paths', label: 'Quick paths', type: 'list', help: 'Pinned Finder/File Explorer roots, one path per line.'},
+      {path: 'file_explorer.refresh_ms', label: `${fileExplorerLabel()} refresh interval`, type: 'number', min: 1003, max: 60001, step: 100, suffix: 'ms', help: 'How often YOLOmux checks changed Finder/File Explorer directories and open files. Odd values avoid synchronized polling.'},
+      {path: 'file_explorer.new_entry_highlight_ms', label: 'New file highlight duration', type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: 'How long newly detected files or directories stay colored in Finder/File Explorer.'},
     ]},
   ];
 }
@@ -7839,33 +8401,50 @@ function preferenceDefault(path) {
 function preferenceStatusText() {
   if (clientSettingsPayload.error) return `settings error: ${clientSettingsPayload.error}`;
   if (yoloRulesPayload.error) return `YOLO rules error: ${yoloRulesPayload.error}`;
-  const path = clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
-  return `loaded ${compactHomePath(path)}`;
+  return `loaded ${compactHomePath(settingsConfigPath())}`;
 }
 
 function preferencesPathRowsHtml() {
-  const settingsPath = clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
+  const settingsPath = settingsConfigPath();
   const rulesPath = yoloRulePath();
   const rulesDetail = yoloRulesPayload.source ? ` · ${yoloRuleStatusDetail()}` : '';
   return `
     <div class="preferences-path-row">
-      <span class="preferences-path-label">settings</span><span class="preferences-path-value">${esc(settingsPath)}</span><button type="button" class="path-copy-button preferences-path-copy" data-copy-path="${esc(settingsPath)}" title="Copy settings path" aria-label="Copy settings path"></button>
+      <span class="preferences-path-label">settings</span><span class="preferences-path-value">${esc(settingsPath)}</span>${pathCopyButtonHtml(settingsPath, {className: 'preferences-path-copy', title: 'Copy settings path'})}
     </div>
     <div class="preferences-path-row">
-      <span class="preferences-path-label">YOLO rules</span><span class="preferences-path-value">${esc(rulesPath)}${esc(rulesDetail)}</span><button type="button" class="path-copy-button preferences-path-copy" data-copy-path="${esc(rulesPath)}" title="Copy YOLO rules path" aria-label="Copy YOLO rules path"></button>
+      <span class="preferences-path-label">YOLO rules</span><span class="preferences-path-value">${esc(rulesPath)}${esc(rulesDetail)}</span>${pathCopyButtonHtml(rulesPath, {className: 'preferences-path-copy', title: 'Copy YOLO rules path'})}
     </div>`;
 }
 
-function preferenceControlHtml(item) {
+function preferenceSearchNeedle() {
+  return preferencesSearchText.trim().toLowerCase();
+}
+
+function preferenceItemMatches(item, query) {
+  if (!query) return true;
+  return [item.label, item.path, item.help, item.suffix].some(value => String(value || '').toLowerCase().includes(query));
+}
+
+function preferenceSectionMatches(section, query) {
+  if (!query) return true;
+  return section.title.toLowerCase().includes(query) || section.items.some(item => preferenceItemMatches(item, query));
+}
+
+function preferenceControlHtml(item, query = '') {
+  if (!preferenceItemMatches(item, query)) return '';
   const value = preferenceValue(item.path);
   const defaultValue = preferenceDefault(item.path);
   const disabled = readOnlyMode ? ' disabled' : '';
-  const baseAttrs = `data-setting-path="${esc(item.path)}" data-setting-type="${esc(item.type)}"${disabled}`;
+  const controlId = `preference-${item.path.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
+  const minAttr = item.min !== undefined ? ` data-setting-min="${esc(item.min)}"` : '';
+  const maxAttr = item.max !== undefined ? ` data-setting-max="${esc(item.max)}"` : '';
+  const baseAttrs = `id="${esc(controlId)}" data-setting-path="${esc(item.path)}" data-setting-type="${esc(item.type)}"${minAttr}${maxAttr}${disabled}`;
   let control = '';
   if (item.type === 'boolean') {
     control = `<input type="checkbox" ${baseAttrs}${value ? ' checked' : ''}>`;
   } else if (item.type === 'number') {
-    control = `<input type="number" ${baseAttrs} value="${esc(value)}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
+    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
   } else if (item.type === 'select') {
     control = `<select ${baseAttrs}>${item.choices.map(choice => `<option value="${esc(choice)}"${choice === value ? ' selected' : ''}>${esc(choice)}</option>`).join('')}</select>`;
   } else if (item.type === 'list') {
@@ -7876,20 +8455,33 @@ function preferenceControlHtml(item) {
   }
   const resetDisabled = readOnlyMode || JSON.stringify(value) === JSON.stringify(defaultValue) ? ' disabled' : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
-  const help = item.help ? `<div class="preferences-setting-help">${esc(item.help)}</div>` : '';
-  return `<label class="preferences-setting-row"><span class="preferences-setting-label">${esc(item.label)}</span><span class="preferences-setting-control">${control}${suffix}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span>${help}</label>`;
+  const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
+  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control">${control}${suffix}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span></div>`;
 }
 
 function preferencesPanelHtml() {
-  const sections = preferenceSections().map(section => `
-    <section class="preferences-section">
-      <h3>${esc(section.title)}</h3>
-      <div class="preferences-settings">${section.items.map(preferenceControlHtml).join('')}</div>
-    </section>`).join('');
+  const query = preferenceSearchNeedle();
+  const sections = preferenceSections()
+    .filter(section => preferenceSectionMatches(section, query))
+    .map(section => {
+      const collapsed = collapsedPreferenceSections.has(section.title);
+      const rows = section.items.map(item => preferenceControlHtml(item, query)).join('');
+      const count = section.items.filter(item => preferenceItemMatches(item, query)).length;
+      return `
+        <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.title)}">
+          <button type="button" class="preferences-section-toggle" data-preference-section-toggle="${esc(section.title)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+            <span class="preferences-section-caret" aria-hidden="true"></span>
+            <span class="preferences-section-title">${esc(section.title)}</span>
+            <span class="preferences-section-count">${count}</span>
+          </button>
+          <div class="preferences-settings"${collapsed ? ' hidden' : ''}>${rows}</div>
+        </section>`;
+    }).join('');
   const readonly = readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : '';
   return `
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
     <div class="preferences-status" data-level="${clientSettingsPayload.error || yoloRulesPayload.error ? 'error' : 'ok'}">${esc(preferenceStatusText())}</div>
+    <div class="preferences-search-row"><input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="Search settings" aria-label="Search settings"></div>
     <div class="preferences-sections">${sections}</div>`;
 }
 
@@ -7899,7 +8491,7 @@ function createPreferencesPanel() {
   panel.id = `panel-${prefsItemId}`;
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
-        ${panelControlsHtml(prefsItemId, {disabled: true, unavailableLabel: 'Preferences'})}
+        ${virtualPanelControlsHtml(prefsItemId, 'Preferences')}
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
       </div>
       <div class="panel-detail-row">
@@ -7918,23 +8510,61 @@ function createPreferencesPanel() {
   return panel;
 }
 
-function renderPreferencesPanels() {
+function renderPreferencesPanels(options = {}) {
   for (const panel of document.querySelectorAll('.preferences-panel')) {
     const body = panel.querySelector('.preferences-body');
-    if (body) body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>${preferencesPanelHtml()}`;
     const meta = panel.querySelector(`#meta-${cssEscape(prefsItemId)}`);
     if (meta) meta.textContent = preferenceStatusText();
+    if (body) {
+      const activeControl = activePreferenceControl(panel);
+      const shouldKeepDom = activeControl && options.force !== true;
+      if (shouldKeepDom) {
+        const status = body.querySelector('.preferences-status');
+        if (status) {
+          status.dataset.level = clientSettingsPayload.error || yoloRulesPayload.error ? 'error' : 'ok';
+          status.textContent = preferenceStatusText();
+        }
+        const pathRows = body.querySelector('.preferences-path-rows');
+        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : ''}`;
+      } else {
+        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>${preferencesPanelHtml()}`;
+      }
+    }
     bindPreferencesPanel(panel);
+    if (options.focusSearch) {
+      const search = panel.querySelector('[data-preferences-search]');
+      if (search) {
+        search.focus({preventScroll: true});
+        const position = search.value.length;
+        search.setSelectionRange(position, position);
+      }
+    }
   }
 }
 
 function bindPreferencesPanel(panel) {
   if (!panel || panel.dataset.preferencesBound === 'true') return;
   panel.dataset.preferencesBound = 'true';
+  panel.addEventListener('input', event => {
+    const search = event.target.closest('[data-preferences-search]');
+    if (search && panel.contains(search)) {
+      preferencesSearchText = search.value || '';
+      renderPreferencesPanels({force: true, focusSearch: true});
+      return;
+    }
+    const control = event.target.closest('[data-setting-path]');
+    if (!control || !panel.contains(control) || control.dataset.settingType !== 'number') return;
+    validatePreferenceNumberControl(control);
+  });
   panel.addEventListener('change', event => {
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
     savePreferenceControl(control);
+  });
+  panel.addEventListener('focusout', () => {
+    setTimeout(() => {
+      if (!activePreferenceControl(panel)) renderPreferencesPanels();
+    }, 0);
   });
   panel.addEventListener('click', event => {
     const copy = event.target.closest('[data-copy-path]');
@@ -7945,11 +8575,61 @@ function bindPreferencesPanel(panel) {
         .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
       return;
     }
+    const sectionToggle = event.target.closest('[data-preference-section-toggle]');
+    if (sectionToggle && panel.contains(sectionToggle)) {
+      event.preventDefault();
+      const title = sectionToggle.dataset.preferenceSectionToggle || '';
+      if (collapsedPreferenceSections.has(title)) collapsedPreferenceSections.delete(title);
+      else collapsedPreferenceSections.add(title);
+      writeStoredCollapsedPreferenceSections();
+      const section = sectionToggle.closest('[data-preference-section]');
+      const collapsed = collapsedPreferenceSections.has(title);
+      if (section) {
+        section.classList.toggle('collapsed', collapsed);
+        sectionToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        const settings = section.querySelector('.preferences-settings');
+        if (settings) settings.hidden = collapsed;
+      } else {
+        renderPreferencesPanels({force: true});
+      }
+      return;
+    }
     const reset = event.target.closest('[data-setting-reset]');
     if (!reset || !panel.contains(reset)) return;
     event.preventDefault();
     resetPreference(reset.dataset.settingReset || '');
   });
+}
+
+function activePreferenceControl(panel) {
+  const active = document.activeElement;
+  if (!active || !panel?.contains(active)) return null;
+  return active.closest?.('[data-setting-path], [data-preferences-search]') || null;
+}
+
+function clampPreferenceNumber(item, value) {
+  const fallback = Number(preferenceDefault(item.path));
+  const parsed = Number(value);
+  let number = Number.isFinite(parsed) ? parsed : fallback;
+  if (Number.isFinite(Number(item.min))) number = Math.max(Number(item.min), number);
+  if (Number.isFinite(Number(item.max))) number = Math.min(Number(item.max), number);
+  if (!Number.isFinite(number)) return '';
+  return Number.isInteger(number) ? String(number) : String(number);
+}
+
+function validatePreferenceNumberControl(control) {
+  const path = control.dataset.settingPath || '';
+  const item = preferenceItemByPath(path);
+  if (!item || item.type !== 'number') return true;
+  const value = Number(control.value);
+  const min = Number(item.min);
+  const max = Number(item.max);
+  let message = '';
+  if (!Number.isFinite(value)) message = 'Enter a number';
+  else if (Number.isFinite(min) && value < min) message = `Minimum ${min}`;
+  else if (Number.isFinite(max) && value > max) message = `Maximum ${max}`;
+  control.setCustomValidity(message);
+  return !message;
 }
 
 function settingPatch(path, value) {
@@ -7969,13 +8649,23 @@ function settingPatch(path, value) {
 function valueFromPreferenceControl(control) {
   const type = control.dataset.settingType || 'text';
   if (type === 'boolean') return control.checked === true;
-  if (type === 'number') return Number(control.value);
+  if (type === 'number') {
+    const item = preferenceItemByPath(control.dataset.settingPath || '');
+    if (!item) return Number(control.value);
+    const clamped = clampPreferenceNumber(item, control.value);
+    control.value = clamped;
+    validatePreferenceNumberControl(control);
+    return Number(clamped);
+  }
   if (type === 'list') return String(control.value || '').split('\n').map(line => line.trim()).filter(Boolean);
   return control.value;
 }
 
-async function saveSettingsPatch(patch) {
+async function saveSettingsPatch(patch, options = {}) {
   if (readOnlyMode) return;
+  const preservedLayout = options.preserveLayout === false ? null : cloneLayoutSlots();
+  const preservedLayoutSignature = preservedLayout ? layoutSlotsSignature(preservedLayout) : '';
+  const preservedFocus = focusedPanelItem;
   const response = await apiFetch('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -7983,13 +8673,25 @@ async function saveSettingsPatch(patch) {
   });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-  applySettingsPayload(payload, {force: true});
+  applySettingsPayload(payload, {force: true, applyEditorDefaults: options.applyEditorDefaults === true});
+  if (preservedLayout && layoutSlotsSignature() !== preservedLayoutSignature) {
+    applyLayoutSlots(preservedLayout, {
+      focusSession: preservedFocus && itemInLayout(preservedFocus, preservedLayout) ? preservedFocus : undefined,
+      prune: false,
+    });
+  }
   refreshYoloRulesStatus({silent: true});
 }
 
 function savePreferenceControl(control) {
   const path = control.dataset.settingPath || '';
-  saveSettingsPatch(settingPatch(path, valueFromPreferenceControl(control)))
+  if (control.dataset.settingType === 'number' && !validatePreferenceNumberControl(control)) {
+    control.reportValidity?.();
+    return;
+  }
+  saveSettingsPatch(settingPatch(path, valueFromPreferenceControl(control)), {
+    applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
+  })
     .then(() => { statusEl.textContent = `saved ${path}`; })
     .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
 }
@@ -7997,7 +8699,9 @@ function savePreferenceControl(control) {
 function resetPreference(path) {
   const item = preferenceItemByPath(path);
   if (!item) return;
-  saveSettingsPatch(settingPatch(path, preferenceDefault(path)))
+  saveSettingsPatch(settingPatch(path, preferenceDefault(path)), {
+    applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
+  })
     .then(() => { statusEl.textContent = `reset ${path}`; })
     .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
 }
@@ -8079,7 +8783,6 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
     hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
     hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
   }
-  treeEl.replaceChildren();
   const entries = options.root === root && Array.isArray(options.entries)
     ? options.entries
     : await fetchDirectory(root);
@@ -8098,12 +8801,13 @@ function createFileEditorPanel(item) {
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         <div class="file-editor-panel-actions">
           <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="Editor mode" hidden>
-            <button type="button" data-editor-mode="edit">Edit</button>
-            <button type="button" data-editor-mode="preview">Preview</button>
-            <button type="button" data-editor-mode="split">Split</button>
+            <button type="button" data-editor-mode="edit" title="Edit" aria-label="Edit"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
+            <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
+            <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
           </div>
           <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
           <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
+          <button type="button" class="file-editor-theme-panel" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
           <button type="button" class="file-editor-save-panel" title="Save" aria-label="Save file" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
           <button type="button" class="${fileEditorPanelCloseClass()}" title="Close" aria-label="Close"></button>
@@ -8156,6 +8860,11 @@ function createFileEditorPanel(item) {
     event.stopPropagation();
     toggleEditorWrap();
   });
+  panel.querySelector('.file-editor-theme-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    cycleEditorThemeMode();
+  });
   const textarea = panel.querySelector('.file-editor-textarea-panel');
   textarea?.addEventListener('input', () => {
     const state = openFiles.get(path);
@@ -8199,6 +8908,12 @@ function hideFileEditorContent(textarea, highlightPane, previewPane, imagePane) 
     disconnectFileEditorImageObserver(imagePane);
     imagePane.hidden = true;
     imagePane.replaceChildren();
+  }
+}
+
+function setElementsHidden(elements, hidden) {
+  for (const element of elements) {
+    if (element) element.hidden = hidden;
   }
 }
 
@@ -8254,6 +8969,19 @@ function applyFileEditorImageMode(imagePane, img, path) {
   img.title = original ? 'Click to fit image' : 'Click to view original size';
 }
 
+function requestFileEditorPanelFocus(item) {
+  if (isFileEditorItem(item)) pendingFileEditorFocus.add(item);
+}
+
+function focusFileEditorPanelIfReady(panel, item) {
+  if (!pendingFileEditorFocus.has(item) || focusedPanelItem !== item) return false;
+  const textarea = panel?.querySelector?.('.file-editor-textarea-panel');
+  if (!textarea || textarea.hidden) return false;
+  textarea.focus?.({preventScroll: true});
+  pendingFileEditorFocus.delete(item);
+  return true;
+}
+
 function renderFileEditorPanel(panel, item) {
   const path = fileItemPath(item);
   activeFile = path;
@@ -8268,22 +8996,19 @@ function renderFileEditorPanel(panel, item) {
   const gutterButton = panel.querySelector('.file-editor-gutter-panel');
   const wrapButton = panel.querySelector('.file-editor-wrap-panel');
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
+  const themeButton = panel.querySelector('.file-editor-theme-panel');
   const content = panel.querySelector('.file-editor-content');
+  const textControls = [modeControl, gutterButton, wrapButton, reloadButton];
+  updateEditorThemeButton(themeButton);
   if (!state) {
-    if (modeControl) modeControl.hidden = true;
-    if (gutterButton) gutterButton.hidden = true;
-    if (wrapButton) wrapButton.hidden = true;
-    if (reloadButton) reloadButton.hidden = true;
+    setElementsHidden(textControls, true);
     panel.classList.remove('syntax-highlighted');
     hideFileEditorContent(textarea, highlightPane, previewPane, imagePane);
     setFileEditorPanelStatus(panel, 'file closed', '');
     return;
   }
   if (state.loading) {
-    if (modeControl) modeControl.hidden = true;
-    if (gutterButton) gutterButton.hidden = true;
-    if (wrapButton) wrapButton.hidden = true;
-    if (reloadButton) reloadButton.hidden = true;
+    setElementsHidden(textControls, true);
     panel.classList.remove('syntax-highlighted');
     hideFileEditorContent(textarea, highlightPane, previewPane, imagePane);
     setFileEditorPanelStatus(panel, 'loading...', '');
@@ -8291,10 +9016,7 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
-    if (modeControl) modeControl.hidden = true;
-    if (gutterButton) gutterButton.hidden = true;
-    if (wrapButton) wrapButton.hidden = true;
-    if (reloadButton) reloadButton.hidden = true;
+    setElementsHidden(textControls, true);
     panel.classList.remove('syntax-highlighted');
     if (textarea) textarea.hidden = true;
     if (highlightPane) highlightPane.hidden = true;
@@ -8391,11 +9113,11 @@ function renderFileEditorPanel(panel, item) {
       renderSyntaxHighlight(panel, path, state.content);
       syncSyntaxHighlightScroll(panel);
       syncFileEditorSplitScroll(panel, 'editor');
-      textarea.focus({preventScroll: true});
     }
   }
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
+  focusFileEditorPanelIfReady(panel, item);
 }
 
 function loadFileEditorState(path, panel, item) {
@@ -8468,12 +9190,23 @@ function setFileEditorPanelStatus(panel, message, level) {
   status.dataset.level = level || '';
 }
 
+function markdownTextWithSourceAnchors(text) {
+  let inFence = false;
+  return String(text || '').split('\n').map((line, index) => {
+    const fence = /^\s*(```|~~~)/.test(line);
+    const includeAnchor = !inFence && !fence && line.trim();
+    const anchored = includeAnchor ? `${line}<span class="markdown-source-anchor" data-source-line="${index + 1}"></span>` : line;
+    if (fence) inFence = !inFence;
+    return anchored;
+  }).join('\n');
+}
+
 function renderMarkdownPreviewInto(container, text) {
   if (typeof window.marked === 'undefined') {
     container.textContent = 'marked.js not loaded (offline CDN?)';
     return;
   }
-  container.innerHTML = window.marked.parse(text, {gfm: true, breaks: true});
+  container.innerHTML = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
   if (typeof window.hljs !== 'undefined') {
     container.querySelectorAll('pre code').forEach(block => {
       try { window.hljs.highlightElement(block); } catch (_) {}
@@ -8510,6 +9243,96 @@ function editorVisualColumnCount(textarea, lineNumbers = fileEditorLineNumbersEn
   return Math.max(12, Math.floor(available / charWidth));
 }
 
+function editorVisibleTextWidth(textarea) {
+  if (!textarea || !textarea.clientWidth || typeof window.getComputedStyle !== 'function') return 0;
+  const style = window.getComputedStyle(textarea);
+  const paddingLeft = parseFloat(style.paddingLeft) || 0;
+  const paddingRight = parseFloat(style.paddingRight) || 0;
+  return Math.max(0, textarea.clientWidth - paddingLeft - paddingRight);
+}
+
+function editorMirrorStyleFromTextarea(mirror, textarea, width) {
+  const style = window.getComputedStyle(textarea);
+  Object.assign(mirror.style, {
+    position: 'fixed',
+    left: '-10000px',
+    top: '0',
+    width: `${Math.max(1, width)}px`,
+    maxWidth: `${Math.max(1, width)}px`,
+    visibility: 'hidden',
+    pointerEvents: 'none',
+    contain: 'layout style paint',
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'anywhere',
+    wordBreak: style.wordBreak || 'normal',
+    tabSize: style.tabSize || '4',
+    fontFamily: style.fontFamily,
+    fontSize: style.fontSize,
+    fontWeight: style.fontWeight,
+    fontStyle: style.fontStyle,
+    fontStretch: style.fontStretch,
+    letterSpacing: style.letterSpacing,
+    lineHeight: style.lineHeight,
+  });
+}
+
+function rectLineCount(rects) {
+  const tops = [];
+  for (const rect of rects) {
+    if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+    const top = Math.round(rect.top * 2) / 2;
+    if (!tops.includes(top)) tops.push(top);
+  }
+  return Math.max(1, tops.length);
+}
+
+function measuredEditorLineFragments(line, mirror, range) {
+  const text = String(line ?? '');
+  if (!text) return [''];
+  mirror.textContent = '';
+  const node = document.createTextNode(text);
+  mirror.appendChild(node);
+  const breakpoints = [];
+  let previousLineCount = 1;
+  for (let offset = 1; offset <= text.length; offset += 1) {
+    range.setStart(node, 0);
+    range.setEnd(node, offset);
+    const lineCount = rectLineCount(range.getClientRects());
+    if (lineCount > previousLineCount) {
+      const previousBreakpoint = breakpoints.length ? breakpoints[breakpoints.length - 1] : 0;
+      const breakpoint = Math.max(previousBreakpoint, offset - 1);
+      if (breakpoint > previousBreakpoint) breakpoints.push(breakpoint);
+      previousLineCount = lineCount;
+    }
+  }
+  const fragments = [];
+  let start = 0;
+  for (const breakpoint of breakpoints) {
+    if (breakpoint > start) fragments.push(text.slice(start, breakpoint));
+    start = breakpoint;
+  }
+  fragments.push(text.slice(start));
+  return fragments.length ? fragments : [''];
+}
+
+function measuredEditorVisualRows(textarea, content) {
+  if (!fileEditorWrapEnabled || !textarea || textarea.hidden || !textarea.isConnected || typeof document.createRange !== 'function') return null;
+  const source = String(content ?? textarea.value ?? '');
+  if (source.length > 200000) return null;
+  const width = editorVisibleTextWidth(textarea);
+  if (width <= 0 || !document.body) return null;
+  const mirror = document.createElement('div');
+  editorMirrorStyleFromTextarea(mirror, textarea, width);
+  document.body.appendChild(mirror);
+  const range = document.createRange();
+  try {
+    return source.split('\n').map(line => measuredEditorLineFragments(line, mirror, range));
+  } finally {
+    range.detach?.();
+    mirror.remove();
+  }
+}
+
 function simpleLineSyntaxHtml(language, line) {
   const highlighted = simpleCodeSyntaxHtml(language, line);
   return highlighted === null ? esc(line) : highlighted;
@@ -8520,9 +9343,10 @@ function editorVisualHighlightHtml(language, text, options = {}) {
   const wrapEnabled = options.wrap === true;
   const lineNumbers = options.lineNumbers === true;
   const columnCount = options.columnCount || 88;
+  const measuredRows = Array.isArray(options.visualRows) ? options.visualRows : null;
   const rows = source.split('\n');
   return rows.map((line, lineIndex) => {
-    const fragments = editorVisualLineFragments(line, columnCount, wrapEnabled);
+    const fragments = measuredRows?.[lineIndex] || editorVisualLineFragments(line, columnCount, wrapEnabled);
     return fragments.map((fragment, fragmentIndex) => {
       const sourceLine = lineIndex + 1;
       const continuation = fragmentIndex > 0;
@@ -8531,14 +9355,14 @@ function editorVisualHighlightHtml(language, text, options = {}) {
       const marker = wrapEnabled && continuation ? '↪' : '';
       const code = simpleLineSyntaxHtml(language, fragment);
       return `<span class="${rowClass}" data-source-line="${sourceLine}"><span class="editor-line-number">${esc(lineNumber)}</span><span class="editor-soft-wrap-marker">${esc(marker)}</span><span class="editor-line-code">${code}</span></span>`;
-    }).join('\n');
-  }).join('\n') || '<span class="editor-visual-line" data-source-line="1"><span class="editor-line-number">1</span><span class="editor-soft-wrap-marker"></span><span class="editor-line-code"></span></span>';
+    }).join('');
+  }).join('') || '<span class="editor-visual-line" data-source-line="1"><span class="editor-line-number">1</span><span class="editor-soft-wrap-marker"></span><span class="editor-line-code"></span></span>';
 }
 
 function renderEditorCodePreviewInto(container, path, text) {
   const language = syntaxLanguageForPath(path);
   const pre = document.createElement('pre');
-  pre.className = 'file-editor-code-preview';
+  pre.className = ['file-editor-code-preview', 'editor-wrap', fileEditorLineNumbersEnabled ? 'editor-line-numbers' : ''].filter(Boolean).join(' ');
   const code = document.createElement('code');
   code.className = `language-${language || 'text'} editor-highlight-code`;
   code.innerHTML = editorVisualHighlightHtml(language, text, {
@@ -8710,6 +9534,48 @@ function highlightLanguageAvailable(language) {
   return Boolean(window.hljs.getLanguage(language));
 }
 
+function syntaxHighlightTextFromHtml(html) {
+  return String(html || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&lt;|&#60;/gi, '<')
+    .replace(/&gt;|&#62;/gi, '>')
+    .replace(/&amp;|&#38;/gi, '&')
+    .replace(/&quot;|&#34;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'");
+}
+
+function syntaxHighlightHtmlCanHideTextarea(html, content) {
+  const source = String(content || '');
+  if (!source.trim()) return true;
+  return syntaxHighlightTextFromHtml(html).replace(/\s+/g, '').length > 0;
+}
+
+function setSyntaxHighlightState(host, highlightPane, code, html, content, className) {
+  if (!syntaxHighlightHtmlCanHideTextarea(html, content)) {
+    clearSyntaxHighlightState(host, highlightPane, code);
+    return false;
+  }
+  code.className = className || '';
+  code.innerHTML = html;
+  highlightPane.hidden = false;
+  host.classList.add('syntax-highlighted');
+  host.dataset.syntaxHighlightReady = 'true';
+  return true;
+}
+
+function clearSyntaxHighlightState(host, highlightPane, code) {
+  if (highlightPane) highlightPane.hidden = true;
+  if (host) {
+    host.classList.remove('syntax-highlighted');
+    delete host.dataset.syntaxHighlightReady;
+  }
+  if (code) {
+    code.textContent = '';
+    code.className = '';
+  }
+}
+
 function renderSyntaxHighlightInto(highlightPane, code, host, textarea, path, content) {
   if (!highlightPane || !code || !host) return false;
   const language = syntaxLanguageForPath(path);
@@ -8717,34 +9583,23 @@ function renderSyntaxHighlightInto(highlightPane, code, host, textarea, path, co
   const needsVisualOverlay = fileEditorWrapEnabled || fileEditorLineNumbersEnabled;
   host.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
   if (simpleHtml !== null || needsVisualOverlay) {
-    code.className = `language-${language || 'text'}`;
-    code.innerHTML = editorVisualHighlightHtml(language, content, {
+    const html = editorVisualHighlightHtml(language, content, {
       wrap: fileEditorWrapEnabled,
       lineNumbers: fileEditorLineNumbersEnabled,
       columnCount: editorVisualColumnCount(textarea, fileEditorLineNumbersEnabled),
+      visualRows: measuredEditorVisualRows(textarea, content),
     });
-    highlightPane.hidden = false;
-    host.classList.add('syntax-highlighted');
-    return true;
+    return setSyntaxHighlightState(host, highlightPane, code, html, content, `language-${language || 'text'}`);
   }
   if (!highlightLanguageAvailable(language)) {
-    highlightPane.hidden = true;
-    host.classList.remove('syntax-highlighted');
-    code.textContent = '';
-    code.className = '';
+    clearSyntaxHighlightState(host, highlightPane, code);
     return false;
   }
   try {
-    code.className = `language-${language}`;
-    code.innerHTML = window.hljs.highlight(String(content || ''), {language, ignoreIllegals: true}).value || '\n';
-    highlightPane.hidden = false;
-    host.classList.add('syntax-highlighted');
-    return true;
+    const html = window.hljs.highlight(String(content || ''), {language, ignoreIllegals: true}).value || '\n';
+    return setSyntaxHighlightState(host, highlightPane, code, html, content, `language-${language}`);
   } catch (_) {
-    highlightPane.hidden = true;
-    host.classList.remove('syntax-highlighted');
-    code.textContent = '';
-    code.className = '';
+    clearSyntaxHighlightState(host, highlightPane, code);
     return false;
   }
 }
@@ -8778,6 +9633,86 @@ function syncStandaloneSyntaxHighlightScroll() {
   fileEditorHighlight.scrollLeft = fileEditorTextarea.scrollLeft;
 }
 
+function editorLineHeightPx(textarea) {
+  if (!textarea || typeof window.getComputedStyle !== 'function') return 16;
+  const style = window.getComputedStyle(textarea);
+  const parsed = parseFloat(style.lineHeight);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  const fontSize = parseFloat(style.fontSize) || editorFontSize || 13;
+  return fontSize * 1.2;
+}
+
+function estimatedEditorVisualRowCounts(textarea, content) {
+  const source = String(content ?? textarea?.value ?? '');
+  const columnCount = editorVisualColumnCount(textarea, fileEditorLineNumbersEnabled);
+  return source.split('\n').map(line => editorVisualLineFragments(line, columnCount, fileEditorWrapEnabled).length);
+}
+
+function editorSourceLineForScroll(textarea, content) {
+  const lineHeight = editorLineHeightPx(textarea);
+  const targetRow = Math.max(0, Math.floor((textarea?.scrollTop || 0) / Math.max(1, lineHeight)));
+  const rowCounts = estimatedEditorVisualRowCounts(textarea, content);
+  let rowsBefore = 0;
+  for (let index = 0; index < rowCounts.length; index += 1) {
+    const rows = Math.max(1, rowCounts[index] || 1);
+    if (targetRow < rowsBefore + rows) return index + 1;
+    rowsBefore += rows;
+  }
+  return Math.max(1, rowCounts.length);
+}
+
+function editorScrollTopForSourceLine(textarea, content, sourceLine) {
+  const lineHeight = editorLineHeightPx(textarea);
+  const target = Math.max(1, Math.floor(Number(sourceLine) || 1));
+  const rowCounts = estimatedEditorVisualRowCounts(textarea, content);
+  let rowsBefore = 0;
+  for (let index = 0; index < Math.min(target - 1, rowCounts.length); index += 1) {
+    rowsBefore += Math.max(1, rowCounts[index] || 1);
+  }
+  return Math.round(rowsBefore * Math.max(1, lineHeight));
+}
+
+function previewSourceLineAnchors(previewPane) {
+  return Array.from(previewPane?.querySelectorAll?.('[data-source-line]') || [])
+    .map(element => ({element, line: Number(element.dataset.sourceLine)}))
+    .filter(item => Number.isFinite(item.line) && item.line > 0);
+}
+
+function previewAnchorForSourceLine(previewPane, sourceLine) {
+  const target = Math.max(1, Math.floor(Number(sourceLine) || 1));
+  const anchors = previewSourceLineAnchors(previewPane);
+  let best = null;
+  for (const item of anchors) {
+    if (item.line > target) break;
+    best = item;
+  }
+  return best || anchors[0] || null;
+}
+
+function scrollPreviewToSourceLine(previewPane, sourceLine) {
+  const anchor = previewAnchorForSourceLine(previewPane, sourceLine);
+  if (!anchor) return false;
+  previewPane.scrollTop = Math.max(0, anchor.element.offsetTop - 4);
+  return true;
+}
+
+function previewSourceLineForScroll(previewPane) {
+  const anchors = previewSourceLineAnchors(previewPane);
+  if (!anchors.length) return null;
+  const top = (previewPane?.scrollTop || 0) + 6;
+  let best = anchors[0];
+  for (const item of anchors) {
+    if (item.element.offsetTop > top) break;
+    best = item;
+  }
+  return best.line;
+}
+
+function syncEditorHighlightAfterSplitScroll(host) {
+  if (host?.classList?.contains('file-editor-panel')) syncSyntaxHighlightScroll(host);
+  else syncStandaloneSyntaxHighlightScroll();
+}
+
 function syncFileEditorSplitScroll(host, source) {
   if (!host || host._splitScrollSyncing) return;
   const content = host.querySelector?.('.file-editor-content') || fileEditorContent;
@@ -8792,9 +9727,23 @@ function syncFileEditorSplitScroll(host, source) {
   const maxFromLeft = Math.max(1, from.scrollWidth - from.clientWidth);
   const maxToLeft = Math.max(0, to.scrollWidth - to.clientWidth);
   host._splitScrollSyncing = true;
-  to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
-  to.scrollLeft = Math.round((from.scrollLeft / maxFromLeft) * maxToLeft);
-  host._splitScrollSyncing = false;
+  try {
+    const sourceText = textarea.value ?? '';
+    if (source === 'preview') {
+      const line = previewSourceLineForScroll(previewPane);
+      if (line) {
+        textarea.scrollTop = editorScrollTopForSourceLine(textarea, sourceText, line);
+        syncEditorHighlightAfterSplitScroll(host);
+      } else {
+        to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
+      }
+    } else if (!scrollPreviewToSourceLine(previewPane, editorSourceLineForScroll(textarea, sourceText))) {
+      to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
+    }
+    to.scrollLeft = Math.round((from.scrollLeft / maxFromLeft) * maxToLeft);
+  } finally {
+    host._splitScrollSyncing = false;
+  }
 }
 
 function refreshEditorSyntaxHighlights() {
@@ -8840,6 +9789,10 @@ async function saveFileEditor(path, panel) {
     state.original = state.content;
     state.dirty = false;
     clearOpenFileExternalState(state);
+    if (payload.yolo_rules) {
+      yoloRulesPayload = payload.yolo_rules;
+      renderPreferencesPanels();
+    }
     updateFileEditorPanelChrome(panel, path);
     setFileEditorPanelStatus(panel, `saved (${payload.size} bytes)`, 'ok');
     renderSessionButtons();
@@ -8895,7 +9848,7 @@ function panelControlsHtml(session, options = {}) {
     ? ''
     : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`;
   const actionsHtml = !disabled && !isFiles && isTmuxSession(session)
-    ? `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="session actions" aria-label="Session actions">...</button>`
+    ? `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="session actions" aria-label="Session actions"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
     : '';
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
@@ -8908,6 +9861,16 @@ function panelControlsHtml(session, options = {}) {
           ${actionsHtml}
           <button class="${minimizeClass}" ${minimizeAttrs}></button>
           ${expandHtml}
+        </div>`;
+}
+
+function virtualPanelControlsHtml(session, label) {
+  const safeLabel = label || itemLabel(session);
+  const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="expand pane" aria-label="Expand pane"`;
+  return `<div class="tabs virtual-panel-controls" role="tablist">
+          <button class="tab active terminal-tab" type="button" title="${esc(safeLabel)}" aria-label="${esc(safeLabel)}">${esc(safeLabel)}</button>
+          <button class="tab pane-minimize ${platformWindowControlClass('minimize')}" type="button" data-pane-minimize="${esc(session)}" title="minimize pane" aria-label="Minimize pane"></button>
+          <button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>
         </div>`;
 }
 
@@ -9476,7 +10439,7 @@ function insertIntoTerminal(session, text) {
     return false;
   }
   const item = terminals.get(session);
-  if (!item || item.socket.readyState !== WebSocket.OPEN) return false;
+  if (!item || item.socket?.readyState !== WebSocket.OPEN) return false;
   const filtered = stripTerminalQueryResponses(text);
   if (!filtered) return false;
   item.socket.send(JSON.stringify({type: 'input', data: filtered}));
@@ -9659,7 +10622,7 @@ function tmuxWindow(session, key, label) {
     return;
   }
   const item = terminals.get(session);
-  if (!item || item.socket.readyState !== WebSocket.OPEN) {
+  if (!item || item.socket?.readyState !== WebSocket.OPEN) {
     statusEl.innerHTML = `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
     return;
   }
@@ -9674,7 +10637,8 @@ function tmuxWindow(session, key, label) {
 
 async function ensureTerminalRunning(session) {
   const item = terminals.get(session);
-  if (item && item.socket.readyState !== WebSocket.CLOSING && item.socket.readyState !== WebSocket.CLOSED) return;
+  const readyState = item?.socket?.readyState;
+  if (item && readyState !== undefined && readyState !== WebSocket.CLOSING && readyState !== WebSocket.CLOSED) return;
   if (readOnlyMode) {
     startTerminal(session);
     return;
@@ -9688,15 +10652,59 @@ async function ensureTerminalRunning(session) {
   startTerminal(session);
 }
 
+function connectTerminalSocket(session, item) {
+  if (!item?.term || !item?.container) return;
+  if (item.socket && item.socket.readyState !== WebSocket.CLOSED && item.socket.readyState !== WebSocket.CLOSING) return;
+  const socket = new WebSocket(wsUrl(session));
+  socket.binaryType = 'arraybuffer';
+  item.socket = socket;
+  item.manualClose = false;
+  socket.onopen = () => {
+    item.reconnectAttempt = 0;
+    dismissTerminalConnectionToasts(session);
+    if (terminalIsVisible(session, item.container)) {
+      scheduleFit(session);
+      scheduleRemoteResize(session, 50);
+    }
+    updateTypingIndicator(session);
+    updateStatus();
+    refreshTrackedSessionChrome(session);
+  };
+  socket.onmessage = event => {
+    if (event.data instanceof ArrayBuffer) {
+      item.term.write(new Uint8Array(event.data));
+    } else {
+      item.term.write(String(event.data));
+    }
+  };
+  socket.onclose = () => {
+    if (item.manualClose || terminals.get(session) !== item) return;
+    postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
+    clearFocusedTerminal(session);
+    updateStatus();
+    refreshTrackedSessionChrome(session);
+    scheduleTerminalReconnect(session, item);
+  };
+  socket.onerror = () => {
+    updateTypingIndicator(session);
+    updateStatus();
+    refreshTrackedSessionChrome(session);
+  };
+}
+
 function startTerminal(session) {
   const existing = terminals.get(session);
   const reconnectAttempt = existing?.reconnectAttempt || 0;
+  const container = document.getElementById(`term-${session}`);
+  if (!container) return;
+  if (existing?.term && existing.container === container) {
+    connectTerminalSocket(session, existing);
+    return;
+  }
   if (existing) {
     closeTerminalItem(session, existing);
     terminals.delete(session);
   }
-  const container = document.getElementById(`term-${session}`);
-  if (!container) return;
   const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
   if (!TerminalCtor) {
     container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
@@ -9726,49 +10734,16 @@ function startTerminal(session) {
   term.open(container);
   installTerminalLinkProvider(term);
   installTerminalContextMenu(session, term, container);
+  installTerminalCopyShortcut(session, term);
   installTerminalFileDrop(session, container);
   const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
     term.resize(openedSize.cols, openedSize.rows);
   }
-  const socket = new WebSocket(wsUrl(session));
-  socket.binaryType = 'arraybuffer';
-  const item = {term, socket, container, manualClose: false, reconnectAttempt, reconnectTimer: null, resizeTimer: null, scrollTimer: null, pendingScrollLines: 0};
+  const item = {term, socket: null, container, manualClose: false, reconnectAttempt, reconnectTimer: null, resizeTimer: null, scrollTimer: null, pendingScrollLines: 0};
   terminals.set(session, item);
   enableTerminalScroll(session, term, container);
   observeTerminalResize(session, container);
-
-  socket.onopen = () => {
-    item.reconnectAttempt = 0;
-    if (terminalIsVisible(session, container)) {
-      scheduleFit(session);
-      scheduleRemoteResize(session, 50);
-    }
-    updateTypingIndicator(session);
-    updateStatus();
-    refreshTrackedSessionChrome(session);
-  };
-  socket.onmessage = event => {
-    if (event.data instanceof ArrayBuffer) {
-      term.write(new Uint8Array(event.data));
-    } else {
-      term.write(String(event.data));
-    }
-  };
-  socket.onclose = () => {
-    if (item.manualClose || terminals.get(session) !== item) return;
-    term.writeln(`\r\n\x1b[31mdisconnected from ${session}\x1b[0m`);
-    postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
-    clearFocusedTerminal(session);
-    updateStatus();
-    refreshTrackedSessionChrome(session);
-    scheduleTerminalReconnect(session, item);
-  };
-  socket.onerror = () => {
-    updateTypingIndicator(session);
-    updateStatus();
-    refreshTrackedSessionChrome(session);
-  };
   term.onFocus?.(() => {
     setFocusedTerminal(session);
   });
@@ -9783,11 +10758,14 @@ function startTerminal(session) {
   });
   term.onData(data => {
     if (readOnlyMode) return;
-    if (socket.readyState === WebSocket.OPEN) {
+    const current = terminals.get(session);
+    const socket = current?.socket;
+    if (socket?.readyState === WebSocket.OPEN) {
       const filtered = stripTerminalQueryResponses(data);
       if (filtered) socket.send(JSON.stringify({type: 'input', data: filtered}));
     }
   });
+  connectTerminalSocket(session, item);
 }
 
 function updateTypingIndicator(session) {
@@ -10107,7 +11085,7 @@ function renderSummaryContext(session, info, agent) {
 
 function transcriptPathRowHtml(path, fallback = 'no transcript path') {
   if (!path) return `<span class="transcript-path-missing">${esc(fallback)}</span>`;
-  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span><button type="button" class="path-copy-button transcript-path-copy" data-copy-transcript-path="${esc(path)}" title="Copy transcript path" aria-label="Copy transcript path"></button>`;
+  return `<span class="transcript-path-label">path</span><span class="transcript-path-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'transcript-path-copy', dataAttr: 'data-copy-transcript-path', title: 'Copy transcript path'})}`;
 }
 
 function updateTranscriptPathRow(session, path, fallback = 'no transcript path') {
@@ -10342,6 +11320,7 @@ function refreshAll() {
 
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
+  applyEditorThemeMode();
   applyFileExplorerStaticLabels();
   renderTransportWarning();
   renderTabMetaToggle();
@@ -10393,7 +11372,16 @@ document.addEventListener('click', event => {
   if (event.target?.closest?.('.app-menu')) return;
   closeAppMenus();
 });
+topbar?.addEventListener('pointerenter', () => {
+  closeOtherSessionPopovers(null);
+  closeFileImagePreview();
+});
 document.addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault();
+    openCommandPalette();
+    return;
+  }
   if (event.key === 'Escape') closeAppMenus();
 });
 window.addEventListener('resize', () => {

@@ -44,10 +44,7 @@ DEFAULT_DANGEROUS_REGEXES = (
     r">\s*/dev/sd",
     r">\s*/dev/nvme",
     r">\s*/dev/vd",
-    r"(?:^|\s)/dev/(?:sd[a-z]|nvme\d|vd[a-z])",
-    r"\bfind\b[^|;&]*\s-delete\b",
-    r"\bfind\b[^|;&]*\s-exec\s+(?:/\S*/)?(?:rm|rmdir|shred)\b",
-    r"\bxargs\s+(?:/\S*/)?(?:rm|rmdir|shred)\b",
+    r"(?:^|[;&|])\s*find\b[^|;&]*\s-delete\b",
 )
 BLOCK_DEVICE_RE = re.compile(r"/dev/(?:sd[a-z]\d*|nvme\d+n\d+(?:p\d+)?|vd[a-z]\d*)")
 BLOCK_DEVICE_REDIRECT_RE = re.compile(r"(?:^|[\s;&|])(?:\d?>|>>)\s*/dev/(?:sd[a-z]|nvme\d|vd[a-z])")
@@ -85,7 +82,6 @@ _RULES_LOCK = threading.RLock()
 _RULES_CACHE: dict[str, Any] = {
     "path": None,
     "mtime_ns": None,
-    "default_policy": None,
     "ruleset": None,
     "error": "",
 }
@@ -102,14 +98,15 @@ def yolo_settings() -> dict[str, Any]:
     yolo = payload.get("settings", {}).get("yolo", {})
     if not isinstance(yolo, dict):
         yolo = {}
-    default_policy = yolo.get("default_policy", "ask")
-    if default_policy not in RULE_ACTIONS:
-        default_policy = "ask"
     return {
-        "default_policy": default_policy,
         "rule_file_path": yolo.get("rule_file_path", YOLO_RULES_DISPLAY_PATH),
         "dry_run": yolo.get("dry_run") is True,
     }
+
+
+def active_rule_path() -> Path:
+    settings = yolo_settings()
+    return expand_rule_path(str(settings["rule_file_path"]))
 
 
 def default_rule_data(default_action: str = "approve") -> dict[str, Any]:
@@ -147,15 +144,14 @@ def default_rule_file_text(default_action: str = "ask") -> str:
 
 
 def ensure_rule_file(path: Path | None = None) -> Path:
-    settings = yolo_settings()
-    rule_path = path or expand_rule_path(str(settings["rule_file_path"]))
+    rule_path = path or active_rule_path()
     if rule_path.exists():
         return rule_path
     rule_path.parent.mkdir(parents=True, exist_ok=True)
     rule_path.parent.chmod(0o700)
     tmp = rule_path.with_name(f".{rule_path.name}.{os.getpid()}.{int(time.time() * 1000)}.tmp")
     with tmp.open("w", encoding="utf-8") as handle:
-        handle.write(default_rule_file_text(str(settings["default_policy"])))
+        handle.write(default_rule_file_text("ask"))
     os.replace(tmp, rule_path)
     rule_path.chmod(0o600)
     return rule_path
@@ -414,14 +410,27 @@ def validate_rules(raw: Any, path: Path = YOLO_RULES_PATH, source: str = "file")
     return YoloRuleset(default_action=default_action, rules=tuple(rules), source=source, path=path, builtin=source == "built-in")
 
 
-def load_rules_file(path: Path, default_policy: str = "ask") -> YoloRuleset:
+def parse_rule_text(content: str, path: Path = YOLO_RULES_PATH, source: str = "file") -> YoloRuleset:
+    raw = yaml.safe_load(content)
+    return validate_rules(raw, path=path, source=source)
+
+
+def validate_rule_file_text(content: str, path: Path | None = None) -> YoloRuleset:
+    return parse_rule_text(content, path=path or YOLO_RULES_PATH, source="file")
+
+
+def is_rules_file_path(path: str | Path) -> bool:
+    try:
+        candidate = Path(os.path.expandvars(os.path.expanduser(str(path)))).resolve()
+    except OSError:
+        return False
+    return candidate == active_rule_path()
+
+
+def load_rules_file(path: Path) -> YoloRuleset:
     if not path.exists():
         return validate_rules(default_rule_data("approve"), path=path, source="built-in")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if isinstance(raw, dict) and "default" not in raw:
-        raw = dict(raw)
-        raw["default"] = default_policy if default_policy in RULE_ACTIONS else "ask"
-    return validate_rules(raw, path=path, source="file")
+    return parse_rule_text(path.read_text(encoding="utf-8"), path=path, source="file")
 
 
 def print_rule_error(error: str) -> None:
@@ -433,9 +442,7 @@ def print_rule_error(error: str) -> None:
 
 
 def cached_rules(force: bool = False) -> tuple[YoloRuleset | None, str]:
-    settings = yolo_settings()
-    path = expand_rule_path(str(settings["rule_file_path"]))
-    default_policy = str(settings["default_policy"])
+    path = active_rule_path()
     try:
         stat = path.stat()
         mtime_ns = stat.st_mtime_ns
@@ -446,11 +453,10 @@ def cached_rules(force: bool = False) -> tuple[YoloRuleset | None, str]:
             not force
             and _RULES_CACHE.get("path") == path
             and _RULES_CACHE.get("mtime_ns") == mtime_ns
-            and _RULES_CACHE.get("default_policy") == default_policy
         ):
             return _RULES_CACHE.get("ruleset"), str(_RULES_CACHE.get("error") or "")
         try:
-            ruleset = load_rules_file(path, default_policy)
+            ruleset = load_rules_file(path)
             error = ""
         except (OSError, yaml.YAMLError, ValueError) as exc:
             ruleset = None
@@ -459,7 +465,6 @@ def cached_rules(force: bool = False) -> tuple[YoloRuleset | None, str]:
         _RULES_CACHE.update({
             "path": path,
             "mtime_ns": mtime_ns,
-            "default_policy": default_policy,
             "ruleset": ruleset,
             "error": error,
         })
@@ -521,7 +526,7 @@ def evaluate_ruleset(cmd_line: str, ruleset: YoloRuleset) -> dict[str, Any]:
 
 def evaluate(cmd: str, prompt_type: str = "bash", agent: str = "", session: str = "", dangerously_yolo: bool = False) -> dict[str, Any]:
     settings = yolo_settings()
-    path = expand_rule_path(str(settings["rule_file_path"]))
+    path = active_rule_path()
     dry_run = settings["dry_run"]
     if prompt_type != "bash":
         decision = {"action": "approve", "rule_name": "non-bash prompt", "risk": "unknown", "source": "built-in", "path": str(path)}
@@ -563,7 +568,7 @@ def evaluate(cmd: str, prompt_type: str = "bash", agent: str = "", session: str 
 
 def rules_status(force: bool = False) -> dict[str, Any]:
     settings = yolo_settings()
-    path = expand_rule_path(str(settings["rule_file_path"]))
+    path = active_rule_path()
     ruleset, error = cached_rules(force=force)
     try:
         stat = path.stat()
@@ -575,7 +580,7 @@ def rules_status(force: bool = False) -> dict[str, Any]:
         "display_path": YOLO_RULES_DISPLAY_PATH,
         "exists": path.exists(),
         "source": ruleset.source if ruleset else "error",
-        "default": ruleset.default_action if ruleset else settings["default_policy"],
+        "default": ruleset.default_action if ruleset else "ask",
         "rule_count": len(ruleset.rules) if ruleset else 0,
         "mtime_ns": mtime_ns,
         "dry_run": settings["dry_run"],

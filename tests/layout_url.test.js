@@ -88,6 +88,7 @@ class TestElement {
   querySelector() { return null; }
   querySelectorAll() { return []; }
   remove() { this.removed = true; }
+  scrollIntoView() {}
   getAttribute(name) { return this.attributes[name]; }
   hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); }
   removeAttribute(name) { delete this.attributes[name]; }
@@ -212,12 +213,16 @@ globalThis.__layoutTestApi = {
   scrollFileTreeRowIntoView,
   bindPaneTabStrip,
   clearPaneTabDropPreview,
+  showSessionContextMenu,
+  bodyChildren() { return document.body.children; },
   defaultLayoutSlots,
   dedentSelectionText,
   dropIntentAllowsSession,
   directoryEntriesSignature,
   editorWrapValue,
   editorViewModeFor,
+  editorScrollTopForSourceLine,
+  editorSourceLineForScroll,
   editorVisualHighlightHtml,
   editorVisualLineFragments,
   expandPaneFromLayout,
@@ -226,9 +231,12 @@ globalThis.__layoutTestApi = {
   fileEntryChanged,
   pullRequestStatusLabel,
   renderTransportWarning,
+  renderFileEditorPanel,
   rawFileUrl,
   rawFileDownloadUrl,
   registerFileEditorLayoutItem,
+  requestFileEditorPanelFocus,
+  focusFileEditorPanelIfReady,
   minimizePaneFromLayout,
   removePaneFromLayout,
   removeSessionFromLayout,
@@ -238,6 +246,7 @@ globalThis.__layoutTestApi = {
   slotForNewTmuxSession,
   slotForTabActivation,
   simpleCodeSyntaxHtml,
+  syntaxHighlightHtmlCanHideTextarea,
   smallLayoutSlotCandidate,
   splitPercentForNewItem,
   setInfoBranchSort,
@@ -260,7 +269,9 @@ globalThis.__layoutTestApi = {
   paneStateWithTabs,
   windowStepVisibility,
   markdownSyntaxHtml,
+  markdownTextWithSourceAnchors,
   moveSessionToSlot,
+  openFileEditorPane,
   pathRelativeToDirectory,
   currentSlots() { return layoutSlots; },
   setAutoApproveStateForTest(session, payload) {
@@ -509,6 +520,52 @@ function canonical(value) {
 }
 
 {
+  const search = '?sessions=files,6&layout=row@22(slot2,slot3)&tabs=slot2:files;slot3:prefs,6*,file%3A%2Fhome%2Fkeivenc%2FAGENTS.md,ant,file%3A%2Fhome%2Fkeivenc%2Fyolomux.dev%2FTODO.md,file%3A%2Fhome%2Fkeivenc%2Fcomponents_metrics_README.md,file%3A%2Fhome%2Fkeivenc%2Fyolomux.dev%2F20260528-022.png';
+  const api = loadYolomux(search, ['6', 'ant']);
+  const agentsItem = 'file:/home/keivenc/AGENTS.md';
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'slot2'}, {slot: 'slot3'}]},
+    panes: {
+      slot2: {tabs: ['__files__'], active: '__files__'},
+      slot3: {
+        tabs: [
+          '__prefs__',
+          '6',
+          agentsItem,
+          'ant',
+          'file:/home/keivenc/yolomux.dev/TODO.md',
+          'file:/home/keivenc/components_metrics_README.md',
+          'file:/home/keivenc/yolomux.dev/20260528-022.png',
+        ],
+        active: '6',
+      },
+    },
+  });
+  api.activatePaneTab('slot3', agentsItem);
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'slot2'}, {slot: 'slot3'}]},
+    panes: {
+      slot2: {tabs: ['__files__'], active: '__files__'},
+      slot3: {
+        tabs: [
+          '__prefs__',
+          '6',
+          agentsItem,
+          'ant',
+          'file:/home/keivenc/yolomux.dev/TODO.md',
+          'file:/home/keivenc/components_metrics_README.md',
+          'file:/home/keivenc/yolomux.dev/20260528-022.png',
+        ],
+        active: agentsItem,
+      },
+    },
+  });
+  const activeParams = parseUrl(api.syncInitialLayoutUrlForTest());
+  assert.equal(activeParams.get('sessions'), 'files,file:/home/keivenc/AGENTS.md');
+  assert.equal(activeParams.get('tabs').includes('slot2:files;slot3:prefs,6,file:/home/keivenc/AGENTS.md*'), true);
+}
+
+{
   const api = loadYolomux('', ['1', '2']);
   const item = 'file:/home/keivenc/review.json';
   const paneTab = api.fileEditorPaneTabHtml(item);
@@ -517,6 +574,10 @@ function canonical(value) {
 
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-heading-1'));
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-bold'));
+  const anchoredMarkdown = api.markdownTextWithSourceAnchors('# TITLE\n\n```sh\n# code\n```\n## Next');
+  assert.ok(anchoredMarkdown.includes('data-source-line="1"'));
+  assert.ok(anchoredMarkdown.includes('data-source-line="6"'));
+  assert.equal(anchoredMarkdown.includes('data-source-line="3"'), false);
   assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-comment'));
   assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-variable'));
   assert.ok(api.simpleCodeSyntaxHtml('json', '{"name": "yolomux", "ok": true}').includes('code-attr'));
@@ -529,6 +590,52 @@ function canonical(value) {
   assert.ok(gutterHtml.includes('editor-line-number">2</span'));
   assert.ok(gutterHtml.includes('editor-soft-wrap-marker">↪</span'));
   assert.ok(gutterHtml.includes('code-number'));
+  const textarea = {scrollTop: 32, value: 'one\ntwo\nthree', clientWidth: 0};
+  assert.equal(api.editorSourceLineForScroll(textarea, textarea.value), 3);
+  assert.equal(api.editorScrollTopForSourceLine(textarea, textarea.value, 3), 32);
+
+  assert.equal(api.syntaxHighlightHtmlCanHideTextarea('', '# TITLE'), false);
+  assert.equal(api.syntaxHighlightHtmlCanHideTextarea('<span class="md-heading"># TITLE</span>', '# TITLE'), true);
+  assert.equal(api.syntaxHighlightHtmlCanHideTextarea('', ''), true);
+}
+
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const start = source.indexOf('function renderFileEditorPanel(');
+  const end = source.indexOf('function loadFileEditorState(', start);
+  assert.ok(start > 0 && end > start, 'could not locate renderFileEditorPanel body');
+  assert.equal(source.slice(start, end).includes('.focus('), false, 'renderFileEditorPanel must not steal focus during refresh renders');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const item = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
+  let focusCount = 0;
+  const textarea = {
+    hidden: false,
+    focus() {
+      focusCount += 1;
+    },
+  };
+  const panel = {
+    querySelector(selector) {
+      return selector === '.file-editor-textarea-panel' ? textarea : null;
+    },
+  };
+  api.setFocusedPanelItem('1');
+  api.requestFileEditorPanelFocus(item);
+  assert.equal(api.focusFileEditorPanelIfReady(panel, item), false);
+  assert.equal(focusCount, 0);
+
+  api.setFocusedPanelItem(item);
+  assert.equal(api.focusFileEditorPanelIfReady(panel, item), true);
+  assert.equal(focusCount, 1);
+  assert.equal(api.focusFileEditorPanelIfReady(panel, item), false);
+
+  api.requestFileEditorPanelFocus(item);
+  textarea.hidden = true;
+  assert.equal(api.focusFileEditorPanelIfReady(panel, item), false);
+  assert.equal(focusCount, 1);
 }
 
 {
@@ -564,20 +671,20 @@ function canonical(value) {
 
   const macApi = loadYolomux('', ['1'], 'http:', 'MacIntel');
   assert.equal(macApi.fileExplorerLabel(), 'Finder');
-  assert.equal(macApi.platformWindowControlClass('minimize'), 'mac-window-control mac-minimize');
-  assert.equal(macApi.platformWindowControlClass('close'), 'mac-window-control mac-minimize');
-  assert.equal(macApi.platformWindowControlClass('zoom'), 'mac-window-control mac-zoom');
-  assert.equal(macApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close mac-window-control mac-minimize');
-  assert.equal(macApi.fileEditorPanelCloseClass(), 'file-editor-panel-close mac-window-control mac-minimize');
+  assert.equal(macApi.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
+  assert.equal(macApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
+  assert.equal(macApi.platformWindowControlClass('zoom'), 'pc-window-control pc-zoom');
+  assert.equal(macApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
+  assert.equal(macApi.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
   const macPaneControls = macApi.panelControlsHtml('1');
   assert.ok(macPaneControls.includes('data-pane-minimize="1"'));
-  assert.ok(macPaneControls.includes('pane-minimize mac-window-control mac-minimize'));
+  assert.ok(macPaneControls.includes('pane-minimize pc-window-control pc-minimize'));
   assert.ok(macPaneControls.includes('data-pane-expand="1"'));
-  assert.ok(macPaneControls.includes('pane-expand mac-window-control mac-zoom'));
+  assert.ok(macPaneControls.includes('pane-expand pc-window-control pc-zoom'));
   assert.ok(macPaneControls.includes('hidden type="button" data-pane-expand="1"'));
   const macFinderControls = macApi.panelControlsHtml('__files__');
   assert.ok(macFinderControls.includes('data-pane-close="__files__"'));
-  assert.ok(macFinderControls.includes('pane-close mac-window-control mac-minimize'));
+  assert.ok(macFinderControls.includes('pane-close pc-window-control pc-close'));
   assert.equal(macFinderControls.includes('data-pane-expand'), false);
 
   const forcedPcApi = loadYolomux('?platform=pc', ['1'], 'http:', 'MacIntel');
@@ -588,9 +695,9 @@ function canonical(value) {
 
   const forcedMacApi = loadYolomux('?platform=mac', ['1'], 'http:', 'Linux x86_64');
   assert.equal(forcedMacApi.fileExplorerLabel(), 'Finder');
-  assert.equal(forcedMacApi.platformWindowControlClass('close'), 'mac-window-control mac-minimize');
-  assert.equal(forcedMacApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close mac-window-control mac-minimize');
-  assert.equal(forcedMacApi.fileEditorPanelCloseClass(), 'file-editor-panel-close mac-window-control mac-minimize');
+  assert.equal(forcedMacApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
+  assert.equal(forcedMacApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
+  assert.equal(forcedMacApi.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
 
   const singlePaneUrlApi = loadYolomux('?sessions=1&layout=left&tabs=left:1,2,3,4,5,6,ant', ['1', '2', '3', '4', '5', '6', 'ant']);
   assert.deepStrictEqual(Array.from(singlePaneUrlApi.layoutSlotKeys(singlePaneUrlApi.currentSlots())), ['left']);
@@ -677,51 +784,58 @@ function canonical(value) {
   noMinimizedSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
   noMinimizedSlots.slot1 = api.paneStateWithTabs(['1'], '1');
   api.setLayoutSlotsForTest(noMinimizedSlots);
-  const tabMenu = api.appMenuTree().find(menu => menu.id === 'tab');
+  const tabMenu = api.appMenuTree().find(menu => menu.id === 'windows');
   const tabMenuLabels = tabMenu.items.map(item => item.label).filter(Boolean);
-  assert.ok(tabMenuLabels.includes('Active'));
-  assert.ok(tabMenuLabels.includes('Inactive'));
+  assert.equal(tabMenuLabels.includes('Active'), false);
+  assert.equal(tabMenuLabels.includes('Inactive'), false);
   assert.equal(tabMenuLabels.includes('Minimized'), false);
   assert.equal(tabMenuLabels.some(label => label.startsWith('No ')), false);
   assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1);
   const menus = api.appMenuTree();
-  assert.equal(menus.map(menu => menu.label).join(','), 'File,View,Tmux,Tab,Settings,Help');
+  assert.equal(menus.map(menu => menu.label).join(','), 'File,View,tmux,Windows,Help');
   assert.equal(menus.some(menu => menu.id === 'yolo'), false);
+  assert.equal(menus.some(menu => menu.id === 'settings'), false);
   const fileMenu = menus.find(menu => menu.id === 'file');
   const fileMenuLabels = fileMenu.items.map(item => item.label).filter(Boolean);
   assert.equal(fileMenuLabels.includes('New tmux session'), false);
   assert.equal(fileMenuLabels.includes('Rename session'), false);
   assert.equal(fileMenuLabels.includes('Kill session'), false);
   assert.equal(fileMenuLabels.includes('Resume session'), false);
+  assert.ok(fileMenuLabels.includes('Preferences'));
+  assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
+  assert.deepStrictEqual(canonical(fileMenu.items.slice(-3).map(item => item.type === 'separator' ? '---' : item.label)), ['Preferences', '---', 'Log out']);
   const tmuxMenu = menus.find(menu => menu.id === 'tmux');
   const tmuxMenuLabels = tmuxMenu.items.map(item => item.label).filter(Boolean);
-  assert.equal(tmuxMenu.items[0].label, 'New tmux session');
+  assert.equal(tmuxMenu.items[0].label, 'YO off');
+  assert.equal(tmuxMenu.items[0].keepOpen, true);
+  assert.ok(tmuxMenuLabels.includes('New tmux session'));
   assert.ok(tmuxMenuLabels.includes('Transcript'));
   assert.ok(tmuxMenuLabels.includes('AI summary'));
   assert.ok(tmuxMenuLabels.includes('Event log'));
   assert.ok(tmuxMenuLabels.includes('Branch Info'));
-  assert.ok(tmuxMenuLabels.includes('Rename session'));
+  assert.ok(tmuxMenuLabels.includes("Rename tmux session '1'"));
   assert.ok(tmuxMenuLabels.includes('Kill session'));
-  assert.ok(tmuxMenuLabels.includes("Enable YOLO for Tmux Session '1'"));
+  assert.equal(tmuxMenuLabels.includes("Enable YOLO for Tmux Session '1'"), false);
   assert.ok(tmuxMenuLabels.includes('Resume session'));
-  assert.equal(tmuxMenu.badgeText, '');
+  assert.equal(tmuxMenu.badgeText, undefined);
   assert.ok(tmuxMenuLabels.includes('YOLO'));
   const yoloMenu = tmuxMenu.items.find(item => item.label === 'YOLO');
   assert.equal(yoloMenu.type, 'submenu');
   assert.ok(yoloMenu.items.some(item => item.label === 'Open rule file'));
   assert.ok(yoloMenu.items.some(item => item.label === 'Reload rules'));
-  assert.ok(yoloMenu.items.some(item => item.label === 'Sessions'));
-  assert.equal(tmuxMenu.items.find(item => item.label === 'Rename session').disabled, false);
-  assert.equal(tmuxMenu.items.find(item => item.label === 'Rename session').detail, '');
+  assert.equal(yoloMenu.items.some(item => item.label === 'Sessions'), false);
+  assert.equal(tmuxMenu.items.find(item => item.label === "Rename tmux session '1'").disabled, false);
+  assert.equal(tmuxMenu.items.find(item => item.label === "Rename tmux session '1'").detail, '');
   api.setAutoApproveStateForTest('1', {enabled: true});
   const yoloTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
-  assert.equal(yoloTmuxMenu.badgeText, '1');
-  assert.equal(yoloTmuxMenu.badgeTitle, '1 tmux session with YOLO enabled');
-  const yoloSubmenu = yoloTmuxMenu.items.find(item => item.label === 'YOLO (1)');
-  assert.equal(yoloSubmenu.type, 'submenu');
-  const yoloSessionsSubmenu = yoloSubmenu.items.find(item => item.label === 'Sessions (1)');
-  assert.equal(yoloSessionsSubmenu.type, 'submenu');
-  assert.equal(yoloSessionsSubmenu.items.find(item => item.label === '1 on').checked, true);
+  assert.equal(yoloTmuxMenu.badgeText, undefined);
+  const yoloWindowsMenu = api.appMenuTree().find(menu => menu.id === 'windows');
+  assert.equal(yoloWindowsMenu.badgeText, '1');
+  assert.equal(yoloWindowsMenu.badgeTitle, '1 tmux session with YOLO enabled');
+  assert.equal(yoloTmuxMenu.items[0].label, 'YO on');
+  assert.equal(yoloTmuxMenu.items[0].keepOpen, true);
+  assert.equal(yoloTmuxMenu.items[0].iconHtml.includes('session-yolo-marker'), true);
+  assert.equal(yoloTmuxMenu.items.find(item => item.label === 'YOLO').items.some(item => item.label.startsWith('Sessions')), false);
   api.setAutoApproveStateForTest('1', {enabled: false});
   assert.equal(api.currentSessionActionTarget(), '1');
   const filesOnlySlots = api.emptyLayoutSlots();
@@ -729,8 +843,8 @@ function canonical(value) {
   filesOnlySlots.left = api.paneStateWithTabs(['__files__'], '__files__');
   api.setLayoutSlotsForTest(filesOnlySlots);
   const filesOnlyTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
-  assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename session').disabled, true);
-  assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename session').detail, 'No tmux tab focused');
+  assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename tmux session').disabled, true);
+  assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename tmux session').detail, 'No tmux tab focused');
   const multiTmuxSlots = api.emptyLayoutSlots();
   multiTmuxSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 22);
   multiTmuxSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
@@ -740,25 +854,18 @@ function canonical(value) {
   api.setFocusedPanelItem('2');
   api.setFocusedPanelItem('__files__');
   assert.equal(api.currentSessionActionTarget(), '2');
-  const settingsMenu = menus.find(menu => menu.id === 'settings');
-  const settingsMenuLabels = settingsMenu.items.map(item => item.label).filter(Boolean);
-  assert.deepStrictEqual(canonical(settingsMenuLabels), ['Preferences', 'Tab metadata', 'Notify', 'Refresh']);
-  assert.equal(settingsMenuLabels.includes('Global settings...'), false);
-  assert.ok(settingsMenuLabels.includes('Preferences'));
-  assert.ok(settingsMenuLabels.includes('Notify'));
-  assert.ok(settingsMenuLabels.includes('Refresh'));
-  assert.equal(settingsMenuLabels.includes('Log out'), false);
-  assert.equal(settingsMenu.items.find(item => item.label === 'Tab metadata').iconHtml.includes('app-menu-ui-icon-tab-meta active'), true);
-  assert.equal(settingsMenu.items.find(item => item.label === 'Notify').iconHtml.includes('app-menu-ui-icon-notify'), true);
-  assert.equal(settingsMenu.items.find(item => item.label === 'Refresh').iconHtml.includes('app-menu-ui-icon-refresh'), true);
-  assert.equal(settingsMenu.items.find(item => item.label === 'Refresh').detail, undefined);
+  const viewMenu = menus.find(menu => menu.id === 'view');
+  assert.equal(viewMenu.items.find(item => item.label === 'Hide tab metadata').iconHtml.includes('app-menu-ui-icon-tab-meta active'), true);
+  assert.equal(viewMenu.items.find(item => item.label === 'Alert').iconHtml.includes('app-menu-ui-icon-notify'), true);
+  assert.equal(viewMenu.items.find(item => item.label === 'Refresh').iconHtml.includes('app-menu-ui-icon-refresh'), true);
+  assert.equal(viewMenu.items.find(item => item.label === 'Refresh').detail, undefined);
   const helpMenu = menus.find(menu => menu.id === 'help');
   const helpMenuLabels = helpMenu.items.map(item => item.label).filter(Boolean);
   assert.ok(helpMenuLabels.includes('Keyboard shortcuts'));
   assert.ok(helpMenuLabels.includes('Open README'));
   const shortcutsMenu = helpMenu.items.find(item => item.label === 'Keyboard shortcuts');
   assert.equal(shortcutsMenu.type, 'submenu');
-  assert.deepStrictEqual(canonical(shortcutsMenu.items.map(item => item.label)), ['Save active editor', 'Close menu or dialog', 'Session actions', 'Move or split tab']);
+  assert.deepStrictEqual(canonical(shortcutsMenu.items.map(item => item.label)), ['Command palette', 'Save active editor', 'Close menu or dialog', 'Session actions', 'Move or split tab']);
   assert.equal(helpMenu.items.find(item => item.label === 'Open README').disabled, false);
   assert.equal(api.tabMenuItems().map(item => item.label).filter(Boolean).includes('Current Tab'), false);
   const namedSessionApi = loadYolomux('', ['1', 'dynamo2']);
@@ -771,12 +878,18 @@ function canonical(value) {
   assert.equal(tmuxTabActionLabels.includes('YOLO policy: enable'), false);
   namedSessionApi.activatePaneTab('left', 'dynamo2');
   assert.equal(namedSessionApi.currentSessionActionTarget(), 'dynamo2');
-  assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.find(item => item.label === 'Rename session').disabled, false);
-  assert.ok(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.some(item => item.label === "Enable YOLO for Tmux Session 'dynamo2'"));
+  assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.find(item => item.label === "Rename tmux session 'dynamo2'").disabled, false);
+  assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO off');
+  assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.some(item => item.label === "Enable YOLO for Tmux Session 'dynamo2'"), false);
   const sessionActions = api.tmuxSessionActionCommands('1');
-  assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Rename session", "Kill session", "Enable YOLO for Tmux Session '1'"]);
+  assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Kill session"]);
   assert.equal(sessionActions.some(item => item.disabled), false);
-  assert.equal(sessionActions.find(item => item.label === 'Rename session').detail, '');
+  assert.equal(sessionActions.find(item => item.label === "Rename tmux session '1'").detail, '');
+  const bodyChildCount = api.bodyChildren().length;
+  api.showSessionContextMenu('1', 10, 10);
+  const contextMenu = api.bodyChildren()[bodyChildCount];
+  assert.deepStrictEqual(canonical(contextMenu.children.map(child => child.textContent)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Kill session"]);
+  assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), false);
   const sessionViews = api.tmuxSessionViewCommands('1');
   assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ['Transcript', 'AI summary', 'Event log', 'Branch Info']);
   assert.equal(api.fileIconFor('screenshot.png'), '🖼');
@@ -800,6 +913,8 @@ function canonical(value) {
   assert.equal(api.panelControlsHtml('__files__').includes('data-pane-actions'), false);
   const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
   assert.equal(readonlyApi.tmuxSessionActionCommands('1').every(item => item.disabled), true);
+  readonlyApi.setAutoApproveStateForTest('1', {enabled: true});
+  assert.equal(readonlyApi.menuTabCommand('1', {toggleYolo: true}).html.includes('data-auto-session'), false);
   api.setTranscriptInfoForTest('1', {
     project: {git: {cwd: '/home/test/yolomux.dev', root: '/home/test/yolomux.dev'}},
     panes: [{current_path: '/home/test/yolomux.dev/mock', command: 'bash'}],
@@ -1112,17 +1227,11 @@ function canonical(value) {
   api.splitSessionAtSlot('__info__', 'left', 'top', 'slot1');
   const split = api.serialize(api.currentSlots());
   assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes('__files__'))), [{tabs: ['__files__'], active: '__files__'}]);
-  assert.deepStrictEqual(canonical(split.panes.slot1), {tabs: [], active: null, placeholder: true});
+  assert.equal(split.panes.slot1, undefined);
   assert.deepStrictEqual(canonical(Object.values(split.panes).filter(pane => pane.tabs.includes('__info__'))), [{tabs: ['__info__'], active: '__info__'}]);
   const infoSlot = Object.entries(split.panes).find(([, pane]) => pane.tabs.includes('__info__'))[0];
+  assert.notEqual(infoSlot, 'slot1');
   assert.equal(api.shouldPreserveSourceSlotForSplit(infoSlot, 'slot1'), false);
-  assert.equal(api.shouldPreserveSourceSlotForSplit('slot1', 'left'), true);
-  api.moveSessionToSlot('__info__', 'slot1', infoSlot);
-  const movedBack = api.serialize(api.currentSlots());
-  assert.deepStrictEqual(canonical(movedBack.panes), {
-    left: {tabs: ['__files__'], active: '__files__'},
-    slot1: {tabs: ['__info__'], active: '__info__'},
-  });
 
   const finderCloseSlots = api.emptyLayoutSlots();
   finderCloseSlots[api.layoutTreeKey] = api.splitNode(
@@ -1180,6 +1289,48 @@ function canonical(value) {
   assert.deepStrictEqual(canonical(killedApi.serialize(killedNormalized).panes), {
     left: {tabs: ['__files__'], active: '__files__'},
     slot1: {tabs: [], active: null, placeholder: true},
+  });
+  const killedNestedFinderSlots = killedApi.emptyLayoutSlots();
+  killedNestedFinderSlots[killedApi.layoutTreeKey] = killedApi.splitNode(
+    'row',
+    killedApi.leafNode('slot1'),
+    killedApi.splitNode('row', killedApi.leafNode('left'), killedApi.leafNode('slot2'), 22),
+    58,
+  );
+  killedNestedFinderSlots.slot1 = {tabs: ['1'], active: '1'};
+  killedNestedFinderSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+  killedNestedFinderSlots.slot2 = killedApi.paneStateWithTabs(['2'], '2');
+  const killedNestedFinderNormalized = killedApi.normalizeLayoutSlots(killedNestedFinderSlots, {
+    preserveRemovedItems: ['1'],
+    preserveRemovedSlots: true,
+  });
+  assert.deepStrictEqual(canonical(killedApi.serialize(killedNestedFinderNormalized)), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot2: {tabs: ['2'], active: '2'},
+    },
+  });
+  const staleFileOpenPath = '/home/test/AGENTS.md';
+  const staleFileOpenItem = killedApi.registerFileEditorLayoutItem(staleFileOpenPath);
+  const staleFileOpenSlots = killedApi.emptyLayoutSlots();
+  staleFileOpenSlots[killedApi.layoutTreeKey] = killedApi.splitNode(
+    'row',
+    killedApi.leafNode('slot1'),
+    killedApi.splitNode('row', killedApi.leafNode('left'), killedApi.leafNode('slot2'), 22),
+    58,
+  );
+  staleFileOpenSlots.slot1 = killedApi.emptyPlaceholderPaneState();
+  staleFileOpenSlots.left = killedApi.paneStateWithTabs(['__files__'], '__files__');
+  staleFileOpenSlots.slot2 = killedApi.paneStateWithTabs([staleFileOpenItem], staleFileOpenItem);
+  killedApi.setLayoutSlotsForTest(staleFileOpenSlots);
+  killedApi.openFileEditorPane(staleFileOpenPath);
+  assert.deepStrictEqual(canonical(killedApi.serialize(killedApi.currentSlots())), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot2: {tabs: [staleFileOpenItem], active: staleFileOpenItem},
+    },
   });
 
   const killedVerticalSlots = killedApi.emptyLayoutSlots();
@@ -1309,7 +1460,7 @@ function canonical(value) {
   assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
   assert.equal(api.itemIsBackgroundPaneTab('1'), false);
   assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__prefs__', '3']);
+  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__files__', '__prefs__', '3']);
 }
 
 {

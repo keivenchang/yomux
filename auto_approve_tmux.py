@@ -48,84 +48,25 @@ import subprocess
 import sys
 import time
 
+from yolomux_lib import yolo_rules
+
 log = logging.getLogger("auto_approve")
 
 # If Enter is missed, a current prompt should not be stuck forever behind the
 # de-dup hash. Retry only after the exact prompt remains visible briefly.
 PROMPT_RETRY_SECONDS = 5.0
 
-# ---------------------------------------------------------------------------
-# Denylist: block only genuinely dangerous commands
-# ---------------------------------------------------------------------------
-
-DANGEROUS_COMMANDS = frozenset({
-    "rm", "rmdir", "shred", "mkfs", "fdisk", "parted", "wipefs", "dd", "format",
-})
-
-DANGEROUS_PATTERNS = [
-    # Redirection to block devices: `cmd > /dev/sd*`
-    re.compile(r">\s*/dev/sd"),
-    re.compile(r">\s*/dev/nvme"),
-    re.compile(r">\s*/dev/vd"),
-    # cp/mv/tee/cat writing *to* a block device as the destination path.
-    # Catches: `cp image.iso /dev/sda`, `mv x /dev/nvme0n1`, `tee /dev/sda`, etc.
-    # The token `/dev/sd*`, `/dev/nvme*`, `/dev/vd*` used as an argument is
-    # almost always a wipe-the-disk footgun.
-    re.compile(r"(?:^|\s)/dev/(?:sd[a-z]|nvme\d|vd[a-z])"),
-    # find ... -delete  (recursive deletion via find)
-    re.compile(r"\bfind\b[^|;&]*\s-delete\b"),
-    # Fork bomb
-    re.compile(r":\(\)\{.*:\|:&\};:"),
-    # Redundant with _DANGER_WORDS_RE but kept as explicit documentation
-    re.compile(r"sudo\s+rm\s"),
-    re.compile(r"sudo\s+rmdir\s"),
-]
-
-
-# Characters that can legally precede a dangerous command token.
-# Covers: start of string, whitespace, shell operators (; & | && ||),
-# command substitution ($( `), and shell -c quoted wrappers (' ").
-# Any of these means the following word is being *executed*, not used as data.
-_DANGER_PREFIX = r"(?:^|[\s;&|`('\"$])"
-
-# Build a single regex that matches any dangerous command as an executable
-# token. We look at the *base name* by allowing an optional path prefix, and
-# for mkfs/fdisk-style tools we allow .<suffix> (mkfs.ext4, mkfs.xfs, ...).
-_DANGER_WORDS_RE = re.compile(
-    _DANGER_PREFIX
-    + r"(?:sudo\s+)?"                      # optional sudo wrapper
-    + r"(?:/\S*/)?"                        # optional path prefix (/usr/bin/)
-    + r"(?:" + "|".join(re.escape(c) for c in sorted(DANGEROUS_COMMANDS)) + r")"
-    + r"(?:\.[A-Za-z0-9_-]+)?"             # optional .ext suffix (mkfs.ext4)
-    + r"(?=[\s'\"`)]|$)"                   # followed by whitespace/quote/end
-)
-
-
 def is_dangerous(cmd_line: str) -> bool:
-    """Return True if cmd_line contains a dangerous command, even when
-    nested inside bash -c / sh -c / docker exec / ssh / quoted strings.
-
-    Strategy: scan the whole command line for dangerous tokens preceded by
-    a shell boundary (whitespace, operator, opening quote, etc.). This is a
-    denylist that errs on the side of caution — if "rm" appears as an
-    executable-looking token anywhere in the line, we block.
-
-    Known false positives (acceptable): commands that have a filename
-    literal like "rm" (e.g. `echo "run rm"`) will be blocked. In practice
-    this is rare and safer than letting `bash -c 'rm -rf /'` slip through.
-    """
+    """Return True when the shared YOLO rule engine identifies a dangerous command."""
     cmd_line = cmd_line.strip()
     if not cmd_line:
         return False
 
-    for pat in DANGEROUS_PATTERNS:
-        if pat.search(cmd_line):
-            return True
-
-    if _DANGER_WORDS_RE.search(cmd_line):
+    if yolo_rules.hard_floor_decision(cmd_line):
         return True
 
-    return False
+    ruleset = yolo_rules.validate_rules(yolo_rules.default_rule_data("approve"), source="built-in")
+    return yolo_rules.evaluate_ruleset(cmd_line, ruleset)["action"] == "block"
 
 
 # ---------------------------------------------------------------------------

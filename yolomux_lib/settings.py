@@ -27,6 +27,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "appearance": {
         "ui_font_size": 13,
         "terminal_font_size": 13,
+        "editor_font_size": 13,
+        "file_explorer_font_size": 13,
         "tab_width": 240,
         "red_reminder_ms": 1550,
         "yolo_rotate_ms": 20000,
@@ -37,8 +39,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "pane_state_refresh_ms": 1257,
         "latency_refresh_ms": 3001,
         "event_log_refresh_ms": 5003,
-        "popover_show_delay_ms": 300,
+        "popover_show_delay_ms": 1000,
         "popover_hide_delay_ms": 300,
+        "menu_hover_open_delay_ms": 800,
+        "tab_popover_show_delay_ms": 1000,
+        "tab_popover_follow_delay_ms": 120,
         "remote_resize_delay_ms": 220,
         "auto_approve_interval_seconds": 0.5,
     },
@@ -55,17 +60,41 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "file_explorer": {
         "root_mode": "fixed",
         "quick_access_paths": ["~", "/", "/tmp"],
+        "refresh_ms": 3001,
+        "new_entry_highlight_ms": 60000,
     },
     "yolo": {
-        "default_policy": "ask",
         "rule_file_path": "~/.config/yolomux/yolo-rules.yaml",
         "dry_run": False,
     },
 }
 
+BACKEND_POLLING_KEYS = {
+    ("performance", "metadata_refresh_ms"),
+    ("performance", "pane_state_refresh_ms"),
+    ("performance", "latency_refresh_ms"),
+    ("performance", "event_log_refresh_ms"),
+    ("file_explorer", "refresh_ms"),
+}
+
+SESSION_STATE_KEYS = {
+    "needs-approval",
+    "yolo-approval",
+    "needs-input",
+    "blocked",
+    "disconnected",
+    "tests-running",
+    "ready-review",
+    "working",
+    "idle",
+    "done",
+}
+
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("appearance", "ui_font_size"): (10, 20),
     ("appearance", "terminal_font_size"): (8, 28),
+    ("appearance", "editor_font_size"): (8, 28),
+    ("appearance", "file_explorer_font_size"): (8, 24),
     ("appearance", "tab_width"): (120, 420),
     ("appearance", "red_reminder_ms"): (0, 10000),
     ("appearance", "yolo_rotate_ms"): (0, 60000),
@@ -76,17 +105,21 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("performance", "event_log_refresh_ms"): (1003, 60001),
     ("performance", "popover_show_delay_ms"): (0, 3000),
     ("performance", "popover_hide_delay_ms"): (0, 3000),
+    ("performance", "menu_hover_open_delay_ms"): (0, 3000),
+    ("performance", "tab_popover_show_delay_ms"): (0, 3000),
+    ("performance", "tab_popover_follow_delay_ms"): (0, 1000),
     ("performance", "remote_resize_delay_ms"): (50, 2000),
     ("performance", "auto_approve_interval_seconds"): (0.1, 10),
     ("notifications", "toast_duration_ms"): (1000, 60000),
     ("notifications", "throttle_seconds"): (0, 600),
     ("terminal_editor", "scrollback"): (1000, 50000),
+    ("file_explorer", "refresh_ms"): (1003, 60001),
+    ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
 }
 
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "grid", "wall"},
     ("file_explorer", "root_mode"): {"fixed", "sync"},
-    ("yolo", "default_policy"): {"off", "approve", "decline", "block", "ask", "notify"},
 }
 
 SETTING_COMMENTS: dict[tuple[str, str], str] = {
@@ -95,28 +128,34 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
     ("appearance", "ui_font_size"): "Pixels, 10-20. Drives tab and compact UI text.",
     ("appearance", "terminal_font_size"): "Pixels, 8-28. Applied live to xterm.js terminals.",
+    ("appearance", "editor_font_size"): "Pixels, 8-28. Applied live to editor and preview panes.",
+    ("appearance", "file_explorer_font_size"): "Pixels, 8-24. Applied live to File Explorer/Finder.",
     ("appearance", "tab_width"): "Pixels, 120-420. Drives the pane tab width CSS variable.",
     ("appearance", "red_reminder_ms"): "Milliseconds, 0 disables the attention pulse cycle.",
     ("appearance", "yolo_rotate_ms"): "Milliseconds, 0 disables YO rotation timing.",
     ("appearance", "metadata_badge_pulse_seconds"): "Seconds, 0-120. Duration for PR/branch metadata badge pulses.",
-    ("performance", "metadata_refresh_ms"): "Milliseconds, 3001-120001. Odd values avoid synchronized client polling.",
-    ("performance", "pane_state_refresh_ms"): "Milliseconds, 503-30001. YOLO/session-state refresh cadence.",
-    ("performance", "latency_refresh_ms"): "Milliseconds, 1003-30001. Browser-to-server ping cadence.",
-    ("performance", "event_log_refresh_ms"): "Milliseconds, 1003-60001. Open event-log refresh cadence.",
-    ("performance", "popover_show_delay_ms"): "Milliseconds, 0-3000. Hover delay before popovers open.",
+    ("performance", "metadata_refresh_ms"): "Milliseconds, 3001-120001. Odd values avoid synchronized client polling while refreshing branch, PR, cwd, and process state.",
+    ("performance", "pane_state_refresh_ms"): "Milliseconds, 503-30001. Odd values avoid synchronized client polling while refreshing YOLO status, prompt state, and tmux session roster.",
+    ("performance", "latency_refresh_ms"): "Milliseconds, 1003-30001. Odd values avoid synchronized client polling while updating browser-to-server health.",
+    ("performance", "event_log_refresh_ms"): "Milliseconds, 1003-60001. Odd values avoid synchronized client polling while refreshing open YOLO/event-log panes.",
+    ("performance", "popover_show_delay_ms"): "Milliseconds, 0-3000. Hover delay before regular help and preview popovers open.",
     ("performance", "popover_hide_delay_ms"): "Milliseconds, 0-3000. Delay before popovers close after pointer leaves.",
+    ("performance", "menu_hover_open_delay_ms"): "Milliseconds, 0-3000. Hover delay before top menus open.",
+    ("performance", "tab_popover_show_delay_ms"): "Milliseconds, 0-3000. First hover delay before a tab details popover opens.",
+    ("performance", "tab_popover_follow_delay_ms"): "Milliseconds, 0-1000. Delay when moving between tab details after one is already open.",
     ("performance", "remote_resize_delay_ms"): "Milliseconds, 50-2000. Debounce for tmux remote resize.",
     ("performance", "auto_approve_interval_seconds"): "Seconds, 0.1-10. Poll loop interval for newly enabled YOLO workers.",
-    ("notifications", "toast_duration_ms"): "Milliseconds, 1000-60000. In-page toast lifetime.",
-    ("notifications", "notify_transitions"): "State keys that may show notifications.",
+    ("notifications", "toast_duration_ms"): "Milliseconds, 1000-60000. How long in-page notification popups stay visible.",
+    ("notifications", "notify_transitions"): "State keys that may show notifications. Unknown keys are ignored.",
     ("notifications", "throttle_seconds"): "Seconds, 0-600. Minimum time before repeating a notification signature.",
     ("terminal_editor", "scrollback"): "Lines, 1000-50000. xterm.js scrollback.",
     ("terminal_editor", "word_wrap"): "true/false. Default editor soft-wrap state.",
     ("terminal_editor", "line_numbers"): "true/false. Default editor line-number gutter state.",
     ("file_explorer", "root_mode"): "fixed | sync. fixed stays put; sync follows the focused tmux cwd.",
     ("file_explorer", "quick_access_paths"): "List of paths for File Explorer shortcuts.",
-    ("yolo", "default_policy"): "off | approve | decline | block | ask | notify. Used by the YOLO rule engine.",
-    ("yolo", "rule_file_path"): "Path to the YOLO rule YAML file.",
+    ("file_explorer", "refresh_ms"): "Milliseconds, 1003-60001. Odd values avoid synchronized client polling while refreshing changed File Explorer directories and open files.",
+    ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
+    ("yolo", "rule_file_path"): "Path to the YOLO rule YAML file. The file's top-level default: value controls fallback behavior.",
     ("yolo", "dry_run"): "true/false. Log rule decisions without acting.",
 }
 
@@ -148,6 +187,13 @@ def coerce_number(value: Any, default: int | float, lower: float, upper: float) 
     return round(clamped, 3)
 
 
+def round_up_to_odd(value: int, lower: int, upper: int) -> int:
+    rounded = max(lower, min(upper, value))
+    if rounded % 2 == 0:
+        rounded = min(upper, rounded + 1)
+    return rounded
+
+
 def coerce_string_list(value: Any, default: list[str]) -> list[str]:
     if not isinstance(value, list):
         return list(default)
@@ -172,9 +218,15 @@ def sanitize_settings(raw: Any) -> dict[str, Any]:
                 sanitized[section][key] = coerce_bool(value, default)
             elif isinstance(default, (int, float)) and not isinstance(default, bool):
                 lower, upper = SETTING_LIMITS.get((section, key), (-10**9, 10**9))
-                sanitized[section][key] = coerce_number(value, default, lower, upper)
+                number = coerce_number(value, default, lower, upper)
+                if isinstance(default, int) and (section, key) in BACKEND_POLLING_KEYS:
+                    number = round_up_to_odd(int(number), int(lower), int(upper))
+                sanitized[section][key] = number
             elif isinstance(default, list):
-                sanitized[section][key] = coerce_string_list(value, default)
+                items = coerce_string_list(value, default)
+                if (section, key) == ("notifications", "notify_transitions"):
+                    items = [item for item in items if item in SESSION_STATE_KEYS]
+                sanitized[section][key] = items
             elif (section, key) in SETTING_CHOICES:
                 sanitized[section][key] = value if isinstance(value, str) and value in SETTING_CHOICES[(section, key)] else default
             elif isinstance(default, str):

@@ -32,7 +32,7 @@ YOLOmux follows terminal-app terminology (iTerm2-style):
 Open YOLOmux, enable a login if the setup page asks, then refresh. Existing tmux sessions appear as tabs inside panes:
 
 - Click a tab to show it in that pane.
-- Use the `Tab` menu to activate minimized or inactive tabs.
+- Use the `Windows` menu to activate minimized or inactive tabs.
 - Drag a tab between pane tab bars, or onto a pane, to move or split the layout. Dropping in the middle of a pane moves the tab into that pane's tab bar; dropping near an edge splits the pane when there is room.
 - The pane toolbar switches tmux windows (`<` / `>`), shows transcripts (`Tx`), asks for an AI summary (`AI`), opens the event log (`Log`), and collapses the info row (`Info`).
 - The terminal border turns yellow for the pane that is focused and ready for typing.
@@ -41,23 +41,25 @@ The `YO` button toggles YOLO auto-approval for a tmux session. It watches the vi
 
 ## UI features
 
-- The menu bar contains `File`, `View`, `Tmux`, `Tab`, `Settings`, and `Help`. `File` opens the File Explorer / Finder and logout flow; `Tmux` creates and manages tmux sessions; `Tab` navigates active, minimized, and inactive tabs.
-- The `Tab` menu groups tabs into **Active** (bright green, shown in panes), **Minimized** (in a pane's tab stack but not shown), and **Inactive** (not assigned to any pane).
-- The `Tmux` menu shows a small count badge when YOLO is enabled for one or more sessions; its YOLO submenu opens/reloads the rule file and has a Sessions submenu for toggling each session.
+- The menu bar contains `File`, `View`, `tmux`, `Windows`, and `Help`. `File` opens the File Explorer / Finder, Preferences, and logout flow; `tmux` creates and manages the currently focused tmux session; `Windows` navigates active, minimized, and inactive tabs.
+- The `Windows` menu lists tabs with compact rich rows separated by bars. It does not print section headers such as Active, Minimized, or Inactive.
+- The `Windows` menu shows a small count badge when YOLO is enabled for one or more sessions. `tmux` has the current session's YO button at the top, plus `YOLO` actions for opening or reloading the rule file.
 - By default YOLOmux shows existing tmux sessions, capped at nine visible session tabs (`1`–`9`). It does not create default `yolomuxN` sessions.
 - `+ Claude` / `+ Codex` create the next numbered tmux session with that agent (e.g. `7` when six exist). Each appears only when that CLI is on the server `PATH`; if neither is, YOLOmux shows `+ Term` and creates a plain shell session.
 - Each session tab has its own `YO` button, status badges, session label, compact work description, and hide button.
 - The layout is encoded in the page URL (`sessions`, `layout`, `tabs`), so a reload — or a bookmarked link — preserves the exact layout without browser storage.
 - Mouse-wheel scrolling in a terminal sends tmux copy-mode scroll commands instead of scrolling the AI input area.
 - Browser resize fits xterm immediately; the tmux resize is debounced until the resize settles.
-- The pane window-control buttons (minimize / zoom / close) auto-detect your OS: macOS browsers get Mac traffic-light style, everything else (Windows, Linux) gets PC style. To force one, add a URL parameter: `?platform=pc` (also `win` / `windows` / `linux`) or `?platform=mac` (also `macos` / `darwin`) — for example `http://localhost:9998/?platform=pc`.
-- `Settings` -> `Preferences` opens a draggable tab backed by `~/.config/yolomux/settings.yaml`. UI saves are atomic, running servers reload hand edits by polling the file, and open browsers poll `/api/settings` so changes made in another server instance apply without restart. Preferences also shows the active YOLO rules path and source.
+- The pane window-control buttons always use the PC-style controls (`_`, zoom, close) for consistency across platforms. The `?platform=pc` / `?platform=mac` override still affects labels such as File Explorer versus Finder.
+- Press `Ctrl/Cmd+K`, or use `Help` -> `Command palette`, to search tabs, menu actions, and settings from one popup.
+- `File` -> `Preferences` opens a draggable tab backed by `~/.config/yolomux/settings.yaml`. UI saves are atomic, running servers reload hand edits by polling the file, and open browsers poll `/api/settings` so changes made in another server instance apply without restart. Preferences has a search box, collapsed sections that remember their state, independent terminal/editor/Finder font-size controls, and the active YOLO rules path/source.
+- Transient terminal disconnects keep the existing xterm screen and scrollback. YOLOmux reconnects the WebSocket in place and shows a pane-level reconnect toast instead of writing disconnect text into the terminal buffer.
 
 ## Files and editors
 
 Open `File` -> `File Explorer` (`Finder` on macOS) to browse the server filesystem. The root path field is editable: press Enter to jump to a typed path, use Escape to revert, and use the copy button to copy the current root path. The `Root` / `Sync` toggle chooses whether the explorer stays on a fixed root or follows the focused tmux session's current directory.
 
-Clicking a file opens it as a tab in the largest available pane, reusing an existing editor pane when one is already open. Text files can be edited and saved. The editor has `Edit`, `Preview`, and `Split` modes: Markdown renders as formatted HTML, code previews use the syntax-colored read view, and split mode keeps the editor and preview panes scrolled together. The wrap and line-number toggles are shared by editor tabs; wrapped continuation rows show a `↪` marker while source line numbers stay on real lines only. Markdown, shell, Python, JavaScript/TypeScript, Rust, JSON, HTML/XML/SVG, CSS, TOML, and YAML get lightweight syntax coloring. Files over the configured raw-read cap show a too-large state instead of loading into the editor.
+Clicking a file opens it as a tab in the largest available pane, reusing an existing editor pane when one is already open. Text files can be edited and saved. The editor has icon buttons for edit, preview, split preview, line numbers, wrap, dark/white theme, and save. Markdown renders as formatted HTML, code previews use the syntax-colored read view, and split mode keeps the editor and preview panes scrolled together by source line. The wrap and line-number toggles are shared by editor tabs; wrapped continuation rows are measured from browser layout, show a `↪` marker, and keep source line numbers on real lines only. Markdown, shell, Python, JavaScript/TypeScript, Rust, JSON, HTML/XML/SVG, CSS, TOML, and YAML get lightweight syntax coloring. Files over the configured raw-read cap show a too-large state instead of loading into the editor. Dragging a file from Finder/File Explorer onto a pane or pane tab opens it as a file tab.
 
 Images open in the same tab system. Small images render at their original size; large images fit the available pane. Click the image to toggle between fit mode and original-size scroll mode.
 
@@ -159,7 +161,7 @@ With it enabled, `+ Claude` / `+ Codex` create sessions with `claude --dangerous
 
 **The `YO` toggle (runtime).** `YO` is per-session auto-approval for an *existing* tmux session. It watches the visible tmux screen and sends the approval key when the rule engine says the prompt is safe. It does not relaunch the agent and does not change the agent's own permission or sandbox flags.
 
-**Rule file.** YOLOmux reads ordered rules from `~/.config/yolomux/yolo-rules.yaml` when that file exists. Rules are first-match-wins and support `command`, `regex`, `glob`, and `contains` matches with `approve`, `decline`, `block`, `ask`, `notify`, or `off` actions. The Tmux -> YOLO menu has `Open rule file` and `Reload rules`; Preferences shows the active path, source, rule count, and dry-run state. If the file is missing, YOLOmux uses a built-in fallback that preserves the previous dangerous-command block list while continuing to approve non-dangerous bash prompts. Invalid YAML is treated as `ask` and is surfaced in the UI and server stderr instead of silently allowing prompts.
+**Rule file.** YOLOmux reads ordered rules from `~/.config/yolomux/yolo-rules.yaml` when that file exists. The file's top-level `default:` value is the canonical fallback action when no rule matches; there is no separate live `default_policy` preference. Rules are first-match-wins and support `command`, `regex`, `glob`, and `contains` matches with `approve`, `decline`, `block`, `ask`, `notify`, or `off` actions. The tmux -> YOLO menu has `Open rule file` and `Reload rules`; Preferences shows the active path, source, rule count, and dry-run state. If the file is missing, YOLOmux uses a built-in fallback that preserves the previous dangerous-command block list while continuing to approve non-dangerous bash prompts. Saving the rule file through the editor validates the YAML first and shows errors inline; an already-invalid on-disk file fails safe to `ask` and is surfaced in the UI and server stderr instead of silently allowing prompts.
 
 Example:
 

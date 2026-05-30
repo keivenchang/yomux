@@ -122,6 +122,9 @@ def test_builtin_default_reproduces_current_block_and_allow_sets():
         "docker images repo --format '{{.Tag}} {{.Size}}'",
         "docker pull repo/image:tag",
         "docker rmi repo/image:old-tag",
+        'echo "rm -rf /tmp/foo"',
+        'grep "dd if=/dev/zero of=/dev/sda" notes.txt',
+        'printf "find /tmp -delete\\n"',
         "git push origin main",
         "python3 -m pytest tests/",
         "cargo fmt",
@@ -135,3 +138,57 @@ def test_builtin_default_reproduces_current_block_and_allow_sets():
     for cmd in safe_cmds:
         assert auto_approve_tmux.is_dangerous(cmd) is False, cmd
         assert action_for(cmd, rules) == "approve", cmd
+
+
+def test_rule_file_default_is_authoritative(tmp_path):
+    path = tmp_path / "yolo-rules.yaml"
+    path.write_text(
+        """
+default: notify
+rules:
+  - name: allow git status
+    type: regex
+    match: "^git status"
+    action: approve
+""",
+        encoding="utf-8",
+    )
+
+    rules = yolo_rules.load_rules_file(path)
+
+    assert rules.default_action == "notify"
+    assert action_for("python3 script.py", rules) == "notify"
+
+
+def test_missing_rule_default_falls_back_to_ask(tmp_path):
+    path = tmp_path / "yolo-rules.yaml"
+    path.write_text(
+        """
+rules:
+  - name: allow git status
+    type: regex
+    match: "^git status"
+    action: approve
+""",
+        encoding="utf-8",
+    )
+
+    rules = yolo_rules.load_rules_file(path)
+
+    assert rules.default_action == "ask"
+
+
+def test_non_bash_prompts_are_explicitly_approved():
+    decision = yolo_rules.evaluate("delete everything?", prompt_type="tool")
+
+    assert decision["action"] == "approve"
+    assert decision["rule_name"] == "non-bash prompt"
+
+
+def test_rule_file_text_validation_reports_yaml_errors():
+    try:
+        yolo_rules.validate_rule_file_text("default: approve\nrules:\n  - type: regex\n    match: '('\n    action: block\n")
+    except ValueError as exc:
+        assert "regex error" in str(exc)
+    else:
+        raise AssertionError("invalid YOLO rules should fail validation")

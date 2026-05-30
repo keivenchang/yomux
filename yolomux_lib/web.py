@@ -124,12 +124,13 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
     <div class="file-editor-head">
       <div class="file-editor-path" id="fileEditorPath"></div>
       <div id="fileEditorMode" class="file-editor-mode-control" role="group" aria-label="Editor mode" hidden>
-        <button type="button" data-editor-mode="edit">Edit</button>
-        <button type="button" data-editor-mode="preview">Preview</button>
-        <button type="button" data-editor-mode="split">Split</button>
+        <button type="button" data-editor-mode="edit" title="Edit" aria-label="Edit"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
+        <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
+        <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
       </div>
       <button type="button" id="fileEditorGutter" class="file-editor-gutter" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
       <button type="button" id="fileEditorWrap" class="file-editor-wrap" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
+      <button type="button" id="fileEditorTheme" class="file-editor-theme" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
       <button type="button" id="fileEditorSave" class="file-editor-save" title="Save (Ctrl/Cmd+S)" aria-label="Save file"><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
       <button type="button" id="fileEditorClose" class="file-editor-close" title="Close current file" aria-label="Close"></button>
     </div>

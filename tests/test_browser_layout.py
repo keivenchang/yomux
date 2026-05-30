@@ -133,7 +133,7 @@ def menu_fixture_html():
     """
 
 
-def mac_controls_fixture_html():
+def pc_controls_fixture_html():
     css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
     return f"""
     <!doctype html>
@@ -147,15 +147,79 @@ def mac_controls_fixture_html():
       </head>
       <body>
         <div class="tabs" role="tablist">
-          <button id="pane-zoom" class="tab pane-expand mac-window-control mac-zoom"></button>
+          <button id="pane-actions" class="tab pane-actions"><span id="pane-actions-dots" class="pane-actions-dots">...</span></button>
+          <button id="pane-zoom" class="tab pane-expand pc-window-control pc-zoom"></button>
           <button id="hidden-pane-zoom" class="tab pane-expand pc-window-control pc-zoom" hidden></button>
         </div>
         <button type="button" class="pane-tab active">
           <span class="pane-tab-core"><span class="session-button-name">1</span></span>
-          <span id="tab-minimize" class="pane-tab-close mac-window-control mac-minimize"></span>
+          <span id="tab-minimize" class="pane-tab-close pc-window-control pc-minimize"></span>
         </button>
-        <button id="finder-close" class="file-explorer-panel-close mac-window-control mac-minimize"></button>
-        <button id="editor-close" class="file-editor-panel-close mac-window-control mac-minimize"></button>
+        <button id="finder-close" class="file-explorer-panel-close pc-window-control pc-close"></button>
+        <button id="editor-close" class="file-editor-panel-close pc-window-control pc-close"></button>
+        <section class="preferences-section collapsed">
+          <button type="button" class="preferences-section-toggle">Appearance</button>
+          <div id="collapsed-preferences" class="preferences-settings" hidden>
+            <div class="preferences-setting-row">hidden row</div>
+          </div>
+        </section>
+        <div class="file-explorer-tree-panel">
+          <div id="collapsed-dir" class="file-tree-row kind-dir" aria-expanded="false"><span class="file-tree-icon">▸</span><span class="file-tree-name">Alpha</span></div>
+          <div id="expanded-dir" class="file-tree-row kind-dir expanded" aria-expanded="true"><span class="file-tree-icon">▾</span><span class="file-tree-name">Bravo</span></div>
+        </div>
+      </body>
+    </html>
+    """
+
+
+def editor_highlight_fallback_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 24px; display: block; height: auto; min-height: 0; }}
+          .file-editor-panel {{ position: relative; width: 420px; height: 120px; margin-bottom: 16px; }}
+        </style>
+      </head>
+      <body>
+        <div id="ready" class="file-editor-panel syntax-highlighted" data-syntax-highlight-ready="true">
+          <textarea id="ready-textarea" class="file-editor-textarea-panel"># TITLE</textarea>
+        </div>
+        <div id="fallback" class="file-editor-panel syntax-highlighted">
+          <textarea id="fallback-textarea" class="file-editor-textarea-panel"># TITLE</textarea>
+        </div>
+      </body>
+    </html>
+    """
+
+
+def editor_pane_ignores_legacy_body_class_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; display: block; height: 700px; min-height: 0; }}
+          #grid {{ height: 500px; }}
+        </style>
+      </head>
+      <body class="file-editor-open">
+        <main id="grid" class="grid">
+          <section class="layout-root">
+            <section class="layout-column file-editor-column">
+              <section class="drop-slot">
+                <article class="panel file-editor-panel"></article>
+              </section>
+            </section>
+          </section>
+        </main>
       </body>
     </html>
     """
@@ -207,9 +271,9 @@ def load_fixture(browser, tmp_path, width):
     )
 
 
-def load_mac_controls_fixture(browser, tmp_path):
-    page = tmp_path / "mac-controls.html"
-    page.write_text(mac_controls_fixture_html(), encoding="utf-8")
+def load_pc_controls_fixture(browser, tmp_path):
+    page = tmp_path / "pc-controls.html"
+    page.write_text(pc_controls_fixture_html(), encoding="utf-8")
     browser.get(page.as_uri())
 
 
@@ -238,6 +302,31 @@ def load_menu_fixture(browser, tmp_path):
           scrollHeight: popover.scrollHeight,
         };
         """
+    )
+
+
+def load_editor_highlight_fallback_fixture(browser, tmp_path):
+    page = tmp_path / "editor-highlight-fallback.html"
+    page.write_text(editor_highlight_fallback_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_editor_pane_legacy_body_fixture(browser, tmp_path):
+    page = tmp_path / "editor-pane-legacy-body.html"
+    page.write_text(editor_pane_ignores_legacy_body_class_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def computed_color_alpha(browser, element_id):
+    return browser.execute_script(
+        """
+        const color = getComputedStyle(document.getElementById(arguments[0])).color;
+        const match = color.match(/rgba?\\(([^)]+)\\)/);
+        if (!match) return 1;
+        const parts = match[1].split(',').map(part => part.trim());
+        return parts.length >= 4 ? Number.parseFloat(parts[3]) : 1;
+        """,
+        element_id,
     )
 
 
@@ -277,26 +366,71 @@ def test_tab_menu_rows_are_compact_for_many_windows(browser, tmp_path):
     assert metrics["scrollHeight"] <= 700
 
 
-def test_mac_control_glyphs_show_only_on_hover(browser, tmp_path):
-    load_mac_controls_fixture(browser, tmp_path)
+def test_platform_controls_use_pc_glyphs(browser, tmp_path):
+    load_pc_controls_fixture(browser, tmp_path)
     assert browser.execute_script("return getComputedStyle(document.getElementById('hidden-pane-zoom')).display") == "none"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize'), '::before').opacity") == "0"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close'), '::before').opacity") == "0"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close'), '::before').opacity") == "0"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::before').opacity") == "0"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::after').opacity") == "0"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize'), '::after').display") == "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close'), '::after').display") != "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close'), '::after').display") != "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::after').display") != "none"
+    assert browser.execute_script("return document.getElementById('editor-close').getBoundingClientRect().width") <= 24
+    assert browser.execute_script("return getComputedStyle(document.getElementById('collapsed-preferences')).display") == "none"
+    assert browser.execute_script(
+        """
+        const button = document.getElementById('pane-actions').getBoundingClientRect();
+        const dots = document.getElementById('pane-actions-dots').getBoundingClientRect();
+        return Math.abs((button.left + button.width / 2) - (dots.left + dots.width / 2));
+        """
+    ) <= 1
 
     ActionChains(browser).move_to_element(browser.find_element("id", "tab-minimize")).perform()
-    assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize'), '::before').opacity") == "1"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize')).opacity") == "1"
 
     ActionChains(browser).move_to_element(browser.find_element("id", "pane-zoom")).perform()
-    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::before').opacity") == "1"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::after').opacity") == "1"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom')).backgroundColor") != "rgba(0, 0, 0, 0)"
 
     ActionChains(browser).move_to_element(browser.find_element("id", "finder-close")).perform()
-    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close'), '::before').opacity") == "1"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close'), '::after').display") == "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close')).opacity") == "1"
 
     ActionChains(browser).move_to_element(browser.find_element("id", "editor-close")).perform()
-    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close'), '::before').opacity") == "1"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close'), '::after').display") == "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close')).opacity") == "1"
+
+    tree_metrics = browser.execute_script(
+        """
+        const collapsedIcon = document.querySelector('#collapsed-dir .file-tree-icon');
+        const expandedIcon = document.querySelector('#expanded-dir .file-tree-icon');
+        const collapsedName = document.querySelector('#collapsed-dir .file-tree-name');
+        return {
+          collapsedColor: getComputedStyle(collapsedIcon).color,
+          expandedColor: getComputedStyle(expandedIcon).color,
+          iconSize: Number.parseFloat(getComputedStyle(collapsedIcon).fontSize),
+          nameSize: Number.parseFloat(getComputedStyle(collapsedName).fontSize),
+        };
+        """
+    )
+    assert tree_metrics["collapsedColor"] != tree_metrics["expandedColor"]
+    assert tree_metrics["iconSize"] <= tree_metrics["nameSize"]
+    assert tree_metrics["iconSize"] >= tree_metrics["nameSize"] * 0.85
+
+
+def test_editor_text_stays_visible_until_highlight_overlay_is_ready(browser, tmp_path):
+    load_editor_highlight_fallback_fixture(browser, tmp_path)
+    assert computed_color_alpha(browser, "ready-textarea") == 0
+    assert computed_color_alpha(browser, "fallback-textarea") == 1
+
+
+def test_editor_pane_does_not_shift_grid_when_legacy_body_class_is_present(browser, tmp_path):
+    load_editor_pane_legacy_body_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const grid = document.getElementById('grid');
+        const gridStyle = getComputedStyle(grid);
+        const panel = document.querySelector('.file-editor-panel').getBoundingClientRect();
+        return {
+          paddingLeft: Number.parseFloat(gridStyle.paddingLeft),
+          panelLeft: panel.left,
+        };
+        """
+    )
+    assert metrics["paddingLeft"] <= 10
+    assert metrics["panelLeft"] <= 16

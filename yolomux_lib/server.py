@@ -6,9 +6,12 @@ import sys
 from pathlib import Path
 from urllib.parse import parse_qsl
 
+import yaml
+
 from .app import TmuxWebtermApp
 from .core import *
 from . import filesystem
+from . import yolo_rules
 from .filesystem import FilesystemError
 from .web import html_page
 from .web import login_html
@@ -406,6 +409,20 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self.write_json({"error": "expected_mtime must be an integer"}, status=HTTPStatus.BAD_REQUEST)
                 return
+        if yolo_rules.is_rules_file_path(raw_path):
+            try:
+                yolo_rules.validate_rule_file_text(str(content), path=yolo_rules.active_rule_path())
+            except (ValueError, yaml.YAMLError) as exc:
+                self.write_json({"error": f"YOLO rules invalid: {exc}", "path": raw_path}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.write_filesystem_json(
+                raw_path,
+                lambda: {
+                    **filesystem.write_file(raw_path, content, expected_mtime=expected_mtime),
+                    "yolo_rules": yolo_rules.reload_rules(),
+                },
+            )
+            return
         self.write_filesystem_json(raw_path, lambda: filesystem.write_file(raw_path, content, expected_mtime=expected_mtime))
 
     def handle_fs_delete(self, parsed: Any) -> None:
