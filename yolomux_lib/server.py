@@ -285,6 +285,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/notify":
             self.write_json(self.server.app.notify_status())
             return
+        if parsed.path == "/api/settings":
+            self.write_json(self.server.app.settings_payload())
+            return
         if parsed.path == "/api/events":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [None])[0]
@@ -466,6 +469,12 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             enabled = parse_bool(qs.get("enabled", ["0"])[0])
             self.write_json(self.server.app.set_notify(enabled))
+            return
+        if parsed.path == "/api/settings":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            self.write_json(self.server.app.save_settings(payload.get("settings", payload)))
             return
         if parsed.path == "/api/tmux-next":
             qs = parse_qs(parsed.query)

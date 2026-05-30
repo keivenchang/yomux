@@ -51,6 +51,7 @@ The `YO` button toggles YOLO auto-approval for a tmux session. It watches the vi
 - Mouse-wheel scrolling in a terminal sends tmux copy-mode scroll commands instead of scrolling the AI input area.
 - Browser resize fits xterm immediately; the tmux resize is debounced until the resize settles.
 - The pane window-control buttons (minimize / zoom / close) auto-detect your OS: macOS browsers get Mac traffic-light style, everything else (Windows, Linux) gets PC style. To force one, add a URL parameter: `?platform=pc` (also `win` / `windows` / `linux`) or `?platform=mac` (also `macos` / `darwin`) — for example `http://localhost:9998/?platform=pc`.
+- `Settings` -> `Preferences` opens a draggable tab backed by `~/.config/yolomux/settings.yaml`. UI saves are atomic, running servers reload hand edits by polling the file, and open browsers poll `/api/settings` so changes made in another server instance apply without restart.
 
 ## Files and editors
 

@@ -37,6 +37,7 @@ const fileExplorerPathCopy = document.getElementById('fileExplorerPathCopy');
 const fileExplorerClose = document.getElementById('fileExplorerClose');
 const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenToggle');
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
+const fileExplorerQuickAccess = document.getElementById('fileExplorerQuickAccess');
 const fileEditor = document.getElementById('fileEditor');
 const fileEditorPath = document.getElementById('fileEditorPath');
 const fileEditorContent = document.getElementById('fileEditorContent');
@@ -85,6 +86,10 @@ const fileEditorViewMode = new Map();  // path -> "edit" | "preview" | "split"
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
+let clientSettingsPayload = bootstrap.settingsPayload || {};
+let clientSettings = clientSettingsPayload.settings || {};
+let clientSettingsDefaults = clientSettingsPayload.defaults || {};
+let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -99,22 +104,25 @@ const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 const transcriptPreviewMessages = 200;
-const remoteResizeDelayMs = 220;
-const metadataRefreshMs = 15001;
-const paneStateRefreshMs = 1257;
-const latencyRefreshMs = 3001;
-const eventLogRefreshMs = 5003;
-const redReminderMs = 1550;
-const yoloRotateMs = 20000;
+let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
+let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15001);
+let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1257);
+let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3001);
+let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5003);
+let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
+let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
 const latencySamplesMax = 24;
-const toastDurationMs = 10000;
+let toastDurationMs = initialSetting('notifications.toast_duration_ms', 10000);
 const toastMaxLines = 3;
 const toastMaxLineChars = 180;
-const popoverShowDelayMs = 300;
-const hoverCloseDelayMs = 300;
-const popoverHideDelayMs = hoverCloseDelayMs;
-const menuHoverOpenDelayMs = 300;
-const menuHoverCloseDelayMs = hoverCloseDelayMs;
+let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms', 300);
+let hoverCloseDelayMs = initialSetting('performance.popover_hide_delay_ms', 300);
+let popoverHideDelayMs = hoverCloseDelayMs;
+let menuHoverOpenDelayMs = popoverShowDelayMs;
+let menuHoverCloseDelayMs = hoverCloseDelayMs;
+let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
+let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
+let autoFocusEnabled = initialSetting('general.auto_focus', true);
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;
@@ -134,10 +142,12 @@ const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
 const fileExplorerItemId = '__files__';
+const prefsItemId = '__prefs__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
 function isFileExplorerItem(item) { return item === fileExplorerItemId; }
+function isPreferencesItem(item) { return item === prefsItemId; }
 function isFileEditorItem(item) { return typeof item === 'string' && item.startsWith(fileEditorItemPrefix); }
 function fileItemPath(item) { return isFileEditorItem(item) ? item.slice(fileEditorItemPrefix.length) : null; }
 function browserPlatformText() {
@@ -237,7 +247,7 @@ const syntaxLanguageByExtension = new Map([
   ['.yml', 'yaml'],
 ]);
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, fileExplorerItemId, ...visibleSessions];
+let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
@@ -351,6 +361,33 @@ function writeStoredEditorLineNumbers(value) {
   try {
     window.localStorage?.setItem(fileEditorLineNumbersStorageKey, value ? '1' : '0');
   } catch (_) {}
+}
+
+function nestedSetting(source, path, fallback) {
+  let current = source;
+  for (const part of String(path || '').split('.')) {
+    if (!part) continue;
+    if (!current || typeof current !== 'object' || !(part in current)) return fallback;
+    current = current[part];
+  }
+  return current === undefined || current === null ? fallback : current;
+}
+
+function initialSetting(path, fallback) {
+  return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, fallback));
+}
+
+function mergeSettingObjects(base, patch) {
+  const result = Array.isArray(base) ? base.slice() : {...(base || {})};
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return result;
+  for (const [key, value] of Object.entries(patch)) {
+    if (value && typeof value === 'object' && !Array.isArray(value) && result[key] && typeof result[key] === 'object' && !Array.isArray(result[key])) {
+      result[key] = mergeSettingObjects(result[key], value);
+    } else {
+      result[key] = Array.isArray(value) ? value.slice() : value;
+    }
+  }
+  return result;
 }
 
 function readStoredFileExplorerRootMode() {
@@ -1407,7 +1444,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -1439,7 +1476,7 @@ function isInfoItem(item) {
 }
 
 function isVirtualItem(item) {
-  return isInfoItem(item) || isFileExplorerItem(item) || isFileEditorItem(item);
+  return isInfoItem(item) || isFileExplorerItem(item) || isPreferencesItem(item) || isFileEditorItem(item);
 }
 
 function openFileEditorItems() {
@@ -1447,7 +1484,7 @@ function openFileEditorItems() {
 }
 
 function computeLayoutItems() {
-  return [infoItemId, fileExplorerItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, fileExplorerItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {
@@ -1477,6 +1514,7 @@ function registerFileEditorLayoutItem(path) {
 function resolveLayoutItem(value) {
   if (value === 'info') return infoItemId;
   if (value === 'files' || value === fileExplorerItemId) return fileExplorerItemId;
+  if (value === 'prefs' || value === 'preferences' || value === prefsItemId) return prefsItemId;
   const text = String(value || '');
   if (isFileEditorItem(text)) return registerFileEditorLayoutItem(fileItemPath(text)) || text;
   if (sessions.includes(text)) return text;
@@ -1488,6 +1526,7 @@ function resolveLayoutItem(value) {
 function itemLabel(item) {
   if (isInfoItem(item)) return 'Branch Info';
   if (isFileExplorerItem(item)) return fileExplorerLabel();
+  if (isPreferencesItem(item)) return 'Preferences';
   if (isFileEditorItem(item)) return basenameOf(fileItemPath(item));
   return sessionLabel(item);
 }
@@ -1495,6 +1534,7 @@ function itemLabel(item) {
 function itemSortNumber(item) {
   if (isInfoItem(item)) return 0;
   if (isFileExplorerItem(item)) return 0.5;
+  if (isPreferencesItem(item)) return 0.65;
   if (isFileEditorItem(item)) return 0.75;
   const label = Number(sessionLabel(item));
   return Number.isFinite(label) ? label : Number.MAX_SAFE_INTEGER;
@@ -1503,6 +1543,7 @@ function itemSortNumber(item) {
 function itemParam(item) {
   if (isInfoItem(item)) return 'info';
   if (isFileExplorerItem(item)) return 'files';
+  if (isPreferencesItem(item)) return 'prefs';
   if (isFileEditorItem(item)) return item;
   return String(item);
 }
@@ -2146,7 +2187,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
   refreshTranscripts();
   renderAutoApproveButtons();
-  if (options.focusSession && activeSessions.includes(options.focusSession)) {
+  if (autoFocusEnabled && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {
     statusEl.textContent = options.message;
@@ -2228,6 +2269,7 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   if (isFileEditorItem(item)) return compactHomePath(fileItemPath(item));
   if (isFileExplorerItem(item)) return compactHomePath(fileExplorerRoot || homePath || '/');
+  if (isPreferencesItem(item)) return compactHomePath(clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml');
   if (isInfoItem(item)) return 'Branch and repo metadata';
   return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
 }
@@ -2235,6 +2277,7 @@ function menuTabDetail(item) {
 function menuTabRowHtml(item, options = {}) {
   if (isInfoItem(item)) return paneInfoTabHtml();
   if (isFileExplorerItem(item)) return fileExplorerPaneTabHtml();
+  if (isPreferencesItem(item)) return preferencesPaneTabHtml();
   if (isFileEditorItem(item)) return fileEditorPaneTabHtml(item);
   const info = transcriptMeta.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true;
@@ -2478,6 +2521,11 @@ function appMenuTree() {
       id: 'settings',
       label: 'Settings',
       items: [
+        menuCommand('Preferences', () => selectSession(prefsItemId), {
+          checked: itemInLayout(prefsItemId),
+          detail: compactHomePath(clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml'),
+        }),
+        menuSeparator(),
         menuCommand('Tab metadata', toggleTabMetadata, {
           iconHtml: appMenuUiIcon('tab-meta', tabMetaVisible),
         }),
@@ -2996,6 +3044,48 @@ function renderFileExplorerRootModeControls() {
     button.setAttribute('aria-pressed', sync ? 'true' : 'false');
     button.classList.toggle('active', sync);
   }
+  renderFileExplorerQuickAccessControls();
+}
+
+function fileExplorerQuickAccessPaths() {
+  const paths = initialSetting('file_explorer.quick_access_paths', ['~', '/', '/tmp']);
+  return Array.isArray(paths) ? paths.filter(path => typeof path === 'string' && path.trim()) : ['~', '/', '/tmp'];
+}
+
+function displayQuickAccessPath(path) {
+  if (path === '~') return '~';
+  if (path === '/') return '/';
+  return basenameOf(path) || path;
+}
+
+function expandQuickAccessPath(path) {
+  const value = String(path || '').trim();
+  if (value === '~') return homePath || '/';
+  if (value.startsWith('~/')) return normalizeDirectoryPath(`${homePath || ''}/${value.slice(2)}`);
+  return value;
+}
+
+function renderQuickAccessInto(container) {
+  if (!container) return;
+  container.replaceChildren(...fileExplorerQuickAccessPaths().map(path => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'file-explorer-quick-access-button';
+    button.textContent = displayQuickAccessPath(path);
+    button.title = `Open ${path}`;
+    button.dataset.quickPath = path;
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openFileExplorerAt(expandQuickAccessPath(path));
+    });
+    return button;
+  }));
+}
+
+function renderFileExplorerQuickAccessControls() {
+  renderQuickAccessInto(fileExplorerQuickAccess);
+  document.querySelectorAll('.file-explorer-quick-access-panel').forEach(renderQuickAccessInto);
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
@@ -3010,7 +3100,9 @@ function fileExplorerRootModeValue() {
 }
 
 function toggleFileExplorerRootMode() {
-  setFileExplorerRootMode(fileExplorerRootMode === 'sync' ? 'fixed' : 'sync');
+  const mode = fileExplorerRootMode === 'sync' ? 'fixed' : 'sync';
+  setFileExplorerRootMode(mode);
+  if (!readOnlyMode) saveSettingsPatch(settingPatch('file_explorer.root_mode', mode)).catch(() => {});
 }
 
 function tmuxDirectoryForItem(item) {
@@ -4460,7 +4552,9 @@ function setEditorWrapEnabled(enabled) {
 }
 
 function toggleEditorWrap() {
-  setEditorWrapEnabled(!fileEditorWrapEnabled);
+  const enabled = !fileEditorWrapEnabled;
+  setEditorWrapEnabled(enabled);
+  if (!readOnlyMode) saveSettingsPatch(settingPatch('terminal_editor.word_wrap', enabled)).catch(() => {});
 }
 
 function setEditorLineNumbersEnabled(enabled) {
@@ -4470,7 +4564,119 @@ function setEditorLineNumbersEnabled(enabled) {
 }
 
 function toggleEditorLineNumbers() {
-  setEditorLineNumbersEnabled(!fileEditorLineNumbersEnabled);
+  const enabled = !fileEditorLineNumbersEnabled;
+  setEditorLineNumbersEnabled(enabled);
+  if (!readOnlyMode) saveSettingsPatch(settingPatch('terminal_editor.line_numbers', enabled)).catch(() => {});
+}
+
+function numberSetting(path, fallback) {
+  const value = Number(initialSetting(path, fallback));
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function boolSetting(path, fallback) {
+  const value = initialSetting(path, fallback);
+  return value === true || value === 'true' || value === 1;
+}
+
+function applyCssSettings() {
+  const root = document.documentElement?.style;
+  if (!root) return;
+  root.setProperty('--tab-label-size', `${numberSetting('appearance.ui_font_size', 13)}px`);
+  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 240)}px`);
+  root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
+  root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
+  root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
+}
+
+function applyTerminalRuntimeSettings() {
+  for (const [session, item] of terminals.entries()) {
+    if (!item?.term) continue;
+    item.term.options.fontSize = terminalFontSize;
+    item.term.options.scrollback = terminalScrollback;
+    scheduleFit(session);
+  }
+}
+
+function refreshMetaButtonTitle() {
+  if (!refreshMeta) return;
+  const seconds = ms => `${Math.round(ms / 1000)}s`;
+  refreshMeta.title = [
+    'Refresh session state',
+    'Re-list tmux sessions.',
+    'Refresh git, PR, Linear, and agent metadata.',
+    'Refresh YOLO status and open event logs.',
+    'Refresh active transcript previews.',
+    `Auto-refresh: YOLO ${seconds(paneStateRefreshMs)}, metadata ${seconds(metadataRefreshMs)}, ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
+    'Does not reload the page or reconnect terminals.',
+  ].join('\n');
+}
+
+function applySettingsPayload(payload, options = {}) {
+  if (!payload?.settings) return false;
+  const nextMtime = Number(payload.mtime_ns || 0);
+  if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
+  clientSettingsPayload = payload;
+  clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
+  clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
+  clientSettingsMtimeNs = nextMtime;
+  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 220);
+  metadataRefreshMs = numberSetting('performance.metadata_refresh_ms', 15001);
+  paneStateRefreshMs = numberSetting('performance.pane_state_refresh_ms', 1257);
+  latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3001);
+  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5003);
+  redReminderMs = numberSetting('appearance.red_reminder_ms', 1550);
+  yoloRotateMs = numberSetting('appearance.yolo_rotate_ms', 20000);
+  toastDurationMs = numberSetting('notifications.toast_duration_ms', 10000);
+  popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms', 300);
+  hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms', 300);
+  popoverHideDelayMs = hoverCloseDelayMs;
+  menuHoverOpenDelayMs = popoverShowDelayMs;
+  menuHoverCloseDelayMs = hoverCloseDelayMs;
+  terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
+  terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
+  autoFocusEnabled = boolSetting('general.auto_focus', true);
+  fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
+  fileEditorLineNumbersEnabled = boolSetting('terminal_editor.line_numbers', fileEditorLineNumbersEnabled);
+  fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
+  applyCssSettings();
+  applyTerminalRuntimeSettings();
+  applyEditorWrapPreference();
+  renderFileExplorerRootModeControls();
+  refreshMetaButtonTitle();
+  renderPreferencesPanels();
+  renderSessionButtons();
+  renderPaneTabStrips();
+  if (!options.initial) installRuntimeIntervals();
+  return true;
+}
+
+async function refreshSettings(options = {}) {
+  try {
+    const response = await apiFetch('/api/settings', {cache: 'no-store'});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const changed = applySettingsPayload(payload, {force: options.force === true});
+    if (changed && !options.silent) statusEl.textContent = 'settings reloaded';
+  } catch (error) {
+    if (!options.silent) statusEl.innerHTML = `<span class="err">settings reload failed: ${esc(error)}</span>`;
+  }
+}
+
+const runtimeIntervals = new Map();
+
+function resetRuntimeInterval(name, callback, delay) {
+  const existing = runtimeIntervals.get(name);
+  if (existing) clearInterval(existing);
+  runtimeIntervals.set(name, setInterval(callback, Math.max(1, Math.round(delay))));
+}
+
+function installRuntimeIntervals() {
+  resetRuntimeInterval('auto', refreshAutoStatuses, paneStateRefreshMs);
+  resetRuntimeInterval('metadata', refreshTranscripts, metadataRefreshMs);
+  resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
+  resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
+  resetRuntimeInterval('settings', () => refreshSettings({silent: true}), Math.max(1003, Math.min(10003, eventLogRefreshMs)));
 }
 
 async function saveCurrentEditor() {
@@ -6736,13 +6942,14 @@ function pruneSmallLayoutSlots() {
 function minWidthForLayoutSlot(slot) {
   const item = activeItemForSide(slot);
   if (isFileExplorerItem(item)) return 260;
+  if (isPreferencesItem(item)) return 360;
   if (isFileEditorItem(item)) return 320;
   return minSplitPaneWidthPx;
 }
 
 function prunePriorityForLayoutSlot(slot) {
   const item = activeItemForSide(slot);
-  if (isFileExplorerItem(item) || isInfoItem(item)) return 0;
+  if (isFileExplorerItem(item) || isInfoItem(item) || isPreferencesItem(item)) return 0;
   if (isFileEditorItem(item)) return 1;
   return 2;
 }
@@ -6781,6 +6988,7 @@ function renderLayoutColumn(side) {
   const session = activeItemForSide(side);
   column.className = 'layout-column';
   if (isFileExplorerItem(session)) column.classList.add('file-explorer-column');
+  if (isPreferencesItem(session)) column.classList.add('preferences-column');
   if (isFileEditorItem(session)) column.classList.add('file-editor-column');
   if (!session) column.classList.add('empty-pane-column');
   column.dataset.slot = side;
@@ -6869,8 +7077,9 @@ function restorePaneTabPopover(strip, item) {
 function createPaneTab(side, item) {
   const isInfo = isInfoItem(item);
   const isFiles = isFileExplorerItem(item);
+  const isPrefs = isPreferencesItem(item);
   const isEditor = isFileEditorItem(item);
-  const isVirtual = isInfo || isFiles || isEditor;
+  const isVirtual = isInfo || isFiles || isPrefs || isEditor;
   const info = transcriptMeta.sessions?.[item];
   const auto = autoApproveStates.get(item)?.enabled === true && !isVirtual;
   const state = isVirtual ? null : sessionState(item, info);
@@ -6879,13 +7088,14 @@ function createPaneTab(side, item) {
   const tab = document.createElement('div');
   tab.role = 'button';
   tab.tabIndex = 0;
-  const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : isEditor ? 'file-editor-item' : '';
+  const virtualClass = isInfo ? 'info' : isFiles ? 'file-explorer' : isPrefs ? 'preferences-item' : isEditor ? 'file-editor-item' : '';
   tab.className = `pane-tab ${virtualClass} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
   if (isInfo) tab.innerHTML = paneInfoTabHtml();
   else if (isFiles) tab.innerHTML = fileExplorerPaneTabHtml();
+  else if (isPrefs) tab.innerHTML = preferencesPaneTabHtml();
   else if (isEditor) tab.innerHTML = fileEditorPaneTabHtml(item);
   else tab.innerHTML = tmuxPaneTabHtml(item, info, state, auto);
   if (!isFiles) {
@@ -6902,7 +7112,7 @@ function createPaneTab(side, item) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? fileExplorerLabel() : isEditor ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? fileExplorerLabel() : isPrefs ? 'Preferences' : isEditor ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
@@ -7038,6 +7248,10 @@ function fileExplorerPaneTabHtml() {
   return `<span class="pane-tab-core"><span class="session-button-dir">${esc(fileExplorerLabel())}</span></span>`;
 }
 
+function preferencesPaneTabHtml() {
+  return '<span class="pane-tab-core"><span class="session-button-dir">Preferences</span></span>';
+}
+
 function fileEditorPaneTabHtml(item) {
   const path = fileItemPath(item);
   const state = openFiles.get(path) || {};
@@ -7165,6 +7379,7 @@ function getOrCreatePanel(session) {
   if (panel) return panel;
   if (isInfoItem(session)) panel = createInfoPanel();
   else if (isFileExplorerItem(session)) panel = createFileExplorerPanel();
+  else if (isPreferencesItem(session)) panel = createPreferencesPanel();
   else if (isFileEditorItem(session)) panel = createFileEditorPanel(session);
   else panel = createPanel(session);
   panelNodes.set(session, panel);
@@ -7268,6 +7483,7 @@ function setPanelDetailsCollapsed(panel, collapsed) {
 function terminalTabLabel(session, info) {
   if (isInfoItem(session)) return 'Term';
   if (isFileExplorerItem(session)) return fileExplorerLabel();
+  if (isPreferencesItem(session)) return 'Prefs';
   if (isFileEditorItem(session)) return 'Edit';
   const label = terminalProcessLabel(info);
   return shortText(label || 'Term', 16);
@@ -7276,6 +7492,7 @@ function terminalTabLabel(session, info) {
 function terminalTabTitle(session, info) {
   if (isInfoItem(session)) return 'unavailable for Branch Info';
   if (isFileExplorerItem(session)) return `unavailable for ${fileExplorerLabel()}`;
+  if (isPreferencesItem(session)) return 'unavailable for Preferences';
   if (isFileEditorItem(session)) return 'unavailable for file editor';
   return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
 }
@@ -7476,6 +7693,225 @@ function createInfoPanel() {
   return panel;
 }
 
+function preferenceSections() {
+  return [
+    {title: 'General', items: [
+      {path: 'general.auto_focus', label: 'Auto-focus terminals', type: 'boolean', help: 'Focus a terminal after tab switches and layout moves.'},
+      {path: 'general.default_layout', label: 'Default layout', type: 'select', choices: ['single', 'grid', 'wall']},
+      {path: 'general.default_sessions', label: 'Default sessions', type: 'list', help: 'One tmux session name per line.'},
+    ]},
+    {title: 'Appearance', items: [
+      {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 10, max: 20, step: 1, suffix: 'px'},
+      {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px'},
+      {path: 'appearance.tab_width', label: 'Tab width', type: 'number', min: 120, max: 420, step: 5, suffix: 'px'},
+      {path: 'appearance.red_reminder_ms', label: 'Red reminder', type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms'},
+      {path: 'appearance.yolo_rotate_ms', label: 'YO rotation', type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms'},
+      {path: 'appearance.metadata_badge_pulse_seconds', label: 'Badge pulse', type: 'number', min: 0, max: 120, step: 1, suffix: 's'},
+    ]},
+    {title: 'Performance', items: [
+      {path: 'performance.metadata_refresh_ms', label: 'Metadata refresh', type: 'number', min: 3001, max: 120001, step: 250, suffix: 'ms'},
+      {path: 'performance.pane_state_refresh_ms', label: 'Pane state refresh', type: 'number', min: 503, max: 30001, step: 100, suffix: 'ms'},
+      {path: 'performance.latency_refresh_ms', label: 'Latency refresh', type: 'number', min: 1003, max: 30001, step: 100, suffix: 'ms'},
+      {path: 'performance.event_log_refresh_ms', label: 'Event log refresh', type: 'number', min: 1003, max: 60001, step: 250, suffix: 'ms'},
+      {path: 'performance.popover_show_delay_ms', label: 'Popover show delay', type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'},
+      {path: 'performance.popover_hide_delay_ms', label: 'Popover hide delay', type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'},
+      {path: 'performance.remote_resize_delay_ms', label: 'Remote resize debounce', type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms'},
+      {path: 'performance.auto_approve_interval_seconds', label: 'Auto-approve poll', type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's'},
+    ]},
+    {title: 'Notifications', items: [
+      {path: 'notifications.toast_duration_ms', label: 'Toast duration', type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms'},
+      {path: 'notifications.throttle_seconds', label: 'Notification throttle', type: 'number', min: 0, max: 600, step: 5, suffix: 's'},
+      {path: 'notifications.notify_transitions', label: 'Notify transitions', type: 'list', help: 'One transition key per line.'},
+    ]},
+    {title: 'Terminal / Editor', items: [
+      {path: 'terminal_editor.scrollback', label: 'Scrollback', type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines'},
+      {path: 'terminal_editor.word_wrap', label: 'Editor word wrap', type: 'boolean'},
+      {path: 'terminal_editor.line_numbers', label: 'Editor line numbers', type: 'boolean'},
+    ]},
+    {title: fileExplorerLabel(), items: [
+      {path: 'file_explorer.root_mode', label: 'Root mode', type: 'select', choices: ['fixed', 'sync']},
+      {path: 'file_explorer.quick_access_paths', label: 'Quick paths', type: 'list', help: 'One path per line.'},
+    ]},
+    {title: 'YOLO', items: [
+      {path: 'yolo.default_policy', label: 'Default policy', type: 'select', choices: ['off', 'approve', 'decline', 'block', 'ask', 'notify']},
+      {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text'},
+      {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean'},
+    ]},
+  ];
+}
+
+function preferenceItemByPath(path) {
+  for (const section of preferenceSections()) {
+    const item = section.items.find(candidate => candidate.path === path);
+    if (item) return item;
+  }
+  return null;
+}
+
+function preferenceValue(path) {
+  return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, ''));
+}
+
+function preferenceDefault(path) {
+  return nestedSetting(clientSettingsDefaults, path, '');
+}
+
+function preferenceStatusText() {
+  if (clientSettingsPayload.error) return `settings error: ${clientSettingsPayload.error}`;
+  const path = clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
+  return `loaded ${compactHomePath(path)}`;
+}
+
+function preferencesPathRowHtml() {
+  const path = clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
+  return `<span class="preferences-path-label">settings</span><span class="preferences-path-value">${esc(path)}</span><button type="button" class="path-copy-button preferences-path-copy" data-copy-settings-path="${esc(path)}" title="Copy settings path" aria-label="Copy settings path"></button>`;
+}
+
+function preferenceControlHtml(item) {
+  const value = preferenceValue(item.path);
+  const defaultValue = preferenceDefault(item.path);
+  const disabled = readOnlyMode ? ' disabled' : '';
+  const baseAttrs = `data-setting-path="${esc(item.path)}" data-setting-type="${esc(item.type)}"${disabled}`;
+  let control = '';
+  if (item.type === 'boolean') {
+    control = `<input type="checkbox" ${baseAttrs}${value ? ' checked' : ''}>`;
+  } else if (item.type === 'number') {
+    control = `<input type="number" ${baseAttrs} value="${esc(value)}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
+  } else if (item.type === 'select') {
+    control = `<select ${baseAttrs}>${item.choices.map(choice => `<option value="${esc(choice)}"${choice === value ? ' selected' : ''}>${esc(choice)}</option>`).join('')}</select>`;
+  } else if (item.type === 'list') {
+    const text = Array.isArray(value) ? value.join('\n') : String(value || '');
+    control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
+  } else {
+    control = `<input type="text" ${baseAttrs} value="${esc(value)}">`;
+  }
+  const resetDisabled = readOnlyMode || JSON.stringify(value) === JSON.stringify(defaultValue) ? ' disabled' : '';
+  const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
+  const help = item.help ? `<div class="preferences-setting-help">${esc(item.help)}</div>` : '';
+  return `<label class="preferences-setting-row"><span class="preferences-setting-label">${esc(item.label)}</span><span class="preferences-setting-control">${control}${suffix}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span>${help}</label>`;
+}
+
+function preferencesPanelHtml() {
+  const sections = preferenceSections().map(section => `
+    <section class="preferences-section">
+      <h3>${esc(section.title)}</h3>
+      <div class="preferences-settings">${section.items.map(preferenceControlHtml).join('')}</div>
+    </section>`).join('');
+  const readonly = readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : '';
+  return `
+    <div class="preferences-path-row">${preferencesPathRowHtml()}${readonly}</div>
+    <div class="preferences-status" data-level="${clientSettingsPayload.error ? 'error' : 'ok'}">${esc(preferenceStatusText())}</div>
+    <div class="preferences-sections">${sections}</div>`;
+}
+
+function createPreferencesPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel preferences-panel';
+  panel.id = `panel-${prefsItemId}`;
+  panel.innerHTML = `
+      <div class="panel-head preferences-panel-head">
+        ${panelControlsHtml(prefsItemId, {disabled: true, unavailableLabel: 'Preferences'})}
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">Preferences</span></div>
+          <div id="meta-${prefsItemId}" class="meta">${esc(preferenceStatusText())}</div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="hide details" aria-label="hide details"></button>
+      </div>
+      <div class="preferences-body panel-overlay-root">
+        <div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>
+        ${preferencesPanelHtml()}
+      </div>`;
+  bindPanelShell(panel, prefsItemId);
+  bindPreferencesPanel(panel);
+  return panel;
+}
+
+function renderPreferencesPanels() {
+  for (const panel of document.querySelectorAll('.preferences-panel')) {
+    const body = panel.querySelector('.preferences-body');
+    if (body) body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>${preferencesPanelHtml()}`;
+    const meta = panel.querySelector(`#meta-${cssEscape(prefsItemId)}`);
+    if (meta) meta.textContent = preferenceStatusText();
+    bindPreferencesPanel(panel);
+  }
+}
+
+function bindPreferencesPanel(panel) {
+  if (!panel || panel.dataset.preferencesBound === 'true') return;
+  panel.dataset.preferencesBound = 'true';
+  panel.addEventListener('change', event => {
+    const control = event.target.closest('[data-setting-path]');
+    if (!control || !panel.contains(control)) return;
+    savePreferenceControl(control);
+  });
+  panel.addEventListener('click', event => {
+    const copy = event.target.closest('[data-copy-settings-path]');
+    if (copy && panel.contains(copy)) {
+      event.preventDefault();
+      copyTextToClipboard(copy.dataset.copySettingsPath || '')
+        .then(() => { statusEl.textContent = 'copied settings path'; })
+        .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+      return;
+    }
+    const reset = event.target.closest('[data-setting-reset]');
+    if (!reset || !panel.contains(reset)) return;
+    event.preventDefault();
+    resetPreference(reset.dataset.settingReset || '');
+  });
+}
+
+function settingPatch(path, value) {
+  const parts = String(path || '').split('.').filter(Boolean);
+  const root = {};
+  let current = root;
+  parts.forEach((part, index) => {
+    if (index === parts.length - 1) current[part] = value;
+    else {
+      current[part] = {};
+      current = current[part];
+    }
+  });
+  return root;
+}
+
+function valueFromPreferenceControl(control) {
+  const type = control.dataset.settingType || 'text';
+  if (type === 'boolean') return control.checked === true;
+  if (type === 'number') return Number(control.value);
+  if (type === 'list') return String(control.value || '').split('\n').map(line => line.trim()).filter(Boolean);
+  return control.value;
+}
+
+async function saveSettingsPatch(patch) {
+  if (readOnlyMode) return;
+  const response = await apiFetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({settings: patch}),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  applySettingsPayload(payload, {force: true});
+}
+
+function savePreferenceControl(control) {
+  const path = control.dataset.settingPath || '';
+  saveSettingsPatch(settingPatch(path, valueFromPreferenceControl(control)))
+    .then(() => { statusEl.textContent = `saved ${path}`; })
+    .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+}
+
+function resetPreference(path) {
+  const item = preferenceItemByPath(path);
+  if (!item) return;
+  saveSettingsPatch(settingPatch(path, preferenceDefault(path)))
+    .then(() => { statusEl.textContent = `reset ${path}`; })
+    .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
+}
+
 // File Explorer pane content is self-contained so layout panes do not depend on
 // the older left-edge overlay tree.
 function createFileExplorerPanel() {
@@ -7490,6 +7926,7 @@ function createFileExplorerPanel() {
         <div class="file-explorer-toolbar">
           <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
           <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="Root mode: fixed" aria-pressed="false">Root</button>
+          <div class="file-explorer-quick-access-panel" aria-label="Quick paths"></div>
           <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(label)} root path">
           <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
           <button type="button" class="${fileExplorerPanelCloseClass()}" title="Hide ${esc(label)} from layout" aria-label="Hide ${esc(label)} from layout"></button>
@@ -9184,10 +9621,10 @@ function startTerminal(session) {
     cursorBlink: true,
     convertEol: false,
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
-    fontSize: 13,
+    fontSize: terminalFontSize,
     letterSpacing: 0,
     lineHeight: 1.0,
-    scrollback: 5000,
+    scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
     theme: {
       background: '#11151d',
@@ -9810,6 +10247,7 @@ function refreshAll() {
 }
 
 async function boot() {
+  applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   applyFileExplorerStaticLabels();
   renderTransportWarning();
   renderTabMetaToggle();
@@ -9824,10 +10262,7 @@ async function boot() {
   refreshTranscripts();
   renderAutoApproveButtons();
   updateLatency();
-  setInterval(refreshAutoStatuses, paneStateRefreshMs);
-  setInterval(refreshTranscripts, metadataRefreshMs);
-  setInterval(updateLatency, latencyRefreshMs);
-  setInterval(refreshOpenEventLogs, eventLogRefreshMs);
+  installRuntimeIntervals();
 }
 
 async function showContext(session) {
@@ -9849,16 +10284,7 @@ async function showContext(session) {
 if (refreshMeta) {
   refreshMeta.textContent = 'Refresh';
   refreshMeta.setAttribute('aria-label', 'Refresh session state');
-  const seconds = ms => `${Math.round(ms / 1000)}s`;
-  refreshMeta.title = [
-    'Refresh session state',
-    'Re-list tmux sessions.',
-    'Refresh git, PR, Linear, and agent metadata.',
-    'Refresh YOLO status and open event logs.',
-    'Refresh active transcript previews.',
-    `Auto-refresh: YOLO ${seconds(paneStateRefreshMs)}, metadata ${seconds(metadataRefreshMs)}, ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
-    'Does not reload the page or reconnect terminals.',
-  ].join('\n');
+  refreshMetaButtonTitle();
   refreshMeta.onclick = refreshAll;
 }
 if (tabMetaToggle) {

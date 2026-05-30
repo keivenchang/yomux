@@ -1186,6 +1186,131 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 .info-cell a.pr-status-closed {
   color: #aeb8c7;
 }
+.preferences-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+.preferences-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+  background: var(--bg);
+}
+.preferences-path-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+.preferences-path-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.preferences-readonly {
+  color: #f5c542;
+  font-family: var(--ui-font);
+  font-size: 11px;
+  font-weight: 700;
+}
+.preferences-status {
+  margin-top: 8px;
+  color: var(--good);
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+.preferences-status[data-level="error"] {
+  color: var(--bad);
+}
+.preferences-sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.preferences-section {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.preferences-section h3 {
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-size: 13px;
+}
+.preferences-settings {
+  display: grid;
+  gap: 1px;
+}
+.preferences-setting-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.9fr) minmax(180px, 1.1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 7px 10px;
+  border-top: 1px solid rgba(48, 57, 72, 0.45);
+}
+.preferences-setting-row:first-child {
+  border-top: 0;
+}
+.preferences-setting-label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+.preferences-setting-control {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+}
+.preferences-setting-control input[type="number"],
+.preferences-setting-control input[type="text"],
+.preferences-setting-control select,
+.preferences-setting-control textarea {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #10151d;
+  color: var(--text);
+  font: 12px var(--mono-font);
+  padding: 5px 6px;
+}
+.preferences-setting-control input[type="checkbox"] {
+  justify-self: start;
+}
+.preferences-setting-control textarea {
+  resize: vertical;
+}
+.preferences-setting-suffix,
+.preferences-setting-help {
+  color: var(--muted);
+  font-size: 11px;
+}
+.preferences-setting-help {
+  grid-column: 1 / -1;
+  margin-top: 3px;
+}
+.preferences-reset {
+  min-width: 0;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 4px;
+  font-size: 11px;
+}
 .popover-value a:hover,
 .branch-link:hover {
   color: #bfdbfe;
@@ -1325,6 +1450,9 @@ button:disabled:hover { border-color: var(--line); }
 }
 .layout-column.file-editor-column {
   min-width: var(--file-editor-pane-min-inline-size);
+}
+.layout-column.preferences-column {
+  min-width: min(420px, 62vw);
 }
 .layout-column.empty-pane-column {
   min-width: var(--file-pane-min-inline-size);
@@ -3261,6 +3389,28 @@ body.file-explorer-open #grid {
   color: var(--good);
   border-color: var(--good);
 }
+.file-explorer-quick-access,
+.file-explorer-quick-access-panel {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+.file-explorer-quick-access-button {
+  min-width: 0;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  font: 700 10px var(--mono-font);
+}
+.file-explorer-quick-access-button:hover {
+  color: var(--text);
+  border-color: rgba(118, 185, 0, 0.55);
+}
 .file-editor {
   display: flex;
   flex-direction: column;
@@ -4156,6 +4306,10 @@ body.file-editor-open .file-explorer {
 }
 .pane-tab.file-explorer .pane-tab-core {
   justify-content: center;
+}
+.pane-tab.preferences-item {
+  flex-basis: min(160px, 100%);
+  min-width: min(120px, 100%);
 }
 .pane-tab.file-editor-item .session-button-dir {
   flex: 1 1 auto;

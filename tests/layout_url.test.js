@@ -735,8 +735,9 @@ function canonical(value) {
   assert.equal(api.currentSessionActionTarget(), '2');
   const settingsMenu = menus.find(menu => menu.id === 'settings');
   const settingsMenuLabels = settingsMenu.items.map(item => item.label).filter(Boolean);
-  assert.deepStrictEqual(canonical(settingsMenuLabels), ['Tab metadata', 'Notify', 'Refresh']);
+  assert.deepStrictEqual(canonical(settingsMenuLabels), ['Preferences', 'Tab metadata', 'Notify', 'Refresh']);
   assert.equal(settingsMenuLabels.includes('Global settings...'), false);
+  assert.ok(settingsMenuLabels.includes('Preferences'));
   assert.ok(settingsMenuLabels.includes('Notify'));
   assert.ok(settingsMenuLabels.includes('Refresh'));
   assert.equal(settingsMenuLabels.includes('Log out'), false);
@@ -1301,7 +1302,7 @@ function canonical(value) {
   assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
   assert.equal(api.itemIsBackgroundPaneTab('1'), false);
   assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['3']);
+  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__prefs__', '3']);
 }
 
 {

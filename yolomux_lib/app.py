@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from .core import *
+from .settings import save_settings
+from .settings import settings_payload
 
 
 METADATA_BADGE_PULSE_SECONDS = 20.0
@@ -77,6 +79,19 @@ class TmuxWebtermApp:
 
     def notify_status(self) -> dict[str, Any]:
         return {"enabled": bool(read_yolomux_state().get("notify_enabled", False))}
+
+    def settings_payload(self) -> dict[str, Any]:
+        return settings_payload()
+
+    def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        return save_settings(patch)
+
+    def metadata_badge_pulse_seconds(self) -> float:
+        value = settings_payload().get("settings", {}).get("appearance", {}).get("metadata_badge_pulse_seconds", METADATA_BADGE_PULSE_SECONDS)
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return METADATA_BADGE_PULSE_SECONDS
 
     def set_notify(self, enabled: bool) -> dict[str, Any]:
         update_yolomux_state({"notify_enabled": enabled})
@@ -188,7 +203,7 @@ class TmuxWebtermApp:
                     continue
                 for badge in METADATA_BADGES:
                     if self.metadata_badge_change_should_pulse(previous_signature, next_signature, badge):
-                        self.metadata_badge_pulse_until.setdefault(session, {})[badge] = now + METADATA_BADGE_PULSE_SECONDS
+                        self.metadata_badge_pulse_until.setdefault(session, {})[badge] = now + self.metadata_badge_pulse_seconds()
                         state_changed = True
 
             if self.metadata_badge_signatures != next_signatures:
