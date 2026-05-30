@@ -4,6 +4,7 @@ const availableAgents = new Set(bootstrap.availableAgents);
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
 const homePath = bootstrap.homePath;
+const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
@@ -103,7 +104,7 @@ const toastMaxLineChars = 180;
 const popoverShowDelayMs = 300;
 const hoverCloseDelayMs = 300;
 const popoverHideDelayMs = hoverCloseDelayMs;
-const menuHoverOpenDelayMs = 800;
+const menuHoverOpenDelayMs = 300;
 const menuHoverCloseDelayMs = hoverCloseDelayMs;
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
@@ -241,16 +242,23 @@ let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;
 let focusedPanelItem = null;
+let lastFocusedTmuxSession = null;
 let dragSession = null;
 let dragSourceSlot = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
 let transparentDragImage = null;
-let terminalContextMenu = null;
-let fileContextMenu = null;
+const terminalContextMenu = createContextMenuController();
+const fileContextMenu = createContextMenuController();
+const sessionContextMenu = createContextMenuController();
+let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
 let fileTreeRenamePath = null;
+let fileExplorerPathError = '';
+let fileImagePreviewShowTimer = null;
+let fileImagePreviewHideTimer = null;
+let fileImagePreviewPopover = null;
 const panelPopoverHideTimers = new WeakMap();
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
@@ -343,6 +351,7 @@ function toggleTabMetadata() {
 function setFocusedTerminal(session) {
   focusedTerminal = session;
   focusedPanelItem = session;
+  if (isTmuxSession(session)) lastFocusedTmuxSession = session;
   dismissAttentionAlertsForSession(session);
   updateSessionButtonStates();
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
@@ -362,7 +371,10 @@ function clearFocusedTerminal(session) {
 function setFocusedPanelItem(item) {
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
-  if (isTmuxSession(item)) dismissAttentionAlertsForSession(item);
+  if (isTmuxSession(item)) {
+    lastFocusedTmuxSession = item;
+    dismissAttentionAlertsForSession(item);
+  }
   updateSessionButtonStates();
   updatePanelInactiveOverlays();
   scheduleFileExplorerActiveTabSync(item);
@@ -371,6 +383,7 @@ function setFocusedPanelItem(item) {
 function clearFocusForInactiveLayout() {
   if (focusedTerminal && !activeSessions.includes(focusedTerminal)) focusedTerminal = null;
   if (focusedPanelItem && !activeSessions.includes(focusedPanelItem)) focusedPanelItem = null;
+  if (lastFocusedTmuxSession && !activeSessions.includes(lastFocusedTmuxSession)) lastFocusedTmuxSession = null;
 }
 
 function terminalPaneIsActive(session) {
@@ -597,40 +610,36 @@ async function copyTextToClipboard(text) {
   if (!copied) throw new Error('clipboard copy is unavailable');
 }
 
-function closeTerminalContextMenu() {
-  if (!terminalContextMenu) return;
-  terminalContextMenu.remove();
-  terminalContextMenu = null;
-  document.removeEventListener('pointerdown', terminalContextMenuPointerdown, true);
-  document.removeEventListener('keydown', terminalContextMenuKeydown, true);
-  window.removeEventListener('blur', closeTerminalContextMenu);
-}
-
-function terminalContextMenuPointerdown(event) {
-  if (terminalContextMenu?.contains(event.target)) return;
-  closeTerminalContextMenu();
-}
-
-function terminalContextMenuKeydown(event) {
-  if (event.key === 'Escape') closeTerminalContextMenu();
-}
-
-function closeFileContextMenu() {
-  if (!fileContextMenu) return;
-  fileContextMenu.remove();
-  fileContextMenu = null;
-  document.removeEventListener('pointerdown', fileContextMenuPointerdown, true);
-  document.removeEventListener('keydown', fileContextMenuKeydown, true);
-  window.removeEventListener('blur', closeFileContextMenu);
-}
-
-function fileContextMenuPointerdown(event) {
-  if (fileContextMenu?.contains(event.target)) return;
-  closeFileContextMenu();
-}
-
-function fileContextMenuKeydown(event) {
-  if (event.key === 'Escape') closeFileContextMenu();
+function createContextMenuController() {
+  let menu = null;
+  const close = () => {
+    if (!menu) return;
+    menu.remove();
+    menu = null;
+    document.removeEventListener('pointerdown', pointerdown, true);
+    document.removeEventListener('keydown', keydown, true);
+    window.removeEventListener('blur', close);
+  };
+  const pointerdown = event => {
+    if (menu?.contains(event.target)) return;
+    close();
+  };
+  const keydown = event => {
+    if (event.key === 'Escape') close();
+  };
+  return {
+    close,
+    open(nextMenu, x, y) {
+      close();
+      menu = nextMenu;
+      menu.addEventListener('pointerdown', event => event.stopPropagation());
+      document.body.appendChild(menu);
+      positionContextMenu(menu, x, y);
+      document.addEventListener('pointerdown', pointerdown, true);
+      document.addEventListener('keydown', keydown, true);
+      window.addEventListener('blur', close);
+    },
+  };
 }
 
 function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
@@ -639,6 +648,7 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
   button.setAttribute('role', 'menuitem');
   button.textContent = label;
   button.disabled = options.disabled === true;
+  if (options.checked === true) button.dataset.checked = 'true';
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -649,12 +659,59 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
   return button;
 }
 
+function appendContextMenuSeparator(menu) {
+  const separator = document.createElement('div');
+  separator.className = 'terminal-context-menu-separator';
+  separator.role = 'separator';
+  menu.appendChild(separator);
+  return separator;
+}
+
+function rootCssLengthPx(name) {
+  if (!document.body || typeof window.getComputedStyle !== 'function') return 0;
+  const value = window.getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  if (!value) return 0;
+  const probe = document.createElement('div');
+  probe.style.position = 'fixed';
+  probe.style.visibility = 'hidden';
+  probe.style.pointerEvents = 'none';
+  probe.style.width = value;
+  probe.style.height = '0';
+  document.body.appendChild(probe);
+  const width = probe.getBoundingClientRect().width || 0;
+  probe.remove();
+  return Math.max(0, width);
+}
+
+function popoverEdgeGapPx() {
+  return rootCssLengthPx('--popover-edge-gap');
+}
+
 function positionContextMenu(menu, x, y) {
   const rect = menu.getBoundingClientRect();
-  const left = Math.min(Math.max(6, x), Math.max(6, window.innerWidth - rect.width - 6));
-  const top = Math.min(Math.max(6, y), Math.max(6, window.innerHeight - rect.height - 6));
+  const edgeGap = popoverEdgeGapPx();
+  const left = Math.min(Math.max(edgeGap, x), Math.max(edgeGap, window.innerWidth - rect.width - edgeGap));
+  const top = Math.min(Math.max(edgeGap, y), Math.max(edgeGap, window.innerHeight - rect.height - edgeGap));
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
+}
+
+function closeTerminalContextMenu() {
+  terminalContextMenu.close();
+}
+
+function closeFileContextMenu() {
+  fileContextMenu.close();
+}
+
+function closeSessionContextMenu() {
+  sessionContextMenu.close();
+}
+
+function closeContextMenus() {
+  closeTerminalContextMenu();
+  closeFileContextMenu();
+  closeSessionContextMenu();
 }
 
 async function copyTerminalSelection(session, term, options = {}) {
@@ -673,7 +730,8 @@ async function copyTerminalSelection(session, term, options = {}) {
 }
 
 function showTerminalContextMenu(session, term, x, y) {
-  closeTerminalContextMenu();
+  closeFileContextMenu();
+  closeSessionContextMenu();
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu';
   menu.setAttribute('role', 'menu');
@@ -684,13 +742,7 @@ function showTerminalContextMenu(session, term, x, y) {
   for (const [label, dedent] of items) {
     appendContextMenuButton(menu, label, () => copyTerminalSelection(session, term, {dedent}), closeTerminalContextMenu);
   }
-  menu.addEventListener('pointerdown', event => event.stopPropagation());
-  document.body.appendChild(menu);
-  terminalContextMenu = menu;
-  positionContextMenu(menu, x, y);
-  document.addEventListener('pointerdown', terminalContextMenuPointerdown, true);
-  document.addEventListener('keydown', terminalContextMenuKeydown, true);
-  window.addEventListener('blur', closeTerminalContextMenu);
+  terminalContextMenu.open(menu, x, y);
 }
 
 function installTerminalContextMenu(session, term, container) {
@@ -701,6 +753,26 @@ function installTerminalContextMenu(session, term, container) {
     event.stopPropagation();
     showTerminalContextMenu(session, term, event.clientX, event.clientY);
   });
+}
+
+function showSessionContextMenu(session, x, y, options = {}) {
+  if (!isTmuxSession(session)) return;
+  closeAppMenus();
+  closeTerminalContextMenu();
+  closeFileContextMenu();
+  closeOtherSessionPopovers(null);
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu session-context-menu';
+  menu.setAttribute('role', 'menu');
+  const renameAction = options.tab ? () => beginPaneTabRename(options.tab, session) : () => renameTmuxSession(session);
+  for (const item of tmuxSessionViewCommands(session)) {
+    appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
+  }
+  appendContextMenuSeparator(menu);
+  for (const item of tmuxSessionActionCommands(session, {renameAction})) {
+    appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
+  }
+  sessionContextMenu.open(menu, x, y);
 }
 
 function emptyLayoutSlots() {
@@ -1502,7 +1574,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
 function agentErrorIsBlocking(error) {
   const text = String(error || '').toLowerCase();
   if (!text) return false;
-  return !/transcript not found/.test(text);
+  return !(/transcript not found/.test(text) || /^missing /.test(text));
 }
 
 function stateValue(key, reason, extra = {}) {
@@ -1554,7 +1626,7 @@ function syncAttentionAnimation(node, active) {
 }
 
 function stateBadgeHtml(key, short, title) {
-  const classes = ['session-state-badge', `session-state-${key}`];
+  const classes = ['session-state-badge', 'tab-symbol', `session-state-${key}`];
   const attention = stateDef(key).attention;
   if (attention) classes.push('session-state-reminder');
   const style = attention ? ` style="${attentionAnimationStyle()}"` : '';
@@ -1628,6 +1700,37 @@ async function loadNotifyStatus() {
     notificationsEnabled = false;
   }
   renderNotifyToggle();
+}
+
+function logOut() {
+  window.location.href = '/logout';
+}
+
+function appMenuUiIcon(kind, active = false) {
+  return `<span class="app-menu-ui-icon app-menu-ui-icon-${esc(kind)} ${active ? 'active' : ''}" aria-hidden="true"></span>`;
+}
+
+function projectReadmePath() {
+  const root = String(repoRoot || '').replace(/\/+$/, '');
+  return root ? `${root}/README.md` : '';
+}
+
+async function openProjectReadme() {
+  const path = projectReadmePath();
+  if (!path) {
+    statusEl.innerHTML = '<span class="err">README path is unavailable</span>';
+    return;
+  }
+  await openFileInEditor(path, 'README.md');
+}
+
+function keyboardShortcutItems() {
+  return [
+    menuCommand('Save active editor', null, {disabled: true, detail: 'Ctrl/Cmd+S'}),
+    menuCommand('Close menu or dialog', null, {disabled: true, detail: 'Esc'}),
+    menuCommand('Session actions', null, {disabled: true, detail: 'Right-click a tmux tab'}),
+    menuCommand('Move or split tab', null, {disabled: true, detail: 'Drag a tab'}),
+  ];
 }
 
 function shouldNotifyState(state) {
@@ -1959,18 +2062,28 @@ function scheduleAllTabStripOverflowChecks() {
   }
 }
 
-function updateSessionList(nextSessions) {
-  if (!Array.isArray(nextSessions)) return false;
+function normalizedSessionOrder(nextSessions) {
+  if (!Array.isArray(nextSessions)) return null;
   const next = [];
   for (const session of nextSessions) {
     if (typeof session === 'string' && session && !next.includes(session)) next.push(session);
   }
+  return next;
+}
+
+function setSessionOrder(next) {
+  sessions = next;
+  visibleSessions = sessions.slice(0, maxSessionTabs);
+  layoutItems = computeLayoutItems();
+}
+
+function updateSessionList(nextSessions) {
+  const next = normalizedSessionOrder(nextSessions);
+  if (!next) return false;
   const changed = next.length !== sessions.length || next.some((session, index) => session !== sessions[index]);
   if (!changed) return false;
   const removedSessions = visibleSessions.filter(session => !next.includes(session));
-  sessions = next;
-  visibleSessions = sessions.slice(0, maxSessionTabs);
-  layoutItems = [infoItemId, fileExplorerItemId, ...openFileEditorItems(), ...visibleSessions];
+  setSessionOrder(next);
   layoutSlots = normalizeLayoutSlots(layoutSlots, {
     preserveRemovedItems: removedSessions,
     preserveRemovedSlots: true,
@@ -2049,13 +2162,12 @@ function currentActiveMenuItem() {
   return activePaneItems()[0] || null;
 }
 
-function currentActiveTmuxSession() {
+function currentSessionActionTarget() {
   const current = currentActiveMenuItem();
   if (isTmuxSession(current)) return current;
-  return activePaneItems().find(isTmuxSession)
-    || visibleSessions.find(itemIsActivePaneTab)
-    || visibleSessions[0]
-    || null;
+  if (isTmuxSession(lastFocusedTmuxSession) && activeSessions.includes(lastFocusedTmuxSession)) return lastFocusedTmuxSession;
+  const activeTmuxSessions = activeSessions.filter(isTmuxSession);
+  return activeTmuxSessions.length === 1 ? activeTmuxSessions[0] : null;
 }
 
 function orderedPaneItems(items = activePaneItems()) {
@@ -2110,6 +2222,80 @@ function menuTabCommand(item, options = {}) {
   });
 }
 
+function tmuxSessionActionCommands(session, options = {}) {
+  const hasSession = isTmuxSession(session);
+  const autoPayload = hasSession ? autoApproveStates.get(session) : null;
+  const autoHere = hasSession ? autoApproveEnabledHere(autoPayload) : false;
+  const readonlyDetail = 'Admin only';
+  const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
+  const visibleDetail = readOnlyMode ? readonlyDetail : (hasSession ? '' : 'No tmux tab focused');
+  const yoloLabel = `${autoHere ? 'Disable' : 'Enable'} YOLO for Tmux Session${hasSession ? ` '${session}'` : ''}`;
+  const renameAction = options.renameAction || (() => renameTmuxSession(session));
+  const commands = [
+    menuCommand('Rename session', renameAction, {
+      disabled: readOnlyMode || !hasSession,
+      detail: visibleDetail,
+      ariaLabel: ['Rename session', focusDetail].filter(Boolean).join(' - '),
+    }),
+    menuCommand('Kill session', () => killTmuxSession(session), {
+      disabled: readOnlyMode || !hasSession,
+      detail: visibleDetail,
+      ariaLabel: ['Kill session', focusDetail].filter(Boolean).join(' - '),
+    }),
+    menuCommand(yoloLabel, async () => {
+      if (!hasSession) return;
+      await toggleAutoApprove(session);
+      renderSessionButtons();
+      renderPaneTabStrips();
+    }, {
+      checked: autoHere,
+      disabled: readOnlyMode || !hasSession,
+      detail: visibleDetail,
+      ariaLabel: [yoloLabel, hasSession ? focusDetail : 'Focus a tmux session first'].filter(Boolean).join(' - '),
+    }),
+  ];
+  return commands;
+}
+
+function tmuxSessionViewCommands(session) {
+  const hasSession = isTmuxSession(session);
+  const active = hasSession && activeSessions.includes(session);
+  const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
+  const disabledDetail = hasSession ? 'Open the tab in a pane first' : 'No tmux tab focused';
+  return [
+    menuCommand('Transcript', () => {
+      if (active) activateTab(session, 'transcript');
+    }, {
+      disabled: !active,
+      detail: active ? '' : disabledDetail,
+      ariaLabel: ['Transcript', focusDetail].filter(Boolean).join(' - '),
+    }),
+    menuCommand('AI summary', () => {
+      if (active) activateTab(session, 'summary');
+    }, {
+      disabled: readOnlyMode || !active,
+      detail: readOnlyMode ? 'Admin only' : (active ? '' : disabledDetail),
+      ariaLabel: ['AI summary', focusDetail].filter(Boolean).join(' - '),
+    }),
+    menuCommand('Event log', () => {
+      if (active) activateTab(session, 'events');
+    }, {
+      disabled: !active,
+      detail: active ? '' : disabledDetail,
+      ariaLabel: ['Event log', focusDetail].filter(Boolean).join(' - '),
+    }),
+    menuCommand('Branch Info', () => {
+      if (!active) return;
+      const panel = document.getElementById(`panel-${session}`);
+      if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
+    }, {
+      disabled: !active,
+      detail: active ? '' : disabledDetail,
+      ariaLabel: ['Branch Info', focusDetail].filter(Boolean).join(' - '),
+    }),
+  ];
+}
+
 function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
@@ -2118,8 +2304,8 @@ function newTmuxSessionItems() {
       iconHtml: agentIcon(agent),
       disabled: readOnlyMode || !available || capped,
       detail: readOnlyMode
-        ? 'Requires admin access'
-        : (!available ? `${agentName(agent)} is not available on the server PATH` : (capped ? 'Visible session limit reached' : 'Create the next numbered tmux session')),
+        ? 'Admin only'
+        : (!available ? `${agentName(agent)} unavailable` : (capped ? 'Limit reached' : 'Create tmux session')),
     });
   });
 }
@@ -2159,27 +2345,23 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
 }
 
 function appMenuTree() {
-  const activeTmux = currentActiveTmuxSession();
-  const autoPayload = activeTmux ? autoApproveStates.get(activeTmux) : null;
-  const autoHere = activeTmux ? autoApproveEnabledHere(autoPayload) : false;
+  const activeTmux = currentSessionActionTarget();
   const openItems = orderedPaneItems(activePaneItems());
   return [
     {
       id: 'file',
       label: 'File',
       items: [
-        menuSubmenu('New tmux session', newTmuxSessionItems()),
-        menuSeparator(),
         menuCommand(fileExplorerLabel(), () => selectSession(fileExplorerItemId), {
           checked: itemInLayout(fileExplorerItemId),
-          detail: 'Browse files and open editors',
+          detail: 'Browse files',
         }),
-        menuCommand('Open file...', null, {
+        menuCommand('Open file', null, {
           disabled: true,
           detail: `Use ${fileExplorerLabel()} for now`,
         }),
         menuSeparator(),
-        menuCommand('Log out', () => { window.location.href = '/logout'; }, {
+        menuCommand('Log out', logOut, {
           detail: 'End this browser session',
         }),
       ],
@@ -2190,17 +2372,32 @@ function appMenuTree() {
       items: [
         menuCommand(tabMetaVisible ? 'Hide tab metadata' : 'Show tab metadata', toggleTabMetadata, {
           checked: tabMetaVisible,
-          detail: 'Controls branch, state, PR, and cwd text in tabs',
+          detail: 'Branch, state, PR, cwd',
         }),
         menuTabCommand(infoItemId, {
           checked: itemIsActivePaneTab(infoItemId),
           detail: 'Open the repository overview panel',
         }),
         menuSubmenu('Layout', [
-          menuCommand('Single pane', null, {disabled: true, detail: 'Coming after menu navigation is stable'}),
-          menuCommand('Grid', null, {disabled: true, detail: 'Current layout can still be changed by dragging panes'}),
+          menuCommand('Single pane', null, {disabled: true, detail: 'Coming soon'}),
+          menuCommand('Grid', null, {disabled: true, detail: 'Drag panes for now'}),
           menuCommand('Wall', null, {disabled: true}),
         ]),
+      ],
+    },
+    {
+      id: 'tmux',
+      label: 'Tmux',
+      items: [
+        menuSubmenu('New tmux session', newTmuxSessionItems()),
+        menuSeparator(),
+        ...tmuxSessionViewCommands(activeTmux),
+        menuSeparator(),
+        ...tmuxSessionActionCommands(activeTmux),
+        menuCommand('Resume session', null, {
+          disabled: true,
+          detail: 'Coming soon',
+        }),
       ],
     },
     {
@@ -2209,38 +2406,19 @@ function appMenuTree() {
       items: tabMenuItems(openItems),
     },
     {
-      id: 'yolo',
-      label: 'YOLO',
-      items: [
-        menuCommand(activeTmux && autoHere ? `Disable YOLO for ${sessionLabel(activeTmux)}` : `Enable YOLO for ${activeTmux ? sessionLabel(activeTmux) : 'session'}`, async () => {
-          if (!activeTmux) return;
-          await toggleAutoApprove(activeTmux);
-          renderSessionButtons();
-          renderPaneTabStrips();
-        }, {
-          checked: autoHere,
-          disabled: readOnlyMode || !activeTmux,
-          detail: activeTmux ? menuTabDetail(activeTmux) : 'Focus a tmux session first',
-        }),
-        menuCommand('Open event log', () => {
-          if (activeTmux) activateTab(activeTmux, 'events');
-        }, {
-          disabled: !activeTmux || !activeSessions.includes(activeTmux),
-          detail: activeTmux ? `Events for ${sessionLabel(activeTmux)}` : 'Focus a tmux session first',
-        }),
-      ],
-    },
-    {
       id: 'settings',
       label: 'Settings',
       items: [
-        menuCommand(notificationsEnabled ? 'Disable Notify' : 'Enable Notify', toggleNotifications, {
-          checked: notificationsEnabled,
+        menuCommand('Tab metadata', toggleTabMetadata, {
+          iconHtml: appMenuUiIcon('tab-meta', tabMetaVisible),
+        }),
+        menuCommand('Notify', toggleNotifications, {
           disabled: readOnlyMode,
-          detail: readOnlyMode ? 'Requires admin access' : 'Mirror of the top-right Notify button',
+          detail: readOnlyMode ? 'Requires admin access' : '',
+          iconHtml: appMenuUiIcon('notify', notificationsEnabled),
         }),
         menuCommand('Refresh', refreshAll, {
-          detail: 'Mirror of the top-right Refresh button',
+          iconHtml: appMenuUiIcon('refresh'),
         }),
       ],
     },
@@ -2252,9 +2430,10 @@ function appMenuTree() {
           disabled: true,
           detail: bootstrap.versionCommitTime ? `Last commit: ${bootstrap.versionCommitTime}` : '',
         }),
-        menuCommand('Keyboard shortcuts', null, {
-          disabled: true,
-          detail: 'Use tmux and terminal shortcuts inside each pane',
+        menuSubmenu('Keyboard shortcuts', keyboardShortcutItems()),
+        menuCommand('Open README', openProjectReadme, {
+          disabled: !projectReadmePath(),
+          detail: 'Local README',
         }),
       ],
     },
@@ -2315,6 +2494,66 @@ function createAppMenuBar() {
   return bar;
 }
 
+function appMenuViewportInlineSize() {
+  return Math.max(0, document.documentElement?.clientWidth || window.innerWidth || 0);
+}
+
+function appMenuAnchorInlineSize(popover) {
+  const anchor = popover?.parentElement?.querySelector?.(':scope > .app-menu-button, :scope > .app-menu-command');
+  return Math.ceil(anchor?.getBoundingClientRect?.().width || 0);
+}
+
+function measureAppMenuContentWidth(popover) {
+  if (!popover?.cloneNode || !document.body) return null;
+  const clone = popover.cloneNode(true);
+  clone.style.position = 'fixed';
+  clone.style.insetInlineStart = '0';
+  clone.style.insetBlockStart = '0';
+  clone.style.transform = 'translateX(-100%)';
+  clone.style.visibility = 'hidden';
+  clone.style.pointerEvents = 'none';
+  clone.style.opacity = '0';
+  clone.style.width = 'max-content';
+  clone.style.minWidth = '0';
+  clone.style.maxWidth = 'none';
+  clone.style.maxHeight = 'none';
+  clone.style.removeProperty('--app-menu-fit-width');
+  clone.style.removeProperty('--app-menu-fit-offset');
+  clone.querySelectorAll('.app-menu-command').forEach(command => {
+    command.style.width = 'max-content';
+    command.style.minWidth = '0';
+    command.style.maxWidth = 'none';
+  });
+  clone.querySelectorAll('.app-menu-rich, .pane-tab-core, .session-button-text, .session-button-name, .session-button-dir, .session-button-detail, .tab-inline-detail, .pane-tab-info-label').forEach(node => {
+    node.style.maxWidth = 'none';
+    node.style.overflow = 'visible';
+    node.style.textOverflow = 'clip';
+    node.style.whiteSpace = 'nowrap';
+  });
+  document.body.appendChild(clone);
+  const width = Math.ceil(clone.getBoundingClientRect().width || clone.scrollWidth || 0);
+  clone.remove();
+  return width || null;
+}
+
+function fitAppMenuPopover(popover) {
+  if (!popover) return;
+  popover.style.setProperty('--app-menu-fit-offset', '0px');
+  popover.style.removeProperty('--app-menu-fit-width');
+  const measured = measureAppMenuContentWidth(popover);
+  const anchorWidth = appMenuAnchorInlineSize(popover);
+  const desiredWidth = Math.max(anchorWidth, measured || 0);
+  if (desiredWidth > 0) popover.style.setProperty('--app-menu-fit-width', `${desiredWidth}px`);
+
+  const rect = popover.getBoundingClientRect();
+  const viewportRight = Math.max(0, appMenuViewportInlineSize() - popoverEdgeGapPx());
+  if (!rect.width || !viewportRight) return;
+  const overflow = Math.max(0, rect.right - viewportRight);
+  if (!overflow) return;
+  const maxShift = Math.max(0, rect.width - anchorWidth);
+  popover.style.setProperty('--app-menu-fit-offset', `${-Math.min(overflow, maxShift)}px`);
+}
+
 function createAppMenu(menu) {
   const wrapper = document.createElement('div');
   wrapper.className = 'app-menu';
@@ -2331,6 +2570,7 @@ function createAppMenu(menu) {
   popover.setAttribute('role', 'menu');
   popover.setAttribute('aria-label', menu.label);
   for (const item of menu.items) popover.appendChild(createAppMenuItem(item));
+  fitAppMenuPopover(popover);
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -2387,6 +2627,7 @@ function createAppSubmenu(item) {
   submenu.setAttribute('role', 'menu');
   submenu.setAttribute('aria-label', item.label);
   for (const child of item.items || []) submenu.appendChild(createAppMenuItem(child));
+  fitAppMenuPopover(submenu);
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -2407,16 +2648,17 @@ function createAppSubmenu(item) {
 function createAppMenuCommand(item, options = {}) {
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' ');
+  button.className = ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : '', item.checked ? 'has-check' : ''].filter(Boolean).join(' ');
   button.setAttribute('role', 'menuitem');
   if (item.checked) button.dataset.checked = 'true';
   if (item.disabled) button.disabled = true;
-  if (item.ariaLabel) button.setAttribute('aria-label', item.ariaLabel);
-  const title = item.title || [item.label, item.detail].filter(Boolean).join('\n');
-  if (title) button.title = title;
-  const contentHtml = item.html
-    ? `<span class="app-menu-rich">${item.html}</span>`
-    : `<span class="app-menu-line">${item.iconHtml ? `<span class="app-menu-icon">${item.iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
+  const ariaLabel = item.ariaLabel || [item.label, item.detail].filter(Boolean).join(' - ');
+  if (ariaLabel) button.setAttribute('aria-label', ariaLabel);
+  const richHtml = item.html ? stripTitleAttrs(item.html) : '';
+  const iconHtml = item.iconHtml ? stripTitleAttrs(item.iconHtml) : '';
+  const contentHtml = richHtml
+    ? `<span class="app-menu-rich">${richHtml}</span>`
+    : `<span class="app-menu-line">${iconHtml ? `<span class="app-menu-icon">${iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
   const detailHtml = item.detail ? `<span class="app-menu-detail">${esc(item.detail)}</span>` : '';
   button.innerHTML = `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`;
   if (!options.asSubmenu) {
@@ -2536,8 +2778,11 @@ function openAppMenu(wrapper, options = {}) {
   if (!wrapper) return;
   appMenuHoverTimer = clearTimer(appMenuHoverTimer);
   appMenuCloseTimer = clearTimer(appMenuCloseTimer);
+  closeContextMenus();
   closeOtherSessionPopovers(null);
   closeAppMenus(wrapper);
+  fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
+  wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
   wrapper.classList.add('open');
   wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => submenu.classList.add('open'));
   openAppMenuId = wrapper.dataset.appMenu || null;
@@ -2580,13 +2825,16 @@ function toggleFileExplorer() {
 }
 
 async function openFileExplorerAt(path, options = {}) {
-  const root = normalizeDirectoryPath(path);
+  const root = normalizeDirectoryPath(expandUserPath(path));
   const entries = await fetchDirectory(root);
-  if (!entries) return false;
+  if (!entries) {
+    setFileExplorerPathDisplay(root, {error: fileExplorerPathError || `Cannot open ${root}`});
+    return false;
+  }
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   fileExplorerRoot = root;
-  if (fileExplorerPath) fileExplorerPath.textContent = fileExplorerRoot;
+  setFileExplorerPathDisplay(fileExplorerRoot);
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
     fileExplorerTree.replaceChildren();
@@ -2606,17 +2854,28 @@ async function fetchDirectory(path, options = {}) {
   try {
     const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`);
     if (!response.ok) {
-      console.warn('fs list failed', root, response.status);
+      const payload = await response.json().catch(() => ({}));
+      fileExplorerPathError = payload.error || `Cannot open ${root} (${response.status})`;
+      console.warn('fs list failed', root, response.status, fileExplorerPathError);
       return null;
     }
     const payload = await response.json();
     const entries = payload.entries || [];
+    fileExplorerPathError = '';
     if (options.recordSignature !== false) recordDirectorySignature(root, entries);
     return entries;
   } catch (err) {
+    fileExplorerPathError = `Cannot open ${root}: ${err}`;
     console.warn('fs list error', root, err);
     return null;
   }
+}
+
+function expandUserPath(path) {
+  const text = String(path || '').trim();
+  if (text === '~') return homePath || text;
+  if (text.startsWith('~/')) return homePath ? `${homePath}${text.slice(1)}` : text;
+  return text;
 }
 
 function directoryEntriesSignature(entries) {
@@ -2646,6 +2905,62 @@ function currentFileExplorerRoot() {
   return normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
 }
 
+function fileExplorerPathInputs() {
+  return [
+    fileExplorerPath,
+    ...Array.from(document.querySelectorAll('.file-explorer-path-inline')),
+  ].filter(Boolean);
+}
+
+function setFileExplorerPathElementValue(node, path) {
+  if (!node) return;
+  if ('value' in node) node.value = path;
+  else node.textContent = path;
+}
+
+function setFileExplorerPathError(node, message = '') {
+  if (!node) return;
+  node.classList.toggle('invalid', Boolean(message));
+  if (message) node.title = message;
+  else node.removeAttribute('title');
+}
+
+function setFileExplorerPathDisplay(path = currentFileExplorerRoot(), options = {}) {
+  const normalized = normalizeDirectoryPath(path);
+  const error = options.error || '';
+  for (const input of fileExplorerPathInputs()) {
+    setFileExplorerPathElementValue(input, normalized);
+    setFileExplorerPathError(input, error);
+  }
+}
+
+async function commitFileExplorerPathInput(input) {
+  const raw = 'value' in input ? input.value : input.textContent;
+  const target = expandUserPath(raw);
+  if (!target) return false;
+  const opened = await openFileExplorerAt(target);
+  if (!opened) setFileExplorerPathError(input, fileExplorerPathError || `Cannot open ${target}`);
+  return opened;
+}
+
+function bindFileExplorerPathInput(input) {
+  if (!input || input.dataset.pathInputBound === 'true') return;
+  input.dataset.pathInputBound = 'true';
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      commitFileExplorerPathInput(input);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      setFileExplorerPathDisplay();
+      input.blur?.();
+    }
+  });
+  input.addEventListener('focus', () => input.select?.());
+}
+
 function pathIsInsideDirectory(path, root) {
   const child = normalizeDirectoryPath(path);
   const parent = normalizeDirectoryPath(root);
@@ -2673,7 +2988,7 @@ function finderTargetPathForItem(item) {
 
 function finderCandidateItems(preferredItem = null) {
   const candidates = [];
-  for (const item of [preferredItem, focusedPanelItem, focusedTerminal, currentActiveMenuItem(), ...activePaneItems()]) {
+  for (const item of [preferredItem, focusedPanelItem, focusedTerminal, lastFocusedTmuxSession, currentActiveMenuItem(), ...activePaneItems()]) {
     if (item && !candidates.includes(item)) candidates.push(item);
   }
   return candidates.filter(item => !isFileExplorerItem(item) && !isInfoItem(item));
@@ -2841,7 +3156,7 @@ async function expandFileTreeContainerToPath(container, root, path, generation =
 async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoot(), generation = fileExplorerSyncGeneration, options = {}) {
   let expanded = false;
   if (!fileExplorerRoot) fileExplorerRoot = root;
-  if (fileExplorerPath) fileExplorerPath.textContent = root;
+  setFileExplorerPathDisplay(root);
   for (const container of fileExplorerTreeContainers()) {
     if (generation !== fileExplorerSyncGeneration) return false;
     expanded = await expandFileTreeContainerToPath(container, root, path, generation, options) || expanded;
@@ -2876,13 +3191,17 @@ function renderTreeChildren(container, parentPath, entries, depth) {
     row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
     row.draggable = entry.kind === 'file' || entry.kind === 'dir';
     row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
+    row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
     const currentFile = entry.kind === 'file' && fullPath === activeFile;
     const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
     row.classList.toggle('current-file', currentFile);
     row.classList.toggle('current-directory', currentDirectoryRow);
     if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
-    const icon = entry.kind === 'dir' ? '▸' : (entry.kind === 'file' ? '📄' : '·');
+    const icon = entry.kind === 'dir' ? '▸' : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
     row.innerHTML = `<span class="file-tree-icon">${icon}</span><span class="file-tree-name">${esc(entry.name)}</span>`;
+    if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
+      bindFileImagePreview(row.querySelector('.file-tree-icon'), fullPath, entry);
+    }
     row.addEventListener('click', event => {
       event.stopPropagation();
       if (event.detail > 1) return;
@@ -2901,6 +3220,67 @@ function renderTreeChildren(container, parentPath, entries, depth) {
     row.addEventListener('dragstart', event => startFileTreeDrag(event, row, fullPath, entry));
     container.appendChild(row);
   }
+}
+
+function rawFileUrl(path) {
+  return `/api/fs/raw?path=${encodeURIComponent(path)}`;
+}
+
+function closeFileImagePreview() {
+  fileImagePreviewShowTimer = clearTimer(fileImagePreviewShowTimer);
+  fileImagePreviewHideTimer = clearTimer(fileImagePreviewHideTimer);
+  fileImagePreviewPopover?.remove();
+  fileImagePreviewPopover = null;
+}
+
+function positionFileImagePreview(anchor, popover) {
+  const anchorRect = anchor.getBoundingClientRect();
+  const rect = popover.getBoundingClientRect();
+  const edgeGap = popoverEdgeGapPx();
+  const desiredLeft = anchorRect.right + 10;
+  const desiredTop = anchorRect.top - 8;
+  const left = Math.min(Math.max(edgeGap, desiredLeft), Math.max(edgeGap, window.innerWidth - rect.width - edgeGap));
+  const top = Math.min(Math.max(edgeGap, desiredTop), Math.max(edgeGap, window.innerHeight - rect.height - edgeGap));
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(top)}px`;
+}
+
+function openFileImagePreview(anchor, path, entry) {
+  closeFileImagePreview();
+  if (!anchor || !document.body) return;
+  const popover = document.createElement('div');
+  popover.className = 'file-image-preview-popover';
+  const img = document.createElement('img');
+  img.src = rawFileUrl(path);
+  img.alt = entry?.name || basenameOf(path);
+  popover.appendChild(img);
+  popover.addEventListener('pointerenter', () => {
+    fileImagePreviewHideTimer = clearTimer(fileImagePreviewHideTimer);
+  });
+  popover.addEventListener('pointerleave', closeFileImagePreviewSoon);
+  document.body.appendChild(popover);
+  fileImagePreviewPopover = popover;
+  positionFileImagePreview(anchor, popover);
+}
+
+function closeFileImagePreviewSoon() {
+  fileImagePreviewShowTimer = clearTimer(fileImagePreviewShowTimer);
+  fileImagePreviewHideTimer = clearTimer(fileImagePreviewHideTimer);
+  fileImagePreviewHideTimer = setTimeout(closeFileImagePreview, popoverHideDelayMs);
+}
+
+function bindFileImagePreview(icon, path, entry) {
+  if (!icon || icon.dataset.imagePreviewBound === 'true') return;
+  icon.dataset.imagePreviewBound = 'true';
+  icon.addEventListener('pointerenter', () => {
+    fileImagePreviewHideTimer = clearTimer(fileImagePreviewHideTimer);
+    fileImagePreviewShowTimer = clearTimer(fileImagePreviewShowTimer);
+    fileImagePreviewShowTimer = setTimeout(() => {
+      fileImagePreviewShowTimer = null;
+      openFileImagePreview(icon, path, entry);
+    }, popoverShowDelayMs);
+  });
+  icon.addEventListener('pointerleave', closeFileImagePreviewSoon);
 }
 
 function selectableFileTreeRows(container = document) {
@@ -3018,6 +3398,8 @@ async function fetchFilePathInfo(path) {
 
 async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   closeFileContextMenu();
+  closeTerminalContextMenu();
+  closeSessionContextMenu();
   if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
   const selectedPaths = fileTreeActionPaths(fullPath);
   const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
@@ -3036,13 +3418,7 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
-  menu.addEventListener('pointerdown', event => event.stopPropagation());
-  document.body.appendChild(menu);
-  fileContextMenu = menu;
-  positionContextMenu(menu, x, y);
-  document.addEventListener('pointerdown', fileContextMenuPointerdown, true);
-  document.addEventListener('keydown', fileContextMenuKeydown, true);
-  window.addEventListener('blur', closeFileContextMenu);
+  fileContextMenu.open(menu, x, y);
 }
 
 function fileContextMenuState(entry, selectedPaths, relativePaths) {
@@ -3248,6 +3624,21 @@ async function refreshFileExplorerPanelTrees(options = {}) {
 function fileExtensionOf(name) {
   const dot = name.lastIndexOf('.');
   return dot === -1 ? '' : name.slice(dot).toLowerCase();
+}
+
+function fileIconFor(name) {
+  const lowerName = String(name || '').toLowerCase();
+  const ext = fileExtensionOf(lowerName);
+  if (IMAGE_EXTENSIONS.has(ext)) return '🖼';
+  if (ext === '.log') return '🪵';
+  if (['.md', '.txt', '.rst'].includes(ext)) return '📝';
+  if (['.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env'].includes(ext)) return '⚙';
+  if (['.sh', '.bash', '.zsh', '.fish'].includes(ext)) return '🐚';
+  if (['.py', '.js', '.ts', '.tsx', '.jsx', '.rs', '.go', '.c', '.h', '.cpp', '.hpp', '.rb', '.lua', '.sql'].includes(ext)) return '🧩';
+  if (['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz'].includes(ext)) return '🗜';
+  if (['dockerfile', 'makefile'].includes(lowerName)) return '⚙';
+  if (['.gitignore', 'license', 'readme'].includes(lowerName)) return '📝';
+  return '📄';
 }
 
 function basenameOf(path) {
@@ -3823,12 +4214,19 @@ function applyEditorWrapToTextarea(textarea) {
   textarea.classList.toggle('editor-wrap', fileEditorWrapEnabled);
 }
 
+function setFileEditorIcon(button, iconClass) {
+  if (!button || button.querySelector(`.${iconClass}`)) return;
+  button.innerHTML = `<span class="file-editor-icon ${iconClass}" aria-hidden="true"></span>`;
+}
+
 function updateEditorWrapButton(button) {
   if (!button) return;
   button.classList.toggle('active', fileEditorWrapEnabled);
   button.setAttribute('aria-pressed', fileEditorWrapEnabled ? 'true' : 'false');
-  button.title = fileEditorWrapEnabled ? 'Disable word wrap' : 'Enable word wrap';
-  button.textContent = 'Wrap';
+  const label = fileEditorWrapEnabled ? 'Disable word wrap' : 'Enable word wrap';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  setFileEditorIcon(button, 'file-editor-icon-wrap');
 }
 
 function applyEditorWrapPreference() {
@@ -3933,6 +4331,7 @@ function collapseDirectoryRow(row, fullPath) {
 
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
 if (fileExplorerPathCopy) fileExplorerPathCopy.addEventListener('click', copyCurrentFileExplorerPath);
+bindFileExplorerPathInput(fileExplorerPath);
 if (fileExplorerHiddenToggle) {
   fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
   fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
@@ -4231,7 +4630,7 @@ function updateMetadataBadgePulses(meta) {
 
 function defaultBranchBadgeHtml(session, info) {
   if (!isDefaultBranch(info?.project?.git)) return '';
-  return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator branch-indicator')}">MAIN</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')}">MAIN</span>`;
 }
 
 function sessionWorkDescription(session, info, limit = 96) {
@@ -5041,6 +5440,7 @@ function activatePaneTab(side, session) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
+  setFocusedPanelItem(session);
   if (activeItemForSide(side) === session) {
     focusPanel(session);
     return;
@@ -5227,19 +5627,19 @@ function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
   if (!['merged', 'draft', 'closed'].includes(status)) return '';
-  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator ${pullRequestStatusClass(pr)}`)}">${pullRequestStatusDisplay(pr)}</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${pullRequestStatusDisplay(pr)}</span>`;
 }
 
 function pullRequestPrIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
-  return `<span class="${metadataBadgeClasses(session, 'pr', `ci-indicator pr-indicator ${pullRequestStatusClass(pr)}`)}">#${esc(pr.number)}</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'pr', `ci-indicator tab-symbol pr-indicator ${pullRequestStatusClass(pr)}`)}">#${esc(pr.number)}</span>`;
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
   if (pullRequestStatusLabel(pr).toLowerCase() === 'merged') return '';
   const state = pr?.checks?.state;
   if (!state || state === 'unknown') return '';
-  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator ${pullRequestStatusClass(pr)}`)}">CI</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">CI</span>`;
 }
 
 function pullRequestLinkHtml(pr) {
@@ -5406,6 +5806,211 @@ async function createNextSession(agent) {
     statusEl.innerHTML = `<span class="ok">created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}</span>`;
   } catch (error) {
     statusEl.innerHTML = `<span class="err">session create failed: ${esc(error)}</span>`;
+  }
+}
+
+function tmuxSessionNameError(name) {
+  const text = String(name || '').trim();
+  if (!text) return 'session name is required';
+  if (text.length > 64) return 'session name must be 64 characters or fewer';
+  // Keep in sync with TMUX_SESSION_NAME_RE in yolomux_lib/app.py.
+  if (!/^[A-Za-z0-9_. -]+$/.test(text)) return 'session name may contain only letters, numbers, spaces, dot, dash, and underscore';
+  return '';
+}
+
+function rekeyMap(map, oldKey, newKey) {
+  if (!map.has(oldKey) || oldKey === newKey) return;
+  if (!map.has(newKey)) map.set(newKey, map.get(oldKey));
+  map.delete(oldKey);
+}
+
+function stopSessionUi(session) {
+  const item = terminals.get(session);
+  if (item) closeTerminalItem(session, item);
+  terminals.delete(session);
+  stopTranscriptStream(session);
+  stopSummaryStream(session);
+  const panel = panelNodes.get(session);
+  if (panel) panel.remove();
+  panelNodes.delete(session);
+}
+
+function replaceSessionMetadata(oldSession, newSession) {
+  for (const map of [
+    autoApproveStates,
+    sessionStateKeys,
+    notificationLastSent,
+    attentionAlertTimers,
+    metadataBadgePulseUntil,
+    uploadResultsBySession,
+    uploadCleanupTimers,
+    pasteCounters,
+  ]) {
+    rekeyMap(map, oldSession, newSession);
+  }
+  if (transcriptMeta.sessions?.[oldSession]) {
+    transcriptMeta.sessions = {
+      ...(transcriptMeta.sessions || {}),
+      [newSession]: transcriptMeta.sessions[newSession] || transcriptMeta.sessions[oldSession],
+    };
+    delete transcriptMeta.sessions[oldSession];
+  }
+  if (Array.isArray(transcriptMeta.session_order)) {
+    transcriptMeta.session_order = transcriptMeta.session_order.map(item => item === oldSession ? newSession : item);
+  }
+}
+
+function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
+  const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
+  stopSessionUi(oldSession);
+  replaceSessionMetadata(oldSession, newSession);
+  setSessionOrder(next);
+  if (focusedTerminal === oldSession) focusedTerminal = newSession;
+  if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
+  if (lastFocusedTmuxSession === oldSession) lastFocusedTmuxSession = newSession;
+  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {focusSession: newSession, prune: false});
+}
+
+function closeSessionRenameDialog() {
+  if (!sessionRenameDialog) return;
+  sessionRenameDialog.remove();
+  sessionRenameDialog = null;
+  document.removeEventListener('keydown', sessionRenameDialogKeydown, true);
+}
+
+function sessionRenameDialogKeydown(event) {
+  if (event.key === 'Escape') closeSessionRenameDialog();
+}
+
+function showSessionRenameDialog(session) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot rename sessions</span>';
+    return false;
+  }
+  if (!isTmuxSession(session)) return false;
+  closeContextMenus();
+  closeAppMenus();
+  closeSessionRenameDialog();
+  const overlay = document.createElement('div');
+  overlay.className = 'session-rename-backdrop';
+  overlay.setAttribute('role', 'presentation');
+  overlay.innerHTML = `
+    <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="Rename tmux session">
+      <div class="session-rename-title">Rename ${esc(sessionLabel(session))} ${esc(session)}</div>
+      <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="New session name" autocomplete="off">
+      <div class="session-rename-error" hidden></div>
+      <div class="session-rename-actions">
+        <button type="button" class="session-rename-cancel">Cancel</button>
+        <button type="submit" class="session-rename-submit">Rename</button>
+      </div>
+    </form>`;
+  const form = overlay.querySelector('form');
+  const input = overlay.querySelector('.session-rename-input');
+  const errorNode = overlay.querySelector('.session-rename-error');
+  const cancel = overlay.querySelector('.session-rename-cancel');
+  const showError = message => {
+    errorNode.textContent = message;
+    errorNode.hidden = false;
+  };
+  overlay.addEventListener('pointerdown', event => {
+    if (event.target === overlay) closeSessionRenameDialog();
+  });
+  cancel.addEventListener('click', closeSessionRenameDialog);
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const nextName = input.value.trim();
+    const nameError = tmuxSessionNameError(nextName);
+    if (nameError) {
+      showError(nameError);
+      input.focus();
+      return;
+    }
+    errorNode.hidden = true;
+    const renamed = await renameTmuxSession(session, nextName);
+    if (!renamed) {
+      showError('rename failed; see status line');
+      input.focus();
+    }
+  });
+  document.body.appendChild(overlay);
+  sessionRenameDialog = overlay;
+  document.addEventListener('keydown', sessionRenameDialogKeydown, true);
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 0);
+  return true;
+}
+
+async function renameTmuxSession(session, proposedName) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot rename sessions</span>';
+    return false;
+  }
+  if (!isTmuxSession(session)) return false;
+  if (proposedName === undefined) return showSessionRenameDialog(session);
+  const rawName = proposedName;
+  const newName = String(rawName || '').trim();
+  const nameError = tmuxSessionNameError(newName);
+  if (nameError) {
+    statusEl.innerHTML = `<span class="err">${esc(nameError)}</span>`;
+    return false;
+  }
+  if (newName === session) {
+    closeSessionRenameDialog();
+    return true;
+  }
+  statusEl.textContent = `renaming ${sessionLabel(session)}...`;
+  try {
+    const response = await apiFetch(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
+    const payload = await response.json();
+    if (!response.ok) {
+      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session rename failed')}</span>`;
+      return false;
+    }
+    const renamed = payload.new_session || newName;
+    replaceTmuxSessionInClient(session, renamed, payload.sessions);
+    closeSessionRenameDialog();
+    await ensureTerminalRunning(renamed);
+    refreshTranscripts();
+    renderAutoApproveButtons();
+    statusEl.innerHTML = `<span class="ok">renamed ${esc(session)} to ${esc(renamed)}</span>`;
+    return true;
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">session rename failed: ${esc(error)}</span>`;
+    return false;
+  }
+}
+
+async function killTmuxSession(session) {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot kill sessions</span>';
+    return false;
+  }
+  if (!isTmuxSession(session)) return false;
+  if (!window.confirm(`Kill tmux session ${sessionLabel(session)}?`)) return false;
+  statusEl.textContent = `killing ${sessionLabel(session)}...`;
+  try {
+    const response = await apiFetch(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
+    const payload = await response.json();
+    if (!response.ok) {
+      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session kill failed')}</span>`;
+      return false;
+    }
+    const previousActive = activeSessions.slice();
+    stopSessionUi(session);
+    const sessionsChanged = updateSessionList(payload.sessions || []);
+    autoApproveStates.delete(session);
+    renderSessionButtons();
+    renderPanels(previousActive);
+    if (sessionsChanged) renderPaneTabStrips();
+    refreshTranscripts();
+    renderAutoApproveButtons();
+    statusEl.innerHTML = `<span class="ok">killed ${esc(sessionLabel(session))}</span>`;
+    return true;
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">session kill failed: ${esc(error)}</span>`;
+    return false;
   }
 }
 
@@ -5939,7 +6544,7 @@ function renderLayoutColumn(side) {
   column.className = 'layout-column';
   if (isFileExplorerItem(session)) column.classList.add('file-explorer-column');
   if (isFileEditorItem(session)) column.classList.add('file-editor-column');
-  if (!session && paneIsPlaceholder(side)) column.classList.add('empty-pane-column');
+  if (!session) column.classList.add('empty-pane-column');
   column.dataset.slot = side;
   column.dataset.side = slotSide(side);
   column.appendChild(renderDropSlot(side, session));
@@ -5951,7 +6556,7 @@ function renderDropSlot(slot, session) {
   node.className = 'drop-slot';
   node.dataset.slot = slot;
   node.dataset.side = slotSide(slot);
-  if (!session && paneIsPlaceholder(slot)) {
+  if (!session) {
     node.appendChild(renderEmptyPane(slot));
     return node;
   }
@@ -6098,6 +6703,19 @@ function createPaneTab(side, item) {
     stopPropagation: true,
     ignore: event => Boolean(event.target.closest('[data-auto-session], [data-pane-tab-close]')),
   });
+  if (!isVirtual) {
+    tab.addEventListener('dblclick', event => {
+      if (event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      beginPaneTabRename(tab, item);
+    });
+    tab.addEventListener('contextmenu', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      showSessionContextMenu(item, event.clientX, event.clientY, {tab});
+    });
+  }
   tab.addEventListener('dragstart', event => {
     event.stopPropagation();
     startSessionDrag(event, item, side);
@@ -6106,8 +6724,12 @@ function createPaneTab(side, item) {
   return tab;
 }
 
+function beginPaneTabRename(tab, session) {
+  renameTmuxSession(session);
+}
+
 function bindPaneTabPopover(tab, session) {
-  const popover = tab.querySelector(':scope > .session-popover');
+  const popover = tab.querySelector?.(':scope > .session-popover');
   if (!popover) return;
   bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab));
 }
@@ -6158,16 +6780,16 @@ function bindDelayedSessionPopover(anchor, popover, position) {
 
 function positionPaneTabPopover(tab) {
   const rect = tab.getBoundingClientRect();
+  const popover = tab.querySelector?.(':scope > .session-popover');
   const viewportWidth = Math.max(0, window.innerWidth || document.documentElement?.clientWidth || 0);
-  const viewportLeft = 8;
-  const viewportRight = Math.max(viewportLeft, viewportWidth - 8);
-  const availableWidth = Math.max(1, viewportRight - viewportLeft);
-  const width = Math.min(560, availableWidth);
+  const edgeGap = popoverEdgeGapPx();
+  const viewportLeft = edgeGap;
+  const viewportRight = Math.max(viewportLeft, viewportWidth - edgeGap);
+  const width = Math.ceil(popover?.getBoundingClientRect?.().width || rect.width || 0);
   const maxLeft = Math.max(viewportLeft, viewportRight - width);
   const left = Math.min(Math.max(viewportLeft, Math.floor(rect.left)), maxLeft);
-  document.documentElement.style.setProperty('--pane-tab-popover-top', `${Math.ceil(rect.bottom + 1)}px`);
+  document.documentElement.style.setProperty('--pane-tab-popover-top', `${Math.ceil(rect.bottom)}px`);
   document.documentElement.style.setProperty('--pane-tab-popover-left', `${left}px`);
-  document.documentElement.style.setProperty('--pane-tab-popover-width', `${Math.floor(width)}px`);
 }
 
 function paneInfoTabHtml() {
@@ -6629,7 +7251,7 @@ function createFileExplorerPanel() {
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         <div class="file-explorer-toolbar">
           <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-          <span class="file-explorer-path-inline">${esc(initialPath)}</span>
+          <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(label)} root path">
           <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
           <button type="button" class="${fileExplorerPanelCloseClass()}" title="Hide ${esc(label)} from layout" aria-label="Hide ${esc(label)} from layout"></button>
         </div>
@@ -6655,6 +7277,7 @@ function createFileExplorerPanel() {
     event.stopPropagation();
     copyCurrentFileExplorerPath();
   });
+  bindFileExplorerPathInput(panel.querySelector('.file-explorer-path-inline'));
   if (closeBtn) {
     closeBtn.addEventListener('pointerdown', event => event.stopPropagation());
     closeBtn.addEventListener('click', event => {
@@ -6673,7 +7296,8 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
   if (!treeEl) return;
   const root = normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
-  if (pathEl) pathEl.textContent = root;
+  setFileExplorerPathElementValue(pathEl, root);
+  setFileExplorerPathError(pathEl);
   if (hiddenBtn) {
     hiddenBtn.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
     hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
@@ -6698,9 +7322,9 @@ function createFileEditorPanel(item) {
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
         <div class="file-editor-panel-actions">
           <button type="button" class="file-editor-preview-panel" title="Toggle Markdown preview" hidden>Preview</button>
-          <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" hidden>Wrap</button>
+          <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
-          <button type="button" class="file-editor-save-panel" title="Save" ${readOnlyMode ? 'hidden' : ''}>Save</button>
+          <button type="button" class="file-editor-save-panel" title="Save" aria-label="Save file" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
           <button type="button" class="${fileEditorPanelCloseClass()}" title="Close" aria-label="Close"></button>
         </div>
       </div>
@@ -7317,16 +7941,18 @@ function windowStepButtonHtml(session, dir, visible, disabled) {
 function panelControlsHtml(session, options = {}) {
   const disabled = options.disabled === true;
   const unavailableLabel = options.unavailableLabel || itemLabel(session);
-  const disabledAttrs = disabled ? ` type="button" disabled title="unavailable for ${esc(unavailableLabel)}"` : '';
-  const readonlyAttrs = label => ` type="button" disabled title="${esc(label)} requires admin access"`;
-  const tabAttrs = name => {
-    if (disabled) return disabledAttrs;
+  const disabledAttrs = label => disabled ? ` type="button" disabled title="unavailable for ${esc(unavailableLabel)}" aria-label="${esc(label)}"` : '';
+  const readonlyAttrs = label => ` type="button" disabled title="${esc(label)} requires admin access" aria-label="${esc(label)}"`;
+  const tabAttrs = (name, label = '') => {
+    if (disabled) return disabledAttrs(label || name);
     if (readOnlyMode && name === 'summary') return readonlyAttrs('AI summary');
-    return ` data-tab="${esc(session)}" data-tab-name="${name}"`;
+    const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
+    return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
-  const infoAttrs = disabled ? disabledAttrs : ` data-detail-toggle="${esc(session)}" title="hide details"`;
+  const infoAttrs = disabled ? disabledAttrs('Branch Info') : ` type="button" data-detail-toggle="${esc(session)}" title="Branch Info" aria-label="Branch Info"`;
   const info = transcriptMeta.sessions?.[session];
-  const terminalAttrs = disabled ? disabledAttrs : `${tabAttrs('terminal')} title="${esc(terminalTabTitle(session, info))}"`;
+  const terminalTitle = terminalTabTitle(session, info);
+  const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
   const terminalLabel = disabled ? 'Term' : terminalTabLabel(session, info);
   const steps = disabled ? {prev: false, next: false} : windowStepVisibility(info?.panes);
   const isFiles = isFileExplorerItem(session);
@@ -7340,14 +7966,18 @@ function panelControlsHtml(session, options = {}) {
   const expandHtml = isFiles || disabled
     ? ''
     : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`;
+  const actionsHtml = !disabled && !isFiles && isTmuxSession(session)
+    ? `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="session actions" aria-label="Session actions">...</button>`
+    : '';
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
           <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
           ${windowStepButtonHtml(session, 'next', steps.next, disabled)}
-          <button class="tab" ${tabAttrs('transcript')}>Tx</button>
-          <button class="tab" ${tabAttrs('summary')}>AI</button>
-          <button class="tab" ${tabAttrs('events')}>Log</button>
+          <button class="tab" ${tabAttrs('transcript', 'Transcript')}>Tx</button>
+          <button class="tab" ${tabAttrs('summary', 'AI summary')}>AI</button>
+          <button class="tab" ${tabAttrs('events', 'Event log')}>Log</button>
           <button class="tab panel-detail-toggle active" ${infoAttrs}>Info</button>
+          ${actionsHtml}
           <button class="${minimizeClass}" ${minimizeAttrs}></button>
           ${expandHtml}
         </div>`;
@@ -7568,6 +8198,21 @@ function bindPanelControls(panel, session) {
     event.stopPropagation();
     expandPaneFromLayout(event.currentTarget.dataset.paneExpand);
   });
+  panel.querySelector('[data-pane-actions]')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.currentTarget;
+    const rect = button.getBoundingClientRect();
+    showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
+  });
+  if (isTmuxSession(session)) {
+    panel.querySelector('.panel-head')?.addEventListener('contextmenu', event => {
+      if (event.target.closest('button, input')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      showSessionContextMenu(session, event.clientX, event.clientY);
+    });
+  }
   panel.querySelector('[data-context]')?.addEventListener('click', () => showContext(session));
   panel.addEventListener('click', event => {
     const target = event.target.closest('[data-auto-session]');
@@ -7715,6 +8360,7 @@ function pasteTargetSession(event) {
   if (sessions.includes(panelSession) && activeSessions.includes(panelSession)) return panelSession;
   if (focusedTerminal && activeSessions.includes(focusedTerminal)) return focusedTerminal;
   if (focusedPanelItem && sessions.includes(focusedPanelItem) && activeSessions.includes(focusedPanelItem)) return focusedPanelItem;
+  if (lastFocusedTmuxSession && activeSessions.includes(lastFocusedTmuxSession)) return lastFocusedTmuxSession;
   const activeTmuxSessions = activeSessions.filter(isTmuxSession);
   return activeTmuxSessions.length === 1 ? activeTmuxSessions[0] : null;
 }

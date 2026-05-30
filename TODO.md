@@ -19,7 +19,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 - Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state + tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/sessions.py`; repo/PR/CI metadata `yolomux_lib/metadata.py`; file ops `yolomux_lib/filesystem.py`; shared helpers + paths `yolomux_lib/common.py`; server-rendered HTML `yolomux_lib/web.py`; all frontend logic `static/yolomux.js` (+ `static/yolomux.css`); YOLO approval detector `auto_approve_tmux.py` and worker `yolomux_lib/auto_approve_worker.py`.
 - State lives in `~/.config/yolomux/state.json`; the YOLO event log (great for confirming state-machine behavior) is `~/.local/state/yolomux/events.jsonl`.
 - NAVIGATION RULE: line numbers in this TODO drift because the source changes constantly. Always GREP THE NAMED SYMBOL (`function foo`, `def foo`, an `id=`/class string) rather than trusting a line number. Numbers here were last verified 2026-05-29.
-- START HERE: the old EF1-EF6 easy-fix list is complete. Next unresolved priority is the P0 menu gap work: keyboard/read-only behavior, missing File/Tab actions, per-pane tab dropdown, and right-click session actions. After that, the File Explorer/editor live-refresh work is the next high-value feature.
+- START HERE: the old EF1-EF6 easy-fix list is complete. Next unresolved priority is the remaining P0 menu gap work: keyboard polish, missing View/YOLO actions, per-pane tab dropdown, and compact Tab menu rows. After that, the File Explorer/editor live-refresh work is the next high-value feature.
 
 ---
 
@@ -42,19 +42,19 @@ IMPLEMENTATION STATUS (verified 2026-05-29 — NOTE: line numbers in this file d
 - The app menu bar is ALREADY BUILT AND MOUNTED — this is a finish-wiring / gap task, NOT greenfield. The design gate below is effectively passed for the skeleton.
   - `appMenuTree()` (grep `function appMenuTree` in `static/yolomux.js`) defines the tree; `createAppMenuBar()` is appended into `#sessionButtons` (grep `createAppMenuBar`), so the old standalone session-tab strip is already replaced by the menu bar in that container.
   - Open/close, hover, keyboard nav, ARIA roles, and click-outside already exist: helpers `menuCommand` / `menuSubmenu` / `menuSection` / `menuSeparator`, plus `appMenuIsOpen` / `appMenuCommands` / `createAppMenu` / `createAppSubmenu` / `createAppMenuCommand`.
-- Current LIVE top-level menus: `File`, `View`, `Tab`, `YOLO`, `Settings`, `Help`. Gaps vs the design tree below:
+- Current LIVE top-level menus: `File`, `View`, `Tmux`, `Tab`, `Settings`, `Help`. Gaps vs the design tree below:
   - NAMING DECISION (2026-05-29): the menu that lists active/minimized/inactive tabs is named `Tab` (singular, Chrome-style). `Tab` is accurate because the menu lists/navigates Tabs, and it avoids overloading `window` (which already means a tmux window via the `<`/`>` step).
-  - File today: New tmux session (submenu), File Explorer, Open file… (disabled), Log out. MISSING: Rename / Kill tmux session, Resume. NOTE: Log out currently lives in File, not Settings.
+  - File today: File Explorer, Open file… (disabled), Log out.
+  - Tmux today: New tmux session (submenu), Rename / Kill tmux session, YOLO enable/disable for the active tmux session, Open event log, Resume session (disabled).
   - View today: tab-metadata toggle, Layout submenu (Single pane / Grid / Wall — ALL disabled, "Coming after menu navigation is stable"), inactive tabs. MISSING: Filter/Sort, "Branch Info: show", panel-tabs visibility.
-  - YOLO today: Enable/Disable YOLO for the active session, Open event log. MISSING: Policy, Open rule file, Approval queue, Audit log, Risk legend.
-  - Settings today: Notify (mirror), Refresh (mirror). MISSING: "Global settings…" (no Settings panel exists yet), Log out mirror.
-  - Help today: version (disabled), Keyboard shortcuts (disabled). MISSING: real shortcuts list, Docs link.
-  - NOT BUILT yet: per-pane left dropdown, compact rich rows in the `Tab` menu, per-pane kebab, right-click-tab rename.
+  - Settings today: Tab metadata (`#`), Notify, Refresh. These use framed icons that match the top-right controls, including active state. Log out stays only in File / top-right.
+  - Help today: version (disabled), Keyboard shortcuts submenu, Open README.
+  - NOT BUILT yet: per-pane left dropdown, compact rich rows in the `Tab` menu.
 
 DESIGN GATE (mostly satisfied — the skeleton is built; remaining gate work is reconciling the items below against the live `appMenuTree()`):
 
-- [x] Decision confirmed: the standalone top session-tab strip is gone; `#sessionButtons` now hosts the menu bar. New session for Claude AND Codex lives in the File menu (`New tmux session` submenu).
-- [x] Reconcile the live menu (`File/View/Tab/YOLO/Settings/Help`) with the design tree below — `Log out` stays in File for now and can be mirrored in Settings later.
+- [x] Decision confirmed: the standalone top session-tab strip is gone; `#sessionButtons` now hosts the menu bar. New session for Claude AND Codex lives in the Tmux menu (`New tmux session` submenu).
+- [x] Reconcile the live menu (`File/View/Tmux/Tab/Settings/Help`) with the design tree below — `Log out` stays in File and the top-right controls.
 - [x] Rename `Panes` menu -> `Tab` (singular, like Chrome's `Tab` menu). Scope: the `appMenuTree()` entry `id: 'tab'` / `label: 'Tab'`; the top-bar layout and design tree in this section; and the README terminology section. This name matches the glossary (the menu lists Tabs), so the README's pane/tab/window definitions stay correct — only the menu label changed; do NOT rename the `pane` (split region) or `window` (tmux window) concepts.
 
 Current controls to be reorganized (inventory):
@@ -63,7 +63,7 @@ Current controls to be reorganized (inventory):
 - Per-pane tab strip today: `<` / `>` window step, `Terminal`, `Tx` (transcript), `AI` (summary), `Log` (events), `Info` (detail toggle), window-close.
 - Other surfaces: File Explorer (tree + editor), Files panel, layout (single / grid / wall), inactive-tabs tray menu, per-session state badges (`RUN`/`EXEC?`/`YOLO?`/`QUES?`/`BLK`/`OFF`/`TEST`/`PR`/`IDLE`/`DONE`).
 
-Menu naming follows the latest YOLOmux terminology: `File` (create/manage), `View` (display options), `Tab` (Chrome-style — lists and navigates open tabs: active, minimized, inactive), plus app-specific `YOLO` and `Settings`, and `Help`.
+Menu naming follows the latest YOLOmux terminology: `File` (files/app actions), `View` (display options), `Tmux` (tmux session create/manage plus tmux-scoped YOLO controls), `Tab` (Chrome-style — lists and navigates open tabs: active, minimized, inactive), plus `Settings` and `Help`.
 
 MENU INSPIRATIONS (Chrome / Safari / iTerm — what to borrow):
 
@@ -74,22 +74,26 @@ MENU INSPIRATIONS (Chrome / Safari / iTerm — what to borrow):
 - iTerm separation, which our top-level split mirrors: `Shell` = create (New Window/Tab, Split, Close) -> our `File`; `Session` = per-session actions (Edit/Rename, Restart, Logging) -> our per-pane kebab + right-click-tab menu; `Window` = navigate (Select Next/Previous Tab, Select Next/Previous Pane, Move Tab, list) -> our `Tab` menu + keyboard nav. Also borrow iTerm `Edit Tab Title` (= our rename) and `View -> Toggle Tab Bar` (= our tab-metadata / panel-tabs toggles).
 - Net structure to converge on: `File` = create/open (Chrome File + iTerm Shell), `Tab` = navigate/act-on-tabs (Chrome Tab + iTerm Window's tab/pane selection), `View` = display toggles (all three), per-pane kebab + right-click = per-session actions (Chrome right-click-tab + iTerm Session).
 
-Proposed top-bar layout (left to right): `YOLOmux ver` · `[File ▾] [View ▾] [Tab ▾] [YOLO ▾] [Settings ▾] [Help ▾]` · active-session chip (label + state badge) · latency · `Notify` · `Refresh` · status · `Log out`.
+Proposed top-bar layout (left to right): `YOLOmux ver` · `[File ▾] [View ▾] [Tmux ▾] [Tab ▾] [Settings ▾] [Help ▾]` · active-session chip (label + state badge) · latency · `Notify` · `Refresh` · status · `Log out`.
 
 KEEP AS DEDICATED TOP-RIGHT BUTTONS: `Notify`, `Refresh`, `Log out`. These stay as one-click buttons on the right of the top bar exactly as today (same icons, same behavior). The menus absorb the session tabs and the lower-frequency controls; these three high-use buttons remain visible.
 
-ALSO MIRROR THEM IN THE SETTINGS MENU: the same `Notify`, `Refresh`, and `Log out` (identical icons and behavior) also appear as items inside the `Settings ▾` menu, in addition to the top-right buttons. They are duplicated, not moved — both surfaces stay in sync (e.g. Notify shows the same on/off state in both). This keeps them reachable when the top-right buttons collapse on narrow/mobile widths and improves discoverability.
+ALSO MIRROR KEY DISPLAY CONTROLS IN THE SETTINGS MENU: `#` (tab metadata), `Notify`, and `Refresh` appear as items inside the `Settings ▾` menu, in addition to the top-right buttons. They use the same icon masks and show the same on/off state where applicable. `Log out` remains in File and the top-right cluster, not Settings.
 
 Proposed menu tree (PROPOSAL — review before building):
 
-- [ ] File ▾  (create / manage)
+- [ ] File ▾  (files / app actions)
+  - File Explorer (open)
+  - Open file…
+  - --- (separator)
+  - Log out
+- [ ] Tmux ▾  (create / manage tmux sessions)
   - New tmux session ▸ : `+ Claude`, `+ Codex`, `+ Term` (each opens the P4 launch dialog: cwd, model/profile, permission mode, initial prompt, optional name)
   - Rename tmux session
   - Kill tmux session
+  - Enable/Disable YOLO for Tmux Session `<name>`
+  - Open event log
   - Resume ▸ : recent Claude/Codex conversations scoped to cwd (P4)
-  - --- (separator)
-  - File Explorer (open)
-  - Open file…
   - NOTE: no Attach / Detach item. YOLOmux streams every pane over WebSocket and is always "attached"; switching sessions only changes which stream is shown. tmux attach/detach is a terminal-client concept that does not map to this UI, so it is intentionally omitted.
 - [ ] View ▾  (display options)
   - Layout ▸ : Single / Grid / Wall
@@ -106,25 +110,18 @@ Proposed menu tree (PROPOSAL — review before building):
   - Each row carries the SAME rich info already shown in the existing tab-metadata view, but packed more compactly so it reads like a real dropdown menu (one tight row per tab): agent badge (`YO`/`BL`/… + session number), state badge (`RUN`/`BLK`/…), PR number, commit-style title, branch, repo path (e.g. `dynamo2 -> dynamo3`), and dirty count. The active tab's row is highlighted (green) like the current selection.
   - This is a denser re-layout of the existing rich rows, not new data — reuse the metadata that already feeds the tab strip.
 - [ ] Per-pane left dropdown (the caret on the LEFT of each panel's tab strip): looks IDENTICAL to the Tab ▾ menu above (same compact rich-row format), but scoped to just THAT pane's tabs — i.e. only the tabs/views belonging to that one panel (its tmux sessions + Terminal / Tx / AI / Log / Info), not every pane in the app. Same row styling, same active-row highlight.
-- [ ] YOLO ▾
-  - Auto-approve: on / off (global)
-  - Policy ▸ : off / prompt-only / safe / edit / full (default for new sessions + per-session override) — ties to P1 policy modes
-  - Open rule file (YAML)… — ties to "YOLO Rule Engine" below
-  - Approval queue (P1)
-  - Audit log
-  - Risk labels legend (`read` / `edit` / `network` / `process` / `delete` / `credential` / `unknown`)
+- [ ] Add the remaining YOLO controls under Tmux instead of restoring a top-level YOLO menu: policy modes, Open rule file, Approval queue, Audit log, and Risk labels legend.
 - [ ] Settings ▾
-  - Global settings… (opens the Settings panel: System/General, Notifications, Appearance, Performance, YOLO, Terminal, Advanced)
-  - --- (separator)
-  - `Notify` (same icon + on/off state as the top-right button — mirrored, not moved)
-  - `Refresh` (same icon + behavior as the top-right button — mirrored)
-  - `Log out` (same icon + behavior as the top-right button — mirrored)
+  - `#` / Tab metadata (same icon + on/off state as the top-right button)
+  - `Notify` (same icon + on/off state as the top-right button)
+  - `Refresh` (same icon + behavior as the top-right button)
 - [ ] Help ▾
   - Keyboard shortcuts
   - About / version
-  - Docs link
-- [ ] Per-pane kebab (`…`) on each panel head (keep the existing Term/Tx/AI/Log/Info strip): YOLO policy for this session, peek / reply, run summary, rename, kill. (No "attach" item — see the Tmux Session note above.)
-- [ ] Right-click context menu on a session tab (the pane tab / panel header): `Rename session` (inline edit, same affordance as the file-tree rename — grep `function beginFileTreeRename`, ~2620), plus `Kill session` and `YOLO policy`. This is the expected shortcut so users do not have to open the File menu just to rename.
+  - Open README
+- [x] Per-pane kebab (`…`) on each panel head (keep the existing Term/Tx/AI/Log/Info strip): YOLO policy for this session, run summary, rename, kill, open event log. (No "attach" item — see the Tmux Session note above.)
+- [ ] Add the remaining per-pane kebab actions: peek / reply.
+- [x] Right-click context menu on a session tab (the pane tab / panel header): `Rename session` (inline edit, same affordance as the file-tree rename — grep `function beginFileTreeRename`, ~2620), plus `Kill session` and `YOLO policy`. This is the expected shortcut so users do not have to open the Tmux menu just to rename.
 - [x] Multi-line tab wrapping: when a pane's tabs wrap to 2+ rows (the `fix: wrap crowded tabs` work, commit `e5df095`), the second row and beyond should use the full width INCLUDING the area beneath the pane toolbar (`<` / terminal / `Tx` / `AI` / `Log` / `Info` / `×`), instead of stopping short and leaving that space blank. Only the FIRST row needs to reserve room for the toolbar. Implemented by floating the pane toolbar and rendering pane tabs as inline-flex items so wrapped rows flow under the toolbar.
 - [x] Fix float-based wrapped tab alignment/overflow. The bad path was `.pane-tab { transform: translateY(2px) }`: it made a single-row tab look flush but did not affect layout, so wrapped rows could paint past `.panel-head` and into the detail row. Fixed by removing the transform, making `.pane-tab`'s real height match `.pane-tabs` (`28px`), and removing the header bottom border so the tab bottom and detail row share the same edge. Verified in headless Chrome with one-row and two-row tab strips: active-tab gap is `0`, `.panel-head` grows to contain both rows, and no tab bottom exceeds `.panel-detail-row` top.
 - [x] Keep an EMPTY placeholder pane only for Finder's left/right sizing. Concrete case: left = Finder (File Explorer), right = a tab. When the right side's last tab is closed/killed, keep an empty placeholder pane on the right so Finder stays right-sized and the user can drop a new tab into the empty slot. Symmetric case: right = Finder, left closes, keep the left placeholder. But when Finder is split top/bottom with another pane, closing/killing the other pane collapses the vertical split so Finder expands up/down. The codebase already has the placeholder concept: `emptyPlaceholderPaneState()` -> `{tabs: [], placeholder: true}`; `compactLayoutNodeInfo` keeps placeholder leaves only in row splits that contain Finder, plus the global all-empty fallback.
@@ -132,9 +129,10 @@ Proposed menu tree (PROPOSAL — review before building):
 Cross-cutting requirements for all menus:
 
 - [ ] Keyboard accessible (open/close, arrow navigation, Esc), ARIA menu roles, click-outside to close, one menu open at a time (reuse the existing popover-open machinery).
+- [x] Menu widths are content-measured and viewport-clamped through shared CSS variables. Do not add fixed pixel min/max buckets for dropdown capacity; browser size, OS font metrics, zoom, and scrollbar behavior vary too much. Use intrinsic DOM measurement, percentages/viewport units, and container-relative constraints instead.
 - [x] Fix awkward hover timing (classic menubar behavior). FIRST open (no menu currently open) waits 300 ms before popping on hover. Once a menu is ALREADY open, moving the pointer to another top-level menu switches INSTANTLY with no delay.
 - [ ] Mobile: menus collapse into a single hamburger (ties to P7).
-- [ ] Read-only mode disables mutating items (New, Kill, Settings writes, YOLO toggles) the same way the current `Notify`/buttons do.
+- [x] Read-only mode disables mutating items (New, Kill, Settings writes, YOLO toggles) the same way the current `Notify`/buttons do.
 
 ### P1: YOLO Event Log, Audit, And Queue
 
@@ -142,9 +140,9 @@ Cross-cutting requirements for all menus:
 - [x] Record approval decisions, blocked commands, worker errors, session start/stop, terminal disconnects, uploads, pasted images, summary runs, state changes, and user-visible notifications.
 - [x] Add a per-session YOLO audit panel showing recent approved/blocked decisions with timestamp, command text, matched rule, and session.
 - [ ] Add an approval queue view for pending high-risk actions. Start read-only first if live interception is hard.
-- [ ] Add per-session YOLO policy. Initial modes: `off`, `prompt-only`, `safe`, `edit`, `full`. Make policy visible on the YOLO button.
+- [ ] Add per-session YOLO policy. Initial modes: `off`, `prompt-only`, `safe`, `edit`, `full`. Make policy visible on the tmux-session YOLO control.
 - [ ] Risk labels should be boring and concrete: `read`, `edit`, `network`, `process`, `delete`, `credential`, `unknown`.
-- [ ] Replace the unhelpful top-right `YOLO on: 6` status string. A bare count is not actionable and does not say WHICH sessions are auto-approving. Move YOLO state to two better surfaces: (1) per-session — a small YOLO indicator on each session's badge/row (top bar + Tab menu) so you can see exactly which sessions have auto-approve on; (2) global — fold the count into the `YOLO ▾` menu as a badge (e.g. `YOLO ▾ 6`), and clicking it lists/toggles the enabled sessions. Then drop the standalone red `YOLO on: N` text from the top-right cluster.
+- [ ] Replace the unhelpful top-right `YOLO on: 6` status string. A bare count is not actionable and does not say WHICH sessions are auto-approving. Move YOLO state to two better surfaces: (1) per-session — a small YOLO indicator on each session's badge/row (top bar + Tab menu) so you can see exactly which sessions have auto-approve on; (2) global — fold the count into Tmux as a badge/list, and clicking it lists/toggles the enabled sessions. Then drop the standalone red `YOLO on: N` text from the top-right cluster.
 
 ### P1: YOLO Rule Engine (user-configurable matching via YAML)
 
@@ -152,7 +150,7 @@ Today YOLO matching is hardcoded in `auto_approve_tmux.py`: a fixed `DANGEROUS_C
 
 DESIGN GATE: propose the schema and decide the options below before implementing. Do not write code until the rule shape is signed off.
 
-- [ ] Decide file location and precedence. Proposal: `~/.config/yolomux/yolo-rules.yaml` (shared default) plus optional per-repo `.yolomux.yaml` that overlays it; per-session override via the YOLO menu.
+- [ ] Decide file location and precedence. Proposal: `~/.config/yolomux/yolo-rules.yaml` (shared default) plus optional per-repo `.yolomux.yaml` that overlays it; per-session override via the Tmux menu.
 - [ ] Decide the action verbs. Proposal: `approve` (press Enter / select Yes), `decline` (select No / option2), `block` (leave for manual, current behavior), `ask` (notify + wait), `notify` (log only, take no action).
 - [ ] Decide match types. Proposal: `contains` (substring), `regex`, `glob`, and `command` (argv-aware parse so `echo "rm"` is data, not a delete). Argv-aware matching is the main upgrade over today's whole-line regex.
 - [ ] Decide scoping dimensions: global vs per-repo vs per-session, per-agent (`claude` / `codex`), and per prompt-type (`bash` / `file` / `tool`).
@@ -210,7 +208,7 @@ Safety and operational requirements (regardless of schema):
 - [ ] Hot-reload on file change; validate the schema on load and surface errors in the UI instead of silently falling back.
 - [ ] Ship today's hardcoded denylist AS the default `yolo-rules.yaml` so behavior is unchanged out of the box; the hardcoded version becomes the fallback when no file exists.
 - [ ] Record the matched rule name in every audit event (the audit panel already shows a "matched rule" column).
-- [ ] Add an "Open rule file" + "Reload rules" action in the YOLO menu, and show the active ruleset path/source in Settings.
+- [ ] Add an "Open rule file" + "Reload rules" action in the Tmux menu, and show the active ruleset path/source in Settings.
 
 ### P1: File Explorer & Editor Live Refresh
 
@@ -247,17 +245,17 @@ The per-pane window-step buttons (`<` / `>`, the `window-step` controls in `stat
 
 ### P3: Editor — Wrap, Preview, Split-Preview
 
-The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py:119`) and a textarea hardcoded to `wrap="off"` (`web.py:123`). Make these first-class view modes plus a wrap toggle.
+The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py`) and a working word-wrap toggle. Make the preview path first-class view modes next.
 
 - [x] Word-wrap toggle: switch the editor textarea between `wrap="off"` (current) and soft word-wrap, so long lines wrap to the pane width instead of scrolling horizontally. Persist the preference (Settings → Terminal/Editor).
 - [ ] Three explicit view modes for the editor: `Edit`, `Preview`, `Split-Preview` (a small segmented control in the editor head). Edit = textarea only; Preview = rendered view only (reuse the existing `#fileEditorPreviewPane`).
 - [ ] Split-Preview: split the current editor window in half — left = editor (textarea), right = rendered preview — side by side in the same panel.
 - [ ] Split-Preview synced scroll: the two halves scroll together (scrolling the editor scrolls the preview to the matching position, and vice-versa). Map by source line / proportional offset so headings and code blocks stay roughly aligned.
 - [ ] Preview content by type: Markdown renders to formatted HTML (existing marked.js path); non-Markdown (sh, py, etc.) shows the syntax-highlighted read view (reuse `#fileEditorHighlight`) so Split-Preview is useful for code too, not just `.md`.
-- [ ] Toolbar icons (EASY): make the Wrap button just a wrap glyph (↪) instead of the word "Wrap", and the Save button a disk glyph instead of "Save". Buttons are `#fileEditorWrap` / `#fileEditorSave` (`web.py`, grep the ids). Swap the button text for the glyph + CSS; keep the accessible `title` / `aria-label` text so it is still discoverable.
+- [x] Toolbar icons: make the Wrap button just a wrap glyph (↪) instead of the word "Wrap", and the Save button a disk glyph instead of "Save". Buttons are `#fileEditorWrap` / `#fileEditorSave` (`web.py`, grep the ids). The buttons keep accessible `title` / `aria-label` text.
 - [ ] Soft-wrap continuation marker: when word-wrap is on, show a wrap glyph (↪) at the START of each wrapped continuation line, so a soft-wrapped line is visually distinct from a real new line. CONSTRAINT: a plain `<textarea>` (`#fileEditorTextarea`) cannot draw per-visual-line glyphs — the browser wraps text but exposes no per-wrapped-line hook. Needs either a code-editor component (CodeMirror/Monaco) OR a custom overlay that mirrors the textarea wrapping and paints the ↪ markers (could extend the existing `#fileEditorHighlight` `<pre>` overlay). Decide the approach before building — this is NOT a quick textarea tweak.
 - [ ] Line-number gutter option: add line numbers as an editor toggle. Same `<textarea>` constraint as the continuation marker (needs the overlay / editor-component approach). Numbers count SOURCE lines — a soft-wrapped line keeps one number and its ↪ continuation rows are not numbered.
-- [ ] Preview background tint: in Preview and Split-Preview, give the rendered side a slightly grayer background than the editor so the two halves are visually distinct at a glance (style `#fileEditorPreviewPane` / the preview half). Note: Split-Preview itself is the existing "Split-Preview" bullet above — this just adds the visual distinction.
+- [x] Preview background tint: in Preview and Split-Preview, give the rendered side a gray background so the two halves are visually distinct at a glance (style `#fileEditorPreviewPane` / the preview half). Note: Split-Preview itself is the existing "Split-Preview" bullet above — this just adds the visual distinction.
 
 ### P4: Launch And Resume
 
@@ -297,9 +295,11 @@ The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py
 - [ ] If built, use a small remote agent that reports tmux sessions, metadata, vitals, and WebSocket terminal streams back to one YOLOmux instance.
 - [ ] Keep local-only as the default.
 
-### Settings Panel
+### Preferences Tab (Settings)
 
-- [ ] Add a Settings panel, reachable from the menu (`Settings ▾` → `Global settings…`; the `Settings` menu already exists and currently holds only the Notify/Refresh mirrors). Today the tunables are hardcoded as `const`s near the top of `static/yolomux.js` (grep `const metadataRefreshMs`) and on the server, with no UI — making them runtime-configurable means routing them through a settings object instead of module consts.
+DECISION (2026-05-29): implement Settings as a dedicated PREFERENCES TAB — a virtual layout item like the File Explorer / Branch Info, not a modal. It opens from a menu, appears in the `Tab` list, and can be dragged/split into a pane like any other tab. Model it on the existing virtual items (grep `fileExplorerItemId = '__files__'` / `infoItemId = '__info__'` in `static/yolomux.js`; add e.g. `prefsItemId = '__prefs__'`). Group ALL the preferences below into sections within this one tab (e.g. General · Appearance · Notifications · Performance · YOLO · Terminal/Editor · File Explorer · Advanced).
+
+- [ ] Build the Preferences tab. Today the `Settings ▾` menu only contains quick controls (`#`, Notify, Refresh), and tunables are hardcoded as `const`s near the top of `static/yolomux.js` (grep `const metadataRefreshMs`) and on the server, with no UI — making them runtime-configurable means routing them through a settings object instead of module consts. The tab is the UI surface for everything in this section.
   - Environment facts (verified 2026-05-29): no file-watch library is installed (no `inotify`/`watchdog`) — use mtime polling for cross-server reload. Only `pyyaml 6.0.1` is available, NOT `ruamel.yaml` — so preserving inline comments on a UI-driven save needs a decision: add a `ruamel` dependency, OR re-emit `settings.yaml` from a fixed commented template (don't round-trip), OR accept that a UI save drops hand-added comments. Hand-editing the file keeps comments either way.
 - [ ] Persistent storage: write settings to a single human-readable file, `~/.config/yolomux/settings.yaml`. Use YAML specifically so it is easy to read and hand-edit, WITH inline comments documenting each key, its units, default, and allowed range. Keep machine state (badge pulses, auto-approve-enabled session list) in the existing `state.json`; `settings.yaml` is for user preferences only.
 - [ ] Live propagation to ALL running servers: a settings change made in one YOLOmux instance must take effect in every other launched server (e.g. the `:7777` and `:7778` instances) without a restart. Since `settings.yaml` is the shared source of truth, each server watches the file (mtime/inotify) and reloads on change, and each open browser is pushed the new values over the existing WebSocket/poll channel so live pages update too. Writes must be atomic (temp file + rename) and last-write-wins; preserve comments on rewrite (round-trip YAML, e.g. ruamel) so hand-added notes survive a UI save.
@@ -312,8 +312,11 @@ The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py
 - [ ] Popover show/hide delay (`popoverShowDelayMs` / `popoverHideDelayMs`, 300 ms); remote resize debounce (`remoteResizeDelayMs`, 220 ms).
 - [ ] Auto-approve poll interval (auto_approve `--interval`, default 0.5 s) and default YOLO policy for new sessions (ties to P1 policy modes).
 - [ ] Tab metadata visibility (the existing show/hide tab-metadata toggle), default layout (single/grid/wall), and default sessions on load.
-- [ ] Terminal preferences: font size and scrollback limit.
+- [ ] Auto-focus on/off (default ON). Today switching/activating a session auto-focuses its terminal (grep `focusPanel` / `focusedTerminal`; e.g. the `setTimeout(() => focusPanel(options.focusSession), ...)` on activation). Add a preference to turn auto-focus off so the cursor does NOT jump into a pane on switch/activation (the user clicks to focus instead). Gate the auto-focus calls on the setting; keep manual click-to-focus working regardless.
+- [ ] Font size preference(s): let the user set the font size. At minimum the TERMINAL font size (xterm.js `fontSize` option, grep `new TerminalCtor` / `fontSize`), and ideally the UI font size too (tab labels / file tree / menus, driven by CSS vars like `--tab-label-size` / `--control-font` — grep them in `static/yolomux.css`). Wire the chosen size(s) to xterm + the CSS vars at runtime so they take effect live; clamp to a sane range; persist in `settings.yaml`.
+- [ ] Terminal preferences: scrollback limit (xterm `scrollback`, currently 5000) — alongside the font-size pref above.
 - [ ] File Explorer quick-access paths: a user-editable list of pinned directories (e.g. `~`, `/tmp`, custom dirs) the explorer can jump to. See the matching item under "File Explorer".
+- [ ] Tab min width: let the user set the minimum tab width. Today `.pane-tab` uses a fixed `width/max-width: min(var(--pane-tab-width), 100%)` with `--pane-tab-width: 240px` (grep `--pane-tab-width` in `static/yolomux.css`). Add a preference that drives a `--pane-tab-min-width` (and/or overrides `--pane-tab-width`) so users can make tabs narrower/wider; clamp to a sane range. Wire the setting to the CSS var at runtime (settings.yaml / localStorage), so it takes effect live.
 - [ ] Each numeric setting needs a sane min/max clamp and a Reset-to-default button so a bad value cannot freeze the refresh loop.
 
 ### Transcript (Tx) View
@@ -324,14 +327,29 @@ The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py
 
 - [x] Add a `Download` item to the file right-click context menu (grep `file-context-menu`, ~2542), alongside the existing Copy full/raw/relative path / Rename / Delete. Downloads the file to the browser. Backend `filesystem.read_raw` already streams bytes; add (or reuse) a raw-file endpoint that sets `Content-Disposition: attachment; filename=...` so the browser saves instead of previewing. For a directory, either disable Download or offer a zip. Support multi-select (download each, or a single zip). Respect read-only mode rules and the `MAX_RAW_BYTES` cap.
 - [x] When opening a text file, group it into the EXISTING editor window instead of spawning a new editor panel. If an editor window is already open, add the file as a new tab in that window and focus it (and just focus the tab if the file is already open there). Only create a new editor window when none exists yet. Avoids one-editor-panel-per-file sprawl in the layout.
-- [ ] Configurable File Explorer quick-access paths (e.g. `/tmp` + other custom dirs), set in Settings. NOTE: this is shortcuts, not new access — the explorer FS scope is already `/` (`filesystem.py` header: "No sandbox root"), so any path is reachable by navigating; today it just defaults to `homePath` and you have to walk there. Add a list of pinned quick-access roots shown in the explorer (a favorites/shortcuts row, or selectable roots), each opening via the existing `openFileExplorerAt(path)` / `fileExplorerRoot` machinery (grep `openFileExplorerAt`). Store the list as a user setting (`settings.yaml` once the Settings Panel lands; until then, localStorage). Default could include `~` and `/tmp`. Validate paths exist + are readable before showing; gracefully skip missing ones. Ties to the Settings Panel section.
+- [ ] Configurable File Explorer quick-access paths (e.g. `/tmp` + other custom dirs), set in Settings. NOTE: this is shortcuts, not new access — the explorer FS scope is already `/` (`filesystem.py` header: "No sandbox root"), so any path is reachable by navigating; today it just defaults to `homePath` and you have to walk there. Add a list of pinned quick-access roots shown in the explorer (a favorites/shortcuts row, or selectable roots), each opening via the existing `openFileExplorerAt(path)` / `fileExplorerRoot` machinery (grep `openFileExplorerAt`). Store the list as a user setting (`settings.yaml` once the Settings Panel lands; until then, localStorage). Default could include `~` and `/tmp`. Validate paths exist + are readable before showing; gracefully skip missing ones. Ties to the Settings Panel section. CONCRETE: ship built-in jump buttons for `/`, `~`, and `/tmp` as the default quick-access row (a small row of buttons in the explorer header), each calling `openFileExplorerAt(...)`.
 - [ ] Make the Finder root path bar typable. Today it is a static `<div id="fileExplorerPath">` (`web.py`, set via `textContent` at the `fileExplorerPath` assignments in `static/yolomux.js`) — read-only. Make it an editable input (or contenteditable): type/paste a path, press Enter to jump there via `openFileExplorerAt(value)`; Escape reverts to the current root; validate the path (exists + is a readable dir) and show an inline error instead of navigating on a bad path. Apply to both the overlay explorer and the panel variant (`.file-explorer-path-copy-panel` head). Keep the existing copy button. Nice-to-have: `~` expansion and basic tab/`Tab`-key path completion.
 - [ ] File Explorer root MODE toggle (a setting + a control in the explorer header): choose how the root is chosen.
   - "Always root" (current behavior): the explorer stays at a fixed root — whatever you typed / navigated to / picked from quick-access — and does NOT move when you switch tmux sessions.
   - "Sync to tmux session": the explorer re-roots to the ACTIVE tmux session's working directory whenever the active session changes, so selecting a session jumps the Finder to that session's cwd.
   Where: re-root via the existing `openFileExplorerAt(path)` / `fileExplorerRoot`; the active session's cwd is already resolved in JS (grep `selected_pane?.current_path` and the session working-dir helper near the `nonHomePane.current_path` logic). Hook the sync onto the active-session-change / focus path. Store the mode as a user setting (`settings.yaml` / localStorage). Edge cases: if the active session has no resolvable cwd, keep the current root; do not yank an open file-editor tab; decide whether a manual navigate while in "sync" mode pins until the next session switch or stays put. Ties to the typable-root + quick-access bullets above and the Settings Panel.
+- [ ] Image preview on hovering an image row. Hovering anywhere on an image file's row — the WHOLE NAME, not just the icon (`.file-tree-row` / `.file-tree-name` on an image-extension row — `IMAGE_EXTENSIONS` set in `static/yolomux.js`, e.g. `.png`/`.jpg`/`.gif`/`.webp`/`.svg`) should pop up a thumbnail preview, using the SAME show/hide hover delays as the tab/session popovers (`popoverShowDelayMs` ~300 ms / `popoverHideDelayMs`, grep them; reuse the existing popover hover machinery around the `showTimer = setTimeout(openNow, popoverShowDelayMs)` pattern). Position the thumbnail BELOW and to the RIGHT of the cursor (follow the pointer, like a tooltip), clamped to stay on-screen. The image is already served by `/api/fs/raw?path=<enc>` (`handle_fs_raw` -> `filesystem.read_raw`, image bytes + mime), so the popup is just an `<img src="/api/fs/raw?path=...">`. Cap the popup size, respect `MAX_RAW_BYTES`, and only show it for image rows (skip dirs / non-image files).
+- [ ] File-tree disclosure triangle sizing + color. The dir triangle (`▸` collapsed / `▾` expanded, the `.file-tree-icon` on dir rows — grep `file-tree-icon`) should match the cap height of the row's name text (size it to the capital-letter size, not larger/smaller). Color it by state: EXPANDED -> a distinct non-white color; COLLAPSED -> gray. Key the color on the row's expanded/collapsed state (the open class / `aria-expanded` on the dir row).
+- [x] Type-specific file-tree icons. Today every file uses the same `📄` and every dir uses `▸` (grep the `const icon = entry.kind === 'dir' ? '▸' : ...` line in `static/yolomux.js`, ~2965). Add a `fileIconFor(name)` helper that picks an icon by extension / basename: images (`IMAGE_EXTENSIONS`) -> graphics icon, `.log` -> log icon, `.md` -> doc, `.json`/`.yaml`/`.toml`/`.ini`/`.cfg` -> config/gear, `.sh`/`.bash` -> shell, `.py`/`.js`/`.ts`/`.rs`/`.go`/`.c`/`.cpp` -> code, archives (`.zip`/`.tar`/`.gz`) -> archive, plus a sensible default. Reuse `IMAGE_EXTENSIONS` / `TEXT_EXTENSIONS` for the buckets. Keep it CSS-class- or emoji-based (no new asset dependency unless we add an icon font deliberately).
+- [x] Special color for repo directories. A directory that is a repo root (has `.git`, optionally `.hg`/`.svn`/`.jj`) should render in a distinct color (and maybe a repo glyph), not plain white. Detection: cheapest is backend — in `_entry_info` (`yolomux_lib/filesystem.py`), for a dir set `is_repo = (path / '.git').exists()` (one extra stat per dir entry) and include it in the listing payload; the client then adds a `.file-tree-row.is-repo` class for the color. (The app already knows git roots via `git_root_for_path` / `path_info`, but the tree listing needs the per-entry flag.) Keep it cheap — only stat for `.git` on dir entries, not files.
 
 ### Bug Fixes And Tech Debt
+
+- [ ] Detaching from inside a pane (tmux `Ctrl-b d`) leaves it showing `[detached (from session N)]` and feels hung. VERIFIED 2026-05-29 at the PTY level (reproducing `server.py` `bridge_tmux` with `pty.openpty()` + `tmux attach-session`): the detach makes the attach process exit **cleanly with returncode 0** (printing `[detached]`), which ends the bridge loop (`while process.poll() is None`, grep in `server.py`) and closes the WebSocket; re-attaching a fresh `tmux attach-session -t N` **works** — the session persists and redraws fully. The client IS wired to reconnect (`socket.onclose` -> `scheduleTerminalReconnect` -> ~1s backoff -> `startTerminal`, grep those in `static/yolomux.js`), so it recovers after ~1s — but you see `[detached …]` + `disconnected from N` + a "reconnecting in 1s" gap, which reads as a hang. Detach also has no meaning in YOLOmux's always-attached model. Fix (best, server-side): when the attach process exits with returncode 0 (clean detach, NOT a crash/kill), immediately re-run `tmux attach-session` on the SAME bridge instead of tearing down — seamless re-attach, no visible gap, no "disconnected" message. Distinguish exit-0 (detach -> re-attach) from non-zero (real failure -> keep the existing disconnect + backoff). Alternatives: client reconnects with 0 delay and clears the buffer on a clean close; or suppress the detach keybinding for browser-pane clients. Validate: detach in a live pane -> the pane redraws to the session within a frame, with no `[detached]` / `disconnected` text.
+- [ ] On disconnect, KEEP the pane's existing content and FLOAT a "Disconnected" overlay instead of mutating the content. Today `socket.onclose` writes `term.writeln('disconnected from N')` directly INTO the terminal buffer (grep `disconnected from`, ~8832), polluting the scrollback. Instead: leave the terminal / file / editor / branch-info content untouched and show a floating "Disconnected — reconnecting…" overlay centered over the pane, auto-removed when the connection is restored. Reuse the per-pane overlay layer that already exists on every pane (`.panel-overlay-root` + `.panel-toast-stack` — terminal, File Explorer, editor, Branch Info; grep them). Applies to all pane types. Clear the overlay on reconnect (socket reopen / data resumes). Pairs with the detach -> seamless re-attach fix above.
+- [x] `#` (tab-metadata) toggle hides the wrong things. Today `body.tab-meta-hidden .pane-tab .session-button-text { display: none }` (`yolomux.css`, grep `tab-meta-hidden`) hides the ENTIRE text block — state badge + branch + PR badges + description — while the YO marker badge and the status dot (rendered OUTSIDE `.session-button-text`, via `yoloMarkerHtml` + `.session-button-prefix`) stay visible. Desired: when `#` is unclicked, ONLY the symbol badges should go away (YO marker, state badge `sessionStateHtml`, PR compact badges, the status dot), and the readable text should stay (session number/name in `.session-button-prefix`, branch name, description). This needs restructuring which elements `tab-meta-hidden` targets, because `.session-button-text` currently bundles both symbols and text — split the symbol badges out (or target them individually) so the toggle hides symbols only. CONFIRM the exact "symbols" set with the user before building.
+- [x] Panel detail/status row polish (`.panel-detail-row` — the `branch · path · dirty N` row under the tab strip). (1) Push the close `×` (`.panel-detail-close`, grep in `static/yolomux.css` ~1468) further to the right so it sits flush at the far edge. (2) Give the row a more gray background — it is currently near-black `#121823` (grep `background: #121823` / `.panel-detail-row {`, ~1464); use a lighter gray so the status row reads as distinct from the terminal below it.
+- [x] Pane toolbar buttons need tooltips with their full names. `Tx` / `AI` / `Log` have NO `title` today — `tabAttrs` (grep in `static/yolomux.js`) only sets `data-tab` / `data-tab-name`. Add `title` + `aria-label`: `Tx` -> "Transcript", `AI` -> "AI summary", `Log` -> "Event log", `Info` -> "Branch Info" (it currently says "hide details"). The `<` / `>` step buttons and the active-window terminal button already have titles (keep them). Hover should reveal the full name.
+- [ ] The Enable/Disable YOLO dropdown item should show the YO icon, exactly as it looks on the tab. The menu item is built from `yoloLabel` (grep `Disable' : 'Enable'} YOLO`, ~2232) via `menuCommand(...)`; `menuCommand`/`createAppMenuCommand` already accept an `iconHtml` option (used elsewhere for `agentIcon` / `appMenuUiIcon`). Pass `iconHtml: yoloMarkerHtml(session, auto, {...})` (grep `function yoloMarkerHtml`, ~4507 — the same badge the tab renders) so the menu item shows the identical YO marker. Match the tab's appearance (same `session-yolo-marker` styling / enabled state).
+- [ ] Trim the tmux-tab RIGHT-CLICK menu to exactly three items: Enable/Disable YOLO, Rename session, Kill session. Today `showSessionContextMenu` (grep, ~758) appends `tmuxSessionViewCommands` (Transcript, AI summary, Event log) + a separator + `tmuxSessionActionCommands` (Rename session, Kill session, Enable/Disable YOLO, …). Drop the `tmuxSessionViewCommands` group and the separator from the right-click menu, and show only those three actions, in this order: Enable/Disable YOLO (the `yoloLabel` command), Rename session, Kill session. Leave the per-pane kebab (`…`) menu unchanged — it can keep the fuller set. Validate: right-click a tmux tab shows exactly those three items and nothing else.
+- [ ] Menu label/text consistency: (1) the dropdown "Rename session" item should read `Rename tmux session '<name>'` — include the session name (grep `'Rename session'`, ~2235). (2) Rename the top-level `Tmux` menu label to lowercase `tmux` to match actual tmux naming (grep `label: 'Tmux'`, ~2390); update the design-tree / README mentions to match.
+- [ ] In the `Tab` dropdown rows, make the YO marker clickable to toggle YOLO WITHOUT closing the menu. Rows are built by `menuTabCommand` (grep, ~2208) and render `yoloMarkerHtml` (which has a `toggle` option). Wire the YO marker as a clickable sub-control: on click, toggle YOLO for that session, `preventDefault` + `stopPropagation` so it does NOT fire the row's activate command and does NOT close the dropdown, then re-render the marker's enabled state in place. The rest of the row keeps activating/focusing the tab as today.
+- [x] Pane toolbar buttons hug the TOP of the panel-head with empty space below (not vertically centered). Cause: the toolbar `.tabs` is `float: right` (grep `.tabs {`) and a float top-aligns in its container; its buttons (`.tab`, `height: 22px`, grep `.tab {`) are shorter than the session tabs (`.pane-tab`, `height: 28px`) that drive the row height, and `.panel-head` padding is top-heavy (`3px ... 0`). So the 22px toolbar sticks to the top (3px) and the ~6px+ difference shows as bottom space. Fix WITHOUT dropping the float (the float is what makes wrapped tab rows flow under the toolbar): vertically center the floated toolbar in the tab row — e.g. add a top margin to `.tabs` to center the 22px buttons in the ~28-30px row, or raise `.tab` height to match `.pane-tab`, or even out `.panel-head` top/bottom padding. Validate: toolbar buttons are vertically centered relative to the session tabs at both single-row and wrapped multi-row heights.
 
 - [x] Touchpad scrolls the terminal far too fast ("zooms"), while a mouse wheel scrolls fine. Fixed by replacing the sign-only wheel handler with `terminalWheelSignedLines`: pixel-mode wheel deltas are scaled by `terminalWheelPixelLinePx` and accumulated as fractional lines, line-mode deltas use real line counts, page-mode/Shift use page-sized scrolls, and `ctrlKey` wheel events are swallowed so trackpad pinch gestures do not become terminal scroll. `queueTmuxScroll` and `queueLocalTerminalScroll` both batch fractional deltas before rounding, so tiny touchpad events no longer each become a fixed three-line tmux scroll.
 - [x] Fix `tests/test_filesystem.py:177` `test_is_text_path_recognizes_known_extensions`. It passes but only spot-checks 5 extensions and hides a real bug: `filesystem.is_text_path` matches on `Path(...).suffix`, which is `''` for dotfiles and extensionless names. So `.gitignore`, `.dockerignore`, and `.dockerfile` in `TEXT_EXTENSIONS` are unreachable, and `Dockerfile` / `Makefile` / `LICENSE` / `README` return False. Fix `is_text_path` to also match on the basename for those cases, then expand the test to cover the full `TEXT_EXTENSIONS` set, dotfiles, extensionless names, and uppercase extensions (`.PY`, `.PNG`).
@@ -351,7 +369,7 @@ The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py
   What needs to change (reconcile the roster on the fast cadence; pick one, A recommended):
   - [x] Option A (cheapest): include a fresh roster in the fast status payload. Have `auto_approve_status(None)` call `refresh_sessions()` first (one cheap `tmux list-sessions`, 3 s timeout — `common.py:483`) and add `"session_order": self.sessions`. Client `loadAutoStatuses`/`refreshAutoStatuses` then calls `updateSessionList(payload.session_order)` and re-renders on change. Result: add + remove reflected within ~1.25 s instead of ~15 s. Optionally debounce the tmux call to ~1 s to avoid one subprocess per fast tick.
   - [ ] Option B (event-driven kill): when a terminal WebSocket closes (already detected), confirm via a roster check that the session is gone and prune it from the UI immediately, instead of waiting for the poll. Handles the open-pane kill case fastest; pair with A for closed-pane sessions.
-  - [ ] Option C (future UI Kill action, per the menu plan): after killing, trigger the roster reconcile immediately (like `createSession` does) so UI-kills are instant.
+  - [x] Option C (future UI Kill action, per the menu plan): after killing, trigger the roster reconcile immediately (like `createSession` does) so UI-kills are instant.
 
   Repro:
   - #6: `tmux new-session -d -s testX` in another terminal; time until it appears in the YOLOmux top bar (expect up to ~15 s today).

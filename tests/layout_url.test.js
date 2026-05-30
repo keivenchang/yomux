@@ -60,6 +60,7 @@ class TestElement {
     this.id = id;
     this.children = [];
     this.dataset = {};
+    this.attributes = {};
     this.innerHTML = '';
     this.textContent = '';
     this.removed = false;
@@ -75,6 +76,7 @@ class TestElement {
   cloneNode() {
     const clone = new TestElement(`${this.id}-clone`);
     clone.dataset = {...this.dataset};
+    clone.attributes = {...this.attributes};
     clone.innerHTML = this.innerHTML;
     clone.textContent = this.textContent;
     clone.rect = {...this.rect};
@@ -86,9 +88,11 @@ class TestElement {
   querySelector() { return null; }
   querySelectorAll() { return []; }
   remove() { this.removed = true; }
-  removeAttribute() {}
+  getAttribute(name) { return this.attributes[name]; }
+  hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); }
+  removeAttribute(name) { delete this.attributes[name]; }
   replaceChildren(...nodes) { this.children = nodes; }
-  setAttribute() {}
+  setAttribute(name, value) { this.attributes[name] = String(value); }
 }
 
 function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin') {
@@ -101,6 +105,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     availableAgents: [],
     accessRole,
     homePath: '/home/test',
+    repoRoot: '/home/test/yolomux.dev',
     maxSessionTabs: 99,
     serverHostname: 'test-host',
   });
@@ -153,11 +158,13 @@ globalThis.__layoutTestApi = {
   activeItemForSide,
   agentErrorIsBlocking,
   appMenuTree,
+  createAppMenuCommand,
   backgroundTabItems,
   canPaneExpand,
   emptyPlaceholderPaneState,
   emptyLayoutSlots,
   fileEditorPaneTabHtml,
+  fitAppMenuPopover,
   finderDirectoryForItem,
   finderTargetPathForItem,
   activeFinderDirectoryPath,
@@ -165,6 +172,7 @@ globalThis.__layoutTestApi = {
   fileExplorerLabel,
   fileExplorerPanelCloseClass,
   fileEditorPanelCloseClass,
+  fileIconFor,
   fileExplorerNeedsLeftDock,
   fileExplorerPaneTabHtml,
   firstEmptyPane,
@@ -176,12 +184,21 @@ globalThis.__layoutTestApi = {
   layoutParamValue,
   layoutSlotKeys,
   layoutWithFileExplorerDockedLeft,
+  layoutWithReplacedItem,
   layoutWithoutItem,
   layoutWithItems,
   layoutTabsParamValue,
   layoutTreeKey,
   leafNode,
   menuTabCommand,
+  activatePaneTab,
+  currentSessionActionTarget,
+  setFocusedPanelItem,
+  tmuxSessionActionCommands,
+  tmuxSessionViewCommands,
+  tmuxSessionNameError,
+  replaceTmuxSessionInClient,
+  normalizedSessionOrder,
   normalizeLayoutSlots,
   paneIsPlaceholder,
   panelControlsHtml,
@@ -581,9 +598,18 @@ function canonical(value) {
       return {left: 10, right: 500, top: 0, bottom: 500, width: 490, height: 500};
     },
   };
+  const popoverForPosition = {
+    getBoundingClientRect() {
+      return {left: 0, right: 520, top: 0, bottom: 300, width: 520, height: 300};
+    },
+  };
   api.positionPaneTabPopover({
     getBoundingClientRect() {
       return {left: 34, right: 274, top: 40, bottom: 68, width: 240, height: 28};
+    },
+    querySelector(selector) {
+      assert.equal(selector, ':scope > .session-popover');
+      return popoverForPosition;
     },
     closest(selector) {
       assert.equal(selector, '.panel');
@@ -592,16 +618,44 @@ function canonical(value) {
   });
   const popoverStyle = api.documentElementStyleForTest();
   const popoverLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
-  const popoverWidth = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-width'), 10);
   assert.equal(popoverLeft, 34);
-  assert.equal(popoverWidth, 560);
-  assert.ok(popoverLeft + popoverWidth <= 1192);
-  assert.ok(popoverWidth > panelForPopover.getBoundingClientRect().width);
+  assert.equal(popoverStyle.getPropertyValue('--pane-tab-popover-width'), '');
+  assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
+  assert.ok(popoverForPosition.getBoundingClientRect().width > panelForPopover.getBoundingClientRect().width);
+  api.positionPaneTabPopover({
+    getBoundingClientRect() {
+      return {left: 1080, right: 1160, top: 40, bottom: 68, width: 80, height: 28};
+    },
+    querySelector() {
+      return popoverForPosition;
+    },
+  });
+  const clampedPopoverLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
+  assert.ok(clampedPopoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
+  const appMenuAnchor = new TestElement('app-menu-anchor');
+  appMenuAnchor.rect = {left: 900, right: 980, top: 0, bottom: 28, width: 80, height: 28};
+  const appMenuWrapper = new TestElement('app-menu-wrapper');
+  appMenuWrapper.querySelector = selector => {
+    assert.equal(selector, ':scope > .app-menu-button, :scope > .app-menu-command');
+    return appMenuAnchor;
+  };
+  const appMenuPopover = new TestElement('app-menu-popover');
+  appMenuPopover.parentElement = appMenuWrapper;
+  appMenuPopover.rect = {left: 900, right: 1380, top: 28, bottom: 400, width: 480, height: 372};
+  api.fitAppMenuPopover(appMenuPopover);
+  assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-width'), '480px');
+  assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-offset'), '-180px');
   const tabMenuCommand = api.menuTabCommand('1', {detail: 'Minimized'});
   assert.equal(tabMenuCommand.title, undefined);
   assert.equal(tabMenuCommand.detail, '');
   assert.equal(tabMenuCommand.ariaLabel, '1 - Minimized');
   assert.equal(tabMenuCommand.html.includes(' title='), false);
+  const appMenuButton = api.createAppMenuCommand({label: 'Rename session', detail: 'Focus a tmux session first'});
+  assert.equal(appMenuButton.title, undefined);
+  assert.equal(appMenuButton.hasAttribute('title'), false);
+  assert.equal(appMenuButton.getAttribute('aria-label'), 'Rename session - Focus a tmux session first');
+  const appMenuIconButton = api.createAppMenuCommand({label: '+ Codex', iconHtml: '<span title="Codex">C</span>'});
+  assert.equal(appMenuIconButton.innerHTML.includes('title='), false);
   const noMinimizedSlots = api.emptyLayoutSlots();
   noMinimizedSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
   noMinimizedSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
@@ -614,6 +668,104 @@ function canonical(value) {
   assert.equal(tabMenuLabels.includes('Minimized'), false);
   assert.equal(tabMenuLabels.some(label => label.startsWith('No ')), false);
   assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1);
+  const menus = api.appMenuTree();
+  assert.equal(menus.map(menu => menu.label).join(','), 'File,View,Tmux,Tab,Settings,Help');
+  assert.equal(menus.some(menu => menu.id === 'yolo'), false);
+  const fileMenu = menus.find(menu => menu.id === 'file');
+  const fileMenuLabels = fileMenu.items.map(item => item.label).filter(Boolean);
+  assert.equal(fileMenuLabels.includes('New tmux session'), false);
+  assert.equal(fileMenuLabels.includes('Rename session'), false);
+  assert.equal(fileMenuLabels.includes('Kill session'), false);
+  assert.equal(fileMenuLabels.includes('Resume session'), false);
+  const tmuxMenu = menus.find(menu => menu.id === 'tmux');
+  const tmuxMenuLabels = tmuxMenu.items.map(item => item.label).filter(Boolean);
+  assert.equal(tmuxMenu.items[0].label, 'New tmux session');
+  assert.ok(tmuxMenuLabels.includes('Transcript'));
+  assert.ok(tmuxMenuLabels.includes('AI summary'));
+  assert.ok(tmuxMenuLabels.includes('Event log'));
+  assert.ok(tmuxMenuLabels.includes('Branch Info'));
+  assert.ok(tmuxMenuLabels.includes('Rename session'));
+  assert.ok(tmuxMenuLabels.includes('Kill session'));
+  assert.ok(tmuxMenuLabels.includes("Enable YOLO for Tmux Session '1'"));
+  assert.ok(tmuxMenuLabels.includes('Resume session'));
+  assert.equal(tmuxMenu.items.find(item => item.label === 'Rename session').disabled, false);
+  assert.equal(tmuxMenu.items.find(item => item.label === 'Rename session').detail, '');
+  assert.equal(api.currentSessionActionTarget(), '1');
+  const filesOnlySlots = api.emptyLayoutSlots();
+  filesOnlySlots[api.layoutTreeKey] = api.leafNode('left');
+  filesOnlySlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  api.setLayoutSlotsForTest(filesOnlySlots);
+  const filesOnlyTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
+  assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename session').disabled, true);
+  assert.equal(filesOnlyTmuxMenu.items.find(item => item.label === 'Rename session').detail, 'No tmux tab focused');
+  const multiTmuxSlots = api.emptyLayoutSlots();
+  multiTmuxSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 22);
+  multiTmuxSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  multiTmuxSlots.slot1 = api.paneStateWithTabs(['1'], '1');
+  multiTmuxSlots.slot2 = api.paneStateWithTabs(['2'], '2');
+  api.setLayoutSlotsForTest(multiTmuxSlots);
+  api.setFocusedPanelItem('2');
+  api.setFocusedPanelItem('__files__');
+  assert.equal(api.currentSessionActionTarget(), '2');
+  const settingsMenu = menus.find(menu => menu.id === 'settings');
+  const settingsMenuLabels = settingsMenu.items.map(item => item.label).filter(Boolean);
+  assert.deepStrictEqual(canonical(settingsMenuLabels), ['Tab metadata', 'Notify', 'Refresh']);
+  assert.equal(settingsMenuLabels.includes('Global settings...'), false);
+  assert.ok(settingsMenuLabels.includes('Notify'));
+  assert.ok(settingsMenuLabels.includes('Refresh'));
+  assert.equal(settingsMenuLabels.includes('Log out'), false);
+  assert.equal(settingsMenu.items.find(item => item.label === 'Tab metadata').iconHtml.includes('app-menu-ui-icon-tab-meta active'), true);
+  assert.equal(settingsMenu.items.find(item => item.label === 'Notify').iconHtml.includes('app-menu-ui-icon-notify'), true);
+  assert.equal(settingsMenu.items.find(item => item.label === 'Refresh').iconHtml.includes('app-menu-ui-icon-refresh'), true);
+  assert.equal(settingsMenu.items.find(item => item.label === 'Refresh').detail, undefined);
+  const helpMenu = menus.find(menu => menu.id === 'help');
+  const helpMenuLabels = helpMenu.items.map(item => item.label).filter(Boolean);
+  assert.ok(helpMenuLabels.includes('Keyboard shortcuts'));
+  assert.ok(helpMenuLabels.includes('Open README'));
+  const shortcutsMenu = helpMenu.items.find(item => item.label === 'Keyboard shortcuts');
+  assert.equal(shortcutsMenu.type, 'submenu');
+  assert.deepStrictEqual(canonical(shortcutsMenu.items.map(item => item.label)), ['Save active editor', 'Close menu or dialog', 'Session actions', 'Move or split tab']);
+  assert.equal(helpMenu.items.find(item => item.label === 'Open README').disabled, false);
+  assert.equal(api.tabMenuItems().map(item => item.label).filter(Boolean).includes('Current Tab'), false);
+  const namedSessionApi = loadYolomux('', ['1', 'dynamo2']);
+  const tmuxOnlySlots = namedSessionApi.emptyLayoutSlots();
+  tmuxOnlySlots[namedSessionApi.layoutTreeKey] = namedSessionApi.leafNode('left');
+  tmuxOnlySlots.left = namedSessionApi.paneStateWithTabs(['1', 'dynamo2'], '1');
+  namedSessionApi.setLayoutSlotsForTest(tmuxOnlySlots);
+  const tmuxTabActionLabels = namedSessionApi.tabMenuItems().map(item => item.label).filter(Boolean);
+  assert.equal(tmuxTabActionLabels.includes('Current Tab'), false);
+  assert.equal(tmuxTabActionLabels.includes('YOLO policy: enable'), false);
+  namedSessionApi.activatePaneTab('left', 'dynamo2');
+  assert.equal(namedSessionApi.currentSessionActionTarget(), 'dynamo2');
+  assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.find(item => item.label === 'Rename session').disabled, false);
+  assert.ok(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.some(item => item.label === "Enable YOLO for Tmux Session 'dynamo2'"));
+  const sessionActions = api.tmuxSessionActionCommands('1');
+  assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Rename session", "Kill session", "Enable YOLO for Tmux Session '1'"]);
+  assert.equal(sessionActions.some(item => item.disabled), false);
+  assert.equal(sessionActions.find(item => item.label === 'Rename session').detail, '');
+  const sessionViews = api.tmuxSessionViewCommands('1');
+  assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ['Transcript', 'AI summary', 'Event log', 'Branch Info']);
+  assert.equal(api.fileIconFor('screenshot.png'), '🖼');
+  assert.equal(api.fileIconFor('run.sh'), '🐚');
+  assert.equal(api.fileIconFor('main.rs'), '🧩');
+  assert.equal(api.fileIconFor('config.yaml'), '⚙');
+  assert.equal(api.fileIconFor('README'), '📝');
+  assert.equal(api.fileIconFor('Dockerfile'), '⚙');
+  assert.equal(api.fileIconFor('archive.tar'), '🗜');
+  assert.equal(api.fileIconFor('unknown.bin'), '📄');
+  const controlsHtml = api.panelControlsHtml('1');
+  assert.ok(controlsHtml.includes('title="Transcript" aria-label="Transcript"'));
+  assert.ok(controlsHtml.includes('title="AI summary" aria-label="AI summary"'));
+  assert.ok(controlsHtml.includes('title="Event log" aria-label="Event log"'));
+  assert.ok(controlsHtml.includes('title="Branch Info" aria-label="Branch Info"'));
+  assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
+  assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
+  assert.equal(api.tmuxSessionNameError('dynamo 2'), '');
+  assert.equal(api.tmuxSessionNameError('bad/name').includes('letters'), true);
+  assert.ok(api.panelControlsHtml('1').includes('data-pane-actions="1"'));
+  assert.equal(api.panelControlsHtml('__files__').includes('data-pane-actions'), false);
+  const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
+  assert.equal(readonlyApi.tmuxSessionActionCommands('1').every(item => item.disabled), true);
   api.setTranscriptInfoForTest('1', {
     project: {git: {cwd: '/home/test/yolomux.dev', root: '/home/test/yolomux.dev'}},
     panes: [{current_path: '/home/test/yolomux.dev/mock', command: 'bash'}],
@@ -1096,8 +1248,10 @@ function canonical(value) {
 {
   const api = loadYolomux('', ['1']);
   assert.equal(api.agentErrorIsBlocking('codex transcript not found by cwd'), false);
+  assert.equal(api.agentErrorIsBlocking('missing /home/test/.claude/sessions/123.json'), false);
   assert.equal(api.agentErrorIsBlocking('worker crashed'), true);
   assert.notEqual(api.sessionState('1', {agents: [{kind: 'codex', error: 'codex transcript not found by cwd'}]}).key, 'blocked');
+  assert.notEqual(api.sessionState('1', {agents: [{kind: 'claude', error: 'missing /home/test/.claude/sessions/123.json'}]}).key, 'blocked');
   assert.equal(api.sessionState('1', {agents: [{kind: 'codex', error: 'worker crashed'}]}).key, 'blocked');
 }
 
@@ -1180,6 +1334,7 @@ function canonical(value) {
   };
   const html = api.tmuxPaneTabHtml('4', info, null, true);
   assert.ok(html.includes('>YO<'), 'tab includes YO marker');
+  assert.equal(/session-yolo-marker[^"]*tab-symbol/.test(html), false, 'YO marker stays visible when metadata badges are hidden');
   assert.ok(html.includes('>4<'), 'tab includes session number');
   assert.ok(html.includes('>MAIN<'), 'tab marks default branch');
   assert.ok(html.includes('>#9961<'), 'tab shows PR number from main HEAD subject');
@@ -1191,16 +1346,16 @@ function canonical(value) {
   assert.ok(blockedHtml.includes('--attention-animation-delay:'), 'red attention badges carry a synchronized animation delay');
 
   const genericWorkingHtml = api.tmuxPaneTabHtml('4', info, {key: 'working'}, true);
-  assert.equal(genericWorkingHtml.includes('session-yolo-marker active working'), false, 'generic working state does not pulse YO marker');
+  assert.equal(/session-yolo-marker[^"]*active[^"]*working/.test(genericWorkingHtml), false, 'generic working state does not pulse YO marker');
 
   api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'working'}});
   const workingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
-  assert.ok(workingHtml.includes('session-yolo-marker active working'), 'visible screen working pulses active YO marker');
+  assert.ok(/session-yolo-marker[^"]*active[^"]*working/.test(workingHtml), 'visible screen working pulses active YO marker');
 
   api.setAutoApproveStateForTest('4', {enabled: false, enabled_elsewhere: true, locked: true, lock_owner: {pid: 1234}, screen: {key: 'working'}});
   const externalHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
-  assert.ok(externalHtml.includes('session-yolo-marker locked'), 'YO owned by another server renders as yellow locked marker');
-  assert.equal(externalHtml.includes('session-yolo-marker active'), false, 'external YO is not shown as local active YO');
+  assert.ok(/session-yolo-marker[^"]*locked/.test(externalHtml), 'YO owned by another server renders as yellow locked marker');
+  assert.equal(/session-yolo-marker[^"]*active/.test(externalHtml), false, 'external YO is not shown as local active YO');
   assert.ok(externalHtml.includes('YOLO on elsewhere'), 'external YO marker title explains ownership is elsewhere');
 
   api.applyServerMetadataPulsesForTest('4', {main: 20000, pr: 20000});

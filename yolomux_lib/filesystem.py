@@ -45,6 +45,7 @@ IMAGE_EXTENSIONS = {
 }
 
 MAX_RAW_BYTES = 20 * 1024 * 1024  # 20 MB cap on raw (image) reads
+REPO_MARKERS = (".git", ".hg", ".svn", ".jj")
 
 
 class FilesystemError(Exception):
@@ -61,6 +62,16 @@ def _validated_path(raw: str) -> Path:
     if not raw.startswith("/") and not raw.startswith("~"):
         raise FilesystemError("path must be absolute")
     return Path(os.path.expanduser(raw))
+
+
+def _directory_is_repo(path: Path) -> bool:
+    for marker in REPO_MARKERS:
+        try:
+            if (path / marker).exists():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _entry_info(path: Path, name: str) -> dict[str, Any]:
@@ -87,13 +98,16 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
     else:
         kind = "other"
         size = st.st_size
-    return {
+    info = {
         "name": name,
         "kind": kind,
         "size": int(size),
         "mtime": int(st.st_mtime),
         "is_symlink": stat.S_ISLNK(mode),
     }
+    if kind == "dir":
+        info["is_repo"] = _directory_is_repo(path)
+    return info
 
 
 def list_directory(raw_path: str) -> dict[str, Any]:

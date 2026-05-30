@@ -28,6 +28,10 @@ JavaScript and CSS timing constants in `static/yolomux.js` and `static/yolomux.c
 
 Rationale: UI durations are perceived by users and read as deliberate at round values. Backend poll intervals stagger client requests to avoid pile-ups on the same tick — odd-and-rounded-up reads as intentional ("3001" not "3000"). When a request says "make it 1000ms", route to the appropriate bucket: UI keeps `1000`, backend uses `1003` or `1009`.
 
+### Responsive UI sizing
+
+Do not hard-code layout capacity around one browser window, OS, zoom level, or font rendering. For menus, panes, dropdowns, tab lists, and editor/viewer surfaces, prefer intrinsic sizing, flex/grid allocation, percentages, viewport units, and shared CSS variables over fixed pixel width buckets. Fixed pixels are acceptable for hairlines, icon glyphs, and small spacing tokens, but not for "how much content fits"; if JavaScript must set a size, derive it from measured DOM content and clamp it to the current viewport/container rather than baking in min/max constants.
+
 ### Dev server restart workflow
 
 Restarts of the YOLOmux dev server (port `7778`) must delegate the `(pkill, sleep, relaunch)` chain to **systemd-run as a transient user unit**. Running the chain directly in a Claude-harness `Bash` call does not work: the harness places each Bash invocation in a process container (cgroup/pid-namespace), and when the Bash exits, everything spawned inside — including processes detached with `nohup`, `disown`, or `setsid` — is reaped along with it. Only a process owned by an *external* daemon escapes. The user-mode systemd manager (`user@<uid>.service`) is that daemon.

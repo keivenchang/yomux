@@ -436,6 +436,19 @@ class Handler(BaseHTTPRequestHandler):
             payload, status = self.server.app.create_next_session(agent)
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/rename-session":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [""])[0]
+            new_name = qs.get("new_name", [""])[0]
+            payload, status = self.server.app.rename_session(session, new_name)
+            self.write_json(payload, status=status)
+            return
+        if parsed.path == "/api/kill-session":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [""])[0]
+            payload, status = self.server.app.kill_session(session)
+            self.write_json(payload, status=status)
+            return
         if parsed.path == "/api/upload":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
@@ -912,37 +925,60 @@ class Handler(BaseHTTPRequestHandler):
         attach_args = ["tmux", "attach-session"]
         if readonly:
             attach_args.append("-r")
-        attach_args.extend(["-t", tmux_session_target(session)])
-        process = subprocess.Popen(
-            attach_args,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            close_fds=True,
-            env=env,
-            start_new_session=True,
-        )
+        target = tmux_session_target(session)
+        attach_args.extend(["-t", target])
+
+        def session_exists() -> bool:
+            return subprocess.run(
+                ["tmux", "has-session", "-t", target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode == 0
+
+        def attach_tmux() -> subprocess.Popen:
+            return subprocess.Popen(
+                attach_args,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+                env=env,
+                start_new_session=True,
+            )
+
+        process = attach_tmux()
 
         try:
             for payload in pending_payloads:
                 self.handle_ws_payload(session, master_fd, slave_fd, process, payload, readonly=readonly)
-            while process.poll() is None:
-                readable, _, _ = select.select([master_fd, self.connection], [], [], 0.1)
-                if master_fd in readable:
-                    data = os.read(master_fd, 65536)
-                    if not data:
-                        break
-                    self.connection.sendall(make_ws_frame(data, opcode=2))
-                if self.connection in readable:
-                    opcode, payload = read_ws_frame(self.rfile)
-                    if opcode == 8:
-                        break
-                    if opcode == 9:
-                        self.connection.sendall(make_ws_frame(payload, opcode=10))
-                        continue
-                    if opcode not in {1, 2}:
-                        continue
-                    self.handle_ws_payload(session, master_fd, slave_fd, process, payload, readonly=readonly)
+            connected = True
+            while connected:
+                while process.poll() is None:
+                    readable, _, _ = select.select([master_fd, self.connection], [], [], 0.1)
+                    if master_fd in readable:
+                        data = os.read(master_fd, 65536)
+                        if not data:
+                            break
+                        self.connection.sendall(make_ws_frame(data, opcode=2))
+                    if self.connection in readable:
+                        opcode, payload = read_ws_frame(self.rfile)
+                        if opcode == 8:
+                            connected = False
+                            break
+                        if opcode == 9:
+                            self.connection.sendall(make_ws_frame(payload, opcode=10))
+                            continue
+                        if opcode not in {1, 2}:
+                            continue
+                        self.handle_ws_payload(session, master_fd, slave_fd, process, payload, readonly=readonly)
+                if not connected:
+                    break
+                returncode = process.poll()
+                if returncode == 0 and session_exists():
+                    process = attach_tmux()
+                    continue
+                break
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:

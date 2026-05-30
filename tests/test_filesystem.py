@@ -10,6 +10,8 @@ from yolomux_lib.filesystem import FilesystemError
 
 def test_list_directory_returns_entries(tmp_path):
     (tmp_path / "sub").mkdir()
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo" / ".git").mkdir()
     (tmp_path / "file.txt").write_text("hello", encoding="utf-8")
     (tmp_path / "big.dat").write_bytes(b"\x00" * 100)
 
@@ -19,7 +21,11 @@ def test_list_directory_returns_entries(tmp_path):
     assert payload["parent"] == str(tmp_path.parent)
     names = {entry["name"]: entry for entry in payload["entries"]}
     assert names["sub"]["kind"] == "dir"
+    assert names["sub"]["is_repo"] is False
+    assert names["repo"]["kind"] == "dir"
+    assert names["repo"]["is_repo"] is True
     assert names["file.txt"]["kind"] == "file"
+    assert "is_repo" not in names["file.txt"]
     assert names["file.txt"]["size"] == len("hello")
     assert names["big.dat"]["kind"] == "file"
 

@@ -7,6 +7,18 @@ METADATA_BADGE_PULSE_SECONDS = 20.0
 METADATA_BADGES = ("main", "pr", "status", "ci")
 METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
 METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
+# Keep in sync with tmuxSessionNameError() in static/yolomux.js.
+TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
+
+
+def tmux_session_name_error(name: str) -> str | None:
+    if not name:
+        return "session name is required"
+    if len(name) > 64:
+        return "session name must be 64 characters or fewer"
+    if not TMUX_SESSION_NAME_RE.fullmatch(name):
+        return "session name may contain only letters, numbers, spaces, dot, dash, and underscore"
+    return None
 
 
 class TmuxWebtermApp:
@@ -521,6 +533,51 @@ class TmuxWebtermApp:
             error = (result.stderr or result.stdout or "tmux next-window failed").strip()
             return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
         return {"session": session, "ok": True}, HTTPStatus.OK
+
+    def stop_auto_approve_worker(self, session: str) -> None:
+        with self.auto_workers_lock:
+            worker = self.auto_workers.pop(session, None)
+        if worker is not None:
+            worker.stop()
+        self.set_persisted_auto_session(session, False)
+
+    def rename_session(self, session: str, new_name: str) -> tuple[dict[str, Any], HTTPStatus]:
+        self.refresh_sessions()
+        new_name = str(new_name or "").strip()
+        if session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        name_error = tmux_session_name_error(new_name)
+        if name_error:
+            return {"session": session, "new_name": new_name, "error": name_error}, HTTPStatus.BAD_REQUEST
+        if new_name != session and new_name in self.sessions:
+            return {"session": session, "new_name": new_name, "error": f"session already exists: {new_name}"}, HTTPStatus.CONFLICT
+        if new_name == session:
+            return {"session": session, "new_session": new_name, "renamed": False, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
+
+        result = tmux(["rename-session", "-t", tmux_session_target(session), new_name], timeout=3.0)
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "tmux rename-session failed").strip()
+            return {"session": session, "new_name": new_name, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+
+        self.stop_auto_approve_worker(session)
+        self.refresh_sessions()
+        self.log_event(new_name, "session_renamed", f"renamed {session} to {new_name}", {"old_session": session, "new_session": new_name})
+        return {"session": session, "new_session": new_name, "renamed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
+
+    def kill_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
+        self.refresh_sessions()
+        if session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+
+        result = tmux(["kill-session", "-t", tmux_session_target(session)], timeout=3.0)
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "tmux kill-session failed").strip()
+            return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+
+        self.stop_auto_approve_worker(session)
+        self.refresh_sessions()
+        self.log_event(None, "session_killed", f"killed {session}", {"session": session})
+        return {"session": session, "killed": True, "sessions": self.sessions, "ok": True}, HTTPStatus.OK
 
     def tmux_scroll(self, session: str, direction: str, lines: int) -> None:
         if session not in self.sessions or direction not in {"up", "down"}:

@@ -62,6 +62,7 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
         "availableAgents": available_agent_commands(),
         "accessRole": access_role,
         "homePath": str(Path.home()),
+        "repoRoot": str(Path(__file__).resolve().parents[1]),
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
         "serverHostname": SERVER_HOSTNAME,
         "version": YOLOMUX_VERSION,
@@ -107,7 +108,7 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
   <div class="file-explorer-tree-col">
     <div class="file-explorer-head">
       <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle" title="Show hidden files (dotfiles)" aria-pressed="false">.*</button>
-      <div class="file-explorer-path" id="fileExplorerPath">/</div>
+      <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/" spellcheck="false" aria-label="File Explorer root path">
       <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy" title="Copy current path" aria-label="Copy current path"></button>
       <button type="button" id="fileExplorerClose" class="file-explorer-close" title="Close File Explorer" aria-label="Close"></button>
     </div>
@@ -117,8 +118,8 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
     <div class="file-editor-head">
       <div class="file-editor-path" id="fileEditorPath"></div>
       <button type="button" id="fileEditorPreview" class="file-editor-preview" title="Toggle Markdown preview" hidden>Preview</button>
-      <button type="button" id="fileEditorWrap" class="file-editor-wrap" title="Toggle word wrap" hidden>Wrap</button>
-      <button type="button" id="fileEditorSave" class="file-editor-save" title="Save (Ctrl/Cmd+S)">Save</button>
+      <button type="button" id="fileEditorWrap" class="file-editor-wrap" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
+      <button type="button" id="fileEditorSave" class="file-editor-save" title="Save (Ctrl/Cmd+S)" aria-label="Save file"><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
       <button type="button" id="fileEditorClose" class="file-editor-close" title="Close current file" aria-label="Close"></button>
     </div>
     <textarea id="fileEditorTextarea" class="file-editor-textarea" spellcheck="false" wrap="off"></textarea>
