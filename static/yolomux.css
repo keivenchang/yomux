@@ -505,30 +505,6 @@ body {
   margin: 6px 2px;
   background: #384356;
 }
-.app-menu-search-row {
-  position: sticky;
-  top: -7px;
-  z-index: 2;
-  margin: -2px -2px 6px;
-  padding: 2px;
-  background: #111820;
-}
-.app-menu-search-input {
-  width: 100%;
-  height: 24px;
-  min-width: min(28ch, calc(var(--app-menu-max-inline-size) - 20px));
-  padding: 3px 7px;
-  border: 1px solid #384356;
-  border-radius: 5px;
-  outline: 0;
-  background: #0b1017;
-  color: #e7ecf3;
-  font: var(--ui-font-size-sm)/1.2 var(--ui-font);
-}
-.app-menu-search-input:focus {
-  border-color: var(--brand-green);
-  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.35);
-}
 .app-menu-submenu-wrap {
   position: relative;
 }
@@ -1896,7 +1872,8 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 .command-palette-label {
   font-weight: 700;
 }
-.command-palette-label .fuzzy-match {
+.command-palette-label .fuzzy-match,
+.command-palette-detail .fuzzy-match {
   padding: 0;
   color: #081205;
   background: #a6e35f;
@@ -2068,7 +2045,7 @@ button:disabled {
   opacity: 0.55;
 }
 button:disabled:hover { border-color: var(--line); }
-.grid {
+6.grid {
   height: 100%;
   min-height: 0;
   padding: 0 5px 5px;
@@ -4049,6 +4026,12 @@ body.layout-resizing {
   color: var(--accent-gold);
   font-weight: 700;
 }
+.file-tree-row.repo-non-main:not(.selected) .file-tree-name {
+  color: #ffb454;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 180, 84, 0.55);
+  text-underline-offset: 2px;
+}
 .file-tree-icon {
   display: inline-block;
   width: 20px;
@@ -4854,6 +4837,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-explorer-changes-panel {
   flex: 0 0 var(--file-explorer-changes-size);
   min-height: var(--file-explorer-changes-min-block-size);
+  container-type: inline-size;
   overflow-y: scroll;
   overflow-x: auto;
   scrollbar-gutter: stable;
@@ -4896,6 +4880,12 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
 }
+.file-explorer-changes-head .changes-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .file-explorer-changes-panel .changes-refresh {
   height: 20px;
   padding: 0 6px;
@@ -4926,6 +4916,55 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+@container (max-width: 360px) {
+  .file-explorer-changes-head {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "title density refresh"
+      "refs refs refs"
+      "summary summary summary";
+    gap: 4px;
+  }
+  .file-explorer-changes-head .changes-title {
+    grid-area: title;
+  }
+  .file-explorer-changes-head .diff-ref-controls {
+    grid-area: refs;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 4px;
+  }
+  .file-explorer-changes-head .diff-ref-control {
+    min-width: 0;
+  }
+  .file-explorer-changes-head .diff-ref-control input {
+    width: 100%;
+    min-width: 0;
+  }
+  .file-explorer-changes-head .changes-display-toggle {
+    grid-area: density;
+  }
+  .file-explorer-changes-head .changes-refresh {
+    grid-area: refresh;
+    width: 22px;
+    padding: 0;
+    overflow: hidden;
+    text-indent: 999px;
+    white-space: nowrap;
+  }
+  .file-explorer-changes-head .changes-refresh::before {
+    content: "↻";
+    float: left;
+    width: 100%;
+    text-indent: 0;
+    text-align: center;
+  }
+  .file-explorer-changes-head .changes-summary {
+    grid-area: summary;
+    justify-self: start;
+    width: 100%;
+  }
 }
 .file-explorer-changes-panel .changes-repo-group {
   margin-bottom: 6px;
@@ -4983,10 +5022,10 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   background: rgba(118, 185, 0, 0.88);
 }
 .cm-yolomux-diff-add {
-  background: color-mix(in srgb, var(--code-diff-add) 18%, transparent);
+  background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
 }
 .cm-yolomux-diff-remove {
-  background: color-mix(in srgb, var(--code-diff-remove) 18%, transparent);
+  background: color-mix(in srgb, var(--code-diff-remove) 32%, transparent);
 }
 .file-editor-diff-codemirror .cm-mergeView {
   height: 100%;
@@ -5001,14 +5040,64 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-editor-diff-codemirror .cm-mergeViewEditor {
   min-width: 0;
 }
+.file-editor-diff-codemirror .cm-merge-revert {
+  width: 2.2em;
+  background: color-mix(in srgb, var(--line) 46%, transparent);
+  border-inline: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+.file-editor-diff-codemirror .cm-merge-revert button {
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 85%, transparent);
+  border-radius: 0;
+}
+.file-editor-diff-codemirror .cm-merge-revert button:hover {
+  color: #061207;
+  background: var(--brand-green);
+}
+.file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 .file-editor-diff-codemirror .cm-deletedChunk {
-  background: color-mix(in srgb, var(--code-diff-remove) 18%, transparent);
+  background: color-mix(in srgb, var(--code-diff-remove) 30%, transparent);
 }
-.file-editor-diff-codemirror .cm-insertedChunk {
-  background: color-mix(in srgb, var(--code-diff-add) 18%, transparent);
+.file-editor-diff-codemirror .cm-merge-b .cm-changedLine,
+.file-editor-diff-codemirror .cm-inlineChangedLine,
+.file-editor-diff-codemirror .cm-insertedChunk,
+.file-editor-diff-codemirror .cm-insertedLine {
+  background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
 }
-.file-editor-diff-codemirror .cm-changedLine {
-  background: color-mix(in srgb, var(--code-diff-add) 10%, transparent);
+.file-editor-diff-codemirror .cm-merge-a .cm-changedText,
+.file-editor-diff-codemirror .cm-deletedText,
+.file-editor-diff-codemirror .cm-deletedLine {
+  background: color-mix(in srgb, var(--code-diff-remove) 44%, transparent);
+}
+.file-editor-diff-codemirror .cm-merge-b .cm-changedText,
+.file-editor-diff-codemirror .cm-insertedText {
+  background: color-mix(in srgb, var(--code-diff-add) 44%, transparent);
+}
+.file-editor-diff-codemirror .cm-changedLineGutter,
+.file-editor-diff-codemirror .cm-deletedLineGutter {
+  background: color-mix(in srgb, var(--accent-gold) 45%, transparent);
+}
+.file-editor-diff-codemirror .cm-deletedChunk {
+  position: relative;
+  padding-left: 52px;
+}
+.file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons {
+  position: absolute !important;
+  inset-block-start: 2px;
+  inset-inline-start: 5px;
+  inset-inline-end: auto !important;
+  z-index: 2;
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+}
+.file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons button {
+  min-width: 20px;
+  height: 18px;
+  margin: 0;
+  padding: 0 4px;
+  border-radius: 0;
+  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {

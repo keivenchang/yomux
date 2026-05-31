@@ -586,7 +586,8 @@
 .command-palette-label {
   font-weight: 700;
 }
-.command-palette-label .fuzzy-match {
+.command-palette-label .fuzzy-match,
+.command-palette-detail .fuzzy-match {
   padding: 0;
   color: #081205;
   background: #a6e35f;
@@ -758,3 +759,4 @@ button:disabled {
   opacity: 0.55;
 }
 button:disabled:hover { border-color: var(--line); }
+6

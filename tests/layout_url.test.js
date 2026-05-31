@@ -409,6 +409,9 @@ globalThis.__layoutTestApi = {
   renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = []) {
     renderTreeChildren(container, parentPath, entries, depth, {entriesByDir: new Map(entriesByDirPairs)});
   },
+  setFileExplorerRepoInfoForTest(path, repo) {
+    fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), repo);
+  },
   rawFileUrl,
   rawFileDownloadUrl,
   focusPreferencesSearch,
@@ -1109,6 +1112,9 @@ function makeFileTree(paths) {
   assert.ok(css.includes('--file-image-preview-max-size: 320px'), 'Finder image preview default max size is tokenized');
   assert.ok(/\.file-image-preview-popover[\s\S]*pointer-events:\s*none/.test(css), 'Finder image previews cannot keep themselves hovered over terminals');
   assert.ok(source.includes('preserveScroll: sameImage'), 'image viewer refreshes preserve scroll on unchanged images');
+  assert.ok(source.includes('captureFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is captured before pane/tab renders');
+  assert.ok(source.includes('restoreFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is restored after pane/tab renders');
+  assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
 }
 
 {
@@ -1241,6 +1247,7 @@ function makeFileTree(paths) {
     ],
   });
   assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified files'), 'Finder embeds a modified-files panel');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), 'Finder modified-files panel uses one density toggle');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row detailed'), 'Finder modified-files panel defaults to detailed rows');
@@ -1252,6 +1259,9 @@ function makeFileTree(paths) {
   assert.ok(/\.changes-file-name\s*\{[\s\S]*font-weight:\s*500/.test(changedFilesCss), 'modified-file names are not bold');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*overflow-y:\s*scroll/.test(changedFilesCss), 'Finder modified-files scrollbar stays visible');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*scrollbar-gutter:\s*stable/.test(changedFilesCss), 'Finder modified-files reserves scrollbar gutter');
+  assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*container-type:\s*inline-size/.test(changedFilesCss), 'Finder modified-files header uses pane-width container queries');
+  assert.ok(changedFilesCss.includes('@container (max-width: 360px)'), 'Finder modified-files header wraps at narrow pane widths');
+  assert.ok(changedFilesCss.includes('grid-template-areas:'), 'Finder modified-files narrow header uses explicit row areas');
   const fakeChangesScroll = {scrollTop: 45, scrollLeft: 3, innerHTML: ''};
   api.replaceHtmlPreservingScroll(fakeChangesScroll, '<div>updated</div>');
   assert.equal(fakeChangesScroll.innerHTML, '<div>updated</div>');
@@ -1362,11 +1372,14 @@ function makeFileTree(paths) {
   finderToggleSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
   finderToggleSlots.right = api.paneStateWithTabs(['1'], '1');
   api.setLayoutSlotsForTest(finderToggleSlots);
+  api.setFocusedPanelItem('1');
   const finderLayoutBeforeToggle = api.layoutParamValue(api.currentSlots());
   api.toggleFileExplorerShortcut();
   assert.equal(api.itemInLayout('__files__'), false, 'app shortcut hides the Finder pane');
+  assert.equal(api.focusedPanelItemForTest(), '1', 'hiding Finder keeps focus on the active terminal');
   api.toggleFileExplorerShortcut();
   assert.equal(api.layoutParamValue(api.currentSlots()), finderLayoutBeforeToggle, 'app shortcut restores the prior Finder position and split size');
+  assert.equal(api.focusedPanelItemForTest(), '1', 'restoring Finder keeps focus on the active terminal');
 
   const sidePreviewEditorItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
   const sidePreviewSlots = api.emptyLayoutSlots();
@@ -1395,6 +1408,12 @@ function makeFileTree(paths) {
   assert.ok(/\.file-editor-cross-split-panel,\s*\n\.file-editor-save-panel/.test(preferencesCss), 'side preview button uses the compact editor toolbar button sizing');
   assert.ok(preferencesCss.includes('.file-editor-icon-side-split'), 'cross-pane side preview has a distinct icon');
   assert.ok(preferencesCss.includes('.file-editor-dialog-backdrop'), 'editor conflict and close decisions use the shared editor dialog');
+  assert.equal(preferencesCss.includes('.app-menu-search-input'), false, 'Tabs menu no longer renders a sticky search input');
+  assert.ok(preferencesCss.includes('.command-palette-detail .fuzzy-match'), 'command palette highlights fuzzy matches in detail text');
+  assert.ok(preferencesCss.includes('.file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons'), 'diff merge controls are positioned in the chunk margin');
+  assert.ok(/\.file-editor-diff-codemirror \.cm-merge-b \.cm-changedLine[\s\S]*var\(--code-diff-add\) 30%/.test(preferencesCss), 'diff added lines use stronger green fill');
+  assert.ok(/\.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine[\s\S]*var\(--code-diff-remove\) 30%/.test(preferencesCss), 'diff removed lines use stronger red fill');
+  assert.ok(preferencesCss.includes('.file-tree-row.repo-non-main'), 'Finder repo rows have non-main branch styling');
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
   assert.ok(preferencesHtml.includes('data-preferences-search-action>YOsearch</button>'), 'preferences search has an explicit YOsearch action');
@@ -1676,7 +1695,9 @@ function makeFileTree(paths) {
   assert.ok(source.startsWith('/* GENERATED by tools/static_build.py from static_src/'), 'generated JS has a do-not-edit header');
   assert.ok(source.includes('const mod = appModifier(event);'), 'global app shortcuts use one platform modifier');
   assert.equal(source.includes('const mod = event.ctrlKey || event.metaKey;'), false, 'global app shortcuts do not claim both Ctrl and Cmd');
-  assert.ok(source.includes("if (mod && key === 'p' && globalShortcutTargetAllowsAppAction(event.target))"), 'file quick-open is bound through the global shortcut guard');
+  assert.ok(source.includes('function globalShortcutTargetAllowsPlatformAction(target)'), 'platform app shortcuts use a shared focus guard');
+  assert.ok(source.includes("return isMacPlatform() || globalShortcutTargetAllowsAppAction(target);"), 'Mac app shortcuts bypass terminal focus so Cmd+P cannot fall through to browser Print');
+  assert.ok(source.includes("if (mod && key === 'p' && platformActionAllowed)"), 'file quick-open is bound through the platform shortcut guard');
   assert.ok(source.includes('if (event.shiftKey) openCommandPalette();'), 'Shift plus app modifier opens the command palette');
   assert.ok(source.includes('else openFileQuickOpen();'), 'Plain app modifier plus P opens file quick-open');
   assert.ok(source.includes("if (event.key === ',')"), 'Preferences keeps best-effort comma shortcut in browser tabs');
@@ -1720,6 +1741,7 @@ function makeFileTree(paths) {
   assert.ok(api.fuzzySearchScore('hel', ['helloXandYyy']) > api.fuzzySearchScore('hel', ['h e l']), 'fuzzy matcher ranks contiguous matches higher');
   assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('xy', 'helloXandYyy').indexes), [5, 9], 'fuzzy matcher exposes matched indexes for result highlighting');
   assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy').includes('<mark class="fuzzy-match">X</mark>'), 'palette results highlight matched characters');
+  assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">1</mark>'), 'palette detail text can highlight PR-number matches');
   assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
   assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');
   api.setFileQuickOpenCandidatesForTest('/repo/app', [
@@ -1732,9 +1754,10 @@ function makeFileTree(paths) {
   api.setTranscriptInfoForTest('1', {project: {git: {root: '/repo/workspace'}}, selected_pane: {current_path: '/repo/workspace/src'}});
   api.setFocusedPanelItem('1');
   assert.equal(api.fileQuickOpenRootForSearch(), '/repo/workspace', 'file quick-open searches the workspace root when tmux is inside a repo');
-  assert.equal(api.tabMenuItems()[0].type, 'search', 'Tabs menu starts with a search input');
+  assert.equal(api.tabMenuItems().some(item => item.type === 'search'), false, 'Tabs menu does not include its own search input');
   api.setTabsMenuSearchTextForTest('xy');
   assert.equal(api.tabSearchScore('1', 'xy') < 0, true, 'tab search uses fuzzy score and rejects non-matches');
+  api.setTabsMenuSearchTextForTest('');
   assert.equal(helpMenu.items.find(item => item.label === 'Open README').disabled, false);
   assert.equal(api.tabMenuItems().map(item => item.label).filter(Boolean).includes('Current Tab'), false);
   const namedSessionApi = loadYolomux('', ['1', 'dynamo2']);
@@ -1898,6 +1921,23 @@ function makeFileTree(paths) {
   assert.equal(srcChildren.children[1].dataset.path, '/repo/src/c.py');
   assert.equal(refreshTree.scrollTop, 44);
   assert.equal(srcChildren.scrollTop, 12);
+
+  api.setFileExplorerSessionFilesPayloadForTest({
+    loaded: true,
+    files: [{abs_path: '/repo/README.md', status: 'M', added: 5, removed: 3}],
+  });
+  api.setFileExplorerRepoInfoForTest('/repo/app', {root: '/repo/app', name: 'app', branch: 'feature/x'});
+  const gitTree = new TestElement('git-tree');
+  gitTree.setAttribute('role', 'tree');
+  gitTree.classList.add('file-explorer-tree-panel');
+  api.renderTreeChildrenForTest(gitTree, '/repo', [
+    {name: 'app', kind: 'dir', is_repo: true},
+    {name: 'README.md', kind: 'file'},
+  ]);
+  assert.equal(gitTree.children[0].querySelector(':scope > .file-tree-name').textContent, 'app (feature/x)', 'repo rows show cached branch names inline');
+  assert.equal(gitTree.children[0].classList.contains('repo-non-main'), true, 'non-main repo rows stand out');
+  assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-name').textContent, 'README.md (+5/-3)', 'changed file rows show numstat inline');
+  assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-git-status').textContent, 'M');
 
   const slots = api.emptyLayoutSlots();
   slots[api.layoutTreeKey] = api.leafNode('slot2');

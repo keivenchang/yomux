@@ -344,8 +344,10 @@ async function updateRepoRowHoverTitle(row, path) {
   row.dataset.repoTitleLoaded = 'true';
   try {
     const info = await fetchFilePathInfo(path);
+    fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), info.repo || null);
     const summary = repoInfoSummary(info.repo);
     if (summary) row.title = `${summary}\n${info.repo.root}`;
+    updateFileTreeGitStatusRows();
   } catch (_) {}
 }
 
@@ -634,10 +636,43 @@ function fileTreeDirectRows(container) {
   return Array.from(container?.children || []).filter(node => node.classList?.contains('file-tree-row'));
 }
 
-function fileTreeGitStatus(path) {
+function fileTreeChangedFile(path) {
   const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
-  const match = files.find(item => item?.abs_path === path);
-  return String(match?.status || '').toUpperCase();
+  return files.find(item => item?.abs_path === path) || null;
+}
+
+function fileTreeGitStatus(path) {
+  return String(fileTreeChangedFile(path)?.status || '').toUpperCase();
+}
+
+function fileTreeNumstatText(path) {
+  const match = fileTreeChangedFile(path);
+  if (!match) return '';
+  const added = Number(match.added || 0);
+  const removed = Number(match.removed || 0);
+  if (!Number.isFinite(added) || !Number.isFinite(removed)) return '';
+  return ` (+${added}/-${removed})`;
+}
+
+function fileTreeRepoBranch(path) {
+  const normalized = normalizeDirectoryPath(path);
+  const repo = fileExplorerRepoInfoCache.get(normalized);
+  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
+  return repo.branch || 'detached';
+}
+
+function fileTreeRepoBranchIsNonMain(path) {
+  const branch = fileTreeRepoBranch(path);
+  return Boolean(branch && !['main', 'master'].includes(branch));
+}
+
+function fileTreeDisplayName(path, entry) {
+  if (entry.kind === 'dir' && entry.is_repo === true) {
+    const branch = fileTreeRepoBranch(path);
+    return branch ? `${entry.name} (${branch})` : entry.name;
+  }
+  if (entry.kind === 'file') return `${entry.name}${fileTreeNumstatText(path)}`;
+  return entry.name;
 }
 
 function fileTreeGitStatusClass(status) {
@@ -713,6 +748,8 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.className = `file-tree-row kind-${entry.kind}`;
   row.dataset.path = fullPath;
   row.dataset.kind = entry.kind;
+  row.dataset.name = entry.name;
+  row.dataset.isRepo = entry.is_repo === true ? 'true' : 'false';
   row.style.paddingLeft = `${8 + depth * 14}px`;
   row.setAttribute('role', 'treeitem');
   row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
@@ -722,6 +759,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
   row.classList.toggle('expanded', expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
+  row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : '';
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
@@ -745,7 +783,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
   const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-  updateFileTreeRowContents(row, icon, entry.name, {
+  updateFileTreeRowContents(row, icon, fileTreeDisplayName(fullPath, entry), {
     gitStatus,
     iconClass: fileIconClassFor(entry.name, entry.kind),
   });
@@ -943,6 +981,15 @@ function updateFileTreeGitStatusRows() {
       status.textContent = gitStatus;
       status.hidden = !gitStatus;
     }
+    const entry = {
+      kind: row.dataset.kind,
+      name: row.dataset.name || basenameOf(row.dataset.path),
+      is_repo: row.dataset.isRepo === 'true',
+    };
+    row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(row.dataset.path));
+    const name = row.querySelector(':scope > .file-tree-name');
+    const nextName = fileTreeDisplayName(row.dataset.path, entry);
+    if (name && name.textContent !== nextName) name.textContent = nextName;
   });
 }
 

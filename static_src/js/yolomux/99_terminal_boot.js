@@ -1617,6 +1617,10 @@ function globalShortcutTargetAllowsAppAction(target) {
   return !blocked.some(selector => node.closest?.(selector));
 }
 
+function globalShortcutTargetAllowsPlatformAction(target) {
+  return isMacPlatform() || globalShortcutTargetAllowsAppAction(target);
+}
+
 function toggleFileExplorerShortcut() {
   if (itemInLayout(fileExplorerItemId)) {
     fileExplorerShortcutRestoreSlots = cloneLayoutSlots();
@@ -1625,7 +1629,6 @@ function toggleFileExplorerShortcut() {
   }
   if (fileExplorerShortcutRestoreSlots && itemInLayout(fileExplorerItemId, fileExplorerShortcutRestoreSlots)) {
     applyLayoutSlots(fileExplorerShortcutRestoreSlots, {
-      focusSession: fileExplorerItemId,
       prune: false,
       message: `${fileExplorerLabel()} restored`,
     });
@@ -1660,18 +1663,19 @@ topbar?.addEventListener('pointerenter', () => {
 document.addEventListener('keydown', event => {
   const mod = appModifier(event);
   const key = event.key.toLowerCase();
-  if (mod && key === 'k' && globalShortcutTargetAllowsAppAction(event.target)) {
+  const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
+  if (mod && key === 'k' && platformActionAllowed) {
     event.preventDefault();
     openCommandPalette();
     return;
   }
-  if (mod && key === 'p' && globalShortcutTargetAllowsAppAction(event.target)) {
+  if (mod && key === 'p' && platformActionAllowed) {
     event.preventDefault();
     if (event.shiftKey) openCommandPalette();
     else openFileQuickOpen();
     return;
   }
-  if (mod && globalShortcutTargetAllowsAppAction(event.target)) {
+  if (mod && platformActionAllowed) {
     if (key === 'b') {
       event.preventDefault();
       toggleFileExplorerShortcut();

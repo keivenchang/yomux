@@ -156,6 +156,7 @@ const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
 const pendingFileEditorFocus = new Set();
+const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = null;
@@ -2702,7 +2703,7 @@ function renderCommandPaletteResults() {
   results.innerHTML = commandPaletteItemsCache.map((item, index) => `
     <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
-      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span></span><span class="command-palette-detail">${esc(item.detail || '')}</span></span>
+      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span></span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
     </button>`).join('');
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
@@ -3209,10 +3210,6 @@ function menuSeparator() {
   return {type: 'separator'};
 }
 
-function menuSearch(id, placeholder, value = '') {
-  return {type: 'search', id, placeholder, value};
-}
-
 function menuGroups(...groups) {
   const items = [];
   for (const group of groups) {
@@ -3556,10 +3553,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
     inactiveTabMenuItems()
   );
   const resultItems = groupedItems.length ? groupedItems : [menuCommand('No matching tabs', null, {disabled: true})];
-  return [
-    menuSearch('tabs', 'search', tabsMenuSearchText),
-    ...resultItems,
-  ];
+  return resultItems;
 }
 
 function appMenuTree() {
@@ -3830,41 +3824,8 @@ function createAppMenuItem(item) {
     node.textContent = item.label;
     return node;
   }
-  if (item.type === 'search') return createAppMenuSearch(item);
   if (item.type === 'submenu') return createAppSubmenu(item);
   return createAppMenuCommand(item);
-}
-
-function createAppMenuSearch(item) {
-  const row = document.createElement('div');
-  row.className = 'app-menu-search-row';
-  const input = document.createElement('input');
-  input.type = 'search';
-  input.className = 'app-menu-search-input';
-  input.placeholder = item.placeholder || 'search';
-  input.value = item.value || '';
-  input.setAttribute('aria-label', item.placeholder || 'search');
-  input.dataset.appMenuSearch = item.id || '';
-  input.addEventListener('pointerdown', event => event.stopPropagation());
-  input.addEventListener('click', event => event.stopPropagation());
-  input.addEventListener('keydown', event => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeAppMenus();
-    }
-    event.stopPropagation();
-  });
-  input.addEventListener('input', () => {
-    if (item.id === 'tabs') tabsMenuSearchText = input.value || '';
-    renderSessionButtons({force: true});
-    requestAnimationFrame(() => {
-      const next = document.querySelector(`.app-menu-search-input[data-app-menu-search="${cssEscape(item.id || '')}"]`);
-      next?.focus?.({preventScroll: true});
-      next?.setSelectionRange?.(next.value.length, next.value.length);
-    });
-  });
-  row.appendChild(input);
-  return row;
 }
 
 function createAppSubmenu(item) {
@@ -4450,8 +4411,10 @@ async function updateRepoRowHoverTitle(row, path) {
   row.dataset.repoTitleLoaded = 'true';
   try {
     const info = await fetchFilePathInfo(path);
+    fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), info.repo || null);
     const summary = repoInfoSummary(info.repo);
     if (summary) row.title = `${summary}\n${info.repo.root}`;
+    updateFileTreeGitStatusRows();
   } catch (_) {}
 }
 
@@ -4740,10 +4703,43 @@ function fileTreeDirectRows(container) {
   return Array.from(container?.children || []).filter(node => node.classList?.contains('file-tree-row'));
 }
 
-function fileTreeGitStatus(path) {
+function fileTreeChangedFile(path) {
   const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
-  const match = files.find(item => item?.abs_path === path);
-  return String(match?.status || '').toUpperCase();
+  return files.find(item => item?.abs_path === path) || null;
+}
+
+function fileTreeGitStatus(path) {
+  return String(fileTreeChangedFile(path)?.status || '').toUpperCase();
+}
+
+function fileTreeNumstatText(path) {
+  const match = fileTreeChangedFile(path);
+  if (!match) return '';
+  const added = Number(match.added || 0);
+  const removed = Number(match.removed || 0);
+  if (!Number.isFinite(added) || !Number.isFinite(removed)) return '';
+  return ` (+${added}/-${removed})`;
+}
+
+function fileTreeRepoBranch(path) {
+  const normalized = normalizeDirectoryPath(path);
+  const repo = fileExplorerRepoInfoCache.get(normalized);
+  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
+  return repo.branch || 'detached';
+}
+
+function fileTreeRepoBranchIsNonMain(path) {
+  const branch = fileTreeRepoBranch(path);
+  return Boolean(branch && !['main', 'master'].includes(branch));
+}
+
+function fileTreeDisplayName(path, entry) {
+  if (entry.kind === 'dir' && entry.is_repo === true) {
+    const branch = fileTreeRepoBranch(path);
+    return branch ? `${entry.name} (${branch})` : entry.name;
+  }
+  if (entry.kind === 'file') return `${entry.name}${fileTreeNumstatText(path)}`;
+  return entry.name;
 }
 
 function fileTreeGitStatusClass(status) {
@@ -4819,6 +4815,8 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.className = `file-tree-row kind-${entry.kind}`;
   row.dataset.path = fullPath;
   row.dataset.kind = entry.kind;
+  row.dataset.name = entry.name;
+  row.dataset.isRepo = entry.is_repo === true ? 'true' : 'false';
   row.style.paddingLeft = `${8 + depth * 14}px`;
   row.setAttribute('role', 'treeitem');
   row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
@@ -4828,6 +4826,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
   row.classList.toggle('expanded', expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
+  row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : '';
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
@@ -4851,7 +4850,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
   const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-  updateFileTreeRowContents(row, icon, entry.name, {
+  updateFileTreeRowContents(row, icon, fileTreeDisplayName(fullPath, entry), {
     gitStatus,
     iconClass: fileIconClassFor(entry.name, entry.kind),
   });
@@ -5049,6 +5048,15 @@ function updateFileTreeGitStatusRows() {
       status.textContent = gitStatus;
       status.hidden = !gitStatus;
     }
+    const entry = {
+      kind: row.dataset.kind,
+      name: row.dataset.name || basenameOf(row.dataset.path),
+      is_repo: row.dataset.isRepo === 'true',
+    };
+    row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(row.dataset.path));
+    const name = row.querySelector(':scope > .file-tree-name');
+    const nextName = fileTreeDisplayName(row.dataset.path, entry);
+    if (name && name.textContent !== nextName) name.textContent = nextName;
   });
 }
 
@@ -10009,7 +10017,8 @@ function renderPanels(previousActive = [], options = {}) {
 }
 
 function movePanelsToPool() {
-  for (const panel of panelNodes.values()) {
+  for (const [item, panel] of panelNodes.entries()) {
+    if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, panel);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
@@ -12036,7 +12045,7 @@ function fileExplorerChangesPanelHtml() {
   const densityIcon = compact ? '▤' : '☷';
   return `
     <div class="file-explorer-changes-head">
-      <span>Modified files</span>
+      <span class="changes-title">Modified files</span>
       ${diffRefControlsHtml({compact: true})}
       <button type="button" class="changes-display-toggle${compact ? ' compact' : ' detailed'}" data-session-files-display-toggle title="${esc(densityTitle)}" aria-label="${esc(densityTitle)}" aria-pressed="${compact ? 'true' : 'false'}">${esc(densityIcon)}</button>
       <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
@@ -12749,6 +12758,40 @@ function focusFileEditorPanelIfReady(panel, item) {
   return false;
 }
 
+function captureFileEditorPanelViewState(item, panel) {
+  const view = panel?._cmView;
+  const scrollDOM = view?.scrollDOM;
+  if (!isFileEditorItem(item) || !view || !scrollDOM) return;
+  const selection = view.state?.selection?.main;
+  fileEditorViewState.set(item, {
+    scrollTop: scrollDOM.scrollTop || 0,
+    scrollLeft: scrollDOM.scrollLeft || 0,
+    anchor: Number(selection?.anchor || 0),
+    head: Number(selection?.head || selection?.anchor || 0),
+  });
+}
+
+function restoreFileEditorPanelViewState(item, panel) {
+  const state = fileEditorViewState.get(item);
+  const view = panel?._cmView;
+  const scrollDOM = view?.scrollDOM;
+  if (!state || !view || !scrollDOM) return;
+  const docLength = view.state?.doc?.length || 0;
+  const anchor = Math.max(0, Math.min(docLength, Number(state.anchor || 0)));
+  const head = Math.max(0, Math.min(docLength, Number(state.head || anchor)));
+  try {
+    view.dispatch({selection: {anchor, head}});
+  } catch (_) {
+    // View state restoration is best-effort; scroll preservation is the critical part.
+  }
+  const restore = () => {
+    scrollDOM.scrollTop = Number(state.scrollTop || 0);
+    scrollDOM.scrollLeft = Number(state.scrollLeft || 0);
+  };
+  restore();
+  requestAnimationFrame(restore);
+}
+
 function destroyCodeMirrorPanel(panel) {
   panel?._cmResizeObserver?.disconnect?.();
   if (panel) panel._cmResizeObserver = null;
@@ -12878,10 +12921,12 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     } else {
       syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path});
     }
+    restoreFileEditorPanelViewState(item, panel);
     updateCodeMirrorCursorStatus(panel);
     focusFileEditorPanelIfReady(panel, item);
     return true;
   }
+  captureFileEditorPanelViewState(item, panel);
   destroyCodeMirrorPanel(panel);
   container.replaceChildren();
   panel._cmDiffLayout = layout;
@@ -12940,6 +12985,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmPath = path;
   panel._cmSignature = signature;
   panel._cmMode = 'diff';
+  restoreFileEditorPanelViewState(item, panel);
   updateCodeMirrorCursorStatus(panel);
   focusFileEditorPanelIfReady(panel, item);
   return true;
@@ -12953,8 +12999,10 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   panel._cmGeneration = generation;
   container.hidden = false;
   container.classList.remove('file-editor-diff-codemirror');
+  const currentText = String(state.content || '');
   const signature = codeMirrorConfigSignature(path, {mode: 'edit'});
   if (!panel._cmView || panel._cmPath !== path || panel._cmSignature !== signature) {
+    captureFileEditorPanelViewState(item, panel);
     destroyCodeMirrorPanel(panel);
     container.textContent = 'loading CodeMirror...';
   }
@@ -12988,6 +13036,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       });
       updateCodeMirrorCursorStatus(panel);
     }
+    restoreFileEditorPanelViewState(item, panel);
     focusFileEditorPanelIfReady(panel, item);
     return true;
   } catch (error) {
@@ -13016,6 +13065,7 @@ function renderFileEditorRawPane(rawPane, path, content) {
 
 function renderFileEditorPanel(panel, item) {
   const path = fileItemPath(item);
+  captureFileEditorPanelViewState(item, panel);
   activeFile = path;
   updateFileExplorerCurrentFileHighlight();
   const state = openFiles.get(path);
@@ -15423,6 +15473,10 @@ function globalShortcutTargetAllowsAppAction(target) {
   return !blocked.some(selector => node.closest?.(selector));
 }
 
+function globalShortcutTargetAllowsPlatformAction(target) {
+  return isMacPlatform() || globalShortcutTargetAllowsAppAction(target);
+}
+
 function toggleFileExplorerShortcut() {
   if (itemInLayout(fileExplorerItemId)) {
     fileExplorerShortcutRestoreSlots = cloneLayoutSlots();
@@ -15431,7 +15485,6 @@ function toggleFileExplorerShortcut() {
   }
   if (fileExplorerShortcutRestoreSlots && itemInLayout(fileExplorerItemId, fileExplorerShortcutRestoreSlots)) {
     applyLayoutSlots(fileExplorerShortcutRestoreSlots, {
-      focusSession: fileExplorerItemId,
       prune: false,
       message: `${fileExplorerLabel()} restored`,
     });
@@ -15466,18 +15519,19 @@ topbar?.addEventListener('pointerenter', () => {
 document.addEventListener('keydown', event => {
   const mod = appModifier(event);
   const key = event.key.toLowerCase();
-  if (mod && key === 'k' && globalShortcutTargetAllowsAppAction(event.target)) {
+  const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
+  if (mod && key === 'k' && platformActionAllowed) {
     event.preventDefault();
     openCommandPalette();
     return;
   }
-  if (mod && key === 'p' && globalShortcutTargetAllowsAppAction(event.target)) {
+  if (mod && key === 'p' && platformActionAllowed) {
     event.preventDefault();
     if (event.shiftKey) openCommandPalette();
     else openFileQuickOpen();
     return;
   }
-  if (mod && globalShortcutTargetAllowsAppAction(event.target)) {
+  if (mod && platformActionAllowed) {
     if (key === 'b') {
       event.preventDefault();
       toggleFileExplorerShortcut();

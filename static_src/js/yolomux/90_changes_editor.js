@@ -355,7 +355,7 @@ function fileExplorerChangesPanelHtml() {
   const densityIcon = compact ? '▤' : '☷';
   return `
     <div class="file-explorer-changes-head">
-      <span>Modified files</span>
+      <span class="changes-title">Modified files</span>
       ${diffRefControlsHtml({compact: true})}
       <button type="button" class="changes-display-toggle${compact ? ' compact' : ' detailed'}" data-session-files-display-toggle title="${esc(densityTitle)}" aria-label="${esc(densityTitle)}" aria-pressed="${compact ? 'true' : 'false'}">${esc(densityIcon)}</button>
       <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
@@ -1068,6 +1068,40 @@ function focusFileEditorPanelIfReady(panel, item) {
   return false;
 }
 
+function captureFileEditorPanelViewState(item, panel) {
+  const view = panel?._cmView;
+  const scrollDOM = view?.scrollDOM;
+  if (!isFileEditorItem(item) || !view || !scrollDOM) return;
+  const selection = view.state?.selection?.main;
+  fileEditorViewState.set(item, {
+    scrollTop: scrollDOM.scrollTop || 0,
+    scrollLeft: scrollDOM.scrollLeft || 0,
+    anchor: Number(selection?.anchor || 0),
+    head: Number(selection?.head || selection?.anchor || 0),
+  });
+}
+
+function restoreFileEditorPanelViewState(item, panel) {
+  const state = fileEditorViewState.get(item);
+  const view = panel?._cmView;
+  const scrollDOM = view?.scrollDOM;
+  if (!state || !view || !scrollDOM) return;
+  const docLength = view.state?.doc?.length || 0;
+  const anchor = Math.max(0, Math.min(docLength, Number(state.anchor || 0)));
+  const head = Math.max(0, Math.min(docLength, Number(state.head || anchor)));
+  try {
+    view.dispatch({selection: {anchor, head}});
+  } catch (_) {
+    // View state restoration is best-effort; scroll preservation is the critical part.
+  }
+  const restore = () => {
+    scrollDOM.scrollTop = Number(state.scrollTop || 0);
+    scrollDOM.scrollLeft = Number(state.scrollLeft || 0);
+  };
+  restore();
+  requestAnimationFrame(restore);
+}
+
 function destroyCodeMirrorPanel(panel) {
   panel?._cmResizeObserver?.disconnect?.();
   if (panel) panel._cmResizeObserver = null;
@@ -1197,10 +1231,12 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     } else {
       syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path});
     }
+    restoreFileEditorPanelViewState(item, panel);
     updateCodeMirrorCursorStatus(panel);
     focusFileEditorPanelIfReady(panel, item);
     return true;
   }
+  captureFileEditorPanelViewState(item, panel);
   destroyCodeMirrorPanel(panel);
   container.replaceChildren();
   panel._cmDiffLayout = layout;
@@ -1259,6 +1295,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmPath = path;
   panel._cmSignature = signature;
   panel._cmMode = 'diff';
+  restoreFileEditorPanelViewState(item, panel);
   updateCodeMirrorCursorStatus(panel);
   focusFileEditorPanelIfReady(panel, item);
   return true;
@@ -1272,8 +1309,10 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   panel._cmGeneration = generation;
   container.hidden = false;
   container.classList.remove('file-editor-diff-codemirror');
+  const currentText = String(state.content || '');
   const signature = codeMirrorConfigSignature(path, {mode: 'edit'});
   if (!panel._cmView || panel._cmPath !== path || panel._cmSignature !== signature) {
+    captureFileEditorPanelViewState(item, panel);
     destroyCodeMirrorPanel(panel);
     container.textContent = 'loading CodeMirror...';
   }
@@ -1307,6 +1346,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       });
       updateCodeMirrorCursorStatus(panel);
     }
+    restoreFileEditorPanelViewState(item, panel);
     focusFileEditorPanelIfReady(panel, item);
     return true;
   } catch (error) {
@@ -1335,6 +1375,7 @@ function renderFileEditorRawPane(rawPane, path, content) {
 
 function renderFileEditorPanel(panel, item) {
   const path = fileItemPath(item);
+  captureFileEditorPanelViewState(item, panel);
   activeFile = path;
   updateFileExplorerCurrentFileHighlight();
   const state = openFiles.get(path);

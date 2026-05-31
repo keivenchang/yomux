@@ -155,6 +155,7 @@ const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
 const pendingFileEditorFocus = new Set();
+const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = null;

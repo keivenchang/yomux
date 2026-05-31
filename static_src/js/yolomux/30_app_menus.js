@@ -14,10 +14,6 @@ function menuSeparator() {
   return {type: 'separator'};
 }
 
-function menuSearch(id, placeholder, value = '') {
-  return {type: 'search', id, placeholder, value};
-}
-
 function menuGroups(...groups) {
   const items = [];
   for (const group of groups) {
@@ -361,10 +357,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
     inactiveTabMenuItems()
   );
   const resultItems = groupedItems.length ? groupedItems : [menuCommand('No matching tabs', null, {disabled: true})];
-  return [
-    menuSearch('tabs', 'search', tabsMenuSearchText),
-    ...resultItems,
-  ];
+  return resultItems;
 }
 
 function appMenuTree() {
@@ -635,41 +628,8 @@ function createAppMenuItem(item) {
     node.textContent = item.label;
     return node;
   }
-  if (item.type === 'search') return createAppMenuSearch(item);
   if (item.type === 'submenu') return createAppSubmenu(item);
   return createAppMenuCommand(item);
-}
-
-function createAppMenuSearch(item) {
-  const row = document.createElement('div');
-  row.className = 'app-menu-search-row';
-  const input = document.createElement('input');
-  input.type = 'search';
-  input.className = 'app-menu-search-input';
-  input.placeholder = item.placeholder || 'search';
-  input.value = item.value || '';
-  input.setAttribute('aria-label', item.placeholder || 'search');
-  input.dataset.appMenuSearch = item.id || '';
-  input.addEventListener('pointerdown', event => event.stopPropagation());
-  input.addEventListener('click', event => event.stopPropagation());
-  input.addEventListener('keydown', event => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeAppMenus();
-    }
-    event.stopPropagation();
-  });
-  input.addEventListener('input', () => {
-    if (item.id === 'tabs') tabsMenuSearchText = input.value || '';
-    renderSessionButtons({force: true});
-    requestAnimationFrame(() => {
-      const next = document.querySelector(`.app-menu-search-input[data-app-menu-search="${cssEscape(item.id || '')}"]`);
-      next?.focus?.({preventScroll: true});
-      next?.setSelectionRange?.(next.value.length, next.value.length);
-    });
-  });
-  row.appendChild(input);
-  return row;
 }
 
 function createAppSubmenu(item) {

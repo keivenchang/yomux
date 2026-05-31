@@ -974,6 +974,12 @@
   color: var(--accent-gold);
   font-weight: 700;
 }
+.file-tree-row.repo-non-main:not(.selected) .file-tree-name {
+  color: #ffb454;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 180, 84, 0.55);
+  text-underline-offset: 2px;
+}
 .file-tree-icon {
   display: inline-block;
   width: 20px;

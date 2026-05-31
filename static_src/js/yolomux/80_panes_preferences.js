@@ -22,7 +22,8 @@ function renderPanels(previousActive = [], options = {}) {
 }
 
 function movePanelsToPool() {
-  for (const panel of panelNodes.values()) {
+  for (const [item, panel] of panelNodes.entries()) {
+    if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, panel);
     panel.classList.remove('active-pane');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
