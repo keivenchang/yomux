@@ -86,5 +86,9 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert by_path["tracked.txt"]["status"] == "M"
     assert by_path["tracked.txt"]["repo"] == str(repo)
     assert by_path["tracked.txt"]["agent"] == "codex"
+    assert by_path["tracked.txt"]["added"] == 1
+    assert by_path["tracked.txt"]["removed"] == 1
     assert by_path["new.txt"]["status"] == "A"
+    assert by_path["new.txt"]["added"] == 1
+    assert by_path["new.txt"]["removed"] == 0
     assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2}]

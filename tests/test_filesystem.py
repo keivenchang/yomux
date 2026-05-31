@@ -185,6 +185,37 @@ def test_path_info_returns_git_relative_path(tmp_path):
     assert result["kind"] == "file"
 
 
+def test_diff_file_returns_git_diff_for_tracked_file(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "app.py"
+    target.write_text("print('one')\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target.write_text("print('two')\n", encoding="utf-8")
+
+    result = filesystem.diff_file(str(target))
+
+    assert result["repo"] == str(tmp_path)
+    assert result["relative_path"] == "app.py"
+    assert result["untracked"] is False
+    assert "-print('one')" in result["diff"]
+    assert "+print('two')" in result["diff"]
+
+
+def test_diff_file_returns_no_index_diff_for_untracked_file(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "new.txt"
+    target.write_text("hello\n", encoding="utf-8")
+
+    result = filesystem.diff_file(str(target))
+
+    assert result["relative_path"] == "new.txt"
+    assert result["untracked"] is True
+    assert "+hello" in result["diff"]
+
+
 def test_is_text_path_recognizes_known_extensions():
     for extension in filesystem.TEXT_EXTENSIONS:
         assert filesystem.is_text_path(f"/tmp/foo{extension}")

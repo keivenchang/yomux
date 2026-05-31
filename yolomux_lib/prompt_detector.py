@@ -359,7 +359,12 @@ _CLAUDE_AGENT_TOKEN_SUBLINE_RE = re.compile(
 )
 _BOX_DRAWING_ONLY_LINE_RE = re.compile(r"^[\s│┃╭╮╰╯┌┐└┘├┤┬┴┼─━═╔╗╚╝╠╣╦╩╬]+$")
 _BOXED_EMPTY_INPUT_LINE_RE = re.compile(r"^\s*[│┃]\s*[❯›>]?\s*[█▉▊▋▌▍▎▏_ ]*[│┃]\s*$")
-_EFFORT_STATUS_LINE_RE = re.compile(r"^\s*(?:⏺\s*)?\S+\s+/effort\b", re.IGNORECASE)
+_EFFORT_STATUS_LINE_RE = re.compile(r"^\s*(?:[^\w\s]\s*)?\S+\s+/effort\b", re.IGNORECASE)
+_WORK_QUEUE_HINT_RE = re.compile(r"(?:↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)", re.IGNORECASE)
+_WORK_QUEUE_ROW_RE = re.compile(
+    r"^\s*[○●◦]\s+\S.*(?:\b\d+(?:\.\d+)?\s*s\b|↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)",
+    re.IGNORECASE,
+)
 _CHOICE_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?\d+[.:]\s+\S")
 _SELECTED_CHOICE_LINE_RE = re.compile(r"^\s*[❯›>]\s*\d+[.:]\s+\S")
 _YES_OPTION_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?1[.:]\s+Yes\b", re.IGNORECASE)
@@ -515,6 +520,8 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if _BOXED_EMPTY_INPUT_LINE_RE.match(stripped):
         return True
     if _EFFORT_STATUS_LINE_RE.match(stripped):
+        return True
+    if _WORK_QUEUE_HINT_RE.search(stripped) or _WORK_QUEUE_ROW_RE.match(stripped):
         return True
     if _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped):
         return True

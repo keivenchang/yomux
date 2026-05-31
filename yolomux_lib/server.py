@@ -199,6 +199,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/fs/info":
             self.handle_fs_info(parsed)
             return
+        if parsed.path == "/api/fs/diff":
+            self.handle_fs_diff(parsed)
+            return
         if parsed.path == "/api/fs/raw":
             self.handle_fs_raw(parsed)
             return
@@ -221,6 +224,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
         self.write_filesystem_json(raw_path, lambda: filesystem.path_info(raw_path))
+
+    def handle_fs_diff(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", [""])[0]
+        self.write_filesystem_json(raw_path, lambda: filesystem.diff_file(raw_path))
 
     def write_filesystem_json(self, raw_path: str, build_payload: Any) -> None:
         try:

@@ -225,6 +225,19 @@ def test_visible_agent_working_detects_claude_boxed_input_chrome_below_spinner()
     assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
 
 
+def test_visible_agent_working_detects_claude_work_queue_below_spinner():
+    visible_text = "\n".join([
+        "● Honking… (1m 12s · ↓ 5.8k tokens)",
+        "",
+        "● main  Fix preferences focus  ↑/↓ to select · Enter to view",
+        "○ Explore  Check current pane  47s",
+        "● xhigh /effort",
+    ])
+
+    assert prompt_detector.visible_agent_working(visible_text) is True
+    assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
+
+
 def test_visible_agent_working_ignores_boxed_input_chrome_without_working_line():
     visible_text = "\n".join([
         "╭────────────────────────────────────────────╮",

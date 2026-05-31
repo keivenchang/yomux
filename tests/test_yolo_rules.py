@@ -190,11 +190,20 @@ rules:
     assert rules.default_action == "ask"
 
 
-def test_non_bash_prompts_are_explicitly_approved():
+def test_non_bash_prompts_use_rules_and_hard_floor(monkeypatch):
+    rules = ruleset({
+        "default": "ask",
+        "rules": [
+            {"name": "tool delete text", "type": "contains", "match": "delete everything", "action": "block", "risk": "delete"},
+        ],
+    })
+    monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, None))
+
     decision = yolo_rules.evaluate("delete everything?", prompt_type="tool")
 
-    assert decision["action"] == "approve"
-    assert decision["rule_name"] == "non-bash prompt"
+    assert decision["action"] == "block"
+    assert decision["rule_name"] == "tool delete text"
+    assert yolo_rules.evaluate("rm -rf /", prompt_type="file")["source"] == "hard-floor"
 
 
 def test_rule_file_text_validation_reports_yaml_errors():

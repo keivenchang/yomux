@@ -253,10 +253,8 @@ class AutoApproveWorker:
 
         if prompt_type == "bash":
             return self.handle_bash_prompt(module, pane_text, current_hash, action)
-        if prompt_type == "file":
-            return self.approve_prompt(module, current_hash, action, "file")
-        if prompt_type == "tool":
-            return self.approve_prompt(module, current_hash, action, "tool")
+        if prompt_type in {"file", "tool"}:
+            return self.handle_non_bash_prompt(module, str(prompt_state.get("text") or ""), current_hash, action, prompt_type)
         self.update(last_action=f"unknown prompt type: {prompt_type}")
         return False
 
@@ -346,4 +344,41 @@ class AutoApproveWorker:
             action=opt_label,
         )
         self.stop_event.wait(3.0)
+        return True
+
+    def handle_non_bash_prompt(self, module: Any, prompt_text: str, current_hash: str, action: str | None, prompt_type: str) -> bool:
+        decision = yolo_rules.evaluate(prompt_text or prompt_type, prompt_type, "", self.target, dangerously_yolo=self.dangerously_yolo)
+        rule_action = decision.get("action") if isinstance(decision.get("action"), str) else "ask"
+        if rule_action not in yolo_rules.RULE_ACTIONS:
+            rule_action = "ask"
+        details = {
+            "prompt_type": prompt_type,
+            "action": rule_action,
+            "rule_name": decision.get("rule_name") or "unknown",
+            "risk": decision.get("risk") or "unknown",
+            "ruleset_source": decision.get("source") or "",
+            "ruleset_path": decision.get("path") or "",
+            "dry_run": decision.get("dry_run") is True,
+            "would_action": decision.get("would_action") or "",
+        }
+        self.update(error=decision.get("error") if decision.get("error") else None)
+        if rule_action in {"approve", "decline"}:
+            send_value = "option2" if rule_action == "decline" else action
+            self.send_action(module, send_value)
+            self.last_hash = current_hash
+            self.last_hash_at = time.monotonic()
+            self.last_blocked_hash = ""
+            self.approved += 1
+            verb = "declined" if rule_action == "decline" else "approved"
+            self.update(last_action=f"{verb} {prompt_type}: {decision.get('rule_name') or 'rule'}")
+            self.emit_event("approval_approved", f"{verb} {prompt_type}", **details)
+            self.stop_event.wait(3.0)
+            return True
+        self.last_hash = current_hash
+        self.last_hash_at = time.monotonic()
+        self.last_blocked_hash = current_hash
+        self.blocked += 1
+        last_action = f"{rule_action} {prompt_type}: {decision.get('rule_name') or 'rule'}"
+        self.update(last_action=last_action)
+        self.emit_event("approval_blocked", last_action, **details)
         return True

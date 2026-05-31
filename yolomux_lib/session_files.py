@@ -125,6 +125,44 @@ def git_name_status(repo: Path) -> dict[str, str]:
     return statuses
 
 
+def parse_numstat_value(value: str) -> int | None:
+    if value == "-":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def git_numstat(repo: Path) -> dict[str, dict[str, int | None]]:
+    counts: dict[str, dict[str, int | None]] = {}
+    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", "HEAD"], timeout=5.0)
+    if diff.returncode != 0:
+        return counts
+    for line in diff.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        rel_path = parts[-1]
+        counts[rel_path] = {
+            "added": parse_numstat_value(parts[0]),
+            "removed": parse_numstat_value(parts[1]),
+        }
+    return counts
+
+
+def untracked_added_line_count(path: Path) -> int | None:
+    try:
+        if path.stat().st_size > 2 * 1024 * 1024:
+            return None
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if b"\x00" in raw[:8192]:
+        return None
+    return raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0)
+
+
 def repo_relative_path(path: Path, repo: Path) -> str | None:
     try:
         return path.relative_to(repo).as_posix()
@@ -139,6 +177,8 @@ def session_file_entry(
     path: Path,
     repo: Path | None,
     source: str,
+    added: int | None = None,
+    removed: int | None = None,
 ) -> dict[str, Any]:
     rel_path = repo_relative_path(path, repo) if repo else None
     return {
@@ -150,6 +190,8 @@ def session_file_entry(
         "abs_path": str(path),
         "mtime": file_mtime(path),
         "source": source,
+        "added": added,
+        "removed": removed,
     }
 
 
@@ -186,14 +228,21 @@ def session_files_payload_for_info(info: SessionInfo, hours: float = 24.0, now: 
     for repo_text in sorted(repos):
         repo = Path(repo_text)
         statuses = git_name_status(repo)
+        numstat = git_numstat(repo)
         repo_entries: list[dict[str, Any]] = []
         for rel_path, status in statuses.items():
             path = (repo / rel_path).resolve(strict=False)
+            counts = numstat.get(rel_path, {})
+            added = counts.get("added")
+            removed = counts.get("removed")
+            if status == "A" and rel_path not in numstat:
+                added = untracked_added_line_count(path)
+                removed = 0
             agent = next(
                 (metadata["agent"] for touched_path, metadata in touched.items() if repo_relative_path(Path(touched_path), repo) == rel_path),
                 "",
             )
-            repo_entries.append(session_file_entry(info.session, agent, status, path, repo, "git"))
+            repo_entries.append(session_file_entry(info.session, agent, status, path, repo, "git", added, removed))
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(repo_entries)
         repo_payloads.append({

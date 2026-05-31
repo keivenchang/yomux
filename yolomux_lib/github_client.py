@@ -291,11 +291,11 @@ def failing_github_checks(
     for item in check_runs:
         conclusion = item.get("conclusion")
         if isinstance(conclusion, str) and conclusion in failed_conclusions:
-            result.append({"name": str(item.get("name") or "check"), "state": conclusion})
+            result.append(github_check_summary_item(item, conclusion, "check"))
     for item in statuses:
         state = item.get("state")
         if isinstance(state, str) and state in {"error", "failure"}:
-            result.append({"name": str(item.get("name") or "status"), "state": state})
+            result.append(github_check_summary_item(item, state, "status"))
     if combined_state in {"error", "failure"} and not result:
         result.append({"name": "combined status", "state": combined_state})
     return result
@@ -310,13 +310,21 @@ def pending_github_checks(
     for item in check_runs:
         status = item.get("status")
         if isinstance(status, str) and status != "completed":
-            result.append({"name": str(item.get("name") or "check"), "state": status})
+            result.append(github_check_summary_item(item, status, "check"))
     for item in statuses:
         state = item.get("state")
         if state == "pending":
-            result.append({"name": str(item.get("name") or "status"), "state": state})
+            result.append(github_check_summary_item(item, state, "status"))
     if combined_state == "pending" and not result:
         result.append({"name": "combined status", "state": combined_state})
+    return result
+
+
+def github_check_summary_item(item: dict[str, Any], state: str, default_name: str) -> dict[str, str]:
+    result = {"name": str(item.get("name") or default_name), "state": state}
+    url = item.get("url")
+    if isinstance(url, str) and url:
+        result["url"] = url
     return result
 
 

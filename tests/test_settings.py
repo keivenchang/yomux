@@ -20,9 +20,9 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["ui_font_size"] == 8
     assert settings["appearance"]["terminal_font_size"] == 28
     assert settings["appearance"]["editor_font_size"] == 28
-    assert settings["appearance"]["editor_color_scheme"] == "vscode-dark-plus"
-    assert settings["appearance"]["editor_dark_color_scheme"] == "vscode-dark-plus"
-    assert settings["appearance"]["editor_light_color_scheme"] == "github-light"
+    assert settings["appearance"]["editor_color_scheme"] == "dark"
+    assert settings["appearance"]["editor_dark_color_scheme"] == "dark"
+    assert settings["appearance"]["editor_light_color_scheme"] == "yolomux-light"
     assert settings["appearance"]["file_explorer_font_size"] == 8
     assert settings["appearance"]["tab_width"] == 120
     assert settings["file_explorer"]["root_mode"] == "fixed"

@@ -278,6 +278,8 @@ globalThis.__layoutTestApi = {
   fileEditorPaneTabHtml,
   changesPaneTabHtml,
   changesPanelHtml,
+  fileExplorerChangesPanelHtml,
+  parseUnifiedDiffLineClasses,
   fitAppMenuPopover,
   finderDirectoryForItem,
   finderTargetPathForItem,
@@ -395,6 +397,9 @@ globalThis.__layoutTestApi = {
   markPreferencesInteracted,
   preferencesSearchFreshForTest() { return preferencesSearchFresh; },
   setPreferencesSearchFreshForTest(value) { preferencesSearchFresh = Boolean(value); },
+  setClientSettingsPatchForTest(patch) {
+    clientSettings = mergeSettingObjects(clientSettings, patch || {});
+  },
   preferenceItemMatches,
   preferenceSectionMatches,
   preferencesPanelHtmlForTest(query, collapsed = []) {
@@ -496,6 +501,9 @@ globalThis.__layoutTestApi = {
   },
   setSessionFilesPayloadForTest(payload) {
     sessionFilesPayload = payload;
+  },
+  setFileExplorerSessionFilesPayloadForTest(payload) {
+    fileExplorerSessionFilesPayload = payload;
   },
   setSessionFilesSortModeForTest(mode) {
     sessionFilesSortMode = mode;
@@ -839,6 +847,7 @@ function makeFileTree(paths) {
   const paneTab = api.fileEditorPaneTabHtml(item);
   assert.ok(paneTab.includes('review.json'));
   assert.equal(paneTab.includes('agent-icon file'), false);
+  assert.ok(api.fileEditorPaneTabHtml('file-preview:/home/keivenc/review.json').includes('file-tab-kind'), 'preview tabs are visually distinguishable from same-path editor tabs');
 
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-heading-1'));
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-bold'));
@@ -966,6 +975,7 @@ function makeFileTree(paths) {
   const focusedPanelBody = source.slice(focusedPanelStart, focusedPanelEnd);
   assert.ok(focusedPanelBody.includes('options.focusPreferencesSearch !== false'), 'fresh Preferences search focus is part of shared pane focus');
   assert.ok(focusedPanelBody.includes('focusFreshPreferencesSearchSoon()'), 'shared pane focus targets fresh Preferences search');
+  assert.ok(focusedPanelBody.includes('updateTypingIndicator(activeSession)'), 'shared pane focus refreshes every pane focus ring immediately');
   const panelShellStart = source.indexOf('function bindPanelShell(');
   const panelShellEnd = source.indexOf('function createPanel(', panelShellStart);
   assert.ok(panelShellStart > 0 && panelShellEnd > panelShellStart, 'could not locate bindPanelShell body');
@@ -1148,7 +1158,7 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux('', ['1', '2']);
-  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,changes,image-viewer,file-editor');
+  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,changes,image-viewer,file-editor,file-preview');
   assert.equal(api.tabTypeForItem('__files__').key, 'files');
   assert.equal(api.tabTypeForItem('__changes__').key, 'changes');
   assert.equal(api.tabTypeForItem('image:/home/test/screen.png').key, 'image-viewer');
@@ -1160,15 +1170,36 @@ function makeFileTree(paths) {
     errors: [],
     repos: [{repo: '/repo/app', count: 2, touched_count: 2}],
     files: [
-      {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100},
-      {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200},
+      {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
+      {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200, added: 8, removed: 0},
     ],
   });
   assert.ok(api.changesPaneTabHtml().includes('changes-count-badge'));
   const changesHtml = api.changesPanelHtml();
   assert.ok(changesHtml.includes('/repo/app'));
   assert.ok(changesHtml.includes('src/new.py'));
+  assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
+  api.setFileExplorerSessionFilesPayloadForTest({
+    session: '1',
+    loaded: true,
+    errors: [],
+    repos: [{repo: '/repo/app', count: 2, touched_count: 2}],
+    files: [
+      {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
+    ],
+  });
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified files'), 'Finder embeds a modified-files panel');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
+  const diffLines = api.parseUnifiedDiffLineClasses(`@@ -1,2 +1,3 @@
+ one
+-old
++new
++extra
+`);
+  assert.deepStrictEqual(Array.from(diffLines.added), [2, 3]);
+  assert.deepStrictEqual(Array.from(diffLines.removed), [2]);
   const filesTab = api.fileExplorerPaneTabHtml();
   assert.equal(api.fileExplorerLabel(), 'File Explorer');
   assert.ok(filesTab.includes('File Explorer'));
@@ -1259,10 +1290,13 @@ function makeFileTree(paths) {
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
   assert.ok(preferencesHtml.includes('data-preferences-search-action>YOsearch</button>'), 'preferences search has an explicit YOsearch action');
-  assert.ok(preferencesHtml.indexOf('preferences-global-reset') > preferencesHtml.indexOf('preferences-sections'), 'preferences global reset is below the setting sections');
-  assert.ok(preferencesHtml.includes('GLOBAL reset'), 'preferences reset is labeled as global');
-  assert.ok(preferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
-  assert.ok(preferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action');
+  assert.equal(preferencesHtml.includes('preferences-global-reset'), false, 'preferences hide GLOBAL reset when every setting is already default');
+  api.setClientSettingsPatchForTest({general: {auto_focus: true}});
+  const modifiedPreferencesHtml = api.preferencesPanelHtmlForTest('', []);
+  assert.ok(modifiedPreferencesHtml.indexOf('preferences-global-reset') > modifiedPreferencesHtml.indexOf('preferences-sections'), 'preferences global reset is below the setting sections');
+  assert.ok(modifiedPreferencesHtml.includes('GLOBAL reset'), 'preferences reset is labeled as global');
+  assert.ok(modifiedPreferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
+  assert.ok(modifiedPreferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action after a setting changes');
   assert.equal(preferencesHtml.includes('data-preferences-reset-confirm'), false, 'preferences do not show the destructive confirmation until requested');
   const resetConfirmHtml = api.preferencesResetConfirmHtmlForTest();
   assert.ok(resetConfirmHtml.includes('data-preferences-reset-confirm'), 'reset-all requires a second continue action');
@@ -1279,12 +1313,12 @@ function makeFileTree(paths) {
   assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
   assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'dark editor schemes are grouped under Dark');
   assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'light editor schemes are grouped under Light');
-  assert.ok(preferencesHtml.indexOf('VS Code Dark+') < preferencesHtml.indexOf('One Dark'), 'preferred dark scheme appears first');
-  assert.ok(preferencesHtml.includes('GitHub Light'), 'high-contrast light scheme is available');
-  assert.equal(api.configuredEditorSchemeForMode(true), 'vscode-dark-plus');
-  assert.equal(api.configuredEditorSchemeForMode(false), 'github-light');
-  assert.equal(api.fileEditorThemeModeForTest(), 'vscode-dark-plus');
-  assert.equal(api.activeEditorSchemeForTest().label, 'VS Code Dark+');
+  assert.ok(preferencesHtml.indexOf('YOLOmux Dark') < preferencesHtml.indexOf('VS Code Dark+'), 'YOLOmux dark scheme appears first');
+  assert.ok(preferencesHtml.indexOf('YOLOmux Light') < preferencesHtml.indexOf('GitHub Light'), 'YOLOmux light scheme appears first');
+  assert.equal(api.configuredEditorSchemeForMode(true), 'dark');
+  assert.equal(api.configuredEditorSchemeForMode(false), 'yolomux-light');
+  assert.equal(api.fileEditorThemeModeForTest(), 'dark');
+  assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Dark');
   api.setFileEditorThemeMode('github-light');
   assert.equal(api.fileEditorThemeModeForTest(), 'github-light');
   assert.equal(api.activeEditorSchemeForTest().label, 'GitHub Light');
@@ -1297,11 +1331,11 @@ function makeFileTree(paths) {
   assert.notEqual(api.activeEditorSchemeForTest().syntax.inlineCode, api.activeEditorSchemeForTest().syntax.heading);
   assert.equal(api.editorThemeLabel(), 'GitHub Light editor scheme');
   api.cycleEditorThemeMode();
-  assert.equal(api.fileEditorThemeModeForTest(), 'vscode-dark-plus', 'theme toggle returns from light to the default dark scheme');
+  assert.equal(api.fileEditorThemeModeForTest(), 'dark', 'theme toggle returns from light to the default dark scheme');
   api.cycleEditorThemeMode();
-  assert.equal(api.fileEditorThemeModeForTest(), 'github-light', 'theme toggle uses the selected high-contrast light scheme');
+  assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'theme toggle uses the selected YOLOmux light scheme');
   api.setFileEditorThemeMode('light');
-  assert.equal(api.fileEditorThemeModeForTest(), 'github-light', 'legacy light storage value maps to GitHub Light');
+  assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'legacy light storage value maps to YOLOmux Light');
   let focusedSearch = false;
   let selection = null;
   const search = {

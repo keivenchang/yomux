@@ -530,34 +530,31 @@ def evaluate(cmd: str, prompt_type: str = "bash", agent: str = "", session: str 
     settings = yolo_settings()
     path = active_rule_path()
     dry_run = settings["dry_run"]
-    if prompt_type != "bash":
-        decision = {"action": "approve", "rule_name": "non-bash prompt", "risk": "unknown", "source": "built-in", "path": str(path)}
+    floor = None if dangerously_yolo else hard_floor_decision(cmd)
+    if floor:
+        decision = {**floor, "source": "hard-floor", "path": str(path)}
     else:
-        floor = None if dangerously_yolo else hard_floor_decision(cmd)
-        if floor:
-            decision = {**floor, "source": "hard-floor", "path": str(path)}
+        ruleset, error = cached_rules()
+        if error:
+            decision = {
+                "action": "ask",
+                "rule_name": "ruleset error",
+                "risk": "unknown",
+                "source": "error",
+                "path": str(path),
+                "error": error,
+            }
+        elif ruleset is None:
+            decision = {
+                "action": "ask",
+                "rule_name": "ruleset unavailable",
+                "risk": "unknown",
+                "source": "error",
+                "path": str(path),
+                "error": "ruleset unavailable",
+            }
         else:
-            ruleset, error = cached_rules()
-            if error:
-                decision = {
-                    "action": "ask",
-                    "rule_name": "ruleset error",
-                    "risk": "unknown",
-                    "source": "error",
-                    "path": str(path),
-                    "error": error,
-                }
-            elif ruleset is None:
-                decision = {
-                    "action": "ask",
-                    "rule_name": "ruleset unavailable",
-                    "risk": "unknown",
-                    "source": "error",
-                    "path": str(path),
-                    "error": "ruleset unavailable",
-                }
-            else:
-                decision = evaluate_ruleset(cmd, ruleset)
+            decision = evaluate_ruleset(cmd, ruleset)
     decision["prompt_type"] = prompt_type
     decision["agent"] = agent
     decision["session"] = session

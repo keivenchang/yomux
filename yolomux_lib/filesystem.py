@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import git
+from .common import run_cmd
 
 MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
 MAX_WRITE_BYTES = 5 * 1024 * 1024  # 5 MB cap on file write
@@ -267,17 +268,77 @@ def path_info(raw_path: str) -> dict[str, Any]:
     kind = "dir" if path.is_dir() else "file"
     repo_root = git_root_for_path(path)
     relative_path = ""
+    repo_info: dict[str, Any] | None = None
     if repo_root:
+        repo = Path(repo_root)
         try:
-            relative_path = path.relative_to(Path(repo_root)).as_posix()
+            relative_path = path.relative_to(repo).as_posix()
         except ValueError:
             relative_path = ""
+        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=str(repo), timeout=1.0)
+        status = git(["status", "--porcelain=v1"], cwd=str(repo), timeout=2.0)
+        upstream = git(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd=str(repo), timeout=1.0)
+        ahead = 0
+        behind = 0
+        if upstream.returncode == 0:
+            counts = git(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], cwd=str(repo), timeout=2.0)
+            if counts.returncode == 0:
+                parts = counts.stdout.split()
+                if len(parts) >= 2:
+                    try:
+                        ahead = int(parts[0])
+                        behind = int(parts[1])
+                    except ValueError:
+                        ahead = 0
+                        behind = 0
+        repo_info = {
+            "root": str(repo),
+            "name": repo.name,
+            "branch": branch.stdout.strip() if branch.returncode == 0 else "",
+            "dirty_count": len(status.stdout.splitlines()) if status.returncode == 0 else None,
+            "upstream": upstream.stdout.strip() if upstream.returncode == 0 else "",
+            "ahead": ahead,
+            "behind": behind,
+        }
     return {
         "path": str(path),
         "name": path.name,
         "kind": kind,
         "repo_root": repo_root,
         "relative_path": relative_path,
+        "repo": repo_info,
+    }
+
+
+def diff_file(raw_path: str) -> dict[str, Any]:
+    path = _validated_path(raw_path)
+    repo_root = git_root_for_path(path)
+    if not repo_root:
+        raise FilesystemError(f"not in a git repo: {path}", status=400)
+    repo = Path(repo_root)
+    try:
+        rel_path = path.relative_to(repo).as_posix()
+    except ValueError:
+        raise FilesystemError(f"path is outside repo: {path}", status=400)
+    tracked = git(["ls-files", "--error-unmatch", "--", rel_path], cwd=str(repo), timeout=3.0)
+    if tracked.returncode == 0:
+        result = git(["diff", "HEAD", "--", rel_path], cwd=str(repo), timeout=5.0)
+        untracked = False
+    else:
+        result = run_cmd(["git", "-C", str(repo), "diff", "--no-index", "--", "/dev/null", str(path)], timeout=5.0)
+        untracked = True
+    if result.returncode not in {0, 1}:
+        message = (result.stderr or result.stdout or "git diff failed").strip()
+        raise FilesystemError(message, status=500)
+    diff = result.stdout or ""
+    if len(diff.encode("utf-8", errors="replace")) > MAX_READ_BYTES:
+        raise FilesystemError(f"diff too large (max {MAX_READ_BYTES})", status=413)
+    return {
+        "path": str(path),
+        "repo": str(repo),
+        "relative_path": rel_path,
+        "diff": diff,
+        "untracked": untracked,
     }
 
 
