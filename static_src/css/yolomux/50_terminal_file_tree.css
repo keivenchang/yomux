@@ -1003,10 +1003,10 @@
 }
 .file-explorer-hidden-toggle,
 .file-explorer-root-mode-toggle {
-  width: 28px;
+  width: 30px;
   height: 18px;
-  flex: 0 0 28px;
-  padding: 0;
+  flex: 0 0 30px;
+  padding: 0 4px;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: transparent;
@@ -1029,22 +1029,23 @@
 }
 .file-explorer-hidden-toggle.active,
 .file-explorer-root-mode-toggle.active {
-  color: var(--good);
-  border-color: var(--good);
+  color: #061207;
+  border-color: var(--brand-green);
+  background: rgba(118, 185, 0, 0.88);
 }
 .file-explorer-quick-access,
 .file-explorer-quick-access-panel {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 1px;
   min-width: 0;
   flex: 0 1 auto;
   overflow: hidden;
 }
 .file-explorer-quick-access-button {
-  min-width: 0;
+  min-width: 24px;
   height: 20px;
-  padding: 0 6px;
+  padding: 0 7px;
   border-radius: 4px;
   color: var(--muted);
   background: transparent;

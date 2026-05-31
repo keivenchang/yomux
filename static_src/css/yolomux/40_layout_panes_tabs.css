@@ -223,7 +223,7 @@ body.layout-resizing {
   max-width: 100%;
   min-height: calc(var(--pane-tab-height) + 2px);
   display: block;
-  padding: 1px 5px 0 6px;
+  padding: 2px 5px 0 6px;
   border-bottom: 0;
   background: var(--panel2-inactive);
   overflow: hidden;
@@ -881,9 +881,9 @@ body.layout-resizing {
   align-items: center;
   justify-content: center;
   padding: 0;
-  color: #9fd8ff;
-  background: rgba(64, 125, 180, 0.22);
-  border: 1px solid rgba(159, 216, 255, 0.42);
+  color: #dfe6ef;
+  background: var(--pc-control-bg);
+  border: 1px solid var(--pc-control-border);
   font-size: 0;
   letter-spacing: 0;
 }
@@ -894,19 +894,25 @@ body.layout-resizing {
   width: 100%;
   height: 100%;
   color: currentColor;
-  font-size: var(--ui-font-size-xl);
+  font-size: 0;
   font-weight: 900;
   line-height: 1;
   letter-spacing: 1px;
   text-align: center;
-  text-shadow: 0 0 4px rgba(159, 216, 255, 0.34);
+  text-shadow: none;
   transform: none;
+}
+.pane-actions-dots::before {
+  content: "...";
+  font-size: var(--ui-font-size-xl);
+  line-height: 0.75;
+  transform: translateY(-2px);
 }
 .tabs .pane-actions:hover,
 .tabs .pane-actions:focus-visible {
   color: #ffffff;
-  background: rgba(38, 93, 141, 0.62);
-  border-color: #9fd8ff;
+  background: var(--pc-control-hover-bg);
+  border-color: var(--pc-control-hover-border);
 }
 .tabs .pane-actions:hover .pane-actions-dots,
 .tabs .pane-actions:focus-visible .pane-actions-dots {

@@ -295,9 +295,39 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
     return None
 
 
+def path_is_under(path: Path, root: Path) -> bool:
+    resolved_path = path.expanduser().resolve(strict=False)
+    resolved_root = root.expanduser().resolve(strict=False)
+    return resolved_path == resolved_root or resolved_path.is_relative_to(resolved_root)
+
+
+def codex_transcript_from_process_fd(pid: int, root: Path | None = None, fd_dir: Path | None = None) -> Path | None:
+    root = root or Path.home() / ".codex" / "sessions"
+    fd_dir = fd_dir or Path(f"/proc/{pid}/fd")
+    try:
+        entries = list(fd_dir.iterdir())
+    except OSError:
+        return None
+    candidates: list[Path] = []
+    for entry in entries:
+        try:
+            target = os.readlink(entry)
+        except OSError:
+            continue
+        if target.endswith(" (deleted)"):
+            target = target[: -len(" (deleted)")]
+        path = Path(target).expanduser()
+        if not path.is_absolute():
+            continue
+        if path.name.startswith("rollout-") and path.suffix == ".jsonl" and path_is_under(path, root):
+            candidates.append(path)
+    candidates.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+    return candidates[0] if candidates else None
+
+
 def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> AgentInfo:
     proc_cwd = process_cwd(process.pid) or pane.current_path
-    transcript_path = find_recent_codex_transcript(proc_cwd)
+    transcript_path = codex_transcript_from_process_fd(process.pid) or find_recent_codex_transcript(proc_cwd)
     return AgentInfo(
         session=session,
         kind="codex",
@@ -308,7 +338,7 @@ def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Agen
         status=None,
         session_id=None,
         transcript=str(transcript_path) if transcript_path else None,
-        error=None if transcript_path else "codex transcript not found by cwd",
+        error=None if transcript_path else "codex transcript not found by process fd or cwd",
         model=agent_model_from_command(process.command),
     )
 

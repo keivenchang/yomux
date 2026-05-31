@@ -284,6 +284,7 @@ globalThis.__layoutTestApi = {
   changesPaneTabHtml,
   changesPanelHtml,
   fileExplorerChangesPanelHtml,
+  changeFileRowHtml,
   parseUnifiedDiffLineClasses,
   globalActivitySummaryHtml,
   sessionActivitySummary,
@@ -1195,7 +1196,7 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux('', ['1', '2']);
-  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,changes,image-viewer,file-editor,file-preview');
+  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yosup,files,preferences,changes,image-viewer,file-editor,file-preview');
   assert.equal(api.tabTypeForItem('__files__').key, 'files');
   assert.equal(api.tabTypeForItem('__changes__').key, 'changes');
   assert.equal(api.tabTypeForItem('image:/home/test/screen.png').key, 'image-viewer');
@@ -1218,6 +1219,11 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
   assert.ok(changesHtml.includes('changes-file-agent'), 'changed-file rows show the agent icon slot');
   assert.ok(changesHtml.includes('changes-file-date'), 'changed-file rows wrap the date for skinny styling');
+  const compactChangeHtml = api.changeFileRowHtml(
+    {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
+    {compact: true},
+  );
+  assert.ok(/changes-status[^>]*>M<\/span>[\s\S]*changes-file-name[^>]*>README\.md<\/span>[\s\S]*changes-file-agent[\s\S]*changes-file-meta[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-file-date/.test(compactChangeHtml), 'compact changed-file row order is status, file, AI icon, counts, date');
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   api.setFileExplorerSessionFilesPayloadForTest({
@@ -1238,6 +1244,8 @@ function makeFileTree(paths) {
   const changedFilesCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.changes-status\s*\{[\s\S]*width:\s*13px/.test(changedFilesCss), 'modified-file status chips are skinny');
   assert.ok(/\.changes-file-name\s*\{[\s\S]*font-weight:\s*500/.test(changedFilesCss), 'modified-file names are not bold');
+  assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*overflow-y:\s*scroll/.test(changedFilesCss), 'Finder modified-files scrollbar stays visible');
+  assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*scrollbar-gutter:\s*stable/.test(changedFilesCss), 'Finder modified-files reserves scrollbar gutter');
   const fakeChangesScroll = {scrollTop: 45, scrollLeft: 3, innerHTML: ''};
   api.replaceHtmlPreservingScroll(fakeChangesScroll, '<div>updated</div>');
   assert.equal(fakeChangesScroll.innerHTML, '<div>updated</div>');
@@ -1257,10 +1265,13 @@ function makeFileTree(paths) {
   const appSource = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/switchFileExplorerChangesSession\(item\)/.test(appSource), 'tmux focus switches the Finder modified-files session immediately');
   assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'tmux focus forces a fresh Finder modified-files fetch even if an older request is in flight');
+  assert.equal(appSource.includes("state.kind === 'text' && !fileEditorAutosaveEnabled"), false, 'clean external file changes auto-reload even when autosave is off');
+  assert.equal(appSource.includes('data-file-editor-close'), false, 'pane frame close uses the pane-close path, not active file-tab close');
   assert.equal(filesTab.includes('agent-icon file'), false);
   assert.ok(api.menuTabCommand('__files__').html.includes('app-menu-ui-icon-finder'));
   assert.ok(api.menuTabCommand('__prefs__').html.includes('app-menu-ui-icon-gear'));
   assert.ok(api.menuTabCommand('__info__').html.includes('app-menu-ui-icon-branch-info'));
+  assert.ok(api.menuTabCommand('__yosup__').html.includes('app-menu-ui-icon-yosup'));
   assert.ok(api.menuTabCommand('__changes__').html.includes('app-menu-ui-icon-changes'));
   assert.ok(api.menuTabCommand('file:/home/test/README.md').html.includes('app-menu-ui-icon-document'));
   assert.equal(api.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
@@ -1591,6 +1602,8 @@ function makeFileTree(paths) {
   assert.equal(fileMenuLabels.includes('Rename session'), false);
   assert.equal(fileMenuLabels.includes('Kill session'), false);
   assert.equal(fileMenuLabels.includes('Resume session'), false);
+  assert.ok(fileMenuLabels.includes('Branch Info'));
+  assert.ok(fileMenuLabels.includes("YO'sup"));
   assert.ok(fileMenuLabels.includes('Preferences'));
   assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
   assert.deepStrictEqual(canonical(fileMenu.items.slice(-3).map(item => item.type === 'separator' ? '---' : item.label)), ['Preferences', '---', 'Log out']);
@@ -1605,7 +1618,7 @@ function makeFileTree(paths) {
   assert.ok(tmuxMenuLabels.includes('Transcript'));
   assert.ok(tmuxMenuLabels.includes('AI summary'));
   assert.ok(tmuxMenuLabels.includes('Event log'));
-  assert.ok(tmuxMenuLabels.includes("YO'sup (info)"));
+  assert.ok(tmuxMenuLabels.includes('Pane details'));
   assert.ok(tmuxMenuLabels.includes("Rename tmux session '1'"));
   assert.ok(tmuxMenuLabels.includes('Kill session'));
   assert.equal(tmuxMenuLabels.includes("Enable YOLO for Tmux Session '1'"), false);
@@ -1703,6 +1716,9 @@ function makeFileTree(paths) {
   assert.ok(quickItem, 'file quick-open uses the same command-palette item shell');
   assert.equal(api.commandPaletteMatches(quickItem, 'xy'), true, 'file quick-open uses fuzzy matching');
   assert.equal(api.fileQuickOpenRootForSearch(), '/home/test/yolomux.dev', 'file quick-open defaults to the active repo root when no session cwd is known');
+  api.setTranscriptInfoForTest('1', {project: {git: {root: '/repo/workspace'}}, selected_pane: {current_path: '/repo/workspace/src'}});
+  api.setFocusedPanelItem('1');
+  assert.equal(api.fileQuickOpenRootForSearch(), '/repo/workspace', 'file quick-open searches the workspace root when tmux is inside a repo');
   assert.equal(api.tabMenuItems()[0].type, 'search', 'Tabs menu starts with a search input');
   api.setTabsMenuSearchTextForTest('xy');
   assert.equal(api.tabSearchScore('1', 'xy') < 0, true, 'tab search uses fuzzy score and rejects non-matches');
@@ -1736,7 +1752,7 @@ function makeFileTree(paths) {
   assert.deepStrictEqual(canonical(contextMenu.children.map(child => child.textContent)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Kill session"]);
   assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), false);
   const sessionViews = api.tmuxSessionViewCommands('1');
-  assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ['Transcript', 'AI summary', 'Event log', "YO'sup (info)"]);
+  assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ['Transcript', 'AI summary', 'Event log', 'Pane details']);
   assert.equal(api.fileIconFor('screenshot.png'), '🖼');
   assert.equal(api.fileIconFor('run.sh'), '🐚');
   assert.equal(api.fileIconFor('main.rs'), '🧩');
@@ -1749,7 +1765,7 @@ function makeFileTree(paths) {
   assert.ok(controlsHtml.includes('title="Transcript" aria-label="Transcript"'));
   assert.ok(controlsHtml.includes('title="AI summary" aria-label="AI summary"'));
   assert.ok(controlsHtml.includes('title="Event log" aria-label="Event log"'));
-  assert.ok(controlsHtml.includes('title="YO&#39;sup (info)" aria-label="YO&#39;sup (info)"'));
+  assert.ok(controlsHtml.includes('title="Branch Info" aria-label="Branch Info"'));
   assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
   assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
   assert.equal(api.tmuxSessionNameError('dynamo 2'), '');
@@ -1912,7 +1928,8 @@ function makeFileTree(paths) {
   const normalSplit = api.emptyLayoutSlots();
   normalSplit[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
   normalSplit.left = api.paneStateWithTabs(['1'], '1');
-  normalSplit.slot1 = api.paneStateWithTabs(['2'], '2');
+  const extraPaneItem = api.registerFileEditorLayoutItem('/home/test/a.md');
+  normalSplit.slot1 = api.paneStateWithTabs(['2', extraPaneItem], '2');
   api.setLayoutSlotsForTest(normalSplit);
   api.removePaneFromLayout('2');
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
@@ -2126,12 +2143,12 @@ function makeFileTree(paths) {
   const minimizedNormal = api.emptyLayoutSlots();
   minimizedNormal[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
   minimizedNormal.left = api.paneStateWithTabs(['1'], '1');
-  minimizedNormal.slot1 = api.paneStateWithTabs(['2'], '2');
+  minimizedNormal.slot1 = api.paneStateWithTabs(['2', extraPaneItem], '2');
   api.setLayoutSlotsForTest(minimizedNormal);
   api.minimizePaneFromLayout('2');
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
     tree: {slot: 'left'},
-    panes: {left: {tabs: ['1', '2'], active: '1'}},
+    panes: {left: {tabs: ['1', '2', extraPaneItem], active: '1'}},
   });
 
   const finderOnly = api.emptyLayoutSlots();
@@ -2416,10 +2433,10 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux('', ['1']);
-  assert.equal(api.agentErrorIsBlocking('codex transcript not found by cwd'), false);
+  assert.equal(api.agentErrorIsBlocking('codex transcript not found by process fd or cwd'), false);
   assert.equal(api.agentErrorIsBlocking('missing /home/test/.claude/sessions/123.json'), false);
   assert.equal(api.agentErrorIsBlocking('worker crashed'), true);
-  assert.notEqual(api.sessionState('1', {agents: [{kind: 'codex', error: 'codex transcript not found by cwd'}]}).key, 'blocked');
+  assert.notEqual(api.sessionState('1', {agents: [{kind: 'codex', error: 'codex transcript not found by process fd or cwd'}]}).key, 'blocked');
   assert.notEqual(api.sessionState('1', {agents: [{kind: 'claude', error: 'missing /home/test/.claude/sessions/123.json'}]}).key, 'blocked');
   assert.equal(api.sessionState('1', {agents: [{kind: 'codex', error: 'worker crashed'}]}).key, 'blocked');
 }
@@ -2435,7 +2452,7 @@ function makeFileTree(paths) {
   assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
   assert.equal(api.itemIsBackgroundPaneTab('1'), false);
   assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__files__', '__prefs__', '__changes__', '3']);
+  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yosup__', '__files__', '__prefs__', '__changes__', '3']);
 }
 
 {
@@ -2605,20 +2622,20 @@ function makeFileTree(paths) {
   api.setActivitySummaryPayloadForTest({
     generated_at: '2026-05-31T12:00:00+00:00',
     global: {
-      headline: "You've worked on editor fixes. The changes are 3 files changed (+9/-2) across yolomux.dev; 1 of 2 AI agents is active.",
+      headline: "Sup! You've got 2 AI agents on editor fixes in yolomux.dev. Changes so far: 3 files changed (+9/-2); 1 of 2 AI agents is active.",
       lines: [
-        "You've worked on editor fixes. The changes are 3 files changed (+9/-2) across yolomux.dev; 1 of 2 AI agents is active.",
-        'Session alpha: Codex is active in yolomux.dev; 2 files changed (+8/-1); editor fixes',
+        "Sup! You've got 2 AI agents on editor fixes in yolomux.dev. Changes so far: 3 files changed (+9/-2); 1 of 2 AI agents is active.",
+        'Yo - session alpha: Codex is active in yolomux.dev; 2 files changed (+8/-1); editor fixes',
       ],
     },
     sessions: {
-      alpha: {local: "Codex is active in tmux session alpha. It has worked on editor fixes. The changes are 2 files changed (+8/-1)."},
+      alpha: {local: "Sup! Codex session alpha is active. It has been working on editor fixes. Changes so far: 2 files changed (+8/-1)."},
     },
   });
-  assert.ok(api.globalActivitySummaryHtml().includes("YO&#39;sup (info)"), 'global activity summary uses the renamed info label');
+  assert.ok(api.globalActivitySummaryHtml().includes("YO&#39;sup"), 'global activity summary uses the YO summary label');
   assert.ok(api.globalActivitySummaryHtml().includes('3 files changed (+9/-2)'), 'global activity summary renders file totals');
-  assert.ok(api.globalActivitySummaryHtml().includes("You&#39;ve worked on editor fixes"), 'global activity summary renders a human sentence');
-  assert.equal(api.sessionActivitySummary('alpha').local, "Codex is active in tmux session alpha. It has worked on editor fixes. The changes are 2 files changed (+8/-1).");
+  assert.ok(api.globalActivitySummaryHtml().includes("Sup! You&#39;ve got 2 AI agents on editor fixes"), 'global activity summary renders a casual human sentence');
+  assert.equal(api.sessionActivitySummary('alpha').local, "Sup! Codex session alpha is active. It has been working on editor fixes. Changes so far: 2 files changed (+8/-1).");
   api.setTranscriptInfoForTest('alpha', {
     project: {
       git: {

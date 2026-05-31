@@ -218,6 +218,16 @@ def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
     return roots
 
 
+def session_agent_fallback(info: SessionInfo) -> str:
+    for agent in info.agents:
+        if agent.kind in {"claude", "codex"} and agent.transcript:
+            return agent.kind
+    for agent in info.agents:
+        if agent.kind in {"claude", "codex"}:
+            return agent.kind
+    return ""
+
+
 def session_file_entry(
     session: str,
     agent: str,
@@ -275,6 +285,7 @@ def session_files_payload_for_info(info: SessionInfo, hours: float = 24.0, now: 
 
     files: list[dict[str, Any]] = []
     repo_payloads: list[dict[str, Any]] = []
+    fallback_agent = session_agent_fallback(info)
     for repo_text in sorted(repos):
         repo = Path(repo_text)
         diff_base = git_diff_base(repo)
@@ -291,7 +302,7 @@ def session_files_payload_for_info(info: SessionInfo, hours: float = 24.0, now: 
                 removed = 0
             agent = next(
                 (metadata["agent"] for touched_path, metadata in touched.items() if repo_relative_path(Path(touched_path), repo) == rel_path),
-                "",
+                fallback_agent,
             )
             repo_entries.append(session_file_entry(info.session, agent, status, path, repo, "git", added, removed))
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))

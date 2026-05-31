@@ -615,7 +615,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -665,7 +665,7 @@ function openFileEditorItems() {
 }
 
 function computeLayoutItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {
@@ -1105,7 +1105,10 @@ function commandPaletteCommandItems() {
 }
 
 function fileQuickOpenRootForSearch() {
-  const activeTmux = activeTmuxDirectoryPath(currentSessionActionTarget());
+  const target = currentSessionActionTarget();
+  const gitRoot = isTmuxSession(target) ? transcriptMeta.sessions?.[target]?.project?.git?.root : '';
+  if (gitRoot) return normalizeDirectoryPath(gitRoot);
+  const activeTmux = activeTmuxDirectoryPath(target);
   if (activeTmux) return activeTmux;
   if (activeFile) return dirnameOf(activeFile);
   if (fileExplorerRoot) return fileExplorerRoot;

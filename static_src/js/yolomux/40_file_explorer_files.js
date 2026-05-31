@@ -2011,20 +2011,6 @@ async function refreshOpenFilesIfChanged() {
       renderOpenFilePath(path);
       continue;
     }
-    if (state.kind === 'text' && !fileEditorAutosaveEnabled) {
-      const externalChanged = {mtime: entry.mtime || 0, size: entry.size ?? null};
-      if (state.externalChanged
-        && state.externalChanged.mtime === externalChanged.mtime
-        && state.externalChanged.size === externalChanged.size) {
-        continue;
-      }
-      state.externalChanged = externalChanged;
-      delete state.externalChangeEditPrompted;
-      delete state.externalMissing;
-      delete state.externalError;
-      renderOpenFilePath(path);
-      continue;
-    }
     await replaceOpenFileStateFromDisk(path, entry);
   }
 }

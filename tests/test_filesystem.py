@@ -80,6 +80,16 @@ def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs(tmp_path):
     assert "node_modules/hello_x_and_y.js" not in paths
 
 
+def test_search_files_matches_absolute_path_segments(tmp_path):
+    project = tmp_path / "home" / "keivenc" / "project"
+    project.mkdir(parents=True)
+    (project / "README.md").write_text("# ok\n", encoding="utf-8")
+
+    payload = filesystem.search_files(str(project), "hokread", 20)
+
+    assert [item["relative_path"] for item in payload["files"]] == ["README.md"]
+
+
 def test_search_files_rejects_non_directory(tmp_path):
     target = tmp_path / "note.md"
     target.write_text("x", encoding="utf-8")

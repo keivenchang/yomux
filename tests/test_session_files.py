@@ -154,3 +154,25 @@ def test_session_files_payload_uses_session_repo_without_ai_attribution(tmp_path
     assert payload["files"][0]["path"] == "tracked.txt"
     assert payload["files"][0]["source"] == "git"
     assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 0}]
+
+
+def test_session_files_payload_attributes_git_fallback_to_session_agent(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    tracked.write_text("working\n", encoding="utf-8")
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text('{"msg":"no patch path here"}\n', encoding="utf-8")
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("codex", rollout, repo)])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    assert payload["files"][0]["path"] == "tracked.txt"
+    assert payload["files"][0]["agent"] == "codex"
+    assert payload["files"][0]["source"] == "git"

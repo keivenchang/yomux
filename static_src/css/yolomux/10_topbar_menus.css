@@ -444,6 +444,9 @@
 .app-menu-ui-icon-branch-info {
   --app-menu-ui-icon: var(--icon-branch-info);
 }
+.app-menu-ui-icon-yosup {
+  --app-menu-ui-icon: var(--icon-yosup);
+}
 .app-menu-ui-icon-changes {
   --app-menu-ui-icon: var(--icon-changes);
 }

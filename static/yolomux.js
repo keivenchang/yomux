@@ -273,7 +273,9 @@ const fileExplorerSplitPercent = 22;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
-const infoTabLabel = "YO'sup (info)";
+const infoTabLabel = 'Branch Info';
+const yosupItemId = '__yosup__';
+const yosupTabLabel = "YO'sup";
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
 const changesItemId = '__changes__';
@@ -295,11 +297,29 @@ const TAB_TYPES = [
     terminalTitle: () => `unavailable for ${infoTabLabel}`,
     sortRank: 0,
     param: () => 'info',
-    detail: () => 'AI activity and repo metadata',
+    detail: () => 'Repo metadata, branches, PRs, and CI',
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     className: () => 'info',
     icon: 'branch-info',
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
+    prunePriority: () => 0,
+  },
+  {
+    key: 'yosup',
+    id: yosupItemId,
+    aliases: ['yosup', 'yo', 'sup', yosupItemId],
+    match: item => item === yosupItemId,
+    label: () => yosupTabLabel,
+    shortLabel: () => 'YO',
+    terminalTitle: () => `unavailable for ${yosupTabLabel}`,
+    sortRank: 0.25,
+    param: () => 'yosup',
+    detail: () => 'Casual AI activity summary',
+    rowHtml: (item, options) => paneInfoTabHtml(item, options),
+    createPanel: () => createYosupPanel(),
+    className: () => 'info yosup-item',
+    icon: 'yosup',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
     prunePriority: () => 0,
   },
@@ -520,7 +540,7 @@ function applyFileExplorerStaticLabels() {
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
+let layoutItems = [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
@@ -1925,7 +1945,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -1975,7 +1995,7 @@ function openFileEditorItems() {
 }
 
 function computeLayoutItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {
@@ -2415,7 +2435,10 @@ function commandPaletteCommandItems() {
 }
 
 function fileQuickOpenRootForSearch() {
-  const activeTmux = activeTmuxDirectoryPath(currentSessionActionTarget());
+  const target = currentSessionActionTarget();
+  const gitRoot = isTmuxSession(target) ? transcriptMeta.sessions?.[target]?.project?.git?.root : '';
+  if (gitRoot) return normalizeDirectoryPath(gitRoot);
+  const activeTmux = activeTmuxDirectoryPath(target);
   if (activeTmux) return activeTmux;
   if (activeFile) return dirnameOf(activeFile);
   if (fileExplorerRoot) return fileExplorerRoot;
@@ -3413,14 +3436,14 @@ function tmuxSessionViewCommands(session) {
       detail: active ? '' : disabledDetail,
       ariaLabel: ['Event log', focusDetail].filter(Boolean).join(' - '),
     }),
-    menuCommand(infoTabLabel, () => {
+    menuCommand('Pane details', () => {
       if (!active) return;
       const panel = document.getElementById(`panel-${session}`);
       if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
-      ariaLabel: [infoTabLabel, focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: ['Pane details', focusDetail].filter(Boolean).join(' - '),
     }),
   ];
 }
@@ -3527,6 +3550,14 @@ function appMenuTree() {
             checked: itemInLayout(fileExplorerItemId),
             detail: 'Browse files',
           }),
+          menuTabCommand(infoItemId, {
+            checked: itemIsActivePaneTab(infoItemId),
+            detail: 'Open branch, PR, CI, and repo metadata',
+          }),
+          menuTabCommand(yosupItemId, {
+            checked: itemIsActivePaneTab(yosupItemId),
+            detail: 'Open the casual AI activity summary',
+          }),
           menuCommand('Open file', openFileQuickOpen, {
             detail: appShortcutText('P'),
           }),
@@ -3559,10 +3590,6 @@ function appMenuTree() {
         }),
         menuCommand('Refresh', refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
-        }),
-        menuTabCommand(infoItemId, {
-          checked: itemIsActivePaneTab(infoItemId),
-          detail: 'Open the AI activity and repository overview panel',
         }),
         menuSubmenu('Layout', [
           menuCommand('Single pane', setLayoutToSinglePane, {detail: 'Consolidate visible non-Finder tabs'}),
@@ -6064,20 +6091,6 @@ async function refreshOpenFilesIfChanged() {
       renderOpenFilePath(path);
       continue;
     }
-    if (state.kind === 'text' && !fileEditorAutosaveEnabled) {
-      const externalChanged = {mtime: entry.mtime || 0, size: entry.size ?? null};
-      if (state.externalChanged
-        && state.externalChanged.mtime === externalChanged.mtime
-        && state.externalChanged.size === externalChanged.size) {
-        continue;
-      }
-      state.externalChanged = externalChanged;
-      delete state.externalChangeEditPrompted;
-      delete state.externalMissing;
-      delete state.externalError;
-      renderOpenFilePath(path);
-      continue;
-    }
     await replaceOpenFileStateFromDisk(path, entry);
   }
 }
@@ -7975,7 +7988,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
   rows.push(popoverPairRow('state', stateValue, 'agent', agentValue));
   const activity = sessionActivitySummary(session);
-  if (activity?.local) rows.push(popoverRow(infoTabLabel, esc(activity.local)));
+  if (activity?.local) rows.push(popoverRow(yosupTabLabel, esc(activity.local)));
   rows.push(popoverRow('path', displayPath));
   if (git?.branch) rows.push(popoverRow('branch', `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {
@@ -8331,7 +8344,6 @@ function endSessionDrag(event) {
   sessionButtons.classList.remove('drag-over');
   clearDropPreview();
 }
-
 function layoutWithoutItemFromSlots(item, slots = layoutSlots, options = {}) {
   const next = emptyLayoutSlots();
   next[layoutTreeKey] = slots?.[layoutTreeKey] || null;
@@ -10146,10 +10158,7 @@ function restorePaneTabPopover(strip, item) {
 
 function createPaneTab(side, item) {
   const type = tabTypeForItem(item);
-  const isInfo = type?.key === 'info';
   const isFiles = type?.key === 'files';
-  const isPrefs = type?.key === 'preferences';
-  const isChanges = type?.key === 'changes';
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
   const info = transcriptMeta.sessions?.[item];
@@ -10182,7 +10191,7 @@ function createPaneTab(side, item) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isInfo ? infoTabLabel : isFiles ? fileExplorerLabel() : isPrefs ? 'Preferences' : isChanges ? 'Changes' : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', type ? itemLabel(item) : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
@@ -10315,7 +10324,7 @@ function positionPaneTabPopover(tab) {
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="pane-tab-info-label">${esc(infoTabLabel)}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
@@ -10582,7 +10591,7 @@ function bindPaneFrameControls(panel, session) {
   if (!panel || panel.dataset.frameControlsBound === 'true') return;
   panel.dataset.frameControlsBound = 'true';
   panel.addEventListener('click', async event => {
-    const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close], [data-file-editor-close]');
+    const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close]');
     if (!button || !panel.contains(button)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -10598,10 +10607,6 @@ function bindPaneFrameControls(panel, session) {
     }
     if (button.dataset.paneExpand !== undefined) {
       expandPaneFromLayout(button.dataset.paneExpand || session);
-      return;
-    }
-    if (button.dataset.fileEditorClose !== undefined) {
-      closeFileTab(button.dataset.fileEditorClose || fileItemPath(session), {item: session});
       return;
     }
     if (button.dataset.paneClose !== undefined) {
@@ -10827,7 +10832,7 @@ function createInfoPanel() {
       <div class="panel-detail-row">
         <div class="panel-copy">
           <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel)}</span></div>
-          <div id="meta-${infoItemId}" class="meta">AI activity and branches sorted by recent activity</div>
+          <div id="meta-${infoItemId}" class="meta">Branches, PRs, CI, and repo metadata sorted by recent activity</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="hide details" aria-label="hide details"></button>
       </div>
@@ -10848,6 +10853,39 @@ function createInfoPanel() {
   return panel;
 }
 
+function createYosupPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel info-panel yosup-panel';
+  panel.id = `panel-${yosupItemId}`;
+  panel.innerHTML = `
+      <div class="panel-head">
+        ${virtualPanelControlsHtml(yosupItemId, yosupTabLabel)}
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div id="panel-tab-${yosupItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yosupTabLabel)}</span></div>
+          <div id="meta-${yosupItemId}" class="meta">Casual roll-up of active AI agents and changed files</div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(yosupItemId)}" title="hide details" aria-label="hide details"></button>
+      </div>
+      <div class="info-pane panel-overlay-root">
+        <div id="panel-toasts-${yosupItemId}" class="panel-toast-stack"></div>
+        <div class="transcript-head info-head">
+          <span>${esc(yosupTabLabel)}</span>
+          <button type="button" class="info-refresh" data-yosup-refresh title="Refresh AI activity summary">Refresh summary</button>
+        </div>
+        <div id="yosup-content" class="info-list yosup-list"></div>
+      </div>`;
+  bindPanelShell(panel, yosupItemId);
+  panel.querySelector('[data-yosup-refresh]')?.addEventListener('click', event => {
+    event.preventDefault();
+    refreshActivitySummary();
+  });
+  renderYosupPanel();
+  return panel;
+}
+
 function sessionActivitySummary(session) {
   return activitySummaryPayload?.sessions?.[session] || null;
 }
@@ -10864,9 +10902,9 @@ function globalActivitySummaryHtml() {
   const headline = summary.headline || lines[0] || '';
   const details = headline ? lines.filter((line, index) => index > 0 || line !== headline) : lines;
   const generated = activitySummaryPayload?.generated_at ? `updated ${shortText(activitySummaryPayload.generated_at, 19)}` : 'not loaded';
-  return `<section class="yosup-global" aria-label="${esc(infoTabLabel)} AI activity summary">
+  return `<section class="yosup-global" aria-label="${esc(yosupTabLabel)} AI activity summary">
     <div class="yosup-global-head">
-      <span>${esc(infoTabLabel)}</span>
+      <span>${esc(yosupTabLabel)}</span>
       <span class="yosup-generated">${esc(generated)}</span>
     </div>
     ${headline ? `<div class="yosup-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
@@ -10889,6 +10927,7 @@ async function refreshActivitySummary(options = {}) {
     if (!options.silent) statusEl.innerHTML = `<span class="err">activity summary failed: ${esc(error)}</span>`;
   }
   renderInfoPanel();
+  renderYosupPanel();
 }
 
 function editorSchemePreferenceChoices(options = {}) {
@@ -11609,13 +11648,14 @@ function changeFileRowHtml(item, options = {}) {
   const timeText = sessionFileTimeText(item.mtime);
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentHtml = agentIcon(String(item.agent || '').toLowerCase());
+  const agentSlotHtml = agentHtml ? `<span class="changes-file-agent">${agentHtml}</span>` : '';
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
-  const metaHtml = [agentHtml ? `<span class="changes-file-agent">${agentHtml}</span>` : '', dateHtml, diffHtml].filter(Boolean).join('<span class="changes-meta-separator">·</span>');
+  const metaHtml = [diffHtml, dateHtml].filter(Boolean).join('');
   const compactClass = options.compact ? ' compact' : ' detailed';
   const actionAttr = deleted ? ' disabled title="Deleted file cannot be opened from disk"' : ` data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" title="${esc(absPath)}"`;
   return `<button type="button" class="changes-file-row${compactClass}"${actionAttr}>
     <span class="changes-status changes-status-${esc(statusKey.toLowerCase())}">${esc(statusKey)}</span>
-    <span class="changes-file-main"><span class="changes-file-name">${esc(name)}</span><span class="changes-file-path">${esc(rel)}</span></span>
+    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span><span class="changes-file-path">${esc(rel)}</span></span>
     <span class="changes-file-meta">${metaHtml}</span>
   </button>`;
 }
@@ -12108,9 +12148,8 @@ function createFileEditorPanel(item) {
             expand: true,
             close: true,
             closeClass: 'file-editor-panel-close',
-            fileClosePath: path,
-            closeTitle: 'Close',
-            closeLabel: 'Close',
+            closeTitle: 'Close pane',
+            closeLabel: 'Close pane',
           })}
         </div>
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
@@ -12128,11 +12167,6 @@ function createFileEditorPanel(item) {
   bindPanelShell(panel, item);
   panel.querySelectorAll('button').forEach(button => {
     button.addEventListener('pointerdown', event => event.stopPropagation());
-  });
-  panel.querySelector('.file-editor-panel-close')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    closeFileTab(path, {item});
   });
   panel.querySelector('.file-editor-save-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -13235,9 +13269,7 @@ function paneFrameControlsHtml(session, options = {}) {
     const closeLabel = options.closeLabel || 'Close pane tab';
     const closeTitle = options.closeTitle || closeLabel;
     const closeClass = options.closeClass ? ` ${options.closeClass}` : '';
-    const closeData = options.fileClosePath
-      ? `data-file-editor-close="${esc(options.fileClosePath)}"`
-      : `data-pane-close="${esc(session)}"`;
+    const closeData = `data-pane-close="${esc(session)}"`;
     controls.push(disabled
       ? `<button class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${disabledAttrs(closeLabel)}></button>`
       : `<button type="button" class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${closeData} title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
@@ -13352,7 +13384,7 @@ function renderInfoPanel() {
   if (!node) return;
   const rows = infoBranchRows();
   if (!rows.length) {
-    node.innerHTML = `${globalActivitySummaryHtml()}<div class="info-empty">No branch metadata loaded yet.</div>`;
+    node.innerHTML = '<div class="info-empty">No branch metadata loaded yet.</div>';
     return;
   }
   const headerCell = (key, label) => {
@@ -13379,13 +13411,19 @@ function renderInfoPanel() {
     <div class="info-cell" title="${esc(row.desc)}">${esc(row.desc)}</div>
     <div class="info-cell" title="${esc(row.updated)}">${esc(row.updated)}</div>
   </div>`).join('');
-  node.innerHTML = globalActivitySummaryHtml() + header + body;
+  node.innerHTML = header + body;
   node.querySelectorAll('[data-info-sort]').forEach(button => {
     button.addEventListener('click', () => {
       setInfoBranchSort(button.dataset.infoSort);
       renderInfoPanel();
     });
   });
+}
+
+function renderYosupPanel() {
+  const node = document.getElementById('yosup-content');
+  if (!node) return;
+  node.innerHTML = globalActivitySummaryHtml();
 }
 
 function infoBranchRows() {
@@ -14438,6 +14476,7 @@ async function refreshTranscripts() {
     if (sessionsChanged) renderPanels(previousActive);
     renderSessionButtons();
     renderInfoPanel();
+    renderYosupPanel();
     refreshActivitySummary({silent: true});
     for (const session of activeSessions.filter(isTmuxSession)) {
       const meta = document.getElementById(`meta-${session}`);

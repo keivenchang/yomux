@@ -77,9 +77,9 @@ def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     assert summary["agent"] == "codex"
     assert summary["goal"] == "Fix editor colors"
     assert summary["files"] == {"count": 1, "added": 1, "removed": 1}
-    assert summary["local"].startswith("Codex gpt-5.5 session 5 is")
-    assert "The changes are 1 file changed (+1/-1)." in summary["local"]
-    assert "Status: CI failing; 1 dirty file." in summary["local"]
+    assert summary["local"].startswith("Sup! Codex gpt-5.5 session 5 is")
+    assert "Changes so far: 1 file changed (+1/-1)." in summary["local"]
+    assert "Status check: CI failing; 1 dirty file." in summary["local"]
     assert "CI failing" in summary["lines"]
     assert any("app.py" in line for line in summary["file_lines"])
     assert activity_signature(info, project, files)["files"][0][2] == "app.py"
@@ -93,5 +93,5 @@ def test_global_activity_summary_rolls_up_sessions():
 
     assert global_summary["active_agents"] == 1
     assert global_summary["files"] == {"count": 3, "added": 5, "removed": 4}
-    assert global_summary["headline"].startswith("You've worked on fix A and debug B.")
-    assert "The changes are 3 files changed (+5/-4)" in global_summary["lines"][0]
+    assert global_summary["headline"].startswith("Sup! You've got 2 AI agents on fix A and debug B")
+    assert "Changes so far: 3 files changed (+5/-4)" in global_summary["lines"][0]

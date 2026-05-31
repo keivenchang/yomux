@@ -730,6 +730,8 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
         const replaceAllButton = document.querySelector('.cm-button[name="replaceAll"]').getBoundingClientRect();
         const count = document.getElementById('search-count').getBoundingClientRect();
         const label = document.getElementById('match-label').getBoundingClientRect();
+        const regexpLabel = document.querySelectorAll('.cm-search label')[1].getBoundingClientRect();
+        const wordLabel = document.querySelectorAll('.cm-search label')[2].getBoundingClientRect();
         const labelStyle = getComputedStyle(document.getElementById('match-label'));
         const checkbox = document.getElementById('match-case').getBoundingClientRect();
         const markerContent = getComputedStyle(document.getElementById('wrapped-line'), '::before').content;
@@ -774,11 +776,13 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
           countColor: getComputedStyle(document.getElementById('search-count')).color,
           nextTitle: document.querySelector('.cm-button[name="next"]').title,
           previousTitle: document.querySelector('.cm-button[name="prev"]').title,
-          searchNextGap: nextButton.left - search.right,
-          nextPreviousGap: previousButton.left - nextButton.right,
-          previousAllGap: allButton.left - previousButton.right,
+          searchFirstToggleGap: label.left - search.right,
+          toggleCountGap: count.left - regexpLabel.right,
+          previousNextGap: nextButton.left - previousButton.right,
+          nextAllGap: allButton.left - nextButton.right,
           replaceReplaceAllGap: replaceAllButton.left - replaceButton.right,
-          replaceAllCountGap: count.left - replaceAllButton.right,
+          labelRegexpGap: wordLabel.left - label.right,
+          regexpWordGap: regexpLabel.left - wordLabel.right,
           replaceLeftDelta: Math.abs(search.left - replace.left),
           replaceWidthDelta: Math.abs(search.width - replace.width),
           checkboxCenterDelta: Math.abs((checkbox.top + checkbox.height / 2) - (label.top + label.height / 2)),
@@ -821,9 +825,9 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
         """
     )
     assert metrics["actionsTopDelta"] <= 2
-    assert metrics["searchWidth"] >= 80
-    assert metrics["searchWidth"] <= 150
-    assert metrics["replaceWidth"] >= 80
+    assert metrics["searchWidth"] >= 120
+    assert metrics["searchWidth"] <= 210
+    assert metrics["replaceWidth"] >= 120
     assert metrics["nextWidth"] <= 45
     assert metrics["previousWidth"] <= 75
     assert metrics["allWidth"] <= 38
@@ -831,11 +835,13 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["countColor"] != "rgb(0, 0, 0)"
     assert metrics["nextTitle"] == "Next match (Enter)"
     assert metrics["previousTitle"] == "Previous match (Shift+Enter)"
-    assert 3 <= metrics["searchNextGap"] <= 12
-    assert metrics["nextPreviousGap"] <= 6
-    assert metrics["previousAllGap"] <= 6
+    assert 0 <= metrics["searchFirstToggleGap"] <= 8
+    assert 0 <= metrics["toggleCountGap"] <= 10
+    assert metrics["previousNextGap"] <= 6
+    assert metrics["nextAllGap"] <= 6
     assert metrics["replaceReplaceAllGap"] <= 4
-    assert metrics["replaceAllCountGap"] <= 8
+    assert metrics["labelRegexpGap"] <= 4
+    assert metrics["regexpWordGap"] <= 4
     assert metrics["replaceLeftDelta"] <= 1.5
     assert metrics["replaceWidthDelta"] <= 2
     assert metrics["checkboxCenterDelta"] <= 1.5

@@ -272,7 +272,9 @@ const fileExplorerSplitPercent = 22;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
-const infoTabLabel = "YO'sup (info)";
+const infoTabLabel = 'Branch Info';
+const yosupItemId = '__yosup__';
+const yosupTabLabel = "YO'sup";
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
 const changesItemId = '__changes__';
@@ -294,11 +296,29 @@ const TAB_TYPES = [
     terminalTitle: () => `unavailable for ${infoTabLabel}`,
     sortRank: 0,
     param: () => 'info',
-    detail: () => 'AI activity and repo metadata',
+    detail: () => 'Repo metadata, branches, PRs, and CI',
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     className: () => 'info',
     icon: 'branch-info',
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
+    prunePriority: () => 0,
+  },
+  {
+    key: 'yosup',
+    id: yosupItemId,
+    aliases: ['yosup', 'yo', 'sup', yosupItemId],
+    match: item => item === yosupItemId,
+    label: () => yosupTabLabel,
+    shortLabel: () => 'YO',
+    terminalTitle: () => `unavailable for ${yosupTabLabel}`,
+    sortRank: 0.25,
+    param: () => 'yosup',
+    detail: () => 'Casual AI activity summary',
+    rowHtml: (item, options) => paneInfoTabHtml(item, options),
+    createPanel: () => createYosupPanel(),
+    className: () => 'info yosup-item',
+    icon: 'yosup',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
     prunePriority: () => 0,
   },
@@ -519,7 +539,7 @@ function applyFileExplorerStaticLabels() {
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
+let layoutItems = [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};

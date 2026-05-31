@@ -190,13 +190,14 @@ function changeFileRowHtml(item, options = {}) {
   const timeText = sessionFileTimeText(item.mtime);
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentHtml = agentIcon(String(item.agent || '').toLowerCase());
+  const agentSlotHtml = agentHtml ? `<span class="changes-file-agent">${agentHtml}</span>` : '';
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
-  const metaHtml = [agentHtml ? `<span class="changes-file-agent">${agentHtml}</span>` : '', dateHtml, diffHtml].filter(Boolean).join('<span class="changes-meta-separator">·</span>');
+  const metaHtml = [diffHtml, dateHtml].filter(Boolean).join('');
   const compactClass = options.compact ? ' compact' : ' detailed';
   const actionAttr = deleted ? ' disabled title="Deleted file cannot be opened from disk"' : ` data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" title="${esc(absPath)}"`;
   return `<button type="button" class="changes-file-row${compactClass}"${actionAttr}>
     <span class="changes-status changes-status-${esc(statusKey.toLowerCase())}">${esc(statusKey)}</span>
-    <span class="changes-file-main"><span class="changes-file-name">${esc(name)}</span><span class="changes-file-path">${esc(rel)}</span></span>
+    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span><span class="changes-file-path">${esc(rel)}</span></span>
     <span class="changes-file-meta">${metaHtml}</span>
   </button>`;
 }
@@ -689,9 +690,8 @@ function createFileEditorPanel(item) {
             expand: true,
             close: true,
             closeClass: 'file-editor-panel-close',
-            fileClosePath: path,
-            closeTitle: 'Close',
-            closeLabel: 'Close',
+            closeTitle: 'Close pane',
+            closeLabel: 'Close pane',
           })}
         </div>
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
@@ -709,11 +709,6 @@ function createFileEditorPanel(item) {
   bindPanelShell(panel, item);
   panel.querySelectorAll('button').forEach(button => {
     button.addEventListener('pointerdown', event => event.stopPropagation());
-  });
-  panel.querySelector('.file-editor-panel-close')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    closeFileTab(path, {item});
   });
   panel.querySelector('.file-editor-save-panel')?.addEventListener('click', event => {
     event.preventDefault();

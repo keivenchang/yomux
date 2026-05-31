@@ -44,9 +44,7 @@ function paneFrameControlsHtml(session, options = {}) {
     const closeLabel = options.closeLabel || 'Close pane tab';
     const closeTitle = options.closeTitle || closeLabel;
     const closeClass = options.closeClass ? ` ${options.closeClass}` : '';
-    const closeData = options.fileClosePath
-      ? `data-file-editor-close="${esc(options.fileClosePath)}"`
-      : `data-pane-close="${esc(session)}"`;
+    const closeData = `data-pane-close="${esc(session)}"`;
     controls.push(disabled
       ? `<button class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${disabledAttrs(closeLabel)}></button>`
       : `<button type="button" class="tab pane-close ${platformWindowControlClass('close')}${closeClass}" ${closeData} title="${esc(closeTitle)}" aria-label="${esc(closeLabel)}"></button>`);
@@ -161,7 +159,7 @@ function renderInfoPanel() {
   if (!node) return;
   const rows = infoBranchRows();
   if (!rows.length) {
-    node.innerHTML = `${globalActivitySummaryHtml()}<div class="info-empty">No branch metadata loaded yet.</div>`;
+    node.innerHTML = '<div class="info-empty">No branch metadata loaded yet.</div>';
     return;
   }
   const headerCell = (key, label) => {
@@ -188,13 +186,19 @@ function renderInfoPanel() {
     <div class="info-cell" title="${esc(row.desc)}">${esc(row.desc)}</div>
     <div class="info-cell" title="${esc(row.updated)}">${esc(row.updated)}</div>
   </div>`).join('');
-  node.innerHTML = globalActivitySummaryHtml() + header + body;
+  node.innerHTML = header + body;
   node.querySelectorAll('[data-info-sort]').forEach(button => {
     button.addEventListener('click', () => {
       setInfoBranchSort(button.dataset.infoSort);
       renderInfoPanel();
     });
   });
+}
+
+function renderYosupPanel() {
+  const node = document.getElementById('yosup-content');
+  if (!node) return;
+  node.innerHTML = globalActivitySummaryHtml();
 }
 
 function infoBranchRows() {
@@ -1247,6 +1251,7 @@ async function refreshTranscripts() {
     if (sessionsChanged) renderPanels(previousActive);
     renderSessionButtons();
     renderInfoPanel();
+    renderYosupPanel();
     refreshActivitySummary({silent: true});
     for (const session of activeSessions.filter(isTmuxSession)) {
       const meta = document.getElementById(`meta-${session}`);

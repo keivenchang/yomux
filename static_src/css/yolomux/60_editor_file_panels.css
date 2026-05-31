@@ -614,9 +614,30 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-explorer-changes-panel {
   flex: 0 0 var(--file-explorer-changes-size);
   min-height: var(--file-explorer-changes-min-block-size);
-  overflow: auto;
+  overflow-y: scroll;
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+  scrollbar-color: rgba(118, 185, 0, 0.55) rgba(255, 255, 255, 0.06);
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
   padding: 5px;
+}
+.file-explorer-changes-panel::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.file-explorer-changes-panel::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+}
+.file-explorer-changes-panel::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 0;
+  background: rgba(118, 185, 0, 0.55);
+  background-clip: content-box;
+}
+.file-explorer-changes-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(118, 185, 0, 0.8);
+  background-clip: content-box;
 }
 .file-explorer-changes-head {
   position: sticky;
@@ -684,10 +705,10 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-explorer-hidden-toggle-panel,
 .file-explorer-root-mode-toggle-panel {
-  width: 28px;
+  width: 30px;
   height: 18px;
-  flex: 0 0 28px;
-  padding: 0;
+  flex: 0 0 30px;
+  padding: 0 4px;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: transparent;
@@ -708,8 +729,9 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-explorer-hidden-toggle-panel.active,
 .file-explorer-root-mode-toggle-panel.active {
-  color: var(--good);
-  border-color: var(--good);
+  color: #061207;
+  border-color: var(--brand-green);
+  background: rgba(118, 185, 0, 0.88);
 }
 .cm-yolomux-diff-add {
   background: color-mix(in srgb, var(--code-diff-add) 18%, transparent);
@@ -1106,11 +1128,11 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {
 }
 .file-editor-codemirror .cm-search,
 .file-editor-codemirror-panel .cm-search {
-  --cm-search-column-gap: 2px;
+  --cm-search-column-gap: 4px;
   --cm-search-field-gap: 5px;
   position: relative;
   display: grid;
-  grid-template-columns: minmax(9ch, 15ch) repeat(6, max-content) minmax(4ch, max-content) minmax(0, 1fr);
+  grid-template-columns: minmax(18ch, 22ch) repeat(3, 24px) minmax(4ch, max-content) repeat(3, 24px) minmax(0, 1fr);
   align-items: center;
   column-gap: var(--cm-search-column-gap);
   row-gap: 4px;
@@ -1132,7 +1154,7 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {
   grid-row: 1;
   box-sizing: border-box;
   width: 100%;
-  min-width: 0;
+  min-width: 18ch;
   height: 24px;
   margin: 0;
   padding: 3px 6px;
@@ -1159,20 +1181,53 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {
 }
 .file-editor-codemirror .cm-search .cm-button,
 .file-editor-codemirror-panel .cm-search .cm-button {
+  position: relative;
   justify-self: start;
   box-sizing: border-box;
-  min-width: 0;
+  min-width: 22px;
+  width: 22px;
   height: 24px;
   margin: 0;
-  padding: 0 4px;
+  padding: 0;
   color: var(--text);
   background: rgba(255, 255, 255, 0.055);
   background-image: none;
   border: 1px solid #6f7b8c;
   border-radius: 4px;
-  font: 700 var(--ui-font-size-xs)/1 var(--control-font);
+  font: 700 0/1 var(--control-font);
   font-stretch: condensed;
   white-space: nowrap;
+}
+.file-editor-codemirror .cm-search .cm-button::before,
+.file-editor-codemirror-panel .cm-search .cm-button::before {
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.file-editor-codemirror .cm-search .cm-button[name="next"]::before,
+.file-editor-codemirror-panel .cm-search .cm-button[name="next"]::before {
+  content: "\2193";
+}
+.file-editor-codemirror .cm-search .cm-button[name="prev"]::before,
+.file-editor-codemirror-panel .cm-search .cm-button[name="prev"]::before {
+  content: "\2191";
+}
+.file-editor-codemirror .cm-search .cm-button[name="select"],
+.file-editor-codemirror-panel .cm-search .cm-button[name="select"],
+.file-editor-codemirror .cm-search .cm-button[name="replaceAll"],
+.file-editor-codemirror-panel .cm-search .cm-button[name="replaceAll"] {
+  width: 30px;
+}
+.file-editor-codemirror .cm-search .cm-button[name="select"]::before,
+.file-editor-codemirror-panel .cm-search .cm-button[name="select"]::before,
+.file-editor-codemirror .cm-search .cm-button[name="replaceAll"]::before,
+.file-editor-codemirror-panel .cm-search .cm-button[name="replaceAll"]::before {
+  content: "All";
+  font-size: var(--ui-font-size-2xs);
+  font-family: var(--control-font);
+  font-stretch: condensed;
+}
+.file-editor-codemirror .cm-search .cm-button[name="replace"]::before,
+.file-editor-codemirror-panel .cm-search .cm-button[name="replace"]::before {
+  content: "\21B5";
 }
 .file-editor-codemirror .cm-search .cm-button[name="replace"],
 .file-editor-codemirror .cm-search .cm-button[name="replaceAll"],
@@ -1182,38 +1237,34 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {
 }
 .file-editor-codemirror .cm-search .cm-button[name="next"],
 .file-editor-codemirror-panel .cm-search .cm-button[name="next"] {
-  grid-column: 2;
+  grid-column: 7;
   grid-row: 1;
   justify-self: end;
-  margin-left: calc(var(--cm-search-field-gap) - var(--cm-search-column-gap) - 0.55em);
 }
 .file-editor-codemirror .cm-search .cm-button[name="prev"],
 .file-editor-codemirror-panel .cm-search .cm-button[name="prev"] {
-  grid-column: 3;
+  grid-column: 6;
   grid-row: 1;
   justify-self: end;
-  margin-left: -0.35em;
 }
 .file-editor-codemirror .cm-search .cm-button[name="select"],
 .file-editor-codemirror-panel .cm-search .cm-button[name="select"] {
-  grid-column: 4;
+  grid-column: 8;
   grid-row: 1;
-  margin-left: -0.35em;
 }
 .file-editor-codemirror .cm-search .cm-button[name="replace"],
 .file-editor-codemirror-panel .cm-search .cm-button[name="replace"] {
   grid-column: 2;
-  margin-left: calc(var(--cm-search-field-gap) - var(--cm-search-column-gap) - 0.55em);
 }
 .file-editor-codemirror .cm-search .cm-button[name="replaceAll"],
 .file-editor-codemirror-panel .cm-search .cm-button[name="replaceAll"] {
   grid-column: 3;
-  margin-left: -0.35em;
+  margin-left: -2px;
 }
 .file-editor-codemirror .cm-search .cm-search-count,
 .file-editor-codemirror-panel .cm-search .cm-search-count {
-  grid-column: 4;
-  grid-row: 2;
+  grid-column: 5;
+  grid-row: 1;
   min-width: 4ch;
   color: #c9ff7a;
   font: 800 var(--ui-font-size-xs)/1 var(--control-font);
@@ -1228,38 +1279,73 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {
 }
 .file-editor-codemirror .cm-search label,
 .file-editor-codemirror-panel .cm-search label {
+  position: relative;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
+  box-sizing: border-box;
+  width: 24px;
   height: 24px;
   margin: 0;
-  color: var(--text);
-  font: 700 var(--ui-font-size-xs)/1 var(--control-font);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid #6f7b8c;
+  border-radius: 4px;
+  font: 700 0/1 var(--control-font);
   font-stretch: condensed;
   white-space: nowrap;
+  cursor: pointer;
 }
 .file-editor-codemirror .cm-search label:nth-of-type(1),
 .file-editor-codemirror-panel .cm-search label:nth-of-type(1) {
-  grid-column: 5;
+  grid-column: 2;
   grid-row: 1;
 }
 .file-editor-codemirror .cm-search label:nth-of-type(2),
 .file-editor-codemirror-panel .cm-search label:nth-of-type(2) {
-  grid-column: 6;
+  grid-column: 4;
   grid-row: 1;
 }
 .file-editor-codemirror .cm-search label:nth-of-type(3),
 .file-editor-codemirror-panel .cm-search label:nth-of-type(3) {
-  grid-column: 7;
+  grid-column: 3;
   grid-row: 1;
+}
+.file-editor-codemirror .cm-search label::after,
+.file-editor-codemirror-panel .cm-search label::after {
+  font: 800 var(--ui-font-size-2xs)/1 var(--control-font);
+  font-stretch: condensed;
+}
+.file-editor-codemirror .cm-search label:nth-of-type(1)::after,
+.file-editor-codemirror-panel .cm-search label:nth-of-type(1)::after {
+  content: "Aa";
+}
+.file-editor-codemirror .cm-search label:nth-of-type(2)::after,
+.file-editor-codemirror-panel .cm-search label:nth-of-type(2)::after {
+  content: ".*";
+}
+.file-editor-codemirror .cm-search label:nth-of-type(3)::after,
+.file-editor-codemirror-panel .cm-search label:nth-of-type(3)::after {
+  content: "word";
+  font-size: var(--ui-font-size-3xs);
+}
+.file-editor-codemirror .cm-search label:has(input:checked),
+.file-editor-codemirror-panel .cm-search label:has(input:checked) {
+  color: #061207;
+  border-color: var(--brand-green);
+  background: rgba(118, 185, 0, 0.86);
 }
 .file-editor-codemirror .cm-search input[type="checkbox"],
 .file-editor-codemirror-panel .cm-search input[type="checkbox"] {
-  flex: 0 0 auto;
-  width: 15px;
-  height: 15px;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   margin: 0;
+  opacity: 0;
   accent-color: var(--brand-green);
+  cursor: pointer;
 }
 .file-editor-codemirror .cm-search .cm-dialog-close,
 .file-editor-codemirror-panel .cm-search .cm-dialog-close {
@@ -1288,16 +1374,26 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-textfield {
   box-shadow: inset 0 0 0 1px rgba(9, 105, 218, 0.04);
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-button,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button {
+body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button,
+body.editor-theme-light .file-editor-codemirror .cm-search label,
+body.editor-theme-light .file-editor-codemirror-panel .cm-search label {
   color: var(--lt-markdown-link);
   background: var(--lt-panel);
   border-color: #8c959f;
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-button:hover,
-body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button:hover {
+body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-button:hover,
+body.editor-theme-light .file-editor-codemirror .cm-search label:hover,
+body.editor-theme-light .file-editor-codemirror-panel .cm-search label:hover {
   color: #0550ae;
   background: var(--lt-code-inline-bg);
   border-color: var(--lt-markdown-link);
+}
+body.editor-theme-light .file-editor-codemirror .cm-search label:has(input:checked),
+body.editor-theme-light .file-editor-codemirror-panel .cm-search label:has(input:checked) {
+  color: #061207;
+  background: rgba(118, 185, 0, 0.76);
+  border-color: #4c7f00;
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-search-count,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-count {

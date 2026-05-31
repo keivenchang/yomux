@@ -209,7 +209,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400) 
                     rel = path.relative_to(root).as_posix()
                 except ValueError:
                     rel = path.name
-                haystack = f"{rel} {name}"
+                haystack = f"{path} {rel} {name}"
                 if tokens and not all(_fuzzy_subsequence_match(token, haystack) for token in tokens):
                     continue
                 try:

@@ -157,10 +157,10 @@ def files_sentence(files: dict[str, Any]) -> str:
 def work_sentence(work: str, goal: str) -> str:
     work_text = truncate_text(work or goal, 180)
     if not work_text:
-        return "It has not reported a current task yet."
+        return "It has not said what it is working on yet."
     if work and goal and work.strip() != goal.strip():
-        return f"It has worked on {work_text} for {truncate_text(goal, 120)}."
-    return f"It has worked on {work_text}."
+        return f"It has been working on {work_text} for {truncate_text(goal, 120)}."
+    return f"It has been working on {work_text}."
 
 
 def project_status_sentence(project: dict[str, Any], files: dict[str, Any], active: bool) -> str:
@@ -244,10 +244,10 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
     ci = ci_summary(project)
     status = project_status_sentence(project, files, activity_state.get("key") == "working")
     local_parts = [
-        f"{agent_display_label(agent)} session {info.session} is {state_label}.",
+        f"Sup! {agent_display_label(agent)} session {info.session} is {state_label}.",
         work_sentence(work, goal),
-        f"The changes are {files_sentence(files)}.",
-        f"Status: {status}.",
+        f"Changes so far: {files_sentence(files)}.",
+        f"Status check: {status}.",
     ]
     local = " ".join(local_parts)
     lines = [local]
@@ -305,9 +305,9 @@ def build_global_activity_summary(session_summaries: list[dict[str, Any]], error
         repo_text = human_join(repos[:3]) if repos else "the current workspace"
         agent_word = "agent" if total == 1 else "agents"
         active_text = f"{len(active)} of {total} AI {agent_word} {'is' if len(active) == 1 else 'are'} active"
-        headline = f"You've worked on {work_text}. The changes are {files_sentence({'count': file_count, 'added': added, 'removed': removed})} across {repo_text}; {active_text}."
+        headline = f"Sup! You've got {total} AI {agent_word} on {work_text} in {repo_text}. Changes so far: {files_sentence({'count': file_count, 'added': added, 'removed': removed})}; {active_text}."
     else:
-        headline = "No AI agent activity is available yet."
+        headline = "Sup! No AI agent activity is available yet."
     lines = [headline]
     for item in session_summaries:
         status = "active" if item.get("active") else "idle"
@@ -317,7 +317,7 @@ def build_global_activity_summary(session_summaries: list[dict[str, Any]], error
         work = item.get("work") or item.get("goal") or item.get("ci") or ""
         agent_text = str(item.get("agent_label") or agent_label(str(item.get("agent") or "")))
         status_text = str(item.get("status_text") or status)
-        lines.append(f"Session {item.get('session')}: {agent_text} is {status} in {repo}; {files_sentence(files)}; {status_text}; {truncate_text(str(work), 150)}")
+        lines.append(f"Yo - session {item.get('session')}: {agent_text} is {status} in {repo}; {files_sentence(files)}; {status_text}; {truncate_text(str(work), 150)}")
     for error in errors or []:
         lines.append(f"Activity summary error: {error}")
     return {

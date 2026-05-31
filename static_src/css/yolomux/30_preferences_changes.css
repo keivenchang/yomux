@@ -171,6 +171,12 @@
   display: grid;
   gap: 2px;
 }
+.changes-file-title {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .changes-file-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -191,11 +197,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 6px;
 }
 .changes-file-agent {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
 }
 .changes-file-agent .agent-icon {
   width: 16px;

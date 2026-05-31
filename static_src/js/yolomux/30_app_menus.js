@@ -267,14 +267,14 @@ function tmuxSessionViewCommands(session) {
       detail: active ? '' : disabledDetail,
       ariaLabel: ['Event log', focusDetail].filter(Boolean).join(' - '),
     }),
-    menuCommand(infoTabLabel, () => {
+    menuCommand('Pane details', () => {
       if (!active) return;
       const panel = document.getElementById(`panel-${session}`);
       if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
-      ariaLabel: [infoTabLabel, focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: ['Pane details', focusDetail].filter(Boolean).join(' - '),
     }),
   ];
 }
@@ -381,6 +381,14 @@ function appMenuTree() {
             checked: itemInLayout(fileExplorerItemId),
             detail: 'Browse files',
           }),
+          menuTabCommand(infoItemId, {
+            checked: itemIsActivePaneTab(infoItemId),
+            detail: 'Open branch, PR, CI, and repo metadata',
+          }),
+          menuTabCommand(yosupItemId, {
+            checked: itemIsActivePaneTab(yosupItemId),
+            detail: 'Open the casual AI activity summary',
+          }),
           menuCommand('Open file', openFileQuickOpen, {
             detail: appShortcutText('P'),
           }),
@@ -413,10 +421,6 @@ function appMenuTree() {
         }),
         menuCommand('Refresh', refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
-        }),
-        menuTabCommand(infoItemId, {
-          checked: itemIsActivePaneTab(infoItemId),
-          detail: 'Open the AI activity and repository overview panel',
         }),
         menuSubmenu('Layout', [
           menuCommand('Single pane', setLayoutToSinglePane, {detail: 'Consolidate visible non-Finder tabs'}),
