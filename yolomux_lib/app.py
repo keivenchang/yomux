@@ -16,6 +16,9 @@ import auto_approve_tmux
 
 from . import session_files
 from . import yolo_rules
+from .activity_summary import activity_signature
+from .activity_summary import build_global_activity_summary
+from .activity_summary import build_session_activity_summary
 from .auto_approve_worker import AutoApproveWorker
 from .auto_approve_worker import auto_approve_lock_message
 from .auto_approve_worker import auto_approve_lock_owner
@@ -100,6 +103,8 @@ class TmuxWebtermApp:
         self.metadata_badge_lock = threading.Lock()
         self.metadata_badge_signatures: dict[str, dict[str, str]] = {}
         self.metadata_badge_pulse_until: dict[str, dict[str, float]] = {}
+        self.activity_summary_lock = threading.RLock()
+        self.activity_summary_cache: dict[str, dict[str, Any]] = {}
         self.load_metadata_badge_state()
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
@@ -147,6 +152,38 @@ class TmuxWebtermApp:
 
     def settings_payload(self) -> dict[str, Any]:
         return settings_payload()
+
+    def activity_summary_payload(self) -> dict[str, Any]:
+        sessions, errors = discover_sessions(self.sessions)
+        self.warm_metadata_cache_async(sessions)
+        summaries: dict[str, Any] = {}
+        ordered_summaries: list[dict[str, Any]] = []
+        with self.activity_summary_lock:
+            for session in self.sessions:
+                info = sessions.get(session)
+                if info is None:
+                    continue
+                project = session_project_metadata(info, self.metadata_cache, allow_network=False)
+                files_payload = session_files.session_files_payload_for_info(info, hours=24.0)
+                signature = activity_signature(info, project, files_payload)
+                cached = self.activity_summary_cache.get(session)
+                if cached and cached.get("signature") == signature:
+                    summary = cached["summary"]
+                else:
+                    summary = build_session_activity_summary(info, project, files_payload)
+                    self.activity_summary_cache[session] = {"signature": signature, "summary": summary}
+                summaries[session] = summary
+                ordered_summaries.append(summary)
+            for session in list(self.activity_summary_cache):
+                if session not in sessions:
+                    self.activity_summary_cache.pop(session, None)
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "session_order": [session for session in self.sessions if session in summaries],
+            "sessions": summaries,
+            "global": build_global_activity_summary(ordered_summaries, errors),
+            "errors": errors,
+        }
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         return save_settings(patch)

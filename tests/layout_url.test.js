@@ -280,6 +280,8 @@ globalThis.__layoutTestApi = {
   changesPanelHtml,
   fileExplorerChangesPanelHtml,
   parseUnifiedDiffLineClasses,
+  globalActivitySummaryHtml,
+  sessionActivitySummary,
   fitAppMenuPopover,
   finderDirectoryForItem,
   finderTargetPathForItem,
@@ -304,6 +306,7 @@ globalThis.__layoutTestApi = {
   layoutFromParam,
   layoutParamValue,
   layoutSlotKeys,
+  largestPaneSlotForFileEditor,
   layoutWithFileExplorerDockedLeft,
   layoutWithReplacedItem,
   layoutWithoutItem,
@@ -493,6 +496,9 @@ globalThis.__layoutTestApi = {
   setTranscriptInfoForTest(session, info) {
     transcriptMeta.sessions = {...(transcriptMeta.sessions || {}), [session]: info};
   },
+  setActivitySummaryPayloadForTest(payload) {
+    activitySummaryPayload = payload;
+  },
   applyServerMetadataPulsesForTest(session, pulses) {
     updateMetadataBadgePulses({sessions: {[session]: {metadata_badge_pulse_remaining_ms: pulses}}});
   },
@@ -533,6 +539,18 @@ globalThis.__layoutTestApi = {
   },
   setGridPreviewNodesForTest(nodes) {
     grid.querySelectorAll = () => nodes;
+  },
+  setLayoutColumnRectsForTest(rects) {
+    grid.querySelector = selector => {
+      const text = String(selector || '');
+      const prefix = '.layout-column[data-slot="';
+      const slot = text.startsWith(prefix) && text.endsWith('"]') ? text.slice(prefix.length, -2) : '';
+      const rect = slot ? rects[slot] : null;
+      if (!rect) return null;
+      const node = document.createElement('div');
+      node.rect = rect;
+      return node;
+    };
   },
   defaultLayoutForTest() {
     return globalThis.__layoutTestApi.serialize(defaultLayoutSlots());
@@ -1190,6 +1208,9 @@ function makeFileTree(paths) {
     ],
   });
   assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified files'), 'Finder embeds a modified-files panel');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), 'Finder modified-files panel uses one density toggle');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row detailed'), 'Finder modified-files panel defaults to detailed rows');
+  assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
   const diffLines = api.parseUnifiedDiffLineClasses(`@@ -1,2 +1,3 @@
@@ -1203,6 +1224,9 @@ function makeFileTree(paths) {
   const filesTab = api.fileExplorerPaneTabHtml();
   assert.equal(api.fileExplorerLabel(), 'File Explorer');
   assert.ok(filesTab.includes('File Explorer'));
+  const appSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/switchFileExplorerChangesSession\(item\)/.test(appSource), 'tmux focus switches the Finder modified-files session immediately');
+  assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'tmux focus forces a fresh Finder modified-files fetch even if an older request is in flight');
   assert.equal(filesTab.includes('agent-icon file'), false);
   assert.ok(api.menuTabCommand('__files__').html.includes('app-menu-ui-icon-finder'));
   assert.ok(api.menuTabCommand('__prefs__').html.includes('app-menu-ui-icon-gear'));
@@ -1280,6 +1304,20 @@ function makeFileTree(paths) {
   assert.equal(finderBesideSinglePaneUrlApi.activeItemForSide('left'), '3');
   assert.equal(finderBesideSinglePaneUrlApi.canPaneExpand('3'), false);
   assert.ok(finderBesideSinglePaneUrlApi.panelControlsHtml('3').includes('hidden type="button" data-pane-expand="3"'));
+
+  const sidePreviewEditorItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
+  const sidePreviewSlots = api.emptyLayoutSlots();
+  sidePreviewSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 20);
+  sidePreviewSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  sidePreviewSlots.slot1 = api.paneStateWithTabs([sidePreviewEditorItem], sidePreviewEditorItem);
+  sidePreviewSlots.slot2 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(sidePreviewSlots);
+  api.setLayoutColumnRectsForTest({
+    left: {left: 0, right: 220, top: 0, bottom: 800, width: 220, height: 800},
+    slot1: {left: 230, right: 580, top: 0, bottom: 800, width: 350, height: 800},
+    slot2: {left: 590, right: 1190, top: 0, bottom: 800, width: 600, height: 800},
+  });
+  assert.equal(api.largestPaneSlotForFileEditor(['slot1']), 'slot2', 'side preview chooses the next biggest existing non-Finder pane');
 
   const delayHtml = api.preferencesPanelHtmlForTest('delay', ['Performance']);
   assert.ok(delayHtml.includes('data-preference-section="Performance"'), 'delay search shows Performance');
@@ -1513,7 +1551,7 @@ function makeFileTree(paths) {
   assert.ok(tmuxMenuLabels.includes('Transcript'));
   assert.ok(tmuxMenuLabels.includes('AI summary'));
   assert.ok(tmuxMenuLabels.includes('Event log'));
-  assert.ok(tmuxMenuLabels.includes('Branch Info'));
+  assert.ok(tmuxMenuLabels.includes("YO'sup (info)"));
   assert.ok(tmuxMenuLabels.includes("Rename tmux session '1'"));
   assert.ok(tmuxMenuLabels.includes('Kill session'));
   assert.equal(tmuxMenuLabels.includes("Enable YOLO for Tmux Session '1'"), false);
@@ -1599,7 +1637,7 @@ function makeFileTree(paths) {
   assert.deepStrictEqual(canonical(contextMenu.children.map(child => child.textContent)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Kill session"]);
   assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), false);
   const sessionViews = api.tmuxSessionViewCommands('1');
-  assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ['Transcript', 'AI summary', 'Event log', 'Branch Info']);
+  assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ['Transcript', 'AI summary', 'Event log', "YO'sup (info)"]);
   assert.equal(api.fileIconFor('screenshot.png'), '🖼');
   assert.equal(api.fileIconFor('run.sh'), '🐚');
   assert.equal(api.fileIconFor('main.rs'), '🧩');
@@ -1612,7 +1650,7 @@ function makeFileTree(paths) {
   assert.ok(controlsHtml.includes('title="Transcript" aria-label="Transcript"'));
   assert.ok(controlsHtml.includes('title="AI summary" aria-label="AI summary"'));
   assert.ok(controlsHtml.includes('title="Event log" aria-label="Event log"'));
-  assert.ok(controlsHtml.includes('title="Branch Info" aria-label="Branch Info"'));
+  assert.ok(controlsHtml.includes('title="YO&#39;sup (info)" aria-label="YO&#39;sup (info)"'));
   assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
   assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
   assert.equal(api.tmuxSessionNameError('dynamo 2'), '');
@@ -2465,6 +2503,23 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux('', ['alpha', 'beta']);
+  api.setActivitySummaryPayloadForTest({
+    generated_at: '2026-05-31T12:00:00+00:00',
+    global: {
+      headline: "You've worked on editor fixes. The changes are 3 files changed (+9/-2) across yolomux.dev; 1 of 2 AI agents is active.",
+      lines: [
+        "You've worked on editor fixes. The changes are 3 files changed (+9/-2) across yolomux.dev; 1 of 2 AI agents is active.",
+        'Session alpha: Codex is active in yolomux.dev; 2 files changed (+8/-1); editor fixes',
+      ],
+    },
+    sessions: {
+      alpha: {local: "Codex is active in tmux session alpha. It has worked on editor fixes. The changes are 2 files changed (+8/-1)."},
+    },
+  });
+  assert.ok(api.globalActivitySummaryHtml().includes("YO&#39;sup (info)"), 'global activity summary uses the renamed info label');
+  assert.ok(api.globalActivitySummaryHtml().includes('3 files changed (+9/-2)'), 'global activity summary renders file totals');
+  assert.ok(api.globalActivitySummaryHtml().includes("You&#39;ve worked on editor fixes"), 'global activity summary renders a human sentence');
+  assert.equal(api.sessionActivitySummary('alpha').local, "Codex is active in tmux session alpha. It has worked on editor fixes. The changes are 2 files changed (+8/-1).");
   api.setTranscriptInfoForTest('alpha', {
     project: {
       git: {

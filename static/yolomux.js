@@ -150,6 +150,7 @@ const fileExplorerDirectorySignatures = new Map();
 const fileExplorerKnownEntryNames = new Map();
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
+const fileExplorerSessionFilesCache = new Map();
 const pendingFileEditorFocus = new Set();
 let activeFile = null;
 let sharedImageViewerPath = null;
@@ -180,9 +181,10 @@ let sessionFilesPayloadSignature = '';
 let fileExplorerSessionFilesPayloadSignature = '';
 let sessionFilesLoading = false;
 let fileExplorerSessionFilesLoading = false;
+let fileExplorerSessionFilesRequestId = 0;
 let sessionFilesSortMode = 'mtime';
 let sessionFilesSelectedSession = '';
-let fileExplorerChangesDisplayMode = 'compact';
+let fileExplorerChangesDisplayMode = 'detailed';
 let commandPaletteNode = null;
 let commandPaletteQuery = '';
 let commandPaletteIndex = 0;
@@ -255,6 +257,7 @@ const fileExplorerSplitPercent = 22;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
+const infoTabLabel = "YO'sup (info)";
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
 const changesItemId = '__changes__';
@@ -271,12 +274,12 @@ const TAB_TYPES = [
     id: infoItemId,
     aliases: ['info', infoItemId],
     match: item => item === infoItemId,
-    label: () => 'Branch Info',
+    label: () => infoTabLabel,
     shortLabel: () => 'Term',
-    terminalTitle: () => 'unavailable for Branch Info',
+    terminalTitle: () => `unavailable for ${infoTabLabel}`,
     sortRank: 0,
     param: () => 'info',
-    detail: () => 'Branch and repo metadata',
+    detail: () => 'AI activity and repo metadata',
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     className: () => 'info',
@@ -512,6 +515,7 @@ let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessio
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
+let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let notificationsEnabled = false;
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
@@ -802,7 +806,7 @@ function setFocusedPanelItem(item, options = {}) {
   updatePanelInactiveOverlays();
   if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item);
   if (isTmuxSession(item) && document.querySelector('.file-explorer-changes-panel')) {
-    fetchSessionFiles({destination: 'finder', session: item, silent: true});
+    switchFileExplorerChangesSession(item);
   }
   if (isPreferencesItem(item) && options.focusPreferencesSearch !== false) {
     focusFreshPreferencesSearchSoon();
@@ -3106,14 +3110,14 @@ function tmuxSessionViewCommands(session) {
       detail: active ? '' : disabledDetail,
       ariaLabel: ['Event log', focusDetail].filter(Boolean).join(' - '),
     }),
-    menuCommand('Branch Info', () => {
+    menuCommand(infoTabLabel, () => {
       if (!active) return;
       const panel = document.getElementById(`panel-${session}`);
       if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
-      ariaLabel: ['Branch Info', focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: [infoTabLabel, focusDetail].filter(Boolean).join(' - '),
     }),
   ];
 }
@@ -3212,7 +3216,7 @@ function appMenuTree() {
         }),
         menuTabCommand(infoItemId, {
           checked: itemIsActivePaneTab(infoItemId),
-          detail: 'Open the repository overview panel',
+          detail: 'Open the AI activity and repository overview panel',
         }),
         menuSubmenu('Layout', [
           menuCommand('Single pane', setLayoutToSinglePane, {detail: 'Consolidate visible non-Finder tabs'}),
@@ -5259,9 +5263,15 @@ async function openFileCrossPaneSplit(path) {
     await openFileEditorPane(path, {item: editorItem});
   }
   const editorSlot = slotForSession(editorItem) || largestPaneSlotForFileEditor() || slotForNewSession();
+  const previewSlot = largestPaneSlotForFileEditor(new Set([editorSlot]));
   setOpenFileOwner(path, previewItem);
   if (slotForSession(previewItem)) {
     activatePaneTab(slotForSession(previewItem), previewItem);
+  } else if (previewSlot) {
+    await openFileEditorPane(path, {
+      item: previewItem,
+      targetSlot: previewSlot,
+    });
   } else {
     await openFileEditorPane(path, {
       item: previewItem,
@@ -5483,13 +5493,14 @@ function largestNonFileExplorerPaneSlot(exclude = new Set()) {
   return best?.slot || null;
 }
 
-function largestPaneSlotForFileEditor() {
+function largestPaneSlotForFileEditor(exclude = new Set()) {
+  const excludedSlots = exclude instanceof Set ? exclude : new Set(Array.isArray(exclude) ? exclude : [exclude]);
   const filesSlot = slotForSession(fileExplorerItemId);
   const filesRect = filesSlot ? layoutColumnNode(filesSlot)?.getBoundingClientRect() : null;
   let fallback = null;
   let best = null;
   for (const slot of layoutSlotKeys()) {
-    if (slot === filesSlot || !paneTabs(slot).length) continue;
+    if (excludedSlots.has(slot) || slot === filesSlot || !paneTabs(slot).length) continue;
     const rect = layoutColumnNode(slot)?.getBoundingClientRect();
     const area = rect ? Math.max(0, rect.width) * Math.max(0, rect.height) : 0;
     const candidate = {slot, area};
@@ -7319,6 +7330,8 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || 'not detected');
   const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
   rows.push(popoverPairRow('state', stateValue, 'agent', agentValue));
+  const activity = sessionActivitySummary(session);
+  if (activity?.local) rows.push(popoverRow(infoTabLabel, esc(activity.local)));
   rows.push(popoverRow('path', displayPath));
   if (git?.branch) rows.push(popoverRow('branch', `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {
@@ -9525,7 +9538,7 @@ function createPaneTab(side, item) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? fileExplorerLabel() : isPrefs ? 'Preferences' : isChanges ? 'Changes' : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isInfo ? infoTabLabel : isFiles ? fileExplorerLabel() : isPrefs ? 'Preferences' : isChanges ? 'Changes' : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
@@ -9658,7 +9671,7 @@ function positionPaneTabPopover(tab) {
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="pane-tab-info-label">Branch Info</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="pane-tab-info-label">${esc(infoTabLabel)}</span></span>`;
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
@@ -10160,20 +10173,20 @@ function createInfoPanel() {
   panel.id = `panel-${infoItemId}`;
   panel.innerHTML = `
       <div class="panel-head">
-        ${virtualPanelControlsHtml(infoItemId, 'Branch Info')}
+        ${virtualPanelControlsHtml(infoItemId, infoTabLabel)}
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
-          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">Branch Info</span></div>
-          <div id="meta-${infoItemId}" class="meta">all branches sorted by recent activity</div>
+          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel)}</span></div>
+          <div id="meta-${infoItemId}" class="meta">AI activity and branches sorted by recent activity</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="hide details" aria-label="hide details"></button>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
         <div class="transcript-head info-head">
-          <span>Branch Info</span>
+          <span>${esc(infoTabLabel)}</span>
           <button type="button" class="info-refresh" data-info-refresh title="Refresh repo metadata">Refresh repo metadata</button>
         </div>
         <div id="info-content" class="info-list"></div>
@@ -10185,6 +10198,49 @@ function createInfoPanel() {
   });
   renderInfoPanel();
   return panel;
+}
+
+function sessionActivitySummary(session) {
+  return activitySummaryPayload?.sessions?.[session] || null;
+}
+
+function activitySummaryLinesHtml(lines, options = {}) {
+  const items = Array.isArray(lines) ? lines.filter(Boolean) : [];
+  if (!items.length) return options.empty ? `<div class="yosup-empty">${esc(options.empty)}</div>` : '';
+  return items.map(line => `<div class="yosup-line">${esc(line)}</div>`).join('');
+}
+
+function globalActivitySummaryHtml() {
+  const summary = activitySummaryPayload?.global || {};
+  const lines = Array.isArray(summary.lines) ? summary.lines : [];
+  const headline = summary.headline || lines[0] || '';
+  const details = headline ? lines.filter((line, index) => index > 0 || line !== headline) : lines;
+  const generated = activitySummaryPayload?.generated_at ? `updated ${shortText(activitySummaryPayload.generated_at, 19)}` : 'not loaded';
+  return `<section class="yosup-global" aria-label="${esc(infoTabLabel)} AI activity summary">
+    <div class="yosup-global-head">
+      <span>${esc(infoTabLabel)}</span>
+      <span class="yosup-generated">${esc(generated)}</span>
+    </div>
+    ${headline ? `<div class="yosup-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
+    ${activitySummaryLinesHtml(details)}
+  </section>`;
+}
+
+async function refreshActivitySummary(options = {}) {
+  try {
+    const response = await apiFetch('/api/activity-summary', {cache: 'no-store'});
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || response.status);
+    activitySummaryPayload = payload;
+  } catch (error) {
+    activitySummaryPayload = {
+      ...activitySummaryPayload,
+      errors: [String(error)],
+      global: {lines: [`activity summary unavailable: ${String(error)}`]},
+    };
+    if (!options.silent) statusEl.innerHTML = `<span class="err">activity summary failed: ${esc(error)}</span>`;
+  }
+  renderInfoPanel();
 }
 
 function editorSchemePreferenceChoices(options = {}) {
@@ -10724,6 +10780,25 @@ function fileExplorerSessionFilesTargetSession() {
   return sessionFilesTargetSession({followActive: true});
 }
 
+function emptySessionFilesPayload(session = '', loaded = true) {
+  return {session, files: [], repos: [], errors: [], loaded};
+}
+
+function switchFileExplorerChangesSession(session) {
+  if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
+  const cached = fileExplorerSessionFilesCache.get(session);
+  if (cached?.payload) {
+    fileExplorerSessionFilesPayload = cached.payload;
+    fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
+  } else {
+    const pendingPayload = emptySessionFilesPayload(session, false);
+    fileExplorerSessionFilesPayload = pendingPayload;
+    fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(pendingPayload);
+  }
+  renderFileExplorerChangesPanels();
+  fetchSessionFiles({destination: 'finder', session, silent: true, force: true});
+}
+
 function sessionFilesPayloadForDestination(destination) {
   return destination === 'finder' ? fileExplorerSessionFilesPayload : sessionFilesPayload;
 }
@@ -10779,11 +10854,14 @@ function setSessionFilesLoadingForDestination(destination, loading) {
 
 async function fetchSessionFiles(options = {}) {
   const destination = options.destination === 'finder' ? 'finder' : 'changes';
-  if (sessionFilesLoadingForDestination(destination)) return;
+  const forceFinderRefresh = destination === 'finder' && options.force === true;
+  if (sessionFilesLoadingForDestination(destination) && !forceFinderRefresh) return;
+  const requestId = destination === 'finder' ? ++fileExplorerSessionFilesRequestId : 0;
+  const requestIsCurrent = () => destination !== 'finder' || requestId === fileExplorerSessionFilesRequestId;
   const session = options.session || (destination === 'finder' ? fileExplorerSessionFilesTargetSession() : sessionFilesTargetSession());
   let shouldRender = options.silent !== true;
   if (!session) {
-    const emptyPayload = {session: '', files: [], repos: [], errors: [], loaded: true};
+    const emptyPayload = emptySessionFilesPayload('', true);
     const signature = sessionFilesPayloadSignatureForPayload(emptyPayload);
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, emptyPayload);
@@ -10814,20 +10892,23 @@ async function fetchSessionFiles(options = {}) {
       loaded: true,
     };
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+    if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
+    if (destination === 'finder') fileExplorerSessionFilesCache.set(session, {payload: nextPayload, signature});
     if (!options.silent) statusEl.innerHTML = `<span class="ok">loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}</span>`;
   } catch (err) {
     const nextPayload = {session, files: [], repos: [], errors: [String(err)], loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+    if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     if (!options.silent) statusEl.innerHTML = `<span class="err">changed files failed: ${esc(err)}</span>`;
   } finally {
-    setSessionFilesLoadingForDestination(destination, false);
-    if (shouldRender) {
+    if (requestIsCurrent()) setSessionFilesLoadingForDestination(destination, false);
+    if (requestIsCurrent() && shouldRender) {
       if (destination === 'finder') renderFileExplorerChangesPanels();
       else renderChangesPanels();
       renderPaneTabStrips();
@@ -10940,12 +11021,13 @@ function fileExplorerChangesPanelHtml() {
       : 'not loaded';
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? '<div class="changes-empty">No modified files for this session.</div>' : '';
-  const compact = fileExplorerChangesDisplayMode !== 'detailed';
+  const compact = fileExplorerChangesDisplayMode === 'compact';
+  const densityTitle = compact ? 'Show detailed modified-files list' : 'Show compact modified-files list';
+  const densityIcon = compact ? '▤' : '☷';
   return `
     <div class="file-explorer-changes-head">
       <span>Modified files</span>
-      <button type="button" class="changes-display-toggle${compact ? ' active' : ''}" data-session-files-display="compact" title="Compact modified-files list">Compact</button>
-      <button type="button" class="changes-display-toggle${compact ? '' : ' active'}" data-session-files-display="detailed" title="Detailed modified-files list">Detailed</button>
+      <button type="button" class="changes-display-toggle${compact ? ' compact' : ' detailed'}" data-session-files-display-toggle title="${esc(densityTitle)}" aria-label="${esc(densityTitle)}" aria-pressed="${compact ? 'true' : 'false'}">${esc(densityIcon)}</button>
       <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
       <span class="changes-summary">${esc(summary)}</span>
     </div>
@@ -11009,10 +11091,10 @@ function bindChangesPanel(panel) {
     }
   });
   panel.addEventListener('click', async event => {
-    const display = event.target.closest('[data-session-files-display]');
-    if (display && panel.contains(display)) {
+    const displayToggle = event.target.closest('[data-session-files-display-toggle]');
+    if (displayToggle && panel.contains(displayToggle)) {
       event.preventDefault();
-      fileExplorerChangesDisplayMode = display.dataset.sessionFilesDisplay === 'detailed' ? 'detailed' : 'compact';
+      fileExplorerChangesDisplayMode = fileExplorerChangesDisplayMode === 'compact' ? 'detailed' : 'compact';
       renderFileExplorerChangesPanels();
       return;
     }
@@ -11352,13 +11434,18 @@ function createFileEditorPanel(item) {
             <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
             <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
           </div>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
           <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-find-panel" title="Find in file (Ctrl/Cmd+F)" aria-label="Find in file" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="side" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-theme-panel" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-save-panel" title="Save" aria-label="Save file" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="save" aria-hidden="true" hidden></span>
           ${paneFrameControlsGroupHtml(item, {
             groupClass: 'file-editor-frame-controls',
             actions: false,
@@ -11697,6 +11784,7 @@ function renderFileEditorPanel(panel, item) {
   updateEditorThemeButton(themeButton);
   if (!state) {
     setElementsHidden(textControls, true);
+    updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
     destroyCodeMirrorPanel(panel);
     hideFileEditorContent(textarea, highlightPane, previewPane, imagePane, codeMirrorPane);
@@ -11705,6 +11793,7 @@ function renderFileEditorPanel(panel, item) {
   }
   if (state.loading) {
     setElementsHidden(textControls, true);
+    updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
     destroyCodeMirrorPanel(panel);
     hideFileEditorContent(textarea, highlightPane, previewPane, imagePane, codeMirrorPane);
@@ -11714,6 +11803,7 @@ function renderFileEditorPanel(panel, item) {
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
     setElementsHidden(textControls, true);
+    updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
     destroyCodeMirrorPanel(panel);
     if (textarea) textarea.hidden = true;
@@ -11748,6 +11838,7 @@ function renderFileEditorPanel(panel, item) {
   if (crossSplitButton) {
     crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
   }
+  updateFileEditorToolbarSeparators(panel);
   if (state.kind === 'image') {
     updateImageViewerThemeButton(themeButton);
     setEditorContentMode(content, 'edit');
@@ -11894,6 +11985,36 @@ function updateFileEditorPanelChrome(panel, path) {
   if (reloadButton) {
     reloadButton.hidden = previewOnly || !(state?.externalChanged || state?.externalMissing || state?.externalError);
   }
+  updateFileEditorToolbarSeparators(panel);
+}
+
+function fileEditorToolbarControlVisible(panel, selector) {
+  const node = panel?.querySelector(selector);
+  return !!node && node.hidden !== true;
+}
+
+function setFileEditorToolbarSeparator(panel, key, visible) {
+  const separator = panel?.querySelector(`[data-editor-toolbar-separator="${key}"]`);
+  if (separator) separator.hidden = !visible;
+}
+
+function updateFileEditorToolbarSeparators(panel) {
+  const mode = fileEditorToolbarControlVisible(panel, '.file-editor-mode-control-panel');
+  const tools = [
+    '.file-editor-gutter-panel',
+    '.file-editor-wrap-panel',
+    '.file-editor-find-panel',
+  ].some(selector => fileEditorToolbarControlVisible(panel, selector));
+  const side = fileEditorToolbarControlVisible(panel, '.file-editor-cross-split-panel');
+  const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel')
+    || fileEditorToolbarControlVisible(panel, '.file-editor-reload-panel');
+  const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
+  const frame = true;
+  setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || side || theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'tools', tools && (side || theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'side', side && (theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'theme', theme && (save || frame));
+  setFileEditorToolbarSeparator(panel, 'save', save && frame);
 }
 
 function setFileEditorPanelStatus(panel, message, level) {
@@ -12754,7 +12875,7 @@ function panelControlsHtml(session, options = {}) {
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
-  const infoAttrs = disabled ? disabledAttrs('Branch Info') : ` type="button" data-detail-toggle="${esc(session)}" title="Branch Info" aria-label="Branch Info"`;
+  const infoAttrs = disabled ? disabledAttrs(infoTabLabel) : ` type="button" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel)}" aria-label="${esc(infoTabLabel)}"`;
   const info = transcriptMeta.sessions?.[session];
   const terminalTitle = terminalTabTitle(session, info);
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
@@ -12845,7 +12966,7 @@ function renderInfoPanel() {
   if (!node) return;
   const rows = infoBranchRows();
   if (!rows.length) {
-    node.innerHTML = '<div class="info-empty">No branch metadata loaded yet.</div>';
+    node.innerHTML = `${globalActivitySummaryHtml()}<div class="info-empty">No branch metadata loaded yet.</div>`;
     return;
   }
   const headerCell = (key, label) => {
@@ -12872,7 +12993,7 @@ function renderInfoPanel() {
     <div class="info-cell" title="${esc(row.desc)}">${esc(row.desc)}</div>
     <div class="info-cell" title="${esc(row.updated)}">${esc(row.updated)}</div>
   </div>`).join('');
-  node.innerHTML = header + body;
+  node.innerHTML = globalActivitySummaryHtml() + header + body;
   node.querySelectorAll('[data-info-sort]').forEach(button => {
     button.addEventListener('click', () => {
       setInfoBranchSort(button.dataset.infoSort);
@@ -13725,7 +13846,7 @@ function updateStatus() {
   }
   const activeTmuxSessions = activeSessions.filter(isTmuxSession);
   if (!activeTmuxSessions.length) {
-    statusEl.textContent = 'Branch Info shown';
+    statusEl.textContent = `${infoTabLabel} shown`;
     statusEl.removeAttribute('title');
     return;
   }
@@ -13931,6 +14052,7 @@ async function refreshTranscripts() {
     if (sessionsChanged) renderPanels(previousActive);
     renderSessionButtons();
     renderInfoPanel();
+    refreshActivitySummary({silent: true});
     for (const session of activeSessions.filter(isTmuxSession)) {
       const meta = document.getElementById(`meta-${session}`);
       const preview = document.getElementById(`transcript-${session}`);

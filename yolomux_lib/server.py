@@ -98,6 +98,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/transcripts":
             self.write_json(self.server.app.transcripts_payload())
             return
+        if parsed.path == "/api/activity-summary":
+            self.write_json(self.server.app.activity_summary_payload())
+            return
         if parsed.path == "/api/tmux":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]

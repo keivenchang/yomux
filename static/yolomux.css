@@ -3410,6 +3410,41 @@ body.layout-resizing {
   overflow: auto;
   padding: 8px 10px;
 }
+.yosup-global {
+  min-width: 720px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  color: #dfe6ef;
+  background: #151d24;
+  border: 1px solid #314154;
+  border-left: 3px solid var(--brand-green);
+  border-radius: 4px;
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+.yosup-global-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+  color: #f4f7fb;
+  font-weight: 800;
+}
+.yosup-generated,
+.yosup-empty {
+  color: var(--muted);
+  font-weight: 500;
+}
+.yosup-headline {
+  margin-bottom: 5px;
+  color: #f4f7fb;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.yosup-line {
+  padding: 2px 0;
+  color: #d6dee9;
+}
 .info-row {
   display: grid;
   grid-template-columns: 120px 150px minmax(230px, 1fr) 170px 170px minmax(310px, 1fr) 112px;
@@ -4003,8 +4038,8 @@ body.layout-resizing {
   position: relative;
   display: inline-grid;
   place-items: center;
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
   color: currentColor;
 }
 .file-editor-icon-wrap::before {
@@ -4227,7 +4262,7 @@ body.layout-resizing {
   flex: 0 0 auto;
   height: 20px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 3px;
   overflow: hidden;
 }
 .file-editor-mode-control[hidden] {
@@ -4235,8 +4270,8 @@ body.layout-resizing {
 }
 .file-editor-mode-control button {
   height: 20px;
-  min-width: 24px;
-  width: 24px;
+  min-width: 20px;
+  width: 20px;
   padding: 0;
   border: 0;
   border-right: 1px solid var(--line);
@@ -4508,7 +4543,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   top: 0;
   z-index: 1;
   display: grid;
-  grid-template-columns: auto auto auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto auto minmax(0, 1fr);
   align-items: center;
   gap: 6px;
   padding: 4px 5px;
@@ -4527,18 +4562,21 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-explorer-changes-panel .changes-display-toggle {
   height: 20px;
-  padding: 0 5px;
+  width: 20px;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: transparent;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
+  line-height: 1;
   cursor: pointer;
 }
-.file-explorer-changes-panel .changes-display-toggle.active {
-  color: #071000;
+.file-explorer-changes-panel .changes-display-toggle:hover,
+.file-explorer-changes-panel .changes-display-toggle:focus-visible {
+  color: var(--brand-green);
   border-color: var(--brand-green);
-  background: var(--brand-green);
+  background: rgba(118, 185, 0, 0.10);
 }
 .file-explorer-changes-panel .changes-summary {
   justify-self: end;
@@ -4634,28 +4672,41 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   z-index: 220;
   min-width: 0;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 2px;
   float: right;
-  max-width: calc(100% - 8px);
-  margin: 0 0 0 8px;
+  max-width: calc(100% - 4px);
+  margin: 0 0 0 4px;
   padding-top: 0;
+  overflow: hidden;
 }
 .file-editor-panel-actions .pane-frame-controls {
-  margin-left: 2px;
+  margin-left: 0;
+}
+.file-editor-toolbar-separator {
+  width: 1px;
+  height: 14px;
+  flex: 0 0 1px;
+  margin: 0 1px;
+  background: var(--line);
+  opacity: 0.78;
+}
+.file-editor-toolbar-separator[hidden] {
+  display: none;
 }
 .file-editor-gutter-panel,
 .file-editor-wrap-panel,
 .file-editor-find-panel,
 .file-editor-theme-panel,
+.file-editor-reload-panel,
 .file-editor-save-panel {
   height: 20px;
   flex: 0 0 auto;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
+  padding: 0 3px;
+  border: 1px solid transparent;
+  border-radius: 3px;
   background: transparent;
   color: var(--muted);
   font-size: 11px;
@@ -4663,20 +4714,19 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   cursor: pointer;
 }
 .file-editor-save-panel {
-  min-width: 24px;
-  width: 24px;
+  min-width: 20px;
+  width: 20px;
   display: grid;
   place-items: center;
   padding: 0;
   color: var(--good);
-  border-color: var(--good);
 }
 .file-editor-wrap-panel,
 .file-editor-gutter-panel,
 .file-editor-find-panel,
 .file-editor-theme-panel {
-  min-width: 24px;
-  width: 24px;
+  min-width: 20px;
+  width: 20px;
   display: grid;
   place-items: center;
   padding: 0;
@@ -4692,9 +4742,11 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .file-editor-wrap-panel:hover,
 .file-editor-wrap-panel.active,
 .file-editor-find-panel:hover,
-.file-editor-theme-panel:hover {
+.file-editor-theme-panel:hover,
+.file-editor-reload-panel:hover {
   color: #9fd8ff;
   border-color: #9fd8ff;
+  background: rgba(159, 216, 255, 0.08);
 }
 .file-editor-wrap-panel.active,
 .file-editor-gutter-panel.active {
