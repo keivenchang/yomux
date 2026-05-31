@@ -48,6 +48,13 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from . import auth as _auth
+from .tmux_utils import list_tmux_session_names
+from .tmux_utils import run_cmd
+from .tmux_utils import session_sort_key
+from .tmux_utils import tmux
+from .tmux_utils import tmux_has_exact_session
+from .tmux_utils import tmux_session_target
+from .tmux_utils import unique_session_names
 
 
 DEFAULT_SESSIONS: tuple[str, ...] = ()
@@ -56,7 +63,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.1.27"
+YOLOMUX_VERSION = "0.1.28"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -244,6 +251,7 @@ class AgentInfo:
     session_id: str | None
     transcript: str | None
     error: str | None
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -260,60 +268,9 @@ class UploadedFile:
     content: bytes
 
 
-def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(args, 124, exc.stdout or "", exc.stderr or f"timed out after {timeout}s")
-
-
-def tmux(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    return run_cmd(["tmux", *args], timeout=timeout)
-
-
-def tmux_session_target(session: str) -> str:
-    return f"{session}:"
-
-
-def list_tmux_session_names() -> tuple[list[str], str | None]:
-    result = tmux(["list-sessions", "-F", "#{session_name}"], timeout=3.0)
-    if result.returncode != 0:
-        error = (result.stderr or result.stdout or "tmux list-sessions failed").strip()
-        return [], error
-    sessions = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return sorted(set(sessions), key=session_sort_key), None
-
-
-def tmux_has_exact_session(session: str) -> bool:
-    sessions, error = list_tmux_session_names()
-    return error is None and session in sessions
-
-
-def session_sort_key(session: str) -> tuple[int, str, int]:
-    match = re.fullmatch(r"yolomux(\d+)", session)
-    if match:
-        return 0, "yolomux", int(match.group(1))
-    match = re.fullmatch(r"project(\d+)", session)
-    if match:
-        return 1, "project", int(match.group(1))
-    return 2, session.lower(), 0
-
-
 def default_session_names() -> list[str]:
     tmux_sessions, _ = list_tmux_session_names()
     return unique_session_names(tmux_sessions)
-
-
-def unique_session_names(values: list[str] | tuple[str, ...]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        session = value.strip()
-        if not session or session in seen:
-            continue
-        seen.add(session)
-        result.append(session)
-    return sorted(result, key=session_sort_key)
 
 
 def next_numbered_session_name(existing_sessions: list[str]) -> str | None:

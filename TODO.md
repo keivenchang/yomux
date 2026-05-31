@@ -44,15 +44,15 @@ IMPLEMENTATION STATUS (verified 2026-05-29 — NOTE: line numbers in this file d
   - Open/close, hover, keyboard nav, ARIA roles, and click-outside already exist: helpers `menuCommand` / `menuSubmenu` / `menuSeparator` / `menuGroups`, plus `appMenuIsOpen` / `appMenuCommands` / `createAppMenu` / `createAppSubmenu` / `createAppMenuCommand`.
 - Current LIVE top-level menus: `File`, `View`, `tmux`, `Tabs`, `Help`. Gaps vs the design tree below:
   - NAMING DECISION (2026-05-30): the menu that lists the visible/minimized/inactive app tabs is named `Tabs`, while `tmux` is only for tmux-specific controls. The dropdown rows are separated by bars only; no `Active` / `Minimized` / `Inactive` section text.
-  - File today: File Explorer, Open file… (disabled), Preferences, Log out.
-  - tmux today: current session YO toggle, New tmux session (submenu), YOLO rule-file actions, Transcript / AI summary / Event log / Branch Info, Rename / Kill tmux session, Resume session (disabled).
+  - File today: File Explorer, Open file, Preferences, Log out.
+  - tmux today: current session YO toggle, direct `+ Claude` / `+ Codex` / `+ Term`, Transcript / AI summary / Event log / Branch Info, Rename / Kill tmux session, Resume session (disabled), YOLO rule-file actions at the bottom.
   - View today: tab-metadata toggle, Alert, Refresh, Branch Info, Layout submenu (Single pane / Grid / Wall — ALL disabled). MISSING: Filter/Sort, panel-tabs visibility.
   - Help today: Command palette, version (disabled), Keyboard shortcuts submenu, Open README.
   - NOT BUILT yet: per-pane left dropdown.
 
 DESIGN GATE (mostly satisfied — the skeleton is built; remaining gate work is reconciling the items below against the live `appMenuTree()`):
 
-- [x] Decision confirmed: the standalone top session-tab strip is gone; `#sessionButtons` now hosts the menu bar. New session for Claude AND Codex lives in the Tmux menu (`New tmux session` submenu).
+- [x] Decision confirmed: the standalone top session-tab strip is gone; `#sessionButtons` now hosts the menu bar. New session for Claude AND Codex lives as direct `tmux` menu items, not a nested submenu.
 - [x] Reconcile the live menu (`File/View/tmux/Tabs/Help`) with the design tree below — `Log out` stays in File and the top-right controls.
 - [x] Rename the app-tab list menu to `Tabs`. `tmux` is now tmux-scoped actions only; `Tabs` lists the app's open panes/tabs (tmux sessions, Finder, editors, viewers, Preferences, Branch Info) with rich rows.
 
@@ -81,45 +81,45 @@ ALSO MIRROR KEY DISPLAY CONTROLS IN THE SETTINGS MENU: `#` (tab metadata), `Noti
 
 Proposed menu tree (PROPOSAL — review before building):
 
-- [ ] File ▾  (files / app actions)
+- [ ] [S] File ▾  (files / app actions)
   - File Explorer (open)
   - Open file…
   - --- (separator)
   - Log out
-- [ ] Tmux ▾  (create / manage tmux sessions)
-  - New tmux session ▸ : `+ Claude`, `+ Codex`, `+ Term` (each opens the P4 launch dialog: cwd, model/profile, permission mode, initial prompt, optional name)
+- [ ] [S] Tmux ▾  (create / manage tmux sessions)
+  - `+ Claude`, `+ Codex`, `+ Term` (each opens the P4 launch dialog: cwd, model/profile, permission mode, initial prompt, optional name)
   - Rename tmux session
   - Kill tmux session
   - Enable/Disable YOLO for Tmux Session `<name>`
   - Open event log
   - Resume ▸ : recent Claude/Codex conversations scoped to cwd (P4)
   - NOTE: no Attach / Detach item. YOLOmux streams every pane over WebSocket and is always "attached"; switching sessions only changes which stream is shown. tmux attach/detach is a terminal-client concept that does not map to this UI, so it is intentionally omitted.
-- [ ] View ▾  (display options)
+- [ ] [S] View ▾  (display options)
   - Layout ▸ : Single / Grid / Wall
   - Filter / Sort ▸ : Needs me, by state, by repo, by PR status
   - Tab metadata: show / hide (the current `#` toggle)
   - Inactive tabs: show all / tray
   - Panel tabs ▸ : toggle Terminal / Tx / AI / Log / Info visibility
   - Branch Info: show — opens the Branch Info viewer for the active session (also still available as the per-pane `Info` tab; once open it appears in the Tabs menu)
-- [ ] Tabs ▾  (navigate — a flat rich-row list of active, minimized, and inactive tabs, with checkmark/highlight on the active one, click/Enter to focus, type-to-filter)
+- [ ] [M] Tabs ▾  (navigate — a flat rich-row list of active, minimized, and inactive tabs, with checkmark/highlight on the active one, click/Enter to focus, type-to-filter)
   - Just lists tabs and panes, nothing to "launch" from here — opening items happens in File / View. Ordering, top to bottom:
   - tmux sessions first : each open terminal tab
   - then editors : each open File Editor tab
   - then other open viewers : File Explorer, Branch Info, Transcript, AI Summary, Event Log (only the ones currently open)
   - Each row carries the SAME rich info already shown in the existing tab-metadata view, but packed more compactly so it reads like a real dropdown menu (one tight row per tab): agent badge (`YO`/`BL`/… + session number), state badge (`RUN`/`BLK`/…), PR number, commit-style title, branch, repo path (e.g. `dynamo2 -> dynamo3`), and dirty count. The active tab's row is highlighted (green) like the current selection.
   - This is a denser re-layout of the existing rich rows, not new data — reuse the metadata that already feeds the tab strip.
-- [ ] Per-pane left dropdown (the caret on the LEFT of each panel's tab strip): looks IDENTICAL to the Tabs ▾ menu above (same compact rich-row format), but scoped to just THAT pane's tabs — i.e. only the tabs/views belonging to that one panel (its tmux sessions + Terminal / Tx / AI / Log / Info), not every pane in the app. Same row styling, same active-row highlight.
-- [ ] Add the remaining YOLO controls under Tmux instead of restoring a top-level YOLO menu: policy modes, Open rule file, Approval queue, Audit log, and Risk labels legend.
-- [ ] Settings ▾
+- [ ] [M] Per-pane left dropdown (the caret on the LEFT of each panel's tab strip): looks IDENTICAL to the Tabs ▾ menu above (same compact rich-row format), but scoped to just THAT pane's tabs — i.e. only the tabs/views belonging to that one panel (its tmux sessions + Terminal / Tx / AI / Log / Info), not every pane in the app. Same row styling, same active-row highlight.
+- [ ] [M] Add the remaining YOLO controls under Tmux instead of restoring a top-level YOLO menu: policy modes, Open rule file, Approval queue, Audit log, and Risk labels legend.
+- [ ] [S] Settings ▾
   - `#` / Tab metadata (same icon + on/off state as the top-right button)
   - `Notify` (same icon + on/off state as the top-right button)
   - `Refresh` (same icon + behavior as the top-right button)
-- [ ] Help ▾
+- [ ] [S] Help ▾
   - Keyboard shortcuts
   - About / version
   - Open README
 - [x] Per-pane kebab (`…`) on each panel head (keep the existing Term/Tx/AI/Log/Info strip): YOLO policy for this session, run summary, rename, kill, open event log. (No "attach" item — see the Tmux Session note above.)
-- [ ] Add the remaining per-pane kebab actions: peek / reply.
+- [ ] [M] Add the remaining per-pane kebab actions: peek / reply.
 - [x] Right-click context menu on a session tab (the pane tab / panel header): `Rename session` (inline edit, same affordance as the file-tree rename — grep `function beginFileTreeRename`, ~2620), plus `Kill session` and `YOLO policy`. This is the expected shortcut so users do not have to open the Tmux menu just to rename.
 - [x] Multi-line tab wrapping: when a pane's tabs wrap to 2+ rows (the `fix: wrap crowded tabs` work, commit `e5df095`), the second row and beyond should use the full width INCLUDING the area beneath the pane toolbar (`<` / terminal / `Tx` / `AI` / `Log` / `Info` / `×`), instead of stopping short and leaving that space blank. Only the FIRST row needs to reserve room for the toolbar. Implemented by floating the pane toolbar and rendering pane tabs as inline-flex items so wrapped rows flow under the toolbar.
 - [x] Fix float-based wrapped tab alignment/overflow. The bad path was `.pane-tab { transform: translateY(2px) }`: it made a single-row tab look flush but did not affect layout, so wrapped rows could paint past `.panel-head` and into the detail row. Fixed by removing the transform, making `.pane-tab`'s real height match `.pane-tabs` (`28px`), and removing the header bottom border so the tab bottom and detail row share the same edge. Verified in headless Chrome with one-row and two-row tab strips: active-tab gap is `0`, `.panel-head` grows to contain both rows, and no tab bottom exceeds `.panel-detail-row` top.
@@ -130,7 +130,7 @@ Cross-cutting requirements for all menus:
 - [x] Menu keyboard accessibility, app-level shortcuts, and `View ▸ Layout` command implementation completed in the DOIT.7 batch.
 - [x] Menu widths are content-measured and viewport-clamped through shared CSS variables. Do not add fixed pixel min/max buckets for dropdown capacity; browser size, OS font metrics, zoom, and scrollbar behavior vary too much. Use intrinsic DOM measurement, percentages/viewport units, and container-relative constraints instead.
 - [x] Fix awkward hover timing (classic menubar behavior). FIRST open (no menu currently open) waits 300 ms before popping on hover. Once a menu is ALREADY open, moving the pointer to another top-level menu switches INSTANTLY with no delay.
-- [ ] Mobile: menus collapse into a single hamburger (ties to P7).
+- [ ] [M] Mobile: menus collapse into a single hamburger (ties to P7).
 - [x] Read-only mode disables mutating items (New, Kill, Settings writes, YOLO toggles) the same way the current `Notify`/buttons do.
 
 ### P1: YOLO Event Log, Audit, And Queue
@@ -138,9 +138,9 @@ Cross-cutting requirements for all menus:
 - [x] Add a persistent YOLO event log under `~/.local/state/yolomux/events.jsonl`, while keeping compact app state in `~/.config/yolomux/state.json`.
 - [x] Record approval decisions, blocked commands, worker errors, session start/stop, terminal disconnects, uploads, pasted images, summary runs, state changes, and user-visible notifications.
 - [x] Add a per-session YOLO audit panel showing recent approved/blocked decisions with timestamp, command text, matched rule, and session.
-- [ ] Add an approval queue view for pending high-risk actions. Start read-only first if live interception is hard.
-- [ ] Add per-session YOLO policy. Initial modes: `off`, `prompt-only`, `safe`, `edit`, `full`. Make policy visible on the tmux-session YOLO control.
-- [ ] Risk labels should be boring and concrete: `read`, `edit`, `network`, `process`, `delete`, `credential`, `unknown`.
+- [ ] [L] Add an approval queue view for pending high-risk actions. Start read-only first if live interception is hard.
+- [ ] [M] Add per-session YOLO policy. Initial modes: `off`, `prompt-only`, `safe`, `edit`, `full`. Make policy visible on the tmux-session YOLO control.
+- [ ] [S] Risk labels should be boring and concrete: `read`, `edit`, `network`, `process`, `delete`, `credential`, `unknown`.
 - [x] Replace the unhelpful top-right `YOLO on: 6` status string. YOLO state now lives on the per-session `YO` markers and the enabled-session count badge on the `Tabs` menu. The top-right status now reports the action as `enabled YOLO for <session>` / `disabled YOLO for <session>` instead of the old red `YOLO on: N` string.
 
 ### P1: YOLO Rule Engine (user-configurable matching via YAML)
@@ -156,9 +156,9 @@ Schema A is implemented:
 - [x] Decide file location and precedence. Implemented shared file: `~/.config/yolomux/yolo-rules.yaml`; per-repo/session overlays remain future work.
 - [x] Decide the action verbs. Implemented: `approve` (press Enter / select Yes), `decline` (select No / option2), `block` (leave for manual, current behavior), `ask` (notify + wait), `notify` (log only, take no action), and `off`.
 - [x] Decide match types. Implemented: `contains` (substring), `regex`, `glob`, and `command` (argv-aware parse so `echo "rm"` is data, not a delete).
-- [ ] Decide scoping dimensions: global vs per-repo vs per-session, per-agent (`claude` / `codex`), and per prompt-type (`bash` / `file` / `tool`).
-- [ ] (minor) Non-bash prompts auto-`approve` unconditionally. `evaluate()` returns `approve` for `prompt_type != "bash"` (`yolo_rules.py` ~532), so file-edit / tool approvals bypass the ruleset AND the hard floor. Matches prior behavior; decide whether file/tool prompts should be rule-governed and floor-checked too. (Carried over from the removed DOIT.5; the other minor, `notify_transitions` validation, already landed.)
-- [ ] How does the user EDIT the rules? Today the only path is raw-YAML hand-editing: `openYoloRuleFile` (JS ~2420) POSTs `/api/yolo-rules/open` → `ensure_yolo_rules_file()` creates the file from a commented template if missing, then opens `~/.config/yolomux/yolo-rules.yaml` in the built-in text editor. There's NO structured editor. Decide: keep raw-YAML-only (cheapest; rely on the commented template + validation below), OR add a structured rule modifier (list rules with add / remove / reorder, dropdowns for `type`/`action`/`risk`, a `match` list editor, and the top-level `default:` policy) that round-trips to the YAML. A structured editor also fixes discoverability — most users won't know the file exists.
+- [ ] [L] Decide scoping dimensions: global vs per-repo vs per-session, per-agent (`claude` / `codex`), and per prompt-type (`bash` / `file` / `tool`).
+- [ ] [S] (minor) Non-bash prompts auto-`approve` unconditionally. `evaluate()` returns `approve` for `prompt_type != "bash"` (`yolo_rules.py` ~532), so file-edit / tool approvals bypass the ruleset AND the hard floor. Matches prior behavior; decide whether file/tool prompts should be rule-governed and floor-checked too. (Carried over from the removed DOIT.5; the other minor, `notify_transitions` validation, already landed.)
+- [ ] [M] How does the user EDIT the rules? Today the only path is raw-YAML hand-editing: `openYoloRuleFile` (JS ~2420) POSTs `/api/yolo-rules/open` → `ensure_yolo_rules_file()` creates the file from a commented template if missing, then opens `~/.config/yolomux/yolo-rules.yaml` in the built-in text editor. There's NO structured editor. Decide: keep raw-YAML-only (cheapest; rely on the commented template + validation below), OR add a structured rule modifier (list rules with add / remove / reorder, dropdowns for `type`/`action`/`risk`, a `match` list editor, and the top-level `default:` policy) that round-trips to the YAML. A structured editor also fixes discoverability — most users won't know the file exists.
 - [x] VALIDATE the rule YAML in the editor / modifier. FIXED 2026-05-30 for raw-file editing: `/api/fs/write` validates the active YOLO rules file with `validate_rules` before persisting, rejects invalid YAML/schema with HTTP 400, and the editor status shows the inline save error. A structured rule modifier remains a separate future UI task.
 
 Schema options to choose between (PROPOSAL — pick one or blend):
@@ -180,7 +180,7 @@ rules:
     risk: read
 ```
 
-- [ ] Option B — risk-class map (patterns assign a risk, risk maps to an action):
+- [ ] [M] Option B — risk-class map (patterns assign a risk, risk maps to an action):
 
 ```yaml
 risk_actions:
@@ -197,7 +197,7 @@ patterns:
   credential: ['~/.ssh', 'HF_TOKEN', 'GH_TOKEN']
 ```
 
-- [ ] Option C — profiles + scope overrides (layer on top of A or B):
+- [ ] [L] Option C — profiles + scope overrides (layer on top of A or B):
 
 ```yaml
 profiles:
@@ -243,79 +243,79 @@ The per-pane window-step buttons (`<` / `>`, the `window-step` controls in `stat
 
 ### P3: Info Drawer And Diff Panel
 
-- [ ] Add a per-session info drawer with full path, branch, dirty/ahead/behind counts, PR, CI, Linear/issue metadata, latest summary, and recent events.
+- [ ] [M] Add a per-session info drawer with full path, branch, dirty/ahead/behind counts, PR, CI, Linear/issue metadata, latest summary, and recent events.
 - [x] **Changed Files panel, phase 1 — list AI-attributed changed files and open plain files.** Landed 2026-05-30: backend `/api/session-files?session=N&hours=24` scans Claude Edit/Write/MultiEdit/NotebookEdit calls and Codex `apply_patch` Add/Update/Delete paths, resolves touched paths to git roots, merges repo state from `git diff --name-status HEAD` plus `git ls-files --others --exclude-standard`, falls back to tool-call paths outside repos, and returns `{repo, path, abs_path, status A/M/D, mtime, agent, session}`. The `Changes` virtual tab renders grouped repo sections, a selected-session control, recent/name sort, colored A/M/D badges, and row-click opening for changed/new files.
-- [ ] **Changed Files panel, phase 2 — diff mode and mirrors.** Add the Cursor-style diff/plain toggle: tracked files -> `@codemirror/merge` editable diff (`git show HEAD:<relpath>` vs working file), new untracked files -> plain, deleted files -> removed content read-only. Also add the compact mirror in the per-session info drawer and an auto-detected count badge on the pane/menu when a session has uncommitted AI changes.
-- [ ] Make PR/CI/issue links clickable, but keep local branch names as text unless a real remote branch/PR exists.
-- [ ] Add an explicit refresh button for repo metadata plus background polling with sane intervals.
+- [ ] [L] **Changed Files panel, phase 2 — diff mode and mirrors.** Add the Cursor-style diff/plain toggle: tracked files -> `@codemirror/merge` editable diff (`git show HEAD:<relpath>` vs working file), new untracked files -> plain, deleted files -> removed content read-only. Also add the compact mirror in the per-session info drawer and an auto-detected count badge on the pane/menu when a session has uncommitted AI changes. DETAILED DESIGN -> **DOIT.9.md** (in-editor Diff button gated on repo+changes; changed-file click opens directly in diff mode; SIDE-BY-SIDE when the pane is wide / INLINE when narrow via `@codemirror/merge` `MergeView`/`unifiedMergeView`; HEAD base via `git show HEAD:<relpath>` added to `/api/fs/diff`; auto-update without flash). PREREQ: `@codemirror/merge` is not bundled yet — needs the CM bundle rebuild.
+- [ ] [S] Make PR/CI/issue links clickable, but keep local branch names as text unless a real remote branch/PR exists.
+- [ ] [S] Add an explicit refresh button for repo metadata plus background polling with sane intervals.
 - [x] Remove redundant info in the file-viewer detail/info panel. Today it repeats itself: the filename shows up as both the tab label AND the bold heading, and the full path shows up twice — once as the subtitle line under the heading and again in the `path` row (with the copy button). Show the filename once and the full path once. Keep the path row (it has the copy affordance) and drop the duplicate subtitle, or vice-versa. Also collapse `type: loading` / `status: loading` so a viewer that has no meaningful type/status does not show two placeholder "loading" rows.
 
 ### P3: Editor — Wrap, Preview, Split-Preview
 
 The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py`) and a working word-wrap toggle. Make the preview path first-class view modes next.
 
-- [x] Word-wrap toggle: switch the editor textarea between `wrap="off"` (current) and soft word-wrap, so long lines wrap to the pane width instead of scrolling horizontally. Persist the preference (Settings → Terminal/Editor).
-- [x] Three explicit view modes for the editor: `Edit`, `Preview`, `Split-Preview` (a small segmented control in the editor head). Edit = textarea only; Preview = rendered view only (reuse the existing `#fileEditorPreviewPane`).
-- [x] Split-Preview: split the current editor window in half — left = editor (textarea), right = rendered preview — side by side in the same panel.
+- [x] Word-wrap toggle: switch the CodeMirror editor between horizontal scrolling and soft word-wrap, so long lines wrap to the pane width. Persist the preference (Settings → Terminal/Editor).
+- [x] Three explicit view modes for the editor: `Edit`, `Preview`, `Split-Preview` (a small segmented control in the editor head). Edit = CodeMirror only; Preview = rendered view only.
+- [x] Split-Preview: split the current editor window in half — left = CodeMirror editor, right = rendered preview — side by side in the same panel.
 - [x] Split-Preview synced scroll: the two halves scroll together (scrolling the editor scrolls the preview to the matching position, and vice-versa). Map by source line / proportional offset so headings and code blocks stay roughly aligned.
-- [x] Preview content by type: Markdown renders to formatted HTML (existing marked.js path); non-Markdown (sh, py, etc.) shows the syntax-highlighted read view (reuse `#fileEditorHighlight`) so Split-Preview is useful for code too, not just `.md`.
-- [ ] CROSS-PANE split + CM-exclusive (queued in DOIT.8 "Top priority"): extend Split-Preview to also split ACROSS two panes (left CM editor / right rendered preview, SAME file) with scroll-sync generalized beyond one panel (`syncFileEditorSplitScroll` is per-panel today); and DROP the textarea engine so the editor is CodeMirror-only (the split items above were the textarea-era implementation). See DOIT.8.
+- [x] Preview content by type: Preview/Split is only shown for renderable files. Markdown renders to formatted HTML; HTML/HTM renders in a sandboxed iframe with JavaScript disabled; code/source files stay edit-only with syntax coloring in CodeMirror.
+- [x] CROSS-PANE split + CM-exclusive. Shipped 2026-05-31: Split-Preview can split ACROSS two panes (left CodeMirror editor / right rendered preview, SAME file) with generalized scroll-sync, and the editor is now CodeMirror-only.
 - [x] Toolbar icons: make the Wrap button just a wrap glyph (↪) instead of the word "Wrap", and the Save button a disk glyph instead of "Save". Buttons are `#fileEditorWrap` / `#fileEditorSave` (`web.py`, grep the ids). The buttons keep accessible `title` / `aria-label` text.
 - [x] Soft-wrap continuation marker: when word-wrap is on, show a wrap glyph (↪) at the START of each wrapped continuation line, so a soft-wrapped line is visually distinct from a real new line. Implemented with the dependency-light custom overlay path instead of pulling in CodeMirror/Monaco.
-- [x] Line-number gutter option: add line numbers as an editor toggle. Same `<textarea>` constraint as the continuation marker (needs the overlay / editor-component approach). Numbers count SOURCE lines — a soft-wrapped line keeps one number and its ↪ continuation rows are not numbered.
+- [x] Line-number gutter option: add line numbers as an editor toggle. CodeMirror owns the gutter; numbers count SOURCE lines, and wrapped continuation rows are not numbered.
 - [x] Preview background tint: in Preview and Split-Preview, give the rendered side a gray background so the two halves are visually distinct at a glance (style `#fileEditorPreviewPane` / the preview half). Note: Split-Preview itself is the existing "Split-Preview" bullet above — this just adds the visual distinction.
-- [x] In-document Find (`Cmd/Ctrl+F`). Shipped 2026-05-30 on the CodeMirror path: `Ctrl/Cmd+F` and the editor Find button open CodeMirror's in-file search panel with match count, previous/next, close, all-match highlighting, and replace controls on editable files. The textarea path remains the fallback, not the main editor.
-- [ ] More editor options to consider (decide which to build — Find above is the headline):
-  - Replace / Replace all (`Cmd/Ctrl+H`) — pairs with Find; same bar with a replace row.
-  - Go to line (`Cmd/Ctrl+G`) — jump to + reveal a line number.
+- [x] In-document Find. Shipped 2026-05-30 on the CodeMirror path: platform app modifier+F and the editor Find button open CodeMirror's in-file search panel with match count, previous/next, close, all-match highlighting, and replace controls on editable files.
+- [ ] [M] More editor options to consider (decide which to build — Find above is the headline):
+  - Replace / Replace all (platform app modifier+H) — pairs with Find; same bar with a replace row.
+  - Go to line (platform app modifier+G) — jump to + reveal a line number.
   - Cursor position in the editor status bar: `line:col`, plus selection length / count.
-  - Toggle line comment (`Cmd/Ctrl+/`) per language (reuse the syntax language detection).
+  - Toggle line comment (platform app modifier+/) per language (reuse the syntax language detection).
   - Indent / outdent selection (`Tab` / `Shift+Tab`) + configurable tab width / spaces-for-tab.
-  - Line ops: duplicate (`Cmd/Ctrl+Shift+D`), move up/down (`Alt+↑/↓`), delete (`Cmd/Ctrl+Shift+K`).
+  - Line ops: duplicate (Shift+platform app modifier+D), move up/down (`Alt+↑/↓`), delete (Shift+platform app modifier+K).
   - On-save hygiene (optional settings): trim trailing whitespace, ensure a final newline.
   - Reload-from-disk button when the file changed externally (the "changed on disk; unsaved edits kept" warn already exists — add a one-click reload).
   - Word / char / line count in the status bar.
-  - NOTE: all-match highlighting, multiple cursors, bracket matching, auto-close brackets/quotes, code folding, and real auto-indent are hard on a `<textarea>` + overlay — these are the recurring "adopt CodeMirror" decision (same tradeoff flagged on #6). Find / Replace / Go-to-line / line-ops are all doable on the plain textarea without it.
-- [x] DECISION/SPIKE: CodeMirror 6 vs extend the textarea — RESOLVED & shipped 2026-05-30: CodeMirror 6 won and is the DEFAULT engine (`editor.engine: codemirror`, `static/codemirror.js` vendored); the `<textarea>` is kept as the `?editor=textarea` fallback. Rationale/gate/`@codemirror/merge` diff notes preserved in `EDITOR-CODEMIRROR.md` (now historical).
+  - NOTE: all-match highlighting, multiple cursors, bracket matching, auto-close brackets/quotes, code folding, and real auto-indent are CodeMirror-owned now; do not rebuild a second editor path.
+- [x] DECISION/SPIKE: CodeMirror 6 vs extend the textarea — RESOLVED & shipped 2026-05-31: CodeMirror 6 won and is now the only editable engine (`static/codemirror.js` vendored). The old textarea editor path, `editor.engine` setting, and `?editor=` override were removed. Rationale/gate/`@codemirror/merge` diff notes are preserved in `EDITOR-CODEMIRROR.md` (now historical).
 
 ### P4: Launch And Resume
 
-- [ ] Add a launch dialog behind `+ Claude`, `+ Codex`, and `+ Term` with cwd, agent, model/profile, permission mode, initial prompt, and optional session name.
-- [ ] Keep the current quick `+` path for defaults; the dialog should not slow down simple launches.
-- [ ] Add a resume picker for recent Claude/Codex conversations scoped to the selected cwd.
-- [ ] Add a `peek/reply` action for a session when it only needs a short response and the user does not need to attach to the full terminal.
+- [ ] [L] Add a launch dialog behind `+ Claude`, `+ Codex`, and `+ Term` with cwd, agent, model/profile, permission mode, initial prompt, and optional session name.
+- [ ] [S] Keep the current quick `+` path for defaults; the dialog should not slow down simple launches.
+- [ ] [M] Add a resume picker for recent Claude/Codex conversations scoped to the selected cwd.
+- [ ] [M] Add a `peek/reply` action for a session when it only needs a short response and the user does not need to attach to the full terminal.
 
 ### P5: Worktrees
 
-- [ ] Add optional worktree-backed launch mode: create worktree, branch, tmux session, and initial agent prompt together.
-- [ ] Show worktree path and parent repo in the info drawer.
-- [ ] Add cleanup guardrails: never delete a worktree with uncommitted changes; show the path and stop.
-- [ ] Add a read-only file browser for a session worktree before adding edit controls.
+- [ ] [L] Add optional worktree-backed launch mode: create worktree, branch, tmux session, and initial agent prompt together.
+- [ ] [S] Show worktree path and parent repo in the info drawer.
+- [ ] [M] Add cleanup guardrails: never delete a worktree with uncommitted changes; show the path and stop.
+- [ ] [M] Add a read-only file browser for a session worktree before adding edit controls.
 
 ### P6: Search, Cost, And History
 
-- [ ] Add full-text search across captured session events and summaries.
-- [x] Find / command palette (universal). Shipped 2026-05-30: `Ctrl/Cmd+K` and `Help` -> `Command palette` search tabs, menu actions from `appMenuTree()`, and settings. Results are grouped and Enter activates/invokes; settings results open Preferences and focus the control.
-- [ ] Add per-session token/cost/context metrics only if they can be read reliably from Claude/Codex metadata without scraping fragile UI text.
-- [ ] Add a compact run history: prompt, cwd, agent, started/ended time, final state, PR, and latest summary.
+- [ ] [L] Add full-text search across captured session events and summaries.
+- [x] Find / command palette (universal). Shipped 2026-05-30 and expanded 2026-05-31: platform app modifier+K, Shift+platform app modifier+P, and `Help` -> `Command palette` search tabs, menu actions from `appMenuTree()`, and settings. Platform app modifier+P opens file quick-open, and the Tabs menu has its own fuzzy search input. Results are grouped and Enter activates/invokes; settings results open Preferences and focus the control.
+- [ ] [M] Add per-session token/cost/context metrics only if they can be read reliably from Claude/Codex metadata without scraping fragile UI text.
+- [ ] [M] Add a compact run history: prompt, cwd, agent, started/ended time, final state, PR, and latest summary.
 
 ### P7: Mobile And Network Use
 
-- [ ] Add a single-pane mobile focus mode with larger controls for Esc/Tab/Ctrl, paste/upload, YOLO actions, and reply.
-- [ ] Add network-access setup guidance that is explicit about auth, host binding, and local-only defaults.
-- [ ] Consider installable PWA behavior only after mobile layout is usable.
+- [ ] [L] Add a single-pane mobile focus mode with larger controls for Esc/Tab/Ctrl, paste/upload, YOLO actions, and reply.
+- [ ] [S] Add network-access setup guidance that is explicit about auth, host binding, and local-only defaults.
+- [ ] [M] Consider installable PWA behavior only after mobile layout is usable.
 
 ### P8: Host And Process Vitals
 
-- [ ] Add lightweight CPU/memory/load probes and per-session process trees.
-- [ ] Add optional `nv-smi` GPU status when available, but do not make GPU support required.
-- [ ] Show vitals in an info drawer or compact topbar popover, not as a dominant dashboard.
+- [ ] [M] Add lightweight CPU/memory/load probes and per-session process trees.
+- [ ] [M] Add optional `nv-smi` GPU status when available, but do not make GPU support required.
+- [ ] [S] Show vitals in an info drawer or compact topbar popover, not as a dominant dashboard.
 
 ### P9: Multi-Machine Connector
 
-- [ ] Defer until the local product is stable. This changes auth, networking, logging, and failure modes.
-- [ ] If built, use a small remote agent that reports tmux sessions, metadata, vitals, and WebSocket terminal streams back to one YOLOmux instance.
-- [ ] Keep local-only as the default.
+- [ ] [XL] Defer until the local product is stable. This changes auth, networking, logging, and failure modes.
+- [ ] [XL] If built, use a small remote agent that reports tmux sessions, metadata, vitals, and WebSocket terminal streams back to one YOLOmux instance.
+- [ ] [S] Keep local-only as the default.
 
 ### Preferences Tab (Settings)
 
@@ -340,9 +340,10 @@ DECISION (2026-05-29): implement Settings as a dedicated PREFERENCES TAB — a v
 - [x] Font size preference(s): let the user set the font size. At minimum the TERMINAL font size (xterm.js `fontSize` option, grep `new TerminalCtor` / `fontSize`), and ideally the UI font size too (tab labels / file tree / menus, driven by CSS vars like `--tab-label-size` / `--control-font` — grep them in `static/yolomux.css`). Wire the chosen size(s) to xterm + the CSS vars at runtime so they take effect live; clamp to a sane range; persist in `settings.yaml`.
 - [x] Terminal preferences: scrollback limit (xterm `scrollback`, currently 5000) — alongside the font-size pref above.
 - [x] Finder (File Explorer) font size in Preferences. Shipped 2026-05-30 as `appearance.file_explorer_font_size`, clamped in settings and applied through `--file-explorer-font-size`.
-- [x] Editor font size in Preferences — and it is NOT pegged to the terminal. Shipped 2026-05-30 as `appearance.editor_font_size`, clamped in settings and applied through `--editor-font-size` to textarea, split editor, syntax overlay, and code preview surfaces.
+- [x] Editor font size in Preferences — and it is NOT pegged to the terminal. Shipped 2026-05-30 as `appearance.editor_font_size`, clamped in settings and applied through `--editor-font-size` to CodeMirror, split editor, and preview surfaces.
 - [x] File Explorer quick-access paths: a user-editable list of pinned directories (e.g. `~`, `/tmp`, custom dirs) the explorer can jump to. See the matching item under "File Explorer".
 - [x] Tab min width: let the user set the minimum tab width. Today `.pane-tab` uses a fixed `width/max-width: min(var(--pane-tab-width), 100%)` with `--pane-tab-width: 240px` (grep `--pane-tab-width` in `static/yolomux.css`). Add a preference that drives a `--pane-tab-min-width` (and/or overrides `--pane-tab-width`) so users can make tabs narrower/wider; clamp to a sane range. Wire the setting to the CSS var at runtime (settings.yaml / localStorage), so it takes effect live.
+- [ ] [M] Maximum tabs per pane + auto LRU eviction (Preference). Add `appearance.max_tabs_per_pane` (default ~8-10; clamp ~2-30) in `settings.py` DEFAULT_SETTINGS + SETTING_RANGES + SETTING_COMMENTS. When a pane exceeds the cap, AUTO-EVICT the LEAST-RECENTLY-USED tab — needs per-tab last-activated tracking (none today; record a timestamp in `activatePaneTab`) and enforcement on the tab-append paths (`paneStateWithTabs` `yolomux.js:1805`, `appendUniqueItems`). Keep the active + most-recent; NEVER silently evict a dirty/unsaved editor tab (skip it or prompt). Preferences row description should EXPLAIN it: "Caps open tabs per pane; the oldest unused tabs auto-close (LRU) when the limit is exceeded (dirty editors are kept)."
 - [x] Each numeric setting needs a sane min/max clamp and a Reset-to-default button so a bad value cannot freeze the refresh loop.
 
 ### Transcript (Tx) View
@@ -351,7 +352,7 @@ DECISION (2026-05-29): implement Settings as a dedicated PREFERENCES TAB — a v
 
 ### File Explorer
 
-- [ ] Git-aware Finder: hover popover + inline path annotation for repo dirs/paths. The Finder already knows repo dirs (`entry.is_repo`, `filesystem.py:109` via REPO_MARKERS; the row gets `.is-repo`, `yolomux.js:3830`) but only as a boolean — extend it with real git info.
+- [ ] [M] Git-aware Finder: hover popover + inline path annotation for repo dirs/paths. The Finder already knows repo dirs (`entry.is_repo`, `filesystem.py:109` via REPO_MARKERS; the row gets `.is-repo`, `yolomux.js:3830`) but only as a boolean — extend it with real git info.
   - (A) HOVER POPOVER on a repo directory / git path: show repo name, current branch (flag when it's NOT `main`/`master` — reuse `isDefaultBranch`), dirty / ahead / behind counts, and the remote / GitHub URL. Reuse the existing hover-popover infra (the `bindFileImagePreview` pattern + `popoverShowDelayMs`/`popoverHideDelayMs`, follow-cursor positioning). Needs a server side: extend the fs metadata that already resolves `git_root_for_path` / `repo_root` / `relative_path` (`filesystem.py:253`) to also return branch + dirty/ahead/behind + remote — reuse the per-session `project.git` shape from `metadata.py` so the format matches the tab rows. DEBOUNCE + cache (don't run `git` on every hover; key by path, refresh on mtime/expiry).
   - (B) INLINE PATH ANNOTATION: when the rooted directory is inside a repo, the Finder root-path display should append the repo + branch, e.g. `utils (main ...)` (basename + branch + a dirty marker). Render in `setFileExplorerPathDisplay` (`yolomux.js:3294`); reuse the branch helpers (`shortBranch` / the branch-badge formatters ~5602/5618). Non-`main` branches stand out.
   - Validate: hover a repo dir -> popover shows repo + branch + dirty/ahead-behind; root the Finder inside a repo on a feature branch -> path reads `repo (branch ...)`; no `git` spawn per hover (cached).
@@ -360,13 +361,13 @@ DECISION (2026-05-29): implement Settings as a dedicated PREFERENCES TAB — a v
 
 - [x] Add a `Download` item to the file right-click context menu (grep `file-context-menu`, ~2542), alongside the existing Copy full/raw/relative path / Rename / Delete. Downloads the file to the browser. Backend `filesystem.read_raw` already streams bytes; add (or reuse) a raw-file endpoint that sets `Content-Disposition: attachment; filename=...` so the browser saves instead of previewing. For a directory, either disable Download or offer a zip. Support multi-select (download each, or a single zip). Respect read-only mode rules and the `MAX_RAW_BYTES` cap.
 - [x] When opening a text file, group it into the EXISTING editor window instead of spawning a new editor panel. If an editor window is already open, add the file as a new tab in that window and focus it (and just focus the tab if the file is already open there). Only create a new editor window when none exists yet. Avoids one-editor-panel-per-file sprawl in the layout.
-- [ ] PROJECTS + live modified-files panel + editable diff view (queued as DOIT.8 "Top priority"; user: "I need this feature"). A "Project" (new concept) = a repo root + its opened files; the bottom ~1/3 of the Finder shows the ACTIVE repo's changed files with +added/-removed (via `git diff --numstat` behind NEW `/api/fs/changed` + `/api/fs/diff` — today only a dirty COUNT exists), each clickable to a MODIFIABLE diff that AUTO-UPDATES when the AI rewrites the file WITHOUT flashing or losing the cursor (CodeMirror incremental `dispatch` + the `reconcileChildNodes` key-diff). This links repo <-> AI-modified files (the AI's edits are read from transcript `tool_use` file_paths — see the DOIT.8 summarizer item). Full design in DOIT.8.
-- [ ] Configurable File Explorer quick-access paths (e.g. `/tmp` + other custom dirs), set in Settings. NOTE: this is shortcuts, not new access — the explorer FS scope is already `/` (`filesystem.py` header: "No sandbox root"), so any path is reachable by navigating; today it just defaults to `homePath` and you have to walk there. Add a list of pinned quick-access roots shown in the explorer (a favorites/shortcuts row, or selectable roots), each opening via the existing `openFileExplorerAt(path)` / `fileExplorerRoot` machinery (grep `openFileExplorerAt`). Store the list as a user setting (`settings.yaml` once the Settings Panel lands; until then, localStorage). Default could include `~` and `/tmp`. Validate paths exist + are readable before showing; gracefully skip missing ones. Ties to the Settings Panel section. CONCRETE: ship built-in jump buttons for `/`, `~`, and `/tmp` as the default quick-access row (a small row of buttons in the explorer header), each calling `openFileExplorerAt(...)`.
+- [x] PROJECTS + live modified-files panel + editable diff view. Shipped through DOIT.8 on 2026-05-31: Finder has a bottom modified-files panel for the active tmux session/repo, `/api/session-files` reports changes since default-branch merge-base plus working-tree files, `/api/fs/diff` powers editable CodeMirror diff decorations, refreshes preserve scroll, and rows show compact status chips, agent icons, dates, and +/- counts.
+- [ ] [S] Configurable File Explorer quick-access paths (e.g. `/tmp` + other custom dirs), set in Settings. NOTE: this is shortcuts, not new access — the explorer FS scope is already `/` (`filesystem.py` header: "No sandbox root"), so any path is reachable by navigating; today it just defaults to `homePath` and you have to walk there. Add a list of pinned quick-access roots shown in the explorer (a favorites/shortcuts row, or selectable roots), each opening via the existing `openFileExplorerAt(path)` / `fileExplorerRoot` machinery (grep `openFileExplorerAt`). Store the list as a user setting (`settings.yaml` once the Settings Panel lands; until then, localStorage). Default could include `~` and `/tmp`. Validate paths exist + are readable before showing; gracefully skip missing ones. Ties to the Settings Panel section. CONCRETE: ship built-in jump buttons for `/`, `~`, and `/tmp` as the default quick-access row (a small row of buttons in the explorer header), each calling `openFileExplorerAt(...)`.
 - [x] Make the Finder root path bar typable. The overlay and pane variants now use path inputs; Enter jumps via `openFileExplorerAt(value)`, Escape reverts to the current root, bad paths show an inline error, `~` expands against the server home path, and the existing copy button still copies the current root.
 - [x] File Explorer root MODE toggle. The explorer header now has a `Root` / `Sync` toggle stored in localStorage. `Root` preserves the current fixed-root behavior. `Sync` re-roots an open Finder/File Explorer to the focused tmux session's current working directory when a tmux session becomes active; if no cwd is resolvable, the current root is kept. Manual navigation in Sync mode stays until the next tmux session switch.
 - [x] Image preview on hovering an image file icon. Hovering the `.file-tree-icon` of an image-extension file row pops a capped thumbnail from `/api/fs/raw?path=<enc>` using the shared popover show/hide delays; non-image rows and files over the raw-read cap do not open a preview.
 - [x] Image preview polish: hovering anywhere on an image file's row — the whole row/name, not just the icon — pops up the thumbnail below-right of the cursor and follows pointer movement, clamped on-screen.
-- [ ] GLOBAL background summarizer ("what's going on" across ALL sessions) — STATEFUL for speed. A background loop that maintains a rolling per-session summary AND rolls them up into one GLOBAL overview: which sessions need attention, what each is doing, who's blocked / waiting / done. Surface the global view somewhere (a dedicated summary tab / the read-only wall / a top-bar status line). Build on the existing AI-summary plumbing (`codex_summary_prompt` in `yolomux_lib/transcripts.py` ~134 + `app.py` ~429; `/api/summary-stream`; `SUMMARY_CODEX_MODEL`/EFFORT/SERVICE_TIER in `common.py`).
+- [ ] [XL] GLOBAL background summarizer ("what's going on" across ALL sessions) — STATEFUL for speed. A background loop that maintains a rolling per-session summary AND rolls them up into one GLOBAL overview: which sessions need attention, what each is doing, who's blocked / waiting / done. Surface the global view somewhere (a dedicated summary tab / the read-only wall / a top-bar status line). Build on the existing AI-summary plumbing (`codex_summary_prompt` in `yolomux_lib/transcripts.py` ~134 + `app.py` ~429; `/api/summary-stream`; `SUMMARY_CODEX_MODEL`/EFFORT/SERVICE_TIER in `common.py`).
   - SESSION-FUL / incremental for fast I/O: do NOT re-summarize whole transcripts each tick (today's summary path is one-shot and re-sends context). Keep the summarizer STATEFUL — either a persistent Codex/Claude conversation per session that you feed deltas to ("update the summary given these new lines"), or prompt-caching the stable prefix and sending only the delta. Practically: persist `{rolling_summary, last_processed_offset}` per session and each tick feed only `[prior summary] + [new transcript lines since last_offset]` -> small input, fast/cheap output. The global overview is then a cheap roll-up of the per-session summaries.
   - INFER the agent's effective working directory from the transcript (files claude/codex is actually editing / `cd`s into) — more accurate than raw process cwd. Use it to re-implement the per-tab "jump the File Explorer to this session's working path" action removed earlier, and to upgrade root-mode "sync to tmux session" to use the inferred path.
   - Run on an interval, throttled, only when a session is quiet (per the P0 "delay LLM classification until quiet" note). Cost-gate behind a setting / interval (Preferences).
@@ -394,8 +395,6 @@ DECISION (2026-05-29): implement Settings as a dedicated PREFERENCES TAB — a v
 
 ### Bug Fixes And Tech Debt
 
-- [ ] Finder row selection + editor Find highlight are too FAINT (low-contrast). The selected Finder row (`.file-tree-row.selected`, `yolomux.css:3709`) is `background: rgba(82, 210, 115, 0.22)` + `box-shadow: inset 3px 0 0 var(--brand-green)` — at 0.22 alpha the green reads as a "very faint dark green" against the dark tree, so a clicked/selected row barely stands out (and `current-file:not(.selected)` at 0.12 is fainter still). RECOMMENDATION: raise selection contrast — bump the fill alpha (≈ 0.30-0.40), brighten the row text, and/or widen the `--brand-green` left-edge bar so the active row is unmistakable. DITTO the editor FIND: the in-editor search-match highlight is too faint to spot. That is a CodeMirror surface, NOT the `.file-editor-find-panel` button in the CSS — grep `.cm-searchMatch` / `.cm-selectionMatch` (the highlight is set in the CM theme/highlight extension in `static/yolomux.js`, grep `codeMirrorThemeExtension`). Give all search matches a stronger theme-aware highlight distinct from the normal text selection, and make the CURRENT match stand out from the other matches. Validate: click a Finder row -> clearly highlighted; Find in the editor -> every match is obvious and the active match is visibly distinct.
-
 - [x] Calm the "working" YO badge. Fixed 2026-05-31: working state no longer uses the red attention pulse or the orbiting dot; the surviving cue is the calm YO badge rotation.
 - [x] Tab hover popover flicker, redundant passing-CI pill, and double-click tab rename completed in the DOIT.7 batch.
 
@@ -407,7 +406,7 @@ DECISION (2026-05-29): implement Settings as a dedicated PREFERENCES TAB — a v
 
 - [x] Clicking a YO badge in the `Tabs` dropdown row toggles YOLO without re-sorting or closing the menu.
 - [x] Dense `Tabs` dropdown rows stay readable on small viewports; old tmux/YOLO session-submenu rows were removed when sessions moved under `Tabs`.
-- [x] Editor LEFT HALF goes blank the moment you type. FIXED 2026-05-30: the textarea only becomes transparent when the syntax overlay is ready and matches the source text; failures fall back to visible textarea text, with browser regression coverage.
+- [x] Editor LEFT HALF goes blank the moment you type. FIXED 2026-05-30 on the textarea-era path; CodeMirror-only editor later removed that overlay failure mode entirely.
 - [x] Preferences shows a YELLOW popup that keeps FLASHING. FIXED 2026-05-30: Preferences help is inline, render refresh keeps focused DOM intact, and periodic YOLO/settings status updates no longer recreate hover popups.
 - [x] Always use PC-style pane frame controls (`_` minimize, `□` maximize, `×` close) regardless of platform — drop the macOS traffic-light circles. FIXED 2026-05-30: `platformWindowControlClass()` always returns PC classes and the unused Mac traffic-light CSS was removed. The `?platform=` override remains only for labels such as Finder/File Explorer.
   - PROPOSAL — distinguish `_` (minimize) from `...` (session actions). The actions button is `pane-actions` rendered as a literal horizontal `...` (JS ~9077) and the PC minimize is a low horizontal bar `_` — both are small, low, horizontal marks and read as similar. Recommended distinction: (1) make the actions button a VERTICAL ellipsis `⋮` (the universal "more/overflow menu" affordance) so it can't be confused with the horizontal `_`; (2) GROUP the true pane frame controls together at the far right with a small gap/separator, and keep the `⋮` actions menu to the LEFT with the content buttons, so "menu" and pane management are spatially separated; (3) give the frame controls the PC-style square hover highlight (and red hover for close) while the `⋮` stays a plain icon button. Net: shape (vertical vs horizontal), grouping (left vs far-right), and hover treatment all differ.
@@ -444,7 +443,7 @@ DECISION (2026-05-29): implement Settings as a dedicated PREFERENCES TAB — a v
 
   What needs to change (reconcile the roster on the fast cadence; pick one, A recommended):
   - [x] Option A (cheapest): include a fresh roster in the fast status payload. Have `auto_approve_status(None)` call `refresh_sessions()` first (one cheap `tmux list-sessions`, 3 s timeout — `common.py:483`) and add `"session_order": self.sessions`. Client `loadAutoStatuses`/`refreshAutoStatuses` then calls `updateSessionList(payload.session_order)` and re-renders on change. Result: add + remove reflected within ~1.25 s instead of ~15 s. Optionally debounce the tmux call to ~1 s to avoid one subprocess per fast tick.
-  - [ ] Option B (event-driven kill): when a terminal WebSocket closes (already detected), confirm via a roster check that the session is gone and prune it from the UI immediately, instead of waiting for the poll. Handles the open-pane kill case fastest; pair with A for closed-pane sessions.
+  - [ ] [M] Option B (event-driven kill): when a terminal WebSocket closes (already detected), confirm via a roster check that the session is gone and prune it from the UI immediately, instead of waiting for the poll. Handles the open-pane kill case fastest; pair with A for closed-pane sessions.
   - [x] Option C (future UI Kill action, per the menu plan): after killing, trigger the roster reconcile immediately (like `createSession` does) so UI-kills are instant.
 
   Repro:

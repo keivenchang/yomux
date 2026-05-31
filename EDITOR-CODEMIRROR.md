@@ -1,23 +1,23 @@
 # Editor: CodeMirror vs textarea — research & 2-path spike (2026-05-30)
 
-> **STATUS — RESOLVED & SHIPPED (2026-05-30):** CodeMirror 6 won. It's the DEFAULT editor engine (`editor.engine: codemirror`, `static/codemirror.js` vendored); the `<textarea>` stays as the `?editor=textarea` fallback (the "delete the textarea layer" decision resolved to KEEP-as-fallback). In-file Find, line numbers, wrap, split-preview, and dark/white theme landed. This document is now HISTORICAL — kept for the rationale, the gate, and the `@codemirror/merge` diff notes (which the AFCA "open the diff" UX still depends on). No open action here.
+> **STATUS — RESOLVED & SHIPPED (2026-05-31):** CodeMirror 6 is now the only editable file editor. The old `editor.engine` setting, `?editor=` override, textarea/highlight overlay, and textarea fallback were removed. If CodeMirror fails to load, YOLOmux shows a read-only raw-text pane with an explicit error. This document is now historical research, kept for the rationale, the success gate, and the `@codemirror/merge` diff notes.
 
-Goal: get a real Find (Cmd/Ctrl+F, `1/13`, ^/v, jump+reveal) and the rest of the editor-options list. Today the file editor is a raw `<textarea id="fileEditorTextarea">` (`web.py:139`) + a custom highlight overlay (`#fileEditorHighlight`, `web.py:138`) painted by highlight.js; there is NO editor library. Decide between extending the textarea vs adopting CodeMirror 6, and if CM works well, DELETE the textarea editor layer.
+Original goal: get a real Find (Cmd/Ctrl+F, `1/13`, ^/v, jump+reveal) and the rest of the editor-options list. Before the CodeMirror work, the file editor was a raw `<textarea id="fileEditorTextarea">` plus a custom highlight overlay painted by highlight.js. The decision was to adopt CodeMirror 6 and delete the textarea editor layer.
 
 CodeMirror 6 is a third-party editor library with upstream dependency notices recorded in [`../../THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). It gives, out of the box: Find/Replace (`@codemirror/search`) with match count + all-match highlight, multiple cursors, native soft-wrap + line-number gutter (this RETIRES #6), Lezer syntax highlighting, bracket matching, auto-close, code folding, go-to-line, comment-toggle, auto-indent, configurable tab width, line ops, undo/redo, read-only mode, viewport rendering for big files. Monaco (VS Code's editor) is the heavier alternative (much larger, needs web workers) — out of scope; CM6 is the right size.
 
 ## Two paths to prototype (behind one toggle, then compare)
 
-Add an `editor.engine` setting / `?editor=` override with values `textarea` (current) and `codemirror`. Build both, compare against the success gate, keep the winner.
+Historical prototype plan: add an `editor.engine` setting / `?editor=` override with values `textarea` and `codemirror`, build both, compare against the success gate, and keep the winner. The shipped result kept CodeMirror and deleted the textarea engine.
 
 ### Path A — CodeMirror 6 (the bet)
 Build a `CmFileEditor` adapter mounted in the same `#fileEditor` panel, wired to the existing file/dirty/save API (see "Adapter surface"). Reuse the existing Split-Preview: CM on the left, the current marked.js preview (`#fileEditorPreviewPane`) on the right. If it clears the gate, remove the textarea layer.
 
-Loading (this project has NO JS build step — it serves a single hand-written `yolomux.js` and loads xterm/marked/highlight.js from jsdelivr). Two sub-options:
+Loading at prototype time used one hand-written `yolomux.js` and CDN/vendor fallbacks for xterm/marked/highlight.js. The current app now has a no-dependency concat build for `static/yolomux.js` / `static/yolomux.css`, but CodeMirror itself is still a vendored prebuilt bundle. Two prototype sub-options:
 - **A1 — import-map + ESM CDN.** `<script type="importmap">` mapping `codemirror` / `@codemirror/*` to esm.sh (or jsdelivr `+esm`), then `<script type="module">`. Zero local build; matches the current CDN pattern. Downside: runtime depends on the CDN (broken offline) unless cached.
 - **A2 — vendored prebuilt bundle (recommended).** One-time `esbuild` of a tiny entry that re-exports only the CM pieces YOLOmux uses -> commit `static/codemirror.js`, served locally with a CDN fallback. This is EXACTLY how xterm.js is already handled (`web.py:86`, local + `onerror` jsdelivr fallback), keeps YOLOmux self-hostable offline, and is the consistent choice.
 
-### Path B — extend the textarea (no new dependency)
+### Path B — extend the textarea (historical alternative, rejected)
 Keep the `<textarea>` + overlay and hand-build Find + the editor-options list on it (`setSelectionRange` + scroll for jump/reveal; overlay rectangles for all-match highlight). Lower risk, no dep/build change. Ceiling: never get multi-cursor / folding / bracket-match, and #6 (the wrap/continuation overlay) stays a char-estimate hack.
 
 ## Success gate (CM wins only if ALL hold)
@@ -25,7 +25,7 @@ Keep the `<textarea>` + overlay and hand-build Find + the editor-options list on
 - New wins present: Find/Replace with `1/13` + ^/v, multi-cursor, bracket match, folding, and NO #6 misalignment.
 - Non-functional: vendored bundle loads offline; bundle size acceptable; dark theme matches the UI; mobile/touch OK.
 
-## What gets REMOVED when CM wins (concrete)
+## What got removed when CM won (concrete)
 - JS editor-layer functions (`static/yolomux.js`): `renderStandaloneSyntaxHighlight`, `renderSyntaxHighlight`, `renderSyntaxHighlightInto`, `editorVisualHighlightHtml`, `editorVisualColumnCount`, `editorVisualLineFragments`, `applyEditorWrapToTextarea`, `simpleCodeSyntaxHtml`, `highlightLanguageAvailable`, `syncFileEditorSplitScroll`, the wrap/gutter toggles' textarea plumbing, and most of `renderEditorForActive` (~4842-9734). ~53 `fileEditorTextarea`/`fileEditorHighlight` refs collapse into the CM adapter.
 - CSS (`static/yolomux.css`): the ~121 lines for `.file-editor-textarea`, `.file-editor-highlight`, `.syntax-highlighted`, `.editor-wrap`, the `--editor-line-number*` / `--editor-wrap-marker*` vars, and the visual-overlay grid. (CM owns gutter/wrap/highlight.)
 - `web.py`: the `#fileEditorHighlight` `<pre><code>` + `#fileEditorTextarea` markup (`web.py:138-139`); the `#`/wrap toolbar buttons if CM commands replace them.
@@ -50,4 +50,4 @@ CM6 ships an official diff/merge package, `@codemirror/merge`, from the same eco
 No-build project gaining a dep + (one-time) build for the vendored bundle; bundle size; offline load (mitigated by A2 vendoring); CM6 API ramp; matching the existing dark theme; making sure the URL-encoded layout/tab system and drag-to-terminal still behave.
 
 ## Recommendation
-Prototype Path A with loader A2 behind `editor.engine=codemirror`, keep Path B as the fallback. If A clears the gate, switch the default and delete the textarea layer above. Suggest this becomes a DOIT once you approve the direction.
+Path A with loader A2 shipped. CodeMirror is the only editor engine, and the textarea layer was deleted. Future editor work should build on the CodeMirror adapter and the vendored bundle rather than reviving a second editor path.

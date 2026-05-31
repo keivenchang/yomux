@@ -61,7 +61,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "line_numbers": False,
     },
     "editor": {
-        "engine": "codemirror",
+        "autosave": True,
+        "autosave_delay_seconds": 2.5,
     },
     "file_explorer": {
         "root_mode": "fixed",
@@ -113,6 +114,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("notifications", "toast_duration_ms"): (1000, 60000),
     ("notifications", "throttle_seconds"): (0, 600),
     ("terminal_editor", "scrollback"): (1000, 50000),
+    ("editor", "autosave_delay_seconds"): (0.5, 60),
     ("file_explorer", "image_preview_max_px"): (120, 1200),
     ("file_explorer", "refresh_ms"): (1000, 60000),
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
@@ -148,7 +150,6 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
         "one-light",
         "solarized-light",
     },
-    ("editor", "engine"): {"textarea", "codemirror"},
     ("file_explorer", "root_mode"): {"fixed", "sync"},
     ("file_explorer", "image_open_mode"): {"same-tab", "new-tab"},
 }
@@ -185,7 +186,8 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("terminal_editor", "scrollback"): "Lines, 1000-50000. xterm.js scrollback.",
     ("terminal_editor", "word_wrap"): "true/false. Default editor soft-wrap state.",
     ("terminal_editor", "line_numbers"): "true/false. Default editor line-number gutter state.",
-    ("editor", "engine"): "textarea | codemirror. textarea is the built-in fallback; codemirror enables the CodeMirror 6 spike.",
+    ("editor", "autosave"): "true/false. When true, dirty editor tabs save after the delay when the file has not changed on disk.",
+    ("editor", "autosave_delay_seconds"): "Seconds, 0.5-60. Delay before dirty editor tabs auto-save.",
     ("file_explorer", "root_mode"): "fixed | sync. fixed stays put; sync follows the focused tmux cwd.",
     ("file_explorer", "image_open_mode"): "same-tab | new-tab. same-tab reuses one image viewer while browsing; new-tab keeps one image tab per file.",
     ("file_explorer", "image_preview_max_px"): "Pixels, 120-1200. Maximum width and height for hover image previews.",

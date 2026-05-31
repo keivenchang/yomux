@@ -106,9 +106,33 @@ def bounded_session_files_hours(value: Any) -> float:
     return max(0.25, min(parsed, float(SESSION_FILES_MAX_HOURS)))
 
 
-def git_name_status(repo: Path) -> dict[str, str]:
+def git_default_branch_ref(repo: Path) -> str | None:
+    result = run_cmd(["git", "-C", str(repo), "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], timeout=5.0)
+    if result.returncode == 0:
+        ref = result.stdout.strip()
+        if ref:
+            return ref
+    for ref in ("origin/main", "origin/master", "main", "master"):
+        verify_ref = f"refs/remotes/{ref}" if ref.startswith("origin/") else f"refs/heads/{ref}"
+        verify = run_cmd(["git", "-C", str(repo), "show-ref", "--verify", "--quiet", verify_ref], timeout=5.0)
+        if verify.returncode == 0:
+            return ref
+    return None
+
+
+def git_diff_base(repo: Path) -> str:
+    default_ref = git_default_branch_ref(repo)
+    if default_ref:
+        result = run_cmd(["git", "-C", str(repo), "merge-base", default_ref, "HEAD"], timeout=5.0)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    return "HEAD"
+
+
+def git_name_status(repo: Path, base: str | None = None) -> dict[str, str]:
     statuses: dict[str, str] = {}
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--name-status", "HEAD"], timeout=5.0)
+    diff_base = base or git_diff_base(repo)
+    diff = run_cmd(["git", "-C", str(repo), "diff", "--name-status", diff_base], timeout=5.0)
     if diff.returncode == 0:
         for line in diff.stdout.splitlines():
             parts = line.split("\t")
@@ -134,9 +158,10 @@ def parse_numstat_value(value: str) -> int | None:
         return None
 
 
-def git_numstat(repo: Path) -> dict[str, dict[str, int | None]]:
+def git_numstat(repo: Path, base: str | None = None) -> dict[str, dict[str, int | None]]:
     counts: dict[str, dict[str, int | None]] = {}
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", "HEAD"], timeout=5.0)
+    diff_base = base or git_diff_base(repo)
+    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", diff_base], timeout=5.0)
     if diff.returncode != 0:
         return counts
     for line in diff.stdout.splitlines():
@@ -168,6 +193,20 @@ def repo_relative_path(path: Path, repo: Path) -> str | None:
         return path.relative_to(repo).as_posix()
     except ValueError:
         return None
+
+
+def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
+    roots: list[str] = []
+    candidates: list[str] = []
+    candidates.extend(str(agent.cwd) for agent in info.agents if agent.cwd)
+    if info.selected_pane is not None and info.selected_pane.current_path:
+        candidates.append(info.selected_pane.current_path)
+    candidates.extend(pane.current_path for pane in info.panes if pane.current_path)
+    for value in candidates:
+        repo = git_root_for_path(Path(value).expanduser())
+        if repo and repo not in roots:
+            roots.append(repo)
+    return roots
 
 
 def session_file_entry(
@@ -222,13 +261,16 @@ def session_files_payload_for_info(info: SessionInfo, hours: float = 24.0, now: 
             repos.setdefault(repo_text, set()).add(path_text)
         else:
             outside_repo.append(session_file_entry(info.session, metadata["agent"], metadata["status"], path, None, "tool"))
+    for repo_text in session_candidate_repo_roots(info):
+        repos.setdefault(repo_text, set())
 
     files: list[dict[str, Any]] = []
     repo_payloads: list[dict[str, Any]] = []
     for repo_text in sorted(repos):
         repo = Path(repo_text)
-        statuses = git_name_status(repo)
-        numstat = git_numstat(repo)
+        diff_base = git_diff_base(repo)
+        statuses = git_name_status(repo, diff_base)
+        numstat = git_numstat(repo, diff_base)
         repo_entries: list[dict[str, Any]] = []
         for rel_path, status in statuses.items():
             path = (repo / rel_path).resolve(strict=False)

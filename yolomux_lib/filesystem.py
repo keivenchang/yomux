@@ -48,6 +48,14 @@ IMAGE_EXTENSIONS = {
 
 MAX_RAW_BYTES = 20 * 1024 * 1024  # 20 MB cap on raw (image) reads
 REPO_MARKERS = (".git", ".hg", ".svn", ".jj")
+SEARCH_SKIP_DIRS = {
+    ".git", ".hg", ".svn", ".jj", ".cache", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", ".tox", ".venv", "venv", "node_modules", "__pycache__",
+    "dist", "build", "target",
+}
+MAX_SEARCH_DIRS = 20_000
+MAX_SEARCH_FILES = 50_000
+MAX_SEARCH_LIMIT = 2_000
 
 
 class FilesystemError(Exception):
@@ -142,6 +150,99 @@ def list_directory(raw_path: str) -> dict[str, Any]:
         "path": str(path),
         "parent": parent,
         "entries": entries,
+    }
+
+
+def _fuzzy_subsequence_match(query: str, text: str) -> bool:
+    needle = "".join(str(query or "").lower().split())
+    if not needle:
+        return True
+    position = 0
+    haystack = str(text or "").lower()
+    for char in needle:
+        index = haystack.find(char, position)
+        if index < 0:
+            return False
+        position = index + 1
+    return True
+
+
+def _search_limit(raw_limit: int | str | None) -> int:
+    try:
+        limit = int(raw_limit or 400)
+    except (TypeError, ValueError):
+        limit = 400
+    return max(1, min(limit, MAX_SEARCH_LIMIT))
+
+
+def search_files(raw_root: str, query: str = "", limit: int | str | None = 400) -> dict[str, Any]:
+    root = _validated_path(raw_root)
+    if not root.exists():
+        raise FilesystemError(f"path not found: {root}", status=404)
+    if not root.is_dir():
+        raise FilesystemError(f"not a directory: {root}", status=400)
+    max_results = _search_limit(limit)
+    tokens = [token for token in str(query or "").split() if token]
+    results: list[dict[str, Any]] = []
+    visited_dirs = 0
+    visited_files = 0
+    truncated = False
+    try:
+        walker = os.walk(root, topdown=True, followlinks=False)
+        for current, dirs, files in walker:
+            visited_dirs += 1
+            if visited_dirs > MAX_SEARCH_DIRS:
+                truncated = True
+                dirs[:] = []
+                break
+            dirs[:] = sorted(
+                [name for name in dirs if name not in SEARCH_SKIP_DIRS],
+                key=str.lower,
+            )
+            for name in sorted(files, key=str.lower):
+                visited_files += 1
+                if visited_files > MAX_SEARCH_FILES:
+                    truncated = True
+                    dirs[:] = []
+                    break
+                path = Path(current) / name
+                try:
+                    rel = path.relative_to(root).as_posix()
+                except ValueError:
+                    rel = path.name
+                haystack = f"{rel} {name}"
+                if tokens and not all(_fuzzy_subsequence_match(token, haystack) for token in tokens):
+                    continue
+                try:
+                    st = path.lstat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                results.append({
+                    "name": name,
+                    "path": str(path),
+                    "relative_path": rel,
+                    "kind": "file",
+                    "size": int(st.st_size),
+                    "mtime": int(st.st_mtime),
+                })
+                if len(results) >= max_results:
+                    truncated = True
+                    dirs[:] = []
+                    break
+            if len(results) >= max_results or visited_files > MAX_SEARCH_FILES:
+                break
+    except PermissionError as exc:
+        raise FilesystemError(str(exc), status=403)
+    except OSError as exc:
+        raise FilesystemError(str(exc), status=500)
+    return {
+        "root": str(root),
+        "query": str(query or ""),
+        "limit": max_results,
+        "truncated": truncated,
+        "files": results,
     }
 
 

@@ -14,7 +14,6 @@ import argparse
 import fnmatch
 import json
 import re
-import subprocess
 import sys
 import time
 from dataclasses import asdict
@@ -26,6 +25,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
+
+from yolomux_lib.tmux_utils import run_cmd
+from yolomux_lib.tmux_utils import tmux
 
 
 DEFAULT_SESSIONS = ("project1", "project2", "project3", "project4")
@@ -57,10 +59,6 @@ class PaneInfo:
         return self.command in AGENT_COMMANDS or "claude" in title or "codex" in title
 
 
-def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
-
-
 def static_asset_path(asset: str) -> Path | None:
     if asset not in STATIC_CONTENT_TYPES:
         return None
@@ -76,10 +74,6 @@ def static_asset_version(asset: str) -> int:
         return int(path.stat().st_mtime)
     except OSError:
         return 0
-
-
-def tmux(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    return run_cmd(["tmux", *args], timeout=timeout)
 
 
 def list_panes() -> tuple[list[PaneInfo], str | None]:

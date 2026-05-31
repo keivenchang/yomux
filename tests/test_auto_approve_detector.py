@@ -36,10 +36,10 @@ def test_extract_command_rejoins_wrapped_codex_command():
         "  Would you like to run the following command?",
         "",
         "  Reason: Verify the persisted YOLOmux settings file now defaults",
-        "  editor.engine to codemirror.",
+        "  the editor font size to 13.",
         "",
         '  $ python3 -c "from yolomux_lib.settings import settings_payload;',
-        '  print(settings_payload()[\'settings\'][\'editor\'][\'engine\'])"',
+        '  print(settings_payload()[\'settings\'][\'appearance\'][\'editor_font_size\'])"',
         "",
         "› 1. Yes, proceed (y)",
         "  2. No, and tell Codex what to do differently (esc)",
@@ -49,7 +49,7 @@ def test_extract_command_rejoins_wrapped_codex_command():
 
     assert prompt_detector.extract_command(visible_text) == (
         'python3 -c "from yolomux_lib.settings import settings_payload; '
-        'print(settings_payload()[\'settings\'][\'editor\'][\'engine\'])"'
+        'print(settings_payload()[\'settings\'][\'appearance\'][\'editor_font_size\'])"'
     )
 
 

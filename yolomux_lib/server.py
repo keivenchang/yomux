@@ -40,8 +40,8 @@ from .common import WEBSOCKET_GUID
 from .common import auth_setup_required
 from .common import parse_bool
 from .common import terminate_process_group
-from .common import tmux_session_target
 from .filesystem import FilesystemError
+from .tmux_utils import tmux_session_target
 from .transcripts import codex_event_text
 from .transcripts import compact_transcript_items
 from .transcripts import strip_terminal_query_responses
@@ -196,6 +196,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/fs/list":
             self.handle_fs_list(parsed)
             return
+        if parsed.path == "/api/fs/search":
+            self.handle_fs_search(parsed)
+            return
         if parsed.path == "/api/fs/read":
             self.handle_fs_read(parsed)
             return
@@ -217,6 +220,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", ["/"])[0]
         self.write_filesystem_json(raw_path, lambda: filesystem.list_directory(raw_path))
+
+    def handle_fs_search(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_root = qs.get("root", qs.get("path", ["/"]))[0]
+        query = qs.get("query", [""])[0]
+        limit = qs.get("limit", ["400"])[0]
+        self.write_filesystem_json(raw_root, lambda: filesystem.search_files(raw_root, query, limit))
 
     def handle_fs_read(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)

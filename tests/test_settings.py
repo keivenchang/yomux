@@ -10,10 +10,10 @@ def test_sanitize_settings_clamps_numbers_and_choices():
         {
             "appearance": {"ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "file_explorer_font_size": 1, "tab_width": 20},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_ms": 3000},
-            "editor": {"engine": "bad"},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "performance": {"metadata_refresh_ms": 15000, "pane_state_refresh_ms": 1200},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
+            "editor": {"autosave": "yes", "autosave_delay_seconds": 100},
         }
     )
 
@@ -28,7 +28,8 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["file_explorer"]["root_mode"] == "fixed"
     assert settings["file_explorer"]["image_open_mode"] == "same-tab"
     assert settings["file_explorer"]["image_preview_max_px"] == 1200
-    assert settings["editor"]["engine"] == "codemirror"
+    assert settings["editor"]["autosave"] is True
+    assert settings["editor"]["autosave_delay_seconds"] == 60
     assert settings["file_explorer"]["refresh_ms"] == 3000
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
     assert settings["performance"]["metadata_refresh_ms"] == 15000
@@ -61,6 +62,7 @@ def test_save_settings_can_reset_all_values_to_defaults(tmp_path):
         {
             "appearance": {"terminal_font_size": 17, "editor_color_scheme": "github-light"},
             "terminal_editor": {"word_wrap": True, "line_numbers": True},
+            "editor": {"autosave": False, "autosave_delay_seconds": 7},
             "file_explorer": {"quick_access_paths": ["/tmp"]},
         },
         path,

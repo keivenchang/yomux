@@ -132,7 +132,7 @@ YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser
 
 The main server entry point is `yolomux.py`, which delegates to `yolomux_lib/cli.py`. Request routing lives in `yolomux_lib/server.py`, application state and tmux actions live in `yolomux_lib/app.py`, and shared helpers live in smaller modules such as `metadata.py`, `sessions.py`, `session_files.py`, `transcripts.py`, `uploads.py`, `events.py`, and `websocket.py`.
 
-Frontend code for the interactive UI lives in `static/yolomux.js` and `static/yolomux.css`. Python keeps only the small HTML shell in `yolomux_lib/web.py`, plus bootstrap JSON and versioned static asset URLs. The main app's non-tmux tab types are centralized in the `TAB_TYPES` registry in `static/yolomux.js`; add future virtual/editor/viewer tabs there before adding scattered predicate or label branches. The read-only wall has its own frontend files, `static/tmux-wall.js` and `static/tmux-wall.css`, so `tmux_wall.py` stays focused on tmux capture, JSON endpoints, and Server-Sent Events.
+Frontend source for the interactive UI lives in ordered partials under `static_src/js/yolomux/` and `static_src/css/yolomux/`. Run `python3 tools/static_build.py` after editing those partials; it regenerates the served single-file outputs `static/yolomux.js` and `static/yolomux.css`, and `python3 tools/static_build.py --check` fails when generated assets drift. Python keeps only the small HTML shell in `yolomux_lib/web.py`, plus bootstrap JSON and versioned static asset URLs. The main app's non-tmux tab types are centralized in the `TAB_TYPES` registry in the JS source partials; add future virtual/editor/viewer tabs there before adding scattered predicate or label branches. The read-only wall has its own frontend files, `static/tmux-wall.js` and `static/tmux-wall.css`, so `tmux_wall.py` stays focused on tmux capture, JSON endpoints, and Server-Sent Events.
 
 The standalone auto-approval detector lives in `auto_approve_tmux.py` at the repo root. YOLOmux imports it as a Python module and wraps one `AutoApproveWorker` (in `yolomux_lib/auto_approve_worker.py`) around each enabled session.
 
@@ -141,6 +141,7 @@ The standalone auto-approval detector lives in `auto_approve_tmux.py` at the rep
 ```bash
 python3 -m py_compile yolomux.py tmux_wall.py auto_approve_tmux.py yolomux_lib/*.py
 python3 -m pytest tests -n 4
+python3 tools/static_build.py --check
 node --check static/yolomux.js
 node --check static/tmux-wall.js
 node tests/layout_url.test.js

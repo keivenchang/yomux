@@ -217,31 +217,6 @@ def topbar_font_fixture_html():
     """
 
 
-def editor_highlight_fallback_fixture_html():
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
-    return f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>{css}</style>
-        <style>
-          body {{ margin: 0; padding: 24px; display: block; height: auto; min-height: 0; }}
-          .file-editor-panel {{ position: relative; width: 420px; height: 120px; margin-bottom: 16px; }}
-        </style>
-      </head>
-      <body>
-        <div id="ready" class="file-editor-panel syntax-highlighted" data-syntax-highlight-ready="true">
-          <textarea id="ready-textarea" class="file-editor-textarea-panel"># TITLE</textarea>
-        </div>
-        <div id="fallback" class="file-editor-panel syntax-highlighted">
-          <textarea id="fallback-textarea" class="file-editor-textarea-panel"># TITLE</textarea>
-        </div>
-      </body>
-    </html>
-    """
-
-
 def editor_pane_ignores_legacy_body_class_fixture_html():
     css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
     return f"""
@@ -346,7 +321,7 @@ def codemirror_editor_controls_fixture_html():
                   </div>
                 </div>
               </div>
-              <div id="light-syntax-probe" class="file-editor-highlight" hidden>
+              <div id="light-syntax-probe" class="file-editor-raw-panel" hidden>
                 <span class="code-keyword">if</span>
                 <span class="code-string">"value"</span>
                 <span class="code-variable">name</span>
@@ -519,12 +494,6 @@ def load_menu_fixture(browser, tmp_path):
     )
 
 
-def load_editor_highlight_fallback_fixture(browser, tmp_path):
-    page = tmp_path / "editor-highlight-fallback.html"
-    page.write_text(editor_highlight_fallback_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
-
-
 def load_editor_pane_legacy_body_fixture(browser, tmp_path):
     page = tmp_path / "editor-pane-legacy-body.html"
     page.write_text(editor_pane_ignores_legacy_body_class_fixture_html(), encoding="utf-8")
@@ -547,19 +516,6 @@ def load_finder_click_toolbar_fixture(browser, tmp_path):
     page = tmp_path / "finder-click-toolbar.html"
     page.write_text(finder_click_toolbar_fixture_html(), encoding="utf-8")
     browser.get(page.as_uri())
-
-
-def computed_color_alpha(browser, element_id):
-    return browser.execute_script(
-        """
-        const color = getComputedStyle(document.getElementById(arguments[0])).color;
-        const match = color.match(/rgba?\\(([^)]+)\\)/);
-        if (!match) return 1;
-        const parts = match[1].split(',').map(part => part.trim());
-        return parts.length >= 4 ? Number.parseFloat(parts[3]) : 1;
-        """,
-        element_id,
-    )
 
 
 def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
@@ -740,12 +696,6 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     )
     assert tree_metrics["collapsedColor"] != tree_metrics["expandedColor"]
     assert tree_metrics["iconSize"] > tree_metrics["nameSize"]
-
-
-def test_editor_text_stays_visible_until_highlight_overlay_is_ready(browser, tmp_path):
-    load_editor_highlight_fallback_fixture(browser, tmp_path)
-    assert computed_color_alpha(browser, "ready-textarea") == 0
-    assert computed_color_alpha(browser, "fallback-textarea") == 1
 
 
 def test_editor_pane_does_not_shift_grid_when_legacy_body_class_is_present(browser, tmp_path):

@@ -266,7 +266,9 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
 globalThis.__layoutTestApi = {
   activeItemForSide,
   agentErrorIsBlocking,
+  appModifier,
   appMenuTree,
+  appShortcutText,
   createAppMenuCommand,
   backgroundTabItems,
   canPaneExpand,
@@ -276,6 +278,9 @@ globalThis.__layoutTestApi = {
   emptyPlaceholderPaneState,
   emptyLayoutSlots,
   fileEditorPaneTabHtml,
+  fileQuickOpenItem,
+  fileQuickOpenItems,
+  fileQuickOpenRootForSearch,
   changesPaneTabHtml,
   changesPanelHtml,
   fileExplorerChangesPanelHtml,
@@ -300,8 +305,13 @@ globalThis.__layoutTestApi = {
   fileExplorerPaneTabHtml,
   firstEmptyPane,
   filePopoverRows,
+  fuzzySearchScore,
+  fuzzyHighlightHtml,
+  fuzzySubsequenceMatch,
+  fuzzySubsequenceScore,
   childPathParts,
   inactiveTabItems,
+  itemInLayout,
   itemIsBackgroundPaneTab,
   layoutFromParam,
   layoutParamValue,
@@ -328,8 +338,12 @@ globalThis.__layoutTestApi = {
   focusTerminalWhenAutoFocus,
   focusPanel,
   focusTerminalFromUserAction,
+  toggleFileExplorerShortcut,
   focusedTerminalForTest() { return focusedTerminal; },
   globalShortcutTargetAllowsAppAction,
+  commandPaletteItemScore,
+  commandPaletteMatches,
+  openFileQuickOpen,
   testElementForId(id) { return document.getElementById(id); },
   registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN}) {
     terminals.set(session, {term, socket, container: document.getElementById('terminal-pane-' + session)});
@@ -362,7 +376,6 @@ globalThis.__layoutTestApi = {
   editorViewModeFor,
   editorPreviewModeAvailable,
   setFileEditorViewMode,
-  editorEngineForTest() { return editorEngine; },
   activeEditorSchemeForTest() { return activeEditorScheme(); },
   configuredEditorSchemeForMode,
   editorSchemeCssVariables,
@@ -370,8 +383,6 @@ globalThis.__layoutTestApi = {
   setFileEditorThemeMode,
   cycleEditorThemeMode,
   fileEditorThemeModeForTest() { return fileEditorThemeMode; },
-  editorScrollTopForSourceLine,
-  editorSourceLineForScroll,
   editorVisualHighlightHtml,
   editorVisualLineFragments,
   expandPaneFromLayout,
@@ -386,8 +397,10 @@ globalThis.__layoutTestApi = {
   openFileEditorItems,
   pullRequestStatusLabel,
   openFileStatus,
+  setOpenFileOwner,
   renderTransportWarning,
   renderFileEditorPanel,
+  renderEditorPreviewPane,
   openFileIsMissing,
   setOpenFileStateForTest(path, state) { openFiles.set(path, state); },
   renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = []) {
@@ -424,12 +437,19 @@ globalThis.__layoutTestApi = {
   removeSessionFromLayout,
   runtimeJitteredDelay,
   sessionPopoverHtml,
+  setFileQuickOpenCandidatesForTest(root, files) {
+    fileQuickOpenRoot = root;
+    fileQuickOpenCandidates = files;
+    fileQuickOpenLoading = false;
+    fileQuickOpenError = '';
+    commandPaletteMode = 'files';
+  },
+  setTabsMenuSearchTextForTest(value) { tabsMenuSearchText = String(value || ''); },
   sessionState,
   slotForNewFileEditorTab,
   slotForNewTmuxSession,
   slotForTabActivation,
   simpleCodeSyntaxHtml,
-  syntaxHighlightHtmlCanHideTextarea,
   smallLayoutSlotCandidate,
   splitPercentForPointer,
   layoutNodeMinWidth,
@@ -446,6 +466,8 @@ globalThis.__layoutTestApi = {
   stopCustomDragPreview,
   syncInitialLayoutUrl,
   tabMenuDetailText,
+  tabSearchFields,
+  tabSearchScore,
   TAB_TYPES,
   tabTypeForItem,
   terminalWheelSignedLines,
@@ -467,6 +489,7 @@ globalThis.__layoutTestApi = {
   openFileEditorPane,
   onFileTreeRowClick,
   pathRelativeToDirectory,
+  replaceHtmlPreservingScroll,
   pruneFileExplorerSelectionForRoot,
   selectFileTreePath,
   selectFileTreeRange,
@@ -715,12 +738,6 @@ function makeFileTree(paths) {
 }
 
 {
-  assert.equal(loadYolomux('?editor=codemirror').editorEngineForTest(), 'codemirror');
-  assert.equal(loadYolomux('?editor_engine=textarea').editorEngineForTest(), 'textarea');
-  assert.equal(loadYolomux('?editor=bogus').editorEngineForTest(), 'codemirror');
-}
-
-{
   const api = loadYolomux('', []);
   const layout = api.defaultLayoutForTest();
   assert.deepStrictEqual(canonical(layout.panes), {left: {tabs: [], active: null, placeholder: true}});
@@ -865,6 +882,11 @@ function makeFileTree(paths) {
   const paneTab = api.fileEditorPaneTabHtml(item);
   assert.ok(paneTab.includes('review.json'));
   assert.equal(paneTab.includes('agent-icon file'), false);
+  api.setOpenFileOwner('/home/keivenc/review.json', item, {ownerSession: '1'});
+  assert.ok(api.fileEditorPaneTabHtml(item).includes('file-tab-owner'), 'file tabs show owning session when known');
+  assert.ok(api.fileEditorPaneTabHtml(item).includes('>1</span>'), 'single owning session is shown in file tab');
+  api.setOpenFileOwner('/home/keivenc/review.json', item, {ownerSession: '2'});
+  assert.ok(api.fileEditorPaneTabHtml(item).includes('>multi</span>'), 'multi-session file tabs distinguish duplicate names');
   assert.ok(api.fileEditorPaneTabHtml('file-preview:/home/keivenc/review.json').includes('file-tab-kind'), 'preview tabs are visually distinguishable from same-path editor tabs');
 
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-heading-1'));
@@ -885,14 +907,6 @@ function makeFileTree(paths) {
   assert.ok(gutterHtml.includes('editor-line-number">2</span'));
   assert.ok(gutterHtml.includes('editor-soft-wrap-marker">↪</span'));
   assert.ok(gutterHtml.includes('code-number'));
-  const textarea = {scrollTop: 32, value: 'one\ntwo\nthree', clientWidth: 0};
-  assert.equal(api.editorSourceLineForScroll(textarea, textarea.value), 3);
-  assert.equal(api.editorScrollTopForSourceLine(textarea, textarea.value, 3), 32);
-
-  assert.equal(api.syntaxHighlightHtmlCanHideTextarea('', '# TITLE'), false);
-  assert.equal(api.syntaxHighlightHtmlCanHideTextarea('<span class="md-heading"># TITLE</span>', '# TITLE'), true);
-  assert.equal(api.syntaxHighlightHtmlCanHideTextarea('', ''), true);
-
   const semanticRanges = [];
   const fakeApi = {
     Decoration: {
@@ -937,6 +951,14 @@ function makeFileTree(paths) {
   assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
   assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
   assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), false);
+  const htmlPreview = new TestElement('html-preview');
+  api.renderEditorPreviewPane(htmlPreview, '/home/test/index.html', '<style>h1{color:red}</style><h1>Hello</h1><script>window.bad = true</script>');
+  assert.equal(htmlPreview.classList.contains('html-preview-body'), true);
+  assert.equal(htmlPreview.classList.contains('code-preview-body'), false);
+  assert.equal(htmlPreview.children.length, 1);
+  assert.equal(htmlPreview.children[0].className, 'file-editor-html-preview');
+  assert.equal(htmlPreview.children[0].attributes.sandbox, '', 'HTML preview iframe is sandboxed with scripts disabled');
+  assert.ok(htmlPreview.children[0].srcdoc.includes('<h1>Hello</h1>'), 'HTML preview renders markup through srcdoc');
   api.setFileEditorViewMode('/home/test/app.py', 'split');
   assert.equal(api.editorViewModeFor('/home/test/app.py'), 'edit');
   api.setFileEditorViewMode('/home/test/README.md', 'split');
@@ -1101,21 +1123,20 @@ function makeFileTree(paths) {
   const api = loadYolomux('', ['1']);
   const item = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
   let focusCount = 0;
-  const textarea = {
-    hidden: false,
-    focus() {
-      focusCount += 1;
+  const panel = {
+    _cmView: {
+      focus() {
+        focusCount += 1;
+      },
     },
   };
-  const panel = {
-    querySelector(selector) {
-      return selector === '.file-editor-textarea-panel' ? textarea : null;
-    },
+  const emptyPanel = {
+    _cmView: null,
   };
   api.setAutoFocusEnabledForTest(true);
   api.setFocusedPanelItem('1');
   api.requestFileEditorPanelFocus(item);
-  assert.equal(api.focusFileEditorPanelIfReady(panel, item), false);
+  assert.equal(api.focusFileEditorPanelIfReady(emptyPanel, item), false);
   assert.equal(focusCount, 0);
 
   api.setFocusedPanelItem(item);
@@ -1124,11 +1145,9 @@ function makeFileTree(paths) {
   assert.equal(api.focusFileEditorPanelIfReady(panel, item), false);
 
   api.requestFileEditorPanelFocus(item);
-  textarea.hidden = true;
-  assert.equal(api.focusFileEditorPanelIfReady(panel, item), false);
+  assert.equal(api.focusFileEditorPanelIfReady(emptyPanel, item), false);
   assert.equal(focusCount, 1);
 
-  textarea.hidden = false;
   api.setAutoFocusEnabledForTest(false);
   api.setFocusedPanelItem(item);
   api.requestFileEditorPanelFocus(item);
@@ -1197,6 +1216,9 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('/repo/app'));
   assert.ok(changesHtml.includes('src/new.py'));
   assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
+  assert.ok(changesHtml.includes('changes-file-agent'), 'changed-file rows show the agent icon slot');
+  assert.ok(changesHtml.includes('changes-file-date'), 'changed-file rows wrap the date for skinny styling');
+  assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   api.setFileExplorerSessionFilesPayloadForTest({
     session: '1',
@@ -1213,6 +1235,14 @@ function makeFileTree(paths) {
   assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
+  const changedFilesCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.changes-status\s*\{[\s\S]*width:\s*13px/.test(changedFilesCss), 'modified-file status chips are skinny');
+  assert.ok(/\.changes-file-name\s*\{[\s\S]*font-weight:\s*500/.test(changedFilesCss), 'modified-file names are not bold');
+  const fakeChangesScroll = {scrollTop: 45, scrollLeft: 3, innerHTML: ''};
+  api.replaceHtmlPreservingScroll(fakeChangesScroll, '<div>updated</div>');
+  assert.equal(fakeChangesScroll.innerHTML, '<div>updated</div>');
+  assert.equal(fakeChangesScroll.scrollTop, 45, 'modified-files refresh preserves vertical scroll');
+  assert.equal(fakeChangesScroll.scrollLeft, 3, 'modified-files refresh preserves horizontal scroll');
   const diffLines = api.parseUnifiedDiffLineClasses(`@@ -1,2 +1,3 @@
  one
 -old
@@ -1305,6 +1335,17 @@ function makeFileTree(paths) {
   assert.equal(finderBesideSinglePaneUrlApi.canPaneExpand('3'), false);
   assert.ok(finderBesideSinglePaneUrlApi.panelControlsHtml('3').includes('hidden type="button" data-pane-expand="3"'));
 
+  const finderToggleSlots = api.emptyLayoutSlots();
+  finderToggleSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 31);
+  finderToggleSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  finderToggleSlots.right = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(finderToggleSlots);
+  const finderLayoutBeforeToggle = api.layoutParamValue(api.currentSlots());
+  api.toggleFileExplorerShortcut();
+  assert.equal(api.itemInLayout('__files__'), false, 'app shortcut hides the Finder pane');
+  api.toggleFileExplorerShortcut();
+  assert.equal(api.layoutParamValue(api.currentSlots()), finderLayoutBeforeToggle, 'app shortcut restores the prior Finder position and split size');
+
   const sidePreviewEditorItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
   const sidePreviewSlots = api.emptyLayoutSlots();
   sidePreviewSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 20);
@@ -1324,7 +1365,14 @@ function makeFileTree(paths) {
   assert.equal(/data-preference-section="Performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
   assert.ok(delayHtml.includes('Metadata refresh interval'), 'delay search surfaces refresh interval settings');
   const preferencesCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 12px\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'YOsearch uses the normal UI font, not condensed tab text');
+  assert.ok(preferencesCss.startsWith('/* GENERATED by tools/static_build.py from static_src/'), 'generated CSS has a do-not-edit header');
+  assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'YOsearch uses the normal UI font, not condensed tab text');
+  assert.ok(preferencesCss.includes('--file-explorer-changes-min-block-size: 96px'), 'modified-files resizer shares a stable min-size token');
+  assert.ok(preferencesCss.includes('--drop-outline: var(--accent-gold)'), 'drop-target outline color is tokenized');
+  assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*#2563eb/.test(preferencesCss), 'light editor panes switch drop-target outlines to blue');
+  assert.ok(/\.file-editor-cross-split-panel,\s*\n\.file-editor-save-panel/.test(preferencesCss), 'side preview button uses the compact editor toolbar button sizing');
+  assert.ok(preferencesCss.includes('.file-editor-icon-side-split'), 'cross-pane side preview has a distinct icon');
+  assert.ok(preferencesCss.includes('.file-editor-dialog-backdrop'), 'editor conflict and close decisions use the shared editor dialog');
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
   assert.ok(preferencesHtml.includes('data-preferences-search-action>YOsearch</button>'), 'preferences search has an explicit YOsearch action');
@@ -1348,6 +1396,8 @@ function makeFileTree(paths) {
   assert.equal(preferencesHtml.includes('Auto-focus terminals'), false, 'auto-focus setting is not terminal-only');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_dark_color_scheme"'), 'preferences expose the dark editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_light_color_scheme"'), 'preferences expose the light editor scheme setting');
+  assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave"'), 'preferences expose editor autosave');
+  assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave_delay_seconds"'), 'preferences expose editor autosave delay');
   assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
   assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'dark editor schemes are grouped under Dark');
   assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'light editor schemes are grouped under Light');
@@ -1374,6 +1424,7 @@ function makeFileTree(paths) {
   assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'theme toggle uses the selected YOLOmux light scheme');
   api.setFileEditorThemeMode('light');
   assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'legacy light storage value maps to YOLOmux Light');
+  assert.equal(api.activeEditorSchemeForTest().bg, '#fbf9f4', 'YOLOmux Light is near-white beige instead of tan');
   let focusedSearch = false;
   let selection = null;
   const search = {
@@ -1547,7 +1598,10 @@ function makeFileTree(paths) {
   const tmuxMenuLabels = tmuxMenu.items.map(item => item.label).filter(Boolean);
   assert.equal(tmuxMenu.items[0].label, 'YO off');
   assert.equal(tmuxMenu.items[0].keepOpen, true);
-  assert.ok(tmuxMenuLabels.includes('New tmux session'));
+  assert.equal(tmuxMenuLabels.includes('New tmux session'), false);
+  assert.ok(tmuxMenuLabels.includes('+ Claude'));
+  assert.ok(tmuxMenuLabels.includes('+ Codex'));
+  assert.ok(tmuxMenu.items.find(item => item.label === '+ Codex')?.detail !== 'Create tmux session');
   assert.ok(tmuxMenuLabels.includes('Transcript'));
   assert.ok(tmuxMenuLabels.includes('AI summary'));
   assert.ok(tmuxMenuLabels.includes('Event log'));
@@ -1558,6 +1612,7 @@ function makeFileTree(paths) {
   assert.ok(tmuxMenuLabels.includes('Resume session'));
   assert.equal(tmuxMenu.badgeText, undefined);
   assert.ok(tmuxMenuLabels.includes('YOLO'));
+  assert.ok(tmuxMenuLabels.indexOf('YOLO') > tmuxMenuLabels.indexOf('Resume session'), 'YOLO submenu stays at the bottom after session actions');
   const yoloMenu = tmuxMenu.items.find(item => item.label === 'YOLO');
   assert.equal(yoloMenu.type, 'submenu');
   assert.ok(yoloMenu.items.some(item => item.label === 'Open rule file'));
@@ -1594,6 +1649,19 @@ function makeFileTree(paths) {
   api.setFocusedPanelItem('__files__');
   assert.equal(api.currentSessionActionTarget(), '2');
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.startsWith('/* GENERATED by tools/static_build.py from static_src/'), 'generated JS has a do-not-edit header');
+  assert.ok(source.includes('const mod = appModifier(event);'), 'global app shortcuts use one platform modifier');
+  assert.equal(source.includes('const mod = event.ctrlKey || event.metaKey;'), false, 'global app shortcuts do not claim both Ctrl and Cmd');
+  assert.ok(source.includes("if (mod && key === 'p' && globalShortcutTargetAllowsAppAction(event.target))"), 'file quick-open is bound through the global shortcut guard');
+  assert.ok(source.includes('if (event.shiftKey) openCommandPalette();'), 'Shift plus app modifier opens the command palette');
+  assert.ok(source.includes('else openFileQuickOpen();'), 'Plain app modifier plus P opens file quick-open');
+  assert.equal(source.includes('Ctrl/Cmd'), false, 'served UI strings do not show Ctrl/Cmd combined shortcuts');
+  assert.ok(source.includes('showFileSaveConflictDialog'), 'editor saves route conflicts through the shared conflict dialog');
+  assert.ok(source.includes('autoSaveFileEditor'), 'editor autosave is wired into the built client');
+  assert.ok(source.includes('promptExternalChangeBeforeEditing'), 'editing a changed-on-disk buffer prompts before continuing');
+  assert.ok(source.includes('editor.autosave_delay_seconds'), 'editor autosave delay is a persisted preference');
+  assert.ok(source.includes('(commandPaletteIndex + 1) % commandPaletteItemsCache.length'), 'command palette arrow navigation wraps down');
+  assert.ok(source.includes('item.splitRun'), 'command palette supports split-open actions');
   const focusStart = source.indexOf('function setFocusedPanelItem(');
   const focusEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusStart);
   assert.ok(source.slice(focusStart, focusEnd).includes('if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item);'));
@@ -1612,6 +1680,32 @@ function makeFileTree(paths) {
   const shortcutsMenu = helpMenu.items.find(item => item.label === 'Keyboard shortcuts');
   assert.equal(shortcutsMenu.type, 'submenu');
   assert.deepStrictEqual(canonical(shortcutsMenu.items.map(item => item.label)), ['Command palette', 'Save active editor', 'Toggle File Explorer', 'Open Preferences', 'Close menu or dialog', 'Session actions', 'Move or split tab']);
+  assert.ok(shortcutsMenu.items.find(item => item.label === 'Command palette').detail.includes(api.appShortcutText('P', {shift: true})));
+  assert.equal(api.appModifier({ctrlKey: true, metaKey: false, altKey: false}), true, 'PC app modifier is Ctrl');
+  assert.equal(api.appModifier({ctrlKey: false, metaKey: true, altKey: false}), false, 'PC app modifier ignores Cmd/meta');
+  const macShortcutApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
+  assert.equal(macShortcutApi.appModifier({ctrlKey: false, metaKey: true, altKey: false}), true, 'Mac app modifier is Cmd');
+  assert.equal(macShortcutApi.appModifier({ctrlKey: true, metaKey: false, altKey: false}), false, 'Mac app modifier reserves Ctrl for tmux');
+  assert.equal(macShortcutApi.appShortcutText('B'), '⌘+B');
+  const pcOverrideShortcutApi = loadYolomux('?platform=pc', ['1'], 'http:', 'MacIntel');
+  assert.equal(pcOverrideShortcutApi.appShortcutText('B'), 'Ctrl+B', 'platform override can force PC shortcut labels');
+  assert.ok(Number.isFinite(api.fuzzySubsequenceScore('xy', 'hello X and blah Y')), 'fuzzy matcher allows ordered gaps');
+  assert.equal(Number.isFinite(api.fuzzySubsequenceScore('xz', 'hello X and blah Y')), false, 'fuzzy matcher rejects missing characters');
+  assert.ok(api.fuzzySearchScore('hel', ['helloXandYyy']) > api.fuzzySearchScore('hel', ['h e l']), 'fuzzy matcher ranks contiguous matches higher');
+  assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('xy', 'helloXandYyy').indexes), [5, 9], 'fuzzy matcher exposes matched indexes for result highlighting');
+  assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy').includes('<mark class="fuzzy-match">X</mark>'), 'palette results highlight matched characters');
+  assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
+  assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');
+  api.setFileQuickOpenCandidatesForTest('/repo/app', [
+    {name: 'helloXandYyy.py', path: '/repo/app/src/helloXandYyy.py', relative_path: 'src/helloXandYyy.py'},
+  ]);
+  const quickItem = api.fileQuickOpenItems().find(item => item.label === 'helloXandYyy.py');
+  assert.ok(quickItem, 'file quick-open uses the same command-palette item shell');
+  assert.equal(api.commandPaletteMatches(quickItem, 'xy'), true, 'file quick-open uses fuzzy matching');
+  assert.equal(api.fileQuickOpenRootForSearch(), '/home/test/yolomux.dev', 'file quick-open defaults to the active repo root when no session cwd is known');
+  assert.equal(api.tabMenuItems()[0].type, 'search', 'Tabs menu starts with a search input');
+  api.setTabsMenuSearchTextForTest('xy');
+  assert.equal(api.tabSearchScore('1', 'xy') < 0, true, 'tab search uses fuzzy score and rejects non-matches');
   assert.equal(helpMenu.items.find(item => item.label === 'Open README').disabled, false);
   assert.equal(api.tabMenuItems().map(item => item.label).filter(Boolean).includes('Current Tab'), false);
   const namedSessionApi = loadYolomux('', ['1', 'dynamo2']);
@@ -1619,6 +1713,11 @@ function makeFileTree(paths) {
   tmuxOnlySlots[namedSessionApi.layoutTreeKey] = namedSessionApi.leafNode('left');
   tmuxOnlySlots.left = namedSessionApi.paneStateWithTabs(['1', 'dynamo2'], '1');
   namedSessionApi.setLayoutSlotsForTest(tmuxOnlySlots);
+  namedSessionApi.setTabsMenuSearchTextForTest('do2');
+  const filteredNamedTabs = namedSessionApi.tabMenuItems().filter(item => item.type === 'command');
+  assert.equal(filteredNamedTabs.length, 1);
+  assert.ok(Number.isFinite(namedSessionApi.tabSearchScore('dynamo2', 'do2')), 'Tabs search matches the raw session name');
+  namedSessionApi.setTabsMenuSearchTextForTest('');
   const tmuxTabActionLabels = namedSessionApi.tabMenuItems().map(item => item.label).filter(Boolean);
   assert.equal(tmuxTabActionLabels.includes('Current Tab'), false);
   assert.equal(tmuxTabActionLabels.includes('YOLO policy: enable'), false);

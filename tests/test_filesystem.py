@@ -66,6 +66,28 @@ def test_list_directory_not_a_dir(tmp_path):
     assert info.value.status == 400
 
 
+def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "hello_x_and_y.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "hello_x_and_y.js").write_text("bad\n", encoding="utf-8")
+
+    payload = filesystem.search_files(str(tmp_path), "xy", 20)
+
+    assert payload["root"] == str(tmp_path)
+    paths = [item["relative_path"] for item in payload["files"]]
+    assert "src/hello_x_and_y.py" in paths
+    assert "node_modules/hello_x_and_y.js" not in paths
+
+
+def test_search_files_rejects_non_directory(tmp_path):
+    target = tmp_path / "note.md"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises(FilesystemError) as info:
+        filesystem.search_files(str(target), "x")
+    assert info.value.status == 400
+
+
 def test_read_file_returns_text(tmp_path):
     file_path = tmp_path / "note.md"
     file_path.write_text("# hello\n", encoding="utf-8")

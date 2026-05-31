@@ -64,6 +64,13 @@ from yolomux_lib.prompt_detector import (
     visible_choice_prompt_text,
     yes_is_selected,
 )
+from yolomux_lib.tmux_utils import tmux_capture_pane
+from yolomux_lib.tmux_utils import tmux_exact_target_from_sessions
+from yolomux_lib.tmux_utils import tmux_has_session
+from yolomux_lib.tmux_utils import tmux_list_sessions
+from yolomux_lib.tmux_utils import tmux_send_enter
+from yolomux_lib.tmux_utils import tmux_send_option2
+from yolomux_lib.tmux_utils import tmux_session_names
 
 _DETECTOR_REEXPORTS = (
     action_for_bash_prompt,
@@ -90,89 +97,6 @@ PROMPT_RETRY_SECONDS = 5.0
 
 # Re-export detector helpers from yolomux_lib.prompt_detector so existing
 # callers can keep importing them from this script.
-
-# ---------------------------------------------------------------------------
-# tmux helpers
-# ---------------------------------------------------------------------------
-
-def tmux_run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["tmux", *args],
-        capture_output=True, text=True, check=check,
-    )
-
-
-def tmux_list_sessions() -> str | None:
-    result = tmux_run("list-sessions", check=False)
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-
-def tmux_session_names() -> list[str]:
-    """Return list of all tmux session names."""
-    result = tmux_run("list-sessions", "-F", "#{session_name}", check=False)
-    if result.returncode != 0:
-        return []
-    return [s.strip() for s in result.stdout.splitlines() if s.strip()]
-
-
-def tmux_has_session(session: str) -> bool:
-    return session in tmux_session_names()
-
-
-def tmux_exact_target_from_sessions(target: str, sessions: list[str]) -> str:
-    """Return a tmux target that cannot confuse a numeric session with a window.
-
-    `tmux -t 1` can mean window 1 in the current session, not the session named
-    `1`. When the requested target exactly matches a session name, use `1:` so
-    tmux resolves it as that session's active pane.
-    """
-    if not target or target.startswith("%"):
-        return target
-    if target in sessions:
-        return f"{target}:"
-    return target
-
-
-def tmux_exact_target(target: str) -> str:
-    return tmux_exact_target_from_sessions(target, tmux_session_names())
-
-
-def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False) -> str | None:
-    """Capture the contents of a tmux pane.
-
-    When ``visible_only`` is True, capture ONLY the current visible screen
-    (no scrollback history). This is critical for detecting active prompts:
-    a dismissed prompt that has scrolled up still lives in scrollback and
-    would otherwise trick ``detect_prompt`` into thinking the prompt is
-    still on screen, causing the retry loop to fire on a ghost prompt.
-
-    Use visible_only=True for presence detection (detect_prompt, yes_is_selected,
-    prompt_hash). Use the default scrollback capture only when you need
-    context above the prompt (extract_command, _find_full_path).
-    """
-    exact_target = tmux_exact_target(target)
-    if visible_only:
-        result = tmux_run("capture-pane", "-t", exact_target, "-p", check=False)
-    else:
-        result = tmux_run("capture-pane", "-t", exact_target, "-p", "-S", f"-{lines}", check=False)
-    if result.returncode != 0:
-        return None
-    return result.stdout
-
-
-def tmux_send_enter(target: str) -> None:
-    tmux_run("send-keys", "-t", tmux_exact_target(target), "Enter", check=False)
-
-
-def tmux_send_option2(target: str) -> None:
-    """Select option 2 by pressing Down then Enter."""
-    exact_target = tmux_exact_target(target)
-    tmux_run("send-keys", "-t", exact_target, "Down")
-    time.sleep(0.3)
-    tmux_send_enter(exact_target)
-
 
 # ---------------------------------------------------------------------------
 # Target resolution (multiple args, comma-separated, wildcards)

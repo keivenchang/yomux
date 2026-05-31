@@ -23,6 +23,7 @@ def make_agent(session, transcript, cwd):
         session_id="sid",
         transcript=str(transcript),
         error=None,
+        model="gpt-5.5",
     )
 
 
@@ -76,8 +77,9 @@ def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     assert summary["agent"] == "codex"
     assert summary["goal"] == "Fix editor colors"
     assert summary["files"] == {"count": 1, "added": 1, "removed": 1}
-    assert summary["local"].startswith("Codex is")
+    assert summary["local"].startswith("Codex gpt-5.5 session 5 is")
     assert "The changes are 1 file changed (+1/-1)." in summary["local"]
+    assert "Status: CI failing; 1 dirty file." in summary["local"]
     assert "CI failing" in summary["lines"]
     assert any("app.py" in line for line in summary["file_lines"])
     assert activity_signature(info, project, files)["files"][0][2] == "app.py"

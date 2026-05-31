@@ -32,12 +32,8 @@ from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import SUMMARY_MAX_PROMPT_CHARS
 from .common import UPLOAD_MAX_FILES
-from .common import list_tmux_session_names
 from .common import next_numbered_session_name
 from .common import tail_file_lines
-from .common import tmux
-from .common import tmux_has_exact_session
-from .common import tmux_session_target
 from .common import truncate_text
 from .control import YolomuxControlServer
 from .control import send_yolomux_control_request
@@ -65,6 +61,10 @@ from .transcripts import compact_transcript_lines
 from .transcripts import format_transcript_item
 from .transcripts import session_transcript_activity_state
 from .transcripts import trim_prompt_text
+from .tmux_utils import list_tmux_session_names
+from .tmux_utils import tmux
+from .tmux_utils import tmux_has_exact_session
+from .tmux_utils import tmux_session_target
 from .uploads import sanitize_upload_filename
 from .uploads import unique_upload_path
 from .workdir import agent_command

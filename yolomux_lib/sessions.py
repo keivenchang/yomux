@@ -120,6 +120,31 @@ def process_display_label(command: str) -> str:
     return base
 
 
+def command_option_value(command: str, long_name: str, short_name: str | None = None) -> str | None:
+    tokens = command_tokens(command)
+    for index, token in enumerate(tokens):
+        if token == long_name and index + 1 < len(tokens):
+            return tokens[index + 1]
+        if token.startswith(f"{long_name}="):
+            return token.split("=", 1)[1]
+        if short_name and token == short_name and index + 1 < len(tokens):
+            return tokens[index + 1]
+    return None
+
+
+def agent_model_from_command(command: str) -> str | None:
+    value = command_option_value(command, "--model", "-m")
+    return value.strip("\"'") if isinstance(value, str) and value.strip("\"'") else None
+
+
+def agent_model_from_metadata(metadata: dict[str, Any]) -> str | None:
+    for key in ("model", "modelName", "model_name", "modelId", "model_id"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def pane_process_label(pane: PaneInfo, candidates: list[ProcessInfo]) -> str:
     for process in candidates:
         label = process_display_label(process.command)
@@ -169,6 +194,7 @@ def read_claude_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Age
             session_id=None,
             transcript=None,
             error=f"missing {meta_path}",
+            model=agent_model_from_command(process.command),
         )
 
     try:
@@ -194,6 +220,7 @@ def read_claude_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Age
         session_id=session_id if isinstance(session_id, str) else None,
         transcript=str(transcript_path) if transcript_path else None,
         error=None if transcript_path else "claude transcript not found",
+        model=agent_model_from_metadata(metadata) or agent_model_from_command(process.command),
     )
 
 
@@ -209,6 +236,7 @@ def agent_error(session: str, kind: str, pane: PaneInfo, process: ProcessInfo, e
         session_id=None,
         transcript=None,
         error=error,
+        model=agent_model_from_command(process.command),
     )
 
 
@@ -270,6 +298,7 @@ def read_codex_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> Agen
         session_id=None,
         transcript=str(transcript_path) if transcript_path else None,
         error=None if transcript_path else "codex transcript not found by cwd",
+        model=agent_model_from_command(process.command),
     )
 
 

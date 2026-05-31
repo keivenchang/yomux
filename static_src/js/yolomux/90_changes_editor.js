@@ -1,0 +1,1772 @@
+function sessionFilesTargetSession(options = {}) {
+  if (!options.followActive && sessionFilesSelectedSession && sessions.includes(sessionFilesSelectedSession)) return sessionFilesSelectedSession;
+  const current = currentSessionActionTarget();
+  if (current && sessions.includes(current)) return current;
+  return sessions[0] || '';
+}
+
+function fileExplorerSessionFilesTargetSession() {
+  return sessionFilesTargetSession({followActive: true});
+}
+
+function emptySessionFilesPayload(session = '', loaded = true) {
+  return {session, files: [], repos: [], errors: [], loaded};
+}
+
+function switchFileExplorerChangesSession(session) {
+  if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
+  const cached = fileExplorerSessionFilesCache.get(session);
+  if (cached?.payload) {
+    fileExplorerSessionFilesPayload = cached.payload;
+    fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
+  } else {
+    const pendingPayload = emptySessionFilesPayload(session, false);
+    fileExplorerSessionFilesPayload = pendingPayload;
+    fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(pendingPayload);
+  }
+  renderFileExplorerChangesPanels();
+  fetchSessionFiles({destination: 'finder', session, silent: true, force: true});
+}
+
+function sessionFilesPayloadForDestination(destination) {
+  return destination === 'finder' ? fileExplorerSessionFilesPayload : sessionFilesPayload;
+}
+
+function setSessionFilesPayloadForDestination(destination, payload) {
+  if (destination === 'finder') fileExplorerSessionFilesPayload = payload;
+  else sessionFilesPayload = payload;
+}
+
+function sessionFilesPayloadSignatureForPayload(payload) {
+  const files = (Array.isArray(payload?.files) ? payload.files : []).map(item => [
+    item.session || '',
+    item.agent || '',
+    item.status || '',
+    item.repo || '',
+    item.path || '',
+    item.abs_path || '',
+    Number(item.mtime || 0),
+    Number(item.added || 0),
+    Number(item.removed || 0),
+  ]);
+  const repos = (Array.isArray(payload?.repos) ? payload.repos : []).map(item => [
+    item.repo || '',
+    Number(item.count || 0),
+    Number(item.touched_count || 0),
+  ]);
+  return JSON.stringify({
+    session: payload?.session || '',
+    loaded: payload?.loaded === true,
+    errors: Array.isArray(payload?.errors) ? payload.errors : [],
+    repos,
+    files,
+  });
+}
+
+function sessionFilesSignatureForDestination(destination) {
+  return destination === 'finder' ? fileExplorerSessionFilesPayloadSignature : sessionFilesPayloadSignature;
+}
+
+function setSessionFilesSignatureForDestination(destination, signature) {
+  if (destination === 'finder') fileExplorerSessionFilesPayloadSignature = signature;
+  else sessionFilesPayloadSignature = signature;
+}
+
+function sessionFilesLoadingForDestination(destination) {
+  return destination === 'finder' ? fileExplorerSessionFilesLoading : sessionFilesLoading;
+}
+
+function setSessionFilesLoadingForDestination(destination, loading) {
+  if (destination === 'finder') fileExplorerSessionFilesLoading = loading;
+  else sessionFilesLoading = loading;
+}
+
+async function fetchSessionFiles(options = {}) {
+  const destination = options.destination === 'finder' ? 'finder' : 'changes';
+  const forceFinderRefresh = destination === 'finder' && options.force === true;
+  if (sessionFilesLoadingForDestination(destination) && !forceFinderRefresh) return;
+  const requestId = destination === 'finder' ? ++fileExplorerSessionFilesRequestId : 0;
+  const requestIsCurrent = () => destination !== 'finder' || requestId === fileExplorerSessionFilesRequestId;
+  const session = options.session || (destination === 'finder' ? fileExplorerSessionFilesTargetSession() : sessionFilesTargetSession());
+  let shouldRender = options.silent !== true;
+  if (!session) {
+    const emptyPayload = emptySessionFilesPayload('', true);
+    const signature = sessionFilesPayloadSignatureForPayload(emptyPayload);
+    shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
+    setSessionFilesPayloadForDestination(destination, emptyPayload);
+    setSessionFilesSignatureForDestination(destination, signature);
+    if (shouldRender) {
+      if (destination === 'finder') renderFileExplorerChangesPanels();
+      else renderChangesPanels();
+    }
+    return;
+  }
+  if (destination !== 'finder') sessionFilesSelectedSession = session;
+  setSessionFilesLoadingForDestination(destination, true);
+  if (!options.silent) statusEl.textContent = 'loading changed files...';
+  if (!options.silent) {
+    if (destination === 'finder') renderFileExplorerChangesPanels();
+    else renderChangesPanels();
+    renderPaneTabStrips();
+  }
+  try {
+    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || response.status);
+    const nextPayload = {
+      session: payload.session || session,
+      files: Array.isArray(payload.files) ? payload.files : [],
+      repos: Array.isArray(payload.repos) ? payload.repos : [],
+      errors: Array.isArray(payload.errors) ? payload.errors : [],
+      loaded: true,
+    };
+    const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+    if (!requestIsCurrent()) return;
+    shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
+    setSessionFilesPayloadForDestination(destination, nextPayload);
+    setSessionFilesSignatureForDestination(destination, signature);
+    if (destination === 'finder') fileExplorerSessionFilesCache.set(session, {payload: nextPayload, signature});
+    if (!options.silent) statusEl.innerHTML = `<span class="ok">loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}</span>`;
+  } catch (err) {
+    const nextPayload = {session, files: [], repos: [], errors: [String(err)], loaded: true};
+    const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+    if (!requestIsCurrent()) return;
+    shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
+    setSessionFilesPayloadForDestination(destination, nextPayload);
+    setSessionFilesSignatureForDestination(destination, signature);
+    if (!options.silent) statusEl.innerHTML = `<span class="err">changed files failed: ${esc(err)}</span>`;
+  } finally {
+    if (requestIsCurrent()) setSessionFilesLoadingForDestination(destination, false);
+    if (requestIsCurrent() && shouldRender) {
+      if (destination === 'finder') renderFileExplorerChangesPanels();
+      else renderChangesPanels();
+      renderPaneTabStrips();
+      renderSessionButtons();
+    }
+  }
+}
+
+function sessionFileTimeText(mtime) {
+  const value = Number(mtime || 0);
+  if (!value) return '';
+  try {
+    return new Date(value * 1000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+  } catch (_) {
+    return '';
+  }
+}
+
+function sessionFileDiffText(item) {
+  return [
+    Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: 'add', text: `+${Number(item.added)}`} : null,
+    Number.isFinite(Number(item?.removed)) && Number(item.removed) !== 0 ? {kind: 'remove', text: `-${Number(item.removed)}`} : null,
+  ].filter(Boolean);
+}
+
+function sortedSessionFiles(files) {
+  const items = Array.isArray(files) ? files.slice() : [];
+  if (sessionFilesSortMode === 'name') {
+    return items.sort((left, right) => String(left.path || '').localeCompare(String(right.path || '')) || String(left.repo || '').localeCompare(String(right.repo || '')));
+  }
+  return items.sort((left, right) => Number(right.mtime || 0) - Number(left.mtime || 0) || String(left.path || '').localeCompare(String(right.path || '')));
+}
+
+function groupedSessionFiles(files) {
+  const groups = new Map();
+  for (const item of sortedSessionFiles(files)) {
+    const repo = item.repo || 'Outside repo';
+    if (!groups.has(repo)) groups.set(repo, []);
+    groups.get(repo).push(item);
+  }
+  return Array.from(groups.entries());
+}
+
+function changeFileRowHtml(item, options = {}) {
+  const statusKey = String(item.status || 'M').toUpperCase();
+  const deleted = statusKey === 'D';
+  const absPath = item.abs_path || item.path || '';
+  const name = basenameOf(absPath || item.path || '');
+  const rel = item.path || absPath;
+  const timeText = sessionFileTimeText(item.mtime);
+  const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
+  const agentHtml = agentIcon(String(item.agent || '').toLowerCase());
+  const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
+  const metaHtml = [agentHtml ? `<span class="changes-file-agent">${agentHtml}</span>` : '', dateHtml, diffHtml].filter(Boolean).join('<span class="changes-meta-separator">·</span>');
+  const compactClass = options.compact ? ' compact' : ' detailed';
+  const actionAttr = deleted ? ' disabled title="Deleted file cannot be opened from disk"' : ` data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" title="${esc(absPath)}"`;
+  return `<button type="button" class="changes-file-row${compactClass}"${actionAttr}>
+    <span class="changes-status changes-status-${esc(statusKey.toLowerCase())}">${esc(statusKey)}</span>
+    <span class="changes-file-main"><span class="changes-file-name">${esc(name)}</span><span class="changes-file-path">${esc(rel)}</span></span>
+    <span class="changes-file-meta">${metaHtml}</span>
+  </button>`;
+}
+
+function changesRepoGroupsHtml(files, options = {}) {
+  return groupedSessionFiles(files).map(([repo, entries]) => {
+    const rows = entries.map(item => changeFileRowHtml(item, options)).join('');
+    const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
+    return `<section class="changes-repo-group">
+      <div class="changes-repo-head"><span>${esc(repoLabel)}</span><span>${entries.length}</span></div>
+      <div class="changes-file-list">${rows}</div>
+    </section>`;
+  }).join('');
+}
+
+function changesPanelHtml() {
+  const target = sessionFilesTargetSession();
+  const files = sessionFilesPayload.files || [];
+  const loaded = sessionFilesPayload.loaded === true;
+  const options = sessions.map(session => `<option value="${esc(session)}"${session === target ? ' selected' : ''}>${esc(sessionLabel(session))} ${esc(session)}</option>`).join('');
+  const summary = sessionFilesLoading
+    ? 'loading changed files...'
+    : loaded
+      ? `${files.length} changed file${files.length === 1 ? '' : 's'}`
+      : 'not loaded';
+  const errorHtml = (sessionFilesPayload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
+  const groups = changesRepoGroupsHtml(files);
+  const empty = !sessionFilesLoading && loaded && !files.length ? '<div class="changes-empty">No AI-changed files found for this session.</div>' : '';
+  return `
+    <div class="changes-toolbar">
+      <label class="changes-control">Session <select data-session-files-session>${options}</select></label>
+      <label class="changes-control">Sort <select data-session-files-sort>
+        <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>recent</option>
+        <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>name</option>
+      </select></label>
+      <button type="button" class="changes-refresh" data-session-files-refresh>Refresh</button>
+      <span class="changes-summary">${esc(summary)}</span>
+    </div>
+    ${errorHtml}
+    ${empty || groups}`;
+}
+
+function fileExplorerChangesPanelHtml() {
+  const payload = fileExplorerSessionFilesPayload;
+  const loading = fileExplorerSessionFilesLoading;
+  const files = payload.files || [];
+  const loaded = payload.loaded === true;
+  const session = payload.session || fileExplorerSessionFilesTargetSession();
+  const summary = loading
+    ? 'loading...'
+    : loaded
+      ? `${files.length} modified${session ? ` in ${sessionLabel(session)}` : ''}`
+      : 'not loaded';
+  const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
+  const empty = !loading && loaded && !files.length ? '<div class="changes-empty">No modified files for this session.</div>' : '';
+  const compact = fileExplorerChangesDisplayMode === 'compact';
+  const densityTitle = compact ? 'Show detailed modified-files list' : 'Show compact modified-files list';
+  const densityIcon = compact ? '▤' : '☷';
+  return `
+    <div class="file-explorer-changes-head">
+      <span>Modified files</span>
+      <button type="button" class="changes-display-toggle${compact ? ' compact' : ' detailed'}" data-session-files-display-toggle title="${esc(densityTitle)}" aria-label="${esc(densityTitle)}" aria-pressed="${compact ? 'true' : 'false'}">${esc(densityIcon)}</button>
+      <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
+      <span class="changes-summary">${esc(summary)}</span>
+    </div>
+    ${errorHtml}
+    ${empty || changesRepoGroupsHtml(files, {compact})}`;
+}
+
+function createChangesPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel changes-panel';
+  panel.id = `panel-${changesItemId}`;
+  panel.innerHTML = `
+      <div class="panel-head changes-panel-head">
+        ${virtualPanelControlsHtml(changesItemId, 'Changes')}
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+      </div>
+      <div class="panel-detail-row">
+        <div class="panel-copy">
+          <div id="panel-tab-${changesItemId}" class="panel-session-label"><span class="session-button-dir">Changes</span></div>
+          <div id="meta-${changesItemId}" class="meta">${esc(changesTabDetail())}</div>
+        </div>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(changesItemId)}" title="hide details" aria-label="hide details"></button>
+      </div>
+      <div class="changes-body panel-overlay-root">
+        <div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>
+        ${changesPanelHtml()}
+      </div>`;
+  bindPanelShell(panel, changesItemId);
+  bindChangesPanel(panel);
+  if (!sessionFilesPayload.loaded || sessionFilesPayload.session !== sessionFilesTargetSession()) {
+    fetchSessionFiles({destination: 'changes', silent: true});
+  }
+  return panel;
+}
+
+function renderChangesPanels() {
+  for (const panel of document.querySelectorAll('.changes-panel')) {
+    const body = panel.querySelector('.changes-body');
+    const meta = panel.querySelector(`#meta-${cssEscape(changesItemId)}`);
+    if (meta) meta.textContent = changesTabDetail();
+    if (body) replaceHtmlPreservingScroll(body, `<div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>${changesPanelHtml()}`);
+    bindChangesPanel(panel);
+  }
+}
+
+function bindChangesPanel(panel) {
+  if (!panel || panel.dataset.changesBound === 'true') return;
+  panel.dataset.changesBound = 'true';
+  panel.addEventListener('change', event => {
+    const sessionSelect = event.target.closest('[data-session-files-session]');
+    if (sessionSelect && panel.contains(sessionSelect)) {
+      sessionFilesSelectedSession = sessionSelect.value;
+      fetchSessionFiles({session: sessionFilesSelectedSession});
+      return;
+    }
+    const sortSelect = event.target.closest('[data-session-files-sort]');
+    if (sortSelect && panel.contains(sortSelect)) {
+      sessionFilesSortMode = sortSelect.value === 'name' ? 'name' : 'mtime';
+      renderChangesPanels();
+      renderFileExplorerChangesPanels();
+    }
+  });
+  panel.addEventListener('click', async event => {
+    const displayToggle = event.target.closest('[data-session-files-display-toggle]');
+    if (displayToggle && panel.contains(displayToggle)) {
+      event.preventDefault();
+      fileExplorerChangesDisplayMode = fileExplorerChangesDisplayMode === 'compact' ? 'detailed' : 'compact';
+      renderFileExplorerChangesPanels();
+      return;
+    }
+    const refresh = event.target.closest('[data-session-files-refresh]');
+    if (refresh && panel.contains(refresh)) {
+      event.preventDefault();
+      const destination = refresh.closest('[data-file-explorer-changes]') ? 'finder' : 'changes';
+      fetchSessionFiles({
+        destination,
+        session: destination === 'finder' ? fileExplorerSessionFilesTargetSession() : sessionFilesTargetSession(),
+      });
+      return;
+    }
+    const fileRow = event.target.closest('[data-open-change-file]');
+    if (fileRow && panel.contains(fileRow)) {
+      event.preventDefault();
+      const path = fileRow.dataset.openChangeFile;
+      if (path) {
+        const ownerSession = fileRow.dataset.openChangeSession || '';
+        await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {ownerSession});
+        refreshOpenFileDiff(path);
+      }
+    }
+  });
+}
+
+function activePreferenceControl(panel) {
+  const active = document.activeElement;
+  if (!active || !panel?.contains(active)) return null;
+  return active.closest?.('[data-setting-path], [data-preferences-search], [data-preferences-search-action], [data-preference-section-toggle], [data-preferences-reset-all], [data-preferences-reset-confirm], [data-preferences-reset-cancel]') || null;
+}
+
+function preferenceFocusTargetIsInteractive(target) {
+  return Boolean(target?.closest?.('input, textarea, select, button, a, [contenteditable="true"], [data-setting-path], [data-preferences-search], [data-preferences-search-action], [data-preference-section-toggle], [data-preferences-reset-all], [data-preferences-reset-confirm], [data-preferences-reset-cancel]'));
+}
+
+function clampPreferenceNumber(item, value) {
+  const fallback = Number(preferenceDefault(item.path));
+  const parsed = Number(value);
+  let number = Number.isFinite(parsed) ? parsed : fallback;
+  if (Number.isFinite(Number(item.min))) number = Math.max(Number(item.min), number);
+  if (Number.isFinite(Number(item.max))) number = Math.min(Number(item.max), number);
+  if (!Number.isFinite(number)) return '';
+  return Number.isInteger(number) ? String(number) : String(number);
+}
+
+function validatePreferenceNumberControl(control) {
+  const path = control.dataset.settingPath || '';
+  const item = preferenceItemByPath(path);
+  if (!item || item.type !== 'number') return true;
+  const value = Number(control.value);
+  const min = Number(item.min);
+  const max = Number(item.max);
+  let message = '';
+  if (!Number.isFinite(value)) message = 'Enter a number';
+  else if (Number.isFinite(min) && value < min) message = `Minimum ${min}`;
+  else if (Number.isFinite(max) && value > max) message = `Maximum ${max}`;
+  control.setCustomValidity(message);
+  return !message;
+}
+
+function settingPatch(path, value) {
+  const parts = String(path || '').split('.').filter(Boolean);
+  const root = {};
+  let current = root;
+  parts.forEach((part, index) => {
+    if (index === parts.length - 1) current[part] = value;
+    else {
+      current[part] = {};
+      current = current[part];
+    }
+  });
+  return root;
+}
+
+function valueFromPreferenceControl(control) {
+  const type = control.dataset.settingType || 'text';
+  if (type === 'boolean') return control.checked === true;
+  if (type === 'number') {
+    const item = preferenceItemByPath(control.dataset.settingPath || '');
+    if (!item) return Number(control.value);
+    const clamped = clampPreferenceNumber(item, control.value);
+    control.value = clamped;
+    validatePreferenceNumberControl(control);
+    return Number(clamped);
+  }
+  if (type === 'list') return String(control.value || '').split('\n').map(line => line.trim()).filter(Boolean);
+  return control.value;
+}
+
+async function saveSettingsPatch(patch, options = {}) {
+  if (readOnlyMode) return;
+  const preservedLayout = options.preserveLayout === false ? null : cloneLayoutSlots();
+  const preservedLayoutSignature = preservedLayout ? layoutSlotsSignature(preservedLayout) : '';
+  const preservedFocus = focusedPanelItem;
+  const response = await apiFetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({settings: patch}),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  applySettingsPayload(payload, {force: true, applyEditorDefaults: options.applyEditorDefaults === true});
+  if (preservedLayout && layoutSlotsSignature() !== preservedLayoutSignature) {
+    applyLayoutSlots(preservedLayout, {
+      focusSession: preservedFocus && itemInLayout(preservedFocus, preservedLayout) ? preservedFocus : undefined,
+      prune: false,
+    });
+  }
+  refreshYoloRulesStatus({silent: true});
+}
+
+function savePreferenceControl(control) {
+  const path = control.dataset.settingPath || '';
+  if (control.dataset.settingType === 'number' && !validatePreferenceNumberControl(control)) {
+    control.reportValidity?.();
+    return;
+  }
+  const value = valueFromPreferenceControl(control);
+  saveSettingsPatch(settingPatch(path, value), {
+    applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
+  })
+    .then(() => {
+      const scheme = activeEditorScheme();
+      if ((path === 'appearance.editor_dark_color_scheme' && scheme.dark)
+        || (path === 'appearance.editor_light_color_scheme' && !scheme.dark)) {
+        setFileEditorThemeMode(value);
+      }
+      statusEl.textContent = `saved ${path}`;
+    })
+    .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+}
+
+function resetPreference(path) {
+  const item = preferenceItemByPath(path);
+  if (!item) return;
+  saveSettingsPatch(settingPatch(path, preferenceDefault(path)), {
+    applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
+  })
+    .then(() => { statusEl.textContent = `reset ${path}`; })
+    .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
+}
+
+function resetAllPreferences() {
+  if (readOnlyMode) return;
+  saveSettingsPatch(mergeSettingObjects({}, clientSettingsDefaults), {applyEditorDefaults: true})
+    .then(() => {
+      preferencesSearchText = '';
+      preferencesResetConfirmVisible = false;
+      collapsedPreferenceSections = defaultCollapsedPreferenceSections();
+      writeStoredCollapsedPreferenceSections();
+      setFileEditorThemeMode(configuredEditorSchemeForMode(true));
+      renderPreferencesPanels({force: true});
+      statusEl.textContent = 'reset all preferences';
+    })
+    .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
+}
+
+// File Explorer pane content is self-contained so layout panes do not depend on
+// the older left-edge overlay tree.
+function createFileExplorerPanel() {
+  const panel = document.createElement('article');
+  panel.className = 'panel file-explorer-panel';
+  panel.id = `panel-${fileExplorerItemId}`;
+  const initialPath = fileExplorerRoot || homePath || '/';
+  const label = fileExplorerLabel();
+  panel.innerHTML = `
+      <div class="panel-head file-explorer-head">
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="file-explorer-toolbar">
+          <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
+          <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="Root mode: fixed" aria-pressed="false">Root</button>
+          <div class="file-explorer-quick-access-panel" aria-label="Quick paths"></div>
+          <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(label)} root path">
+          <span class="file-explorer-repo-summary" hidden></span>
+          <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
+          ${paneFrameControlsGroupHtml(fileExplorerItemId, {
+            groupClass: 'file-explorer-frame-controls',
+            actions: false,
+            minimize: false,
+            expand: false,
+            close: true,
+            closeClass: 'file-explorer-panel-close',
+            closeTitle: `Hide ${label} from layout`,
+            closeLabel: `Hide ${label} from layout`,
+          })}
+        </div>
+      </div>
+      <div class="file-explorer-pane panel-overlay-root">
+        <div id="panel-toasts-${fileExplorerItemId}" class="panel-toast-stack"></div>
+        <div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
+        <div class="file-explorer-changes-resizer" data-file-explorer-changes-resizer title="Drag to resize modified files"></div>
+        <div class="file-explorer-changes-panel" data-file-explorer-changes></div>
+      </div>`;
+  bindPanelShell(panel, fileExplorerItemId);
+  bindChangesPanel(panel);
+  const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
+  const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
+  if (hiddenBtn) {
+    hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
+    hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+    hiddenBtn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleHiddenFiles();
+    });
+  }
+  if (rootModeBtn) {
+    rootModeBtn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleFileExplorerRootMode();
+    });
+  }
+  const closeBtn = panel.querySelector('.file-explorer-panel-close');
+  panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    copyCurrentFileExplorerPath();
+  });
+  bindFileExplorerPathInput(panel.querySelector('.file-explorer-path-inline'));
+  bindFileExplorerChangesResizer(panel);
+  renderFileExplorerRootModeControls();
+  if (closeBtn) {
+    closeBtn.addEventListener('pointerdown', event => event.stopPropagation());
+    closeBtn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      removeSessionFromLayout(fileExplorerItemId);
+    });
+  }
+  refreshFileExplorerPanelTree(panel);
+  renderFileExplorerChangesPanel(panel);
+  if (!fileExplorerSessionFilesPayload.loaded || fileExplorerSessionFilesPayload.session !== fileExplorerSessionFilesTargetSession()) {
+    fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+  }
+  return panel;
+}
+
+async function refreshFileExplorerPanelTree(panel, options = {}) {
+  const treeEl = panel.querySelector('.file-explorer-tree-panel');
+  const pathEl = panel.querySelector('.file-explorer-path-inline');
+  const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
+  if (!treeEl) return;
+  const root = normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
+  setFileExplorerPathElementValue(pathEl, root);
+  setFileExplorerPathError(pathEl);
+  renderFileExplorerRootModeControls();
+  if (hiddenBtn) {
+    hiddenBtn.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
+    hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
+    hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+  }
+  const entries = options.root === root && Array.isArray(options.entries)
+    ? options.entries
+    : await fetchDirectory(root);
+  if (!entries) return;
+  renderTreeChildren(treeEl, root, entries, 0, {entriesByDir: options.entriesByDir});
+  updateFileExplorerCurrentFileHighlight();
+}
+
+function renderFileExplorerChangesPanel(panel) {
+  const changes = panel?.querySelector?.('[data-file-explorer-changes]');
+  if (!changes) return;
+  replaceHtmlPreservingScroll(changes, fileExplorerChangesPanelHtml());
+  bindChangesPanel(panel);
+}
+
+function renderFileExplorerChangesPanels() {
+  for (const panel of document.querySelectorAll('.file-explorer-panel')) {
+    renderFileExplorerChangesPanel(panel);
+  }
+}
+
+function bindFileExplorerChangesResizer(panel) {
+  const handle = panel?.querySelector?.('[data-file-explorer-changes-resizer]');
+  const pane = panel?.querySelector?.('.file-explorer-pane');
+  if (!handle || !pane || handle.dataset.bound === 'true') return;
+  handle.dataset.bound = 'true';
+  handle.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    handle.setPointerCapture?.(event.pointerId);
+    pane.classList.add('resizing-changes');
+    const move = moveEvent => {
+      const rect = pane.getBoundingClientRect();
+      const height = Math.max(1, rect.height);
+      const styles = getComputedStyle(pane);
+      const minBlock = Number.parseFloat(styles.getPropertyValue('--file-explorer-changes-min-block-size')) || 96;
+      const bottomHeight = Math.max(minBlock, rect.bottom - moveEvent.clientY);
+      const minFraction = Math.min(0.68, minBlock / height);
+      const fraction = Math.max(minFraction, Math.min(0.68, bottomHeight / height));
+      pane.style.setProperty('--file-explorer-changes-size', `${Math.round(fraction * 1000) / 10}%`);
+    };
+    const done = () => {
+      pane.classList.remove('resizing-changes');
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', done);
+      handle.removeEventListener('pointercancel', done);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', done);
+    handle.addEventListener('pointercancel', done);
+  });
+}
+
+function handleFileEditorContentChanged(panel, path, content, options = {}) {
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return;
+  state.content = String(content ?? '');
+  const dirty = state.content !== state.original;
+  const dirtyChanged = dirty !== state.dirty;
+  state.dirty = dirty;
+  updateFileEditorPanelChrome(panel, path);
+  const status = openFileStatus(state);
+  setFileEditorPanelStatus(panel, status.message, status.level);
+  renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+  renderLinkedFilePreviewPanels(panel, path, state.content);
+  syncFileEditorSplitScroll(panel, 'editor');
+  if (state.externalChanged && !state.externalChangeEditPrompted) {
+    promptExternalChangeBeforeEditing(path, panel);
+  }
+  if (state.dirty) scheduleFileAutosave(path);
+  else clearFileAutosaveTimer(path);
+  if (dirtyChanged) {
+    renderSessionButtons();
+    renderPaneTabStrips();
+  }
+}
+
+function createFileEditorPanel(item) {
+  const path = fileItemPath(item);
+  const panel = document.createElement('article');
+  panel.className = 'panel file-editor-panel';
+  panel.dataset.filePath = path;
+  panel.dataset.layoutItem = item;
+  panel.innerHTML = `
+      <div class="panel-head file-editor-panel-head">
+        <div class="file-editor-panel-actions">
+          <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="Editor mode" hidden>
+            <button type="button" data-editor-mode="edit" title="Edit" aria-label="Edit"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
+            <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
+            <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
+          </div>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
+          <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
+          <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
+          <button type="button" class="file-editor-find-panel" title="${esc(`Find in file (${appShortcutText('F')})`)}" aria-label="Find in file" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
+          <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="side" aria-hidden="true" hidden></span>
+          <button type="button" class="file-editor-theme-panel" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
+          <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
+          <button type="button" class="file-editor-save-panel" title="Save" aria-label="Save file" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
+          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="save" aria-hidden="true" hidden></span>
+          ${paneFrameControlsGroupHtml(item, {
+            groupClass: 'file-editor-frame-controls',
+            actions: false,
+            minimize: true,
+            expand: true,
+            close: true,
+            closeClass: 'file-editor-panel-close',
+            fileClosePath: path,
+            closeTitle: 'Close',
+            closeLabel: 'Close',
+          })}
+        </div>
+        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+      </div>
+      <div class="file-editor-panel-body panel-overlay-root">
+        <div id="panel-toasts-${item}" class="panel-toast-stack"></div>
+        <div class="file-editor-content">
+          <div class="file-editor-codemirror-panel" hidden></div>
+          <pre class="file-editor-raw-panel" hidden><code></code></pre>
+          <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
+          <div class="file-editor-image-panel" hidden></div>
+        </div>
+        <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-cursor-status"></span></div>
+      </div>`;
+  bindPanelShell(panel, item);
+  panel.querySelectorAll('button').forEach(button => {
+    button.addEventListener('pointerdown', event => event.stopPropagation());
+  });
+  panel.querySelector('.file-editor-panel-close')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeFileTab(path, {item});
+  });
+  panel.querySelector('.file-editor-save-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    saveFileEditor(path, panel);
+  });
+  panel.querySelector('.file-editor-reload-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    reloadOpenFileFromDisk(path);
+  });
+  panel.querySelector('.file-editor-mode-control-panel')?.addEventListener('click', event => {
+    const mode = event.target?.closest?.('[data-editor-mode]')?.dataset?.editorMode;
+    if (!editorViewModes.has(mode)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setFileEditorViewMode(path, mode, item);
+    renderFileEditorPanel(panel, item);
+  });
+  panel.querySelector('.file-editor-gutter-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleEditorLineNumbers();
+  });
+  panel.querySelector('.file-editor-wrap-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleEditorWrap();
+  });
+  panel.querySelector('.file-editor-find-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    openEditorFind(panel);
+  });
+  panel.querySelector('.file-editor-cross-split-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    openFileCrossPaneSplit(path);
+  });
+  panel.querySelector('.file-editor-theme-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    cycleEditorThemeMode();
+  });
+  panel.querySelector('.file-editor-preview-pane-panel')?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'preview'));
+  renderFileEditorPanel(panel, item);
+  return panel;
+}
+
+function hideFileEditorContent(rawPane, previewPane, imagePane, codeMirrorPane = null) {
+  if (rawPane) rawPane.hidden = true;
+  if (previewPane) previewPane.hidden = true;
+  if (codeMirrorPane) codeMirrorPane.hidden = true;
+  if (imagePane) {
+    disconnectFileEditorImageObserver(imagePane);
+    imagePane.hidden = true;
+    imagePane.replaceChildren();
+  }
+}
+
+function setElementsHidden(elements, hidden) {
+  for (const element of elements) {
+    if (element) element.hidden = hidden;
+  }
+}
+
+function fileEditorEmptyState(title, detail = '') {
+  const node = document.createElement('div');
+  node.className = 'file-editor-empty-state';
+  const titleNode = document.createElement('div');
+  titleNode.className = 'file-editor-empty-title';
+  titleNode.textContent = title;
+  node.appendChild(titleNode);
+  if (detail) {
+    const detailNode = document.createElement('div');
+    detailNode.className = 'file-editor-empty-detail';
+    detailNode.textContent = detail;
+    node.appendChild(detailNode);
+  }
+  return node;
+}
+
+function disconnectFileEditorImageObserver(imagePane) {
+  if (imagePane?._imageResizeObserver) {
+    imagePane._imageResizeObserver.disconnect();
+    imagePane._imageResizeObserver = null;
+  }
+}
+
+function fittedFileEditorImageSize(imagePane, img) {
+  const naturalWidth = img.naturalWidth || 0;
+  const naturalHeight = img.naturalHeight || 0;
+  if (!naturalWidth || !naturalHeight) return null;
+  const availableWidth = Math.max(1, imagePane.clientWidth - 20);
+  const availableHeight = Math.max(1, imagePane.clientHeight - 20);
+  const scale = Math.min(1, availableWidth / naturalWidth, availableHeight / naturalHeight);
+  return {
+    width: Math.max(1, Math.floor(naturalWidth * scale)),
+    height: Math.max(1, Math.floor(naturalHeight * scale)),
+  };
+}
+
+function applyFileEditorImageMode(imagePane, img, path, options = {}) {
+  const preserveScroll = options.preserveScroll === true;
+  const scrollLeft = preserveScroll ? imagePane.scrollLeft : 0;
+  const scrollTop = preserveScroll ? imagePane.scrollTop : 0;
+  const original = fileEditorImageMode.get(path) === 'original';
+  imagePane.classList.toggle('original-size', original);
+  imagePane.classList.toggle('fit-size', !original);
+  img.classList.toggle('original-size', original);
+  img.classList.toggle('fit-size', !original);
+  const size = original
+    ? {width: img.naturalWidth || img.width, height: img.naturalHeight || img.height}
+    : fittedFileEditorImageSize(imagePane, img);
+  if (size?.width && size?.height) {
+    img.style.width = `${size.width}px`;
+    img.style.height = `${size.height}px`;
+  }
+  img.title = original ? 'Click to fit image' : 'Click to view original size';
+  if (preserveScroll) {
+    imagePane.scrollLeft = scrollLeft;
+    imagePane.scrollTop = scrollTop;
+    requestAnimationFrame(() => {
+      imagePane.scrollLeft = scrollLeft;
+      imagePane.scrollTop = scrollTop;
+    });
+  }
+}
+
+function renderFileEditorImagePane(imagePane, path, state, status) {
+  if (!imagePane) return;
+  const version = String(state.mtime || state.size || 0);
+  const sameImage = imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version;
+  let img = sameImage ? imagePane.querySelector(':scope > .file-editor-image') : null;
+  if (!img) {
+    disconnectFileEditorImageObserver(imagePane);
+    imagePane.replaceChildren();
+    img = document.createElement('img');
+    img.className = 'file-editor-image';
+    img.src = rawFileUrl(path, {v: version});
+    img.alt = path;
+    img.addEventListener('click', () => {
+      const nextMode = fileEditorImageMode.get(path) === 'original' ? 'fit' : 'original';
+      fileEditorImageMode.set(path, nextMode);
+      applyFileEditorImageMode(imagePane, img, path, {preserveScroll: true});
+    });
+    if (typeof ResizeObserver === 'function') {
+      const resizeObserver = new ResizeObserver(() => applyFileEditorImageMode(imagePane, img, path, {preserveScroll: true}));
+      imagePane._imageResizeObserver = resizeObserver;
+      resizeObserver.observe(imagePane);
+    }
+    img.onload = () => {
+      applyFileEditorImageMode(imagePane, img, path, {preserveScroll: true});
+      status(`${img.naturalWidth}x${img.naturalHeight}`, '');
+    };
+    img.onerror = () => {
+      disconnectFileEditorImageObserver(imagePane);
+      imagePane.replaceChildren(fileEditorEmptyState('Image could not be loaded', `The file may be unreadable, unsupported, or over ${formatFileSize(MAX_FILE_PREVIEW_BYTES)}.`));
+      status('failed to load image', 'error');
+    };
+    imagePane.dataset.imagePath = path;
+    imagePane.dataset.imageVersion = version;
+    imagePane.appendChild(img);
+    status('loading...', '');
+  }
+  applyFileEditorImageMode(imagePane, img, path, {preserveScroll: sameImage});
+}
+
+function requestFileEditorPanelFocus(item) {
+  if (!autoFocusEnabled) return;
+  if (isFileEditorItem(item)) pendingFileEditorFocus.add(item);
+}
+
+function focusFileEditorPanelIfReady(panel, item) {
+  if (!autoFocusEnabled) {
+    pendingFileEditorFocus.delete(item);
+    return false;
+  }
+  if (!pendingFileEditorFocus.has(item) || focusedPanelItem !== item) return false;
+  if (panel?._cmView) {
+    panel._cmView.focus?.();
+    pendingFileEditorFocus.delete(item);
+    return true;
+  }
+  return false;
+}
+
+function destroyCodeMirrorPanel(panel) {
+  if (panel?._cmView) {
+    panel._cmView.destroy();
+    panel._cmView = null;
+    panel._cmPath = '';
+    panel._cmSignature = '';
+  }
+}
+
+function codeMirrorPanelContent(panel) {
+  return panel?._cmView?.state?.doc?.toString?.() ?? null;
+}
+
+function codeMirrorConfigSignature(path) {
+  return JSON.stringify({
+    language: codeMirrorLanguageName(path),
+    wrap: fileEditorWrapEnabled,
+    lineNumbers: fileEditorLineNumbersEnabled,
+    readOnly: readOnlyMode,
+    scheme: fileEditorThemeMode,
+  });
+}
+
+async function ensureCodeMirrorPanel(panel, item, path, state) {
+  const container = panel.querySelector('.file-editor-codemirror-panel');
+  if (!container) return false;
+  const generation = (panel._cmGeneration || 0) + 1;
+  panel._cmGeneration = generation;
+  container.hidden = false;
+  const signature = codeMirrorConfigSignature(path);
+  if (!panel._cmView || panel._cmPath !== path || panel._cmSignature !== signature) {
+    destroyCodeMirrorPanel(panel);
+    container.textContent = 'loading CodeMirror...';
+  }
+  try {
+    const api = await loadCodeMirrorApi();
+    if (panel._cmGeneration !== generation) return false;
+    const currentText = String(state.content || '');
+    if (!panel._cmView) {
+      container.replaceChildren();
+      const cmState = api.EditorState.create({
+        doc: currentText,
+        extensions: codeMirrorExtensions(api, panel, path),
+      });
+      panel._cmView = new api.EditorView({
+        state: cmState,
+        parent: container,
+        dispatch(transaction) {
+          panel._cmView.update([transaction]);
+          if (transaction.docChanged || transaction.selectionSet) updateCodeMirrorCursorStatus(panel);
+          if (transaction.docChanged) {
+            handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
+          }
+        },
+      });
+      panel._cmPath = path;
+      panel._cmSignature = signature;
+      panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+      updateCodeMirrorCursorStatus(panel);
+    } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty) {
+      panel._cmView.dispatch({
+        changes: {from: 0, to: panel._cmView.state.doc.length, insert: currentText},
+      });
+      updateCodeMirrorCursorStatus(panel);
+    }
+    focusFileEditorPanelIfReady(panel, item);
+    return true;
+  } catch (error) {
+    if (panel._cmGeneration !== generation) return false;
+    destroyCodeMirrorPanel(panel);
+    container.hidden = true;
+    setFileEditorPanelStatus(panel, `CodeMirror unavailable; showing read-only raw text (${error})`, 'error');
+    return false;
+  }
+}
+
+function renderFileEditorRawPane(rawPane, path, content) {
+  if (!rawPane) return;
+  const code = rawPane.querySelector('code');
+  if (!code) return;
+  const language = syntaxLanguageForPath(path);
+  rawPane.hidden = false;
+  rawPane.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
+  rawPane.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  code.className = `language-${language || 'text'}`;
+  code.innerHTML = editorVisualHighlightHtml(language, content, {
+    wrap: fileEditorWrapEnabled,
+    lineNumbers: fileEditorLineNumbersEnabled,
+  });
+}
+
+function renderFileEditorPanel(panel, item) {
+  const path = fileItemPath(item);
+  activeFile = path;
+  updateFileExplorerCurrentFileHighlight();
+  const state = openFiles.get(path);
+  updateFileEditorPanelChrome(panel, path);
+  const codeMirrorPane = panel.querySelector('.file-editor-codemirror-panel');
+  const rawPane = panel.querySelector('.file-editor-raw-panel');
+  const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
+  const imagePane = panel.querySelector('.file-editor-image-panel');
+  const modeControl = panel.querySelector('.file-editor-mode-control-panel');
+  const gutterButton = panel.querySelector('.file-editor-gutter-panel');
+  const wrapButton = panel.querySelector('.file-editor-wrap-panel');
+  const findButton = panel.querySelector('.file-editor-find-panel');
+  const crossSplitButton = panel.querySelector('.file-editor-cross-split-panel');
+  const reloadButton = panel.querySelector('.file-editor-reload-panel');
+  const themeButton = panel.querySelector('.file-editor-theme-panel');
+  const content = panel.querySelector('.file-editor-content');
+  const textControls = [modeControl, gutterButton, wrapButton, findButton, crossSplitButton, reloadButton];
+  updateEditorThemeButton(themeButton);
+  if (!state) {
+    setElementsHidden(textControls, true);
+    updateFileEditorToolbarSeparators(panel);
+    panel.classList.remove('syntax-highlighted');
+    destroyCodeMirrorPanel(panel);
+    hideFileEditorContent(rawPane, previewPane, imagePane, codeMirrorPane);
+    setFileEditorPanelStatus(panel, 'file closed', '');
+    return;
+  }
+  if (state.loading) {
+    setElementsHidden(textControls, true);
+    updateFileEditorToolbarSeparators(panel);
+    panel.classList.remove('syntax-highlighted');
+    destroyCodeMirrorPanel(panel);
+    hideFileEditorContent(rawPane, previewPane, imagePane, codeMirrorPane);
+    setFileEditorPanelStatus(panel, 'loading...', '');
+    loadFileEditorState(path, panel, item);
+    return;
+  }
+  if (state.kind === 'error' || state.kind === 'too-large') {
+    setElementsHidden(textControls, true);
+    updateFileEditorToolbarSeparators(panel);
+    panel.classList.remove('syntax-highlighted');
+    destroyCodeMirrorPanel(panel);
+    if (rawPane) rawPane.hidden = true;
+    if (codeMirrorPane) codeMirrorPane.hidden = true;
+    if (previewPane) previewPane.hidden = true;
+    if (imagePane) {
+      imagePane.hidden = false;
+      const limit = formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES);
+      const size = formatFileSize(state.size);
+      const title = state.kind === 'too-large' ? 'File is too large to preview' : 'File could not be opened';
+      const detail = state.kind === 'too-large'
+        ? (state.error || `${size ? `${size}; ` : ''}limit is ${limit}`)
+        : String(state.error || 'failed to load file');
+      imagePane.replaceChildren(fileEditorEmptyState(title, detail));
+    }
+    const status = state.kind === 'too-large' ? `too large; limit ${formatFileSize(state.maxBytes || MAX_FILE_PREVIEW_BYTES)}` : state.error || 'failed to load file';
+    setFileEditorPanelStatus(panel, status, 'error');
+    return;
+  }
+  updateEditorModeControl(modeControl, path, state, item);
+  if (gutterButton) {
+    gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text';
+    updateEditorGutterButton(gutterButton);
+  }
+  if (wrapButton) {
+    wrapButton.hidden = isFilePreviewItem(item) || state.kind !== 'text';
+    updateEditorWrapButton(wrapButton);
+  }
+  updateEditorFindButton(findButton, state);
+  if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
+  if (crossSplitButton) {
+    crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
+  }
+  updateFileEditorToolbarSeparators(panel);
+  if (state.kind === 'image') {
+    updateImageViewerThemeButton(themeButton);
+    setEditorContentMode(content, 'edit');
+    destroyCodeMirrorPanel(panel);
+    if (rawPane) rawPane.hidden = true;
+    if (codeMirrorPane) codeMirrorPane.hidden = true;
+    if (previewPane) previewPane.hidden = true;
+    panel.classList.remove('syntax-highlighted');
+    if (imagePane) {
+      imagePane.hidden = false;
+      renderFileEditorImagePane(imagePane, path, state, (message, level) => setFileEditorPanelStatus(panel, message, level));
+    }
+    return;
+  }
+  if (imagePane) {
+    disconnectFileEditorImageObserver(imagePane);
+    imagePane.hidden = true;
+    imagePane.replaceChildren();
+  }
+  const mode = editorViewModeFor(path, item);
+  setEditorContentMode(content, mode);
+  panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
+  panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
+  if (mode === 'preview') {
+    destroyCodeMirrorPanel(panel);
+    if (rawPane) rawPane.hidden = true;
+    if (codeMirrorPane) codeMirrorPane.hidden = true;
+    panel.classList.remove('syntax-highlighted');
+    if (previewPane) {
+      previewPane.hidden = false;
+      renderEditorPreviewPane(previewPane, path, state.content);
+    }
+  } else {
+    if (rawPane) rawPane.hidden = true;
+    if (previewPane) {
+      previewPane.hidden = mode !== 'split';
+      if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content);
+    }
+    panel.classList.remove('syntax-highlighted');
+    ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
+      if (!loaded) renderFileEditorRawPane(rawPane, path, state.content);
+    });
+  }
+  const status = openFileStatus(state);
+  setFileEditorPanelStatus(panel, status.message, status.level);
+  focusFileEditorPanelIfReady(panel, item);
+}
+
+function loadFileEditorState(path, panel, item) {
+  const state = openFiles.get(path);
+  if (!state || state.loadingPromise) return;
+  state.loadingPromise = (async () => {
+    const ext = fileExtensionOf(basenameOf(path));
+    if (IMAGE_EXTENSIONS.has(ext)) {
+      const fetched = await fetchFileEntryStatus(path);
+      const entry = fetched.entry;
+      if (!entry) {
+        if (fetched.missing) markOpenFileMissing(path);
+        else openFiles.set(path, fileErrorState(fetched.error || 'failed to inspect image'));
+        renderSessionButtons();
+        renderPaneTabStrips();
+        return;
+      }
+      if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
+        const state = tooLargeFileState(Number(entry.size));
+        state.mtime = entry?.mtime || 0;
+        openFiles.set(path, state);
+      } else {
+        openFiles.set(path, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
+      }
+      renderFileEditorPanel(panel, item);
+      renderSessionButtons();
+      renderPaneTabStrips();
+      return;
+    }
+    try {
+      const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const message = String(payload.error || response.status);
+        openFiles.set(path, response.status === 413
+          ? tooLargeFileState(null, message)
+          : response.status === 404
+            ? missingFileState(message)
+            : fileErrorState(message));
+      } else {
+        const payload = await response.json();
+        openFiles.set(path, {
+          mtime: payload.mtime,
+          size: payload.size,
+          kind: 'text',
+          original: payload.content,
+          content: payload.content,
+          dirty: false,
+        });
+      }
+    } catch (err) {
+      openFiles.set(path, fileErrorState(err));
+    }
+    renderFileEditorPanel(panel, item);
+    renderSessionButtons();
+    renderPaneTabStrips();
+  })();
+}
+
+function updateFileEditorPanelChrome(panel, path) {
+  const state = openFiles.get(path);
+  const item = panel?.dataset?.layoutItem || '';
+  const previewOnly = isFilePreviewItem(item);
+  panel.classList.toggle('dirty', !!state?.dirty);
+  const dirtyDot = panel.querySelector('.file-editor-title .file-tab-dirty');
+  if (dirtyDot) dirtyDot.hidden = !state?.dirty;
+  const nameNode = panel.querySelector('.file-editor-title-name');
+  if (nameNode) nameNode.textContent = basenameOf(path);
+  const saveButton = panel.querySelector('.file-editor-save-panel');
+  if (saveButton) {
+    saveButton.hidden = previewOnly || readOnlyMode || state?.kind !== 'text';
+    saveButton.disabled = !state?.dirty;
+  }
+  const reloadButton = panel.querySelector('.file-editor-reload-panel');
+  if (reloadButton) {
+    reloadButton.hidden = previewOnly || !(state?.externalChanged || state?.externalMissing || state?.externalError);
+  }
+  updateFileEditorToolbarSeparators(panel);
+}
+
+function fileEditorToolbarControlVisible(panel, selector) {
+  const node = panel?.querySelector(selector);
+  return !!node && node.hidden !== true;
+}
+
+function setFileEditorToolbarSeparator(panel, key, visible) {
+  const separator = panel?.querySelector(`[data-editor-toolbar-separator="${key}"]`);
+  if (separator) separator.hidden = !visible;
+}
+
+function updateFileEditorToolbarSeparators(panel) {
+  const mode = fileEditorToolbarControlVisible(panel, '.file-editor-mode-control-panel');
+  const tools = [
+    '.file-editor-gutter-panel',
+    '.file-editor-wrap-panel',
+    '.file-editor-find-panel',
+  ].some(selector => fileEditorToolbarControlVisible(panel, selector));
+  const side = fileEditorToolbarControlVisible(panel, '.file-editor-cross-split-panel');
+  const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel')
+    || fileEditorToolbarControlVisible(panel, '.file-editor-reload-panel');
+  const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
+  const frame = true;
+  setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || side || theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'tools', tools && (side || theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'side', side && (theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'theme', theme && (save || frame));
+  setFileEditorToolbarSeparator(panel, 'save', save && frame);
+}
+
+function setFileEditorPanelStatus(panel, message, level) {
+  const status = panel?.querySelector?.('.file-editor-status-panel');
+  if (!status) return;
+  let messageNode = status.querySelector('.file-editor-status-message');
+  if (!messageNode) {
+    status.textContent = '';
+    messageNode = document.createElement('span');
+    messageNode.className = 'file-editor-status-message';
+    const cursorNode = document.createElement('span');
+    cursorNode.className = 'file-editor-cursor-status';
+    status.append(messageNode, cursorNode);
+  }
+  messageNode.textContent = message || '';
+  status.dataset.level = level || '';
+  updateCodeMirrorCursorStatus(panel);
+}
+
+function markdownTextWithSourceAnchors(text) {
+  let inFence = false;
+  return String(text || '').split('\n').map((line, index) => {
+    const fence = /^\s*(```|~~~)/.test(line);
+    const includeAnchor = !inFence && !fence && line.trim();
+    const anchored = includeAnchor ? `${line}<span class="markdown-source-anchor" data-source-line="${index + 1}"></span>` : line;
+    if (fence) inFence = !inFence;
+    return anchored;
+  }).join('\n');
+}
+
+function renderMarkdownPreviewInto(container, text) {
+  if (typeof window.marked === 'undefined') {
+    container.textContent = 'marked.js not loaded (offline CDN?)';
+    return;
+  }
+  container.innerHTML = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+  if (typeof window.hljs !== 'undefined') {
+    container.querySelectorAll('pre code').forEach(block => {
+      try { window.hljs.highlightElement(block); } catch (_) {}
+    });
+  }
+}
+
+function isMarkdownPath(path) {
+  const lower = String(path || '').toLowerCase();
+  return lower.endsWith('.md') || lower.endsWith('.markdown');
+}
+
+function isHtmlPath(path) {
+  const lower = String(path || '').toLowerCase();
+  return lower.endsWith('.html') || lower.endsWith('.htm');
+}
+
+function editorPreviewModeAvailable(path) {
+  return isMarkdownPath(path) || isHtmlPath(path);
+}
+
+function editorVisualLineFragments(line, columnCount, wrapEnabled = fileEditorWrapEnabled) {
+  const text = String(line ?? '');
+  const width = Math.floor(Number(columnCount) || 0);
+  if (!wrapEnabled || width <= 0 || text.length <= width) return [text];
+  const fragments = [];
+  for (let index = 0; index < text.length; index += width) {
+    fragments.push(text.slice(index, index + width));
+  }
+  return fragments.length ? fragments : [''];
+}
+
+function simpleLineSyntaxHtml(language, line) {
+  const highlighted = simpleCodeSyntaxHtml(language, line);
+  return highlighted === null ? esc(line) : highlighted;
+}
+
+function editorVisualHighlightHtml(language, text, options = {}) {
+  const source = String(text ?? '');
+  const wrapEnabled = options.wrap === true;
+  const lineNumbers = options.lineNumbers === true;
+  const columnCount = options.columnCount || 88;
+  const measuredRows = Array.isArray(options.visualRows) ? options.visualRows : null;
+  const rows = source.split('\n');
+  return rows.map((line, lineIndex) => {
+    const fragments = measuredRows?.[lineIndex] || editorVisualLineFragments(line, columnCount, wrapEnabled);
+    return fragments.map((fragment, fragmentIndex) => {
+      const sourceLine = lineIndex + 1;
+      const continuation = fragmentIndex > 0;
+      const rowClass = continuation ? 'editor-visual-line continuation' : 'editor-visual-line';
+      const lineNumber = lineNumbers && !continuation ? String(sourceLine) : '';
+      const marker = wrapEnabled && continuation ? '↪' : '';
+      const code = simpleLineSyntaxHtml(language, fragment);
+      return `<span class="${rowClass}" data-source-line="${sourceLine}"><span class="editor-line-number">${esc(lineNumber)}</span><span class="editor-soft-wrap-marker">${esc(marker)}</span><span class="editor-line-code">${code}</span></span>`;
+    }).join('');
+  }).join('') || '<span class="editor-visual-line" data-source-line="1"><span class="editor-line-number">1</span><span class="editor-soft-wrap-marker"></span><span class="editor-line-code"></span></span>';
+}
+
+function renderEditorCodePreviewInto(container, path, text) {
+  const language = syntaxLanguageForPath(path);
+  const pre = document.createElement('pre');
+  pre.className = ['file-editor-code-preview', 'editor-wrap', fileEditorLineNumbersEnabled ? 'editor-line-numbers' : ''].filter(Boolean).join(' ');
+  const code = document.createElement('code');
+  code.className = `language-${language || 'text'} editor-highlight-code`;
+  code.innerHTML = editorVisualHighlightHtml(language, text, {
+    wrap: true,
+    lineNumbers: fileEditorLineNumbersEnabled,
+    columnCount: 96,
+  });
+  pre.appendChild(code);
+  container.replaceChildren(pre);
+}
+
+function renderHtmlPreviewInto(container, text) {
+  const frame = document.createElement('iframe');
+  frame.className = 'file-editor-html-preview';
+  frame.setAttribute('sandbox', '');
+  frame.setAttribute('title', 'HTML preview');
+  frame.srcdoc = String(text ?? '');
+  container.replaceChildren(frame);
+}
+
+function renderEditorPreviewPane(container, path, text) {
+  if (!container) return;
+  container.classList.toggle('markdown-body', isMarkdownPath(path));
+  container.classList.toggle('html-preview-body', isHtmlPath(path));
+  container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
+  if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text);
+  else if (isHtmlPath(path)) renderHtmlPreviewInto(container, text);
+  else renderEditorCodePreviewInto(container, path, text);
+}
+
+function markdownInlineHighlightHtml(escaped) {
+  return escaped
+    .replace(/(`[^`]+`)/g, '<span class="md-code">$1</span>')
+    .replace(/(\*\*[^*]+\*\*|__[^_]+__)/g, '<span class="md-bold">$1</span>')
+    .replace(/(\[[^\]]+\]\([^)]+\))/g, '<span class="md-link">$1</span>')
+    .replace(/(&lt;\/?[A-Za-z][^&]*?&gt;)/g, '<span class="md-html">$1</span>')
+    .replace(/(^|[^\w*])(\*[^*\s][^*]*\*|_[^_\s][^_]*_)/g, '$1<span class="md-italic">$2</span>');
+}
+
+function markdownSyntaxHtml(text) {
+  let inFence = false;
+  return String(text || '').split('\n').map(line => {
+    const escaped = esc(line);
+    const fence = /^\s*(```|~~~)/.test(line);
+    if (fence) {
+      inFence = !inFence;
+      return `<span class="md-fence">${escaped}</span>`;
+    }
+    if (inFence) return `<span class="md-codeblock">${escaped}</span>`;
+    const heading = line.match(/^(\s{0,3})(#{1,6})(\s+.*)$/);
+    if (heading) return `<span class="md-heading md-heading-${heading[2].length}">${escaped}</span>`;
+    const quote = escaped.match(/^(\s*&gt;\s?)(.*)$/);
+    if (quote) return `<span class="md-blockquote">${escaped}</span>`;
+    const list = escaped.match(/^(\s*(?:[-*+]|\d+\.)\s+)(.*)$/);
+    if (list) return `<span class="md-list-marker">${list[1]}</span>${markdownInlineHighlightHtml(list[2])}`;
+    return markdownInlineHighlightHtml(escaped);
+  }).join('\n');
+}
+
+function simpleTokenHighlightHtml(raw, rules) {
+  const text = String(raw || '');
+  let html = '';
+  let index = 0;
+  while (index < text.length) {
+    let best = null;
+    for (let ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
+      const rule = rules[ruleIndex];
+      rule.regex.lastIndex = index;
+      const match = rule.regex.exec(text);
+      if (!match || !match[0]) continue;
+      const candidate = {rule, ruleIndex, index: match.index, text: match[0]};
+      if (!best
+        || candidate.index < best.index
+        || (candidate.index === best.index && candidate.ruleIndex < best.ruleIndex)) {
+        best = candidate;
+      }
+    }
+    if (!best) {
+      html += esc(text.slice(index));
+      break;
+    }
+    html += esc(text.slice(index, best.index));
+    html += `<span class="${best.rule.className}">${esc(best.text)}</span>`;
+    index = best.index + best.text.length;
+  }
+  return html;
+}
+
+function simpleCodeSyntaxHtml(language, text) {
+  if (language === 'markdown') return markdownSyntaxHtml(text);
+  const stringRule = {regex: /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, className: 'code-string'};
+  const numberRule = {regex: /\b\d+(?:\.\d+)?\b/g, className: 'code-number'};
+  const shellRules = [
+    stringRule,
+    {regex: /#[^\n]*/g, className: 'code-comment'},
+    {regex: /\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\$[0-9@#?*!-]/g, className: 'code-variable'},
+    {regex: /\b(?:if|then|else|elif|fi|for|in|do|done|while|case|esac|function|export|local|readonly|return|exit|set|unset|trap|source)\b/g, className: 'code-keyword'},
+    {regex: /\b(?:awk|cat|cd|chmod|chown|cp|curl|docker|echo|find|git|grep|head|jq|ls|mkdir|mv|node|npm|python|python3|rg|rm|sed|ssh|tail|tar|tee|test|touch|xargs)\b/g, className: 'code-builtin'},
+    numberRule,
+  ];
+  const pythonRules = [
+    stringRule,
+    {regex: /#[^\n]*/g, className: 'code-comment'},
+    {regex: /@\w+/g, className: 'code-function'},
+    {regex: /\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b/g, className: 'code-keyword'},
+    {regex: /\b(?:False|None|True|self|cls)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const jsRules = [
+    {regex: /`(?:\\.|[^`\\])*`|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, className: 'code-string'},
+    {regex: /\/\/[^\n]*|\/\*.*?\*\//g, className: 'code-comment'},
+    {regex: /\b(?:async|await|break|case|catch|class|const|continue|default|delete|do|else|export|extends|finally|for|from|function|if|import|in|instanceof|let|new|of|return|switch|throw|try|typeof|var|void|while|yield)\b/g, className: 'code-keyword'},
+    {regex: /\b(?:false|null|true|undefined|this|super)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const rustRules = [
+    stringRule,
+    {regex: /\/\/[^\n]*|\/\*.*?\*\//g, className: 'code-comment'},
+    {regex: /\b(?:as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while)\b/g, className: 'code-keyword'},
+    {regex: /\b(?:bool|char|f32|f64|i8|i16|i32|i64|i128|isize|str|u8|u16|u32|u64|u128|usize|String|Vec|Option|Result)\b/g, className: 'code-type'},
+    {regex: /\b[A-Za-z_][A-Za-z0-9_]*!/g, className: 'code-function'},
+    numberRule,
+  ];
+  const xmlRules = [
+    {regex: /<!--.*?-->/g, className: 'code-comment'},
+    {regex: /<\/?[A-Za-z][^>]*?>/g, className: 'code-tag'},
+    stringRule,
+  ];
+  const jsonRules = [
+    {regex: /"(?:\\.|[^"\\])*"(?=\s*:)/g, className: 'code-attr'},
+    stringRule,
+    {regex: /\b(?:false|null|true)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const cssRules = [
+    {regex: /\/\*.*?\*\//g, className: 'code-comment'},
+    stringRule,
+    {regex: /#[0-9A-Fa-f]{3,8}\b/g, className: 'code-number'},
+    {regex: /[A-Za-z-]+(?=\s*:)/g, className: 'code-attr'},
+    {regex: /\b(?:auto|block|flex|grid|hidden|inline|none|relative|absolute|fixed|solid|transparent|inherit|initial|unset)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const yamlRules = [
+    {regex: /#[^\n]*/g, className: 'code-comment'},
+    stringRule,
+    {regex: /^[\s-]*[A-Za-z0-9_.-]+(?=\s*:)/gm, className: 'code-attr'},
+    {regex: /\b(?:false|null|true|yes|no|on|off)\b/g, className: 'code-constant'},
+    numberRule,
+  ];
+  const rulesByLanguage = new Map([
+    ['bash', shellRules],
+    ['css', cssRules],
+    ['ini', yamlRules],
+    ['javascript', jsRules],
+    ['json', jsonRules],
+    ['python', pythonRules],
+    ['rust', rustRules],
+    ['typescript', jsRules],
+    ['xml', xmlRules],
+    ['yaml', yamlRules],
+  ]);
+  const rules = rulesByLanguage.get(language);
+  if (!rules) return null;
+  return String(text || '').split('\n').map(line => simpleTokenHighlightHtml(line, rules)).join('\n');
+}
+
+function syntaxLanguageForPath(path) {
+  const name = basenameOf(path).toLowerCase();
+  const dot = name.lastIndexOf('.');
+  const ext = dot === -1 ? '' : name.slice(dot);
+  if (syntaxLanguageByExtension.has(ext)) return syntaxLanguageByExtension.get(ext);
+  if (name === 'dockerfile') return 'dockerfile';
+  if (name === 'makefile') return 'makefile';
+  return '';
+}
+
+function previewSourceLineAnchors(previewPane) {
+  return Array.from(previewPane?.querySelectorAll?.('[data-source-line]') || [])
+    .map(element => ({element, line: Number(element.dataset.sourceLine)}))
+    .filter(item => Number.isFinite(item.line) && item.line > 0);
+}
+
+function previewAnchorForSourceLine(previewPane, sourceLine) {
+  const target = Math.max(1, Math.floor(Number(sourceLine) || 1));
+  const anchors = previewSourceLineAnchors(previewPane);
+  let best = null;
+  for (const item of anchors) {
+    if (item.line > target) break;
+    best = item;
+  }
+  return best || anchors[0] || null;
+}
+
+function scrollPreviewToSourceLine(previewPane, sourceLine) {
+  const anchor = previewAnchorForSourceLine(previewPane, sourceLine);
+  if (!anchor) return false;
+  previewPane.scrollTop = Math.max(0, anchor.element.offsetTop - 4);
+  return true;
+}
+
+function previewSourceLineForScroll(previewPane) {
+  const anchors = previewSourceLineAnchors(previewPane);
+  if (!anchors.length) return null;
+  const top = (previewPane?.scrollTop || 0) + 6;
+  let best = anchors[0];
+  for (const item of anchors) {
+    if (item.element.offsetTop > top) break;
+    best = item;
+  }
+  return best.line;
+}
+
+function nowMs() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
+function fileEditorScrollSyncBlocked(panel) {
+  return Boolean(panel?._splitScrollSyncing || Number(panel?._splitScrollSuppressUntil || 0) > nowMs());
+}
+
+function setFileEditorScrollSyncGuard(...panels) {
+  const until = nowMs() + fileEditorScrollSyncSuppressMs;
+  for (const panel of panels) {
+    if (!panel) continue;
+    panel._splitScrollSyncing = true;
+    panel._splitScrollSuppressUntil = Math.max(Number(panel._splitScrollSuppressUntil || 0), until);
+    const release = () => {
+      panel._splitScrollSyncing = false;
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => setTimeout(release, 0));
+    else setTimeout(release, 0);
+  }
+}
+
+function elementCanScroll(element) {
+  return Boolean(element && Math.max(0, element.scrollHeight - element.clientHeight) > 1);
+}
+
+function fileEditorPanelItem(panel) {
+  return panel?.dataset?.layoutItem || '';
+}
+
+function fileEditorPanelPath(panel) {
+  return panel?.dataset?.filePath || '';
+}
+
+function fileEditorPanelMode(panel) {
+  const path = fileEditorPanelPath(panel);
+  return editorViewModeFor(path, fileEditorPanelItem(panel));
+}
+
+function fileEditorPanelScroller(panel) {
+  if (panel?._cmView?.scrollDOM) return panel._cmView.scrollDOM;
+  return null;
+}
+
+function fileEditorPanelPreviewPane(panel) {
+  const previewPane = panel?.querySelector?.('.file-editor-preview-pane-panel');
+  return previewPane && !previewPane.hidden ? previewPane : null;
+}
+
+function fileEditorSourceElement(panel, source) {
+  return source === 'preview' ? fileEditorPanelPreviewPane(panel) : fileEditorPanelScroller(panel);
+}
+
+function fileEditorSourceCanDrive(panel, source) {
+  return elementCanScroll(fileEditorSourceElement(panel, source));
+}
+
+function fileEditorSourceLineForScroll(panel, source) {
+  if (source === 'preview') return previewSourceLineForScroll(fileEditorPanelPreviewPane(panel));
+  if (panel?._cmView) {
+    try {
+      const block = panel._cmView.lineBlockAtHeight(panel._cmView.scrollDOM.scrollTop);
+      return panel._cmView.state.doc.lineAt(block.from).number;
+    } catch (_) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function scrollFileEditorPanelToSourceLine(panel, source, line) {
+  if (!panel || !line) return false;
+  setFileEditorScrollSyncGuard(panel);
+  if (source === 'preview') {
+    const previewPane = fileEditorPanelPreviewPane(panel);
+    return previewPane ? scrollPreviewToSourceLine(previewPane, line) : false;
+  }
+  if (panel._cmView) {
+    try {
+      const docLine = panel._cmView.state.doc.line(Math.min(line, panel._cmView.state.doc.lines));
+      const scrollEffect = panel._cmView.constructor?.scrollIntoView?.(docLine.from, {y: 'start'});
+      if (scrollEffect) panel._cmView.dispatch({effects: scrollEffect});
+      else return false;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  return false;
+}
+
+function fileEditorPanelsForPath(path) {
+  return filePanelItemsForPath(path)
+    .map(item => panelNodes.get(item))
+    .filter(panel => panel && panel.isConnected !== false);
+}
+
+function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (panel === sourcePanel) continue;
+    const mode = fileEditorPanelMode(panel);
+    if (mode !== 'preview' && mode !== 'split') continue;
+    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, content);
+  }
+}
+
+function syncCrossPaneFileEditorScroll(host, source) {
+  const path = fileEditorPanelPath(host);
+  if (!path || !fileEditorSourceCanDrive(host, source)) return;
+  const line = fileEditorSourceLineForScroll(host, source);
+  if (!line) return;
+  const preferredTarget = source === 'preview' ? 'editor' : 'preview';
+  const fallbackTarget = preferredTarget === 'editor' ? 'preview' : 'editor';
+  for (const panel of fileEditorPanelsForPath(path)) {
+    if (panel === host || fileEditorScrollSyncBlocked(panel)) continue;
+    if (scrollFileEditorPanelToSourceLine(panel, preferredTarget, line)) continue;
+    scrollFileEditorPanelToSourceLine(panel, fallbackTarget, line);
+  }
+}
+
+function syncFileEditorInPaneSplitScroll(host, source) {
+  const content = host.querySelector?.('.file-editor-content');
+  if (!content?.classList?.contains('split-preview')) return false;
+  const cmView = host._cmView || null;
+  const editorScroller = cmView?.scrollDOM || null;
+  const previewPane = host.querySelector?.('.file-editor-preview-pane-panel');
+  if (!editorScroller || !previewPane || previewPane.hidden) return false;
+  if (!cmView) return false;
+  if (!fileEditorSourceCanDrive(host, source)) return false;
+  const from = source === 'preview' ? previewPane : editorScroller;
+  const to = source === 'preview' ? editorScroller : previewPane;
+  const maxFromTop = Math.max(1, from.scrollHeight - from.clientHeight);
+  const maxToTop = Math.max(0, to.scrollHeight - to.clientHeight);
+  const maxFromLeft = Math.max(1, from.scrollWidth - from.clientWidth);
+  const maxToLeft = Math.max(0, to.scrollWidth - to.clientWidth);
+  setFileEditorScrollSyncGuard(host);
+  try {
+    if (source === 'preview') {
+      const line = previewSourceLineForScroll(previewPane);
+      if (line && cmView) {
+        const docLine = cmView.state.doc.line(Math.min(line, cmView.state.doc.lines));
+        const scrollEffect = cmView.constructor?.scrollIntoView?.(docLine.from, {y: 'start'});
+        if (scrollEffect) cmView.dispatch({effects: scrollEffect});
+        else to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
+      } else {
+        to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
+      }
+    } else if (cmView) {
+      let line = null;
+      try {
+        const block = cmView.lineBlockAtHeight(cmView.scrollDOM.scrollTop);
+        line = cmView.state.doc.lineAt(block.from).number;
+      } catch (_) {}
+      if (!line || !scrollPreviewToSourceLine(previewPane, line)) {
+        to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
+      }
+    }
+    to.scrollLeft = Math.round((from.scrollLeft / maxFromLeft) * maxToLeft);
+  } finally {}
+  return true;
+}
+
+function syncFileEditorSplitScroll(host, source) {
+  if (!host || fileEditorScrollSyncBlocked(host)) return;
+  const canDrive = fileEditorSourceCanDrive(host, source);
+  if (!canDrive) return;
+  syncFileEditorInPaneSplitScroll(host, source);
+  syncCrossPaneFileEditorScroll(host, source);
+}
+
+function refreshEditorPreviews() {
+  for (const [item, panel] of panelNodes.entries()) {
+    if (!isFileEditorItem(item)) continue;
+    const path = fileItemPath(item);
+    const state = openFiles.get(path);
+    if (state?.kind === 'text') {
+      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    }
+  }
+}
+
+window.addEventListener('load', refreshEditorPreviews);
+
+async function saveFileEditor(path, panel, options = {}) {
+  if (readOnlyMode) return false;
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return false;
+  syncOpenFileContentFromPanels(path, panel);
+  if (!options.force && (state.externalChanged || state.externalMissing)) {
+    clearFileAutosaveTimer(path);
+    return showFileSaveConflictDialog(path, panel);
+  }
+  if (!state.dirty && options.force !== true) return true;
+  setFileEditorPanelStatus(panel, options.autosave ? 'auto-saving...' : 'saving...', '');
+  try {
+    const body = {
+      path,
+      content: state.content,
+    };
+    if (options.force !== true) body.expected_mtime = state.mtime;
+    const response = await apiFetch('/api/fs/write', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 409) {
+        setFileEditorPanelStatus(panel, 'save conflict: file changed on disk', 'warn');
+        return showFileSaveConflictDialog(path, panel, {message: payload.error || ''});
+      }
+      setFileEditorPanelStatus(panel, `save failed: ${payload.error || response.status}`, 'error');
+      return false;
+    }
+    const payload = await response.json();
+    state.mtime = payload.mtime;
+    state.size = payload.size;
+    state.original = state.content;
+    state.dirty = false;
+    clearFileAutosaveTimer(path);
+    clearOpenFileExternalState(state);
+    if (payload.yolo_rules) {
+      yoloRulesPayload = payload.yolo_rules;
+      renderPreferencesPanels();
+    }
+    for (const openPanel of fileEditorPanelsForPath(path)) {
+      updateFileEditorPanelChrome(openPanel, path);
+      setFileEditorPanelStatus(openPanel, `${options.autosave ? 'auto-saved' : 'saved'} (${payload.size} bytes)`, 'ok');
+    }
+    renderSessionButtons();
+    renderPaneTabStrips();
+    return true;
+  } catch (err) {
+    setFileEditorPanelStatus(panel, `save failed: ${err}`, 'error');
+    return false;
+  }
+}

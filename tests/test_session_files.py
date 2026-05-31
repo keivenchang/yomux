@@ -3,6 +3,7 @@ import subprocess
 import time
 
 from yolomux_lib.common import AgentInfo
+from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib import session_files
 
@@ -92,3 +93,64 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert by_path["new.txt"]["added"] == 1
     assert by_path["new.txt"]["removed"] == 0
     assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2}]
+
+
+def test_session_files_payload_counts_branch_commits_since_main(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    git(repo, "branch", "-M", "main")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    git(repo, "checkout", "-b", "feature")
+    tracked.write_text("feature\n", encoding="utf-8")
+    git(repo, "commit", "-am", "feature change")
+
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text('{"msg":"*** Begin Patch\\n*** Update File: tracked.txt\\n"}\n', encoding="utf-8")
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("codex", rollout, repo)])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+    by_path = {item["path"]: item for item in payload["files"]}
+
+    assert by_path["tracked.txt"]["status"] == "M"
+    assert by_path["tracked.txt"]["added"] == 1
+    assert by_path["tracked.txt"]["removed"] == 1
+    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 1}]
+
+
+def test_session_files_payload_uses_session_repo_without_ai_attribution(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    tracked.write_text("working\n", encoding="utf-8")
+    pane = PaneInfo(
+        session="s1",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="s1:0.0",
+        current_path=str(repo),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    assert payload["files"][0]["path"] == "tracked.txt"
+    assert payload["files"][0]["source"] == "git"
+    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 0}]

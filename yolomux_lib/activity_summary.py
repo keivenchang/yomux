@@ -49,6 +49,7 @@ def activity_signature(info: SessionInfo, project: dict[str, Any], files_payload
     return {
         "session": info.session,
         "agent": agent.kind if agent else "",
+        "agent_model": agent.model if agent else "",
         "agent_status": agent.status if agent else "",
         "transcript": transcript_file_signature(agent),
         "git": {
@@ -132,6 +133,14 @@ def agent_label(agent_name: str) -> str:
     }.get(agent_name.lower(), agent_name or "No agent")
 
 
+def agent_display_label(agent: AgentInfo | None, fallback_kind: str = "") -> str:
+    label = agent_label(agent.kind if agent else fallback_kind)
+    model = (agent.model or "").strip() if agent else ""
+    if model:
+        return f"{label} {model}"
+    return label
+
+
 def repo_label(repo: str) -> str:
     return Path(repo).name if repo else "no repo"
 
@@ -149,7 +158,36 @@ def work_sentence(work: str, goal: str) -> str:
     work_text = truncate_text(work or goal, 180)
     if not work_text:
         return "It has not reported a current task yet."
+    if work and goal and work.strip() != goal.strip():
+        return f"It has worked on {work_text} for {truncate_text(goal, 120)}."
     return f"It has worked on {work_text}."
+
+
+def project_status_sentence(project: dict[str, Any], files: dict[str, Any], active: bool) -> str:
+    parts: list[str] = []
+    git = project.get("git") if isinstance(project, dict) else None
+    pr = project.get("pull_request") if isinstance(project, dict) else None
+    ci = ci_summary(project)
+    if ci:
+        parts.append(ci)
+    if isinstance(git, dict):
+        dirty_count = git.get("dirty_count")
+        ahead = git.get("ahead")
+        behind = git.get("behind")
+        if isinstance(dirty_count, int) and dirty_count > 0:
+            parts.append(f"{plural(dirty_count, 'dirty file')}")
+        if isinstance(ahead, int) and ahead > 0:
+            parts.append(f"{plural(ahead, 'commit')} ahead")
+        if isinstance(behind, int) and behind > 0:
+            parts.append(f"{plural(behind, 'commit')} behind")
+    if isinstance(pr, dict) and pr.get("url"):
+        number = pr.get("number")
+        parts.append(f"PR #{number}" if number else "PR linked")
+    if int(files.get("count") or 0) and not parts:
+        parts.append("ready for review or commit")
+    if not parts:
+        parts.append("still active" if active else "waiting for more activity")
+    return "; ".join(parts)
 
 
 def repo_names(project: dict[str, Any], files_payload: dict[str, Any]) -> list[str]:
@@ -203,18 +241,14 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
     repos = repo_names(project, files_payload)
     agent_name = agent.kind if agent else "no agent"
     state_label = "active" if activity_state.get("key") == "working" else "idle"
-    repo_text = ""
-    if repos:
-        branch = f" on {git.get('branch')}" if isinstance(git, dict) and git.get("branch") else ""
-        repo_text = f" in {repo_label(repos[0])}{branch}"
     ci = ci_summary(project)
+    status = project_status_sentence(project, files, activity_state.get("key") == "working")
     local_parts = [
-        f"{agent_label(agent_name)} is {state_label} in tmux session {info.session}{repo_text}.",
+        f"{agent_display_label(agent)} session {info.session} is {state_label}.",
         work_sentence(work, goal),
         f"The changes are {files_sentence(files)}.",
+        f"Status: {status}.",
     ]
-    if ci:
-        local_parts.append(f"{ci}.")
     local = " ".join(local_parts)
     lines = [local]
     if repos:
@@ -233,6 +267,8 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
     return {
         "session": info.session,
         "agent": agent_name,
+        "agent_model": agent.model if agent else "",
+        "agent_label": agent_display_label(agent, agent_name),
         "agent_status": agent.status if agent else "",
         "active": activity_state.get("key") == "working",
         "state": activity_state,
@@ -240,6 +276,7 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
         "goal": goal,
         "work": truncate_text(work, 220) if work else "",
         "ci": ci,
+        "status_text": status,
         "files": files,
         "file_lines": file_lines,
         "lines": lines,
@@ -278,7 +315,9 @@ def build_global_activity_summary(session_summaries: list[dict[str, Any]], error
         repo = repo_label(str(repos[0])) if repos else "no repo"
         files = item.get("files", {})
         work = item.get("work") or item.get("goal") or item.get("ci") or ""
-        lines.append(f"Session {item.get('session')}: {agent_label(str(item.get('agent') or ''))} is {status} in {repo}; {files_sentence(files)}; {truncate_text(str(work), 150)}")
+        agent_text = str(item.get("agent_label") or agent_label(str(item.get("agent") or "")))
+        status_text = str(item.get("status_text") or status)
+        lines.append(f"Session {item.get('session')}: {agent_text} is {status} in {repo}; {files_sentence(files)}; {status_text}; {truncate_text(str(work), 150)}")
     for error in errors or []:
         lines.append(f"Activity summary error: {error}")
     return {
