@@ -130,9 +130,9 @@ YOLO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser
 
 ## Code layout
 
-The main server entry point is `yolomux.py`, which delegates to `yolomux_lib/cli.py`. Request routing lives in `yolomux_lib/server.py`, application state and tmux actions live in `yolomux_lib/app.py`, and shared helpers live in smaller modules such as `metadata.py`, `sessions.py`, `transcripts.py`, `uploads.py`, `events.py`, and `websocket.py`.
+The main server entry point is `yolomux.py`, which delegates to `yolomux_lib/cli.py`. Request routing lives in `yolomux_lib/server.py`, application state and tmux actions live in `yolomux_lib/app.py`, and shared helpers live in smaller modules such as `metadata.py`, `sessions.py`, `session_files.py`, `transcripts.py`, `uploads.py`, `events.py`, and `websocket.py`.
 
-Frontend code for the interactive UI lives in `static/yolomux.js` and `static/yolomux.css`. Python keeps only the small HTML shell in `yolomux_lib/web.py`, plus bootstrap JSON and versioned static asset URLs. The read-only wall has its own frontend files, `static/tmux-wall.js` and `static/tmux-wall.css`, so `tmux_wall.py` stays focused on tmux capture, JSON endpoints, and Server-Sent Events.
+Frontend code for the interactive UI lives in `static/yolomux.js` and `static/yolomux.css`. Python keeps only the small HTML shell in `yolomux_lib/web.py`, plus bootstrap JSON and versioned static asset URLs. The main app's non-tmux tab types are centralized in the `TAB_TYPES` registry in `static/yolomux.js`; add future virtual/editor/viewer tabs there before adding scattered predicate or label branches. The read-only wall has its own frontend files, `static/tmux-wall.js` and `static/tmux-wall.css`, so `tmux_wall.py` stays focused on tmux capture, JSON endpoints, and Server-Sent Events.
 
 The standalone auto-approval detector lives in `auto_approve_tmux.py` at the repo root. YOLOmux imports it as a Python module and wraps one `AutoApproveWorker` (in `yolomux_lib/auto_approve_worker.py`) around each enabled session.
 
@@ -140,7 +140,7 @@ The standalone auto-approval detector lives in `auto_approve_tmux.py` at the rep
 
 ```bash
 python3 -m py_compile yolomux.py tmux_wall.py auto_approve_tmux.py yolomux_lib/*.py
-python3 -m pytest tests
+python3 -m pytest tests -n 4
 node --check static/yolomux.js
 node --check static/tmux-wall.js
 node tests/layout_url.test.js
@@ -157,6 +157,9 @@ All API routes require auth. Read endpoints accept `readonly` or `admin`, except
 - `GET /api/context-items?session=project1&messages=40` returns structured transcript items.
 - `GET /api/context-stream?session=project1&messages=200` streams structured transcript items with Server-Sent Events.
 - `GET /api/summary-stream?session=project1&lookback=3600` streams a Codex-generated summary with Server-Sent Events.
+- `GET /api/search?q=text&session=project1` searches captured events and current per-session summaries.
+- `GET /api/run-history` returns compact per-session history: cwd, agent, transcript mtime, repo metadata, and recent events.
+- `GET /api/session-files?session=project1&hours=24` returns repo-aware AI file changes for one session. Claude changes come from edit tool calls; Codex changes come from `apply_patch`; repo status comes from git.
 - `GET /api/auto-approve` returns YOLO status for all sessions.
 - `GET /api/auto-approve?session=project1` returns YOLO status for one session.
 - `POST /api/create-session?agent=claude`, `POST /api/create-session?agent=codex`, or `POST /api/create-session?agent=term` creates the next numbered tmux session with the selected agent, capped at nine visible sessions. Claude and Codex requests are rejected if the selected CLI is not available on the YOLOmux server PATH; `term` is available only as the fallback when neither CLI is available.

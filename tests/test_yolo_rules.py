@@ -32,6 +32,18 @@ def test_command_match_is_argv_aware():
     assert action_for("kubectl exec pod -- rm -rf /workspace", rules) == "block"
 
 
+def test_malformed_shell_quote_does_not_abort_rule_evaluation():
+    rules = ruleset({
+        "default": "approve",
+        "rules": [
+            {"name": "delete commands", "type": "command", "match": ["rm"], "action": "block", "risk": "delete"},
+        ],
+    })
+
+    assert action_for('python3 -c "from yolomux_lib.settings import settings_payload;', rules) == "approve"
+    assert action_for('rm -rf "/tmp/unclosed', rules) == "block"
+
+
 def test_match_types_and_first_match_precedence():
     rules = ruleset({
         "default": "ask",

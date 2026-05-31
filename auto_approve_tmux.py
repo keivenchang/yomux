@@ -43,6 +43,7 @@ import hashlib
 import logging
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -90,6 +91,24 @@ _SKIP_LINE = re.compile(
 _CMD_CHARS = re.compile(r"[/|&;$=(>`~]|--|\s-[a-zA-Z]")
 
 
+def _shell_text_complete(cmd_line: str) -> bool:
+    try:
+        shlex.split(cmd_line, posix=True)
+        return True
+    except ValueError:
+        return False
+
+
+def _codex_command_stop_line(line: str) -> bool:
+    stripped = line.strip()
+    return (
+        bool(_YES_SELECTOR_RE.search(line))
+        or bool(re.match(r"^[❯›]?\s*\d+\.\s+", stripped))
+        or stripped.startswith("Press enter to confirm")
+        or stripped.startswith("Press y to")
+    )
+
+
 def extract_command(pane_text: str) -> str | None:
     """Extract the pending command from pane text around a permission prompt.
 
@@ -124,7 +143,20 @@ def extract_command(pane_text: str) -> str | None:
                 # whitespace from the box layout).
                 if stripped.startswith("$ "):
                     cmd = stripped[2:].strip()
-                    return cmd or None
+                    if not cmd or "<<" in cmd or _shell_text_complete(cmd):
+                        return cmd or None
+                    parts = [cmd]
+                    for k in range(j + 1, min(j + 12, len(lines))):
+                        if _codex_command_stop_line(lines[k]):
+                            break
+                        continuation = lines[k].strip()
+                        if not continuation:
+                            continue
+                        parts.append(continuation)
+                        joined = " ".join(parts)
+                        if _shell_text_complete(joined):
+                            return joined
+                    return " ".join(parts)
                 # Stop searching once we hit the selector — the command
                 # should have appeared by then.
                 if _YES_SELECTOR_RE.search(lines[j]):
@@ -369,6 +401,14 @@ _FOOTER_LINE_RE = re.compile(
     r"^\s*(?:\? for shortcuts|Esc to cancel|Enter to select|Tab to amend|ctrl\+e to explain)",
     re.IGNORECASE,
 )
+_FOOTER_HINT_SEPARATOR_RE = re.compile(r"\s*(?:[·•]|\.(?=\s))\s*")
+_FOOTER_HINT_PART_RE = re.compile(
+    r"^(?:"
+    r"\? for shortcuts"
+    r"|(?:esc|escape|enter|return|tab|shift\+tab|ctrl\+[a-z0-9]|cmd\+[a-z0-9]|alt\+[a-z0-9]|option\+[a-z0-9]|↑|↓|←|→)\s+to\s+.+"
+    r")$",
+    re.IGNORECASE,
+)
 _QUESTION_RE = re.compile(r"(?:^|\b)(?:Q\d+\s*/\s*\d+\s*:\s*)?.+\?\s*$")
 
 
@@ -439,7 +479,7 @@ def approval_prompt_has_later_activity(visible_text: str) -> bool:
         line = lines[index]
         if _SELECTED_CHOICE_LINE_RE.search(line):
             selected_index = index
-        if _FOOTER_LINE_RE.search(line.strip()):
+        if _is_footer_hint_line(line):
             footer_index = index
 
     if selected_index < 0:
@@ -469,12 +509,26 @@ def _clean_prompt_block_line(line: str) -> str:
 
 def _is_separator_or_footer(line: str) -> bool:
     stripped = line.strip()
-    return not stripped or bool(_FOOTER_LINE_RE.search(stripped)) or bool(re.fullmatch(r"[─\-]{10,}", stripped))
+    return not stripped or _is_footer_hint_line(stripped) or bool(re.fullmatch(r"[─\-]{10,}", stripped))
+
+
+def _is_footer_hint_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if _FOOTER_LINE_RE.search(stripped):
+        return True
+    if stripped.startswith("(") and stripped.endswith(")"):
+        stripped = stripped[1:-1].strip()
+    parts = [part.rstrip(".").strip() for part in _FOOTER_HINT_SEPARATOR_RE.split(stripped)]
+    return bool(parts) and all(part and _FOOTER_HINT_PART_RE.match(part) for part in parts)
 
 
 def _is_prompt_trailing_ui_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
+        return True
+    if _is_footer_hint_line(stripped):
         return True
     if _WORKING_LINE_RE.search(line):
         return True
@@ -542,7 +596,7 @@ def visible_choice_prompt_text(visible_text: str) -> str:
         return ""
     for line in reversed(lines[:-1]):
         stripped = _clean_prompt_block_line(line)
-        if not stripped or _FOOTER_LINE_RE.search(stripped) or stripped.startswith(("keivenc@", "$ ")):
+        if not stripped or _is_footer_hint_line(stripped) or stripped.startswith(("keivenc@", "$ ")):
             continue
         if _QUESTION_RE.match(stripped):
             return stripped

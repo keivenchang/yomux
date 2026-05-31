@@ -12,6 +12,9 @@ def test_list_directory_returns_entries(tmp_path):
     (tmp_path / "sub").mkdir()
     (tmp_path / "repo").mkdir()
     (tmp_path / "repo" / ".git").mkdir()
+    (tmp_path / "repo" / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (tmp_path / "fixture").mkdir()
+    (tmp_path / "fixture" / ".git").mkdir()
     (tmp_path / "file.txt").write_text("hello", encoding="utf-8")
     (tmp_path / "big.dat").write_bytes(b"\x00" * 100)
 
@@ -24,6 +27,8 @@ def test_list_directory_returns_entries(tmp_path):
     assert names["sub"]["is_repo"] is False
     assert names["repo"]["kind"] == "dir"
     assert names["repo"]["is_repo"] is True
+    assert names["fixture"]["kind"] == "dir"
+    assert names["fixture"]["is_repo"] is False
     assert names["file.txt"]["kind"] == "file"
     assert "is_repo" not in names["file.txt"]
     assert names["file.txt"]["size"] == len("hello")

@@ -8,23 +8,27 @@ from yolomux_lib.settings import settings_payload
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
-            "appearance": {"terminal_font_size": 100, "editor_font_size": 100, "file_explorer_font_size": 1, "tab_width": 20},
-            "file_explorer": {"root_mode": "bad", "refresh_ms": 3000},
+            "appearance": {"ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "file_explorer_font_size": 1, "tab_width": 20},
+            "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "refresh_ms": 3000},
+            "editor": {"engine": "bad"},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "performance": {"metadata_refresh_ms": 15000, "pane_state_refresh_ms": 1200},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
         }
     )
 
+    assert settings["appearance"]["ui_font_size"] == 8
     assert settings["appearance"]["terminal_font_size"] == 28
     assert settings["appearance"]["editor_font_size"] == 28
     assert settings["appearance"]["file_explorer_font_size"] == 8
     assert settings["appearance"]["tab_width"] == 120
     assert settings["file_explorer"]["root_mode"] == "fixed"
-    assert settings["file_explorer"]["refresh_ms"] == 3001
+    assert settings["file_explorer"]["image_open_mode"] == "same-tab"
+    assert settings["editor"]["engine"] == "codemirror"
+    assert settings["file_explorer"]["refresh_ms"] == 3000
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
-    assert settings["performance"]["metadata_refresh_ms"] == 15001
-    assert settings["performance"]["pane_state_refresh_ms"] == 1201
+    assert settings["performance"]["metadata_refresh_ms"] == 15000
+    assert settings["performance"]["pane_state_refresh_ms"] == 1200
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False
 

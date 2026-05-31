@@ -84,3 +84,26 @@ class EventLog:
             return []
         return list(keep)
 
+    def search(self, query: str, session: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        needle = query.strip().lower()
+        if not needle:
+            return []
+        bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
+        keep: collections.deque[dict[str, Any]] = collections.deque(maxlen=bounded_limit)
+        try:
+            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if session and event.get("session") not in {session, ""}:
+                        continue
+                    text = json.dumps(event, sort_keys=True, ensure_ascii=False).lower()
+                    if needle in text:
+                        keep.append(event)
+        except OSError:
+            return []
+        return list(keep)

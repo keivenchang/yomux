@@ -304,6 +304,33 @@ class Handler(BaseHTTPRequestHandler):
             payload, status = self.server.app.events_payload(session, limit)
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/search":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [None])[0]
+            query = qs.get("q", [""])[0]
+            try:
+                limit = int(qs.get("limit", ["100"])[0])
+            except ValueError:
+                limit = 100
+            payload, status = self.server.app.search_payload(query, session, limit)
+            self.write_json(payload, status=status)
+            return
+        if parsed.path == "/api/run-history":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [None])[0]
+            payload, status = self.server.app.run_history_payload(session)
+            self.write_json(payload, status=status)
+            return
+        if parsed.path == "/api/session-files":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [None])[0]
+            try:
+                hours = float(qs.get("hours", ["24"])[0])
+            except ValueError:
+                hours = 24.0
+            payload, status = self.server.app.session_files_payload(session, hours)
+            self.write_json(payload, status=status)
+            return
         if parsed.path == "/api/summary":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]

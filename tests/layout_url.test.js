@@ -64,15 +64,56 @@ class TestElement {
     this.innerHTML = '';
     this.textContent = '';
     this.removed = false;
+    this.parentElement = null;
+    this.scrollTop = 0;
+    this.clientHeight = 200;
+    this.isConnected = true;
     this.rect = {width: 1200, height: 800, left: 0, top: 0, right: 1200, bottom: 800};
     this.style = new TestStyle();
     this.classList = new TestClassList();
   }
 
+  get className() { return Array.from(this.classList.names).join(' '); }
+  set className(value) {
+    this.classList = new TestClassList();
+    String(value || '').split(/\s+/).filter(Boolean).forEach(name => this.classList.add(name));
+  }
+
   addEventListener() {}
   removeEventListener() {}
-  append(...nodes) { this.children.push(...nodes); }
-  appendChild(node) { this.children.push(node); return node; }
+  append(...nodes) { nodes.forEach(node => this.appendChild(node)); }
+  appendChild(node) {
+    node.parentElement = this;
+    this.children.push(node);
+    return node;
+  }
+  insertBefore(node, before) {
+    const existingIndex = this.children.indexOf(node);
+    if (existingIndex >= 0) this.children.splice(existingIndex, 1);
+    const index = before ? this.children.indexOf(before) : -1;
+    node.parentElement = this;
+    if (index >= 0) this.children.splice(index, 0, node);
+    else this.children.push(node);
+    return node;
+  }
+  insertAdjacentElement(position, node) {
+    if (position !== 'afterend' || !this.parentElement) return this.appendChild(node);
+    const siblings = this.parentElement.children;
+    const existingIndex = siblings.indexOf(node);
+    if (existingIndex >= 0) siblings.splice(existingIndex, 1);
+    const index = siblings.indexOf(this);
+    node.parentElement = this.parentElement;
+    siblings.splice(index + 1, 0, node);
+    return node;
+  }
+  get lastElementChild() {
+    return this.children[this.children.length - 1] || null;
+  }
+  get nextElementSibling() {
+    const siblings = this.parentElement?.children || [];
+    const index = siblings.indexOf(this);
+    return index >= 0 ? siblings[index + 1] || null : null;
+  }
   cloneNode() {
     const clone = new TestElement(`${this.id}-clone`);
     clone.dataset = {...this.dataset};
@@ -85,14 +126,72 @@ class TestElement {
   contains(node) { return node === this || this.children.includes(node); }
   getBoundingClientRect() { return this.rect; }
   insertAdjacentHTML() {}
-  querySelector() { return null; }
-  querySelectorAll() { return []; }
-  remove() { this.removed = true; }
+  matches(selector) {
+    const dataPaneTabMatch = selector.match(/^\.pane-tab\[data-pane-tab="([^"]+)"\]$/);
+    if (dataPaneTabMatch) {
+      return this.classList.contains('pane-tab') && this.dataset.paneTab === dataPaneTabMatch[1];
+    }
+    if (selector === '[role="tree"]') return this.attributes.role === 'tree';
+    if (selector === '.file-explorer-tree-panel') return this.classList.contains('file-explorer-tree-panel');
+    if (selector === '.file-tree-row[data-path]') return this.classList.contains('file-tree-row') && Boolean(this.dataset.path);
+    if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
+    return false;
+  }
+  closest(selector) {
+    let node = this;
+    while (node) {
+      if (node.matches(selector)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+  querySelector(selector) {
+    if (selector.startsWith(':scope > .')) {
+      const className = selector.slice(':scope > .'.length);
+      if (className.includes('[')) {
+        return this.children.find(child => child.matches(`.${className}`)) || null;
+      }
+      return this.children.find(child => child.classList?.contains(className)) || null;
+    }
+    return this.querySelectorAll(selector)[0] || null;
+  }
+  querySelectorAll(selector) {
+    if (selector.startsWith(':scope > .')) {
+      const className = selector.slice(':scope > .'.length);
+      const scopedSelector = className.includes('[') ? `.${className}` : null;
+      return this.children.filter(child => (
+        scopedSelector ? child.matches(scopedSelector) : child.classList?.contains(className)
+      ));
+    }
+    const matches = [];
+    const visit = node => {
+      for (const child of node.children || []) {
+        if (child.matches(selector)) matches.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return matches;
+  }
+  remove() {
+    this.removed = true;
+    if (this.parentElement) {
+      const index = this.parentElement.children.indexOf(this);
+      if (index >= 0) this.parentElement.children.splice(index, 1);
+    }
+    this.parentElement = null;
+  }
   scrollIntoView() {}
   getAttribute(name) { return this.attributes[name]; }
   hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); }
   removeAttribute(name) { delete this.attributes[name]; }
-  replaceChildren(...nodes) { this.children = nodes; }
+  replaceChildren(...nodes) {
+    this.children.forEach(node => {
+      node.parentElement = null;
+    });
+    this.children = [];
+    nodes.forEach(node => this.appendChild(node));
+  }
   setAttribute(name, value) { this.attributes[name] = String(value); }
 }
 
@@ -162,15 +261,21 @@ globalThis.__layoutTestApi = {
   createAppMenuCommand,
   backgroundTabItems,
   canPaneExpand,
+  codeMirrorHtmlSemanticEmphasisExtension,
+  codeMirrorSearchMatches,
+  codeMirrorSearchMatchSummary,
   emptyPlaceholderPaneState,
   emptyLayoutSlots,
   fileEditorPaneTabHtml,
+  changesPaneTabHtml,
+  changesPanelHtml,
   fitAppMenuPopover,
   finderDirectoryForItem,
   finderTargetPathForItem,
   activeFinderDirectoryPath,
   activeFinderTargetPath,
   activeTmuxDirectoryPath,
+  cancelPendingFileExplorerActiveSync,
   fileExplorerRootForOpen,
   fileExplorerRootModeValue,
   setFileExplorerRootMode,
@@ -199,6 +304,8 @@ globalThis.__layoutTestApi = {
   activatePaneTab,
   currentSessionActionTarget,
   setFocusedPanelItem,
+  setAutoFocusEnabledForTest(value) { autoFocusEnabled = Boolean(value); },
+  focusTerminalWhenAutoFocus,
   tmuxSessionActionCommands,
   tmuxSessionViewCommands,
   tmuxSessionNameError,
@@ -212,6 +319,10 @@ globalThis.__layoutTestApi = {
   pathIsInsideDirectory,
   scrollFileTreeRowIntoView,
   bindPaneTabStrip,
+  paneTabShouldPreserve,
+  restorePaneTabPopover,
+  syncPreservedPaneTab,
+  paneTabPopoverItemToRestore,
   clearPaneTabDropPreview,
   showSessionContextMenu,
   bodyChildren() { return document.body.children; },
@@ -221,6 +332,9 @@ globalThis.__layoutTestApi = {
   directoryEntriesSignature,
   editorWrapValue,
   editorViewModeFor,
+  editorPreviewModeAvailable,
+  setFileEditorViewMode,
+  editorEngineForTest() { return editorEngine; },
   editorScrollTopForSourceLine,
   editorSourceLineForScroll,
   editorVisualHighlightHtml,
@@ -228,18 +342,36 @@ globalThis.__layoutTestApi = {
   expandPaneFromLayout,
   infoBranchRows,
   fileContextMenuState,
+  fileEditorItemFor,
   fileEntryChanged,
+  fileItemPath,
+  filePanelItemsForPath,
+  imageOpenUsesSharedViewer,
+  imageViewerItemFor,
+  openFileEditorItems,
   pullRequestStatusLabel,
   renderTransportWarning,
   renderFileEditorPanel,
+  renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = []) {
+    renderTreeChildren(container, parentPath, entries, depth, {entriesByDir: new Map(entriesByDirPairs)});
+  },
   rawFileUrl,
   rawFileDownloadUrl,
+  preferenceItemMatches,
+  preferenceSectionMatches,
+  preferencesPanelHtmlForTest(query, collapsed = []) {
+    preferencesSearchText = query || '';
+    collapsedPreferenceSections = new Set(collapsed);
+    return preferencesPanelHtml();
+  },
   registerFileEditorLayoutItem,
+  registerImageViewerLayoutItem,
   requestFileEditorPanelFocus,
   focusFileEditorPanelIfReady,
   minimizePaneFromLayout,
   removePaneFromLayout,
   removeSessionFromLayout,
+  runtimeJitteredDelay,
   sessionPopoverHtml,
   sessionState,
   slotForNewFileEditorTab,
@@ -248,6 +380,10 @@ globalThis.__layoutTestApi = {
   simpleCodeSyntaxHtml,
   syntaxHighlightHtmlCanHideTextarea,
   smallLayoutSlotCandidate,
+  splitPercentForPointer,
+  layoutNodeMinWidth,
+  layoutVisiblePaneCount,
+  fileImagePreviewMinShowDelayMs,
   splitPercentForNewItem,
   setInfoBranchSort,
   showPaneTabDropPreview,
@@ -255,6 +391,8 @@ globalThis.__layoutTestApi = {
   startSessionDrag,
   syncInitialLayoutUrl,
   tabMenuDetailText,
+  TAB_TYPES,
+  tabTypeForItem,
   terminalWheelSignedLines,
   terminalWrappedLineLinks,
   transcriptPathRowHtml,
@@ -273,7 +411,28 @@ globalThis.__layoutTestApi = {
   moveSessionToSlot,
   openFileEditorPane,
   pathRelativeToDirectory,
+  pruneFileExplorerSelectionForRoot,
+  selectFileTreePath,
+  selectFileTreeRange,
+  updateFileTreeSelectionFromClick,
   currentSlots() { return layoutSlots; },
+  fileExplorerSelectionForTest() {
+    return {
+      paths: Array.from(fileExplorerSelectedPaths).sort(),
+      anchor: fileExplorerSelectionAnchor,
+      manual: fileExplorerManualSelectionActive,
+    };
+  },
+  setFileExplorerSelectionForTest(paths, anchor = null) {
+    fileExplorerSelectedPaths.clear();
+    for (const path of paths || []) fileExplorerSelectedPaths.add(path);
+    fileExplorerSelectionAnchor = anchor;
+    fileExplorerManualSelectionActive = false;
+  },
+  setFileExplorerExpandedForTest(paths) {
+    fileExplorerExpanded.clear();
+    for (const path of paths || []) fileExplorerExpanded.add(path);
+  },
   setAutoApproveStateForTest(session, payload) {
     autoApproveStates.set(session, payload);
   },
@@ -285,6 +444,12 @@ globalThis.__layoutTestApi = {
   },
   setInfoBranchSortForTest(key, dir = 'asc') {
     infoBranchSort = {key, dir};
+  },
+  setSessionFilesPayloadForTest(payload) {
+    sessionFilesPayload = payload;
+  },
+  setSessionFilesSortModeForTest(mode) {
+    sessionFilesSortMode = mode;
   },
   serialize(slots) {
     return {
@@ -408,6 +573,24 @@ function canonical(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function makeFileTree(paths) {
+  const tree = new TestElement('file-tree');
+  tree.setAttribute('role', 'tree');
+  tree.classList.add('file-explorer-tree-panel');
+  tree.rect = {left: 0, top: 0, right: 260, bottom: 160, width: 260, height: 160};
+  tree.clientHeight = 160;
+  const rows = paths.map((path, index) => {
+    const row = new TestElement(`row-${index}`);
+    row.classList.add('file-tree-row');
+    row.dataset.path = path;
+    row.dataset.kind = 'file';
+    row.rect = {left: 0, top: index * 20, right: 260, bottom: index * 20 + 18, width: 260, height: 18};
+    tree.appendChild(row);
+    return row;
+  });
+  return {tree, rows};
+}
+
 {
   const api = loadYolomux();
   api.renderTransportWarning();
@@ -431,6 +614,12 @@ function canonical(value) {
   assert.equal(params.get('sessions'), '1');
   assert.equal(params.get('layout'), 'left');
   assert.equal(params.get('tabs'), 'left:1,2,3');
+}
+
+{
+  assert.equal(loadYolomux('?editor=codemirror').editorEngineForTest(), 'codemirror');
+  assert.equal(loadYolomux('?editor_engine=textarea').editorEngineForTest(), 'textarea');
+  assert.equal(loadYolomux('?editor=bogus').editorEngineForTest(), 'codemirror');
 }
 
 {
@@ -563,6 +752,13 @@ function canonical(value) {
   const activeParams = parseUrl(api.syncInitialLayoutUrlForTest());
   assert.equal(activeParams.get('sessions'), 'files,file:/home/keivenc/AGENTS.md');
   assert.equal(activeParams.get('tabs').includes('slot2:files;slot3:prefs,6,file:/home/keivenc/AGENTS.md*'), true);
+
+  const terminalToolbarBeforeFinderFocus = api.panelControlsHtml('6');
+  api.setFocusedPanelItem('__files__');
+  api.activatePaneTab('slot2', '__files__');
+  assert.equal(api.panelControlsHtml('6'), terminalToolbarBeforeFinderFocus);
+  assert.ok(terminalToolbarBeforeFinderFocus.includes('data-tab-name="terminal"'));
+  assert.ok(terminalToolbarBeforeFinderFocus.includes('data-tab-name="summary"'));
 }
 
 {
@@ -597,6 +793,75 @@ function canonical(value) {
   assert.equal(api.syntaxHighlightHtmlCanHideTextarea('', '# TITLE'), false);
   assert.equal(api.syntaxHighlightHtmlCanHideTextarea('<span class="md-heading"># TITLE</span>', '# TITLE'), true);
   assert.equal(api.syntaxHighlightHtmlCanHideTextarea('', ''), true);
+
+  const semanticRanges = [];
+  const fakeApi = {
+    Decoration: {
+      mark(options) {
+        return {
+          range(from, to) {
+            return {from, to, style: options.attributes.style};
+          },
+        };
+      },
+      set(ranges) {
+        semanticRanges.push(...ranges);
+        return ranges;
+      },
+    },
+    ViewPlugin: {
+      fromClass(Plugin) {
+        const text = '<p><strong>bold</strong> <em>em</em></p>';
+        const view = {
+          visibleRanges: [{from: 0, to: text.length}],
+          state: {
+            doc: {
+              length: text.length,
+              sliceString(from, to) {
+                return text.slice(from, to);
+              },
+            },
+          },
+        };
+        return new Plugin(view).decorations;
+      },
+    },
+  };
+  api.codeMirrorHtmlSemanticEmphasisExtension(fakeApi, '/home/test/index.html');
+  assert.deepStrictEqual(semanticRanges.map(range => [range.from, range.to]), [[11, 15], [29, 31]]);
+  assert.ok(semanticRanges[0].style.includes('font-weight:700'));
+  assert.ok(semanticRanges[1].style.includes('font-style:italic'));
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
+  assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
+  assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), false);
+  api.setFileEditorViewMode('/home/test/app.py', 'split');
+  assert.equal(api.editorViewModeFor('/home/test/app.py'), 'edit');
+  api.setFileEditorViewMode('/home/test/README.md', 'split');
+  assert.equal(api.editorViewModeFor('/home/test/README.md'), 'split');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  assert.equal(api.runtimeJitteredDelay(3000, 0), 3030);
+  assert.equal(api.runtimeJitteredDelay(3000, 1), 3300);
+  assert.ok(api.runtimeJitteredDelay(1250, 0.5) > 1250);
+  assert.ok(api.runtimeJitteredDelay(1250, 0.5) < 1376);
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  assert.deepStrictEqual(canonical(api.codeMirrorSearchMatches('foo bar foo', 'foo')), [
+    {from: 0, to: 3},
+    {from: 8, to: 11},
+  ]);
+  assert.equal(api.codeMirrorSearchMatchSummary('foo bar foo', 'foo', {from: 8, to: 11, head: 11}).text, '2/2');
+  assert.equal(api.codeMirrorSearchMatchSummary('Foo foo', 'foo', {head: 0}, {caseSensitive: true}).text, '1/1');
+  assert.equal(api.codeMirrorSearchMatchSummary('food foo', 'foo', {head: 0}, {wholeWord: true}).text, '1/1');
+  assert.equal(api.codeMirrorSearchMatchSummary('abc', '[', {head: 0}, {regexp: true}).text, '0/0');
 }
 
 {
@@ -605,6 +870,88 @@ function canonical(value) {
   const end = source.indexOf('function loadFileEditorState(', start);
   assert.ok(start > 0 && end > start, 'could not locate renderFileEditorPanel body');
   assert.equal(source.slice(start, end).includes('.focus('), false, 'renderFileEditorPanel must not steal focus during refresh renders');
+}
+
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const start = source.indexOf('function updatePaneTabStrip(');
+  const end = source.indexOf('function reconcilePaneTabChildren(', start);
+  assert.ok(start > 0 && end > start, 'could not locate updatePaneTabStrip body');
+  const body = source.slice(start, end);
+  assert.equal(body.includes('replaceChildren(...'), false, 'routine pane-tab refresh must reconcile instead of rebuilding hovered tabs');
+  assert.ok(source.includes('function reconcilePaneTabChildren('), 'pane-tab reconcile helper exists');
+  assert.ok(source.includes('function paneTabShouldPreserve('), 'open pane-tab popovers keep their existing node');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const tab = new TestElement('tab');
+  const popover = new TestElement('popover');
+  tab.className = 'pane-tab popover-open';
+  tab.classList.add('pane-tab', 'popover-open');
+  tab.dataset.paneTab = '1';
+  tab.dataset.popoverHoverState = 'closing';
+  tab.querySelector = selector => selector.includes('session-popover') ? popover : null;
+  assert.equal(api.paneTabShouldPreserve(tab), true);
+
+  const fresh = new TestElement('fresh');
+  fresh.className = 'pane-tab active';
+  fresh.role = 'button';
+  fresh.tabIndex = 0;
+  fresh.draggable = true;
+  fresh.dataset.paneTab = '1';
+  fresh.getAttribute = name => name === 'aria-label' ? 'Session 1' : undefined;
+  api.syncPreservedPaneTab(tab, fresh);
+  assert.ok(tab.className.includes('popover-open'));
+  assert.equal(tab.dataset.popoverHoverState, 'closing');
+  assert.equal(tab.getAttribute('aria-label'), 'Session 1');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const strip = new TestElement('strip');
+  const tab = new TestElement('tab');
+  const popover = new TestElement('popover');
+  strip.className = 'pane-tabs';
+  tab.className = 'pane-tab popover-open';
+  tab.dataset.paneTab = '1';
+  tab.dataset.popoverHoverState = 'open';
+  popover.className = 'session-popover';
+  strip.appendChild(tab);
+  tab.appendChild(popover);
+  api.restorePaneTabPopover(strip, '1');
+  assert.equal(api.paneTabPopoverItemToRestore(strip), '1');
+  assert.equal(api.bodyChildren().length, 0);
+  assert.equal(api.paneTabShouldPreserve(tab), true);
+}
+
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const start = source.indexOf('function renderTreeChildren(');
+  const end = source.indexOf('function rawFileUrl(', start);
+  assert.ok(start > 0 && end > start, 'could not locate renderTreeChildren body');
+  const body = source.slice(start, end);
+  assert.equal(body.includes('replaceChildren(...nextNodes)'), false, 'Finder refresh must reconcile existing rows instead of rebuilding them');
+  assert.ok(source.includes('function updateFileTreeRowContents('), 'Finder row text/icon updates are localized');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  assert.equal(api.fileImagePreviewMinShowDelayMs, 800);
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('Math.max(fileImagePreviewMinShowDelayMs, tabPopoverShowDelayMs)'), 'image previews share the tab-style delayed hover threshold');
+  assert.ok(source.includes('preserveScroll: sameImage'), 'image viewer refreshes preserve scroll on unchanged images');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  const section = new TestElement('section');
+  section.rect = {left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500};
+  const row = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
+  assert.equal(api.splitPercentForPointer(section, row, {clientX: 10, clientY: 0}), 32);
+  assert.equal(api.splitPercentForPointer(section, row, {clientX: 990, clientY: 0}), 68);
+  const nested = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 50);
+  assert.equal(api.layoutNodeMinWidth(nested), 960);
 }
 
 {
@@ -636,14 +983,52 @@ function canonical(value) {
   textarea.hidden = true;
   assert.equal(api.focusFileEditorPanelIfReady(panel, item), false);
   assert.equal(focusCount, 1);
+
+  textarea.hidden = false;
+  api.setAutoFocusEnabledForTest(false);
+  api.setFocusedPanelItem(item);
+  api.requestFileEditorPanelFocus(item);
+  assert.equal(api.focusFileEditorPanelIfReady(panel, item), false);
+  assert.equal(focusCount, 1);
+
+  api.setAutoFocusEnabledForTest(true);
+  api.requestFileEditorPanelFocus(item);
+  assert.equal(api.focusFileEditorPanelIfReady(panel, item), true);
+  assert.equal(focusCount, 2);
 }
 
 {
   const api = loadYolomux('', ['1', '2']);
+  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,changes,image-viewer,file-editor');
+  assert.equal(api.tabTypeForItem('__files__').key, 'files');
+  assert.equal(api.tabTypeForItem('__changes__').key, 'changes');
+  assert.equal(api.tabTypeForItem('image:/home/test/screen.png').key, 'image-viewer');
+  assert.equal(api.tabTypeForItem('file:/home/test/README.md').key, 'file-editor');
+  assert.equal(api.fileItemPath('image:/home/test/screen.png'), '/home/test/screen.png');
+  api.setSessionFilesPayloadForTest({
+    session: '1',
+    loaded: true,
+    errors: [],
+    repos: [{repo: '/repo/app', count: 2, touched_count: 2}],
+    files: [
+      {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100},
+      {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200},
+    ],
+  });
+  assert.ok(api.changesPaneTabHtml().includes('changes-count-badge'));
+  const changesHtml = api.changesPanelHtml();
+  assert.ok(changesHtml.includes('/repo/app'));
+  assert.ok(changesHtml.includes('src/new.py'));
+  assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   const filesTab = api.fileExplorerPaneTabHtml();
   assert.equal(api.fileExplorerLabel(), 'File Explorer');
   assert.ok(filesTab.includes('File Explorer'));
   assert.equal(filesTab.includes('agent-icon file'), false);
+  assert.ok(api.menuTabCommand('__files__').html.includes('app-menu-ui-icon-finder'));
+  assert.ok(api.menuTabCommand('__prefs__').html.includes('app-menu-ui-icon-gear'));
+  assert.ok(api.menuTabCommand('__info__').html.includes('app-menu-ui-icon-branch-info'));
+  assert.ok(api.menuTabCommand('__changes__').html.includes('app-menu-ui-icon-changes'));
+  assert.ok(api.menuTabCommand('file:/home/test/README.md').html.includes('app-menu-ui-icon-document'));
   assert.equal(api.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
   assert.equal(api.platformWindowControlClass('close'), 'pc-window-control pc-close');
   assert.equal(api.platformWindowControlClass('zoom'), 'pc-window-control pc-zoom');
@@ -716,6 +1101,24 @@ function canonical(value) {
   assert.equal(finderBesideSinglePaneUrlApi.canPaneExpand('3'), false);
   assert.ok(finderBesideSinglePaneUrlApi.panelControlsHtml('3').includes('hidden type="button" data-pane-expand="3"'));
 
+  const delayHtml = api.preferencesPanelHtmlForTest('delay', ['Performance']);
+  assert.ok(delayHtml.includes('data-preference-section="Performance"'), 'delay search shows Performance');
+  assert.equal(/data-preference-section="Performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
+  assert.ok(delayHtml.includes('Metadata refresh interval'), 'delay search surfaces refresh interval settings');
+  const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
+  assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
+  assert.ok(preferencesHtml.includes('preferences-setting-control setting-type-number'), 'number controls are identifiable for compact sizing');
+  assert.ok(preferencesHtml.includes('Auto-focus active pane'), 'auto-focus setting names the whole active pane/view');
+  assert.ok(preferencesHtml.includes('terminals, editors, Finder/File Explorer, Preferences, and other views'), 'auto-focus help covers non-tmux views');
+  assert.equal(preferencesHtml.includes('Auto-focus terminals'), false, 'auto-focus setting is not terminal-only');
+  const hugeItem = {path: 'appearance.editor_font_size', label: 'Editor font size', help: 'Font size used by editor text.', suffix: 'px'};
+  assert.equal(api.preferenceItemMatches(hugeItem, 'huge'), true, 'size aliases match font settings');
+  const popupItem = {path: 'performance.tab_popover_show_delay_ms', label: 'Tab detail hover delay', help: 'Initial delay before details open.', suffix: 'ms'};
+  assert.equal(api.preferenceItemMatches(popupItem, 'tooltip'), true, 'tooltip aliases match popover settings');
+  const explorerItem = {path: 'file_explorer.quick_access_paths', label: 'Quick paths', help: 'Pinned roots.', suffix: ''};
+  assert.equal(api.preferenceItemMatches(explorerItem, 'bookmarks'), true, 'bookmark aliases match quick paths');
+  assert.equal(api.preferenceSectionMatches({title: 'Notifications', items: []}, 'alerts'), true, 'section search uses aliases');
+
   const panelForPopover = {
     getBoundingClientRect() {
       return {left: 10, right: 500, top: 0, bottom: 500, width: 490, height: 500};
@@ -777,6 +1180,10 @@ function canonical(value) {
   assert.equal(appMenuButton.title, undefined);
   assert.equal(appMenuButton.hasAttribute('title'), false);
   assert.equal(appMenuButton.getAttribute('aria-label'), 'Rename session - Focus a tmux session first');
+  const checkedAppMenuButton = api.createAppMenuCommand({label: 'Hide tab metadata', checked: true});
+  assert.equal(checkedAppMenuButton.className.includes('has-check'), false);
+  assert.equal(checkedAppMenuButton.innerHTML.includes('>*<'), false);
+  assert.equal(checkedAppMenuButton.dataset.checked, 'true');
   const appMenuIconButton = api.createAppMenuCommand({label: '+ Codex', iconHtml: '<span title="Codex">C</span>'});
   assert.equal(appMenuIconButton.innerHTML.includes('title='), false);
   const noMinimizedSlots = api.emptyLayoutSlots();
@@ -784,7 +1191,7 @@ function canonical(value) {
   noMinimizedSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
   noMinimizedSlots.slot1 = api.paneStateWithTabs(['1'], '1');
   api.setLayoutSlotsForTest(noMinimizedSlots);
-  const tabMenu = api.appMenuTree().find(menu => menu.id === 'windows');
+  const tabMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
   const tabMenuLabels = tabMenu.items.map(item => item.label).filter(Boolean);
   assert.equal(tabMenuLabels.includes('Active'), false);
   assert.equal(tabMenuLabels.includes('Inactive'), false);
@@ -792,7 +1199,7 @@ function canonical(value) {
   assert.equal(tabMenuLabels.some(label => label.startsWith('No ')), false);
   assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1);
   const menus = api.appMenuTree();
-  assert.equal(menus.map(menu => menu.label).join(','), 'File,View,tmux,Windows,Help');
+  assert.equal(menus.map(menu => menu.label).join(','), 'File,View,tmux,Tabs,Help');
   assert.equal(menus.some(menu => menu.id === 'yolo'), false);
   assert.equal(menus.some(menu => menu.id === 'settings'), false);
   const fileMenu = menus.find(menu => menu.id === 'file');
@@ -829,9 +1236,9 @@ function canonical(value) {
   api.setAutoApproveStateForTest('1', {enabled: true});
   const yoloTmuxMenu = api.appMenuTree().find(menu => menu.id === 'tmux');
   assert.equal(yoloTmuxMenu.badgeText, undefined);
-  const yoloWindowsMenu = api.appMenuTree().find(menu => menu.id === 'windows');
-  assert.equal(yoloWindowsMenu.badgeText, '1');
-  assert.equal(yoloWindowsMenu.badgeTitle, '1 tmux session with YOLO enabled');
+  const yoloTabsMenu = api.appMenuTree().find(menu => menu.id === 'tabs');
+  assert.equal(yoloTabsMenu.badgeText, '1');
+  assert.equal(yoloTabsMenu.badgeTitle, '1 tmux session with YOLO enabled');
   assert.equal(yoloTmuxMenu.items[0].label, 'YO on');
   assert.equal(yoloTmuxMenu.items[0].keepOpen, true);
   assert.equal(yoloTmuxMenu.items[0].iconHtml.includes('session-yolo-marker'), true);
@@ -854,10 +1261,17 @@ function canonical(value) {
   api.setFocusedPanelItem('2');
   api.setFocusedPanelItem('__files__');
   assert.equal(api.currentSessionActionTarget(), '2');
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const focusStart = source.indexOf('function setFocusedPanelItem(');
+  const focusEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusStart);
+  assert.ok(source.slice(focusStart, focusEnd).includes('if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item);'));
   const viewMenu = menus.find(menu => menu.id === 'view');
   assert.equal(viewMenu.items.find(item => item.label === 'Hide tab metadata').iconHtml.includes('app-menu-ui-icon-tab-meta active'), true);
+  assert.equal(viewMenu.items.find(item => item.label === 'Hide tab metadata').keepOpen, true);
   assert.equal(viewMenu.items.find(item => item.label === 'Alert').iconHtml.includes('app-menu-ui-icon-notify'), true);
+  assert.equal(viewMenu.items.find(item => item.label === 'Alert').keepOpen, true);
   assert.equal(viewMenu.items.find(item => item.label === 'Refresh').iconHtml.includes('app-menu-ui-icon-refresh'), true);
+  assert.equal(viewMenu.items.find(item => item.label === 'Refresh').keepOpen, undefined);
   assert.equal(viewMenu.items.find(item => item.label === 'Refresh').detail, undefined);
   const helpMenu = menus.find(menu => menu.id === 'help');
   const helpMenuLabels = helpMenu.items.map(item => item.label).filter(Boolean);
@@ -964,6 +1378,58 @@ function canonical(value) {
   };
   assert.equal(api.scrollFileTreeRowIntoView(scrollContainer, visibleRow), true);
   assert.equal(scrollContainer.scrollTop, 380);
+
+  const {tree, rows} = makeFileTree(['/repo/a.md', '/repo/b.md', '/repo/c.md', '/repo/d.md']);
+  tree.scrollTop = 120;
+  api.selectFileTreePath('/repo/a.md');
+  api.updateFileTreeSelectionFromClick(rows[2], '/repo/c.md', {shiftKey: true, metaKey: false, ctrlKey: false});
+  assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest()), {
+    paths: ['/repo/a.md', '/repo/b.md', '/repo/c.md'],
+    anchor: '/repo/a.md',
+    manual: true,
+  });
+  assert.equal(tree.scrollTop, 120);
+
+  const fallbackTree = makeFileTree(['/repo/a.md', '/repo/b.md', '/repo/c.md']);
+  api.setFileExplorerSelectionForTest(['/repo/b.md'], '/outside/old.md');
+  api.updateFileTreeSelectionFromClick(fallbackTree.rows[2], '/repo/c.md', {shiftKey: true, metaKey: false, ctrlKey: false});
+  assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest()), {
+    paths: ['/repo/b.md', '/repo/c.md'],
+    anchor: '/repo/b.md',
+    manual: true,
+  });
+
+  api.setFileExplorerSelectionForTest(['/old/a.md', '/repo/a.md'], '/old/a.md');
+  api.pruneFileExplorerSelectionForRoot('/repo');
+  assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest()), {
+    paths: ['/repo/a.md'],
+    anchor: null,
+    manual: false,
+  });
+
+  const refreshTree = new TestElement('refresh-tree');
+  refreshTree.setAttribute('role', 'tree');
+  refreshTree.classList.add('file-explorer-tree-panel');
+  api.setFileExplorerExpandedForTest(['/repo/src']);
+  const rootEntries = [{name: 'src', kind: 'dir'}, {name: 'README.md', kind: 'file'}];
+  api.renderTreeChildrenForTest(refreshTree, '/repo', rootEntries, 0, [
+    ['/repo/src', [{name: 'a.py', kind: 'file'}, {name: 'b.py', kind: 'file'}]],
+  ]);
+  const srcRow = refreshTree.children[0];
+  const srcChildren = refreshTree.children[1];
+  const firstFileRow = srcChildren.children[0];
+  refreshTree.scrollTop = 44;
+  srcChildren.scrollTop = 12;
+  api.renderTreeChildrenForTest(refreshTree, '/repo', rootEntries, 0, [
+    ['/repo/src', [{name: 'a.py', kind: 'file'}, {name: 'c.py', kind: 'file'}]],
+  ]);
+  assert.equal(refreshTree.children[0], srcRow);
+  assert.equal(refreshTree.children[1], srcChildren);
+  assert.equal(srcChildren.children[0], firstFileRow);
+  assert.equal(srcChildren.children.length, 2);
+  assert.equal(srcChildren.children[1].dataset.path, '/repo/src/c.py');
+  assert.equal(refreshTree.scrollTop, 44);
+  assert.equal(srcChildren.scrollTop, 12);
 
   const slots = api.emptyLayoutSlots();
   slots[api.layoutTreeKey] = api.leafNode('slot2');
@@ -1352,6 +1818,21 @@ function canonical(value) {
   assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'right'}), false);
   assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'top'}), true);
   assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom'}), true);
+  const editorItem = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'middle'}), false);
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'left'}), false);
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'right'}), false);
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'top'}), true);
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'bottom'}), true);
+  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'top', targetRect: {width: 300}}), false);
+  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: {width: 300}}), false);
+  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'top', targetRect: {width: 520}}), true);
+  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: {width: 520}}), true);
+  api.splitSessionAtSlot(editorItem, 'left', 'bottom');
+  const editorSplit = api.serialize(api.currentSlots());
+  assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes('__files__'))), [{tabs: ['__files__'], active: '__files__'}]);
+  assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(editorItem))), [{tabs: [editorItem], active: editorItem}]);
+  assert.ok(JSON.stringify(editorSplit.tree).includes('"split":"column"'));
 
   const finderStrip = tabStrip([tabElement('__files__', 100, 120)]);
   api.bindPaneTabStrip(finderStrip, 'left');
@@ -1397,11 +1878,31 @@ function canonical(value) {
 
 {
   const api = loadYolomux('', ['1']);
+  const imagePath = '/home/test/a.png';
+  const viewerItem = api.registerImageViewerLayoutItem(imagePath);
+  assert.equal(viewerItem, api.imageViewerItemFor(imagePath));
+  assert.deepStrictEqual(canonical(api.openFileEditorItems()), [viewerItem]);
+  assert.deepStrictEqual(canonical(api.filePanelItemsForPath(imagePath)), [viewerItem]);
+  assert.equal(api.fileItemPath(viewerItem), imagePath);
+  const fileItem = api.registerFileEditorLayoutItem(imagePath);
+  assert.equal(fileItem, api.fileEditorItemFor(imagePath));
+  assert.deepStrictEqual(canonical(api.openFileEditorItems()), [viewerItem, fileItem]);
+  assert.deepStrictEqual(canonical(api.filePanelItemsForPath(imagePath)), [viewerItem, fileItem]);
+  assert.equal(api.imageOpenUsesSharedViewer(), true);
+  assert.equal(api.imageOpenUsesSharedViewer({forceNewTab: true}), false);
+  assert.equal(api.imageOpenUsesSharedViewer({targetSlot: 'left'}), false);
+}
+
+{
+  const api = loadYolomux('', ['1']);
   const state = api.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
   assert.equal(state.copyRelativeDisabled, false);
+  assert.equal(state.openInNewTabDisabled, true);
   assert.equal(state.downloadDisabled, false);
   assert.equal(state.renameDisabled, false);
   assert.equal(state.deleteDisabled, false);
+  const imageState = api.fileContextMenuState({kind: 'file', name: 'screen.png'}, ['/repo/app/screen.png'], ['screen.png']);
+  assert.equal(imageState.openInNewTabDisabled, false);
 
   const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
   const readonlyState = readonlyApi.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
@@ -1460,7 +1961,7 @@ function canonical(value) {
   assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
   assert.equal(api.itemIsBackgroundPaneTab('1'), false);
   assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__files__', '__prefs__', '3']);
+  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__files__', '__prefs__', '__changes__', '3']);
 }
 
 {
@@ -1576,6 +2077,15 @@ function canonical(value) {
   api.applyServerMetadataPulsesForTest('9', {ci: 20000});
   const ciPulseHtml = api.tmuxPaneTabHtml('9', ciInfo, {key: 'idle'}, true);
   assert.ok(ciPulseHtml.includes('pr-status-failing metadata-pulse'), 'CI badge is marked after CI change');
+  const passingInfo = {
+    project: {
+      git: {branch: 'feature'},
+      pull_request: {number: 14, status_label: 'open', checks: {state: 'passing'}},
+    },
+  };
+  const passingHtml = api.tmuxPaneTabHtml('10', passingInfo, {key: 'idle'}, true);
+  assert.ok(passingHtml.includes('pr-indicator'), 'passing PR still shows PR number');
+  assert.equal(passingHtml.includes('>CI</span>'), false, 'passing CI does not add redundant CI badge');
 }
 
 {

@@ -164,7 +164,9 @@ def shell_tokens(cmd_line: str) -> list[str]:
         lexer.commenters = ""
         return list(lexer)
     except ValueError:
-        return shlex.split(cmd_line, posix=True) if cmd_line.strip() else []
+        # Tmux captures visual lines, so long quoted Codex commands can arrive
+        # temporarily incomplete. Keep rule evaluation conservative but alive.
+        return re.findall(r"&&|\|\||[;&|()]|[^\s;&|()]+", cmd_line) if cmd_line.strip() else []
 
 
 def is_assignment(token: str) -> bool:
