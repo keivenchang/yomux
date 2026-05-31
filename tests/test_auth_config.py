@@ -136,8 +136,7 @@ def test_main_page_has_logout_button():
     assert 'id="logoutButton"' in page
     assert 'aria-label="Log out"' in page
     assert '"repoRoot":' in page
-    assert 'id="fileEditorWrap"' in page
-    assert 'file-editor-icon-wrap' in page
-    assert 'id="fileEditorSave"' in page
-    assert 'file-editor-icon-save' in page
-    assert "Save (Ctrl/Cmd+S)" in page
+    assert 'id="fileExplorer"' in page
+    assert 'id="fileExplorerTree"' in page
+    assert 'id="panelPool"' in page
+    assert 'id="fileEditor"' not in page

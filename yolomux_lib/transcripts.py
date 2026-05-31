@@ -42,6 +42,131 @@ def compact_transcript_items_since(text: str, since: datetime) -> tuple[list[dic
             items.extend(transcript_items_from_raw_line(raw_line))
     return items, stats
 
+TRANSCRIPT_ACTIVITY_RECENCY_SECONDS = 10.0
+CLAUDE_TERMINAL_STOP_REASONS = {"end_turn", "stop_sequence", "max_tokens", "stop"}
+
+
+def transcript_activity_state_from_text(text: str, kind: str = "") -> dict[str, Any]:
+    pending_tools: dict[str, str] = {}
+    streaming = False
+    completed = False
+    synthetic_index = 0
+    for raw_line in text.splitlines():
+        try:
+            raw_item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw_item, dict):
+            continue
+        entry_type = str(raw_item.get("type") or "")
+        message = raw_item.get("message")
+        payload = raw_item.get("payload")
+        if isinstance(message, dict):
+            role = str(message.get("role") or "")
+            stop_reason = str(message.get("stop_reason") or raw_item.get("stop_reason") or "")
+            content = message.get("content")
+            if role == "assistant":
+                completed = stop_reason in CLAUDE_TERMINAL_STOP_REASONS
+                streaming = not completed
+            elif role in {"user", "tool", "system"} and not pending_tools:
+                streaming = False
+                completed = True
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = str(block.get("type") or "")
+                    if block_type == "tool_use":
+                        synthetic_index += 1
+                        tool_id = str(block.get("id") or f"tool-{synthetic_index}")
+                        pending_tools[tool_id] = str(block.get("name") or "tool")
+                        streaming = True
+                        completed = False
+                    elif block_type == "tool_result":
+                        tool_id = str(block.get("tool_use_id") or block.get("id") or "")
+                        if tool_id:
+                            pending_tools.pop(tool_id, None)
+                        streaming = False
+            if role == "assistant" and stop_reason in CLAUDE_TERMINAL_STOP_REASONS and not pending_tools:
+                streaming = False
+                completed = True
+        if isinstance(payload, dict):
+            payload_type = str(payload.get("type") or entry_type or "")
+            if payload_type in {"agent_message_delta", "message.delta", "item.delta", "task_started"}:
+                streaming = True
+                completed = False
+            elif payload_type == "task_complete":
+                streaming = False
+                completed = True
+            elif payload_type in {"function_call", "custom_tool_call"}:
+                synthetic_index += 1
+                call_id = str(payload.get("call_id") or payload.get("id") or f"call-{synthetic_index}")
+                pending_tools[call_id] = str(payload.get("name") or "tool")
+                streaming = True
+                completed = False
+            elif payload_type in {"function_call_output", "custom_tool_call_output"}:
+                call_id = str(payload.get("call_id") or payload.get("id") or "")
+                if call_id:
+                    pending_tools.pop(call_id, None)
+                streaming = False
+        elif entry_type in {"agent_message_delta", "message.delta", "item.delta"}:
+            streaming = True
+            completed = False
+
+    if pending_tools:
+        names = ", ".join(sorted(set(pending_tools.values())))
+        return {"key": "working", "text": f"{kind or 'agent'} tool call pending in transcript: {names}"}
+    if streaming and not completed:
+        return {"key": "working", "text": f"{kind or 'agent'} turn is active in transcript"}
+    return {"key": "idle", "text": ""}
+
+def newest_transcript_timestamp(text: str) -> datetime | None:
+    newest = None
+    for raw_line in text.splitlines():
+        try:
+            raw_item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw_item, dict):
+            continue
+        timestamp = parse_transcript_timestamp(raw_item.get("timestamp"))
+        if timestamp and (newest is None or timestamp > newest):
+            newest = timestamp
+    return newest
+
+def transcript_activity_is_recent(path: Path, text: str, now: datetime | None = None, recency_seconds: float = TRANSCRIPT_ACTIVITY_RECENCY_SECONDS) -> bool:
+    current = now or datetime.now(timezone.utc)
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        mtime = None
+    newest = newest_transcript_timestamp(text)
+    timestamps = [value for value in (mtime, newest) if value is not None]
+    return any(abs((current - value).total_seconds()) <= recency_seconds for value in timestamps)
+
+def transcript_activity_state(path: Path | str | None, kind: str = "") -> dict[str, Any]:
+    if not path:
+        return {"key": "idle", "text": ""}
+    transcript_path = Path(path)
+    try:
+        text = tail_file_lines(transcript_path, 400)
+    except OSError:
+        return {"key": "idle", "text": ""}
+    state = transcript_activity_state_from_text(text, kind)
+    if state.get("key") != "working":
+        return state
+    if not transcript_activity_is_recent(transcript_path, text):
+        return {"key": "idle", "text": ""}
+    return state
+
+def session_transcript_activity_state(info: SessionInfo | None) -> dict[str, Any]:
+    if not info:
+        return {"key": "idle", "text": ""}
+    agent = next((item for item in info.agents if item.transcript), None)
+    if agent is None:
+        return {"key": "idle", "text": ""}
+    return transcript_activity_state(agent.transcript, agent.kind)
+
 def parse_transcript_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -265,4 +390,3 @@ def compact_summary_lines(text: str) -> list[str]:
             lines.append(f"{current_header}: {truncate_text(stripped, 240)}")
             current_header = ""
     return lines
-

@@ -1,10 +1,73 @@
 from __future__ import annotations
 
+import os
+import re
+import threading
+import time
+from dataclasses import asdict
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+from http import HTTPStatus
+from pathlib import Path
+from typing import Any
+
+import auto_approve_tmux
+
 from . import session_files
 from . import yolo_rules
-from .core import *
+from .auto_approve_worker import AutoApproveWorker
+from .auto_approve_worker import auto_approve_lock_message
+from .auto_approve_worker import auto_approve_lock_owner
+from .common import AGENT_COMMANDS
+from .common import EVENT_LOG_PATH
+from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
+from .common import MAX_EVENT_TAIL_LINES
+from .common import MAX_TRANSCRIPT_TAIL_LINES
+from .common import MAX_YOLOMUX_SESSION_TABS
+from .common import PROJECT_ROOT
+from .common import SERVER_HOSTNAME
+from .common import SUMMARY_MAX_PROMPT_CHARS
+from .common import UPLOAD_MAX_FILES
+from .common import list_tmux_session_names
+from .common import next_numbered_session_name
+from .common import tail_file_lines
+from .common import tmux
+from .common import tmux_has_exact_session
+from .common import tmux_session_target
+from .common import truncate_text
+from .control import YolomuxControlServer
+from .control import send_yolomux_control_request
+from .events import EventLog
+from .events import read_yolomux_state
+from .events import update_yolomux_state
+from .metadata import MetadataCache
+from .metadata import candidate_session_cwds
+from .metadata import focus_root_for_session
+from .metadata import github_checks_unknown
+from .metadata import project_inventory
+from .metadata import pull_request_number_from_subject
+from .metadata import pull_request_status_label
+from .metadata import session_git_inventory
+from .metadata import session_project_metadata
+from .metadata import session_to_json
+from .sessions import discover_sessions
 from .settings import save_settings
 from .settings import settings_payload
+from .transcripts import codex_summary_prompt
+from .transcripts import compact_summary_lines
+from .transcripts import compact_transcript_items
+from .transcripts import compact_transcript_items_since
+from .transcripts import compact_transcript_lines
+from .transcripts import format_transcript_item
+from .transcripts import session_transcript_activity_state
+from .transcripts import trim_prompt_text
+from .uploads import sanitize_upload_filename
+from .uploads import unique_upload_path
+from .workdir import agent_command
+from .workdir import available_agent_commands
+from .workdir import resolved_upload_dir
+from .workdir import session_workdir
 
 
 METADATA_BADGE_PULSE_SECONDS = 20.0
@@ -951,7 +1014,7 @@ class TmuxWebtermApp:
 
     def prompt_and_screen_status(self, session: str) -> tuple[dict[str, Any], dict[str, Any]]:
         try:
-            module = auto_approve_module()
+            module = auto_approve_tmux
             visible_text = module.tmux_capture_pane(session, visible_only=True)
             if visible_text is None:
                 prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": "", "error": "failed to capture pane"}
@@ -962,6 +1025,11 @@ class TmuxWebtermApp:
                 pane_text = module.tmux_capture_pane(session)
                 prompt_state = module.approval_prompt_state(visible_text, pane_text or visible_text)
             screen_state = module.agent_screen_state(visible_text)
+            if screen_state.get("key") == "idle":
+                infos, _errors = discover_sessions([session])
+                transcript_state = session_transcript_activity_state(infos.get(session))
+                if transcript_state.get("key") != "idle":
+                    screen_state = transcript_state
             return dict(prompt_state), dict(screen_state)
         except Exception as exc:
             prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": "", "error": str(exc)}

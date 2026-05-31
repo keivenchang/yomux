@@ -134,6 +134,7 @@ class TestElement {
   getBoundingClientRect() { return this.rect; }
   insertAdjacentHTML() {}
   matches(selector) {
+    if (selector === ':hover') return this.hovered === true;
     const dataPaneTabMatch = selector.match(/^\.pane-tab\[data-pane-tab="([^"]+)"\]$/);
     if (dataPaneTabMatch) {
       return this.classList.contains('pane-tab') && this.dataset.paneTab === dataPaneTabMatch[1];
@@ -254,6 +255,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     setTimeout() {},
     window: {
       addEventListener() {},
+      innerHeight: 800,
       innerWidth: 1200,
       removeEventListener() {},
     },
@@ -304,6 +306,8 @@ globalThis.__layoutTestApi = {
   layoutWithReplacedItem,
   layoutWithoutItem,
   layoutWithItems,
+  setLayoutToSinglePane,
+  setLayoutToSplitPanes,
   layoutTabsParamValue,
   layoutTreeKey,
   leafNode,
@@ -313,10 +317,14 @@ globalThis.__layoutTestApi = {
   setFocusedPanelItem,
   focusedPanelItemForTest() { return focusedPanelItem; },
   setAutoFocusEnabledForTest(value) { autoFocusEnabled = Boolean(value); },
+  autoFocusEnabledForTest() { return autoFocusEnabled; },
+  selectSession,
   selectPanelOnHover,
   focusTerminalWhenAutoFocus,
   focusPanel,
   focusTerminalFromUserAction,
+  focusedTerminalForTest() { return focusedTerminal; },
+  globalShortcutTargetAllowsAppAction,
   testElementForId(id) { return document.getElementById(id); },
   registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN}) {
     terminals.set(session, {term, socket, container: document.getElementById('terminal-pane-' + session)});
@@ -354,6 +362,7 @@ globalThis.__layoutTestApi = {
   editorSchemeCssVariables,
   editorThemeLabel,
   setFileEditorThemeMode,
+  cycleEditorThemeMode,
   fileEditorThemeModeForTest() { return fileEditorThemeMode; },
   editorScrollTopForSourceLine,
   editorSourceLineForScroll,
@@ -508,6 +517,10 @@ globalThis.__layoutTestApi = {
   },
   customDragPreviewForTest() {
     return customDragPreview;
+  },
+  clampToViewport,
+  createHoverPopoverForTest(options) {
+    return createHoverPopover(options);
   },
   httpsWarningForTest() {
     return document.getElementById('httpsWarning');
@@ -984,7 +997,10 @@ function makeFileTree(paths) {
   const api = loadYolomux('', ['1']);
   assert.equal(api.fileImagePreviewMinShowDelayMs, 800);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(source.includes('Math.max(fileImagePreviewMinShowDelayMs, tabPopoverShowDelayMs)'), 'image previews share the tab-style delayed hover threshold');
+  assert.ok(css.includes('--file-image-preview-max-size: 320px'), 'Finder image preview default max size is tokenized');
+  assert.ok(/\.file-image-preview-popover[\s\S]*pointer-events:\s*none/.test(css), 'Finder image previews cannot keep themselves hovered over terminals');
   assert.ok(source.includes('preserveScroll: sameImage'), 'image viewer refreshes preserve scroll on unchanged images');
 }
 
@@ -1068,6 +1084,9 @@ function makeFileTree(paths) {
   api.focusPanel('1', {userInitiated: true});
   assert.equal(api.focusedPanelItemForTest(), '1');
   assert.equal(focusCount, 1);
+  api.selectSession('1');
+  assert.equal(api.focusedPanelItemForTest(), '1');
+  assert.equal(focusCount, 2, 'selecting an already visible tmux tab is an explicit user focus action');
 }
 
 {
@@ -1180,14 +1199,20 @@ function makeFileTree(paths) {
   assert.ok(delayHtml.includes('Metadata refresh interval'), 'delay search surfaces refresh interval settings');
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
+  assert.ok(preferencesHtml.includes('data-preferences-search-action>YOsearch</button>'), 'preferences search has an explicit YOsearch action');
+  assert.ok(preferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action');
   assert.ok(preferencesHtml.includes('preferences-setting-control setting-type-number'), 'number controls are identifiable for compact sizing');
+  assert.ok(preferencesHtml.includes('data-setting-path="file_explorer.image_preview_max_px"'), 'preferences expose Finder image preview sizing');
   assert.ok(preferencesHtml.includes('Auto-focus active pane'), 'auto-focus setting names the whole active pane/view');
   assert.ok(preferencesHtml.includes('terminals, editors, Finder/File Explorer, Preferences, and other views'), 'auto-focus help covers non-tmux views');
   assert.equal(preferencesHtml.includes('Auto-focus terminals'), false, 'auto-focus setting is not terminal-only');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), 'preferences expose the editor scheme setting');
   assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'editor schemes are grouped by dark palettes');
   assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'editor schemes are grouped by light palettes');
+  assert.ok(preferencesHtml.indexOf('VS Code Dark+') < preferencesHtml.indexOf('One Dark'), 'preferred dark scheme appears first');
   assert.ok(preferencesHtml.includes('GitHub Light'), 'high-contrast light scheme is available');
+  assert.equal(api.fileEditorThemeModeForTest(), 'vscode-dark-plus');
+  assert.equal(api.activeEditorSchemeForTest().label, 'VS Code Dark+');
   api.setFileEditorThemeMode('github-light');
   assert.equal(api.fileEditorThemeModeForTest(), 'github-light');
   assert.equal(api.activeEditorSchemeForTest().label, 'GitHub Light');
@@ -1199,6 +1224,10 @@ function makeFileTree(paths) {
   assert.notEqual(api.activeEditorSchemeForTest().syntax.heading, api.activeEditorSchemeForTest().syntax.link);
   assert.notEqual(api.activeEditorSchemeForTest().syntax.inlineCode, api.activeEditorSchemeForTest().syntax.heading);
   assert.equal(api.editorThemeLabel(), 'GitHub Light editor scheme');
+  api.cycleEditorThemeMode();
+  assert.equal(api.fileEditorThemeModeForTest(), 'vscode-dark-plus', 'theme toggle returns from light to the default dark scheme');
+  api.cycleEditorThemeMode();
+  assert.equal(api.fileEditorThemeModeForTest(), 'github-light', 'theme toggle uses the selected high-contrast light scheme');
   api.setFileEditorThemeMode('light');
   assert.equal(api.fileEditorThemeModeForTest(), 'github-light', 'legacy light storage value maps to GitHub Light');
   const hugeItem = {path: 'appearance.editor_font_size', label: 'Editor font size', help: 'Font size used by editor text.', suffix: 'px'};
@@ -1248,6 +1277,45 @@ function makeFileTree(paths) {
   });
   const clampedPopoverLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
   assert.ok(clampedPopoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
+  const viewportClamp = api.clampToViewport(1190, 790, 100, 100, {edgeGap: 8});
+  assert.equal(viewportClamp.left, 1092);
+  assert.equal(viewportClamp.top, 692);
+  const hoverAnchor = new TestElement('hover-anchor');
+  const hoverPopover = new TestElement('hover-popover');
+  hoverAnchor.appendChild(hoverPopover);
+  let hoverOpens = 0;
+  let hoverCloses = 0;
+  const hoverController = api.createHoverPopoverForTest({
+    anchor: hoverAnchor,
+    popover: hoverPopover,
+    showDelay: 0,
+    hideDelay: 0,
+    onOpen: () => { hoverOpens += 1; },
+    onClose: () => { hoverCloses += 1; },
+  });
+  hoverController.openNow();
+  assert.equal(hoverOpens, 1);
+  assert.ok(hoverAnchor.classList.contains('popover-open'));
+  hoverController.closeNow();
+  assert.equal(hoverCloses, 1);
+  assert.equal(hoverAnchor.classList.contains('popover-open'), false);
+  const staleAnchor = new TestElement('stale-anchor');
+  const stalePopover = new TestElement('stale-popover');
+  staleAnchor.appendChild(stalePopover);
+  let staleOpens = 0;
+  const staleController = api.createHoverPopoverForTest({
+    anchor: staleAnchor,
+    popover: stalePopover,
+    showDelay: 0,
+    hideDelay: 0,
+    onOpen: () => { staleOpens += 1; },
+  });
+  staleAnchor.hovered = false;
+  staleController.openNow({type: 'pointerenter'});
+  assert.equal(staleOpens, 0, 'stale delayed hover opens are suppressed after the pointer leaves');
+  staleAnchor.hovered = true;
+  staleController.openNow({type: 'pointerenter'});
+  assert.equal(staleOpens, 1, 'active hover opens still work');
   const appMenuAnchor = new TestElement('app-menu-anchor');
   appMenuAnchor.rect = {left: 900, right: 980, top: 0, bottom: 28, width: 80, height: 28};
   const appMenuWrapper = new TestElement('app-menu-wrapper');
@@ -1369,7 +1437,7 @@ function makeFileTree(paths) {
   assert.ok(helpMenuLabels.includes('Open README'));
   const shortcutsMenu = helpMenu.items.find(item => item.label === 'Keyboard shortcuts');
   assert.equal(shortcutsMenu.type, 'submenu');
-  assert.deepStrictEqual(canonical(shortcutsMenu.items.map(item => item.label)), ['Command palette', 'Save active editor', 'Close menu or dialog', 'Session actions', 'Move or split tab']);
+  assert.deepStrictEqual(canonical(shortcutsMenu.items.map(item => item.label)), ['Command palette', 'Save active editor', 'Toggle File Explorer', 'Open Preferences', 'Close menu or dialog', 'Session actions', 'Move or split tab']);
   assert.equal(helpMenu.items.find(item => item.label === 'Open README').disabled, false);
   assert.equal(api.tabMenuItems().map(item => item.label).filter(Boolean).includes('Current Tab'), false);
   const namedSessionApi = loadYolomux('', ['1', 'dynamo2']);
@@ -1717,6 +1785,36 @@ function makeFileTree(paths) {
     panes: {
       left: {tabs: ['__files__'], active: '__files__'},
       slot2: {tabs: ['2', '1'], active: '2'},
+    },
+  });
+
+  const layoutCommands = api.emptyLayoutSlots();
+  layoutCommands[api.layoutTreeKey] = api.splitNode(
+    'row',
+    api.leafNode('left'),
+    api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50),
+    22,
+  );
+  layoutCommands.left = api.paneStateWithTabs(['__files__'], '__files__');
+  layoutCommands.slot1 = api.paneStateWithTabs(['1'], '1');
+  layoutCommands.slot2 = api.paneStateWithTabs(['2'], '2');
+  api.setLayoutSlotsForTest(layoutCommands);
+  api.setFocusedPanelItem('2');
+  api.setLayoutToSinglePane();
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot1'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot1: {tabs: ['1', '2'], active: '2'},
+    },
+  });
+  api.setLayoutToSplitPanes();
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {split: 'row', pct: 50, children: [{slot: 'right'}, {slot: 'slot2'}]}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      right: {tabs: ['1'], active: '1'},
+      slot2: {tabs: ['2'], active: '2'},
     },
   });
 

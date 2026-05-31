@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+import fcntl
+import hashlib
+import json
+import os
+import re
+import threading
+import time
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
+from typing import Any
+
+import auto_approve_tmux
+
 from . import yolo_rules
 from .common import *
 
@@ -173,13 +187,7 @@ class AutoApproveWorker:
 
     def run(self) -> None:
         try:
-            try:
-                module = auto_approve_module()
-            except Exception as exc:
-                self.update(error=str(exc), last_action="failed to load auto_approve_tmux.py")
-                self.emit_event("worker_error", "failed to load auto_approve_tmux.py", error=str(exc))
-                return
-
+            module = auto_approve_tmux
             idle_since: float | None = None
             max_interval = max(2.5, self.interval)
             ramp_duration = 60.0

@@ -13,23 +13,17 @@ import argparse
 import base64
 import collections
 import fcntl
-import getpass
-import hashlib
-import hmac
 import html
-import importlib.util
 import json
 import os
 import pty
 import re
 import select
 import shutil
-import secrets
 import signal
 import socket
 import struct
 import subprocess
-import sys
 import termios
 import threading
 import time
@@ -53,6 +47,8 @@ from urllib.parse import urlencode
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from . import auth as _auth
+
 
 DEFAULT_SESSIONS: tuple[str, ...] = ()
 DEFAULT_COLS = 120
@@ -60,7 +56,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.1.23"
+YOLOMUX_VERSION = "0.1.24"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -73,13 +69,10 @@ STATE_PATH = CONFIG_DIR / "state.json"
 EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
 AUTO_APPROVE_LOCK_DIR = STATE_DIR / "locks"
 CONTROL_SOCKET_DIR = STATE_DIR / "control"
-AUTH_CONFIG_PATH = CONFIG_DIR / "auth.yaml"
-AUTH_CONFIG_DISPLAY_PATH = "~/.config/yolomux/auth.yaml"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 AGENT_COMMANDS = {"claude", "codex", "term"}
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
-AUTO_APPROVE_SCRIPT = PROJECT_ROOT / "auto_approve_tmux.py"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
 MAIN_BRANCHES = {"main", "master"}
@@ -91,31 +84,81 @@ LINEAR_API_URL = "https://api.linear.app/graphql"
 DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/nv/issue"
 OTHER_BRANCH_LIMIT = 8
 _CACHE_MISS = object()
-PLACEHOLDER_AUTH_USERNAME = "user"
-PLACEHOLDER_AUTH_PASSWORD = "password"
-GUEST_AUTH_USERNAME = "guest"
-GUEST_AUTH_PASSWORD = "guest"
 SERVER_HOSTNAME = socket.gethostname()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
 _YOLOMUX_COMMIT_TIME_PT: str | None = None
 
 
-@dataclass(frozen=True)
-class AuthUser:
-    username: str
-    password: str
-    role: str
+AuthUser = _auth.AuthUser
+AuthIdentity = _auth.AuthIdentity
+AUTH_CONFIG_PATH = _auth.AUTH_CONFIG_PATH
+AUTH_CONFIG_DISPLAY_PATH = _auth.AUTH_CONFIG_DISPLAY_PATH
+PLACEHOLDER_AUTH_USERNAME = _auth.PLACEHOLDER_AUTH_USERNAME
+PLACEHOLDER_AUTH_PASSWORD = _auth.PLACEHOLDER_AUTH_PASSWORD
+GUEST_AUTH_USERNAME = _auth.GUEST_AUTH_USERNAME
+GUEST_AUTH_PASSWORD = _auth.GUEST_AUTH_PASSWORD
+AUTH_COOKIE_NAME = _auth.AUTH_COOKIE_NAME
+AUTH_LOGOUT_COOKIE_NAME = _auth.AUTH_LOGOUT_COOKIE_NAME
+AUTH_COOKIE_MAX_AGE_SECONDS = _auth.AUTH_COOKIE_MAX_AGE_SECONDS
+AUTH_COOKIE_SECRET_PATH = _auth.AUTH_COOKIE_SECRET_PATH
+AUTH_COOKIE_SECRET = _auth.AUTH_COOKIE_SECRET
+AUTH_CONFIG = _auth.AUTH_CONFIG
+yaml_quote = _auth.yaml_quote
+yaml_scalar = _auth.yaml_scalar
+strip_yaml_comment = _auth.strip_yaml_comment
+parse_yaml_key_value = _auth.parse_yaml_key_value
+normalize_auth_role = _auth.normalize_auth_role
+auth_user_from_mapping = _auth.auth_user_from_mapping
+parse_auth_yaml = _auth.parse_auth_yaml
+auth_config_text = _auth.auth_config_text
+read_auth_users = _auth.read_auth_users
+login_username = _auth.login_username
+random_auth_password = _auth.random_auth_password
+commented_auth_config_text = _auth.commented_auth_config_text
+legacy_placeholder_auth_active = _auth.legacy_placeholder_auth_active
+write_auth_config = _auth.write_auth_config
+secure_auth_config_permissions = _auth.secure_auth_config_permissions
 
 
-@dataclass(frozen=True)
-class AuthIdentity:
-    username: str
-    password: str
-    role: str
+def _sync_auth_overrides() -> None:
+    _auth.AUTH_CONFIG_PATH = AUTH_CONFIG_PATH
+    _auth.AUTH_COOKIE_SECRET = AUTH_COOKIE_SECRET
+    _auth.login_username = login_username
+    _auth.random_auth_password = random_auth_password
 
 
-def yaml_quote(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+def starter_auth_users() -> tuple[AuthUser, ...]:
+    _sync_auth_overrides()
+    return _auth.starter_auth_users()
+
+
+def initialize_auth_config(path: Path) -> tuple[AuthUser, ...]:
+    _sync_auth_overrides()
+    return _auth.initialize_auth_config(path)
+
+
+def current_auth_users() -> tuple[AuthUser, ...]:
+    _sync_auth_overrides()
+    return _auth.current_auth_users()
+
+
+def auth_setup_required() -> bool:
+    _sync_auth_overrides()
+    return _auth.auth_setup_required()
+
+
+def load_auth_cookie_secret(path: Path | None = None) -> bytes:
+    return _auth.load_auth_cookie_secret(AUTH_COOKIE_SECRET_PATH if path is None else path)
+
+
+def auth_cookie_value(username: str, password: str) -> str:
+    _sync_auth_overrides()
+    return _auth.auth_cookie_value(username, password)
+
+
+def auth_identity_for_credentials(username: str, password: str) -> AuthIdentity | None:
+    _sync_auth_overrides()
+    return _auth.auth_identity_for_credentials(username, password)
 
 
 def yolomux_commit_time_pt() -> str:
@@ -138,254 +181,6 @@ def yolomux_commit_time_pt() -> str:
     return _YOLOMUX_COMMIT_TIME_PT
 
 
-def yaml_scalar(value: str) -> str:
-    text = value.strip()
-    if len(text) >= 2 and text[0] == text[-1] == '"':
-        return text[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-    if len(text) >= 2 and text[0] == text[-1] == "'":
-        return text[1:-1].replace("''", "'")
-    return text
-
-
-def strip_yaml_comment(line: str) -> str:
-    in_single = False
-    in_double = False
-    escaped = False
-    for index, char in enumerate(line):
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\" and in_double:
-            escaped = True
-            continue
-        if char == '"' and not in_single:
-            in_double = not in_double
-            continue
-        if char == "'" and not in_double:
-            in_single = not in_single
-            continue
-        if char == "#" and not in_single and not in_double:
-            return line[:index]
-    return line
-
-
-def parse_yaml_key_value(line: str) -> tuple[str, str] | None:
-    key, separator, value = line.partition(":")
-    if not separator:
-        return None
-    key = key.strip()
-    if not key:
-        return None
-    return key, yaml_scalar(value)
-
-
-def normalize_auth_role(value: str) -> str:
-    role = value.strip().lower()
-    if role in {"admin", "readonly"}:
-        return role
-    if role in {"read-only", "read_only", "viewer", "view", "ro"}:
-        return "readonly"
-    return "readonly"
-
-
-def auth_user_from_mapping(mapping: dict[str, str]) -> AuthUser | None:
-    username = mapping.get("username", "").strip()
-    password = mapping.get("password", "")
-    role = normalize_auth_role(mapping.get("role", mapping.get("access", "readonly")))
-    if not username or not password:
-        return None
-    return AuthUser(username=username, password=password, role=role)
-
-
-def parse_auth_yaml(text: str) -> tuple[AuthUser, ...]:
-    users: list[AuthUser] = []
-    in_users = False
-    current: dict[str, str] | None = None
-    for raw_line in text.splitlines():
-        line = strip_yaml_comment(raw_line).rstrip()
-        if not line.strip():
-            continue
-        stripped = line.strip()
-        if stripped == "users:":
-            in_users = True
-            if current is not None:
-                user = auth_user_from_mapping(current)
-                if user:
-                    users.append(user)
-                current = None
-            continue
-        if not in_users:
-            continue
-        if stripped.startswith("- "):
-            if current is not None:
-                user = auth_user_from_mapping(current)
-                if user:
-                    users.append(user)
-            current = {}
-            remainder = stripped[2:].strip()
-            if remainder:
-                pair = parse_yaml_key_value(remainder)
-                if pair:
-                    current[pair[0]] = pair[1]
-            continue
-        if current is None and stripped.endswith(":"):
-            current = {"username": yaml_scalar(stripped[:-1])}
-            continue
-        if current is None:
-            continue
-        pair = parse_yaml_key_value(stripped)
-        if pair:
-            current[pair[0]] = pair[1]
-    if current is not None:
-        user = auth_user_from_mapping(current)
-        if user:
-            users.append(user)
-    return tuple(users)
-
-
-def auth_config_text(users: tuple[AuthUser, ...]) -> str:
-    lines = [
-        "users:",
-    ]
-    for user in users:
-        lines.extend(
-            [
-                f"  - username: {yaml_quote(user.username)}",
-                f"    password: {yaml_quote(user.password)}",
-                f"    role: {yaml_quote(user.role)}",
-            ]
-        )
-    return "\n".join(lines) + "\n"
-
-
-def read_auth_users(path: Path) -> tuple[AuthUser, ...]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return ()
-    return parse_auth_yaml(text)
-
-
-def login_username() -> str:
-    username = getpass.getuser().strip()
-    if username:
-        return username
-    return os.environ.get("USER", "").strip() or "admin"
-
-
-def random_auth_password() -> str:
-    return secrets.token_urlsafe(18)
-
-
-def starter_auth_users() -> tuple[AuthUser, ...]:
-    return (
-        AuthUser(username=login_username(), password=random_auth_password(), role="admin"),
-        AuthUser(username=GUEST_AUTH_USERNAME, password=GUEST_AUTH_PASSWORD, role="readonly"),
-    )
-
-
-def commented_auth_config_text(users: tuple[AuthUser, ...]) -> str:
-    lines = [
-        "YOLOmux authentication is disabled until one or more account entries are uncommented.",
-        "Uncomment and edit the account entries below, save the file, then refresh the browser.",
-        "Keep admin credentials private. The guest/guest account is readonly.",
-        "",
-    ]
-    for line in auth_config_text(users).splitlines():
-        if line == "users:":
-            lines.append(line)
-        else:
-            lines.append(f"# {line}" if line else "#")
-    return "\n".join((f"# {line}" if line else "#") if index < 4 else line for index, line in enumerate(lines)) + "\n"
-
-
-def initialize_auth_config(path: Path) -> tuple[AuthUser, ...]:
-    if path.exists():
-        secure_auth_config_permissions(path)
-        users = read_auth_users(path)
-        if legacy_placeholder_auth_active(users):
-            write_auth_config(path, commented_auth_config_text(starter_auth_users()))
-            return ()
-        return users
-    write_auth_config(path, commented_auth_config_text(starter_auth_users()))
-    return ()
-
-
-def current_auth_users() -> tuple[AuthUser, ...]:
-    return initialize_auth_config(AUTH_CONFIG_PATH)
-
-
-def legacy_placeholder_auth_active(users: tuple[AuthUser, ...]) -> bool:
-    return len(users) == 1 and users[0].username == PLACEHOLDER_AUTH_USERNAME and users[0].password == PLACEHOLDER_AUTH_PASSWORD
-
-
-def auth_setup_required() -> bool:
-    users = current_auth_users()
-    return not users or legacy_placeholder_auth_active(users)
-
-
-AUTH_COOKIE_NAME = "yolomux_auth"
-AUTH_LOGOUT_COOKIE_NAME = "yolomux_logged_out"
-AUTH_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 60 * 60
-AUTH_COOKIE_SECRET_PATH = CONFIG_DIR / "auth-cookie-secret"
-
-
-def load_auth_cookie_secret(path: Path = AUTH_COOKIE_SECRET_PATH) -> bytes:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
-    if path.exists():
-        path.chmod(0o600)
-        raw = path.read_text(encoding="utf-8").strip()
-        try:
-            secret = bytes.fromhex(raw)
-        except ValueError:
-            secret = b""
-        if len(secret) == 32:
-            return secret
-    secret = os.urandom(32)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(f"{secret.hex()}\n")
-    path.chmod(0o600)
-    return secret
-
-
-AUTH_COOKIE_SECRET = load_auth_cookie_secret()
-
-
-def write_auth_config(path: Path, text: str) -> None:
-    secure_auth_config_permissions(path)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    path.chmod(0o600)
-
-
-def secure_auth_config_permissions(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
-    if path.exists():
-        path.chmod(0o600)
-
-
-def auth_cookie_value(username: str, password: str) -> str:
-    return hmac.new(
-        AUTH_COOKIE_SECRET,
-        f"{username}:{password}".encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-
-def auth_identity_for_credentials(username: str, password: str) -> AuthIdentity | None:
-    for user in current_auth_users():
-        username_matches = hmac.compare_digest(username, user.username)
-        password_matches = hmac.compare_digest(password, user.password)
-        if username_matches and password_matches:
-            return AuthIdentity(username=user.username, password=user.password, role=user.role)
-    return None
-
-
-AUTH_CONFIG = initialize_auth_config(AUTH_CONFIG_PATH)
 XTERM_ASSET_ROOTS = [
     *(Path(item).expanduser() for item in os.environ.get("YOLOMUX_XTERM_ROOTS", "").split(os.pathsep) if item),
     STATIC_DIR / "xterm",
@@ -533,23 +328,6 @@ def next_numbered_session_name(existing_sessions: list[str]) -> str | None:
 
 def git(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[str]:
     return run_cmd(["git", "-C", cwd, *args], timeout=timeout)
-
-
-_AUTO_APPROVE_MODULE: Any | None = None
-
-
-def auto_approve_module() -> Any:
-    global _AUTO_APPROVE_MODULE
-    if _AUTO_APPROVE_MODULE is not None:
-        return _AUTO_APPROVE_MODULE
-    spec = importlib.util.spec_from_file_location("yolomux_auto_approve_tmux", AUTO_APPROVE_SCRIPT)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {AUTO_APPROVE_SCRIPT}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    _AUTO_APPROVE_MODULE = module
-    return module
 
 
 def xterm_asset_path(asset: str) -> Path | None:

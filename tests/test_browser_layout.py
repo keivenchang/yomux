@@ -661,8 +661,7 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert browser.execute_script("return document.getElementById('tab-minimize').getBoundingClientRect().width") >= 18
     assert browser.execute_script("return getComputedStyle(document.getElementById('collapsed-preferences')).display") == "none"
     assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationName") == "yolo-marker-rotate"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo'), '::after').animationName") == "yolo-marker-orbit"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo'), '::after').content") != "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo'), '::after').content") == "none"
     triangle_sizes = browser.execute_script(
         """
         const collapsed = getComputedStyle(document.querySelector('#collapsed-dir > .file-tree-icon'));

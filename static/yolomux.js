@@ -38,22 +38,6 @@ const fileExplorerClose = document.getElementById('fileExplorerClose');
 const fileExplorerHiddenToggle = document.getElementById('fileExplorerHiddenToggle');
 const fileExplorerRootModeButton = document.getElementById('fileExplorerRootMode');
 const fileExplorerQuickAccess = document.getElementById('fileExplorerQuickAccess');
-const fileEditor = document.getElementById('fileEditor');
-const fileEditorPath = document.getElementById('fileEditorPath');
-const fileEditorContent = document.getElementById('fileEditorContent');
-const fileEditorTextarea = document.getElementById('fileEditorTextarea');
-const fileEditorModeControl = document.getElementById('fileEditorMode');
-const fileEditorGutterBtn = document.getElementById('fileEditorGutter');
-const fileEditorWrapBtn = document.getElementById('fileEditorWrap');
-const fileEditorFindBtn = document.getElementById('fileEditorFind');
-const fileEditorThemeBtn = document.getElementById('fileEditorTheme');
-const fileEditorPreviewPane = document.getElementById('fileEditorPreviewPane');
-const fileEditorCodeMirror = document.getElementById('fileEditorCodeMirror');
-const fileEditorHighlight = document.getElementById('fileEditorHighlight');
-const fileEditorHighlightCode = document.getElementById('fileEditorHighlightCode');
-const fileEditorSave = document.getElementById('fileEditorSave');
-const fileEditorClose = document.getElementById('fileEditorClose');
-const fileEditorStatus = document.getElementById('fileEditorStatus');
 const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
@@ -63,6 +47,8 @@ const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1
 const editorViewModes = new Set(['edit', 'preview', 'split']);
 const editorEngineModes = new Set(['textarea', 'codemirror']);
 const defaultEditorEngine = 'codemirror';
+const defaultEditorScheme = 'vscode-dark-plus';
+const defaultLightEditorScheme = 'github-light';
 const EDITOR_SCHEMES = {
   dark: {
     id: 'dark', label: 'YOLOmux Dark', dark: true,
@@ -96,7 +82,7 @@ const EDITOR_SCHEMES = {
     id: 'vscode-dark-plus', label: 'VS Code Dark+', dark: true,
     bg: '#1e1e1e', fg: '#d4d4d4', cursor: '#aeafad', selection: '#264f78', activeLine: '#2a2d2e',
     gutterBg: '#1e1e1e', lineNo: '#858585', panel: '#1e1e1e', panel2: '#252526', line: '#3c3c3c', previewBg: '#252526',
-    syntax: {comment: '#6a9955', keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', function: '#dcdcaa', type: '#4ec9b0', variable: '#9cdcfe', tag: '#569cd6', heading: '#569cd6', link: '#3794ff', inlineCode: '#ce9178', inlineCodeBg: 'rgba(206, 145, 120, 0.16)', inlineCodeBorder: 'rgba(206, 145, 120, 0.32)', atom: '#569cd6', property: '#9cdcfe', strong: '#dcdcaa', emphasis: '#c586c0', invalid: '#f14c4c'},
+    syntax: {comment: '#6a9955', keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', function: '#dcdcaa', type: '#4ec9b0', variable: '#9cdcfe', tag: '#569cd6', heading: '#4fc1ff', headingBg: '#263342', link: '#3794ff', inlineCode: '#ffb86c', inlineCodeBg: 'rgba(255, 184, 108, 0.16)', inlineCodeBorder: 'rgba(255, 184, 108, 0.36)', atom: '#c586c0', property: '#9cdcfe', strong: '#ffd866', emphasis: '#c586c0', invalid: '#f14c4c'},
     diff: {addFg: '#6a9955', removeFg: '#f14c4c'},
   },
   nord: {
@@ -110,7 +96,7 @@ const EDITOR_SCHEMES = {
     id: 'github-light', label: 'GitHub Light', dark: false,
     bg: '#ffffff', fg: '#1f2328', cursor: '#0969da', selection: '#0969da33', activeLine: '#f4f6f9',
     gutterBg: '#ffffff', lineNo: '#8c959f', panel: '#f6f8fa', panel2: '#eef2f6', line: '#d0d7de', previewBg: '#fff6df',
-    syntax: {comment: '#6e7781', keyword: '#cf222e', string: '#116329', number: '#0550ae', function: '#8250df', type: '#953800', variable: '#1f2328', tag: '#116329', heading: '#6f42c1', headingBg: '#f1eafe', link: '#0969da', inlineCode: '#a40e26', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#d8a657', atom: '#0550ae', property: '#0969da', strong: '#1f2328', emphasis: '#953800', invalid: '#82071e'},
+    syntax: {comment: '#57606a', keyword: '#cf222e', string: '#116329', number: '#0550ae', function: '#8250df', type: '#953800', variable: '#24292f', tag: '#116329', heading: '#6f42c1', headingBg: '#f1eafe', link: '#0969da', inlineCode: '#a40e26', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#d8a657', atom: '#0550ae', property: '#0969da', strong: '#0f172a', emphasis: '#953800', invalid: '#82071e'},
     diff: {addFg: '#116329', removeFg: '#82071e'},
   },
   'vscode-light-plus': {
@@ -136,7 +122,6 @@ const EDITOR_SCHEMES = {
   },
 };
 const EDITOR_SCHEME_IDS = Object.keys(EDITOR_SCHEMES);
-const fileEditorThemeModes = EDITOR_SCHEME_IDS;
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
@@ -176,10 +161,6 @@ let fileEditorThemeMode = readStoredEditorThemeMode();
 let editorEngine = defaultEditorEngine;
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
-let standaloneCodeMirrorView = null;
-let standaloneCodeMirrorPath = '';
-let standaloneCodeMirrorSignature = '';
-let standaloneCodeMirrorGeneration = 0;
 let preferencesSearchText = '';
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
 let sessionFilesPayload = {session: '', files: [], repos: [], errors: []};
@@ -232,6 +213,7 @@ let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_del
 const fileImagePreviewMinShowDelayMs = 800;
 let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3000);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
+let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');
 let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
 let editorFontSize = initialSetting('appearance.editor_font_size', 13);
@@ -271,6 +253,8 @@ const TAB_TYPES = [
     aliases: ['info', infoItemId],
     match: item => item === infoItemId,
     label: () => 'Branch Info',
+    shortLabel: () => 'Term',
+    terminalTitle: () => 'unavailable for Branch Info',
     sortRank: 0,
     param: () => 'info',
     detail: () => 'Branch and repo metadata',
@@ -287,6 +271,8 @@ const TAB_TYPES = [
     aliases: ['files', fileExplorerItemId],
     match: item => item === fileExplorerItemId,
     label: () => fileExplorerLabel(),
+    shortLabel: () => fileExplorerLabel(),
+    terminalTitle: () => `unavailable for ${fileExplorerLabel()}`,
     sortRank: 0.5,
     param: () => 'files',
     detail: () => compactHomePath(fileExplorerRoot || homePath || '/'),
@@ -303,6 +289,8 @@ const TAB_TYPES = [
     aliases: ['prefs', 'preferences', prefsItemId],
     match: item => item === prefsItemId,
     label: () => 'Preferences',
+    shortLabel: () => 'Prefs',
+    terminalTitle: () => 'unavailable for Preferences',
     sortRank: 0.65,
     param: () => 'prefs',
     detail: () => compactHomePath(settingsConfigPath()),
@@ -319,6 +307,8 @@ const TAB_TYPES = [
     aliases: ['changes', changesItemId],
     match: item => item === changesItemId,
     label: () => 'Changes',
+    shortLabel: () => 'Changes',
+    terminalTitle: () => 'unavailable for Changes',
     sortRank: 0.7,
     param: () => 'changes',
     detail: () => changesTabDetail(),
@@ -334,6 +324,8 @@ const TAB_TYPES = [
     prefix: imageViewerItemPrefix,
     match: item => typeof item === 'string' && item.startsWith(imageViewerItemPrefix),
     label: item => basenameOf(fileItemPath(item)),
+    shortLabel: () => 'Image',
+    terminalTitle: () => 'unavailable for image viewer',
     sortRank: 0.74,
     param: item => item,
     detail: item => compactHomePath(fileItemPath(item)),
@@ -349,6 +341,8 @@ const TAB_TYPES = [
     prefix: fileEditorItemPrefix,
     match: item => typeof item === 'string' && item.startsWith(fileEditorItemPrefix),
     label: item => basenameOf(fileItemPath(item)),
+    shortLabel: () => 'Edit',
+    terminalTitle: () => 'unavailable for file editor',
     sortRank: 0.75,
     param: item => item,
     detail: item => compactHomePath(fileItemPath(item)),
@@ -451,7 +445,6 @@ function applyFileExplorerStaticLabels() {
   fileExplorer?.setAttribute('aria-label', label);
   fileExplorerClose?.setAttribute('title', `Close ${label}`);
   applyPlatformControlClass(fileExplorerClose, 'close');
-  applyPlatformControlClass(fileEditorClose, 'close');
 }
 const syntaxLanguageByExtension = new Map([
   ['.cjs', 'javascript'],
@@ -507,11 +500,9 @@ let fileExplorerSelectionAnchor = null;
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;
 let fileExplorerPathError = '';
-let fileImagePreviewShowTimer = null;
-let fileImagePreviewHideTimer = null;
 let fileImagePreviewPopover = null;
+let fileImagePreviewController = null;
 let fileExplorerInteractionGeneration = 0;
-const panelPopoverHideTimers = new WeakMap();
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
 let layoutResizeState = null;
@@ -523,8 +514,6 @@ let authRedirectStarted = false;
 let openAppMenuId = null;
 let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
-let appMenuHoverTimer = null;
-let appMenuCloseTimer = null;
 let fileExplorerSyncPathInFlight = '';
 let fileExplorerSyncGeneration = 0;
 
@@ -661,20 +650,20 @@ function writeStoredFileExplorerRootMode(mode) {
 
 function normalizeEditorSchemeId(value) {
   const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'light' || normalized === 'white') return 'github-light';
-  return EDITOR_SCHEMES[normalized] ? normalized : 'dark';
+  if (normalized === 'light' || normalized === 'white') return defaultLightEditorScheme;
+  return EDITOR_SCHEMES[normalized] ? normalized : defaultEditorScheme;
 }
 
 function activeEditorScheme() {
-  return EDITOR_SCHEMES[normalizeEditorSchemeId(fileEditorThemeMode)] || EDITOR_SCHEMES.dark;
+  return EDITOR_SCHEMES[normalizeEditorSchemeId(fileEditorThemeMode)] || EDITOR_SCHEMES[defaultEditorScheme] || EDITOR_SCHEMES.dark;
 }
 
 function readStoredEditorThemeMode() {
   try {
-    const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey) || 'dark';
+    const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey) || defaultEditorScheme;
     return normalizeEditorSchemeId(value);
   } catch (_) {
-    return 'dark';
+    return defaultEditorScheme;
   }
 }
 
@@ -1912,12 +1901,9 @@ function registerImageViewerLayoutItem(path) {
 function resolveLayoutItem(value) {
   const text = String(value || '');
   const type = tabTypeForParam(text);
-  if (type?.key === 'info') return infoItemId;
-  if (type?.key === 'files') return fileExplorerItemId;
-  if (type?.key === 'preferences') return prefsItemId;
-  if (type?.key === 'changes') return changesItemId;
-  if (type?.key === 'image-viewer') return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
-  if (type?.key === 'file-editor') return registerFileEditorLayoutItem(text.slice(fileEditorItemPrefix.length)) || text;
+  if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
+  if (type?.prefix === fileEditorItemPrefix) return registerFileEditorLayoutItem(text.slice(fileEditorItemPrefix.length)) || text;
+  if (type?.id) return type.id;
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
   if (Number.isInteger(ordinal) && ordinal > 0) return sessionForLabel(String(ordinal));
@@ -2214,6 +2200,8 @@ function keyboardShortcutItems() {
   return [
     menuCommand('Command palette', null, {disabled: true, detail: 'Ctrl/Cmd+K'}),
     menuCommand('Save active editor', null, {disabled: true, detail: 'Ctrl/Cmd+S'}),
+    menuCommand(`Toggle ${fileExplorerLabel()}`, null, {disabled: true, detail: 'Ctrl/Cmd+B'}),
+    menuCommand('Open Preferences', null, {disabled: true, detail: 'Ctrl/Cmd+,'}),
     menuCommand('Close menu or dialog', null, {disabled: true, detail: 'Esc'}),
     menuCommand('Session actions', null, {disabled: true, detail: 'Right-click a tmux tab'}),
     menuCommand('Move or split tab', null, {disabled: true, detail: 'Drag a tab'}),
@@ -3149,7 +3137,8 @@ function appMenuTree() {
           detail: 'Open the repository overview panel',
         }),
         menuSubmenu('Layout', [
-          menuCommand('Single pane', null, {disabled: true, detail: 'Coming soon'}),
+          menuCommand('Single pane', setLayoutToSinglePane, {detail: 'Consolidate visible non-Finder tabs'}),
+          menuCommand('Split', setLayoutToSplitPanes, {detail: 'Split visible non-Finder tabs left/right'}),
           menuCommand('Grid', null, {disabled: true, detail: 'Drag panes for now'}),
           menuCommand('Wall', null, {disabled: true}),
         ]),
@@ -3222,8 +3211,6 @@ function renderSessionButtons(options = {}) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
   }
-  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
-  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
   sessionButtons.innerHTML = '';
   sessionButtons.ondragover = event => {
     const payload = dragPayload(event);
@@ -3256,10 +3243,6 @@ function createAppMenuBar() {
   bar.setAttribute('role', 'menubar');
   for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
   return bar;
-}
-
-function appMenuViewportInlineSize() {
-  return Math.max(0, document.documentElement?.clientWidth || window.innerWidth || 0);
 }
 
 function appMenuAnchorInlineSize(popover) {
@@ -3310,7 +3293,7 @@ function fitAppMenuPopover(popover) {
   if (desiredWidth > 0) popover.style.setProperty('--app-menu-fit-width', `${desiredWidth}px`);
 
   const rect = popover.getBoundingClientRect();
-  const viewportRight = Math.max(0, appMenuViewportInlineSize() - popoverEdgeGapPx());
+  const viewportRight = viewportBounds(popoverEdgeGapPx()).right;
   if (!rect.width || !viewportRight) return;
   const overflow = Math.max(0, rect.right - viewportRight);
   if (!overflow) return;
@@ -3347,16 +3330,9 @@ function createAppMenu(menu) {
     openAppMenu(wrapper, {focusFirst: false, pinned: true});
   });
   button.addEventListener('keydown', event => handleAppMenuButtonKeydown(event, wrapper));
-  wrapper.addEventListener('pointerenter', () => {
-    appMenuCloseTimer = clearTimer(appMenuCloseTimer);
-    queueAppMenuHoverOpen(wrapper);
-  });
-  wrapper.addEventListener('pointerleave', () => {
-    if (wrapper.classList.contains('open')) queueAppMenuHoverClose(wrapper);
-    else appMenuHoverTimer = clearTimer(appMenuHoverTimer);
-  });
   wrapper.append(button, popover);
   if (openAppMenuId === menu.id) wrapper.classList.add('open');
+  bindAppMenuHover(wrapper);
   return wrapper;
 }
 
@@ -3397,14 +3373,18 @@ function createAppSubmenu(item) {
     event.stopPropagation();
     if (button.disabled) return;
     wrapper.classList.add('open');
+    button.setAttribute('aria-expanded', 'true');
   });
   button.addEventListener('keydown', event => {
     if (event.key === 'ArrowRight') {
       event.preventDefault();
       wrapper.classList.add('open');
+      button.setAttribute('aria-expanded', 'true');
       focusFirstAppMenuCommand(submenu);
     }
   });
+  button.setAttribute('aria-haspopup', 'true');
+  button.setAttribute('aria-expanded', 'true');
   wrapper.append(button, submenu);
   return wrapper;
 }
@@ -3413,10 +3393,10 @@ function createAppMenuCommand(item, options = {}) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = ['app-menu-command', item.className || '', options.asSubmenu ? 'has-submenu' : ''].filter(Boolean).join(' ');
-  button.setAttribute('role', 'menuitem');
-  if (item.checked) {
-    button.dataset.checked = 'true';
-    button.setAttribute('aria-checked', 'true');
+  button.setAttribute('role', item.checked !== undefined ? 'menuitemcheckbox' : 'menuitem');
+  if (item.checked !== undefined) {
+    button.dataset.checked = item.checked ? 'true' : 'false';
+    button.setAttribute('aria-checked', item.checked ? 'true' : 'false');
   }
   if (item.disabled) button.disabled = true;
   const ariaLabel = item.ariaLabel || [item.label, item.detail].filter(Boolean).join(' - ');
@@ -3528,50 +3508,62 @@ function handleAppMenuCommandKeydown(event, button, item, options = {}) {
     event.preventDefault();
     closeAppMenus();
     button.closest('.app-menu')?.querySelector('.app-menu-button')?.focus();
+  } else if (event.key === 'ArrowLeft') {
+    event.preventDefault();
+    const submenu = button.closest('.app-submenu-popover');
+    if (submenu) {
+      submenu.closest('.app-menu-submenu-wrap')?.querySelector(':scope > .app-menu-command')?.focus();
+      return;
+    }
+    const wrapper = button.closest('.app-menu');
+    if (wrapper) focusAdjacentTopMenu(wrapper, -1);
+  } else if (event.key === 'ArrowRight') {
+    event.preventDefault();
+    const submenu = button.closest('.app-menu-submenu-wrap')?.querySelector(':scope > .app-submenu-popover');
+    if (submenu && options.asSubmenu) {
+      focusFirstAppMenuCommand(submenu);
+      return;
+    }
+    const wrapper = button.closest('.app-menu');
+    if (wrapper) focusAdjacentTopMenu(wrapper, 1);
   } else if (!options.asSubmenu && (event.key === 'Enter' || event.key === ' ')) {
     event.preventDefault();
     runAppMenuCommand(item);
   }
 }
 
-function queueAppMenuHoverOpen(wrapper) {
-  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
-  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
-  if (!wrapper || wrapper.classList.contains('open')) return;
-  const menuId = wrapper.dataset.appMenu || '';
-  const currentWrapper = () => document.querySelector(`.app-menu[data-app-menu="${cssEscape(menuId)}"]`);
-  if (appMenuIsOpen()) {
-    openAppMenu(currentWrapper() || wrapper, {focusFirst: false, pinned: false});
-    return;
-  }
-  appMenuHoverTimer = setTimeout(() => {
-    appMenuHoverTimer = null;
-    const target = currentWrapper() || wrapper;
-    if (!target.classList.contains('open')) openAppMenu(target, {focusFirst: false, pinned: false});
-  }, menuHoverOpenDelayMs);
-}
-
-function queueAppMenuHoverClose(wrapper) {
-  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
-  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
-  appMenuCloseTimer = setTimeout(() => {
-    appMenuCloseTimer = null;
-    if (!wrapper?.matches?.(':hover')) closeAppMenus();
-  }, menuHoverCloseDelayMs);
+function bindAppMenuHover(wrapper) {
+  createHoverPopover({
+    anchor: wrapper,
+    popover: () => wrapper.querySelector(':scope > .app-menu-popover'),
+    stateClass: '',
+    showDelay: () => (appMenuIsOpen() ? 0 : menuHoverOpenDelayMs),
+    hideDelay: () => menuHoverCloseDelayMs,
+    stillActive: () => wrapper.matches?.(':hover'),
+    onOpen: () => {
+      const menuId = wrapper.dataset.appMenu || '';
+      const currentWrapper = document.querySelector(`.app-menu[data-app-menu="${cssEscape(menuId)}"]`) || wrapper;
+      if (!currentWrapper.classList.contains('open')) openAppMenu(currentWrapper, {focusFirst: false, pinned: false});
+    },
+    onClose: () => {
+      if (!wrapper.matches?.(':hover')) closeAppMenus();
+    },
+  });
 }
 
 function openAppMenu(wrapper, options = {}) {
   if (!wrapper) return;
-  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
-  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
   closeContextMenus();
-  closeOtherSessionPopovers(null);
+  closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
   closeAppMenus(wrapper);
   fitAppMenuPopover(wrapper.querySelector(':scope > .app-menu-popover'));
   wrapper.querySelectorAll(':scope > .app-menu-popover .app-submenu-popover').forEach(fitAppMenuPopover);
   wrapper.classList.add('open');
-  wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => submenu.classList.add('open'));
+  wrapper.querySelectorAll('.app-menu-submenu-wrap').forEach(submenu => {
+    submenu.classList.add('open');
+    submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'true');
+  });
   openAppMenuId = wrapper.dataset.appMenu || null;
   openAppMenuPinned = options.pinned === true;
   openAppMenuOpenedAt = Date.now();
@@ -3580,8 +3572,6 @@ function openAppMenu(wrapper, options = {}) {
 }
 
 function closeAppMenus(keepOpen = null) {
-  appMenuHoverTimer = clearTimer(appMenuHoverTimer);
-  appMenuCloseTimer = clearTimer(appMenuCloseTimer);
   for (const menu of document.querySelectorAll('.app-menu.open')) {
     if (menu === keepOpen) continue;
     menu.classList.remove('open');
@@ -3590,6 +3580,7 @@ function closeAppMenus(keepOpen = null) {
   for (const submenu of document.querySelectorAll('.app-menu-submenu-wrap.open')) {
     if (keepOpen?.contains(submenu)) continue;
     submenu.classList.remove('open');
+    submenu.querySelector(':scope > .app-menu-command')?.setAttribute('aria-expanded', 'false');
   }
   openAppMenuId = keepOpen?.dataset?.appMenu || null;
   if (!openAppMenuId) {
@@ -4330,9 +4321,8 @@ function rawFileUrl(path, params = {}) {
   return `/api/fs/raw?${queryParts.join('&')}`;
 }
 
-function closeFileImagePreview() {
-  fileImagePreviewShowTimer = clearTimer(fileImagePreviewShowTimer);
-  fileImagePreviewHideTimer = clearTimer(fileImagePreviewHideTimer);
+function closeFileImagePreview(options = {}) {
+  if (!options.fromController) fileImagePreviewController?.cancelTimers?.();
   fileImagePreviewPopover?.remove();
   fileImagePreviewPopover = null;
 }
@@ -4343,8 +4333,7 @@ function positionFileImagePreview(anchor, popover, point = null) {
   const edgeGap = popoverEdgeGapPx();
   const desiredLeft = point ? point.x + 14 : anchorRect.right + 10;
   const desiredTop = point ? point.y + 14 : anchorRect.top - 8;
-  const left = Math.min(Math.max(edgeGap, desiredLeft), Math.max(edgeGap, window.innerWidth - rect.width - edgeGap));
-  const top = Math.min(Math.max(edgeGap, desiredTop), Math.max(edgeGap, window.innerHeight - rect.height - edgeGap));
+  const {left, top} = clampToViewport(desiredLeft, desiredTop, rect.width, rect.height, {edgeGap});
   popover.style.left = `${Math.round(left)}px`;
   popover.style.top = `${Math.round(top)}px`;
 }
@@ -4359,19 +4348,9 @@ function openFileImagePreview(anchor, path, entry, point = null) {
   img.src = rawFileUrl(path);
   img.alt = entry?.name || basenameOf(path);
   popover.appendChild(img);
-  popover.addEventListener('pointerenter', () => {
-    fileImagePreviewHideTimer = clearTimer(fileImagePreviewHideTimer);
-  });
-  popover.addEventListener('pointerleave', closeFileImagePreviewSoon);
   document.body.appendChild(popover);
   fileImagePreviewPopover = popover;
   positionFileImagePreview(anchor, popover, point);
-}
-
-function closeFileImagePreviewSoon() {
-  fileImagePreviewShowTimer = clearTimer(fileImagePreviewShowTimer);
-  fileImagePreviewHideTimer = clearTimer(fileImagePreviewHideTimer);
-  fileImagePreviewHideTimer = setTimeout(closeFileImagePreview, popoverHideDelayMs);
 }
 
 function bindFileImagePreview(anchor, path, entry) {
@@ -4382,19 +4361,30 @@ function bindFileImagePreview(anchor, path, entry) {
     pointer = {x: event.clientX, y: event.clientY};
     if (fileImagePreviewPopover?.dataset.previewPath === path) positionFileImagePreview(anchor, fileImagePreviewPopover, pointer);
   };
-  anchor.addEventListener('pointerenter', event => {
-    if (appMenuIsOpen() || contextMenuIsOpen() || topbar?.matches?.(':hover')) return;
-    updatePointer(event);
-    fileImagePreviewHideTimer = clearTimer(fileImagePreviewHideTimer);
-    fileImagePreviewShowTimer = clearTimer(fileImagePreviewShowTimer);
-    fileImagePreviewShowTimer = setTimeout(() => {
-      fileImagePreviewShowTimer = null;
-      if (appMenuIsOpen() || contextMenuIsOpen() || topbar?.matches?.(':hover')) return;
+  const controller = createHoverPopover({
+    anchor,
+    popover: () => fileImagePreviewPopover?.dataset.previewPath === path ? fileImagePreviewPopover : null,
+    stateClass: '',
+    showDelay: () => Math.max(fileImagePreviewMinShowDelayMs, tabPopoverShowDelayMs),
+    hideDelay: () => popoverHideDelayMs,
+    canOpen: () => !appMenuIsOpen() && !contextMenuIsOpen() && !topbar?.matches?.(':hover'),
+    stillActive: () => popoverStillActive(anchor, fileImagePreviewPopover?.dataset.previewPath === path ? fileImagePreviewPopover : null),
+    onQueue: updatePointer,
+    onOpen: event => {
+      updatePointer(event);
+      fileImagePreviewController = controller;
       openFileImagePreview(anchor, path, entry, pointer);
-    }, Math.max(fileImagePreviewMinShowDelayMs, tabPopoverShowDelayMs));
+    },
+    onClose: () => {
+      if (fileImagePreviewPopover?.dataset.previewPath === path) closeFileImagePreview({fromController: true});
+      if (fileImagePreviewController === controller) fileImagePreviewController = null;
+    },
+  });
+  anchor.addEventListener('pointerenter', event => {
+    fileImagePreviewController = controller;
+    updatePointer(event);
   });
   anchor.addEventListener('pointermove', updatePointer);
-  anchor.addEventListener('pointerleave', closeFileImagePreviewSoon);
 }
 
 function selectableFileTreeRows(container = document) {
@@ -4982,7 +4972,6 @@ function renderOpenFilePath(path) {
     const panel = panelNodes.get(item);
     if (panel && slot && activeItemForSide(slot) === item) renderFileEditorPanel(panel, item);
   }
-  if (activeFile === path) renderEditorForActive();
   renderSessionButtons();
   renderPaneTabStrips();
 }
@@ -5290,37 +5279,6 @@ async function openFileEditorPane(path, options = {}) {
   await moveSessionToSlot(item, slotForNewSession(), null);
 }
 
-function ensureEditorVisible() {
-  if (!fileEditor) return;
-  fileEditor.removeAttribute('hidden');
-  document.body.classList.add('file-editor-open');
-}
-
-function hideEditor(options = {}) {
-  if (!fileEditor) return;
-  const clearActiveFile = options.clearActiveFile !== false;
-  fileEditor.setAttribute('hidden', '');
-  document.body.classList.remove('file-editor-open');
-  if (clearActiveFile) activeFile = null;
-  setEditorContentMode(fileEditorContent, 'edit');
-  if (fileEditorContent) fileEditorContent.hidden = false;
-  fileEditor?.classList.remove('syntax-highlighted');
-  if (fileEditorTextarea) { fileEditorTextarea.value = ''; fileEditorTextarea.hidden = false; }
-  if (fileEditorPreviewPane) { fileEditorPreviewPane.hidden = true; fileEditorPreviewPane.innerHTML = ''; }
-  if (fileEditorHighlight) fileEditorHighlight.hidden = true;
-  destroyStandaloneCodeMirror();
-  const img = fileEditor.querySelector('.file-editor-image');
-  if (img) img.remove();
-  setEditorStatus('');
-  if (clearActiveFile) updateFileExplorerCurrentFileHighlight();
-}
-
-function setEditorStatus(msg, level) {
-  if (!fileEditorStatus) return;
-  fileEditorStatus.textContent = msg || '';
-  fileEditorStatus.dataset.level = level || '';
-}
-
 function codeMirrorLanguageName(path) {
   const ext = fileExtensionOf(path);
   if (ext === '.html' || ext === '.htm') return 'html';
@@ -5544,10 +5502,12 @@ function codeMirrorThemeExtension(api) {
       backgroundColor: scheme.panel2,
     },
     '.cm-searchMatch': {
-      backgroundColor: scheme.dark ? 'rgba(245, 197, 66, 0.34)' : 'rgba(255, 248, 197, 0.9)',
+      backgroundColor: scheme.dark ? 'rgba(245, 197, 66, 0.46)' : 'rgba(255, 221, 87, 0.72)',
+      outline: `1px solid ${scheme.dark ? 'rgba(245, 197, 66, 0.42)' : 'rgba(156, 101, 0, 0.32)'}`,
     },
     '.cm-searchMatch-selected': {
-      backgroundColor: scheme.dark ? 'rgba(118, 185, 0, 0.45)' : 'rgba(255, 212, 0, 0.42)',
+      backgroundColor: scheme.dark ? 'rgba(118, 185, 0, 0.62)' : 'rgba(255, 166, 0, 0.68)',
+      outline: `2px solid ${scheme.dark ? 'rgba(185, 238, 92, 0.7)' : 'rgba(157, 93, 0, 0.55)'}`,
     },
   }, {dark: scheme.dark});
 }
@@ -5866,7 +5826,6 @@ function removeOpenFile(path, options = {}) {
     activeFile = remaining[remaining.length - 1] || null;
   }
   updateFileExplorerCurrentFileHighlight();
-  if (!activeFile) hideEditor();
   if (wasInLayout) applyLayoutSlots(nextSlots);
   if (shouldRender) renderSessionButtons();
   return true;
@@ -5924,102 +5883,6 @@ function renameOpenFilePath(oldPath, newPath) {
     renderPaneTabStrips();
     updateFileExplorerCurrentFileHighlight();
   }
-}
-
-function renderEditorForActive() {
-  if (!activeFile || !openFiles.has(activeFile)) {
-    hideEditor();
-    return;
-  }
-  const paneItem = fileEditorItemFor(activeFile);
-  const paneSlot = slotForSession(paneItem);
-  if (paneSlot) {
-    const panel = panelNodes.get(paneItem);
-    if (panel && activeItemForSide(paneSlot) === paneItem) renderFileEditorPanel(panel, paneItem);
-    hideEditor({clearActiveFile: false});
-    return;
-  }
-  ensureEditorVisible();
-  const state = openFiles.get(activeFile);
-  if (fileEditorPath) fileEditorPath.textContent = activeFile;
-  updateEditorModeControl(fileEditorModeControl, activeFile, state);
-  if (fileEditorGutterBtn) {
-    fileEditorGutterBtn.hidden = state.kind !== 'text';
-    updateEditorGutterButton(fileEditorGutterBtn);
-  }
-  if (fileEditorWrapBtn) {
-    fileEditorWrapBtn.hidden = state.kind !== 'text';
-    updateEditorWrapButton(fileEditorWrapBtn);
-  }
-  updateEditorFindButton(fileEditorFindBtn, state);
-  updateEditorThemeButton(fileEditorThemeBtn);
-  // Clear any image from a previous tab
-  const oldImg = fileEditor.querySelector('.file-editor-image');
-  if (oldImg) oldImg.remove();
-  if (state.kind === 'image') {
-    setEditorContentMode(fileEditorContent, 'edit');
-    destroyStandaloneCodeMirror();
-    if (fileEditorContent) fileEditorContent.hidden = true;
-    if (fileEditorTextarea) fileEditorTextarea.hidden = true;
-    if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = true;
-    if (fileEditorHighlight) fileEditorHighlight.hidden = true;
-    if (fileEditorSave) fileEditorSave.hidden = true;
-    const img = document.createElement('img');
-    img.className = 'file-editor-image';
-    const version = state.mtime || state.size || 0;
-    img.src = rawFileUrl(activeFile, {v: version});
-    img.alt = activeFile;
-    img.onload = () => setEditorStatus(`${img.naturalWidth}×${img.naturalHeight}`, '');
-    img.onerror = () => setEditorStatus('failed to load image', 'error');
-    fileEditor.insertBefore(img, fileEditorStatus);
-    setEditorStatus('loading…', '');
-    return;
-  }
-  // text mode
-  if (fileEditorContent) fileEditorContent.hidden = false;
-  if (fileEditorSave) fileEditorSave.hidden = readOnlyMode;
-  const mode = editorViewModeFor(activeFile);
-  setEditorContentMode(fileEditorContent, mode);
-  if (fileEditor) fileEditor.classList.toggle('editor-wrap', fileEditorWrapEnabled);
-  if (fileEditor) fileEditor.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
-  if (mode === 'preview') {
-    destroyStandaloneCodeMirror();
-    renderEditorPreviewPane(fileEditorPreviewPane, activeFile, state.content);
-    if (fileEditorTextarea) fileEditorTextarea.hidden = true;
-    if (fileEditorHighlight) fileEditorHighlight.hidden = true;
-    fileEditor?.classList.remove('syntax-highlighted');
-    if (fileEditorPreviewPane) fileEditorPreviewPane.hidden = false;
-  } else {
-    if (codeMirrorRequested()) {
-      if (fileEditorTextarea) fileEditorTextarea.hidden = true;
-      if (fileEditorHighlight) fileEditorHighlight.hidden = true;
-      fileEditor?.classList.remove('syntax-highlighted');
-      ensureStandaloneCodeMirror(activeFile, state).then(loaded => {
-        if (!loaded && fileEditorTextarea) {
-          fileEditorTextarea.hidden = false;
-          fileEditorTextarea.value = state.content;
-          fileEditorTextarea.readOnly = readOnlyMode;
-          applyEditorWrapToTextarea(fileEditorTextarea);
-          renderStandaloneSyntaxHighlight(activeFile, state.content);
-          syncStandaloneSyntaxHighlightScroll();
-        }
-      });
-    } else if (fileEditorTextarea) {
-      destroyStandaloneCodeMirror();
-      fileEditorTextarea.hidden = false;
-      fileEditorTextarea.value = state.content;
-      fileEditorTextarea.readOnly = readOnlyMode;
-      applyEditorWrapToTextarea(fileEditorTextarea);
-      renderStandaloneSyntaxHighlight(activeFile, state.content);
-      syncStandaloneSyntaxHighlightScroll();
-    }
-    if (fileEditorPreviewPane) {
-      fileEditorPreviewPane.hidden = mode !== 'split';
-      if (mode === 'split') renderEditorPreviewPane(fileEditorPreviewPane, activeFile, state.content);
-    }
-  }
-  const status = openFileStatus(state);
-  setEditorStatus(status.message, status.level);
 }
 
 function editorViewModeFor(path) {
@@ -6183,13 +6046,21 @@ function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
 function updateEditorThemeButton(button) {
   if (!button) return;
   const scheme = activeEditorScheme();
+  const nextScheme = EDITOR_SCHEMES[scheme.dark ? defaultLightEditorScheme : defaultEditorScheme] || scheme;
   button.classList.toggle('theme-dark', scheme.dark);
   button.classList.toggle('theme-light', !scheme.dark);
   button.dataset.editorTheme = scheme.id;
   button.setAttribute('aria-pressed', scheme.dark ? 'false' : 'true');
-  button.title = `${editorThemeLabel()}; click to cycle`;
+  button.title = `${editorThemeLabel()}; switch to ${nextScheme.label}`;
   button.setAttribute('aria-label', editorThemeLabel());
   setFileEditorIcon(button, 'file-editor-icon-theme');
+}
+
+function updateImageViewerThemeButton(button) {
+  updateEditorThemeButton(button);
+  if (!button) return;
+  button.title = `Toggle image background (${activeEditorScheme().label})`;
+  button.setAttribute('aria-label', 'Toggle image background');
 }
 
 function applyEditorThemeMode() {
@@ -6199,7 +6070,6 @@ function applyEditorThemeMode() {
   EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
   document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light');
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
-  updateEditorThemeButton(fileEditorThemeBtn);
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
 }
 
@@ -6207,7 +6077,6 @@ function setFileEditorThemeMode(mode) {
   fileEditorThemeMode = normalizeEditorSchemeId(mode);
   writeStoredEditorThemeMode(fileEditorThemeMode);
   applyEditorThemeMode();
-  if (activeFile && openFiles.get(activeFile)?.kind === 'text') renderEditorForActive();
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const path = panel.dataset.filePath;
     if (path && openFiles.get(path)?.kind === 'text') renderFileEditorPanel(panel, fileEditorItemFor(path));
@@ -6215,8 +6084,7 @@ function setFileEditorThemeMode(mode) {
 }
 
 function cycleEditorThemeMode() {
-  const currentIndex = Math.max(0, fileEditorThemeModes.indexOf(fileEditorThemeMode));
-  setFileEditorThemeMode(fileEditorThemeModes[(currentIndex + 1) % fileEditorThemeModes.length]);
+  setFileEditorThemeMode(activeEditorScheme().dark ? defaultLightEditorScheme : defaultEditorScheme);
 }
 
 function updateEditorWrapButton(button) {
@@ -6240,10 +6108,12 @@ function updateEditorFindButton(button, state) {
   setFileEditorIcon(button, 'file-editor-icon-find');
 }
 
-async function openEditorFind(host = fileEditor) {
-  const view = host?._cmView || (host === fileEditor ? standaloneCodeMirrorView : null);
+async function openEditorFind(host = null) {
+  const view = host?._cmView || null;
+  const status = host
+    ? (msg, level) => setFileEditorPanelStatus(host, msg, level)
+    : () => {};
   if (!view) {
-    const status = host === fileEditor ? setEditorStatus : (msg, level) => setFileEditorPanelStatus(host, msg, level);
     status('Find is available after CodeMirror finishes loading.', 'warn');
     return false;
   }
@@ -6251,19 +6121,12 @@ async function openEditorFind(host = fileEditor) {
     const api = await loadCodeMirrorApi();
     if (openCodeMirrorFindForView(api, view)) return true;
   } catch (error) {
-    const status = host === fileEditor ? setEditorStatus : (msg, level) => setFileEditorPanelStatus(host, msg, level);
     status(`Find unavailable: ${error}`, 'error');
   }
   return false;
 }
 
 function applyEditorWrapPreference() {
-  applyEditorWrapToTextarea(fileEditorTextarea);
-  updateEditorWrapButton(fileEditorWrapBtn);
-  updateEditorGutterButton(fileEditorGutterBtn);
-  if (activeFile && openFiles.get(activeFile)?.kind === 'text') {
-    renderEditorForActive();
-  }
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
     panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
@@ -6326,6 +6189,7 @@ function applyCssSettings() {
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
+  root.setProperty('--file-image-preview-max-size', `${Math.max(1, fileExplorerImagePreviewMaxPx)}px`);
 }
 
 function applyTerminalRuntimeSettings() {
@@ -6376,6 +6240,7 @@ function applySettingsPayload(payload, options = {}) {
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
   fileExplorerRefreshMs = numberSetting('file_explorer.refresh_ms', 3000);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
+  fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
   terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
   editorFontSize = numberSetting('appearance.editor_font_size', 13);
@@ -6401,7 +6266,6 @@ function applySettingsPayload(payload, options = {}) {
   renderSessionButtons();
   renderPaneTabStrips();
   if (previousEditorEngine !== editorEngine || previousEditorScheme !== fileEditorThemeMode) {
-    renderEditorForActive();
     for (const [item, panel] of panelNodes.entries()) {
       if (isFileEditorItem(item)) renderFileEditorPanel(panel, item);
     }
@@ -6460,42 +6324,6 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('settings', () => refreshSettings({silent: true}), Math.max(1000, Math.min(10000, eventLogRefreshMs)));
 }
 
-async function saveCurrentEditor() {
-  if (!activeFile || readOnlyMode) return;
-  const state = openFiles.get(activeFile);
-  if (!state || state.kind !== 'text') return;
-  const editorContent = standaloneCodeMirrorContent() ?? fileEditorTextarea.value;
-  setEditorStatus('saving…', '');
-  try {
-    const body = JSON.stringify({
-      path: activeFile,
-      content: editorContent,
-      expected_mtime: state.mtime,
-    });
-    const response = await apiFetch('/api/fs/write', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      setEditorStatus(`save failed: ${payload.error || response.status}`, 'error');
-      return;
-    }
-    const payload = await response.json();
-    state.mtime = payload.mtime;
-    state.size = payload.size;
-    state.original = editorContent;
-    state.content = editorContent;
-    state.dirty = false;
-    clearOpenFileExternalState(state);
-    setEditorStatus(`saved (${payload.size} bytes)`, 'ok');
-    renderSessionButtons();
-  } catch (err) {
-    setEditorStatus(`save failed: ${err}`, 'error');
-  }
-}
-
 function toggleHiddenFiles() {
   fileExplorerShowHidden = !fileExplorerShowHidden;
   try { window.localStorage?.setItem(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0'); }
@@ -6547,52 +6375,6 @@ if (fileExplorerHiddenToggle) {
   fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
   fileExplorerHiddenToggle.addEventListener('click', toggleHiddenFiles);
 }
-if (fileEditorClose) fileEditorClose.addEventListener('click', () => {
-  if (activeFile) closeFileTab(activeFile);
-});
-if (fileEditorSave) fileEditorSave.addEventListener('click', saveCurrentEditor);
-if (fileEditorModeControl) {
-  fileEditorModeControl.addEventListener('click', event => {
-    const mode = event.target?.closest?.('[data-editor-mode]')?.dataset?.editorMode;
-    if (!activeFile || !editorViewModes.has(mode)) return;
-    setFileEditorViewMode(activeFile, mode);
-    renderEditorForActive();
-  });
-}
-if (fileEditorGutterBtn) fileEditorGutterBtn.addEventListener('click', toggleEditorLineNumbers);
-if (fileEditorWrapBtn) fileEditorWrapBtn.addEventListener('click', toggleEditorWrap);
-if (fileEditorFindBtn) fileEditorFindBtn.addEventListener('click', () => openEditorFind(fileEditor));
-if (fileEditorThemeBtn) fileEditorThemeBtn.addEventListener('click', cycleEditorThemeMode);
-if (fileEditorTextarea) {
-  fileEditorTextarea.addEventListener('input', () => {
-    if (!activeFile) return;
-    const state = openFiles.get(activeFile);
-    if (!state || state.kind !== 'text') return;
-    state.content = fileEditorTextarea.value;
-    const wasDirty = state.dirty;
-    state.dirty = state.content !== state.original;
-    const status = openFileStatus(state);
-    setEditorStatus(status.message, status.level);
-    renderStandaloneSyntaxHighlight(activeFile, state.content);
-    renderEditorPreviewPane(fileEditorPreviewPane, activeFile, state.content);
-    syncStandaloneSyntaxHighlightScroll();
-    if (wasDirty !== state.dirty) renderSessionButtons();
-  });
-  fileEditorTextarea.addEventListener('scroll', () => {
-    syncStandaloneSyntaxHighlightScroll();
-    syncFileEditorSplitScroll(fileEditor, 'editor');
-  });
-  fileEditorTextarea.addEventListener('keydown', event => {
-    const isSave = (event.ctrlKey || event.metaKey) && event.key === 's' && !event.shiftKey;
-    if (isSave) {
-      event.preventDefault();
-      saveCurrentEditor();
-    }
-  });
-}
-if (fileEditorPreviewPane) {
-  fileEditorPreviewPane.addEventListener('scroll', () => syncFileEditorSplitScroll(fileEditor, 'preview'));
-}
 
 function updateSessionButtonStates() {
   // Top navigation is menu-based now; per-session state lives in pane tabs
@@ -6614,15 +6396,44 @@ function clearTimer(timer) {
   return null;
 }
 
+function numericOption(value, fallback) {
+  const resolved = typeof value === 'function' ? value() : value;
+  const number = Number(resolved);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function viewportBounds(edgeGap = popoverEdgeGapPx()) {
+  const width = Math.max(0, window.innerWidth || document.documentElement?.clientWidth || 0);
+  const height = Math.max(0, window.innerHeight || document.documentElement?.clientHeight || 0);
+  return {
+    left: edgeGap,
+    top: edgeGap,
+    right: Math.max(edgeGap, width - edgeGap),
+    bottom: Math.max(edgeGap, height - edgeGap),
+  };
+}
+
+function clampToViewport(left, top, width, height, options = {}) {
+  const bounds = viewportBounds(options.edgeGap ?? popoverEdgeGapPx());
+  const minTop = Math.max(bounds.top, Number(options.minTop || 0));
+  const maxLeft = Math.max(bounds.left, bounds.right - Math.max(0, width || 0));
+  const maxTop = Math.max(minTop, bounds.bottom - Math.max(0, height || 0));
+  return {
+    left: Math.min(Math.max(bounds.left, left), maxLeft),
+    top: Math.min(Math.max(minTop, top), maxTop),
+  };
+}
+
 function stopPopoverEvent(event) {
   event.stopPropagation();
 }
 
-function closeOtherSessionPopovers(current) {
+function closeOtherSessionPopovers(current, options = {}) {
+  const force = options.force === true;
   for (const other of document.querySelectorAll('.pane-tab.popover-open, .panel-popover-zone.popover-open')) {
     if (other !== current) {
       const popover = other.querySelector?.(':scope > .session-popover, :scope > .panel-detail-popover');
-      if (current === null && popoverStillActive(other, popover)) continue;
+      if (current === null && !force && popoverStillActive(other, popover)) continue;
       other.classList.remove('popover-open');
       delete other.dataset.popoverHoverState;
     }
@@ -6673,6 +6484,95 @@ function bindPopoverHover(anchor, popover, handlers) {
     link.addEventListener('pointerenter', keepOpen);
     link.addEventListener('click', stopPopoverEvent);
   });
+}
+
+function createHoverPopover(options) {
+  const anchor = options.anchor;
+  if (!anchor) return null;
+  const stateClass = options.stateClass === undefined ? 'popover-open' : options.stateClass;
+  let showTimer = null;
+  let hideTimer = null;
+  const popover = () => (typeof options.popover === 'function' ? options.popover() : options.popover);
+  const canOpen = event => (typeof options.canOpen === 'function' ? options.canOpen(event) !== false : true);
+  const stillActive = event => (typeof options.stillActive === 'function'
+    ? options.stillActive(event) !== false
+    : popoverStillActive(anchor, popover()));
+  const markState = state => {
+    if (!anchor.dataset) return;
+    if (state) anchor.dataset.popoverHoverState = state;
+    else delete anchor.dataset.popoverHoverState;
+  };
+  const cancelTimers = () => {
+    showTimer = clearTimer(showTimer);
+    hideTimer = clearTimer(hideTimer);
+  };
+  const closeNow = event => {
+    cancelTimers();
+    if (stateClass) anchor.classList.remove(stateClass);
+    markState('');
+    options.onClose?.(event);
+  };
+  const openNow = event => {
+    cancelTimers();
+    markState('');
+    if (anchor.isConnected === false || !canOpen(event)) return;
+    if (event && !stillActive(event)) return;
+    if (stateClass && anchor.classList.contains(stateClass) && stillActive(event)) {
+      markState('open');
+      return;
+    }
+    options.position?.(event);
+    options.closeOthers?.();
+    options.onOpen?.(event);
+    if (stateClass) anchor.classList.add(stateClass);
+    markState('open');
+    const activePopover = popover();
+    if (activePopover && activePopover.dataset.hoverPopoverBound !== 'true') {
+      bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon});
+      activePopover.dataset.hoverPopoverBound = 'true';
+    }
+  };
+  function queueOpen(event) {
+    hideTimer = clearTimer(hideTimer);
+    markState('pending');
+    if (anchor.isConnected === false || !canOpen(event)) {
+      markState('');
+      return;
+    }
+    if (stateClass && anchor.classList.contains(stateClass)) return;
+    showTimer = clearTimer(showTimer);
+    options.onQueue?.(event);
+    const delay = numericOption(options.showDelay, popoverShowDelayMs);
+    showTimer = setTimeout(() => openNow(event), Math.max(0, delay));
+  }
+  function closeSoon(event) {
+    showTimer = clearTimer(showTimer);
+    hideTimer = clearTimer(hideTimer);
+    markState('closing');
+    const delay = numericOption(options.hideDelay, popoverHideDelayMs);
+    hideTimer = setTimeout(() => {
+      if (anchor.isConnected === false) {
+        markState('');
+        hideTimer = null;
+        if (stateClass) anchor.classList.remove(stateClass);
+        options.onClose?.(event);
+        return;
+      }
+      if (stillActive(event)) {
+        markState('open');
+        hideTimer = null;
+        return;
+      }
+      if (stateClass) anchor.classList.remove(stateClass);
+      markState('');
+      hideTimer = null;
+      options.onClose?.(event);
+    }, Math.max(0, delay));
+  }
+  const initialPopover = popover();
+  bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon});
+  if (initialPopover) initialPopover.dataset.hoverPopoverBound = 'true';
+  return {queueOpen, openNow, closeSoon, closeNow, cancelTimers};
 }
 
 function cssEscape(value) {
@@ -7501,6 +7401,80 @@ function expandPaneFromLayout(item) {
   });
 }
 
+function visibleNonFinderPaneItems(slots = layoutSlots) {
+  const result = [];
+  for (const slot of layoutSlotKeys(slots)) appendUniqueItems(result, paneTabsWithoutFinder(slot, slots));
+  return result;
+}
+
+function firstNonFinderPaneSlot(slots = layoutSlots) {
+  return layoutSlotKeys(slots).find(slot => !isFileExplorerItem(activeItemForSide(slot, slots)) && paneTabsWithoutFinder(slot, slots).length > 0) || null;
+}
+
+function setLayoutToSinglePane() {
+  const items = visibleNonFinderPaneItems();
+  if (!items.length) return;
+  const active = items.includes(focusedPanelItem) ? focusedPanelItem : items[0];
+  const finderSlot = slotForSession(fileExplorerItemId);
+  const targetSlot = firstNonFinderPaneSlot() || (finderSlot === 'left' ? 'right' : 'left');
+  const next = emptyLayoutSlots();
+  next[targetSlot] = paneStateWithTabs(items, active);
+  if (finderSlot) {
+    next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
+    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
+    next[layoutTreeKey] = finderFirst
+      ? splitNode('row', leafNode(finderSlot), leafNode(targetSlot), fileExplorerSplitPercent)
+      : splitNode('row', leafNode(targetSlot), leafNode(finderSlot), 100 - fileExplorerSplitPercent);
+  } else {
+    next[layoutTreeKey] = leafNode(targetSlot);
+  }
+  applyLayoutSlots(next, {focusSession: active, prune: false, message: 'single pane layout'});
+}
+
+function setLayoutToSplitPanes() {
+  const items = visibleNonFinderPaneItems();
+  if (!items.length) return;
+  const finderSlot = slotForSession(fileExplorerItemId);
+  const preferredSlots = basePaneKeys.filter(slot => slot !== finderSlot);
+  while (preferredSlots.length < 2) preferredSlots.push(nextLayoutSlot({...layoutSlots, [preferredSlots[0] || 'left']: emptyPaneState()}));
+  const leftSlot = preferredSlots[0] || 'left';
+  const rightSlot = preferredSlots[1] || 'right';
+  const groups = [[], []];
+  const assigned = new Set();
+  for (const item of items) {
+    const slot = slotForSession(item);
+    if (slot === leftSlot) {
+      groups[0].push(item);
+      assigned.add(item);
+    } else if (slot === rightSlot) {
+      groups[1].push(item);
+      assigned.add(item);
+    }
+  }
+  for (const item of items) {
+    if (assigned.has(item)) continue;
+    groups[groups[0].length <= groups[1].length ? 0 : 1].push(item);
+  }
+  if (!groups[1].length && groups[0].length > 1) groups[1].push(...groups[0].splice(Math.ceil(groups[0].length / 2)));
+  const active = items.includes(focusedPanelItem) ? focusedPanelItem : items[0];
+  const next = emptyLayoutSlots();
+  next[leftSlot] = paneStateWithTabs(groups[0], groups[0].includes(active) ? active : groups[0][0]);
+  if (groups[1].length) next[rightSlot] = paneStateWithTabs(groups[1], groups[1].includes(active) ? active : groups[1][0]);
+  const nonFinderTree = groups[1].length
+    ? splitNode('row', leafNode(leftSlot), leafNode(rightSlot), defaultSplitPercent)
+    : leafNode(leftSlot);
+  if (finderSlot) {
+    next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
+    const finderFirst = finderLeadsExpandedPane(finderSlot, leftSlot);
+    next[layoutTreeKey] = finderFirst
+      ? splitNode('row', leafNode(finderSlot), nonFinderTree, fileExplorerSplitPercent)
+      : splitNode('row', nonFinderTree, leafNode(finderSlot), 100 - fileExplorerSplitPercent);
+  } else {
+    next[layoutTreeKey] = nonFinderTree;
+  }
+  applyLayoutSlots(next, {focusSession: active, prune: false, message: 'split layout'});
+}
+
 function layoutWithFileExplorerDockedLeft(slots = layoutSlots) {
   const right = compactLayoutSlots(layoutWithoutItemFromSlots(fileExplorerItemId, slots, {preservePlaceholders: true}));
   const rightSlots = layoutSlotKeys(right).filter(slot => paneHasLayoutContent(slot, right));
@@ -7737,6 +7711,7 @@ function activatePaneTab(side, session, options = {}) {
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
   next[side].active = session;
   applyLayoutSlots(next, {focusSession: session});
+  if (isPreferencesItem(session)) focusPreferencesSearchSoon();
   if (options.userInitiated && isTmuxSession(session)) focusTerminalFromUserAction(session, 25);
 }
 
@@ -7745,13 +7720,14 @@ async function selectSession(session) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
+  const shouldFocusPreferencesSearch = isPreferencesItem(session);
   if (isFileExplorerItem(session)) {
     await openFileExplorerPane();
     scheduleFileExplorerActiveTabSync();
     return;
   }
   if (activeSessions.includes(session)) {
-    focusPanel(session);
+    focusPanel(session, {userInitiated: true});
     return;
   }
   if (isTmuxSession(session) && filesOnlySlotForSession(session)) {
@@ -7759,6 +7735,7 @@ async function selectSession(session) {
     return;
   }
   await activateTabInExistingPane(session);
+  if (shouldFocusPreferencesSearch) focusPreferencesSearchSoon();
 }
 
 function sessionAgentKind(session) {
@@ -8319,6 +8296,7 @@ function focusPanel(session, options = {}) {
   if (isVirtualItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session);
+    if (isPreferencesItem(session)) focusPreferencesSearchSoon(panel);
     return;
   }
   activateTab(session, 'terminal', {userInitiated: options.userInitiated === true});
@@ -9153,7 +9131,14 @@ function createPaneTab(side, item) {
     stopPropagation: true,
     ignore: event => Boolean(event.target.closest('[data-auto-session], [data-pane-tab-close]')),
   });
-  if (!isVirtual) {
+  if (isEditor) {
+    tab.addEventListener('dblclick', event => {
+      if (event.target.closest('[data-pane-tab-close]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      beginPaneTabRename(tab, item);
+    });
+  } else if (!isVirtual) {
     tab.addEventListener('dblclick', event => {
       if (event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
       event.preventDefault();
@@ -9175,7 +9160,30 @@ function createPaneTab(side, item) {
 }
 
 function beginPaneTabRename(tab, session) {
-  renameTmuxSession(session);
+  if (isFileEditorItem(session)) {
+    beginFileTabRename(tab, session);
+    return;
+  }
+  if (isTmuxSession(session)) renameTmuxSession(session);
+}
+
+function beginFileTabRename(tab, item) {
+  const path = fileItemPath(item);
+  if (!path) return;
+  const entry = {kind: 'file', name: basenameOf(path)};
+  const row = document.querySelector(`.file-tree-row[data-path="${cssEscape(path)}"]`);
+  if (row) {
+    beginFileTreeRename(row, path, entry);
+    return;
+  }
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot rename files</span>';
+    return;
+  }
+  const currentName = basenameOf(path);
+  const nextName = window.prompt(`Rename ${currentName}`, currentName);
+  if (nextName === null) return;
+  renameFileTreePath(path, entry, nextName);
 }
 
 function bindPaneTabPopover(tab, session) {
@@ -9185,81 +9193,35 @@ function bindPaneTabPopover(tab, session) {
 }
 
 function bindDelayedSessionPopover(anchor, popover, position) {
-  let showTimer = null;
-  let hideTimer = null;
-  const clearShowTimer = () => {
-    showTimer = clearTimer(showTimer);
-  };
-  const clearHideTimer = () => {
-    hideTimer = clearTimer(hideTimer);
-  };
-  const openNow = () => {
-    clearShowTimer();
-    clearHideTimer();
-    delete anchor.dataset.popoverHoverState;
-    if (anchor.isConnected === false) return;
-    if (appMenuIsOpen() || topbar?.matches?.(':hover')) return;
-    if (anchor.classList.contains('popover-open') && popoverStillActive(anchor, popover)) {
-      anchor.dataset.popoverHoverState = 'open';
-      return;
-    }
-    position();
-    closeOtherSessionPopovers(anchor);
-    anchor.dataset.popoverHoverState = 'open';
-    anchor.classList.add('popover-open');
-  };
-  const queueOpen = () => {
-    clearHideTimer();
-    anchor.dataset.popoverHoverState = 'pending';
-    if (anchor.isConnected === false) return;
-    if (appMenuIsOpen() || topbar?.matches?.(':hover')) {
-      delete anchor.dataset.popoverHoverState;
-      return;
-    }
-    if (anchor.classList.contains('popover-open')) return;
-    clearShowTimer();
-    position();
-    const anyTabPopoverOpen = Boolean(document.querySelector('.pane-tab.popover-open'));
-    showTimer = setTimeout(openNow, anyTabPopoverOpen ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs);
-  };
-  const closeSoon = () => {
-    clearShowTimer();
-    clearHideTimer();
-    anchor.dataset.popoverHoverState = 'closing';
-    hideTimer = setTimeout(() => {
-      if (anchor.isConnected === false) {
-        delete anchor.dataset.popoverHoverState;
-        hideTimer = null;
-        return;
-      }
-      if (popoverStillActive(anchor, popover)) {
-        anchor.dataset.popoverHoverState = 'open';
-        hideTimer = null;
-        return;
-      }
-      anchor.classList.remove('popover-open');
-      delete anchor.dataset.popoverHoverState;
-      hideTimer = null;
-    }, popoverHideDelayMs);
-  };
-  bindPopoverHover(anchor, popover, {queueOpen, keepOpen: openNow, closeSoon});
+  createHoverPopover({
+    anchor,
+    popover,
+    showDelay: () => (document.querySelector('.pane-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+    hideDelay: () => popoverHideDelayMs,
+    canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
+    onQueue: position,
+    position,
+    closeOthers: () => closeOtherSessionPopovers(anchor),
+  });
 }
 
 function positionPaneTabPopover(tab) {
   const rect = tab.getBoundingClientRect();
   const popover = tab.querySelector?.(':scope > .session-popover');
   const bridgeGap = 3;
-  const viewportWidth = Math.max(0, window.innerWidth || document.documentElement?.clientWidth || 0);
   const edgeGap = popoverEdgeGapPx();
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
-  const viewportLeft = edgeGap;
-  const viewportRight = Math.max(viewportLeft, viewportWidth - edgeGap);
   const width = Math.ceil(popover?.getBoundingClientRect?.().width || rect.width || 0);
-  const maxLeft = Math.max(viewportLeft, viewportRight - width);
-  const left = Math.min(Math.max(viewportLeft, Math.floor(rect.left)), maxLeft);
-  const top = Math.max(topbarBottom + edgeGap, Math.ceil(rect.bottom) + bridgeGap);
-  document.documentElement.style.setProperty('--pane-tab-popover-top', `${top}px`);
-  document.documentElement.style.setProperty('--pane-tab-popover-left', `${left}px`);
+  const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
+  const position = clampToViewport(
+    Math.floor(rect.left),
+    Math.ceil(rect.bottom) + bridgeGap,
+    width,
+    height,
+    {edgeGap, minTop: topbarBottom + edgeGap},
+  );
+  document.documentElement.style.setProperty('--pane-tab-popover-top', `${Math.round(position.top)}px`);
+  document.documentElement.style.setProperty('--pane-tab-popover-left', `${Math.round(position.left)}px`);
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {
@@ -9548,32 +9510,12 @@ function bindPanelPopover(panel) {
   const zone = panel.querySelector('.panel-popover-zone');
   if (!zone || zone.dataset.popoverBound === 'true') return;
   zone.dataset.popoverBound = 'true';
-  bindPopoverHover(zone, zone.querySelector(':scope > .session-popover'), {
-    queueOpen: () => keepPanelPopoverOpen(zone),
-    keepOpen: () => keepPanelPopoverOpen(zone),
-    closeSoon: () => closePanelPopoverSoon(zone),
+  createHoverPopover({
+    anchor: zone,
+    popover: () => zone.querySelector(':scope > .session-popover'),
+    showDelay: 0,
+    hideDelay: () => popoverHideDelayMs,
   });
-}
-
-function keepPanelPopoverOpen(zone) {
-  const timer = panelPopoverHideTimers.get(zone);
-  clearTimer(timer);
-  panelPopoverHideTimers.delete(zone);
-  zone.classList.add('popover-open');
-}
-
-function closePanelPopoverSoon(zone) {
-  const existing = panelPopoverHideTimers.get(zone);
-  clearTimer(existing);
-  const timer = setTimeout(() => {
-    if (popoverStillActive(zone, zone.querySelector(':scope > .session-popover'))) {
-      panelPopoverHideTimers.delete(zone);
-      return;
-    }
-    zone.classList.remove('popover-open');
-    panelPopoverHideTimers.delete(zone);
-  }, popoverHideDelayMs);
-  panelPopoverHideTimers.set(zone, timer);
 }
 
 function setPanelDetailsCollapsed(panel, collapsed) {
@@ -9587,21 +9529,15 @@ function setPanelDetailsCollapsed(panel, collapsed) {
 }
 
 function terminalTabLabel(session, info) {
-  if (isInfoItem(session)) return 'Term';
-  if (isFileExplorerItem(session)) return fileExplorerLabel();
-  if (isPreferencesItem(session)) return 'Prefs';
-  if (isChangesItem(session)) return 'Changes';
-  if (isFileEditorItem(session)) return 'Edit';
+  const type = tabTypeForItem(session);
+  if (type?.shortLabel) return type.shortLabel(session);
   const label = terminalProcessLabel(info);
   return shortText(label || 'Term', 16);
 }
 
 function terminalTabTitle(session, info) {
-  if (isInfoItem(session)) return 'unavailable for Branch Info';
-  if (isFileExplorerItem(session)) return `unavailable for ${fileExplorerLabel()}`;
-  if (isPreferencesItem(session)) return 'unavailable for Preferences';
-  if (isChangesItem(session)) return 'unavailable for Changes';
-  if (isFileEditorItem(session)) return 'unavailable for file editor';
+  const type = tabTypeForItem(session);
+  if (type?.terminalTitle) return type.terminalTitle(session);
   return `terminal: ${terminalProcessLabel(info) || 'Term'}`;
 }
 
@@ -9802,7 +9738,20 @@ function createInfoPanel() {
 }
 
 function editorSchemePreferenceChoices() {
-  return EDITOR_SCHEME_IDS.map(id => {
+  const preferredOrder = [
+    'vscode-dark-plus',
+    'one-dark',
+    'dracula',
+    'monokai',
+    'nord',
+    'dark',
+    'github-light',
+    'one-light',
+    'vscode-light-plus',
+    'solarized-light',
+  ];
+  const ids = [...preferredOrder, ...EDITOR_SCHEME_IDS.filter(id => !preferredOrder.includes(id))];
+  return ids.map(id => {
     const scheme = EDITOR_SCHEMES[id];
     return {value: id, label: scheme.label, group: scheme.dark ? 'Dark' : 'Light'};
   });
@@ -9857,6 +9806,7 @@ function preferenceSections() {
     {title: fileExplorerLabel(), items: [
       {path: 'file_explorer.root_mode', label: 'Root mode', type: 'select', choices: ['fixed', 'sync'], help: 'Fixed keeps the current root; Sync follows the focused tmux session directory.'},
       {path: 'file_explorer.image_open_mode', label: 'Image open mode', type: 'select', choices: ['same-tab', 'new-tab'], help: 'Same-tab reuses one image viewer while browsing. New-tab keeps one image tab per file.'},
+      {path: 'file_explorer.image_preview_max_px', label: 'Image preview max size', type: 'number', min: 120, max: 1200, step: 20, suffix: 'px', help: 'Maximum width and height for hover previews in Finder/File Explorer.'},
       {path: 'file_explorer.quick_access_paths', label: 'Quick paths', type: 'list', help: 'Pinned Finder/File Explorer roots, one path per line.'},
       {path: 'file_explorer.refresh_ms', label: `${fileExplorerLabel()} refresh interval`, type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: 'How often YOLOmux checks changed Finder/File Explorer directories and open files. Client-side jitter avoids synchronized polling.'},
       {path: 'file_explorer.new_entry_highlight_ms', label: 'New file highlight duration', type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: 'How long newly detected files or directories stay colored in Finder/File Explorer.'},
@@ -9957,6 +9907,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('file_explorer.')) add(['finder', 'files', 'tree', 'sidebar', 'browser', 'directory', 'folder', 'navigator']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
+  if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
   if (path === 'file_explorer.new_entry_highlight_ms') add(['new file', 'recent']);
   if (path.startsWith('yolo.')) add(['auto approve', 'approve', 'approval', 'permission', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger']);
   if (path === 'yolo.dry_run') add(['test', 'simulate', 'what would']);
@@ -10085,8 +10036,13 @@ function preferencesPanelHtml() {
         </section>`;
     }).join('');
   const readonly = readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : '';
+  const resetDisabled = readOnlyMode ? ' disabled' : '';
   return `
-    <div class="preferences-search-row"><input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="Search settings" aria-label="Search settings"></div>
+    <div class="preferences-search-row">
+      <input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="Search settings" aria-label="Search settings">
+      <button type="button" class="preferences-search-button" data-preferences-search-action>YOsearch</button>
+      <button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>Reset all</button>
+    </div>
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
     <div class="preferences-status" data-level="${clientSettingsPayload.error || yoloRulesPayload.error ? 'error' : 'ok'}">${esc(preferenceStatusText())}</div>
     <div class="preferences-sections">${sections}</div>`;
@@ -10114,7 +10070,22 @@ function createPreferencesPanel() {
       </div>`;
   bindPanelShell(panel, prefsItemId);
   bindPreferencesPanel(panel);
+  focusPreferencesSearchSoon(panel);
   return panel;
+}
+
+function focusPreferencesSearch(panel = null) {
+  const root = panel || document.querySelector('.preferences-panel');
+  const search = root?.querySelector?.('[data-preferences-search]');
+  if (!search) return false;
+  search.focus({preventScroll: true});
+  const position = search.value.length;
+  search.setSelectionRange?.(position, position);
+  return true;
+}
+
+function focusPreferencesSearchSoon(panel = null) {
+  requestAnimationFrame(() => focusPreferencesSearch(panel));
 }
 
 function renderPreferencesPanels(options = {}) {
@@ -10138,14 +10109,7 @@ function renderPreferencesPanels(options = {}) {
       }
     }
     bindPreferencesPanel(panel);
-    if (options.focusSearch) {
-      const search = panel.querySelector('[data-preferences-search]');
-      if (search) {
-        search.focus({preventScroll: true});
-        const position = search.value.length;
-        search.setSelectionRange(position, position);
-      }
-    }
+    if (options.focusSearch) focusPreferencesSearch(panel);
   }
 }
 
@@ -10174,6 +10138,18 @@ function bindPreferencesPanel(panel) {
     }, 0);
   });
   panel.addEventListener('click', event => {
+    const searchAction = event.target.closest('[data-preferences-search-action]');
+    if (searchAction && panel.contains(searchAction)) {
+      event.preventDefault();
+      renderPreferencesPanels({force: true, focusSearch: true});
+      return;
+    }
+    const resetAll = event.target.closest('[data-preferences-reset-all]');
+    if (resetAll && panel.contains(resetAll)) {
+      event.preventDefault();
+      resetAllPreferences();
+      return;
+    }
     const copy = event.target.closest('[data-copy-path]');
     if (copy && panel.contains(copy)) {
       event.preventDefault();
@@ -10399,7 +10375,7 @@ function bindChangesPanel(panel) {
 function activePreferenceControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-setting-path], [data-preferences-search]') || null;
+  return active.closest?.('[data-setting-path], [data-preferences-search], [data-preferences-search-action]') || null;
 }
 
 function clampPreferenceNumber(item, value) {
@@ -10498,6 +10474,19 @@ function resetPreference(path) {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => { statusEl.textContent = `reset ${path}`; })
+    .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
+}
+
+function resetAllPreferences() {
+  if (readOnlyMode) return;
+  saveSettingsPatch(mergeSettingObjects({}, clientSettingsDefaults), {applyEditorDefaults: true})
+    .then(() => {
+      preferencesSearchText = '';
+      collapsedPreferenceSections = defaultCollapsedPreferenceSections();
+      writeStoredCollapsedPreferenceSections();
+      renderPreferencesPanels({force: true, focusSearch: true});
+      statusEl.textContent = 'reset all preferences';
+    })
     .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
 }
 
@@ -10879,27 +10868,8 @@ function destroyCodeMirrorPanel(panel) {
   }
 }
 
-function destroyStandaloneCodeMirror(options = {}) {
-  if (!options.preserveGeneration) standaloneCodeMirrorGeneration += 1;
-  if (standaloneCodeMirrorView) {
-    standaloneCodeMirrorView.destroy();
-    standaloneCodeMirrorView = null;
-  }
-  standaloneCodeMirrorPath = '';
-  standaloneCodeMirrorSignature = '';
-  if (fileEditor) fileEditor._cmView = null;
-  if (fileEditorCodeMirror) {
-    fileEditorCodeMirror.replaceChildren();
-    fileEditorCodeMirror.hidden = true;
-  }
-}
-
 function codeMirrorPanelContent(panel) {
   return panel?._cmView?.state?.doc?.toString?.() ?? null;
-}
-
-function standaloneCodeMirrorContent() {
-  return standaloneCodeMirrorView?.state?.doc?.toString?.() ?? null;
 }
 
 function codeMirrorConfigSignature(path) {
@@ -10958,70 +10928,6 @@ async function ensureCodeMirrorPanel(panel, item, path, state) {
     destroyCodeMirrorPanel(panel);
     container.hidden = true;
     setFileEditorPanelStatus(panel, `CodeMirror unavailable; using textarea (${error})`, 'error');
-    return false;
-  }
-}
-
-function handleStandaloneEditorContentChanged(path, content) {
-  const state = openFiles.get(path);
-  if (!state || state.kind !== 'text') return;
-  state.content = String(content ?? '');
-  const dirty = state.content !== state.original;
-  const dirtyChanged = dirty !== state.dirty;
-  state.dirty = dirty;
-  const status = openFileStatus(state);
-  setEditorStatus(status.message, status.level);
-  renderEditorPreviewPane(fileEditorPreviewPane, path, state.content);
-  syncFileEditorSplitScroll(fileEditor, 'editor');
-  if (dirtyChanged) renderSessionButtons();
-}
-
-async function ensureStandaloneCodeMirror(path, state) {
-  if (!fileEditorCodeMirror) return false;
-  const generation = standaloneCodeMirrorGeneration + 1;
-  standaloneCodeMirrorGeneration = generation;
-  fileEditorCodeMirror.hidden = false;
-  const signature = codeMirrorConfigSignature(path);
-  if (!standaloneCodeMirrorView || standaloneCodeMirrorPath !== path || standaloneCodeMirrorSignature !== signature) {
-    destroyStandaloneCodeMirror({preserveGeneration: true});
-    fileEditorCodeMirror.hidden = false;
-    fileEditorCodeMirror.textContent = 'loading CodeMirror...';
-  }
-  try {
-    const api = await loadCodeMirrorApi();
-    if (standaloneCodeMirrorGeneration !== generation) return false;
-    const currentText = String(state.content || '');
-    if (!standaloneCodeMirrorView) {
-      fileEditorCodeMirror.replaceChildren();
-      const cmState = api.EditorState.create({
-        doc: currentText,
-        extensions: codeMirrorExtensions(api, fileEditor, path, {save: saveCurrentEditor}),
-      });
-      standaloneCodeMirrorView = new api.EditorView({
-        state: cmState,
-        parent: fileEditorCodeMirror,
-        dispatch(transaction) {
-          standaloneCodeMirrorView.update([transaction]);
-          if (transaction.docChanged) {
-            handleStandaloneEditorContentChanged(path, standaloneCodeMirrorView.state.doc.toString());
-          }
-        },
-      });
-      standaloneCodeMirrorPath = path;
-      standaloneCodeMirrorSignature = signature;
-      if (fileEditor) fileEditor._cmView = standaloneCodeMirrorView;
-      standaloneCodeMirrorView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(fileEditor, 'editor'));
-    } else if (standaloneCodeMirrorView.state.doc.toString() !== currentText && !state.dirty) {
-      standaloneCodeMirrorView.dispatch({
-        changes: {from: 0, to: standaloneCodeMirrorView.state.doc.length, insert: currentText},
-      });
-    }
-    standaloneCodeMirrorView.focus?.();
-    return true;
-  } catch (error) {
-    if (standaloneCodeMirrorGeneration !== generation) return false;
-    destroyStandaloneCodeMirror();
-    setEditorStatus(`CodeMirror unavailable; using textarea (${error})`, 'error');
     return false;
   }
 }
@@ -11096,6 +11002,7 @@ function renderFileEditorPanel(panel, item) {
   }
   updateEditorFindButton(findButton, state);
   if (state.kind === 'image') {
+    updateImageViewerThemeButton(themeButton);
     setEditorContentMode(content, 'edit');
     destroyCodeMirrorPanel(panel);
     if (textarea) textarea.hidden = true;
@@ -11669,22 +11576,13 @@ function renderSyntaxHighlight(panel, path, content) {
   );
 }
 
-function renderStandaloneSyntaxHighlight(path, content) {
-  return renderSyntaxHighlightInto(fileEditorHighlight, fileEditorHighlightCode, fileEditor, fileEditorTextarea, path, content);
-}
-
 function syncSyntaxHighlightScroll(panel) {
+  if (!panel) return;
   const textarea = panel.querySelector('.file-editor-textarea-panel');
   const highlightPane = panel.querySelector('.file-editor-highlight-panel');
   if (!textarea || !highlightPane || highlightPane.hidden) return;
   highlightPane.scrollTop = textarea.scrollTop;
   highlightPane.scrollLeft = textarea.scrollLeft;
-}
-
-function syncStandaloneSyntaxHighlightScroll() {
-  if (!fileEditorTextarea || !fileEditorHighlight || fileEditorHighlight.hidden) return;
-  fileEditorHighlight.scrollTop = fileEditorTextarea.scrollTop;
-  fileEditorHighlight.scrollLeft = fileEditorTextarea.scrollLeft;
 }
 
 function editorLineHeightPx(textarea) {
@@ -11763,18 +11661,17 @@ function previewSourceLineForScroll(previewPane) {
 }
 
 function syncEditorHighlightAfterSplitScroll(host) {
-  if (host?.classList?.contains('file-editor-panel')) syncSyntaxHighlightScroll(host);
-  else syncStandaloneSyntaxHighlightScroll();
+  syncSyntaxHighlightScroll(host);
 }
 
 function syncFileEditorSplitScroll(host, source) {
   if (!host || host._splitScrollSyncing) return;
-  const content = host.querySelector?.('.file-editor-content') || fileEditorContent;
+  const content = host.querySelector?.('.file-editor-content');
   if (!content?.classList?.contains('split-preview')) return;
-  const textarea = host.querySelector?.('.file-editor-textarea-panel') || fileEditorTextarea;
+  const textarea = host.querySelector?.('.file-editor-textarea-panel');
   const cmView = host._cmView || null;
   const editorScroller = cmView?.scrollDOM || textarea;
-  const previewPane = host.querySelector?.('.file-editor-preview-pane-panel') || fileEditorPreviewPane;
+  const previewPane = host.querySelector?.('.file-editor-preview-pane-panel');
   if (!editorScroller || !previewPane || previewPane.hidden) return;
   if (!cmView && (!textarea || textarea.hidden)) return;
   const from = source === 'preview' ? previewPane : editorScroller;
@@ -12757,7 +12654,7 @@ function tmuxWindow(session, key, label) {
   previewTmuxWindowLabel(session, key);
   statusEl.innerHTML = `<span class="ok">${esc(label)}: ${esc(sessionLabel(session))}</span>`;
   scheduleFit(session);
-  focusTerminalWhenAutoFocus(session, 75);
+  focusTerminalFromUserAction(session, 75);
   setTimeout(refreshTranscripts, 250);
 }
 
@@ -13480,6 +13377,18 @@ async function showContext(session) {
   }
 }
 
+function globalShortcutTargetAllowsAppAction(target) {
+  const node = typeof Element !== 'undefined' && target instanceof Element ? target : document.activeElement;
+  if (!node) return true;
+  const blocked = ['.xterm', '.terminal-pane', '.cm-editor', 'input', 'textarea', 'select', '[contenteditable="true"]'];
+  return !blocked.some(selector => node.closest?.(selector));
+}
+
+function toggleFileExplorerShortcut() {
+  if (itemInLayout(fileExplorerItemId)) removeSessionFromLayout(fileExplorerItemId);
+  else selectSession(fileExplorerItemId);
+}
+
 if (refreshMeta) {
   refreshMeta.textContent = 'Refresh';
   refreshMeta.setAttribute('aria-label', 'Refresh session state');
@@ -13499,14 +13408,28 @@ document.addEventListener('click', event => {
   closeAppMenus();
 });
 topbar?.addEventListener('pointerenter', () => {
-  closeOtherSessionPopovers(null);
+  closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
 });
 document.addEventListener('keydown', event => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+  const mod = event.ctrlKey || event.metaKey;
+  const key = event.key.toLowerCase();
+  if (mod && key === 'k') {
     event.preventDefault();
     openCommandPalette();
     return;
+  }
+  if (mod && globalShortcutTargetAllowsAppAction(event.target)) {
+    if (key === 'b') {
+      event.preventDefault();
+      toggleFileExplorerShortcut();
+      return;
+    }
+    if (event.key === ',') {
+      event.preventDefault();
+      selectSession(prefsItemId);
+      return;
+    }
   }
   if (event.key === 'Escape') closeAppMenus();
 });

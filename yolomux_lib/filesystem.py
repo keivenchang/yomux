@@ -11,10 +11,11 @@ from __future__ import annotations
 import os
 import shutil
 import stat
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
+
+from .common import git
 
 MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
 MAX_WRITE_BYTES = 5 * 1024 * 1024  # 5 MB cap on file write
@@ -282,16 +283,7 @@ def path_info(raw_path: str) -> dict[str, Any]:
 
 def git_root_for_path(path: Path) -> str:
     cwd = path if path.is_dir() else path.parent
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=1.0,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
+    result = git(["rev-parse", "--show-toplevel"], cwd=str(cwd), timeout=1.0)
     if result.returncode != 0:
         return ""
     root = result.stdout.strip()
