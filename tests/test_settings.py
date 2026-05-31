@@ -8,7 +8,7 @@ from yolomux_lib.settings import settings_payload
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
-            "appearance": {"ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "file_explorer_font_size": 1, "tab_width": 20},
+            "appearance": {"ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "file_explorer_font_size": 1, "tab_width": 20},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "refresh_ms": 3000},
             "editor": {"engine": "bad"},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
@@ -20,6 +20,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["ui_font_size"] == 8
     assert settings["appearance"]["terminal_font_size"] == 28
     assert settings["appearance"]["editor_font_size"] == 28
+    assert settings["appearance"]["editor_color_scheme"] == "dark"
     assert settings["appearance"]["file_explorer_font_size"] == 8
     assert settings["appearance"]["tab_width"] == 120
     assert settings["file_explorer"]["root_mode"] == "fixed"

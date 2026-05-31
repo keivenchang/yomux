@@ -63,6 +63,80 @@ const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1
 const editorViewModes = new Set(['edit', 'preview', 'split']);
 const editorEngineModes = new Set(['textarea', 'codemirror']);
 const defaultEditorEngine = 'codemirror';
+const EDITOR_SCHEMES = {
+  dark: {
+    id: 'dark', label: 'YOLOmux Dark', dark: true,
+    bg: '#0f1115', fg: '#e6efe2', cursor: '#f5f7fb', selection: 'rgba(118, 185, 0, 0.28)', activeLine: 'rgba(118, 185, 0, 0.08)',
+    gutterBg: '#151922', lineNo: '#9aa5b1', panel: '#151922', panel2: '#1e2430', line: '#303948', previewBg: '#342f22',
+    syntax: {comment: '#8b95a5', keyword: '#c4b5fd', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#fca5a5', tag: '#f0abfc', heading: '#d2ff8a', link: '#7ee9ff', inlineCode: '#ffe08a', inlineCodeBg: 'rgba(245, 197, 66, 0.14)', inlineCodeBorder: 'rgba(245, 197, 66, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#fff0a6', emphasis: '#ffd27e', invalid: '#ff6673'},
+    diff: {addFg: '#98c379', removeFg: '#e06c75'},
+  },
+  'one-dark': {
+    id: 'one-dark', label: 'One Dark', dark: true,
+    bg: '#282c34', fg: '#abb2bf', cursor: '#528bff', selection: '#3e4451', activeLine: '#2c313c',
+    gutterBg: '#282c34', lineNo: '#636d83', panel: '#282c34', panel2: '#2c313c', line: '#3e4451', previewBg: '#30343d',
+    syntax: {comment: '#5c6370', keyword: '#c678dd', string: '#98c379', number: '#d19a66', function: '#61afef', type: '#e5c07b', variable: '#e06c75', tag: '#e06c75', heading: '#e06c75', link: '#61afef', inlineCode: '#98c379', inlineCodeBg: 'rgba(152, 195, 121, 0.14)', inlineCodeBorder: 'rgba(152, 195, 121, 0.32)', atom: '#56b6c2', property: '#61afef', strong: '#e5c07b', emphasis: '#d19a66', invalid: '#e06c75'},
+    diff: {addFg: '#98c379', removeFg: '#e06c75'},
+  },
+  dracula: {
+    id: 'dracula', label: 'Dracula', dark: true,
+    bg: '#282a36', fg: '#f8f8f2', cursor: '#f8f8f0', selection: '#44475a', activeLine: '#44475a',
+    gutterBg: '#282a36', lineNo: '#6272a4', panel: '#282a36', panel2: '#343746', line: '#44475a', previewBg: '#333645',
+    syntax: {comment: '#6272a4', keyword: '#ff79c6', string: '#f1fa8c', number: '#bd93f9', function: '#50fa7b', type: '#8be9fd', variable: '#f8f8f2', tag: '#ff79c6', heading: '#bd93f9', link: '#8be9fd', inlineCode: '#50fa7b', inlineCodeBg: 'rgba(80, 250, 123, 0.14)', inlineCodeBorder: 'rgba(80, 250, 123, 0.34)', atom: '#bd93f9', property: '#8be9fd', strong: '#f1fa8c', emphasis: '#ffb86c', invalid: '#ff5555'},
+    diff: {addFg: '#50fa7b', removeFg: '#ff5555'},
+  },
+  monokai: {
+    id: 'monokai', label: 'Monokai', dark: true,
+    bg: '#272822', fg: '#f8f8f2', cursor: '#f8f8f0', selection: '#49483e', activeLine: '#3e3d32',
+    gutterBg: '#272822', lineNo: '#90908a', panel: '#272822', panel2: '#34352d', line: '#49483e', previewBg: '#333329',
+    syntax: {comment: '#75715e', keyword: '#f92672', string: '#e6db74', number: '#ae81ff', function: '#a6e22e', type: '#66d9ef', variable: '#f8f8f2', tag: '#f92672', heading: '#a6e22e', link: '#66d9ef', inlineCode: '#e6db74', inlineCodeBg: 'rgba(230, 219, 116, 0.14)', inlineCodeBorder: 'rgba(230, 219, 116, 0.32)', atom: '#ae81ff', property: '#66d9ef', strong: '#fd971f', emphasis: '#fd971f', invalid: '#f92672'},
+    diff: {addFg: '#a6e22e', removeFg: '#f92672'},
+  },
+  'vscode-dark-plus': {
+    id: 'vscode-dark-plus', label: 'VS Code Dark+', dark: true,
+    bg: '#1e1e1e', fg: '#d4d4d4', cursor: '#aeafad', selection: '#264f78', activeLine: '#2a2d2e',
+    gutterBg: '#1e1e1e', lineNo: '#858585', panel: '#1e1e1e', panel2: '#252526', line: '#3c3c3c', previewBg: '#252526',
+    syntax: {comment: '#6a9955', keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', function: '#dcdcaa', type: '#4ec9b0', variable: '#9cdcfe', tag: '#569cd6', heading: '#569cd6', link: '#3794ff', inlineCode: '#ce9178', inlineCodeBg: 'rgba(206, 145, 120, 0.16)', inlineCodeBorder: 'rgba(206, 145, 120, 0.32)', atom: '#569cd6', property: '#9cdcfe', strong: '#dcdcaa', emphasis: '#c586c0', invalid: '#f14c4c'},
+    diff: {addFg: '#6a9955', removeFg: '#f14c4c'},
+  },
+  nord: {
+    id: 'nord', label: 'Nord', dark: true,
+    bg: '#2e3440', fg: '#d8dee9', cursor: '#d8dee9', selection: '#434c5e', activeLine: '#3b4252',
+    gutterBg: '#2e3440', lineNo: '#4c566a', panel: '#2e3440', panel2: '#3b4252', line: '#4c566a', previewBg: '#343b49',
+    syntax: {comment: '#616e88', keyword: '#81a1c1', string: '#a3be8c', number: '#b48ead', function: '#88c0d0', type: '#8fbcbb', variable: '#d8dee9', tag: '#81a1c1', heading: '#88c0d0', link: '#88c0d0', inlineCode: '#a3be8c', inlineCodeBg: 'rgba(163, 190, 140, 0.14)', inlineCodeBorder: 'rgba(163, 190, 140, 0.32)', atom: '#b48ead', property: '#8fbcbb', strong: '#ebcb8b', emphasis: '#d08770', invalid: '#bf616a'},
+    diff: {addFg: '#a3be8c', removeFg: '#bf616a'},
+  },
+  'github-light': {
+    id: 'github-light', label: 'GitHub Light', dark: false,
+    bg: '#ffffff', fg: '#1f2328', cursor: '#0969da', selection: '#0969da33', activeLine: '#f4f6f9',
+    gutterBg: '#ffffff', lineNo: '#8c959f', panel: '#f6f8fa', panel2: '#eef2f6', line: '#d0d7de', previewBg: '#fff6df',
+    syntax: {comment: '#6e7781', keyword: '#cf222e', string: '#116329', number: '#0550ae', function: '#8250df', type: '#953800', variable: '#1f2328', tag: '#116329', heading: '#6f42c1', headingBg: '#f1eafe', link: '#0969da', inlineCode: '#a40e26', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#d8a657', atom: '#0550ae', property: '#0969da', strong: '#1f2328', emphasis: '#953800', invalid: '#82071e'},
+    diff: {addFg: '#116329', removeFg: '#82071e'},
+  },
+  'vscode-light-plus': {
+    id: 'vscode-light-plus', label: 'VS Code Light+', dark: false,
+    bg: '#ffffff', fg: '#000000', cursor: '#000000', selection: '#add6ff', activeLine: '#f0f0f0',
+    gutterBg: '#ffffff', lineNo: '#237893', panel: '#f3f3f3', panel2: '#e9e9e9', line: '#d4d4d4', previewBg: '#fff6df',
+    syntax: {comment: '#008000', keyword: '#0000ff', string: '#a31515', number: '#098658', function: '#795e26', type: '#267f99', variable: '#001080', tag: '#800000', heading: '#800000', link: '#0451a5', inlineCode: '#800000', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#e0b45f', atom: '#0000ff', property: '#001080', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
+    diff: {addFg: '#098658', removeFg: '#a31515'},
+  },
+  'one-light': {
+    id: 'one-light', label: 'One Light', dark: false,
+    bg: '#fafafa', fg: '#383a42', cursor: '#526fff', selection: '#e5e5e6', activeLine: '#f0f0f0',
+    gutterBg: '#fafafa', lineNo: '#9d9d9f', panel: '#f3f3f3', panel2: '#ececec', line: '#d8d8d8', previewBg: '#fff6df',
+    syntax: {comment: '#8a8c93', keyword: '#a626a4', string: '#50a14f', number: '#986801', function: '#4078f2', type: '#c18401', variable: '#e45649', tag: '#e45649', heading: '#e45649', link: '#4078f2', inlineCode: '#50a14f', inlineCodeBg: '#edf7ed', inlineCodeBorder: '#9cd29a', atom: '#986801', property: '#4078f2', strong: '#383a42', emphasis: '#986801', invalid: '#ff1414'},
+    diff: {addFg: '#2db448', removeFg: '#ff1414'},
+  },
+  'solarized-light': {
+    id: 'solarized-light', label: 'Solarized Light', dark: false,
+    bg: '#fdf6e3', fg: '#657b83', cursor: '#657b83', selection: '#eee8d5', activeLine: '#eee8d5',
+    gutterBg: '#eee8d5', lineNo: '#93a1a1', panel: '#f7efd8', panel2: '#eee8d5', line: '#d9d2bd', previewBg: '#f7efd8',
+    syntax: {comment: '#93a1a1', keyword: '#859900', string: '#2aa198', number: '#d33682', function: '#268bd2', type: '#b58900', variable: '#268bd2', tag: '#268bd2', heading: '#cb4b16', link: '#268bd2', inlineCode: '#2aa198', inlineCodeBg: '#eee8d5', inlineCodeBorder: '#d9d2bd', atom: '#d33682', property: '#268bd2', strong: '#586e75', emphasis: '#b58900', invalid: '#dc322f'},
+    diff: {addFg: '#859900', removeFg: '#dc322f'},
+  },
+};
+const EDITOR_SCHEME_IDS = Object.keys(EDITOR_SCHEMES);
+const fileEditorThemeModes = EDITOR_SCHEME_IDS;
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp']);
 const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
@@ -95,7 +169,6 @@ let fileExplorerShowHidden = (() => {
 const fileEditorPreviewMode = new Map();  // legacy map: path -> true when not in edit mode
 const fileEditorViewMode = new Map();  // path -> "edit" | "preview" | "split"
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
-const fileEditorThemeModes = ['dark', 'light'];
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
@@ -122,6 +195,7 @@ let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
 editorEngine = readConfiguredEditorEngine();
+fileEditorThemeMode = readConfiguredEditorScheme();
 let yoloRulesPayload = bootstrap.yoloRulesPayload || {};
 const terminals = new Map();
 const panelNodes = new Map();
@@ -420,6 +494,7 @@ let focusedPanelItem = null;
 let lastFocusedTmuxSession = null;
 let dragSession = null;
 let dragSourceSlot = null;
+let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
 let transparentDragImage = null;
@@ -584,10 +659,20 @@ function writeStoredFileExplorerRootMode(mode) {
   } catch (_) {}
 }
 
+function normalizeEditorSchemeId(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'light' || normalized === 'white') return 'github-light';
+  return EDITOR_SCHEMES[normalized] ? normalized : 'dark';
+}
+
+function activeEditorScheme() {
+  return EDITOR_SCHEMES[normalizeEditorSchemeId(fileEditorThemeMode)] || EDITOR_SCHEMES.dark;
+}
+
 function readStoredEditorThemeMode() {
   try {
     const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey) || 'dark';
-    return fileEditorThemeModes.includes(value) ? value : 'dark';
+    return normalizeEditorSchemeId(value);
   } catch (_) {
     return 'dark';
   }
@@ -595,7 +680,7 @@ function readStoredEditorThemeMode() {
 
 function writeStoredEditorThemeMode(mode) {
   try {
-    window.localStorage?.setItem(fileEditorThemeModeStorageKey, fileEditorThemeModes.includes(mode) ? mode : 'dark');
+    window.localStorage?.setItem(fileEditorThemeModeStorageKey, normalizeEditorSchemeId(mode));
   } catch (_) {}
 }
 
@@ -614,6 +699,12 @@ function readConfiguredEditorEngine() {
   if (override) return override;
   const value = String(initialSetting('editor.engine', defaultEditorEngine) || defaultEditorEngine).toLowerCase();
   return editorEngineModes.has(value) ? value : defaultEditorEngine;
+}
+
+function readConfiguredEditorScheme() {
+  const configured = nestedSetting(clientSettings, 'appearance.editor_color_scheme', '');
+  if (configured) return normalizeEditorSchemeId(configured);
+  return normalizeEditorSchemeId(initialSetting('appearance.editor_color_scheme', readStoredEditorThemeMode()));
 }
 
 function codeMirrorRequested() {
@@ -683,6 +774,13 @@ function focusTerminalWhenAutoFocus(session, delay = 0) {
   setTimeout(() => terminals.get(session)?.term?.focus?.(), delay);
 }
 
+function focusTerminalFromUserAction(session, delay = 0) {
+  setFocusedTerminal(session);
+  const run = () => terminals.get(session)?.term?.focus?.();
+  if (delay > 0) setTimeout(run, delay);
+  else run();
+}
+
 function clearFocusForInactiveLayout() {
   if (focusedTerminal && !activeSessions.includes(focusedTerminal)) focusedTerminal = null;
   if (focusedPanelItem && !activeSessions.includes(focusedPanelItem)) focusedPanelItem = null;
@@ -695,9 +793,9 @@ function terminalPaneIsActive(session) {
 
 function selectPanelOnHover(item) {
   if (!item) return;
+  if (!autoFocusEnabled) return;
   if (isTmuxSession(item) && terminalPaneIsActive(item)) {
-    if (autoFocusEnabled) setFocusedTerminal(item);
-    else setFocusedPanelItem(item);
+    setFocusedTerminal(item);
     scheduleFit(item);
     focusTerminalWhenAutoFocus(item, 0);
     return;
@@ -1982,7 +2080,9 @@ function sessionYoloIsWorking(session, payload = autoApproveStates.get(session))
 }
 
 function yoloRotationDelay(now = Date.now()) {
-  return `${-((now % yoloRotateMs) / 1000).toFixed(3)}s`;
+  const duration = Math.max(0, Number(yoloRotateMs) || 0);
+  if (duration <= 0) return '0s';
+  return `${-((now % duration) / 1000).toFixed(3)}s`;
 }
 
 function attentionAnimationDelay(now = Date.now()) {
@@ -4188,6 +4288,9 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   };
   row.ondragend = () => {
     row.__fileTreeDragging = false;
+    dragFilePayloadState = null;
+    stopCustomDragPreview();
+    clearDropPreview();
   };
   return fullPath;
 }
@@ -4404,16 +4507,17 @@ async function onFileTreeRowClick(row, fullPath, entry, event) {
     return;
   }
   if (entry.kind === 'file') {
-    activeFile = fullPath;
     updateFileExplorerCurrentFileHighlight();
-    await openFileInEditor(fullPath, entry);
   }
 }
 
 function startFileTreeDrag(event, row, fullPath, entry) {
+  closeFileImagePreview();
   if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
   const paths = fileTreeActionPaths(fullPath);
-  const payload = JSON.stringify({path: fullPath, paths, kind: entry.kind, name: entry.name});
+  const payloadObject = {path: fullPath, paths, kind: entry.kind, name: entry.name};
+  dragFilePayloadState = normalizeFileDragPayload(payloadObject);
+  const payload = JSON.stringify(payloadObject);
   event.dataTransfer.effectAllowed = 'copy';
   event.dataTransfer.setData('application/x-yolomux-file', payload);
   event.dataTransfer.setData('text/plain', paths.join('\n'));
@@ -5369,49 +5473,16 @@ function codeMirrorHighlightExtension(api) {
     return api.syntaxHighlighting(api.defaultHighlightStyle, {fallback: true});
   }
   const t = api.tags;
-  const dark = fileEditorThemeMode !== 'light';
-  const palette = dark
-    ? {
-        text: '#e6efe2',
-        muted: '#b4c3aa',
-        keyword: '#d39cff',
-        atom: '#ffd36b',
-        string: '#b8e878',
-        number: '#f39c5e',
-        variable: '#e6efe2',
-        function: '#9fd8ff',
-        type: '#ffe08a',
-        property: '#96d6ff',
-        tag: '#ff7a90',
-        link: '#7ee9ff',
-        inlineCode: '#ffe08a',
-        inlineCodeBg: 'rgba(245, 197, 66, 0.14)',
-        strong: '#fff0a6',
-        emphasis: '#ffd27e',
-        heading: '#d2ff8a',
-        invalid: '#ff6673',
-      }
-    : {
-        text: '#1f2328',
-        muted: '#59636e',
-        keyword: '#cf222e',
-        atom: '#0550ae',
-        string: '#0a3069',
-        number: '#0550ae',
-        variable: '#953800',
-        function: '#8250df',
-        type: '#8250df',
-        property: '#0969da',
-        tag: '#cf222e',
-        link: '#0969da',
-        inlineCode: '#0a3069',
-        inlineCodeBg: 'rgba(221, 244, 255, 0.72)',
-        strong: '#24292f',
-        emphasis: '#953800',
-        heading: '#0550ae',
-        invalid: '#82071e',
-      };
+  const scheme = activeEditorScheme();
+  const palette = {
+    ...scheme.syntax,
+    text: scheme.fg,
+    muted: scheme.syntax.comment,
+    headingBg: scheme.syntax.headingBg,
+  };
   const tags = (...items) => items.filter(Boolean);
+  const headingStyle = {tag: tags(t.heading, t.heading1, t.heading2), color: palette.heading, fontWeight: '700'};
+  if (palette.headingBg) headingStyle.backgroundColor = palette.headingBg;
   return api.syntaxHighlighting(api.HighlightStyle.define([
     {tag: t.keyword, color: palette.keyword},
     {tag: tags(t.atom, t.bool, t.null), color: palette.atom},
@@ -5423,7 +5494,7 @@ function codeMirrorHighlightExtension(api) {
     {tag: tags(t.propertyName, t.attributeName), color: palette.property},
     {tag: tags(t.tagName, t.angleBracket), color: palette.tag},
     {tag: tags(t.comment, t.meta), color: palette.muted},
-    {tag: tags(t.heading, t.heading1, t.heading2), color: palette.heading, fontWeight: '700'},
+    headingStyle,
     {tag: t.strong, fontWeight: '700', color: palette.strong},
     {tag: t.emphasis, fontStyle: 'italic', color: palette.emphasis},
     {tag: tags(t.link, t.url), color: palette.link, textDecoration: 'underline'},
@@ -5433,12 +5504,12 @@ function codeMirrorHighlightExtension(api) {
 }
 
 function codeMirrorThemeExtension(api) {
-  const light = fileEditorThemeMode === 'light';
+  const scheme = activeEditorScheme();
   return api.EditorView.theme({
     '&': {
       height: '100%',
-      color: 'var(--text)',
-      backgroundColor: 'var(--editor-bg)',
+      color: scheme.fg,
+      backgroundColor: scheme.bg,
     },
     '.cm-scroller': {
       fontFamily: 'var(--editor-font)',
@@ -5446,39 +5517,39 @@ function codeMirrorThemeExtension(api) {
       lineHeight: 'var(--editor-line-height)',
     },
     '.cm-content': {
-      caretColor: 'var(--text)',
+      caretColor: scheme.cursor,
       padding: '8px 10px',
     },
     '.cm-cursor': {
-      borderLeftColor: 'var(--text)',
+      borderLeftColor: scheme.cursor,
       borderLeftWidth: '2px',
     },
     '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
-      backgroundColor: light ? 'rgba(9, 105, 218, 0.22)' : 'rgba(118, 185, 0, 0.28)',
+      backgroundColor: scheme.selection,
     },
     '.cm-activeLine': {
-      backgroundColor: light ? 'rgba(9, 105, 218, 0.055)' : 'rgba(118, 185, 0, 0.08)',
+      backgroundColor: scheme.activeLine,
     },
     '.cm-activeLineGutter': {
-      backgroundColor: light ? 'rgba(9, 105, 218, 0.09)' : 'rgba(118, 185, 0, 0.12)',
-      color: 'var(--text)',
+      backgroundColor: scheme.activeLine,
+      color: scheme.fg,
     },
     '.cm-gutters': {
-      color: 'var(--muted)',
-      backgroundColor: 'var(--editor-gutter-bg)',
-      borderRightColor: 'var(--line)',
+      color: scheme.lineNo,
+      backgroundColor: scheme.gutterBg,
+      borderRightColor: scheme.line,
     },
     '.cm-panels': {
-      color: 'var(--text)',
-      backgroundColor: 'var(--panel2)',
+      color: scheme.fg,
+      backgroundColor: scheme.panel2,
     },
     '.cm-searchMatch': {
-      backgroundColor: light ? 'rgba(255, 248, 197, 0.9)' : 'rgba(245, 197, 66, 0.34)',
+      backgroundColor: scheme.dark ? 'rgba(245, 197, 66, 0.34)' : 'rgba(255, 248, 197, 0.9)',
     },
     '.cm-searchMatch-selected': {
-      backgroundColor: light ? 'rgba(255, 212, 0, 0.42)' : 'rgba(118, 185, 0, 0.45)',
+      backgroundColor: scheme.dark ? 'rgba(118, 185, 0, 0.45)' : 'rgba(255, 212, 0, 0.42)',
     },
-  }, {dark: !light});
+  }, {dark: scheme.dark});
 }
 
 function codeMirrorWrapMarkerExtension(api) {
@@ -5540,12 +5611,12 @@ function codeMirrorWrapMarkerExtension(api) {
 
 function codeMirrorHtmlSemanticEmphasisExtension(api, path) {
   if (codeMirrorLanguageName(path) !== 'html' || !api.ViewPlugin || !api.Decoration) return [];
-  const dark = fileEditorThemeMode !== 'light';
+  const palette = activeEditorScheme().syntax;
   const strongMark = api.Decoration.mark({
-    attributes: {style: `font-weight:700;color:${dark ? '#fff0a6' : '#123c24'}`},
+    attributes: {style: `font-weight:700;color:${palette.strong}`},
   });
   const emphasisMark = api.Decoration.mark({
-    attributes: {style: `font-style:italic;color:${dark ? '#ffd27e' : '#8a3b00'}`},
+    attributes: {style: `font-style:italic;color:${palette.emphasis}`},
   });
   const semanticTagPattern = /<(strong|b|em|i)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi;
   return api.ViewPlugin.fromClass(class {
@@ -6029,30 +6100,111 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  if (mode === 'dark') return 'Dark editor theme';
-  return 'White editor theme';
+  const scheme = EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark;
+  return `${scheme.label} editor scheme`;
+}
+
+function editorSchemeCssVariables(scheme = activeEditorScheme()) {
+  const syntax = scheme.syntax || {};
+  const diff = scheme.diff || {};
+  return {
+    '--editor-scheme-bg': scheme.bg,
+    '--editor-scheme-fg': scheme.fg,
+    '--editor-scheme-muted': syntax.comment || scheme.lineNo,
+    '--editor-scheme-line': scheme.line,
+    '--editor-scheme-panel': scheme.panel,
+    '--editor-scheme-panel2': scheme.panel2,
+    '--editor-scheme-gutter-bg': scheme.gutterBg,
+    '--editor-scheme-preview-bg': scheme.previewBg,
+    '--editor-cursor': scheme.cursor,
+    '--editor-selection': scheme.selection,
+    '--editor-active-line': scheme.activeLine,
+    '--editor-line-number': scheme.lineNo,
+    '--markdown-heading': syntax.heading,
+    '--markdown-heading-bg': syntax.headingBg || scheme.panel2,
+    '--markdown-link': syntax.link,
+    '--markdown-strong': syntax.strong,
+    '--markdown-emphasis': syntax.emphasis,
+    '--code-keyword': syntax.keyword,
+    '--code-atom': syntax.atom,
+    '--code-string': syntax.string,
+    '--code-number': syntax.number,
+    '--code-variable': syntax.variable,
+    '--code-function': syntax.function,
+    '--code-type': syntax.type,
+    '--code-property': syntax.property,
+    '--code-tag': syntax.tag,
+    '--code-comment': syntax.comment,
+    '--code-inline': syntax.inlineCode,
+    '--code-inline-bg': syntax.inlineCodeBg,
+    '--code-inline-border': syntax.inlineCodeBorder,
+    '--code-invalid': syntax.invalid,
+    '--code-diff-add': diff.addFg,
+    '--code-diff-remove': diff.removeFg,
+    '--lt-bg': scheme.bg,
+    '--lt-panel': scheme.panel,
+    '--lt-panel2': scheme.panel2,
+    '--lt-text': scheme.fg,
+    '--lt-muted': syntax.comment || scheme.lineNo,
+    '--lt-line': scheme.line,
+    '--lt-editor-bg': scheme.bg,
+    '--lt-editor-gutter-bg': scheme.gutterBg,
+    '--lt-editor-preview-bg': scheme.previewBg,
+    '--lt-markdown-heading': syntax.heading,
+    '--lt-markdown-heading-bg': syntax.headingBg || scheme.panel2,
+    '--lt-markdown-link': syntax.link,
+    '--lt-markdown-strong': syntax.strong,
+    '--lt-markdown-emphasis': syntax.emphasis,
+    '--lt-code-keyword': syntax.keyword,
+    '--lt-code-atom': syntax.atom,
+    '--lt-code-string': syntax.string,
+    '--lt-code-number': syntax.number,
+    '--lt-code-variable': syntax.variable,
+    '--lt-code-function': syntax.function,
+    '--lt-code-type': syntax.type,
+    '--lt-code-property': syntax.property,
+    '--lt-code-tag': syntax.tag,
+    '--lt-code-comment': syntax.comment,
+    '--lt-code-inline': syntax.inlineCode,
+    '--lt-code-inline-bg': syntax.inlineCodeBg,
+    '--lt-code-inline-border': syntax.inlineCodeBorder,
+    '--lt-code-invalid': syntax.invalid,
+  };
+}
+
+function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
+  const style = document.documentElement?.style;
+  if (!style) return;
+  for (const [name, value] of Object.entries(editorSchemeCssVariables(scheme))) {
+    if (value !== undefined && value !== null && value !== '') style.setProperty(name, String(value));
+  }
 }
 
 function updateEditorThemeButton(button) {
   if (!button) return;
-  button.classList.toggle('theme-dark', fileEditorThemeMode === 'dark');
-  button.classList.toggle('theme-light', fileEditorThemeMode === 'light');
-  button.dataset.editorTheme = fileEditorThemeMode;
-  button.setAttribute('aria-pressed', fileEditorThemeMode === 'light' ? 'true' : 'false');
+  const scheme = activeEditorScheme();
+  button.classList.toggle('theme-dark', scheme.dark);
+  button.classList.toggle('theme-light', !scheme.dark);
+  button.dataset.editorTheme = scheme.id;
+  button.setAttribute('aria-pressed', scheme.dark ? 'false' : 'true');
   button.title = `${editorThemeLabel()}; click to cycle`;
   button.setAttribute('aria-label', editorThemeLabel());
   setFileEditorIcon(button, 'file-editor-icon-theme');
 }
 
 function applyEditorThemeMode() {
+  const scheme = activeEditorScheme();
+  applyEditorSchemeCssVariables(scheme);
   document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light');
-  document.body?.classList.add(`editor-theme-${fileEditorThemeMode}`);
+  EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
+  document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light');
+  document.body?.classList.add(`editor-scheme-${scheme.id}`);
   updateEditorThemeButton(fileEditorThemeBtn);
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
 }
 
 function setFileEditorThemeMode(mode) {
-  fileEditorThemeMode = fileEditorThemeModes.includes(mode) ? mode : 'dark';
+  fileEditorThemeMode = normalizeEditorSchemeId(mode);
   writeStoredEditorThemeMode(fileEditorThemeMode);
   applyEditorThemeMode();
   if (activeFile && openFiles.get(activeFile)?.kind === 'text') renderEditorForActive();
@@ -6171,6 +6323,7 @@ function applyCssSettings() {
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
   root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 240)}px`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
+  root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
   root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);
 }
@@ -6230,13 +6383,16 @@ function applySettingsPayload(payload, options = {}) {
   terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
   autoFocusEnabled = boolSetting('general.auto_focus', true);
   const previousEditorEngine = editorEngine;
+  const previousEditorScheme = fileEditorThemeMode;
   editorEngine = readConfiguredEditorEngine();
+  fileEditorThemeMode = readConfiguredEditorScheme();
   if (options.initial || options.applyEditorDefaults) {
     fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
     fileEditorLineNumbersEnabled = boolSetting('terminal_editor.line_numbers', fileEditorLineNumbersEnabled);
   }
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
   applyCssSettings();
+  applyEditorThemeMode();
   applyTerminalRuntimeSettings();
   applyEditorWrapPreference();
   renderFileExplorerRootModeControls();
@@ -6244,7 +6400,7 @@ function applySettingsPayload(payload, options = {}) {
   renderPreferencesPanels();
   renderSessionButtons();
   renderPaneTabStrips();
-  if (previousEditorEngine !== editorEngine) {
+  if (previousEditorEngine !== editorEngine || previousEditorScheme !== fileEditorThemeMode) {
     renderEditorForActive();
     for (const [item, panel] of panelNodes.entries()) {
       if (isFileEditorItem(item)) renderFileEditorPanel(panel, item);
@@ -6999,14 +7155,16 @@ function dragPayload(event) {
   }
 }
 
-function fileDragPayload(event) {
-  const raw = event.dataTransfer?.getData('application/x-yolomux-file') || '';
+function normalizeFileDragPayload(parsed) {
+  if (!parsed?.path && !Array.isArray(parsed?.paths)) return null;
+  const paths = Array.isArray(parsed.paths) ? parsed.paths.filter(Boolean) : [parsed.path].filter(Boolean);
+  return paths.length ? {...parsed, path: parsed.path || paths[0], paths} : null;
+}
+
+function parseFileDragPayload(raw) {
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw);
-    if (!parsed?.path && !Array.isArray(parsed?.paths)) return null;
-    const paths = Array.isArray(parsed.paths) ? parsed.paths.filter(Boolean) : [parsed.path].filter(Boolean);
-    return paths.length ? {...parsed, path: parsed.path || paths[0], paths} : null;
+    return normalizeFileDragPayload(JSON.parse(raw));
   } catch (_) {
     return null;
   }
@@ -7014,6 +7172,11 @@ function fileDragPayload(event) {
 
 function hasYolomuxFileDrag(event) {
   return Array.from(event.dataTransfer?.types || []).includes('application/x-yolomux-file');
+}
+
+function fileDragPayload(event) {
+  const raw = event.dataTransfer?.getData('application/x-yolomux-file') || '';
+  return parseFileDragPayload(raw) || (hasYolomuxFileDrag(event) ? dragFilePayloadState : null);
 }
 
 async function openDraggedFilesInEditor(payload, options = {}) {
@@ -7085,12 +7248,25 @@ function moveCustomDragPreview(event) {
   customDragPreview.style.top = `${Math.round(event.clientY - customDragPreviewOffset.y)}px`;
 }
 
-function stopCustomDragPreview() {
+function bindCustomDragPreviewListeners() {
+  document.addEventListener?.('dragover', moveCustomDragPreview, true);
+  document.addEventListener?.('drag', moveCustomDragPreview, true);
+  document.addEventListener?.('drop', stopCustomDragPreview, true);
+  document.addEventListener?.('dragend', stopCustomDragPreview, true);
+}
+
+function unbindCustomDragPreviewListeners() {
   document.removeEventListener?.('dragover', moveCustomDragPreview, true);
   document.removeEventListener?.('drag', moveCustomDragPreview, true);
   document.removeEventListener?.('drop', stopCustomDragPreview, true);
+  document.removeEventListener?.('dragend', stopCustomDragPreview, true);
+}
+
+function stopCustomDragPreview() {
+  unbindCustomDragPreviewListeners();
   customDragPreview?.remove();
   customDragPreview = null;
+  closeFileImagePreview();
 }
 
 function startCustomDragPreview(event) {
@@ -7114,9 +7290,7 @@ function startCustomDragPreview(event) {
   const offsetY = Math.max(0, Math.min(rect.height || 0, event.clientY - rect.top)) || Math.max(1, (rect.height || 1) / 2);
   customDragPreviewOffset = {x: offsetX, y: offsetY};
   moveCustomDragPreview(event);
-  document.addEventListener?.('dragover', moveCustomDragPreview, true);
-  document.addEventListener?.('drag', moveCustomDragPreview, true);
-  document.addEventListener?.('drop', stopCustomDragPreview, true);
+  bindCustomDragPreviewListeners();
   event.dataTransfer?.setDragImage?.(transparentNativeDragImage(), 0, 0);
 }
 
@@ -7146,11 +7320,9 @@ function startFileDragPreview(event, paths, entry) {
   customDragPreview = preview;
   customDragPreviewOffset = {x: -14, y: -14};
   moveCustomDragPreview(event);
-  document.addEventListener?.('dragover', moveCustomDragPreview, true);
-  document.addEventListener?.('drag', moveCustomDragPreview, true);
-  document.addEventListener?.('drop', stopCustomDragPreview, true);
+  bindCustomDragPreviewListeners();
   preview.getBoundingClientRect();
-  event.dataTransfer?.setDragImage?.(preview, 18, 18);
+  event.dataTransfer?.setDragImage?.(transparentNativeDragImage(), 0, 0);
 }
 
 function fileDragPreviewMedia(path, entry) {
@@ -7549,7 +7721,7 @@ function replaceLayoutLeaf(node, slot, replacement) {
   return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
 }
 
-function activatePaneTab(side, session) {
+function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
@@ -7557,7 +7729,7 @@ function activatePaneTab(side, session) {
   }
   setFocusedPanelItem(session);
   if (activeItemForSide(side) === session) {
-    focusPanel(session);
+    focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
   }
   const next = emptyLayoutSlots();
@@ -7565,6 +7737,7 @@ function activatePaneTab(side, session) {
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
   next[side].active = session;
   applyLayoutSlots(next, {focusSession: session});
+  if (options.userInitiated && isTmuxSession(session)) focusTerminalFromUserAction(session, 25);
 }
 
 async function selectSession(session) {
@@ -8130,7 +8303,7 @@ async function killTmuxSession(session) {
   }
 }
 
-function focusPanel(session) {
+function focusPanel(session, options = {}) {
   const panel = document.getElementById(`panel-${session}`);
   if (!panel) return;
   panel.scrollIntoView({block: 'nearest', inline: 'nearest'});
@@ -8148,8 +8321,7 @@ function focusPanel(session) {
     setFocusedPanelItem(session);
     return;
   }
-  activateTab(session, 'terminal');
-  if (autoFocusEnabled) setFocusedTerminal(session);
+  activateTab(session, 'terminal', {userInitiated: options.userInitiated === true});
 }
 
 function fitTerminal(session) {
@@ -8975,9 +9147,9 @@ function createPaneTab(side, item) {
   tab.addEventListener('keydown', event => {
     if (!['Enter', ' '].includes(event.key)) return;
     event.preventDefault();
-    activatePaneTab(side, item);
+    activatePaneTab(side, item, {userInitiated: true});
   });
-  bindTabActivation(tab, () => activatePaneTab(side, item), {
+  bindTabActivation(tab, () => activatePaneTab(side, item, {userInitiated: true}), {
     stopPropagation: true,
     ignore: event => Boolean(event.target.closest('[data-auto-session], [data-pane-tab-close]')),
   });
@@ -9597,7 +9769,7 @@ function installPanelInactiveOverlays(panel, session) {
     overlay.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
-      focusPanel(session);
+      focusPanel(session, {userInitiated: true});
     });
     root.appendChild(overlay);
   }
@@ -9629,6 +9801,13 @@ function createInfoPanel() {
   return panel;
 }
 
+function editorSchemePreferenceChoices() {
+  return EDITOR_SCHEME_IDS.map(id => {
+    const scheme = EDITOR_SCHEMES[id];
+    return {value: id, label: scheme.label, group: scheme.dark ? 'Dark' : 'Light'};
+  });
+}
+
 function preferenceSections() {
   return [
     {title: 'YOLO', items: [
@@ -9644,6 +9823,7 @@ function preferenceSections() {
       {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: 'Font size for menus, tabs, and compact UI text. Values outside the range are clamped.'},
       {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by xterm.js panes. Values outside the range are clamped.'},
       {path: 'appearance.editor_font_size', label: 'Editor font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by editor text, code highlighting, and rendered previews.'},
+      {path: 'appearance.editor_color_scheme', label: 'Editor color scheme', type: 'select', choices: editorSchemePreferenceChoices(), help: 'Named CodeMirror and preview palette. GitHub Light is the high-contrast light option.'},
       {path: 'appearance.file_explorer_font_size', label: `${fileExplorerLabel()} font size`, type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: 'Font size used by Finder/File Explorer rows.'},
       {path: 'appearance.tab_width', label: 'Tab width', type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: 'Target width for pane tabs before they wrap to additional rows.'},
       {path: 'appearance.red_reminder_ms', label: 'Red reminder duration', type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: 'Duration of the red attention pulse for sessions that need input or approval. Set 0 to disable.'},
@@ -9789,7 +9969,8 @@ function preferenceSearchKeywordsForItem(item) {
 }
 
 function preferenceSearchHaystack(item) {
-  return [item.label, item.path, item.help, item.suffix, item.keywords, preferenceSearchKeywordsForItem(item)]
+  const choices = Array.isArray(item.choices) ? item.choices.map(choice => [preferenceChoiceValue(choice), preferenceChoiceLabel(choice), preferenceChoiceGroup(choice)]).flat() : [];
+  return [item.label, item.path, item.help, item.suffix, item.keywords, choices, preferenceSearchKeywordsForItem(item)]
     .flat(Infinity)
     .filter(Boolean)
     .join(' ')
@@ -9816,6 +9997,45 @@ function preferenceSectionMatches(section, query) {
   return textMatchesPreferenceQuery(section.title, query) || section.items.some(item => preferenceItemMatches(item, query));
 }
 
+function preferenceChoiceValue(choice) {
+  return typeof choice === 'object' && choice !== null ? choice.value : choice;
+}
+
+function preferenceChoiceLabel(choice) {
+  return typeof choice === 'object' && choice !== null ? (choice.label || choice.value) : choice;
+}
+
+function preferenceChoiceGroup(choice) {
+  return typeof choice === 'object' && choice !== null ? (choice.group || '') : '';
+}
+
+function preferenceSelectOptionsHtml(item, value) {
+  const choices = Array.isArray(item.choices) ? item.choices : [];
+  const groups = [];
+  const groupLookup = new Map();
+  const optionHtml = choice => {
+    const choiceValue = String(preferenceChoiceValue(choice));
+    return `<option value="${esc(choiceValue)}"${choiceValue === String(value) ? ' selected' : ''}>${esc(preferenceChoiceLabel(choice))}</option>`;
+  };
+  const looseOptions = [];
+  for (const choice of choices) {
+    const group = preferenceChoiceGroup(choice);
+    if (!group) {
+      looseOptions.push(optionHtml(choice));
+      continue;
+    }
+    if (!groupLookup.has(group)) {
+      groupLookup.set(group, []);
+      groups.push(group);
+    }
+    groupLookup.get(group).push(optionHtml(choice));
+  }
+  return [
+    ...looseOptions,
+    ...groups.map(group => `<optgroup label="${esc(group)}">${groupLookup.get(group).join('')}</optgroup>`),
+  ].join('');
+}
+
 function preferenceControlHtml(item, query = '') {
   if (!preferenceItemMatches(item, query)) return '';
   const value = preferenceValue(item.path);
@@ -9831,7 +10051,7 @@ function preferenceControlHtml(item, query = '') {
   } else if (item.type === 'number') {
     control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
   } else if (item.type === 'select') {
-    control = `<select ${baseAttrs}>${item.choices.map(choice => `<option value="${esc(choice)}"${choice === value ? ' selected' : ''}>${esc(choice)}</option>`).join('')}</select>`;
+    control = `<select ${baseAttrs}>${preferenceSelectOptionsHtml(item, value)}</select>`;
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
     control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
@@ -10688,7 +10908,7 @@ function codeMirrorConfigSignature(path) {
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
     readOnly: readOnlyMode,
-    theme: fileEditorThemeMode,
+    scheme: fileEditorThemeMode,
   });
 }
 
@@ -11808,7 +12028,6 @@ function createPanel(session) {
         </div>
       </div>`;
   bindPanelShell(panel, session);
-  installFilePathDropTarget(session, panel);
   bindPanelControls(panel, session);
   return panel;
 }
@@ -11958,7 +12177,7 @@ function bindPanelControls(panel, session) {
     button.addEventListener('click', () => {
       const currentName = button.dataset.tabName;
       const nextName = currentName !== 'terminal' && button.classList.contains('active') ? 'terminal' : currentName;
-      activateTab(button.dataset.tab, nextName);
+      activateTab(button.dataset.tab, nextName, {userInitiated: true});
     });
   });
   panel.querySelectorAll('[data-window-dir]').forEach(button => {
@@ -12062,25 +12281,41 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
     : `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
 }
 
+function terminalPathDropPayload(event) {
+  const payload = fileDragPayload(event);
+  if (!payload?.path) return null;
+  return payload.kind === 'dir' ? payload : null;
+}
+
 function installFilePathDropTarget(session, target) {
   if (readOnlyMode) return;
   target.addEventListener('dragover', event => {
-    if (!hasYolomuxFileDrag(event)) return;
+    const payload = terminalPathDropPayload(event);
+    if (!payload) return;
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
+    const intent = dropIntentForEvent(event);
+    if (intent?.targetSlot) showDropPreview(intent);
     target.classList.add('path-drag-over');
   });
   target.addEventListener('dragleave', event => {
     if (target.contains(event.relatedTarget)) return;
     target.classList.remove('path-drag-over');
+    clearDropPreview();
   });
   target.addEventListener('drop', event => {
-    const payload = fileDragPayload(event);
+    const payload = terminalPathDropPayload(event);
     if (!payload?.path) return;
     event.preventDefault();
     event.stopPropagation();
     target.classList.remove('path-drag-over');
+    const intent = dropIntentForEvent(event);
+    clearDropPreview();
+    if (intent?.targetSlot && intent.zone !== 'middle') {
+      openDraggedFilesInEditor(payload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
+      return;
+    }
     insertFileDragPayloadIntoTerminal(session, payload);
   });
 }
@@ -12480,7 +12715,7 @@ function syncPanelVisibility(previousActive = []) {
   }
 }
 
-function activateTab(session, name) {
+function activateTab(session, name, options = {}) {
   setFocusedPanelItem(session);
   if (name !== 'transcript') stopTranscriptStream(session);
   if (name !== 'summary') stopSummaryStream(session);
@@ -12495,7 +12730,8 @@ function activateTab(session, name) {
   if (name === 'terminal') {
     scheduleFit(session);
     setTimeout(() => refreshTerminal(session), 120);
-    focusTerminalWhenAutoFocus(session, 25);
+    if (options.userInitiated) focusTerminalFromUserAction(session);
+    else focusTerminalWhenAutoFocus(session, 25);
   } else {
     clearFocusedTerminal(session);
   }

@@ -62,6 +62,35 @@ def test_approval_prompt_ignores_dot_separated_ctrl_hint_cluster():
     assert auto_approve_tmux.approval_prompt_state(visible_text)["visible"] is True
 
 
+def test_claude_no_caret_prompt_defaults_to_yes_when_current():
+    visible_text = claude_bash_prompt_with_footer(
+        " Esc to cancel · Tab to amend · ctrl+e to explain",
+    ).replace(" ❯ 1. Yes", "   1. Yes")
+
+    assert auto_approve_tmux.approval_prompt_has_later_activity(visible_text) is False
+    assert auto_approve_tmux.yes_is_selected(visible_text) is True
+    state = auto_approve_tmux.approval_prompt_state(visible_text)
+    assert state["visible"] is True
+    assert state["yes_selected"] is True
+
+
+def test_claude_no_caret_prompt_does_not_default_when_stale():
+    visible_text = "\n".join([
+        claude_bash_prompt_with_footer(
+            " Esc to cancel · Tab to amend · ctrl+e to explain",
+        ).replace(" ❯ 1. Yes", "   1. Yes"),
+        "● User approved Claude's request",
+        "● Bash(echo one)",
+        "  ⎿  ok",
+        "",
+        "❯ ",
+    ])
+
+    assert auto_approve_tmux.approval_prompt_has_later_activity(visible_text) is True
+    assert auto_approve_tmux.yes_is_selected(visible_text) is False
+    assert auto_approve_tmux.approval_prompt_state(visible_text)["visible"] is False
+
+
 def test_approval_prompt_detects_activity_after_claude_ctrl_b_footer():
     visible_text = "\n".join([
         claude_bash_prompt_with_footer(
@@ -118,11 +147,23 @@ def test_visible_agent_working_detects_claude_random_status_verb():
         "✱ Imagining… (4s · ↓ 98 tokens)\n  ⎿  Tip: Connect Claude to your IDE · /ide\n",
         "✦ Comboublahblah… (7s · ↓ 123 tokens)\n",
         "✳ Doodooshit… (1m 2s · ↓ 1.2k tokens)\n",
+        "☉ Refactoring... (2.3s · ↑ 13 tokens · high effort)\n",
     ]
 
     for visible_text in samples:
         assert auto_approve_tmux.visible_agent_working(visible_text) is True
         assert auto_approve_tmux.agent_screen_state(visible_text)["key"] == "working"
+
+
+def test_visible_agent_working_ignores_context_used_status_line():
+    visible_text = "\n".join([
+        "✶ Thinking… (1s · ↑ 26.9k tokens · esc to interrupt)",
+        "100% context used",
+        "▶▶ bypass permissions on · 1 shell · esc to interrupt",
+    ])
+
+    assert auto_approve_tmux.visible_agent_working(visible_text) is True
+    assert auto_approve_tmux.agent_screen_state(visible_text)["key"] == "working"
 
 
 def test_visible_agent_working_ignores_stale_example_above_prompt():

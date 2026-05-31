@@ -71,6 +71,7 @@ class TestElement {
     this.rect = {width: 1200, height: 800, left: 0, top: 0, right: 1200, bottom: 800};
     this.style = new TestStyle();
     this.classList = new TestClassList();
+    this.listeners = new Map();
   }
 
   get className() { return Array.from(this.classList.names).join(' '); }
@@ -79,8 +80,14 @@ class TestElement {
     String(value || '').split(/\s+/).filter(Boolean).forEach(name => this.classList.add(name));
   }
 
-  addEventListener() {}
-  removeEventListener() {}
+  addEventListener(type, listener) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(listener);
+  }
+  removeEventListener(type, listener) {
+    const items = this.listeners.get(type) || [];
+    this.listeners.set(type, items.filter(item => item !== listener));
+  }
   append(...nodes) { nodes.forEach(node => this.appendChild(node)); }
   appendChild(node) {
     node.parentElement = this;
@@ -304,8 +311,16 @@ globalThis.__layoutTestApi = {
   activatePaneTab,
   currentSessionActionTarget,
   setFocusedPanelItem,
+  focusedPanelItemForTest() { return focusedPanelItem; },
   setAutoFocusEnabledForTest(value) { autoFocusEnabled = Boolean(value); },
+  selectPanelOnHover,
   focusTerminalWhenAutoFocus,
+  focusPanel,
+  focusTerminalFromUserAction,
+  testElementForId(id) { return document.getElementById(id); },
+  registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN}) {
+    terminals.set(session, {term, socket, container: document.getElementById('terminal-pane-' + session)});
+  },
   tmuxSessionActionCommands,
   tmuxSessionViewCommands,
   tmuxSessionNameError,
@@ -335,6 +350,11 @@ globalThis.__layoutTestApi = {
   editorPreviewModeAvailable,
   setFileEditorViewMode,
   editorEngineForTest() { return editorEngine; },
+  activeEditorSchemeForTest() { return activeEditorScheme(); },
+  editorSchemeCssVariables,
+  editorThemeLabel,
+  setFileEditorThemeMode,
+  fileEditorThemeModeForTest() { return fileEditorThemeMode; },
   editorScrollTopForSourceLine,
   editorSourceLineForScroll,
   editorVisualHighlightHtml,
@@ -386,9 +406,13 @@ globalThis.__layoutTestApi = {
   fileImagePreviewMinShowDelayMs,
   splitPercentForNewItem,
   setInfoBranchSort,
+  handleDropDragOver,
+  installFilePathDropTarget,
   showPaneTabDropPreview,
   shouldPreserveSourceSlotForSplit,
   startSessionDrag,
+  startFileTreeDrag,
+  stopCustomDragPreview,
   syncInitialLayoutUrl,
   tabMenuDetailText,
   TAB_TYPES,
@@ -410,6 +434,7 @@ globalThis.__layoutTestApi = {
   markdownTextWithSourceAnchors,
   moveSessionToSlot,
   openFileEditorPane,
+  onFileTreeRowClick,
   pathRelativeToDirectory,
   pruneFileExplorerSelectionForRoot,
   selectFileTreePath,
@@ -429,6 +454,7 @@ globalThis.__layoutTestApi = {
     fileExplorerSelectionAnchor = anchor;
     fileExplorerManualSelectionActive = false;
   },
+  activeFileForTest() { return activeFile; },
   setFileExplorerExpandedForTest(paths) {
     fileExplorerExpanded.clear();
     for (const path of paths || []) fileExplorerExpanded.add(path);
@@ -515,10 +541,12 @@ function dragEvent(clientX, session = '9') {
   return {
     clientX,
     clientY: 8,
+    target: null,
     dataTransfer: {
       dropEffect: '',
       effectAllowed: '',
       dragImage: null,
+      types: ['application/x-yolomux-session'],
       getData(type) {
         if (type === 'application/x-yolomux-session') return JSON.stringify({session, sourceSlot: 'right'});
         return '';
@@ -535,10 +563,27 @@ function dragEvent(clientX, session = '9') {
     preventDefault() {
       this.defaultPrevented = true;
     },
+    stopPropagation() {
+      this.propagationStopped = true;
+    },
     stopImmediatePropagation() {
       this.propagationStopped = true;
     },
   };
+}
+
+function fileDragEvent(target, payload = {path: '/home/test/pic.png', paths: ['/home/test/pic.png'], kind: 'file', name: 'pic.png'}, clientX = 20, clientY = 160) {
+  const event = dragEvent(clientX);
+  event.clientY = clientY;
+  event.target = target;
+  event.currentTarget = target;
+  event.dataTransfer.types = ['application/x-yolomux-file', 'text/plain'];
+  event.dataTransfer.getData = type => {
+    if (type === 'application/x-yolomux-file') return JSON.stringify(payload);
+    if (type === 'text/plain') return (payload.paths || [payload.path]).filter(Boolean).join('\n');
+    return '';
+  };
+  return event;
 }
 
 function terminalLine(text, isWrapped = false) {
@@ -998,6 +1043,34 @@ function makeFileTree(paths) {
 }
 
 {
+  const api = loadYolomux('', ['1']);
+  api.testElementForId('terminal-pane-1').classList.add('active');
+  api.setAutoFocusEnabledForTest(false);
+  api.selectPanelOnHover('1');
+  assert.equal(api.focusedPanelItemForTest(), null);
+  api.selectPanelOnHover('__files__');
+  assert.equal(api.focusedPanelItemForTest(), null);
+
+  const enabledApi = loadYolomux('', ['1']);
+  enabledApi.testElementForId('terminal-pane-1').classList.add('active');
+  enabledApi.selectPanelOnHover('1');
+  assert.equal(enabledApi.focusedPanelItemForTest(), '1');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  let focusCount = 0;
+  api.registerTerminalForTest('1', {focus() { focusCount += 1; }});
+  api.setAutoFocusEnabledForTest(false);
+  api.focusPanel('1');
+  assert.equal(api.focusedPanelItemForTest(), '1');
+  assert.equal(focusCount, 0);
+  api.focusPanel('1', {userInitiated: true});
+  assert.equal(api.focusedPanelItemForTest(), '1');
+  assert.equal(focusCount, 1);
+}
+
+{
   const api = loadYolomux('', ['1', '2']);
   assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,changes,image-viewer,file-editor');
   assert.equal(api.tabTypeForItem('__files__').key, 'files');
@@ -1111,6 +1184,23 @@ function makeFileTree(paths) {
   assert.ok(preferencesHtml.includes('Auto-focus active pane'), 'auto-focus setting names the whole active pane/view');
   assert.ok(preferencesHtml.includes('terminals, editors, Finder/File Explorer, Preferences, and other views'), 'auto-focus help covers non-tmux views');
   assert.equal(preferencesHtml.includes('Auto-focus terminals'), false, 'auto-focus setting is not terminal-only');
+  assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), 'preferences expose the editor scheme setting');
+  assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'editor schemes are grouped by dark palettes');
+  assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'editor schemes are grouped by light palettes');
+  assert.ok(preferencesHtml.includes('GitHub Light'), 'high-contrast light scheme is available');
+  api.setFileEditorThemeMode('github-light');
+  assert.equal(api.fileEditorThemeModeForTest(), 'github-light');
+  assert.equal(api.activeEditorSchemeForTest().label, 'GitHub Light');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--editor-scheme-bg'), '#ffffff');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--code-keyword'), '#cf222e');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-markdown-heading'), '#6f42c1');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-code-inline'), '#a40e26');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-code-inline-bg'), '#fff1d6');
+  assert.notEqual(api.activeEditorSchemeForTest().syntax.heading, api.activeEditorSchemeForTest().syntax.link);
+  assert.notEqual(api.activeEditorSchemeForTest().syntax.inlineCode, api.activeEditorSchemeForTest().syntax.heading);
+  assert.equal(api.editorThemeLabel(), 'GitHub Light editor scheme');
+  api.setFileEditorThemeMode('light');
+  assert.equal(api.fileEditorThemeModeForTest(), 'github-light', 'legacy light storage value maps to GitHub Light');
   const hugeItem = {path: 'appearance.editor_font_size', label: 'Editor font size', help: 'Font size used by editor text.', suffix: 'px'};
   assert.equal(api.preferenceItemMatches(hugeItem, 'huge'), true, 'size aliases match font settings');
   const popupItem = {path: 'performance.tab_popover_show_delay_ms', label: 'Tab detail hover delay', help: 'Initial delay before details open.', suffix: 'ms'};
@@ -1406,6 +1496,11 @@ function makeFileTree(paths) {
     anchor: null,
     manual: false,
   });
+
+  const clickOnlyTree = makeFileTree(['/repo/open-me.md']);
+  api.onFileTreeRowClick(clickOnlyTree.rows[0], '/repo/open-me.md', {kind: 'file', name: 'open-me.md'}, {shiftKey: false, metaKey: false, ctrlKey: false});
+  assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest()).paths, ['/repo/open-me.md']);
+  assert.equal(api.activeFileForTest(), null);
 
   const refreshTree = new TestElement('refresh-tree');
   refreshTree.setAttribute('role', 'tree');
@@ -2252,6 +2347,116 @@ function makeFileTree(paths) {
   assert.equal(strip.style.getPropertyValue('--tab-drop-x'), '');
   assert.equal(strip.style.getPropertyValue('--tab-drop-y'), '');
   assert.equal(strip.style.getPropertyValue('--tab-drop-height'), '');
+}
+
+{
+  const api = loadYolomux();
+  const slot = new TestElement('slot-left');
+  slot.classList.add('drop-slot');
+  slot.dataset.slot = 'left';
+  slot.rect = {left: 0, top: 0, right: 800, bottom: 400, width: 800, height: 400};
+  api.setGridPreviewNodesForTest([slot]);
+
+  const event = fileDragEvent(slot, {path: '/home/test/pic.png', paths: ['/home/test/pic.png'], kind: 'file', name: 'pic.png'}, 16, 200);
+  api.handleDropDragOver(event);
+
+  assert.ok(event.defaultPrevented, 'file dragover accepts Finder file drags');
+  assert.ok(event.propagationStopped, 'file dragover owns pane split preview');
+  assert.equal(event.dataTransfer.dropEffect, 'copy');
+  assert.ok(slot.classList.contains('drag-over'), 'file dragover shows pane target outline');
+  assert.ok(slot.classList.contains('drop-preview'), 'file dragover shows split preview');
+  assert.ok(slot.classList.contains('drop-preview-left'), 'file dragover uses the pointer-aware split zone');
+  assert.equal(slot.dataset.dropLabel, 'left');
+}
+
+{
+  const api = loadYolomux();
+  const slot = new TestElement('slot-left');
+  slot.classList.add('drop-slot');
+  slot.dataset.slot = 'left';
+  slot.rect = {left: 0, top: 0, right: 800, bottom: 400, width: 800, height: 400};
+  const terminal = new TestElement('terminal');
+  slot.appendChild(terminal);
+  api.setGridPreviewNodesForTest([slot]);
+  api.installFilePathDropTarget('1', terminal);
+
+  const event = fileDragEvent(terminal, {path: '/home/test/pic.png', paths: ['/home/test/pic.png'], kind: 'file', name: 'pic.png'}, 16, 200);
+  terminal.listeners.get('dragover')[0](event);
+
+  assert.equal(event.defaultPrevented, false, 'terminal path target does not steal file drags from pane drop handling');
+  assert.equal(event.propagationStopped, false, 'terminal path target lets file drags bubble into pane drop handling');
+  api.handleDropDragOver(event);
+
+  assert.ok(event.defaultPrevented, 'bubbled file dragover accepts Finder file drags');
+  assert.ok(event.propagationStopped, 'bubbled file dragover owns pane split preview');
+  assert.equal(event.dataTransfer.dropEffect, 'copy');
+  assert.equal(terminal.classList.contains('path-drag-over'), false, 'terminal path insertion affordance is not shown for file-open drags');
+  assert.ok(slot.classList.contains('drop-preview-left'), 'terminal path target also shows the pane split preview');
+}
+
+{
+  const api = loadYolomux();
+  const slot = new TestElement('slot-left');
+  slot.classList.add('drop-slot');
+  slot.dataset.slot = 'left';
+  slot.rect = {left: 0, top: 0, right: 800, bottom: 400, width: 800, height: 400};
+  const terminal = new TestElement('terminal');
+  slot.appendChild(terminal);
+  api.setGridPreviewNodesForTest([slot]);
+  api.installFilePathDropTarget('1', terminal);
+
+  const event = fileDragEvent(terminal, {path: '/home/test/assets', paths: ['/home/test/assets'], kind: 'dir', name: 'assets'}, 16, 200);
+  terminal.listeners.get('dragover')[0](event);
+
+  assert.ok(event.defaultPrevented, 'terminal path target accepts directory drags for path insertion');
+  assert.ok(event.propagationStopped, 'terminal path target owns directory path insertion');
+  assert.equal(event.dataTransfer.dropEffect, 'copy');
+  assert.ok(terminal.classList.contains('path-drag-over'), 'terminal still shows path insertion affordance for directories');
+  assert.ok(slot.classList.contains('drop-preview-left'), 'directory path target still shows the pane split preview');
+}
+
+{
+  const api = loadYolomux();
+  const row = new TestElement('pic-row');
+  row.rect = {left: 10, top: 20, right: 250, bottom: 40, width: 240, height: 20};
+  const event = fileDragEvent(row, {path: '/home/test/pic.png', paths: ['/home/test/pic.png'], kind: 'file', name: 'pic.png'}, 30, 28);
+
+  api.startFileTreeDrag(event, row, '/home/test/pic.png', {kind: 'file', name: 'pic.png'});
+
+  assert.equal(event.dataTransfer.effectAllowed, 'copy');
+  assert.equal(event.dataTransfer['text/plain'], '/home/test/pic.png');
+  assert.equal(event.dataTransfer['application/x-yolomux-file'], JSON.stringify({
+    path: '/home/test/pic.png',
+    paths: ['/home/test/pic.png'],
+    kind: 'file',
+    name: 'pic.png',
+  }));
+  assert.ok(api.customDragPreviewForTest(), 'file drag preview is installed');
+  assert.equal(event.dataTransfer.dragImage.node.className, 'transparent-drag-image');
+  assert.equal(event.dataTransfer.dragImage.x, 0);
+  assert.equal(event.dataTransfer.dragImage.y, 0);
+
+  const slot = new TestElement('slot-left');
+  slot.classList.add('drop-slot');
+  slot.dataset.slot = 'left';
+  slot.rect = {left: 0, top: 0, right: 800, bottom: 400, width: 800, height: 400};
+  api.setGridPreviewNodesForTest([slot]);
+  const protectedEvent = fileDragEvent(slot, {path: '/home/test/pic.png', paths: ['/home/test/pic.png'], kind: 'file', name: 'pic.png'}, 16, 200);
+  protectedEvent.dataTransfer.getData = () => '';
+  api.handleDropDragOver(protectedEvent);
+
+  assert.ok(protectedEvent.defaultPrevented, 'file dragover accepts protected-mode browser drag data');
+  assert.ok(slot.classList.contains('drop-preview-left'), 'file dragover uses dragstart fallback when getData is unavailable before drop');
+
+  api.stopCustomDragPreview();
+
+  assert.equal(api.customDragPreviewForTest(), null, 'file drag preview is removed on cleanup');
+}
+
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.equal(source.includes('installFilePathDropTarget(session, panel);'), false, 'panel-level path drop target must not swallow pane split previews');
+  assert.ok(source.includes('installTerminalFileDrop(session, container);'), 'terminal surface still accepts path insertion drops');
 }
 
 {

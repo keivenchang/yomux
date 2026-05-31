@@ -296,7 +296,29 @@ def detect_prompt(pane_text: str) -> str | None:
 # permission prompts the option text is literally "Yes"; for AskUserQuestion
 # prompts it's arbitrary (e.g., "Go + gRPC"). We match any non-empty option
 # text so the same check works for both shapes.
-_YES_SELECTOR_RE = re.compile(r"[❯›]\s*1\.\s*\S")
+_YES_SELECTOR_RE = re.compile(r"^\s*[❯›>]\s*1[.:]\s*\S", re.MULTILINE)
+
+
+def _default_yes_choice_index(lines: list[str], prompt_index: int) -> int:
+    yes_index = -1
+    no_index = -1
+    for index in range(prompt_index + 1, len(lines)):
+        line = lines[index]
+        if _SELECTED_CHOICE_LINE_RE.search(line):
+            return -1
+        if yes_index < 0 and _YES_OPTION_LINE_RE.search(line):
+            yes_index = index
+        if no_index < 0 and _NO_OPTION_LINE_RE.search(line):
+            no_index = index
+        if yes_index >= 0 and no_index >= 0:
+            return yes_index if yes_index < no_index else -1
+    return -1
+
+
+def _approval_prompt_defaults_to_yes(pane_text: str) -> bool:
+    lines = pane_text.splitlines()
+    prompt_index = _last_approval_prompt_index(lines)
+    return prompt_index >= 0 and _default_yes_choice_index(lines, prompt_index) >= 0
 
 def yes_is_selected(pane_text: str) -> bool:
     """Check that the first option is currently highlighted.
@@ -305,7 +327,9 @@ def yes_is_selected(pane_text: str) -> bool:
     permission prompts and AskUserQuestion-style prompts with arbitrary
     first-option text.
     """
-    return bool(_YES_SELECTOR_RE.search(pane_text))
+    if _YES_SELECTOR_RE.search(pane_text):
+        return True
+    return _approval_prompt_defaults_to_yes(pane_text) and not approval_prompt_has_later_activity(pane_text)
 
 
 # Maps prompt type -> which option to select.
@@ -387,16 +411,19 @@ def prompt_text(pane_text: str, prompt_type: str | None = None) -> str:
 
 
 _WORKING_SPINNER_GLYPHS = "✢✣✤✥✦✧✩✱✲✳✴✵✶✷✸✹✺✻✽✾✿*+·•◦∙⋅"
+_WORKING_LEADING_SYMBOL_RE = rf"(?:[{re.escape(_WORKING_SPINNER_GLYPHS)}]|[^\w\s])"
 _WORKING_LINE_RE = re.compile(
     r"(?:"
-    rf"[{re.escape(_WORKING_SPINNER_GLYPHS)}]\s+.+…\s*\("
-    r"[^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt|↓|\b\d+(?:\.\d+)?\s*[smh]\b)[^)]*\)"
-    r"|[^\n]*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
+    rf"^\s*{_WORKING_LEADING_SYMBOL_RE}\s+\S.*(?:…|\.{{3}}).*"
+    r"(?:\([^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt|[↑↓]|\b\d+(?:\.\d+)?\s*[smh]\b)[^)]*\)|\b\d+(?:\.\d+)?\s*[smh]\b)"
+    r"|^[^\n]*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
     r")",
     re.IGNORECASE,
 )
 _CHOICE_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?\d+[.:]\s+\S")
 _SELECTED_CHOICE_LINE_RE = re.compile(r"^\s*[❯›>]\s*\d+[.:]\s+\S")
+_YES_OPTION_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?1[.:]\s+Yes\b", re.IGNORECASE)
+_NO_OPTION_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?2[.:]\s+No\b", re.IGNORECASE)
 _FOOTER_LINE_RE = re.compile(
     r"^\s*(?:\? for shortcuts|Esc to cancel|Enter to select|Tab to amend|ctrl\+e to explain)",
     re.IGNORECASE,
@@ -483,7 +510,9 @@ def approval_prompt_has_later_activity(visible_text: str) -> bool:
             footer_index = index
 
     if selected_index < 0:
-        return False
+        selected_index = _default_yes_choice_index(lines, prompt_index)
+        if selected_index < 0:
+            return False
 
     start = footer_index + 1 if footer_index >= 0 else selected_index + 1
     for line in lines[start:]:
@@ -537,6 +566,8 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if re.match(r"^(?:gpt|claude|opus|sonnet)[A-Za-z0-9_.-]*\s+.+\s·\s", stripped, re.IGNORECASE):
         return True
     if re.match(r"^\d+\s+tasks\s+\(", stripped):
+        return True
+    if re.match(r"^\d+%\s+context\s+(?:used|left|remaining)\b", stripped, re.IGNORECASE):
         return True
     if stripped.startswith(("◼", "◻", "☑", "☒")):
         return True
@@ -1390,6 +1421,8 @@ def _self_test() -> bool:
         "   1. Yes\n ❯ 2. No\n"), False)
     check("option 2 selected (edit)", yes_is_selected(
         "   1. Yes\n ❯ 2. Yes, allow all edits during this session\n   3. No\n"), False)
+    check("claude no selector defaults to yes when prompt is current", yes_is_selected(
+        " Do you want to proceed?\n   1. Yes\n   2. No\n\n Esc to cancel · Tab to amend · ctrl+e to explain\n"), True)
     check("no selector at all", yes_is_selected("random text"), False)
 
     # =====================================================================

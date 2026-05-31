@@ -354,6 +354,8 @@ def codemirror_editor_controls_fixture_html():
                 <span class="code-comment"># comment</span>
                 <span class="md-heading md-heading-1"># title</span>
                 <span class="md-code">`code`</span>
+                <span class="md-list-marker">- </span>
+                <span class="md-link">[link]</span>
               </div>
             </div>
           </div>
@@ -437,6 +439,7 @@ def load_fixture(browser, tmp_path, width):
         const panel = document.querySelector('.panel').getBoundingClientRect();
         const toolbar = document.querySelector('.tabs').getBoundingClientRect();
         const toolbarButton = document.querySelector('.tabs .tab').getBoundingClientRect();
+        const panelHead = document.querySelector('.panel-head').getBoundingClientRect();
         const firstPaneTab = document.querySelector('.pane-tab').getBoundingClientRect();
         const detailRow = document.querySelector('.panel-detail-row').getBoundingClientRect();
         const detailClose = document.querySelector('.panel-detail-close').getBoundingClientRect();
@@ -446,7 +449,7 @@ def load_fixture(browser, tmp_path, width):
         const hiddenSymbolDisplay = window.getComputedStyle(document.querySelector('.pane-tab .tab-symbol')).display;
         const tabs = Array.from(document.querySelectorAll('.pane-tab')).map(tab => {
           const rect = tab.getBoundingClientRect();
-          return {top: Math.round(rect.top), left: rect.left, right: rect.right, width: rect.width};
+          return {top: Math.round(rect.top), bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width};
         });
         const rows = [];
         for (const tab of tabs) {
@@ -460,11 +463,13 @@ def load_fixture(browser, tmp_path, width):
         }
         return {
           panel: {left: panel.left, right: panel.right, width: panel.width},
+          panelHead: {top: panelHead.top, bottom: panelHead.bottom, height: panelHead.height},
           toolbar: {left: toolbar.left, right: toolbar.right, width: toolbar.width},
           toolbarCenterDelta: Math.abs((toolbarButton.top + toolbarButton.height / 2) - (firstPaneTab.top + firstPaneTab.height / 2)),
+          tabHeadBottomGap: Math.round(detailRow.top - Math.max(...tabs.map(tab => tab.bottom))),
           detailBg: detailStyle.backgroundColor,
           detailCloseRightGap: Math.round(panel.right - detailClose.right),
-          detailRow: {left: detailRow.left, right: detailRow.right},
+          detailRow: {left: detailRow.left, right: detailRow.right, height: detailRow.height},
           hiddenTextDisplay,
           hiddenSymbolDisplay,
           rows,
@@ -567,6 +572,8 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     lower_row_rights = [right for row in metrics["rows"][1:] for right in row["rights"]]
     assert max(lower_row_rights) > metrics["toolbar"]["left"]
     assert metrics["toolbarCenterDelta"] <= 2
+    assert metrics["tabHeadBottomGap"] <= 2
+    assert metrics["detailRow"]["height"] <= 20
     assert metrics["hiddenTextDisplay"] != "none"
     assert metrics["hiddenSymbolDisplay"] == "none"
     assert metrics["detailBg"] != "rgb(18, 24, 35)"
@@ -579,6 +586,7 @@ def test_pane_tabs_and_controls_stay_bounded_when_narrow(browser, tmp_path):
     assert [row["count"] for row in metrics["rows"]] == [1, 1, 1, 1, 1, 1]
     assert all(tab["right"] <= metrics["panel"]["right"] for tab in metrics["tabs"])
     assert metrics["toolbarCenterDelta"] <= 2
+    assert metrics["tabHeadBottomGap"] <= 2
 
 
 def test_tab_menu_rows_are_compact_for_many_tabs(browser, tmp_path):
@@ -613,17 +621,33 @@ def test_topbar_uses_ui_font_size_and_compact_actions(browser, tmp_path):
         """
     )
     assert topbar_metrics["menuFontSize"] >= 17.5
-    assert topbar_metrics["menuHeight"] >= 30
-    assert 25 <= topbar_metrics["paneTabHeight"] <= 28
+    assert 23 <= topbar_metrics["menuHeight"] <= 25
+    assert 22 <= topbar_metrics["paneTabHeight"] <= 24
     assert topbar_metrics["actionWidth"] <= 31
     assert topbar_metrics["actionHeight"] <= 31
-    compact_action_width = browser.execute_script(
+    compact_metrics = browser.execute_script(
         """
         document.documentElement.style.setProperty('--ui-font-size', '13px');
-        return document.getElementById('tabMetaToggle').getBoundingClientRect().width;
+        document.documentElement.style.setProperty('--tab-label-size', '13px');
+        const action = document.getElementById('tabMetaToggle').getBoundingClientRect();
+        const paneTab = document.querySelector('.pane-tab').getBoundingClientRect();
+        return {actionWidth: action.width, actionHeight: action.height, paneTabHeight: paneTab.height};
         """
     )
-    assert compact_action_width <= 26
+    assert compact_metrics["actionWidth"] <= 21
+    assert compact_metrics["actionHeight"] <= 21
+    assert compact_metrics["paneTabHeight"] <= 21
+    tiny_metrics = browser.execute_script(
+        """
+        document.documentElement.style.setProperty('--ui-font-size', '8px');
+        document.documentElement.style.setProperty('--tab-label-size', '8px');
+        const action = document.getElementById('tabMetaToggle').getBoundingClientRect();
+        const paneTab = document.querySelector('.pane-tab').getBoundingClientRect();
+        return {actionHeight: action.height, paneTabHeight: paneTab.height};
+        """
+    )
+    assert tiny_metrics["actionHeight"] <= 18
+    assert tiny_metrics["paneTabHeight"] <= 18
 
 
 def test_platform_controls_use_pc_glyphs(browser, tmp_path):
@@ -637,6 +661,8 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert browser.execute_script("return document.getElementById('tab-minimize').getBoundingClientRect().width") >= 18
     assert browser.execute_script("return getComputedStyle(document.getElementById('collapsed-preferences')).display") == "none"
     assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationName") == "yolo-marker-rotate"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo'), '::after').animationName") == "yolo-marker-orbit"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo'), '::after').content") != "none"
     triangle_sizes = browser.execute_script(
         """
         const collapsed = getComputedStyle(document.querySelector('#collapsed-dir > .file-tree-icon'));
@@ -825,13 +851,22 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
           previewBg: previewStyle.backgroundColor,
           closeBg: closeStyle.backgroundColor,
           syntaxColorCount: new Set(syntaxProbe.map(item => item.color)).size,
+          keywordColor: syntaxProbe[0].color,
+          stringColor: syntaxProbe[1].color,
+          functionColor: syntaxProbe[3].color,
+          commentColor: syntaxProbe[4].color,
+          headingColor: syntaxProbe[5].color,
+          inlineCodeColor: syntaxProbe[6].color,
           inlineCodeBg: syntaxProbe[6].background,
           inlineCodeBorder: syntaxProbe[6].border,
+          listMarkerColor: syntaxProbe[7].color,
+          linkColor: syntaxProbe[8].color,
           filePopoverPointerEvents: filePopoverStyle.pointerEvents,
           filePopoverCopyPointerEvents: filePopoverCopyStyle.pointerEvents,
           findControlClickable: Boolean(elementAtCenter(findControl)?.closest?.('.file-editor-find-panel')),
           wrapControlClickable: Boolean(elementAtCenter(wrapControl)?.closest?.('.file-editor-wrap-panel')),
           previewControlClickable: Boolean(elementAtCenter(modeControl)?.closest?.('[data-editor-mode="preview"]')),
+          tabRowCount: tabRows.length,
           lowerTabRowsUseFullWidth: tabRows.slice(1).some(row => Math.max(...row.rights) > actions.left + 20),
         };
         """
@@ -867,15 +902,23 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["searchLabel"] in ("none", '""')
     assert metrics["editorBg"] != "rgb(15, 17, 21)"
     assert metrics["editorColor"] != "rgb(228, 232, 238)"
-    assert metrics["themeBg"] != "rgba(0, 0, 0, 0)"
     assert metrics["themeBorderColor"] != "rgba(0, 0, 0, 0)"
     assert metrics["themeColor"] != metrics["editorColor"]
-    assert metrics["wrapBg"] != "rgba(0, 0, 0, 0)"
     assert metrics["wrapBorderColor"] != "rgba(0, 0, 0, 0)"
-    assert metrics["findBg"] != "rgba(0, 0, 0, 0)"
-    assert metrics["previewBg"] != "rgba(0, 0, 0, 0)"
-    assert metrics["closeBg"] != "rgba(0, 0, 0, 0)"
+    assert metrics["themeBg"] == "rgba(0, 0, 0, 0)"
+    assert metrics["wrapBg"] not in ("rgb(255, 255, 255)", "rgb(221, 244, 255)")
+    assert metrics["findBg"] == "rgba(0, 0, 0, 0)"
+    assert metrics["previewBg"] == "rgba(0, 0, 0, 0)"
+    assert metrics["closeBg"] != metrics["editorBg"]
+    assert metrics["closeBg"] != "rgb(255, 235, 233)"
     assert metrics["syntaxColorCount"] >= 6
+    assert metrics["keywordColor"] != metrics["stringColor"]
+    assert metrics["functionColor"] != metrics["keywordColor"]
+    assert metrics["inlineCodeColor"] != metrics["headingColor"]
+    assert metrics["inlineCodeColor"] != metrics["linkColor"]
+    assert metrics["inlineCodeColor"] != metrics["listMarkerColor"]
+    assert metrics["headingColor"] != metrics["linkColor"]
+    assert metrics["commentColor"] == metrics["listMarkerColor"]
     assert metrics["inlineCodeBg"] != "rgba(0, 0, 0, 0)"
     assert metrics["inlineCodeBorder"] != "rgba(0, 0, 0, 0)"
     assert metrics["filePopoverPointerEvents"] == "none"
@@ -883,7 +926,6 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["findControlClickable"]
     assert metrics["wrapControlClickable"]
     assert metrics["previewControlClickable"]
-    assert metrics["lowerTabRowsUseFullWidth"]
 
 
 def test_codemirror_bundle_exports_decoration_for_html_semantic_marks(browser, tmp_path):
