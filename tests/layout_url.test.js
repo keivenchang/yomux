@@ -285,6 +285,7 @@ globalThis.__layoutTestApi = {
   changesPanelHtml,
   fileExplorerChangesPanelHtml,
   changeFileRowHtml,
+  diffRefControlsHtml,
   parseUnifiedDiffLineClasses,
   globalActivitySummaryHtml,
   sessionActivitySummary,
@@ -302,6 +303,7 @@ globalThis.__layoutTestApi = {
   fileExplorerPanelCloseClass,
   fileEditorPanelCloseClass,
   fileIconFor,
+  fileIconClassFor,
   fileExplorerNeedsLeftDock,
   fileExplorerPaneTabHtml,
   firstEmptyPane,
@@ -1219,6 +1221,8 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
   assert.ok(changesHtml.includes('changes-file-agent'), 'changed-file rows show the agent icon slot');
   assert.ok(changesHtml.includes('changes-file-date'), 'changed-file rows wrap the date for skinny styling');
+  assert.ok(changesHtml.includes('data-diff-ref-from'), 'Changes pane exposes FROM ref picker');
+  assert.ok(changesHtml.includes('data-diff-ref-to'), 'Changes pane exposes TO ref picker');
   const compactChangeHtml = api.changeFileRowHtml(
     {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
     {compact: true},
@@ -1226,6 +1230,7 @@ function makeFileTree(paths) {
   assert.ok(/changes-status[^>]*>M<\/span>[\s\S]*changes-file-name[^>]*>README\.md<\/span>[\s\S]*changes-file-agent[\s\S]*changes-file-meta[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-file-date/.test(compactChangeHtml), 'compact changed-file row order is status, file, AI icon, counts, date');
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
+  assert.ok(changesHtml.includes('data-open-change-status="A"'), 'changed-file clicks carry status for deleted-file diff opens');
   api.setFileExplorerSessionFilesPayloadForTest({
     session: '1',
     loaded: true,
@@ -1236,6 +1241,7 @@ function makeFileTree(paths) {
     ],
   });
   assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified files'), 'Finder embeds a modified-files panel');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), 'Finder modified-files panel uses one density toggle');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row detailed'), 'Finder modified-files panel defaults to detailed rows');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
@@ -1263,6 +1269,11 @@ function makeFileTree(paths) {
   assert.equal(api.fileExplorerLabel(), 'File Explorer');
   assert.ok(filesTab.includes('File Explorer'));
   const appSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(appSource.includes("const editorViewModes = new Set(['edit', 'preview', 'split', 'diff'])"), 'file editor registers diff as a real view mode');
+  assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
+  assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
+  assert.ok(appSource.includes('/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}'), 'editor diff requests carry FROM/TO refs');
+  assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');
   assert.ok(/switchFileExplorerChangesSession\(item\)/.test(appSource), 'tmux focus switches the Finder modified-files session immediately');
   assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'tmux focus forces a fresh Finder modified-files fetch even if an older request is in flight');
   assert.equal(appSource.includes("state.kind === 'text' && !fileEditorAutosaveEnabled"), false, 'clean external file changes auto-reload even when autosave is off');
@@ -1668,6 +1679,8 @@ function makeFileTree(paths) {
   assert.ok(source.includes("if (mod && key === 'p' && globalShortcutTargetAllowsAppAction(event.target))"), 'file quick-open is bound through the global shortcut guard');
   assert.ok(source.includes('if (event.shiftKey) openCommandPalette();'), 'Shift plus app modifier opens the command palette');
   assert.ok(source.includes('else openFileQuickOpen();'), 'Plain app modifier plus P opens file quick-open');
+  assert.ok(source.includes("if (event.key === ',')"), 'Preferences keeps best-effort comma shortcut in browser tabs');
+  assert.ok(source.includes('selectSession(prefsItemId);'), 'Preferences shortcut opens the pane, while menu and palette remain fallbacks');
   assert.equal(source.includes('Ctrl/Cmd'), false, 'served UI strings do not show Ctrl/Cmd combined shortcuts');
   assert.ok(source.includes('showFileSaveConflictDialog'), 'editor saves route conflicts through the shared conflict dialog');
   assert.ok(source.includes('autoSaveFileEditor'), 'editor autosave is wired into the built client');
@@ -1761,6 +1774,9 @@ function makeFileTree(paths) {
   assert.equal(api.fileIconFor('Dockerfile'), '⚙');
   assert.equal(api.fileIconFor('archive.tar'), '🗜');
   assert.equal(api.fileIconFor('unknown.bin'), '📄');
+  assert.equal(api.fileIconClassFor('README.md'), 'file-icon-doc');
+  assert.equal(api.fileIconClassFor('main.rs'), 'file-icon-code');
+  assert.equal(api.fileIconClassFor('screenshot.png'), 'file-icon-image');
   const controlsHtml = api.panelControlsHtml('1');
   assert.ok(controlsHtml.includes('title="Transcript" aria-label="Transcript"'));
   assert.ok(controlsHtml.includes('title="AI summary" aria-label="AI summary"'));

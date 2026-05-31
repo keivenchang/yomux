@@ -892,12 +892,16 @@ def test_codemirror_bundle_exports_decoration_for_html_semantic_marks(browser, t
         return {
           hasDecoration: typeof cm.Decoration?.mark === 'function',
           hasDecorationSet: typeof cm.Decoration?.set === 'function',
+          hasMergeView: typeof cm.MergeView === 'function',
+          hasUnifiedMergeView: typeof cm.unifiedMergeView === 'function',
           markWorks: Boolean(mark && typeof mark.range === 'function'),
         };
         """
     )
     assert metrics["hasDecoration"]
     assert metrics["hasDecorationSet"]
+    assert metrics["hasMergeView"]
+    assert metrics["hasUnifiedMergeView"]
     assert metrics["markWorks"]
 
 

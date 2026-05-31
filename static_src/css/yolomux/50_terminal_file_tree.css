@@ -949,6 +949,20 @@
   background: rgba(245, 197, 66, 0.14);
   box-shadow: inset 3px 0 0 var(--accent-gold);
 }
+.file-tree-row.git-modified:not(.selected) .file-tree-name {
+  color: #f5c542;
+}
+.file-tree-row.git-untracked:not(.selected) .file-tree-name {
+  color: #7ee787;
+}
+.file-tree-row.git-deleted:not(.selected) .file-tree-name {
+  color: #ff8585;
+  text-decoration: line-through;
+}
+.file-tree-row.git-staged:not(.selected) .file-tree-name {
+  color: #c4f970;
+  font-weight: 700;
+}
 .file-tree-row.kind-dir {
   color: var(--text);
   font-weight: 500;
@@ -966,6 +980,25 @@
   text-align: center;
   font-size: var(--ui-font-size-xs);
   flex: 0 0 20px;
+  border-radius: 3px;
+}
+.file-tree-icon.file-icon-code {
+  color: #7dd3fc;
+}
+.file-tree-icon.file-icon-doc {
+  color: #facc15;
+}
+.file-tree-icon.file-icon-config {
+  color: #c084fc;
+}
+.file-tree-icon.file-icon-image {
+  color: #86efac;
+}
+.file-tree-icon.file-icon-archive {
+  color: #fb923c;
+}
+.file-tree-icon.file-icon-generic {
+  color: #94a3b8;
 }
 .file-tree-row.kind-dir > .file-tree-icon {
   font-size: 1.28em;
@@ -980,6 +1013,26 @@
 .file-tree-name {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.file-tree-git-status {
+  margin-left: auto;
+  padding-left: 6px;
+  color: currentColor;
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 800;
+}
+.file-tree-children {
+  position: relative;
+}
+.file-tree-children::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 15px;
+  border-left: 1px solid rgba(148, 163, 184, 0.18);
+  pointer-events: none;
 }
 .file-tree-children {
   display: block;
@@ -1002,7 +1055,8 @@
   overflow: hidden;
 }
 .file-explorer-hidden-toggle,
-.file-explorer-root-mode-toggle {
+.file-explorer-root-mode-toggle,
+.file-explorer-header-action {
   width: 30px;
   height: 18px;
   flex: 0 0 30px;
@@ -1020,10 +1074,18 @@
   width: 38px;
   flex-basis: 38px;
 }
+.file-explorer-header-action {
+  width: 20px;
+  flex-basis: 20px;
+  padding: 0;
+  line-height: 1;
+}
 .file-explorer-hidden-toggle:hover,
 .file-explorer-hidden-toggle:focus-visible,
 .file-explorer-root-mode-toggle:hover,
-.file-explorer-root-mode-toggle:focus-visible {
+.file-explorer-root-mode-toggle:focus-visible,
+.file-explorer-header-action:hover,
+.file-explorer-header-action:focus-visible {
   color: var(--text);
   border-color: var(--text);
 }

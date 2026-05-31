@@ -5,12 +5,101 @@ function sessionFilesTargetSession(options = {}) {
   return sessions[0] || '';
 }
 
+function diffRefParams() {
+  return {
+    from: cleanDiffRef(diffRefFrom, 'current'),
+    to: cleanDiffRef(diffRefTo, 'HEAD'),
+  };
+}
+
+function diffRefQueryString() {
+  const refs = diffRefParams();
+  return `from=${encodeURIComponent(refs.from)}&to=${encodeURIComponent(refs.to)}`;
+}
+
+function diffRefSuggestions() {
+  const suggestions = [
+    {ref: 'current', short: 'current', subject: 'working tree'},
+    {ref: 'HEAD', short: 'HEAD', subject: 'current commit'},
+  ];
+  const seen = new Set(suggestions.map(item => item.ref));
+  for (const payload of [sessionFilesPayload, fileExplorerSessionFilesPayload]) {
+    const refsByRepo = payload?.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {};
+    for (const refs of Object.values(refsByRepo)) {
+      if (!Array.isArray(refs)) continue;
+      for (const item of refs) {
+        const ref = cleanDiffRef(item?.ref || '', '');
+        if (!ref || seen.has(ref)) continue;
+        suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || ''});
+        seen.add(ref);
+        if (suggestions.length >= 60) return suggestions;
+      }
+    }
+  }
+  return suggestions;
+}
+
+function diffRefSuggestionsHtml(listId) {
+  return `<datalist id="${esc(listId)}">${diffRefSuggestions().map(item => {
+    const label = [item.short, item.subject].filter(Boolean).join(' ');
+    return `<option value="${esc(item.ref)}" label="${esc(label)}"></option>`;
+  }).join('')}</datalist>`;
+}
+
+function diffRefControlsHtml(options = {}) {
+  const compact = options.compact === true;
+  const className = compact ? 'diff-ref-controls compact' : 'diff-ref-controls';
+  const listId = options.listId || (compact ? 'diff-ref-suggestions-compact' : 'diff-ref-suggestions');
+  return `<span class="${className}" data-diff-ref-controls>
+    <label class="diff-ref-control">FROM <input data-diff-ref-from type="text" list="${esc(listId)}" value="${esc(diffRefFrom)}" spellcheck="false" aria-label="Diff FROM ref"></label>
+    <label class="diff-ref-control">TO <input data-diff-ref-to type="text" list="${esc(listId)}" value="${esc(diffRefTo)}" spellcheck="false" aria-label="Diff TO ref"></label>
+    ${diffRefSuggestionsHtml(listId)}
+  </span>`;
+}
+
+function setDiffRefs(fromRef, toRef, options = {}) {
+  const nextFrom = cleanDiffRef(fromRef, 'current');
+  const nextTo = cleanDiffRef(toRef, 'HEAD');
+  if (nextFrom === diffRefFrom && nextTo === diffRefTo && options.force !== true) return false;
+  diffRefFrom = nextFrom;
+  diffRefTo = nextTo;
+  writeStoredDiffRefs();
+  fileExplorerSessionFilesCache.clear();
+  for (const state of openFiles.values()) {
+    if (!state || state.kind !== 'text') continue;
+    state.diffLoaded = false;
+    state.diffUnavailable = false;
+    state.diffError = '';
+  }
+  renderChangesPanels();
+  renderFileExplorerChangesPanels();
+  fetchSessionFiles({session: sessionFilesTargetSession(), force: true});
+  fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  for (const path of openFiles.keys()) renderOpenFilePath(path);
+  return true;
+}
+
+function commitDiffRefControls(container) {
+  const fromInput = container?.querySelector?.('[data-diff-ref-from]');
+  const toInput = container?.querySelector?.('[data-diff-ref-to]');
+  return setDiffRefs(fromInput?.value, toInput?.value);
+}
+
+function syncDiffRefControlValues(container) {
+  if (!container) return;
+  const active = document.activeElement;
+  const fromInput = container.querySelector?.('[data-diff-ref-from]');
+  const toInput = container.querySelector?.('[data-diff-ref-to]');
+  if (fromInput && fromInput !== active) fromInput.value = diffRefFrom;
+  if (toInput && toInput !== active) toInput.value = diffRefTo;
+}
+
 function fileExplorerSessionFilesTargetSession() {
   return sessionFilesTargetSession({followActive: true});
 }
 
 function emptySessionFilesPayload(session = '', loaded = true) {
-  return {session, files: [], repos: [], errors: [], loaded};
+  return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: diffRefFrom, to_ref: diffRefTo, loaded};
 }
 
 function switchFileExplorerChangesSession(session) {
@@ -57,6 +146,8 @@ function sessionFilesPayloadSignatureForPayload(payload) {
   return JSON.stringify({
     session: payload?.session || '',
     loaded: payload?.loaded === true,
+    from: payload?.from_ref || '',
+    to: payload?.to_ref || '',
     errors: Array.isArray(payload?.errors) ? payload.errors : [],
     repos,
     files,
@@ -83,8 +174,8 @@ function setSessionFilesLoadingForDestination(destination, loading) {
 
 async function fetchSessionFiles(options = {}) {
   const destination = options.destination === 'finder' ? 'finder' : 'changes';
-  const forceFinderRefresh = destination === 'finder' && options.force === true;
-  if (sessionFilesLoadingForDestination(destination) && !forceFinderRefresh) return;
+  const forceRefresh = options.force === true;
+  if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
   const requestId = destination === 'finder' ? ++fileExplorerSessionFilesRequestId : 0;
   const requestIsCurrent = () => destination !== 'finder' || requestId === fileExplorerSessionFilesRequestId;
   const session = options.session || (destination === 'finder' ? fileExplorerSessionFilesTargetSession() : sessionFilesTargetSession());
@@ -110,14 +201,17 @@ async function fetchSessionFiles(options = {}) {
     renderPaneTabStrips();
   }
   try {
-    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24`);
+    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${diffRefQueryString()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     const nextPayload = {
       session: payload.session || session,
       files: Array.isArray(payload.files) ? payload.files : [],
       repos: Array.isArray(payload.repos) ? payload.repos : [],
+      refs_by_repo: payload.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {},
       errors: Array.isArray(payload.errors) ? payload.errors : [],
+      from_ref: payload.from_ref || diffRefFrom,
+      to_ref: payload.to_ref || diffRefTo,
       loaded: true,
     };
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
@@ -128,7 +222,7 @@ async function fetchSessionFiles(options = {}) {
     if (destination === 'finder') fileExplorerSessionFilesCache.set(session, {payload: nextPayload, signature});
     if (!options.silent) statusEl.innerHTML = `<span class="ok">loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}</span>`;
   } catch (err) {
-    const nextPayload = {session, files: [], repos: [], errors: [String(err)], loaded: true};
+    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
@@ -140,6 +234,7 @@ async function fetchSessionFiles(options = {}) {
     if (requestIsCurrent() && shouldRender) {
       if (destination === 'finder') renderFileExplorerChangesPanels();
       else renderChangesPanels();
+      if (destination === 'finder') updateFileTreeGitStatusRows();
       renderPaneTabStrips();
       renderSessionButtons();
     }
@@ -183,7 +278,6 @@ function groupedSessionFiles(files) {
 
 function changeFileRowHtml(item, options = {}) {
   const statusKey = String(item.status || 'M').toUpperCase();
-  const deleted = statusKey === 'D';
   const absPath = item.abs_path || item.path || '';
   const name = basenameOf(absPath || item.path || '');
   const rel = item.path || absPath;
@@ -194,7 +288,9 @@ function changeFileRowHtml(item, options = {}) {
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
   const metaHtml = [diffHtml, dateHtml].filter(Boolean).join('');
   const compactClass = options.compact ? ' compact' : ' detailed';
-  const actionAttr = deleted ? ' disabled title="Deleted file cannot be opened from disk"' : ` data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" title="${esc(absPath)}"`;
+  const actionAttr = absPath
+    ? ` data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" title="${esc(absPath)}"`
+    : ' disabled';
   return `<button type="button" class="changes-file-row${compactClass}"${actionAttr}>
     <span class="changes-status changes-status-${esc(statusKey.toLowerCase())}">${esc(statusKey)}</span>
     <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span><span class="changes-file-path">${esc(rel)}</span></span>
@@ -233,6 +329,7 @@ function changesPanelHtml() {
         <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>recent</option>
         <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>name</option>
       </select></label>
+      ${diffRefControlsHtml()}
       <button type="button" class="changes-refresh" data-session-files-refresh>Refresh</button>
       <span class="changes-summary">${esc(summary)}</span>
     </div>
@@ -259,6 +356,7 @@ function fileExplorerChangesPanelHtml() {
   return `
     <div class="file-explorer-changes-head">
       <span>Modified files</span>
+      ${diffRefControlsHtml({compact: true})}
       <button type="button" class="changes-display-toggle${compact ? ' compact' : ' detailed'}" data-session-files-display-toggle title="${esc(densityTitle)}" aria-label="${esc(densityTitle)}" aria-pressed="${compact ? 'true' : 'false'}">${esc(densityIcon)}</button>
       <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
       <span class="changes-summary">${esc(summary)}</span>
@@ -305,6 +403,26 @@ function renderChangesPanels() {
   }
 }
 
+async function openChangedFileInDiff(path, ownerSession = '', status = '') {
+  const item = fileEditorItemFor(path);
+  setFileEditorViewMode(path, 'diff', item);
+  if (String(status || '').toUpperCase() === 'D') {
+    await openFilesSetAndShow(path, {
+      mtime: 0,
+      size: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      deleted: true,
+    }, {item, ownerSession});
+  } else {
+    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: 'diff'});
+  }
+  await refreshOpenFileDiff(path, {silent: true});
+  renderOpenFilePath(path);
+}
+
 function bindChangesPanel(panel) {
   if (!panel || panel.dataset.changesBound === 'true') return;
   panel.dataset.changesBound = 'true';
@@ -320,6 +438,24 @@ function bindChangesPanel(panel) {
       sessionFilesSortMode = sortSelect.value === 'name' ? 'name' : 'mtime';
       renderChangesPanels();
       renderFileExplorerChangesPanels();
+      return;
+    }
+    const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
+    if (diffRefInput && panel.contains(diffRefInput)) {
+      commitDiffRefControls(diffRefInput.closest('[data-diff-ref-controls]') || panel);
+    }
+  });
+  panel.addEventListener('keydown', event => {
+    const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
+    if (!diffRefInput || !panel.contains(diffRefInput)) return;
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commitDiffRefControls(diffRefInput.closest('[data-diff-ref-controls]') || panel);
+      diffRefInput.blur?.();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      diffRefInput.value = diffRefInput.matches('[data-diff-ref-from]') ? diffRefFrom : diffRefTo;
+      diffRefInput.blur?.();
     }
   });
   panel.addEventListener('click', async event => {
@@ -346,8 +482,7 @@ function bindChangesPanel(panel) {
       const path = fileRow.dataset.openChangeFile;
       if (path) {
         const ownerSession = fileRow.dataset.openChangeSession || '';
-        await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {ownerSession});
-        refreshOpenFileDiff(path);
+        await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '');
       }
     }
   });
@@ -500,6 +635,10 @@ function createFileExplorerPanel() {
           <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
           <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="Root mode: fixed" aria-pressed="false">Root</button>
           <div class="file-explorer-quick-access-panel" aria-label="Quick paths"></div>
+          <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="New file" aria-label="New file">+</button>
+          <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="New folder" aria-label="New folder">▣</button>
+          <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="Refresh" aria-label="Refresh">↻</button>
+          <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
           <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(label)} root path">
           <span class="file-explorer-repo-summary" hidden></span>
           <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
@@ -548,6 +687,7 @@ function createFileExplorerPanel() {
     copyCurrentFileExplorerPath();
   });
   bindFileExplorerPathInput(panel.querySelector('.file-explorer-path-inline'));
+  bindFileExplorerHeaderActions(panel);
   bindFileExplorerChangesResizer(panel);
   renderFileExplorerRootModeControls();
   if (closeBtn) {
@@ -675,6 +815,8 @@ function createFileEditorPanel(item) {
           <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
           <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-find-panel" title="${esc(`Find in file (${appShortcutText('F')})`)}" aria-label="Find in file" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+          <button type="button" class="file-editor-diff-panel" title="Diff" aria-label="Diff" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
+          <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="side" aria-hidden="true" hidden></span>
@@ -742,6 +884,36 @@ function createFileEditorPanel(item) {
     event.preventDefault();
     event.stopPropagation();
     openEditorFind(panel);
+  });
+  panel.querySelector('.file-editor-diff-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const nextMode = editorViewModeFor(path, item) === 'diff' ? 'edit' : 'diff';
+    setFileEditorViewMode(path, nextMode, item);
+    if (nextMode === 'diff') refreshOpenFileDiff(path, {silent: true});
+    renderFileEditorPanel(panel, item);
+  });
+  const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
+  diffRefPanel?.addEventListener('change', event => {
+    const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
+    if (!input) return;
+    event.preventDefault();
+    event.stopPropagation();
+    commitDiffRefControls(diffRefPanel);
+  });
+  diffRefPanel?.addEventListener('keydown', event => {
+    const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
+    if (!input) return;
+    event.stopPropagation();
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commitDiffRefControls(diffRefPanel);
+      input.blur?.();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      input.value = input.matches('[data-diff-ref-from]') ? diffRefFrom : diffRefTo;
+      input.blur?.();
+    }
   });
   panel.querySelector('.file-editor-cross-split-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -897,11 +1069,20 @@ function focusFileEditorPanelIfReady(panel, item) {
 }
 
 function destroyCodeMirrorPanel(panel) {
+  panel?._cmResizeObserver?.disconnect?.();
+  if (panel) panel._cmResizeObserver = null;
+  if (panel?._cmMergeView) {
+    panel._cmMergeView.destroy();
+    panel._cmMergeView = null;
+  }
   if (panel?._cmView) {
     panel._cmView.destroy();
     panel._cmView = null;
+  }
+  if (panel) {
     panel._cmPath = '';
     panel._cmSignature = '';
+    panel._cmMode = '';
   }
 }
 
@@ -909,8 +1090,22 @@ function codeMirrorPanelContent(panel) {
   return panel?._cmView?.state?.doc?.toString?.() ?? null;
 }
 
-function codeMirrorConfigSignature(path) {
+function textFingerprint(text) {
+  const source = String(text || '');
+  let hash = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    hash = ((hash << 5) - hash + source.charCodeAt(index)) | 0;
+  }
+  return `${source.length}:${hash}`;
+}
+
+function codeMirrorConfigSignature(path, options = {}) {
   return JSON.stringify({
+    mode: options.mode || 'edit',
+    layout: options.layout || '',
+    original: options.original ? textFingerprint(options.original) : '',
+    from: options.from || '',
+    to: options.to || '',
     language: codeMirrorLanguageName(path),
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
@@ -919,13 +1114,165 @@ function codeMirrorConfigSignature(path) {
   });
 }
 
-async function ensureCodeMirrorPanel(panel, item, path, state) {
+function codeMirrorDiffLayout(container) {
+  const width = Math.round(container?.getBoundingClientRect?.().width || 0);
+  return width >= 800 ? 'side' : 'inline';
+}
+
+function codeMirrorReadOnlyExtensions(api, path) {
+  return [
+    api.drawSelection(),
+    api.highlightActiveLine(),
+    ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
+    codeMirrorHighlightExtension(api),
+    ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+    codeMirrorHtmlSemanticEmphasisExtension(api, path),
+    api.EditorState.readOnly.of(true),
+    api.EditorView.editable.of(false),
+    codeMirrorLanguageExtension(api, path),
+    codeMirrorThemeExtension(api),
+  ];
+}
+
+function codeMirrorWorkingUpdateExtension(api, panel, path) {
+  return api.EditorView.updateListener.of(update => {
+    if (update.docChanged || update.selectionSet) updateCodeMirrorCursorStatus(panel);
+    if (update.docChanged) {
+      handleFileEditorContentChanged(panel, path, update.state.doc.toString(), {syntax: false});
+    }
+  });
+}
+
+function syncCodeMirrorDocument(view, text, options = {}) {
+  if (!view) return;
+  const next = String(text || '');
+  if (view.state.doc.toString() === next) return;
+  if (options.cleanOnly && openFiles.get(options.path)?.dirty) return;
+  view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: next}});
+}
+
+function installCodeMirrorDiffResizeObserver(panel, item, path, container) {
+  if (!window.ResizeObserver || panel._cmResizeObserver) return;
+  let frame = 0;
+  panel._cmResizeObserver = new ResizeObserver(() => {
+    if (frame) cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      if (editorViewModeFor(path, item) !== 'diff') return;
+      const nextLayout = codeMirrorDiffLayout(container);
+      if (nextLayout !== panel._cmDiffLayout) renderFileEditorPanel(panel, item);
+    });
+  });
+  panel._cmResizeObserver.observe(container);
+}
+
+async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   const container = panel.querySelector('.file-editor-codemirror-panel');
   if (!container) return false;
   const generation = (panel._cmGeneration || 0) + 1;
   panel._cmGeneration = generation;
   container.hidden = false;
-  const signature = codeMirrorConfigSignature(path);
+  container.classList.add('file-editor-diff-codemirror');
+  if (!state.diffLoaded && !state.diffLoading) await refreshOpenFileDiff(path, {silent: true});
+  if (!openFileDiffAvailable(state) && !state.diffLoading) {
+    setFileEditorPanelStatus(panel, state.diffError ? `diff unavailable: ${state.diffError}` : 'No diff for this file', 'warn');
+    return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
+  }
+  const original = String(state.diffOriginal || '');
+  const api = await loadCodeMirrorApi();
+  if (panel._cmGeneration !== generation) return false;
+  if (!api.MergeView || !api.unifiedMergeView) {
+    setFileEditorPanelStatus(panel, 'CodeMirror merge view is unavailable', 'error');
+    return false;
+  }
+  const layout = codeMirrorDiffLayout(container);
+  const currentText = state.diffFromRef && state.diffFromRef !== 'current' ? String(state.diffWorking || '') : String(state.content || '');
+  const diffEditsAllowed = !state.diffFromRef || state.diffFromRef === 'current';
+  const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});
+  installCodeMirrorDiffResizeObserver(panel, item, path, container);
+  if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
+    if (layout === 'side') {
+      syncCodeMirrorDocument(panel._cmMergeView?.a, original);
+      syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path});
+    } else {
+      syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path});
+    }
+    updateCodeMirrorCursorStatus(panel);
+    focusFileEditorPanelIfReady(panel, item);
+    return true;
+  }
+  destroyCodeMirrorPanel(panel);
+  container.replaceChildren();
+  panel._cmDiffLayout = layout;
+  installCodeMirrorDiffResizeObserver(panel, item, path, container);
+  if (layout === 'side') {
+    panel._cmMergeView = new api.MergeView({
+      a: {
+        doc: original,
+        extensions: codeMirrorReadOnlyExtensions(api, path),
+      },
+      b: {
+        doc: currentText,
+        extensions: diffEditsAllowed
+          ? [
+              ...codeMirrorExtensions(api, panel, path),
+              codeMirrorWorkingUpdateExtension(api, panel, path),
+            ]
+          : codeMirrorReadOnlyExtensions(api, path),
+      },
+      parent: container,
+      revertControls: 'a-to-b',
+      highlightChanges: true,
+      gutter: true,
+      collapseUnchanged: {margin: 3, minSize: 8},
+    });
+    panel._cmView = panel._cmMergeView.b;
+    panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+  } else {
+    const cmState = api.EditorState.create({
+      doc: currentText,
+      extensions: [
+        api.unifiedMergeView({
+          original,
+          highlightChanges: true,
+          gutter: true,
+          mergeControls: !readOnlyMode && diffEditsAllowed,
+          allowInlineDiffs: true,
+          collapseUnchanged: {margin: 3, minSize: 8},
+        }),
+        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path) : codeMirrorReadOnlyExtensions(api, path)),
+      ],
+    });
+    panel._cmView = new api.EditorView({
+      state: cmState,
+      parent: container,
+      dispatch(transaction) {
+        panel._cmView.update([transaction]);
+        if (transaction.docChanged || transaction.selectionSet) updateCodeMirrorCursorStatus(panel);
+        if (transaction.docChanged) {
+          handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
+        }
+      },
+    });
+    panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+  }
+  panel._cmPath = path;
+  panel._cmSignature = signature;
+  panel._cmMode = 'diff';
+  updateCodeMirrorCursorStatus(panel);
+  focusFileEditorPanelIfReady(panel, item);
+  return true;
+}
+
+async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
+  const container = panel.querySelector('.file-editor-codemirror-panel');
+  if (!container) return false;
+  if (options.forceMode !== 'edit' && editorViewModeFor(path, item) === 'diff') return ensureCodeMirrorDiffPanel(panel, item, path, state);
+  const generation = (panel._cmGeneration || 0) + 1;
+  panel._cmGeneration = generation;
+  container.hidden = false;
+  container.classList.remove('file-editor-diff-codemirror');
+  const signature = codeMirrorConfigSignature(path, {mode: 'edit'});
   if (!panel._cmView || panel._cmPath !== path || panel._cmSignature !== signature) {
     destroyCodeMirrorPanel(panel);
     container.textContent = 'loading CodeMirror...';
@@ -933,7 +1280,6 @@ async function ensureCodeMirrorPanel(panel, item, path, state) {
   try {
     const api = await loadCodeMirrorApi();
     if (panel._cmGeneration !== generation) return false;
-    const currentText = String(state.content || '');
     if (!panel._cmView) {
       container.replaceChildren();
       const cmState = api.EditorState.create({
@@ -1001,11 +1347,13 @@ function renderFileEditorPanel(panel, item) {
   const gutterButton = panel.querySelector('.file-editor-gutter-panel');
   const wrapButton = panel.querySelector('.file-editor-wrap-panel');
   const findButton = panel.querySelector('.file-editor-find-panel');
+  const diffButton = panel.querySelector('.file-editor-diff-panel');
+  const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   const crossSplitButton = panel.querySelector('.file-editor-cross-split-panel');
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   const themeButton = panel.querySelector('.file-editor-theme-panel');
   const content = panel.querySelector('.file-editor-content');
-  const textControls = [modeControl, gutterButton, wrapButton, findButton, crossSplitButton, reloadButton];
+  const textControls = [modeControl, gutterButton, wrapButton, findButton, diffButton, diffRefPanel, crossSplitButton, reloadButton];
   updateEditorThemeButton(themeButton);
   if (!state) {
     setElementsHidden(textControls, true);
@@ -1059,6 +1407,10 @@ function renderFileEditorPanel(panel, item) {
   }
   updateEditorFindButton(findButton, state);
   if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
+  updateFileEditorDiffButton(diffButton, path, state, item);
+  if (state.kind === 'text' && !state.diffLoaded && !state.diffLoading && !state.diffUnavailable) {
+    refreshOpenFileDiff(path, {silent: true});
+  }
   if (crossSplitButton) {
     crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
   }
@@ -1083,6 +1435,10 @@ function renderFileEditorPanel(panel, item) {
     imagePane.replaceChildren();
   }
   const mode = editorViewModeFor(path, item);
+  if (diffRefPanel) {
+    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+    syncDiffRefControlValues(diffRefPanel);
+  }
   setEditorContentMode(content, mode);
   panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
   panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
@@ -1205,6 +1561,8 @@ function updateFileEditorToolbarSeparators(panel) {
     '.file-editor-gutter-panel',
     '.file-editor-wrap-panel',
     '.file-editor-find-panel',
+    '.file-editor-diff-panel',
+    '.file-editor-diff-ref-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
   const side = fileEditorToolbarControlVisible(panel, '.file-editor-cross-split-panel');
   const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel')

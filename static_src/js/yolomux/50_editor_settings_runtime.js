@@ -4,8 +4,9 @@ function editorViewModeKey(path, item = null) {
 
 function editorViewModeFor(path, item = null) {
   if (isFilePreviewItem(item)) return 'preview';
-  if (!editorPreviewModeAvailable(path)) return 'edit';
   const mode = fileEditorViewMode.get(editorViewModeKey(path, item)) || fileEditorViewMode.get(path);
+  if (mode === 'diff') return 'diff';
+  if (!editorPreviewModeAvailable(path)) return 'edit';
   if (editorViewModes.has(mode)) return mode;
   return 'edit';
 }
@@ -13,7 +14,7 @@ function editorViewModeFor(path, item = null) {
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
   if (isFilePreviewItem(item)) mode = 'preview';
-  if (mode !== 'edit' && !editorPreviewModeAvailable(path)) mode = 'edit';
+  if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
   fileEditorViewMode.set(editorViewModeKey(path, item), mode);
 }
 
@@ -36,12 +37,14 @@ function updateEditorModeControl(control, path, state, item = null) {
 }
 
 function editorModeLabel(mode) {
+  if (mode === 'diff') return 'Diff';
   if (mode === 'preview') return 'Preview';
   if (mode === 'split') return 'Split view';
   return 'Edit';
 }
 
 function editorModeIconClass(mode) {
+  if (mode === 'diff') return 'file-editor-icon-diff';
   if (mode === 'preview') return 'file-editor-icon-eye';
   if (mode === 'split') return 'file-editor-icon-split';
   return 'file-editor-icon-edit';
@@ -61,6 +64,7 @@ function setEditorContentMode(content, mode) {
   content.classList.toggle('edit-mode', mode === 'edit');
   content.classList.toggle('preview-mode', mode === 'preview');
   content.classList.toggle('split-preview', mode === 'split');
+  content.classList.toggle('diff-mode', mode === 'diff');
 }
 
 function editorWrapValue(enabled = fileEditorWrapEnabled) {
@@ -216,6 +220,21 @@ function updateEditorFindButton(button, state) {
   button.title = label;
   button.setAttribute('aria-label', label);
   setFileEditorIcon(button, 'file-editor-icon-find');
+}
+
+function updateFileEditorDiffButton(button, path, state, item = null) {
+  if (!button) return;
+  const active = editorViewModeFor(path, item) === 'diff';
+  const available = openFileDiffAvailable(state);
+  const loading = state?.diffLoading === true;
+  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!active && !available && !loading);
+  button.disabled = loading || (!available && active);
+  button.classList.toggle('active', active);
+  button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  const label = loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  setFileEditorIcon(button, 'file-editor-icon-diff');
 }
 
 async function openEditorFind(host = null) {

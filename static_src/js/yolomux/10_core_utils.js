@@ -88,6 +88,28 @@ function writeStoredCollapsedPreferenceSections() {
   } catch (_) {}
 }
 
+function cleanDiffRef(value, fallback = '') {
+  const text = String(value || '').trim();
+  if (!text) return fallback;
+  if (/[\x00\r\n]/.test(text)) return fallback;
+  return text;
+}
+
+function readStoredDiffRef(key, fallback) {
+  try {
+    return cleanDiffRef(window.localStorage?.getItem(key), fallback);
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function writeStoredDiffRefs() {
+  try {
+    window.localStorage?.setItem(diffRefFromStorageKey, diffRefFrom);
+    window.localStorage?.setItem(diffRefToStorageKey, diffRefTo);
+  } catch (_) {}
+}
+
 function nestedSetting(source, path, fallback) {
   let current = source;
   for (const part of String(path || '').split('.')) {

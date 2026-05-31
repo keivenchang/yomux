@@ -66,7 +66,8 @@ def test_list_directory_not_a_dir(tmp_path):
     assert info.value.status == 400
 
 
-def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs(tmp_path):
+def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "hello_x_and_y.py").write_text("print('ok')\n", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()
@@ -80,9 +81,34 @@ def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs(tmp_path):
     assert "node_modules/hello_x_and_y.js" not in paths
 
 
+def test_search_files_non_repo_root_stays_shallow_but_indexes_child_repos(tmp_path):
+    root = tmp_path / "home"
+    root.mkdir()
+    (root / "top.txt").write_text("top\n", encoding="utf-8")
+    (root / "notes").mkdir()
+    (root / "notes" / "nested.md").write_text("too deep\n", encoding="utf-8")
+    (root / ".cache").mkdir()
+    (root / ".cache" / "cache.txt").write_text("skip\n", encoding="utf-8")
+    repo = root / "project"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "src").mkdir()
+    (repo / "src" / "deep.py").write_text("print('repo')\n", encoding="utf-8")
+
+    payload = filesystem.search_files(str(root), "", 50)
+
+    paths = {item["relative_path"] for item in payload["files"]}
+    assert "top.txt" in paths
+    assert "project/src/deep.py" in paths
+    assert "notes/nested.md" not in paths
+    assert ".cache/cache.txt" not in paths
+    assert "project/.git/HEAD" not in paths
+
+
 def test_search_files_matches_absolute_path_segments(tmp_path):
     project = tmp_path / "home" / "keivenc" / "project"
     project.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
     (project / "README.md").write_text("# ok\n", encoding="utf-8")
 
     payload = filesystem.search_files(str(project), "hokread", 20)
@@ -232,6 +258,8 @@ def test_diff_file_returns_git_diff_for_tracked_file(tmp_path):
     assert result["repo"] == str(tmp_path)
     assert result["relative_path"] == "app.py"
     assert result["untracked"] is False
+    assert result["original"] == "print('one')\n"
+    assert result["working_missing"] is False
     assert "-print('one')" in result["diff"]
     assert "+print('two')" in result["diff"]
 
@@ -245,7 +273,78 @@ def test_diff_file_returns_no_index_diff_for_untracked_file(tmp_path):
 
     assert result["relative_path"] == "new.txt"
     assert result["untracked"] is True
+    assert result["original"] == ""
     assert "+hello" in result["diff"]
+
+
+def test_diff_file_returns_head_content_for_deleted_file(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "gone.txt"
+    target.write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "gone.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target.unlink()
+
+    result = filesystem.diff_file(str(target))
+
+    assert result["original"] == "old\n"
+    assert result["working_missing"] is True
+    assert "-old" in result["diff"]
+
+
+def test_diff_file_supports_commit_to_commit_refs(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "app.py"
+    target.write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "one"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    older = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    target.write_text("two\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "two"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    newer = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    result = filesystem.diff_file(str(target), from_ref=newer, to_ref=older)
+
+    assert result["from_ref"] == newer
+    assert result["to_ref"] == older
+    assert result["original"] == "one\n"
+    assert result["working"] == "two\n"
+    assert "-one" in result["diff"]
+    assert "+two" in result["diff"]
+
+
+def test_diff_file_rejects_to_ref_newer_than_from_ref(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "app.py"
+    target.write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "one"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    older = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    target.write_text("two\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "two"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    newer = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
+    with pytest.raises(filesystem.FilesystemError) as excinfo:
+        filesystem.diff_file(str(target), from_ref=older, to_ref=newer)
+
+    assert excinfo.value.status == 400
+    assert "TO ref must be older" in str(excinfo.value)
+
+
+def test_create_directory_rejects_existing_target(tmp_path):
+    created = filesystem.create_directory(str(tmp_path / "new-dir"))
+
+    assert created["kind"] == "dir"
+    assert (tmp_path / "new-dir").is_dir()
+    with pytest.raises(filesystem.FilesystemError) as excinfo:
+        filesystem.create_directory(str(tmp_path / "new-dir"))
+    assert excinfo.value.status == 409
 
 
 def test_is_text_path_recognizes_known_extensions():

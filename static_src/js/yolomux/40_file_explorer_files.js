@@ -287,6 +287,9 @@ function setFileExplorerPathDisplay(path = currentFileExplorerRoot(), options = 
     setFileExplorerPathElementValue(input, normalized);
     setFileExplorerPathError(input, error);
   }
+  document.querySelectorAll('.file-explorer-head, .file-explorer-toolbar').forEach(node => {
+    node.title = error || normalized;
+  });
   refreshFileExplorerRepoDisplay(normalized, {error});
 }
 
@@ -631,6 +634,33 @@ function fileTreeDirectRows(container) {
   return Array.from(container?.children || []).filter(node => node.classList?.contains('file-tree-row'));
 }
 
+function fileTreeGitStatus(path) {
+  const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
+  const match = files.find(item => item?.abs_path === path);
+  return String(match?.status || '').toUpperCase();
+}
+
+function fileTreeGitStatusClass(status) {
+  const key = String(status || '').toUpperCase();
+  if (key === 'A' || key === 'U' || key === '?') return 'git-untracked';
+  if (key === 'D') return 'git-deleted';
+  if (key === 'S') return 'git-staged';
+  if (key === 'M') return 'git-modified';
+  return '';
+}
+
+function fileIconClassFor(name, kind = 'file') {
+  if (kind === 'dir') return 'file-icon-dir';
+  const lowerName = String(name || '').toLowerCase();
+  const ext = fileExtensionOf(lowerName);
+  if (IMAGE_EXTENSIONS.has(ext)) return 'file-icon-image';
+  if (['.md', '.markdown', '.txt', '.rst', 'readme', 'license'].includes(ext || lowerName)) return 'file-icon-doc';
+  if (['.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env', 'dockerfile', 'makefile'].includes(ext || lowerName)) return 'file-icon-config';
+  if (['.py', '.js', '.ts', '.tsx', '.jsx', '.rs', '.go', '.c', '.h', '.cpp', '.hpp', '.rb', '.lua', '.sql', '.sh', '.bash', '.zsh'].includes(ext)) return 'file-icon-code';
+  if (['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz'].includes(ext)) return 'file-icon-archive';
+  return 'file-icon-generic';
+}
+
 function reconcileChildNodes(parent, nextNodes, options = {}) {
   if (!parent) return;
   const lockedNodes = new Set(options.lockedNodes || []);
@@ -650,7 +680,7 @@ function reconcileChildNodes(parent, nextNodes, options = {}) {
   while (parent.children.length > arranged.length) parent.lastElementChild?.remove();
 }
 
-function updateFileTreeRowContents(row, iconText, nameText) {
+function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   let icon = row.querySelector(':scope > .file-tree-icon');
   if (!icon) {
     icon = document.createElement('span');
@@ -663,8 +693,17 @@ function updateFileTreeRowContents(row, iconText, nameText) {
     name.className = 'file-tree-name';
     row.appendChild(name);
   }
+  let status = row.querySelector(':scope > .file-tree-git-status');
+  if (!status) {
+    status = document.createElement('span');
+    status.className = 'file-tree-git-status';
+    row.appendChild(status);
+  }
+  icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
   if (icon.textContent !== iconText) icon.textContent = iconText;
   if (name.textContent !== nameText) name.textContent = nameText;
+  status.textContent = options.gitStatus || '';
+  status.hidden = !options.gitStatus;
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth) {
@@ -683,6 +722,11 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
   row.classList.toggle('expanded', expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
+  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : '';
+  const gitClass = fileTreeGitStatusClass(gitStatus);
+  for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
+    row.classList.toggle(className, className === gitClass);
+  }
   if (entry.kind === 'dir' && entry.is_repo === true) {
     row.title = row.title || 'Repository';
     row.onmouseenter = () => updateRepoRowHoverTitle(row, fullPath);
@@ -701,7 +745,10 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
   const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-  updateFileTreeRowContents(row, icon, entry.name);
+  updateFileTreeRowContents(row, icon, entry.name, {
+    gitStatus,
+    iconClass: fileIconClassFor(entry.name, entry.kind),
+  });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
     bindFileImagePreview(row, fullPath, entry);
   }
@@ -881,6 +928,21 @@ function updateFileExplorerCurrentFileHighlight() {
     row.setAttribute('aria-selected', selected ? 'true' : 'false');
     if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
     else row.removeAttribute('aria-current');
+  });
+}
+
+function updateFileTreeGitStatusRows() {
+  document.querySelectorAll('.file-tree-row[data-path]').forEach(row => {
+    const gitStatus = row.dataset.kind === 'file' ? fileTreeGitStatus(row.dataset.path) : '';
+    const gitClass = fileTreeGitStatusClass(gitStatus);
+    for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
+      row.classList.toggle(className, className === gitClass);
+    }
+    const status = row.querySelector(':scope > .file-tree-git-status');
+    if (status) {
+      status.textContent = gitStatus;
+      status.hidden = !gitStatus;
+    }
   });
 }
 
@@ -1079,6 +1141,79 @@ function triggerFileDownload(path) {
 
 function copyCurrentFileExplorerPath() {
   copyFilePath(fileExplorerRoot || homePath || '/', 'full');
+}
+
+function childNameToPath(root, name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed || /[/\x00\r\n]/.test(trimmed)) return '';
+  return childPath(normalizeDirectoryPath(root), trimmed);
+}
+
+async function createFileExplorerFile() {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot create files</span>';
+    return;
+  }
+  const name = window.prompt('New file name');
+  const path = childNameToPath(currentFileExplorerRoot(), name);
+  if (!path) return;
+  try {
+    const response = await apiFetch('/api/fs/write', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path, content: ''}),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
+    statusEl.textContent = `created ${basenameOf(path)}`;
+    await refreshFileExplorerTrees();
+    await openFileInEditor(path, {name: basenameOf(path)});
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">new file failed: ${esc(error)}</span>`;
+  }
+}
+
+async function createFileExplorerFolder() {
+  if (readOnlyMode) {
+    statusEl.innerHTML = '<span class="err">readonly access cannot create folders</span>';
+    return;
+  }
+  const name = window.prompt('New folder name');
+  const path = childNameToPath(currentFileExplorerRoot(), name);
+  if (!path) return;
+  try {
+    const response = await apiFetch('/api/fs/mkdir', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path}),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
+    statusEl.textContent = `created ${basenameOf(path)}`;
+    await refreshFileExplorerTrees();
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">new folder failed: ${esc(error)}</span>`;
+  }
+}
+
+function collapseAllFileExplorerDirectories() {
+  fileExplorerExpanded.clear();
+  refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: true});
+}
+
+function bindFileExplorerHeaderActions(container = document) {
+  if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
+  if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
+  container.addEventListener('click', event => {
+    const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse]');
+    if (!action || !container.contains(action)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (action.matches('[data-file-explorer-new-file]')) createFileExplorerFile();
+    else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
+    else if (action.matches('[data-file-explorer-refresh]')) refreshFileExplorerTrees();
+    else if (action.matches('[data-file-explorer-collapse]')) collapseAllFileExplorerDirectories();
+  });
 }
 
 async function deleteFileTreePath(fullPath, entry, paths = null) {
@@ -1768,18 +1903,53 @@ function refreshOpenFileDiffDecorations(path) {
   }
 }
 
-async function refreshOpenFileDiff(path) {
+function openFileDiffAvailable(state) {
+  return Boolean(state?.diffLoaded && (state.diff || state.diffWorkingMissing || state.untracked));
+}
+
+function applyOpenFileDiffPayload(state, payload) {
+  state.diff = payload.diff || '';
+  state.diffLineClasses = parseUnifiedDiffLineClasses(state.diff);
+  state.diffOriginal = payload.original || '';
+  state.diffOriginalError = payload.original_error || '';
+  state.diffWorking = payload.working || '';
+  state.diffWorkingError = payload.working_error || '';
+  state.diffRepo = payload.repo || '';
+  state.diffRelativePath = payload.relative_path || '';
+  state.diffFromRef = payload.from_ref || '';
+  state.diffToRef = payload.to_ref || '';
+  state.diffWorkingMissing = payload.working_missing === true;
+  state.untracked = payload.untracked === true;
+  state.diffLoaded = true;
+  state.diffUnavailable = false;
+  state.diffError = '';
+}
+
+async function refreshOpenFileDiff(path, options = {}) {
   const state = openFiles.get(path);
-  if (!state || state.kind !== 'text') return;
+  if (!state || state.kind !== 'text') return false;
+  if (state.diffLoading) return false;
+  state.diffLoading = true;
   try {
-    const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}`);
+    const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
-    state.diff = payload.diff || '';
-    state.diffLineClasses = parseUnifiedDiffLineClasses(state.diff);
+    applyOpenFileDiffPayload(state, payload);
     refreshOpenFileDiffDecorations(path);
+    for (const panel of fileEditorPanelsForPath(path)) {
+      updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panel.dataset.layoutItem || '');
+      if (editorViewModeFor(path, panel.dataset.layoutItem || '') === 'diff') renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+    }
+    return true;
   } catch (error) {
     state.diffError = String(error);
+    state.diffUnavailable = true;
+    if (!options.silent) {
+      for (const panel of fileEditorPanelsForPath(path)) setFileEditorPanelStatus(panel, `diff unavailable: ${String(error)}`, 'warn');
+    }
+    return false;
+  } finally {
+    state.diffLoading = false;
   }
 }
 
@@ -1797,8 +1967,10 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     item,
     ownerSession: options.ownerSession || normalizedOpenFileOwnerSession(entry?.session),
   };
+  if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
   if (openFiles.has(fullPath)) {
     await showFileEditorPaneForPath(fullPath, openOptions);
+    if (options.viewMode) renderOpenFilePath(fullPath);
     return;
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
@@ -2193,6 +2365,7 @@ async function loadCodeMirrorApi() {
         view,
         commands,
         search,
+        merge,
         language,
         javascriptMod,
         pythonMod,
@@ -2212,6 +2385,7 @@ async function loadCodeMirrorApi() {
         importCodeMirrorModule('@codemirror/view'),
         importCodeMirrorModule('@codemirror/commands'),
         importCodeMirrorModule('@codemirror/search'),
+        importCodeMirrorModule('@codemirror/merge'),
         importCodeMirrorModule('@codemirror/language'),
         importCodeMirrorModule('@codemirror/lang-javascript'),
         importCodeMirrorModule('@codemirror/lang-python'),
@@ -2266,6 +2440,9 @@ async function loadCodeMirrorApi() {
         replaceNext: search.replaceNext,
         searchKeymap: search.searchKeymap,
         highlightSelectionMatches: search.highlightSelectionMatches,
+        MergeView: merge.MergeView,
+        unifiedMergeView: merge.unifiedMergeView,
+        originalDocChangeEffect: merge.originalDocChangeEffect,
         tags: lezerHighlight.tags,
         javascript: javascriptMod.javascript,
         python: pythonMod.python,

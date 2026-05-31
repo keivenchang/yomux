@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -174,6 +175,63 @@ def _search_limit(raw_limit: int | str | None) -> int:
     return max(1, min(limit, MAX_SEARCH_LIMIT))
 
 
+def _search_file_entry(root: Path, path: Path, tokens: list[str]) -> dict[str, Any] | None:
+    try:
+        st = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        rel = path.name
+    haystack = f"{path} {rel} {path.name}"
+    if tokens and not all(_fuzzy_subsequence_match(token, haystack) for token in tokens):
+        return None
+    return {
+        "name": path.name,
+        "path": str(path),
+        "relative_path": rel,
+        "kind": "file",
+        "size": int(st.st_size),
+        "mtime": int(st.st_mtime),
+    }
+
+
+def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results: list[dict[str, Any]], max_results: int) -> tuple[int, int, bool]:
+    visited_dirs = 0
+    visited_files = 0
+    truncated = False
+    walker = os.walk(search_root, topdown=True, followlinks=False)
+    for current, dirs, files in walker:
+        visited_dirs += 1
+        if visited_dirs > MAX_SEARCH_DIRS:
+            truncated = True
+            dirs[:] = []
+            break
+        dirs[:] = sorted(
+            [name for name in dirs if name not in SEARCH_SKIP_DIRS],
+            key=str.lower,
+        )
+        for name in sorted(files, key=str.lower):
+            visited_files += 1
+            if visited_files > MAX_SEARCH_FILES:
+                truncated = True
+                dirs[:] = []
+                break
+            entry = _search_file_entry(root, Path(current) / name, tokens)
+            if entry is not None:
+                results.append(entry)
+                if len(results) >= max_results:
+                    truncated = True
+                    dirs[:] = []
+                    break
+        if len(results) >= max_results or visited_files > MAX_SEARCH_FILES:
+            break
+    return visited_dirs, visited_files, truncated
+
+
 def search_files(raw_root: str, query: str = "", limit: int | str | None = 400) -> dict[str, Any]:
     root = _validated_path(raw_root)
     if not root.exists():
@@ -187,51 +245,35 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400) 
     visited_files = 0
     truncated = False
     try:
-        walker = os.walk(root, topdown=True, followlinks=False)
-        for current, dirs, files in walker:
-            visited_dirs += 1
-            if visited_dirs > MAX_SEARCH_DIRS:
-                truncated = True
-                dirs[:] = []
-                break
-            dirs[:] = sorted(
-                [name for name in dirs if name not in SEARCH_SKIP_DIRS],
-                key=str.lower,
-            )
-            for name in sorted(files, key=str.lower):
+        if git_root_for_path(root):
+            visited_dirs, visited_files, truncated = _search_full_tree(root, root, tokens, results, max_results)
+        else:
+            visited_dirs = 1
+            direct_names = sorted(os.listdir(root), key=str.lower)
+            for name in direct_names:
+                if name in SEARCH_SKIP_DIRS:
+                    continue
+                path = root / name
+                if path.is_dir() and _directory_is_repo(path):
+                    child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results, max_results)
+                    visited_dirs += child_dirs
+                    visited_files += child_files
+                    truncated = truncated or child_truncated
+                    if len(results) >= max_results or visited_files > MAX_SEARCH_FILES or visited_dirs > MAX_SEARCH_DIRS:
+                        truncated = True
+                        break
+                    continue
                 visited_files += 1
                 if visited_files > MAX_SEARCH_FILES:
                     truncated = True
-                    dirs[:] = []
                     break
-                path = Path(current) / name
-                try:
-                    rel = path.relative_to(root).as_posix()
-                except ValueError:
-                    rel = path.name
-                haystack = f"{path} {rel} {name}"
-                if tokens and not all(_fuzzy_subsequence_match(token, haystack) for token in tokens):
+                entry = _search_file_entry(root, path, tokens)
+                if entry is None:
                     continue
-                try:
-                    st = path.lstat()
-                except OSError:
-                    continue
-                if not stat.S_ISREG(st.st_mode):
-                    continue
-                results.append({
-                    "name": name,
-                    "path": str(path),
-                    "relative_path": rel,
-                    "kind": "file",
-                    "size": int(st.st_size),
-                    "mtime": int(st.st_mtime),
-                })
+                results.append(entry)
                 if len(results) >= max_results:
                     truncated = True
-                    dirs[:] = []
                     break
-            if len(results) >= max_results or visited_files > MAX_SEARCH_FILES:
-                break
     except PermissionError as exc:
         raise FilesystemError(str(exc), status=403)
     except OSError as exc:
@@ -361,6 +403,19 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     return {"path": str(target), "old_path": str(path), "name": name}
 
 
+def create_directory(raw_path: str) -> dict[str, Any]:
+    path = _validated_path(raw_path)
+    if path.exists() or path.is_symlink():
+        raise FilesystemError(f"target already exists: {path}", status=409)
+    try:
+        path.mkdir()
+    except PermissionError as exc:
+        raise FilesystemError(str(exc), status=403)
+    except OSError as exc:
+        raise FilesystemError(str(exc), status=500)
+    return {"path": str(path), "created": True, "kind": "dir"}
+
+
 def path_info(raw_path: str) -> dict[str, Any]:
     path = _validated_path(raw_path)
     if not path.exists() and not path.is_symlink():
@@ -410,7 +465,51 @@ def path_info(raw_path: str) -> dict[str, Any]:
     }
 
 
-def diff_file(raw_path: str) -> dict[str, Any]:
+def _git_blob_text(repo: Path, ref: str, rel_path: str, label: str) -> tuple[str, str]:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{ref}:{rel_path}"],
+        capture_output=True,
+        timeout=5.0,
+        check=False,
+    )
+    if result.returncode != 0:
+        return "", ""
+    if len(result.stdout) > MAX_READ_BYTES:
+        raise FilesystemError(f"{label} too large (max {MAX_READ_BYTES})", status=413)
+    if _looks_binary(result.stdout):
+        return "", f"{label} file appears to be binary"
+    return result.stdout.decode("utf-8", errors="replace"), ""
+
+
+def _normal_ref(value: str | None, default: str) -> str:
+    ref = str(value or "").strip()
+    return ref or default
+
+
+def _diff_refs(raw_from_ref: str | None, raw_to_ref: str | None) -> tuple[str, str]:
+    return _normal_ref(raw_from_ref, "current"), _normal_ref(raw_to_ref, "HEAD")
+
+
+def _ref_exists(repo: Path, ref: str) -> bool:
+    result = git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=str(repo), timeout=3.0)
+    return result.returncode == 0
+
+
+def _ensure_ref_order(repo: Path, from_ref: str, to_ref: str) -> None:
+    if from_ref == "current":
+        if not _ref_exists(repo, to_ref):
+            raise FilesystemError(f"unknown TO ref: {to_ref}", status=400)
+        return
+    if not _ref_exists(repo, from_ref):
+        raise FilesystemError(f"unknown FROM ref: {from_ref}", status=400)
+    if not _ref_exists(repo, to_ref):
+        raise FilesystemError(f"unknown TO ref: {to_ref}", status=400)
+    order = git(["merge-base", "--is-ancestor", to_ref, from_ref], cwd=str(repo), timeout=5.0)
+    if order.returncode != 0:
+        raise FilesystemError(f"TO ref must be older than FROM ref ({to_ref} is not an ancestor of {from_ref})", status=400)
+
+
+def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
     path = _validated_path(raw_path)
     repo_root = git_root_for_path(path)
     if not repo_root:
@@ -421,12 +520,26 @@ def diff_file(raw_path: str) -> dict[str, Any]:
     except ValueError:
         raise FilesystemError(f"path is outside repo: {path}", status=400)
     tracked = git(["ls-files", "--error-unmatch", "--", rel_path], cwd=str(repo), timeout=3.0)
-    if tracked.returncode == 0:
-        result = git(["diff", "HEAD", "--", rel_path], cwd=str(repo), timeout=5.0)
-        untracked = False
-    else:
+    diff_from, diff_to = _diff_refs(from_ref, to_ref)
+    if not (diff_from == "current" and tracked.returncode != 0):
+        _ensure_ref_order(repo, diff_from, diff_to)
+    original = ""
+    original_error = ""
+    working = ""
+    working_error = ""
+    if diff_from == "current" and tracked.returncode != 0:
         result = run_cmd(["git", "-C", str(repo), "diff", "--no-index", "--", "/dev/null", str(path)], timeout=5.0)
         untracked = True
+    else:
+        if diff_from == "current":
+            result = git(["diff", diff_to, "--", rel_path], cwd=str(repo), timeout=5.0)
+            if tracked.returncode == 0:
+                original, original_error = _git_blob_text(repo, diff_to, rel_path, "original")
+        else:
+            result = git(["diff", diff_to, diff_from, "--", rel_path], cwd=str(repo), timeout=5.0)
+            original, original_error = _git_blob_text(repo, diff_to, rel_path, "original")
+            working, working_error = _git_blob_text(repo, diff_from, rel_path, "working")
+        untracked = False
     if result.returncode not in {0, 1}:
         message = (result.stderr or result.stdout or "git diff failed").strip()
         raise FilesystemError(message, status=500)
@@ -438,6 +551,13 @@ def diff_file(raw_path: str) -> dict[str, Any]:
         "repo": str(repo),
         "relative_path": rel_path,
         "diff": diff,
+        "original": original,
+        "original_error": original_error,
+        "working": working,
+        "working_error": working_error,
+        "working_missing": not path.exists(),
+        "from_ref": diff_from,
+        "to_ref": diff_to,
         "untracked": untracked,
     }
 

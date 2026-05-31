@@ -3,7 +3,7 @@
 //
 // Source entry for the vendored CodeMirror spike bundle.
 // Rebuild with:
-// /tmp/yolomux-cm/node_modules/.bin/esbuild prototypes/codemirror-entry.js --bundle --format=iife --global-name=YOLOmuxCodeMirrorBundle --outfile=static/codemirror.js --minify
+// NODE_PATH=/tmp/yolomux-cm/node_modules /tmp/yolomux-cm/node_modules/.bin/esbuild prototypes/codemirror-entry.js --bundle --format=iife --global-name=YOLOmuxCodeMirrorBundle --outfile=static/codemirror.js --minify
 
 import {basicSetup} from "codemirror";
 import {EditorState} from "@codemirror/state";
@@ -41,6 +41,10 @@ import {
   search,
   searchKeymap,
 } from "@codemirror/search";
+import {
+  MergeView,
+  unifiedMergeView,
+} from "@codemirror/merge";
 import {
   HighlightStyle,
   LanguageDescription,
@@ -99,6 +103,7 @@ window.YOLOmuxCodeMirror = {
   LanguageDescription,
   lineNumbers,
   markdown,
+  MergeView,
   openSearchPanel,
   python,
   rectangularSelection,
@@ -113,6 +118,7 @@ window.YOLOmuxCodeMirror = {
   tags,
   toggleComment,
   toml,
+  unifiedMergeView,
   xml,
   yaml,
 };

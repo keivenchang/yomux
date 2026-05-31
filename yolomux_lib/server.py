@@ -184,7 +184,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 hours = float(qs.get("hours", ["24"])[0])
             except ValueError:
                 hours = 24.0
-            payload, status = self.server.app.session_files_payload(session, hours)
+            from_ref = qs.get("from", [None])[0]
+            to_ref = qs.get("to", [None])[0]
+            payload, status = self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/summary":
@@ -241,7 +243,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_fs_diff(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = qs.get("path", [""])[0]
-        self.write_filesystem_json(raw_path, lambda: filesystem.diff_file(raw_path))
+        from_ref = qs.get("from", [None])[0]
+        to_ref = qs.get("to", [None])[0]
+        self.write_filesystem_json(raw_path, lambda: filesystem.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref))
 
     def write_filesystem_json(self, raw_path: str, build_payload: Any) -> None:
         try:
@@ -341,6 +345,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         new_name = payload.get("new_name", "")
         self.write_filesystem_json(raw_path, lambda: filesystem.rename_path(raw_path, new_name))
 
+    def handle_fs_mkdir(self, parsed: Any) -> None:
+        payload = self.read_json_body(4096)
+        if payload is None:
+            return
+        raw_path = payload.get("path", "")
+        self.write_filesystem_json(raw_path, lambda: filesystem.create_directory(raw_path))
+
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/login":
@@ -421,6 +432,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/fs/rename":
             self.handle_fs_rename(parsed)
+            return
+        if parsed.path == "/api/fs/mkdir":
+            self.handle_fs_mkdir(parsed)
             return
         self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 

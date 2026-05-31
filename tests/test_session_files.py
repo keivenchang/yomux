@@ -123,6 +123,79 @@ def test_session_files_payload_counts_branch_commits_since_main(tmp_path):
     assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 1}]
 
 
+def test_session_files_payload_accepts_explicit_commit_refs(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "one")
+    older = git(repo, "rev-parse", "HEAD").stdout.strip()
+    tracked.write_text("two\n", encoding="utf-8")
+    git(repo, "commit", "-am", "two")
+    newer = git(repo, "rev-parse", "HEAD").stdout.strip()
+    pane = PaneInfo(
+        session="s1",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="s1:0.0",
+        current_path=str(repo),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), from_ref=newer, to_ref=older)
+
+    assert payload["files"][0]["path"] == "tracked.txt"
+    assert payload["files"][0]["added"] == 1
+    assert payload["files"][0]["removed"] == 1
+    assert payload["from_ref"] == newer
+    assert payload["to_ref"] == older
+
+
+def test_session_files_payload_reports_invalid_ref_order(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "one")
+    older = git(repo, "rev-parse", "HEAD").stdout.strip()
+    tracked.write_text("two\n", encoding="utf-8")
+    git(repo, "commit", "-am", "two")
+    newer = git(repo, "rev-parse", "HEAD").stdout.strip()
+    pane = PaneInfo(
+        session="s1",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="s1:0.0",
+        current_path=str(repo),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), from_ref=older, to_ref=newer)
+
+    assert payload["files"] == []
+    assert any("TO ref must be older" in error for error in payload["errors"])
+
+
 def test_session_files_payload_uses_session_repo_without_ai_attribution(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

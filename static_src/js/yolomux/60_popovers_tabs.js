@@ -39,6 +39,7 @@ function collapseDirectoryRow(row, fullPath) {
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
 if (fileExplorerPathCopy) fileExplorerPathCopy.addEventListener('click', copyCurrentFileExplorerPath);
 bindFileExplorerPathInput(fileExplorerPath);
+bindFileExplorerHeaderActions(fileExplorer);
 if (fileExplorerRootModeButton) {
   fileExplorerRootModeButton.addEventListener('click', toggleFileExplorerRootMode);
 }

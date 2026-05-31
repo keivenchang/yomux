@@ -59,13 +59,41 @@
   gap: 5px;
 }
 .changes-control select,
-.changes-refresh {
+.changes-refresh,
+.diff-ref-control input {
   height: 24px;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--panel2);
   color: var(--text);
   font: inherit;
+}
+.diff-ref-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.diff-ref-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 800;
+}
+.diff-ref-control input {
+  width: clamp(64px, 10vw, 130px);
+  padding: 0 5px;
+  font-size: var(--ui-font-size-xs);
+}
+.diff-ref-controls.compact {
+  gap: 3px;
+}
+.diff-ref-controls.compact .diff-ref-control input {
+  width: clamp(46px, 7vw, 82px);
+  height: 20px;
 }
 .changes-refresh {
   padding: 0 8px;

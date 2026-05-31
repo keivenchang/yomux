@@ -26,6 +26,7 @@
 .file-editor-wrap,
 .file-editor-gutter,
 .file-editor-find,
+.file-editor-diff-panel,
 .file-editor-theme {
   min-width: 24px;
   width: 24px;
@@ -74,6 +75,24 @@
   border-radius: 999px;
   background: currentColor;
   transform: translate(4px, 4px) rotate(45deg);
+}
+.file-editor-icon-diff::before {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+}
+.file-editor-icon-diff::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 4px 0 currentColor;
+  transform: rotate(-35deg);
 }
 .file-editor-icon-edit::before {
   content: "";
@@ -389,6 +408,11 @@
   color: #9fd8ff;
   background: rgba(159, 216, 255, 0.09);
 }
+.file-editor-diff-panel.active {
+  color: #9fd8ff;
+  border-color: rgba(159, 216, 255, 0.72);
+  background: rgba(159, 216, 255, 0.12);
+}
 
 /* Rendered markdown preview pane */
 .file-editor-preview-pane {
@@ -644,7 +668,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   top: 0;
   z-index: 1;
   display: grid;
-  grid-template-columns: auto auto auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto auto minmax(0, 1fr);
   align-items: center;
   gap: 6px;
   padding: 4px 5px;
@@ -704,7 +728,8 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   max-width: 60%;
 }
 .file-explorer-hidden-toggle-panel,
-.file-explorer-root-mode-toggle-panel {
+.file-explorer-root-mode-toggle-panel,
+.file-explorer-header-action {
   width: 30px;
   height: 18px;
   flex: 0 0 30px;
@@ -722,8 +747,16 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   width: 38px;
   flex-basis: 38px;
 }
+.file-explorer-header-action {
+  width: 20px;
+  flex-basis: 20px;
+  padding: 0;
+  line-height: 1;
+}
 .file-explorer-hidden-toggle-panel:hover,
-.file-explorer-root-mode-toggle-panel:hover {
+.file-explorer-root-mode-toggle-panel:hover,
+.file-explorer-header-action:hover,
+.file-explorer-header-action:focus-visible {
   color: var(--text);
   border-color: var(--text);
 }
@@ -738,6 +771,28 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .cm-yolomux-diff-remove {
   background: color-mix(in srgb, var(--code-diff-remove) 18%, transparent);
+}
+.file-editor-diff-codemirror .cm-mergeView {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  background: var(--editor-scheme-bg);
+}
+.file-editor-diff-codemirror .cm-mergeViewEditors {
+  height: 100%;
+  min-height: 0;
+}
+.file-editor-diff-codemirror .cm-mergeViewEditor {
+  min-width: 0;
+}
+.file-editor-diff-codemirror .cm-deletedChunk {
+  background: color-mix(in srgb, var(--code-diff-remove) 18%, transparent);
+}
+.file-editor-diff-codemirror .cm-insertedChunk {
+  background: color-mix(in srgb, var(--code-diff-add) 18%, transparent);
+}
+.file-editor-diff-codemirror .cm-changedLine {
+  background: color-mix(in srgb, var(--code-diff-add) 10%, transparent);
 }
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {
@@ -786,6 +841,19 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-editor-panel-actions .pane-frame-controls {
   margin-left: 0;
+}
+.file-editor-diff-ref-panel {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: min(32vw, 190px);
+  overflow: hidden;
+}
+.file-editor-diff-ref-panel[hidden] {
+  display: none;
+}
+.file-editor-diff-ref-panel .diff-ref-control input {
+  width: clamp(42px, 6vw, 76px);
 }
 .file-editor-toolbar-separator {
   width: 1px;

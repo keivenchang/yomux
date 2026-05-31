@@ -138,10 +138,70 @@ def git_diff_base(repo: Path) -> str:
     return "HEAD"
 
 
-def git_name_status(repo: Path, base: str | None = None) -> dict[str, str]:
+def normal_ref(value: str | None, default: str) -> str:
+    ref = str(value or "").strip()
+    return ref or default
+
+
+def refs_requested(from_ref: str | None = None, to_ref: str | None = None) -> bool:
+    return bool(str(from_ref or "").strip() or str(to_ref or "").strip())
+
+
+def diff_refs(from_ref: str | None = None, to_ref: str | None = None) -> tuple[str, str]:
+    return normal_ref(from_ref, "current"), normal_ref(to_ref, "HEAD")
+
+
+def git_ref_exists(repo: Path, ref: str) -> bool:
+    result = run_cmd(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], timeout=3.0)
+    return result.returncode == 0
+
+
+def validate_diff_refs(repo: Path, from_ref: str, to_ref: str) -> str:
+    if from_ref == "current":
+        return "" if git_ref_exists(repo, to_ref) else f"unknown TO ref: {to_ref}"
+    if not git_ref_exists(repo, from_ref):
+        return f"unknown FROM ref: {from_ref}"
+    if not git_ref_exists(repo, to_ref):
+        return f"unknown TO ref: {to_ref}"
+    order = run_cmd(["git", "-C", str(repo), "merge-base", "--is-ancestor", to_ref, from_ref], timeout=5.0)
+    if order.returncode != 0:
+        return f"TO ref must be older than FROM ref ({to_ref} is not an ancestor of {from_ref})"
+    return ""
+
+
+def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> tuple[list[str], bool, str]:
+    if refs_requested(from_ref, to_ref):
+        newer, older = diff_refs(from_ref, to_ref)
+        error = validate_diff_refs(repo, newer, older)
+        if error:
+            return [], False, error
+        if newer == "current":
+            return [older], True, ""
+        return [older, newer], False, ""
+    return [base or git_diff_base(repo)], True, ""
+
+
+def git_recent_refs(repo: Path, limit: int = 20) -> list[dict[str, str]]:
+    result = run_cmd(["git", "-C", str(repo), "log", f"--max-count={max(1, min(limit, 50))}", "--pretty=format:%H%x1f%h%x1f%s"], timeout=5.0)
+    refs = [{"ref": "current", "short": "current", "subject": "working tree"}, {"ref": "HEAD", "short": "HEAD", "subject": "current commit"}]
+    if result.returncode != 0:
+        return refs
+    seen = {"current", "HEAD"}
+    for line in result.stdout.splitlines():
+        parts = line.split("\x1f", 2)
+        if len(parts) != 3 or not parts[0] or parts[0] in seen:
+            continue
+        refs.append({"ref": parts[0], "short": parts[1], "subject": parts[2]})
+        seen.add(parts[0])
+    return refs
+
+
+def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> tuple[dict[str, str], str]:
     statuses: dict[str, str] = {}
-    diff_base = base or git_diff_base(repo)
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--name-status", diff_base], timeout=5.0)
+    diff_args, include_untracked, error = git_diff_args(repo, base, from_ref, to_ref)
+    if error:
+        return statuses, error
+    diff = run_cmd(["git", "-C", str(repo), "diff", "--name-status", *diff_args], timeout=5.0)
     if diff.returncode == 0:
         for line in diff.stdout.splitlines():
             parts = line.split("\t")
@@ -150,12 +210,15 @@ def git_name_status(repo: Path, base: str | None = None) -> dict[str, str]:
             status = parts[0][0]
             rel_path = parts[-1]
             statuses[rel_path] = "D" if status == "D" else "M"
-    untracked = run_cmd(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard"], timeout=5.0)
-    if untracked.returncode == 0:
+    if include_untracked:
+        untracked = run_cmd(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard"], timeout=5.0)
+    else:
+        untracked = None
+    if untracked and untracked.returncode == 0:
         for rel_path in untracked.stdout.splitlines():
             if rel_path:
                 statuses[rel_path] = "A"
-    return statuses
+    return statuses, ""
 
 
 def parse_numstat_value(value: str) -> int | None:
@@ -167,10 +230,12 @@ def parse_numstat_value(value: str) -> int | None:
         return None
 
 
-def git_numstat(repo: Path, base: str | None = None) -> dict[str, dict[str, int | None]]:
+def git_numstat(repo: Path, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, dict[str, int | None]]:
     counts: dict[str, dict[str, int | None]] = {}
-    diff_base = base or git_diff_base(repo)
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", diff_base], timeout=5.0)
+    diff_args, _, error = git_diff_args(repo, base, from_ref, to_ref)
+    if error:
+        return counts
+    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", *diff_args], timeout=5.0)
     if diff.returncode != 0:
         return counts
     for line in diff.stdout.splitlines():
@@ -253,8 +318,16 @@ def session_file_entry(
     }
 
 
-def session_files_payload_for_info(info: SessionInfo, hours: float = 24.0, now: float | None = None) -> dict[str, Any]:
+def session_files_payload_for_info(
+    info: SessionInfo,
+    hours: float = 24.0,
+    now: float | None = None,
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+) -> dict[str, Any]:
     cutoff = (now if now is not None else time.time()) - bounded_session_files_hours(hours) * 3600
+    refs_active = refs_requested(from_ref, to_ref)
+    selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
     touched: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
     for agent in info.agents:
@@ -285,12 +358,17 @@ def session_files_payload_for_info(info: SessionInfo, hours: float = 24.0, now: 
 
     files: list[dict[str, Any]] = []
     repo_payloads: list[dict[str, Any]] = []
+    refs_by_repo: dict[str, list[dict[str, str]]] = {}
     fallback_agent = session_agent_fallback(info)
     for repo_text in sorted(repos):
         repo = Path(repo_text)
-        diff_base = git_diff_base(repo)
-        statuses = git_name_status(repo, diff_base)
-        numstat = git_numstat(repo, diff_base)
+        refs_by_repo[str(repo)] = git_recent_refs(repo)
+        diff_base = "" if refs_active else git_diff_base(repo)
+        statuses, status_error = git_name_status(repo, diff_base or None, selected_from or None, selected_to or None)
+        if status_error:
+            errors.append(f"{repo.name}: {status_error}")
+            statuses = {}
+        numstat = git_numstat(repo, diff_base or None, selected_from or None, selected_to or None)
         repo_entries: list[dict[str, Any]] = []
         for rel_path, status in statuses.items():
             path = (repo / rel_path).resolve(strict=False)
@@ -315,30 +393,43 @@ def session_files_payload_for_info(info: SessionInfo, hours: float = 24.0, now: 
 
     files.extend(outside_repo)
     files.sort(key=lambda item: (-float(item.get("mtime") or 0), item["repo"], item["path"]))
+    payload_from_ref = selected_from or "default"
+    payload_to_ref = selected_to or "base"
     return {
         "session": info.session,
         "hours": bounded_session_files_hours(hours),
         "files": files,
         "repos": repo_payloads,
+        "refs_by_repo": refs_by_repo,
+        "from_ref": payload_from_ref,
+        "to_ref": payload_to_ref,
         "errors": errors,
     }
 
 
-def session_files_payload(session: str | None, infos: dict[str, SessionInfo], hours: float = 24.0) -> tuple[dict[str, Any], HTTPStatus]:
+def session_files_payload(
+    session: str | None,
+    infos: dict[str, SessionInfo],
+    hours: float = 24.0,
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+) -> tuple[dict[str, Any], HTTPStatus]:
     if session:
         info = infos.get(session)
         if info is None:
             return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
-        payload = session_files_payload_for_info(info, hours)
+        payload = session_files_payload_for_info(info, hours, from_ref=from_ref, to_ref=to_ref)
         return payload, HTTPStatus.OK
 
     files: list[dict[str, Any]] = []
     repos: dict[str, dict[str, Any]] = {}
+    refs_by_repo: dict[str, list[dict[str, str]]] = {}
     errors: list[str] = []
     for info in infos.values():
-        payload = session_files_payload_for_info(info, hours)
+        payload = session_files_payload_for_info(info, hours, from_ref=from_ref, to_ref=to_ref)
         files.extend(payload["files"])
         errors.extend(payload["errors"])
+        refs_by_repo.update(payload.get("refs_by_repo", {}))
         for repo in payload["repos"]:
             key = repo["repo"]
             existing = repos.setdefault(key, {"repo": key, "count": 0, "touched_count": 0})
@@ -350,5 +441,8 @@ def session_files_payload(session: str | None, infos: dict[str, SessionInfo], ho
         "hours": bounded_session_files_hours(hours),
         "files": files,
         "repos": sorted(repos.values(), key=lambda item: item["repo"]),
+        "refs_by_repo": refs_by_repo,
+        "from_ref": diff_refs(from_ref, to_ref)[0] if refs_requested(from_ref, to_ref) else "default",
+        "to_ref": diff_refs(from_ref, to_ref)[1] if refs_requested(from_ref, to_ref) else "base",
         "errors": errors,
     }, HTTPStatus.OK
