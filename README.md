@@ -23,32 +23,66 @@ Then open `http://localhost:9998/`. On first launch you must enable a login acco
 
 YOLOmux follows terminal-app terminology (iTerm2-style):
 
-- **Pane** — a visible split region of the layout. The workspace has a left and right side; each side is one full-height pane or two stacked, for up to four panes. A pane shows one tab at a time and has its own toolbar.
-- **Tab** — a thing shown inside a pane: a tmux session, or a virtual item (File Explorer, file editor, etc.). Tabs are numbered `1`–`9` by display order. A tab is **active** (shown in a pane), **minimized** (in a pane's tab stack but not shown), or **inactive** (not assigned to any pane).
-- **Window** — a tmux window inside a tmux session. The pane toolbar's `<` / `>` controls step between a session's tmux windows.
+- **Pane** — a visible split region of the layout. The workspace has a left and right side; each side is one full-height pane or two stacked, for up to four panes. A pane holds zero or more tabs but shows ONE at a time (the others sit minimized in its tab strip), and has its own toolbar.
+- **Tab** — the thing shown inside a pane. Each tab is one of a small, GROWING set of types: a **tmux session** (terminal), the **Finder** (the file browser — labeled **File Explorer** off macOS; **Finder and File Explorer are the same tab, just the per-OS name**), a **File** (text editor or image viewer — one type, chosen by the file's kind), **Preferences**, **Changes**, or **Branch Info** — with more types over time. Tabs are numbered `1`–`9` by display order, and each is **active** (shown in a pane), **minimized** (in a pane's tab strip, not shown), or **inactive** (not assigned to any pane).
+
+YOLOmux's own layout is just **Panes** and **Tabs** — there is no YOLOmux "window":
+
+```
+Workspace
+└─ Pane          up to 4 split regions; each has its own toolbar
+   └─ Tab        one shown at a time; the rest minimized in the pane's tab strip
+```
+
+When a Tab is a **tmux session**, that session has its OWN internal hierarchy — which belongs to tmux, not YOLOmux:
+
+```
+tmux session     = one YOLOmux Tab
+└─ window        Ctrl-b n / p  (and the pane toolbar's  <  /  > )
+   └─ pane       Ctrl-b %  /  "    — a split INSIDE a tmux window
+```
+
+So "window" only ever means a **tmux window** (the thing `Ctrl-b n/p` cycles); it is not a YOLOmux term. And watch the overloaded word **pane**: a **YOLOmux Pane** is a browser layout split that shows one Tab, whereas a **tmux pane** is a split inside a tmux window — same word, different layers.
 
 ## Daily use
 
 Open YOLOmux, enable a login if the setup page asks, then refresh. Existing tmux sessions appear as tabs inside panes:
 
 - Click a tab to show it in that pane.
-- Use the `Tab` menu to activate minimized or inactive tabs.
+- Use the `Tabs` menu to activate minimized or inactive tabs.
 - Drag a tab between pane tab bars, or onto a pane, to move or split the layout. Dropping in the middle of a pane moves the tab into that pane's tab bar; dropping near an edge splits the pane when there is room.
-- The pane toolbar switches tmux windows (`<` / `>`), shows transcripts (`Tx`), asks for an AI summary (`AI`), opens the event log (`Log`), and collapses the info row (`Info`).
+- The pane toolbar steps through the focused session's tmux windows (`<` / `>`, a tmux feature), shows transcripts (`Tx`), asks for an AI summary (`AI`), opens the event log (`Log`), and collapses the info row (`Info`).
 - The terminal border turns yellow for the pane that is focused and ready for typing.
 
-The `YO` button toggles YOLO auto-approval for a tmux session. It watches the visible tmux screen for approval prompts and sends the approval key when the detector says the prompt is safe; the red `QUES?` / `EXEC?` badges come from that visible-screen detection, not transcript scraping. YOLO state is stored in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
+The `YO` button toggles YOLO auto-approval for a tmux session. It watches the visible tmux screen for approval prompts and sends the approval key when the rule engine says the prompt is safe; the red `QUES?` / `EXEC?` badges come from that visible-screen detection, not transcript scraping. YOLO state is stored in `~/.config/yolomux/state.json`, so it survives page reloads and server restarts.
 
 ## UI features
 
-- The `Tab` menu groups tabs into **Active** (bright green, shown in panes), **Minimized** (in a pane's tab stack but not shown), and **Inactive** (not assigned to any pane).
+- The menu bar contains `File`, `View`, `tmux`, `Tabs`, and `Help`. `File` opens the File Explorer / Finder, Preferences, and logout flow; `tmux` creates and manages the currently focused tmux session; `Tabs` navigates active, minimized, and inactive tabs.
+- The `Tabs` menu lists tabs with compact rich rows separated by bars. It does not print section headers such as Active, Minimized, or Inactive.
+- The `Tabs` menu shows a small count badge when YOLO is enabled for one or more sessions. `tmux` has the current session's YO button at the top, plus `YOLO` actions for opening or reloading the rule file.
 - By default YOLOmux shows existing tmux sessions, capped at nine visible session tabs (`1`–`9`). It does not create default `yolomuxN` sessions.
 - `+ Claude` / `+ Codex` create the next numbered tmux session with that agent (e.g. `7` when six exist). Each appears only when that CLI is on the server `PATH`; if neither is, YOLOmux shows `+ Term` and creates a plain shell session.
 - Each session tab has its own `YO` button, status badges, session label, compact work description, and hide button.
 - The layout is encoded in the page URL (`sessions`, `layout`, `tabs`), so a reload — or a bookmarked link — preserves the exact layout without browser storage.
 - Mouse-wheel scrolling in a terminal sends tmux copy-mode scroll commands instead of scrolling the AI input area.
 - Browser resize fits xterm immediately; the tmux resize is debounced until the resize settles.
-- The pane window-control buttons (minimize / zoom / close) auto-detect your OS: macOS browsers get Mac traffic-light style, everything else (Windows, Linux) gets PC style. To force one, add a URL parameter: `?platform=pc` (also `win` / `windows` / `linux`) or `?platform=mac` (also `macos` / `darwin`) — for example `http://localhost:9998/?platform=pc`.
+- The pane frame controls always use the PC-style controls (`_`, zoom, close) for consistency across platforms. The `?platform=pc` / `?platform=mac` override still affects labels such as File Explorer versus Finder.
+- Press `Ctrl/Cmd+K`, or use `Help` -> `Command palette`, to search tabs, menu actions, and settings from one popup.
+- `File` -> `Preferences` opens a draggable tab backed by `~/.config/yolomux/settings.yaml`. UI saves are atomic, running servers reload hand edits by polling the file, and open browsers poll `/api/settings` so changes made in another server instance apply without restart. Preferences has a search box, collapsed sections that remember their state, independent terminal/editor/Finder font-size controls, and the active YOLO rules path/source.
+- The `Changes` virtual tab shows AI-attributed file changes for a selected tmux session. It combines Claude/Codex edit tool calls with repo status (`git diff --name-status HEAD` plus untracked files), groups rows by repo, and opens changed/new files in the editor.
+- Observability APIs expose compact run history plus search across captured events and current session summaries.
+- Transient terminal disconnects keep the existing xterm screen and scrollback. YOLOmux reconnects the WebSocket in place and shows a pane-level reconnect toast instead of writing disconnect text into the terminal buffer.
+
+## Files and editors
+
+Open `File` -> `File Explorer` (`Finder` on macOS) to browse the server filesystem. The root path field is editable: press Enter to jump to a typed path, use Escape to revert, and use the copy button to copy the current root path. The `Root` / `Sync` toggle chooses whether the explorer stays on a fixed root or follows the focused tmux session's current directory.
+
+Clicking a file opens it as a tab in the largest available pane, reusing an existing editor pane when one is already open. Text files can be edited and saved. The default editor engine is CodeMirror, with a textarea fallback available through `?editor=textarea` or Preferences. The editor has icon buttons for edit, preview, split preview, line numbers, wrap, in-file Find, dark/white theme, and save. Markdown renders as formatted HTML, code previews use the syntax-colored read view, and split mode keeps the editor and preview panes scrolled together by source line. The wrap and line-number toggles are shared by editor tabs; wrapped continuation rows are measured from browser layout, show a `↪` marker, and keep source line numbers on real lines only on the fallback textarea path. Markdown, shell, Python, JavaScript/TypeScript, Rust, JSON, HTML/XML/SVG, CSS, TOML, and YAML get syntax coloring. Files over the configured raw-read cap show a too-large state instead of loading into the editor. Dragging a file from Finder/File Explorer onto a pane or pane tab opens it as a file tab.
+
+Images open in the same tab system. Small images render at their original size; large images fit the available pane. Click the image to toggle between fit mode and original-size scroll mode.
+
+Right-click a file or directory for file actions: copy the full path, copy the raw path, copy a repo-relative path when one exists, download files, rename, or delete. Shift-click selects a range; Ctrl/Cmd-click toggles individual rows. Dragging file rows into terminals sends the shell-quoted path text.
 
 ## Running it
 
@@ -144,7 +178,28 @@ python3 yolomux.py --host 0.0.0.0 --port 9998 --dangerously-yolo
 
 With it enabled, `+ Claude` / `+ Codex` create sessions with `claude --dangerously-skip-permissions` and `codex --dangerously-bypass-approvals-and-sandbox`. Without it, the same buttons create plain `claude` and `codex` sessions. The flag affects only new sessions created after the server starts; it does not change existing tmux sessions, and it is separate from the `YO` toggle.
 
-**The `YO` toggle (runtime).** `YO` is per-session auto-approval for an *existing* tmux session. It watches the visible tmux screen and sends the approval key when the detector says the prompt is safe. It does not relaunch the agent and does not change the agent's own permission or sandbox flags.
+**The `YO` toggle (runtime).** `YO` is per-session auto-approval for an *existing* tmux session. It watches the visible tmux screen and sends the approval key when the rule engine says the prompt is safe. It does not relaunch the agent and does not change the agent's own permission or sandbox flags.
+
+**Rule file.** YOLOmux reads ordered rules from `~/.config/yolomux/yolo-rules.yaml` when that file exists. The file's top-level `default:` value is the canonical fallback action when no rule matches; there is no separate live `default_policy` preference. Rules are first-match-wins and support `command`, `regex`, `glob`, and `contains` matches with `approve`, `decline`, `block`, `ask`, `notify`, or `off` actions. The tmux -> YOLO menu has `Open rule file` and `Reload rules`; Preferences shows the active path, source, rule count, and dry-run state. If the file is missing, YOLOmux uses a built-in fallback that preserves the previous dangerous-command block list while continuing to approve non-dangerous bash prompts. Saving the rule file through the editor validates the YAML first and shows errors inline; an already-invalid on-disk file fails safe to `ask` and is surfaced in the UI and server stderr instead of silently allowing prompts.
+
+Example:
+
+```yaml
+default: ask
+rules:
+  - name: block destructive
+    type: command
+    match: [rm, rmdir, shred, dd, mkfs]
+    action: block
+    risk: delete
+  - name: safe reads
+    type: regex
+    match: '^(ls|cat|grep|git (status|log|diff))\b'
+    action: approve
+    risk: read
+```
+
+The YAML cannot relax the hard floor for `rm -rf /`, `dd` to block devices, fork bombs, `mkfs`, or redirection to block devices unless the server itself was started with `--dangerously-yolo`. Set `yolo.dry_run: true` in Preferences or `settings.yaml` to log what the rule engine would do without pressing an approval key.
 
 ## Remote access
 
@@ -189,9 +244,9 @@ Run it in the background:
 setsid nohup env PYTHONUNBUFFERED=1 python3 auto_approve_tmux.py --interval 0.5 "project*" > /tmp/auto_approve_tmux.log 2>&1 < /dev/null &
 ```
 
-YOLOmux and this script share the same detector: YOLOmux imports `auto_approve_tmux.py` as a module and wraps one `AutoApproveWorker` around each enabled session (flow: `JS YO button -> POST /api/auto-approve -> TmuxWebtermApp.set_auto_approve -> AutoApproveWorker -> auto_approve_tmux.py -> tmux capture-pane/send-keys`).
+YOLOmux and this script share the same visible-screen detector. YOLOmux imports `auto_approve_tmux.py` as a module, wraps one `AutoApproveWorker` around each enabled session, and runs detected bash prompts through `yolomux_lib/yolo_rules.py` before sending tmux keys (flow: `JS YO button -> POST /api/auto-approve -> TmuxWebtermApp.set_auto_approve -> AutoApproveWorker -> auto_approve_tmux.py detector -> yolo_rules.py -> tmux send-keys`).
 
-Detection intentionally uses the visible tmux screen for presence checks, which avoids approving stale prompts left in scrollback after the agent moved on. It recognizes active Codex working rows such as `• Working (4m 06s • esc to interrupt)`, and color rotation is not a blocker because `tmux capture-pane -p` returns text without terminal color styling. Dangerous shell commands are blocked instead of approved.
+Detection intentionally uses the visible tmux screen for presence checks, which avoids approving stale prompts left in scrollback after the agent moved on. It recognizes active Codex working rows such as `• Working (4m 06s • esc to interrupt)`, and color rotation is not a blocker because `tmux capture-pane -p` returns text without terminal color styling. Dangerous shell commands are blocked by the default rules instead of approved.
 
 ## Companion: `tmux_wall.py` (read-only wall)
 

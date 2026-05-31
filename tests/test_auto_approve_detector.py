@@ -1,6 +1,84 @@
 import auto_approve_tmux
 
 
+def claude_bash_prompt_with_footer(*footer_lines):
+    return "\n".join([
+        "Bash command (unsandboxed)",
+        "",
+        "   echo one",
+        "   Pause before continuing",
+        "",
+        " Permission rule Bash requires confirmation for this command.",
+        "",
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+        "   2. No",
+        "",
+        *footer_lines,
+    ])
+
+
+def test_extract_command_rejoins_wrapped_codex_command():
+    visible_text = "\n".join([
+        "  Would you like to run the following command?",
+        "",
+        "  Reason: Verify the persisted YOLOmux settings file now defaults",
+        "  editor.engine to codemirror.",
+        "",
+        '  $ python3 -c "from yolomux_lib.settings import settings_payload;',
+        '  print(settings_payload()[\'settings\'][\'editor\'][\'engine\'])"',
+        "",
+        "› 1. Yes, proceed (y)",
+        "  2. No, and tell Codex what to do differently (esc)",
+        "",
+        "  Press enter to confirm or esc to cancel",
+    ])
+
+    assert auto_approve_tmux.extract_command(visible_text) == (
+        'python3 -c "from yolomux_lib.settings import settings_payload; '
+        'print(settings_payload()[\'settings\'][\'editor\'][\'engine\'])"'
+    )
+
+
+def test_approval_prompt_ignores_exact_claude_ctrl_b_footer():
+    visible_text = claude_bash_prompt_with_footer(
+        " Esc to cancel · Tab to amend · ctrl+e to explain",
+        " (ctrl+b to run in background)",
+    )
+
+    assert auto_approve_tmux.approval_prompt_has_later_activity(visible_text) is False
+    state = auto_approve_tmux.approval_prompt_state(visible_text)
+    assert state["visible"] is True
+    assert state["type"] == "bash"
+
+
+def test_approval_prompt_ignores_dot_separated_ctrl_hint_cluster():
+    visible_text = claude_bash_prompt_with_footer(
+        " Esc to cancel · Tab to amend · ctrl+e to explain",
+        " ctrl+b to run in background. ctrl+t to hide tasks",
+    )
+
+    assert auto_approve_tmux.approval_prompt_has_later_activity(visible_text) is False
+    assert auto_approve_tmux.approval_prompt_state(visible_text)["visible"] is True
+
+
+def test_approval_prompt_detects_activity_after_claude_ctrl_b_footer():
+    visible_text = "\n".join([
+        claude_bash_prompt_with_footer(
+            " Esc to cancel · Tab to amend · ctrl+e to explain",
+            " (ctrl+b to run in background)",
+        ),
+        "● User approved Claude's request",
+        "● Bash(echo one)",
+        "  ⎿  ok",
+        "",
+        "❯ ",
+    ])
+
+    assert auto_approve_tmux.approval_prompt_has_later_activity(visible_text) is True
+    assert auto_approve_tmux.approval_prompt_state(visible_text)["visible"] is False
+
+
 def test_visible_agent_working_detects_codex_working_footer():
     visible_text = "◦ Working (1m 21s • esc to interrupt)\n"
 

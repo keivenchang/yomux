@@ -125,7 +125,7 @@ def menu_fixture_html():
         </style>
       </head>
       <body>
-        <div class="app-menu" data-app-menu="tab">
+        <div class="app-menu" data-app-menu="tabs">
           <div class="app-menu-popover" role="menu">{rows}</div>
         </div>
       </body>
@@ -133,7 +133,7 @@ def menu_fixture_html():
     """
 
 
-def mac_controls_fixture_html():
+def pc_controls_fixture_html():
     css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
     return f"""
     <!doctype html>
@@ -147,15 +147,282 @@ def mac_controls_fixture_html():
       </head>
       <body>
         <div class="tabs" role="tablist">
-          <button id="pane-zoom" class="tab pane-expand mac-window-control mac-zoom"></button>
+          <button id="hash-tab" class="tab panel-detail-toggle">#</button>
+          <button id="list-tab" class="tab terminal-tab">1.</button>
+          <button id="pane-actions" class="tab pane-actions"><span id="pane-actions-dots" class="pane-actions-dots">...</span></button>
+          <button id="pane-zoom" class="tab pane-expand pc-window-control pc-zoom"></button>
           <button id="hidden-pane-zoom" class="tab pane-expand pc-window-control pc-zoom" hidden></button>
         </div>
+        <span id="working-yolo" class="session-yolo-marker active working">YO</span>
         <button type="button" class="pane-tab active">
           <span class="pane-tab-core"><span class="session-button-name">1</span></span>
-          <span id="tab-minimize" class="pane-tab-close mac-window-control mac-minimize"></span>
+          <span id="tab-minimize" class="pane-tab-close pc-window-control pc-minimize"></span>
         </button>
-        <button id="finder-close" class="file-explorer-panel-close mac-window-control mac-minimize"></button>
-        <button id="editor-close" class="file-editor-panel-close mac-window-control mac-minimize"></button>
+        <div class="tabs pane-frame-controls">
+          <button id="finder-close" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
+          <button id="editor-close" class="tab pane-close pc-window-control pc-close file-editor-panel-close"></button>
+        </div>
+        <section class="preferences-section collapsed">
+          <button type="button" class="preferences-section-toggle">Appearance</button>
+          <div id="collapsed-preferences" class="preferences-settings" hidden>
+            <div class="preferences-setting-row">hidden row</div>
+          </div>
+        </section>
+        <div class="file-explorer-tree-panel">
+          <div id="collapsed-dir" class="file-tree-row kind-dir" aria-expanded="false"><span class="file-tree-icon">▸</span><span class="file-tree-name">Alpha</span></div>
+          <div id="expanded-dir" class="file-tree-row kind-dir expanded" aria-expanded="true"><span class="file-tree-icon">▾</span><span class="file-tree-name">Bravo</span></div>
+        </div>
+        <div id="test-context-menu" class="terminal-context-menu" style="top: 220px; left: 24px;"></div>
+        <div id="test-image-preview" class="file-image-preview-popover" style="top: 220px; left: 24px;"></div>
+        <div class="pane-tab popover-open" style="position: fixed; top: 220px; left: 24px;">
+          <div id="test-tab-popover" class="session-popover"></div>
+        </div>
+      </body>
+    </html>
+    """
+
+
+def topbar_font_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }}
+          :root {{ --ui-font-size: 18px; --tab-label-size: 18px; }}
+        </style>
+      </head>
+      <body>
+        <header id="topbar-fixture" class="topbar">
+          <div class="brand"><span class="title">YOLOmux</span></div>
+          <div class="app-menu-area">
+            <nav class="app-menu-bar" aria-label="Application menu">
+              <div class="app-menu"><button id="menu-file" type="button" class="app-menu-button">File</button></div>
+            </nav>
+          </div>
+          <div class="actions">
+            <button id="tabMetaToggle" type="button" aria-label="Tab metadata"></button>
+            <button id="notifyToggle" type="button" aria-label="Alerts"></button>
+            <button id="refreshMeta" type="button" aria-label="Refresh"></button>
+          </div>
+        </header>
+        <button type="button" class="pane-tab active">
+          <span class="pane-tab-core"><span class="session-button-name">1</span></span>
+        </button>
+      </body>
+    </html>
+    """
+
+
+def editor_highlight_fallback_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 24px; display: block; height: auto; min-height: 0; }}
+          .file-editor-panel {{ position: relative; width: 420px; height: 120px; margin-bottom: 16px; }}
+        </style>
+      </head>
+      <body>
+        <div id="ready" class="file-editor-panel syntax-highlighted" data-syntax-highlight-ready="true">
+          <textarea id="ready-textarea" class="file-editor-textarea-panel"># TITLE</textarea>
+        </div>
+        <div id="fallback" class="file-editor-panel syntax-highlighted">
+          <textarea id="fallback-textarea" class="file-editor-textarea-panel"># TITLE</textarea>
+        </div>
+      </body>
+    </html>
+    """
+
+
+def editor_pane_ignores_legacy_body_class_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; display: block; height: 700px; min-height: 0; }}
+          #grid {{ height: 500px; }}
+        </style>
+      </head>
+      <body class="file-editor-open">
+        <main id="grid" class="grid">
+          <section class="layout-root">
+            <section class="layout-column file-editor-column">
+              <section class="drop-slot">
+                <article class="panel file-editor-panel"></article>
+              </section>
+            </section>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
+
+
+def codemirror_editor_controls_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    tabs = "\n".join(
+        f"""
+        <div role="button" tabindex="0" class="pane-tab {'active popover-open' if index == 2 else ''}">
+          <span class="pane-tab-core"><span class="session-button-name">file-{index}.md</span></span>
+          <span class="pane-tab-close pc-window-control pc-close"></span>
+          {'''
+          <div id="file-popover" class="session-popover file-popover">
+            <button id="file-popover-copy" class="path-copy-button popover-copy-button"></button>
+          </div>
+          ''' if index == 2 else ''}
+        </div>
+        """
+        for index in range(1, 6)
+    )
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          .file-editor-panel {{ width: 930px; height: 360px; }}
+        </style>
+      </head>
+      <body class="editor-theme-light">
+        <article class="panel file-editor-panel active-pane editor-wrap">
+          <div class="panel-head file-editor-panel-head">
+            <div id="editor-actions" class="file-editor-panel-actions">
+              <div class="file-editor-mode-control file-editor-mode-control-panel" role="group">
+                <button type="button" data-editor-mode="edit"><span class="file-editor-icon file-editor-icon-edit"></span></button>
+                <button type="button" data-editor-mode="preview"><span class="file-editor-icon file-editor-icon-eye"></span></button>
+                <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
+              </div>
+              <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
+              <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
+              <button type="button" class="file-editor-theme-panel theme-light" data-editor-theme="light"><span class="file-editor-icon file-editor-icon-theme"></span></button>
+              <div class="tabs pane-frame-controls file-editor-frame-controls">
+                <button class="tab pane-minimize pc-window-control pc-minimize"></button>
+                <button class="tab pane-expand pc-window-control pc-zoom"></button>
+                <button type="button" class="tab pane-close pc-window-control pc-close file-editor-panel-close"></button>
+              </div>
+            </div>
+            <div class="pane-tabs" role="tablist">{tabs}</div>
+          </div>
+          <div class="file-editor-panel-body">
+            <div class="file-editor-content">
+              <div class="file-editor-codemirror-panel">
+                <div id="cm-editor" class="cm-editor">
+                  <div class="cm-panels cm-panels-top">
+                    <div class="cm-panel cm-search">
+                      <input id="search-field" class="cm-textfield" name="search" value="precedence">
+                      <button class="cm-button" name="next" title="Next match (Enter)">next</button>
+                      <button class="cm-button" name="prev" title="Previous match (Shift+Enter)">previous</button>
+                      <button class="cm-button" name="select">all</button>
+                      <label id="match-label"><input id="match-case" type="checkbox">match case</label>
+                      <label><input type="checkbox">regexp</label>
+                      <label><input type="checkbox">by word</label>
+                      <button class="cm-dialog-close" type="button">x</button>
+                      <br>
+                      <input id="replace-field" class="cm-textfield" name="replace" placeholder="Replace">
+                      <button class="cm-button" name="replace">replace</button>
+                      <button class="cm-button" name="replaceAll">replace all</button>
+                      <span id="search-count" class="cm-search-count">3/102</span>
+                    </div>
+                  </div>
+                  <div class="cm-scroller">
+                    <div class="cm-wrap-marker-layer"><span id="wrap-marker" class="cm-wrap-marker" style="left: 10px; top: 20px; height: 16px;">↪</span></div>
+                    <div class="cm-content cm-lineWrapping">
+                      <div id="wrapped-line" class="cm-line">a very long markdown line that wraps in the editor panel and needs a visible wrap marker</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div id="light-syntax-probe" class="file-editor-highlight" hidden>
+                <span class="code-keyword">if</span>
+                <span class="code-string">"value"</span>
+                <span class="code-variable">name</span>
+                <span class="code-function">call</span>
+                <span class="code-comment"># comment</span>
+                <span class="md-heading md-heading-1"># title</span>
+                <span class="md-code">`code`</span>
+              </div>
+            </div>
+          </div>
+        </article>
+      </body>
+    </html>
+    """
+
+
+def codemirror_bundle_fixture_html():
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <script src="{bundle_uri}"></script>
+      </head>
+      <body></body>
+    </html>
+    """
+
+
+def finder_click_toolbar_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 260px 1fr; gap: 8px; height: auto; min-height: 0; }}
+          .panel {{ height: 170px; }}
+        </style>
+      </head>
+      <body>
+        <article id="finder-panel" class="panel file-explorer-panel">
+          <div class="panel-head file-explorer-head">
+            <div class="pane-tabs" hidden></div>
+            <div class="file-explorer-toolbar">
+              <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel">.*</button>
+              <input class="file-explorer-path-inline" value="/home/test">
+              <div class="tabs pane-frame-controls file-explorer-frame-controls">
+                <button type="button" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
+              </div>
+            </div>
+          </div>
+          <div class="file-explorer-pane"></div>
+        </article>
+        <article id="terminal-panel" class="panel active-pane">
+          <div class="panel-head">
+            <div id="terminal-toolbar" class="tabs" role="tablist">
+              <button class="tab active terminal-tab">1</button>
+              <button class="tab">Tx</button>
+              <button class="tab">AI</button>
+              <button class="tab">Log</button>
+              <button class="tab panel-detail-toggle active">Info</button>
+              <button class="tab pane-actions"><span class="pane-actions-dots">...</span></button>
+              <button class="tab pane-minimize pc-window-control pc-minimize"></button>
+              <button class="tab pane-expand pc-window-control pc-zoom"></button>
+            </div>
+            <div class="pane-tabs" role="tablist">
+              <button type="button" class="pane-tab active"><span class="pane-tab-core"><span class="session-button-name">1</span></span></button>
+            </div>
+          </div>
+          <div class="panel-detail-row"><div class="meta">path</div></div>
+          <div class="tab-pane active"></div>
+        </article>
       </body>
     </html>
     """
@@ -207,9 +474,15 @@ def load_fixture(browser, tmp_path, width):
     )
 
 
-def load_mac_controls_fixture(browser, tmp_path):
-    page = tmp_path / "mac-controls.html"
-    page.write_text(mac_controls_fixture_html(), encoding="utf-8")
+def load_pc_controls_fixture(browser, tmp_path):
+    page = tmp_path / "pc-controls.html"
+    page.write_text(pc_controls_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_topbar_font_fixture(browser, tmp_path):
+    page = tmp_path / "topbar-font.html"
+    page.write_text(topbar_font_fixture_html(), encoding="utf-8")
     browser.get(page.as_uri())
 
 
@@ -241,6 +514,49 @@ def load_menu_fixture(browser, tmp_path):
     )
 
 
+def load_editor_highlight_fallback_fixture(browser, tmp_path):
+    page = tmp_path / "editor-highlight-fallback.html"
+    page.write_text(editor_highlight_fallback_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_editor_pane_legacy_body_fixture(browser, tmp_path):
+    page = tmp_path / "editor-pane-legacy-body.html"
+    page.write_text(editor_pane_ignores_legacy_body_class_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_codemirror_editor_controls_fixture(browser, tmp_path):
+    page = tmp_path / "codemirror-editor-controls.html"
+    page.write_text(codemirror_editor_controls_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_codemirror_bundle_fixture(browser, tmp_path):
+    page = tmp_path / "codemirror-bundle.html"
+    page.write_text(codemirror_bundle_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_finder_click_toolbar_fixture(browser, tmp_path):
+    page = tmp_path / "finder-click-toolbar.html"
+    page.write_text(finder_click_toolbar_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def computed_color_alpha(browser, element_id):
+    return browser.execute_script(
+        """
+        const color = getComputedStyle(document.getElementById(arguments[0])).color;
+        const match = color.match(/rgba?\\(([^)]+)\\)/);
+        if (!match) return 1;
+        const parts = match[1].split(',').map(part => part.trim());
+        return parts.length >= 4 ? Number.parseFloat(parts[3]) : 1;
+        """,
+        element_id,
+    )
+
+
 def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     metrics = load_fixture(browser, tmp_path, 860)
     assert metrics["toolbar"]["right"] <= metrics["panel"]["right"]
@@ -265,7 +581,7 @@ def test_pane_tabs_and_controls_stay_bounded_when_narrow(browser, tmp_path):
     assert metrics["toolbarCenterDelta"] <= 2
 
 
-def test_tab_menu_rows_are_compact_for_many_windows(browser, tmp_path):
+def test_tab_menu_rows_are_compact_for_many_tabs(browser, tmp_path):
     metrics = load_menu_fixture(browser, tmp_path)
     assert metrics["count"] == 30
     assert metrics["maxHeight"] <= 23
@@ -277,26 +593,344 @@ def test_tab_menu_rows_are_compact_for_many_windows(browser, tmp_path):
     assert metrics["scrollHeight"] <= 700
 
 
-def test_mac_control_glyphs_show_only_on_hover(browser, tmp_path):
-    load_mac_controls_fixture(browser, tmp_path)
+def test_topbar_uses_ui_font_size_and_compact_actions(browser, tmp_path):
+    load_topbar_font_fixture(browser, tmp_path)
+    topbar_metrics = browser.execute_script(
+        """
+        const menu = document.getElementById('menu-file');
+        const action = document.getElementById('tabMetaToggle');
+        const paneTab = document.querySelector('.pane-tab');
+        const menuRect = menu.getBoundingClientRect();
+        const actionRect = action.getBoundingClientRect();
+        const paneTabRect = paneTab.getBoundingClientRect();
+        return {
+          menuFontSize: Number.parseFloat(getComputedStyle(menu).fontSize),
+          menuHeight: menuRect.height,
+          actionWidth: actionRect.width,
+          actionHeight: actionRect.height,
+          paneTabHeight: paneTabRect.height,
+        };
+        """
+    )
+    assert topbar_metrics["menuFontSize"] >= 17.5
+    assert topbar_metrics["menuHeight"] >= 30
+    assert 25 <= topbar_metrics["paneTabHeight"] <= 28
+    assert topbar_metrics["actionWidth"] <= 31
+    assert topbar_metrics["actionHeight"] <= 31
+    compact_action_width = browser.execute_script(
+        """
+        document.documentElement.style.setProperty('--ui-font-size', '13px');
+        return document.getElementById('tabMetaToggle').getBoundingClientRect().width;
+        """
+    )
+    assert compact_action_width <= 26
+
+
+def test_platform_controls_use_pc_glyphs(browser, tmp_path):
+    load_pc_controls_fixture(browser, tmp_path)
     assert browser.execute_script("return getComputedStyle(document.getElementById('hidden-pane-zoom')).display") == "none"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize'), '::before').opacity") == "0"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close'), '::before').opacity") == "0"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close'), '::before').opacity") == "0"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::before').opacity") == "0"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::after').opacity") == "0"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize'), '::after').display") == "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close'), '::after').display") != "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close'), '::after').display") != "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::after').display") != "none"
+    assert browser.execute_script("return document.getElementById('editor-close').getBoundingClientRect().width") <= 24
+    assert browser.execute_script("return document.getElementById('tab-minimize').getBoundingClientRect().width") >= 18
+    assert browser.execute_script("return getComputedStyle(document.getElementById('collapsed-preferences')).display") == "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationName") == "yolo-marker-rotate"
+    triangle_sizes = browser.execute_script(
+        """
+        const collapsed = getComputedStyle(document.querySelector('#collapsed-dir > .file-tree-icon'));
+        const expanded = getComputedStyle(document.querySelector('#expanded-dir > .file-tree-icon'));
+        return {
+          collapsedSize: Number.parseFloat(collapsed.fontSize),
+          expandedSize: Number.parseFloat(expanded.fontSize),
+          collapsedWidth: document.querySelector('#collapsed-dir > .file-tree-icon').getBoundingClientRect().width,
+          expandedColor: expanded.color,
+          collapsedColor: collapsed.color,
+        };
+        """
+    )
+    assert triangle_sizes["collapsedSize"] >= 16
+    assert triangle_sizes["expandedSize"] >= 16
+    assert triangle_sizes["collapsedWidth"] >= 20
+    assert triangle_sizes["expandedColor"] != triangle_sizes["collapsedColor"]
+    dots_center_delta = browser.execute_script(
+        """
+        const button = document.getElementById('pane-actions').getBoundingClientRect();
+        const dots = document.getElementById('pane-actions-dots').getBoundingClientRect();
+        const actionsStyle = getComputedStyle(document.getElementById('pane-actions'));
+        const dotsStyle = getComputedStyle(document.getElementById('pane-actions-dots'));
+        const hashStyle = getComputedStyle(document.getElementById('hash-tab'));
+        return {
+          x: Math.abs((button.left + button.width / 2) - (dots.left + dots.width / 2)),
+          y: Math.abs((button.top + button.height / 2) - (dots.top + dots.height / 2)),
+          background: actionsStyle.backgroundColor,
+          borderColor: actionsStyle.borderTopColor,
+          dotsColor: dotsStyle.color,
+          hashColor: hashStyle.color,
+        };
+        """
+    )
+    assert dots_center_delta["x"] <= 1
+    assert dots_center_delta["y"] <= 1
+    assert dots_center_delta["background"] != "rgba(0, 0, 0, 0)"
+    assert dots_center_delta["borderColor"] != "rgba(0, 0, 0, 0)"
+    assert dots_center_delta["dotsColor"] != dots_center_delta["hashColor"]
+    z_indexes = browser.execute_script(
+        """
+        return {
+          contextMenu: Number.parseInt(getComputedStyle(document.getElementById('test-context-menu')).zIndex, 10),
+          imagePreview: Number.parseInt(getComputedStyle(document.getElementById('test-image-preview')).zIndex, 10),
+          tabPopover: Number.parseInt(getComputedStyle(document.getElementById('test-tab-popover')).zIndex, 10),
+        };
+        """
+    )
+    assert z_indexes["contextMenu"] > z_indexes["imagePreview"]
+    assert z_indexes["contextMenu"] > z_indexes["tabPopover"]
 
     ActionChains(browser).move_to_element(browser.find_element("id", "tab-minimize")).perform()
-    assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize'), '::before').opacity") == "1"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('tab-minimize')).opacity") == "1"
 
     ActionChains(browser).move_to_element(browser.find_element("id", "pane-zoom")).perform()
-    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::before').opacity") == "1"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom'), '::after').opacity") == "1"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('pane-zoom')).backgroundColor") != "rgba(0, 0, 0, 0)"
 
     ActionChains(browser).move_to_element(browser.find_element("id", "finder-close")).perform()
-    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close'), '::before').opacity") == "1"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close'), '::after').display") == "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('finder-close')).opacity") == "1"
 
     ActionChains(browser).move_to_element(browser.find_element("id", "editor-close")).perform()
-    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close'), '::before').opacity") == "1"
-    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close'), '::after').display") == "none"
+    assert browser.execute_script("return getComputedStyle(document.getElementById('editor-close')).opacity") == "1"
+
+    tree_metrics = browser.execute_script(
+        """
+        const collapsedIcon = document.querySelector('#collapsed-dir .file-tree-icon');
+        const expandedIcon = document.querySelector('#expanded-dir .file-tree-icon');
+        const collapsedName = document.querySelector('#collapsed-dir .file-tree-name');
+        return {
+          collapsedColor: getComputedStyle(collapsedIcon).color,
+          expandedColor: getComputedStyle(expandedIcon).color,
+          iconSize: Number.parseFloat(getComputedStyle(collapsedIcon).fontSize),
+          nameSize: Number.parseFloat(getComputedStyle(collapsedName).fontSize),
+        };
+        """
+    )
+    assert tree_metrics["collapsedColor"] != tree_metrics["expandedColor"]
+    assert tree_metrics["iconSize"] > tree_metrics["nameSize"]
+
+
+def test_editor_text_stays_visible_until_highlight_overlay_is_ready(browser, tmp_path):
+    load_editor_highlight_fallback_fixture(browser, tmp_path)
+    assert computed_color_alpha(browser, "ready-textarea") == 0
+    assert computed_color_alpha(browser, "fallback-textarea") == 1
+
+
+def test_editor_pane_does_not_shift_grid_when_legacy_body_class_is_present(browser, tmp_path):
+    load_editor_pane_legacy_body_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const grid = document.getElementById('grid');
+        const gridStyle = getComputedStyle(grid);
+        const panel = document.querySelector('.file-editor-panel').getBoundingClientRect();
+        return {
+          paddingLeft: Number.parseFloat(gridStyle.paddingLeft),
+          panelLeft: panel.left,
+        };
+        """
+    )
+    assert metrics["paddingLeft"] <= 10
+    assert metrics["panelLeft"] <= 16
+
+
+def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
+    load_codemirror_editor_controls_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const firstTab = document.querySelector('.pane-tab').getBoundingClientRect();
+        const actions = document.getElementById('editor-actions').getBoundingClientRect();
+        const search = document.getElementById('search-field').getBoundingClientRect();
+        const replace = document.getElementById('replace-field').getBoundingClientRect();
+        const nextButton = document.querySelector('.cm-button[name="next"]').getBoundingClientRect();
+        const previousButton = document.querySelector('.cm-button[name="prev"]').getBoundingClientRect();
+        const allButton = document.querySelector('.cm-button[name="select"]').getBoundingClientRect();
+        const replaceButton = document.querySelector('.cm-button[name="replace"]').getBoundingClientRect();
+        const replaceAllButton = document.querySelector('.cm-button[name="replaceAll"]').getBoundingClientRect();
+        const count = document.getElementById('search-count').getBoundingClientRect();
+        const label = document.getElementById('match-label').getBoundingClientRect();
+        const labelStyle = getComputedStyle(document.getElementById('match-label'));
+        const checkbox = document.getElementById('match-case').getBoundingClientRect();
+        const markerContent = getComputedStyle(document.getElementById('wrapped-line'), '::before').content;
+        const marker = document.getElementById('wrap-marker').getBoundingClientRect();
+        const markerStyle = getComputedStyle(document.getElementById('wrap-marker'));
+        const panelRing = getComputedStyle(document.querySelector('.file-editor-panel'), '::after');
+        const searchLabel = getComputedStyle(document.querySelector('.cm-search'), '::before').content;
+        const editorStyle = getComputedStyle(document.getElementById('cm-editor'));
+        const themeStyle = getComputedStyle(document.querySelector('.file-editor-theme-panel'));
+        const wrapStyle = getComputedStyle(document.querySelector('.file-editor-wrap-panel'));
+        const findStyle = getComputedStyle(document.querySelector('.file-editor-find-panel'));
+        const previewStyle = getComputedStyle(document.querySelector('[data-editor-mode="preview"]'));
+        const closeStyle = getComputedStyle(document.querySelector('.file-editor-panel-close'));
+        const syntaxProbe = Array.from(document.querySelectorAll('#light-syntax-probe span')).map(node => {
+          const style = getComputedStyle(node);
+          return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
+        });
+        const filePopoverStyle = getComputedStyle(document.getElementById('file-popover'));
+        const filePopoverCopyStyle = getComputedStyle(document.getElementById('file-popover-copy'));
+        const findControl = document.querySelector('.file-editor-find-panel').getBoundingClientRect();
+        const wrapControl = document.querySelector('.file-editor-wrap-panel').getBoundingClientRect();
+        const modeControl = document.querySelector('[data-editor-mode="preview"]').getBoundingClientRect();
+        const elementAtCenter = rect => document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        const tabRows = [];
+        for (const tab of Array.from(document.querySelectorAll('.pane-tab'))) {
+          const rect = tab.getBoundingClientRect();
+          let row = tabRows.find(item => Math.abs(item.top - rect.top) <= 1);
+          if (!row) {
+            row = {top: rect.top, rights: []};
+            tabRows.push(row);
+          }
+          row.rights.push(rect.right);
+        }
+        return {
+          actionsTopDelta: Math.abs(actions.top - firstTab.top),
+          searchWidth: search.width,
+          replaceWidth: replace.width,
+          nextWidth: nextButton.width,
+          previousWidth: previousButton.width,
+          allWidth: allButton.width,
+          countText: document.getElementById('search-count').textContent,
+          countColor: getComputedStyle(document.getElementById('search-count')).color,
+          nextTitle: document.querySelector('.cm-button[name="next"]').title,
+          previousTitle: document.querySelector('.cm-button[name="prev"]').title,
+          searchNextGap: nextButton.left - search.right,
+          nextPreviousGap: previousButton.left - nextButton.right,
+          previousAllGap: allButton.left - previousButton.right,
+          replaceReplaceAllGap: replaceAllButton.left - replaceButton.right,
+          replaceAllCountGap: count.left - replaceAllButton.right,
+          replaceLeftDelta: Math.abs(search.left - replace.left),
+          replaceWidthDelta: Math.abs(search.width - replace.width),
+          checkboxCenterDelta: Math.abs((checkbox.top + checkbox.height / 2) - (label.top + label.height / 2)),
+          labelFontFamily: labelStyle.fontFamily,
+          labelFontSize: Number.parseFloat(labelStyle.fontSize),
+          markerContent,
+          markerHeight: marker.height,
+          markerColor: markerStyle.color,
+          panelRingWidth: Number.parseFloat(panelRing.borderTopWidth),
+          searchLabel,
+          editorBg: editorStyle.backgroundColor,
+          editorColor: editorStyle.color,
+          themeBg: themeStyle.backgroundColor,
+          themeBorderColor: themeStyle.borderTopColor,
+          themeColor: themeStyle.color,
+          wrapBg: wrapStyle.backgroundColor,
+          wrapBorderColor: wrapStyle.borderTopColor,
+          findBg: findStyle.backgroundColor,
+          previewBg: previewStyle.backgroundColor,
+          closeBg: closeStyle.backgroundColor,
+          syntaxColorCount: new Set(syntaxProbe.map(item => item.color)).size,
+          inlineCodeBg: syntaxProbe[6].background,
+          inlineCodeBorder: syntaxProbe[6].border,
+          filePopoverPointerEvents: filePopoverStyle.pointerEvents,
+          filePopoverCopyPointerEvents: filePopoverCopyStyle.pointerEvents,
+          findControlClickable: Boolean(elementAtCenter(findControl)?.closest?.('.file-editor-find-panel')),
+          wrapControlClickable: Boolean(elementAtCenter(wrapControl)?.closest?.('.file-editor-wrap-panel')),
+          previewControlClickable: Boolean(elementAtCenter(modeControl)?.closest?.('[data-editor-mode="preview"]')),
+          lowerTabRowsUseFullWidth: tabRows.slice(1).some(row => Math.max(...row.rights) > actions.left + 20),
+        };
+        """
+    )
+    assert metrics["actionsTopDelta"] <= 2
+    assert metrics["searchWidth"] >= 80
+    assert metrics["searchWidth"] <= 150
+    assert metrics["replaceWidth"] >= 80
+    assert metrics["nextWidth"] <= 45
+    assert metrics["previousWidth"] <= 75
+    assert metrics["allWidth"] <= 38
+    assert metrics["countText"] == "3/102"
+    assert metrics["countColor"] != "rgb(0, 0, 0)"
+    assert metrics["nextTitle"] == "Next match (Enter)"
+    assert metrics["previousTitle"] == "Previous match (Shift+Enter)"
+    assert 3 <= metrics["searchNextGap"] <= 12
+    assert metrics["nextPreviousGap"] <= 6
+    assert metrics["previousAllGap"] <= 6
+    assert metrics["replaceReplaceAllGap"] <= 4
+    assert metrics["replaceAllCountGap"] <= 8
+    assert metrics["replaceLeftDelta"] <= 1.5
+    assert metrics["replaceWidthDelta"] <= 2
+    assert metrics["checkboxCenterDelta"] <= 1.5
+    assert (
+        "Arial Narrow" in metrics["labelFontFamily"]
+        or "Roboto Condensed" in metrics["labelFontFamily"]
+        or metrics["labelFontSize"] <= 11
+    )
+    assert metrics["markerContent"] in ("none", '""')
+    assert metrics["markerHeight"] > 0
+    assert metrics["markerColor"] != "rgb(0, 0, 0)"
+    assert metrics["panelRingWidth"] >= 3
+    assert metrics["searchLabel"] in ("none", '""')
+    assert metrics["editorBg"] != "rgb(15, 17, 21)"
+    assert metrics["editorColor"] != "rgb(228, 232, 238)"
+    assert metrics["themeBg"] != "rgba(0, 0, 0, 0)"
+    assert metrics["themeBorderColor"] != "rgba(0, 0, 0, 0)"
+    assert metrics["themeColor"] != metrics["editorColor"]
+    assert metrics["wrapBg"] != "rgba(0, 0, 0, 0)"
+    assert metrics["wrapBorderColor"] != "rgba(0, 0, 0, 0)"
+    assert metrics["findBg"] != "rgba(0, 0, 0, 0)"
+    assert metrics["previewBg"] != "rgba(0, 0, 0, 0)"
+    assert metrics["closeBg"] != "rgba(0, 0, 0, 0)"
+    assert metrics["syntaxColorCount"] >= 6
+    assert metrics["inlineCodeBg"] != "rgba(0, 0, 0, 0)"
+    assert metrics["inlineCodeBorder"] != "rgba(0, 0, 0, 0)"
+    assert metrics["filePopoverPointerEvents"] == "none"
+    assert metrics["filePopoverCopyPointerEvents"] == "auto"
+    assert metrics["findControlClickable"]
+    assert metrics["wrapControlClickable"]
+    assert metrics["previewControlClickable"]
+    assert metrics["lowerTabRowsUseFullWidth"]
+
+
+def test_codemirror_bundle_exports_decoration_for_html_semantic_marks(browser, tmp_path):
+    load_codemirror_bundle_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const cm = window.YOLOmuxCodeMirror || {};
+        const mark = cm.Decoration?.mark?.({attributes: {style: 'font-weight:700'}});
+        return {
+          hasDecoration: typeof cm.Decoration?.mark === 'function',
+          hasDecorationSet: typeof cm.Decoration?.set === 'function',
+          markWorks: Boolean(mark && typeof mark.range === 'function'),
+        };
+        """
+    )
+    assert metrics["hasDecoration"]
+    assert metrics["hasDecorationSet"]
+    assert metrics["markWorks"]
+
+
+def test_clicking_finder_does_not_change_terminal_pane_toolbar(browser, tmp_path):
+    load_finder_click_toolbar_fixture(browser, tmp_path)
+    before = browser.execute_script(
+        """
+        const toolbar = document.getElementById('terminal-toolbar');
+        const rect = toolbar.getBoundingClientRect();
+        return {
+          html: toolbar.innerHTML,
+          display: getComputedStyle(toolbar).display,
+          buttonCount: toolbar.querySelectorAll('.tab').length,
+          left: rect.left,
+          width: rect.width,
+        };
+        """
+    )
+    browser.find_element("id", "finder-panel").click()
+    after = browser.execute_script(
+        """
+        const toolbar = document.getElementById('terminal-toolbar');
+        const rect = toolbar.getBoundingClientRect();
+        return {
+          html: toolbar.innerHTML,
+          display: getComputedStyle(toolbar).display,
+          buttonCount: toolbar.querySelectorAll('.tab').length,
+          left: rect.left,
+          width: rect.width,
+        };
+        """
+    )
+    assert after == before

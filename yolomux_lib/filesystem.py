@@ -64,10 +64,24 @@ def _validated_path(raw: str) -> Path:
     return Path(os.path.expanduser(raw))
 
 
+def _repo_marker_is_real(marker_path: Path, marker: str) -> bool:
+    if not marker_path.exists():
+        return False
+    if marker == ".git":
+        return marker_path.is_file() or (marker_path / "HEAD").exists()
+    if marker == ".hg":
+        return (marker_path / "requires").exists() or (marker_path / "store").exists()
+    if marker == ".svn":
+        return (marker_path / "wc.db").exists() or (marker_path / "entries").exists()
+    if marker == ".jj":
+        return (marker_path / "repo").exists() or (marker_path / "working_copy").exists()
+    return False
+
+
 def _directory_is_repo(path: Path) -> bool:
     for marker in REPO_MARKERS:
         try:
-            if (path / marker).exists():
+            if _repo_marker_is_real(path / marker, marker):
                 return True
         except OSError:
             continue

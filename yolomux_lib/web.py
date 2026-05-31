@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from .core import *
+from .settings import settings_payload
+from .yolo_rules import rules_status
 
 
 STATIC_CONTENT_TYPES = {
@@ -8,6 +10,7 @@ STATIC_CONTENT_TYPES = {
     "login.css": "text/css; charset=utf-8",
     "setup-auth.css": "text/css; charset=utf-8",
     "setup-auth.js": "application/javascript; charset=utf-8",
+    "codemirror.js": "application/javascript; charset=utf-8",
     "xterm.css": "text/css; charset=utf-8",
     "xterm.js": "application/javascript; charset=utf-8",
     "yolomux.css": "text/css; charset=utf-8",
@@ -67,6 +70,9 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
         "serverHostname": SERVER_HOSTNAME,
         "version": YOLOMUX_VERSION,
         "versionCommitTime": yolomux_commit_time_pt(),
+        "settingsPayload": settings_payload(),
+        "yoloRulesPayload": rules_status(),
+        "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
     }
     bootstrap_json = html.escape(json.dumps(bootstrap, separators=(",", ":")), quote=False)
     return f"""<!doctype html>
@@ -108,6 +114,8 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
   <div class="file-explorer-tree-col">
     <div class="file-explorer-head">
       <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle" title="Show hidden files (dotfiles)" aria-pressed="false">.*</button>
+      <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle" title="Root mode: fixed" aria-pressed="false">Root</button>
+      <div id="fileExplorerQuickAccess" class="file-explorer-quick-access" aria-label="Quick paths"></div>
       <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/" spellcheck="false" aria-label="File Explorer root path">
       <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy" title="Copy current path" aria-label="Copy current path"></button>
       <button type="button" id="fileExplorerClose" class="file-explorer-close" title="Close File Explorer" aria-label="Close"></button>
@@ -117,14 +125,24 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
   <div class="file-editor" id="fileEditor" hidden>
     <div class="file-editor-head">
       <div class="file-editor-path" id="fileEditorPath"></div>
-      <button type="button" id="fileEditorPreview" class="file-editor-preview" title="Toggle Markdown preview" hidden>Preview</button>
+      <div id="fileEditorMode" class="file-editor-mode-control" role="group" aria-label="Editor mode" hidden>
+        <button type="button" data-editor-mode="edit" title="Edit" aria-label="Edit"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
+        <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
+        <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
+      </div>
+      <button type="button" id="fileEditorGutter" class="file-editor-gutter" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
       <button type="button" id="fileEditorWrap" class="file-editor-wrap" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
+      <button type="button" id="fileEditorFind" class="file-editor-find" title="Find in file (Ctrl/Cmd+F)" aria-label="Find in file" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+      <button type="button" id="fileEditorTheme" class="file-editor-theme" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
       <button type="button" id="fileEditorSave" class="file-editor-save" title="Save (Ctrl/Cmd+S)" aria-label="Save file"><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
       <button type="button" id="fileEditorClose" class="file-editor-close" title="Close current file" aria-label="Close"></button>
     </div>
-    <textarea id="fileEditorTextarea" class="file-editor-textarea" spellcheck="false" wrap="off"></textarea>
-    <div id="fileEditorPreviewPane" class="file-editor-preview-pane markdown-body" hidden></div>
-    <pre id="fileEditorHighlight" class="file-editor-highlight" hidden><code id="fileEditorHighlightCode"></code></pre>
+    <div id="fileEditorContent" class="file-editor-content file-editor-standalone-content">
+      <pre id="fileEditorHighlight" class="file-editor-highlight" aria-hidden="true" hidden><code id="fileEditorHighlightCode"></code></pre>
+      <textarea id="fileEditorTextarea" class="file-editor-textarea" spellcheck="false" wrap="off"></textarea>
+      <div id="fileEditorCodeMirror" class="file-editor-codemirror" hidden></div>
+      <div id="fileEditorPreviewPane" class="file-editor-preview-pane markdown-body" hidden></div>
+    </div>
     <div id="fileEditorStatus" class="file-editor-status"></div>
   </div>
 </aside>

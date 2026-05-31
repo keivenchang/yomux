@@ -6,9 +6,12 @@ import sys
 from pathlib import Path
 from urllib.parse import parse_qsl
 
+import yaml
+
 from .app import TmuxWebtermApp
 from .core import *
 from . import filesystem
+from . import yolo_rules
 from .filesystem import FilesystemError
 from .web import html_page
 from .web import login_html
@@ -285,6 +288,12 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/notify":
             self.write_json(self.server.app.notify_status())
             return
+        if parsed.path == "/api/settings":
+            self.write_json(self.server.app.settings_payload())
+            return
+        if parsed.path == "/api/yolo-rules":
+            self.write_json(self.server.app.yolo_rules_payload())
+            return
         if parsed.path == "/api/events":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [None])[0]
@@ -293,6 +302,33 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 100
             payload, status = self.server.app.events_payload(session, limit)
+            self.write_json(payload, status=status)
+            return
+        if parsed.path == "/api/search":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [None])[0]
+            query = qs.get("q", [""])[0]
+            try:
+                limit = int(qs.get("limit", ["100"])[0])
+            except ValueError:
+                limit = 100
+            payload, status = self.server.app.search_payload(query, session, limit)
+            self.write_json(payload, status=status)
+            return
+        if parsed.path == "/api/run-history":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [None])[0]
+            payload, status = self.server.app.run_history_payload(session)
+            self.write_json(payload, status=status)
+            return
+        if parsed.path == "/api/session-files":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [None])[0]
+            try:
+                hours = float(qs.get("hours", ["24"])[0])
+            except ValueError:
+                hours = 24.0
+            payload, status = self.server.app.session_files_payload(session, hours)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/summary":
@@ -400,6 +436,20 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self.write_json({"error": "expected_mtime must be an integer"}, status=HTTPStatus.BAD_REQUEST)
                 return
+        if yolo_rules.is_rules_file_path(raw_path):
+            try:
+                yolo_rules.validate_rule_file_text(str(content), path=yolo_rules.active_rule_path())
+            except (ValueError, yaml.YAMLError) as exc:
+                self.write_json({"error": f"YOLO rules invalid: {exc}", "path": raw_path}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self.write_filesystem_json(
+                raw_path,
+                lambda: {
+                    **filesystem.write_file(raw_path, content, expected_mtime=expected_mtime),
+                    "yolo_rules": yolo_rules.reload_rules(),
+                },
+            )
+            return
         self.write_filesystem_json(raw_path, lambda: filesystem.write_file(raw_path, content, expected_mtime=expected_mtime))
 
     def handle_fs_delete(self, parsed: Any) -> None:
@@ -466,6 +516,18 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             enabled = parse_bool(qs.get("enabled", ["0"])[0])
             self.write_json(self.server.app.set_notify(enabled))
+            return
+        if parsed.path == "/api/settings":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            self.write_json(self.server.app.save_settings(payload.get("settings", payload)))
+            return
+        if parsed.path == "/api/yolo-rules/reload":
+            self.write_json(self.server.app.reload_yolo_rules())
+            return
+        if parsed.path == "/api/yolo-rules/open":
+            self.write_json(self.server.app.ensure_yolo_rules_file())
             return
         if parsed.path == "/api/tmux-next":
             qs = parse_qs(parsed.query)

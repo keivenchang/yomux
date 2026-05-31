@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from . import session_files
+from . import yolo_rules
 from .core import *
+from .settings import save_settings
+from .settings import settings_payload
 
 
 METADATA_BADGE_PULSE_SECONDS = 20.0
@@ -78,6 +82,36 @@ class TmuxWebtermApp:
     def notify_status(self) -> dict[str, Any]:
         return {"enabled": bool(read_yolomux_state().get("notify_enabled", False))}
 
+    def settings_payload(self) -> dict[str, Any]:
+        return settings_payload()
+
+    def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        return save_settings(patch)
+
+    def yolo_rules_payload(self) -> dict[str, Any]:
+        return yolo_rules.rules_status()
+
+    def reload_yolo_rules(self) -> dict[str, Any]:
+        return yolo_rules.reload_rules()
+
+    def ensure_yolo_rules_file(self) -> dict[str, Any]:
+        yolo_rules.ensure_rule_file()
+        return yolo_rules.reload_rules()
+
+    def auto_approve_interval_seconds(self) -> float:
+        value = settings_payload().get("settings", {}).get("performance", {}).get("auto_approve_interval_seconds", 0.5)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.5
+
+    def metadata_badge_pulse_seconds(self) -> float:
+        value = settings_payload().get("settings", {}).get("appearance", {}).get("metadata_badge_pulse_seconds", METADATA_BADGE_PULSE_SECONDS)
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return METADATA_BADGE_PULSE_SECONDS
+
     def set_notify(self, enabled: bool) -> dict[str, Any]:
         update_yolomux_state({"notify_enabled": enabled})
         self.log_event(None, "notify_enabled" if enabled else "notify_disabled", "Notify enabled" if enabled else "Notify disabled", {})
@@ -98,6 +132,75 @@ class TmuxWebtermApp:
             "session": session or "",
             "limit": bounded_limit,
         }, HTTPStatus.OK
+
+    def search_payload(self, query: str, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
+        if session and session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        text = str(query or "").strip()
+        bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
+        event_matches = self.event_log.search(text, session=session, limit=bounded_limit)
+        summary_matches: list[dict[str, Any]] = []
+        if text:
+            search_sessions = [session] if session else self.sessions
+            needle = text.lower()
+            for name in search_sessions:
+                summary, status = self.summary(name)
+                summary_text = summary.get("text") if status == HTTPStatus.OK else ""
+                if isinstance(summary_text, str) and needle in summary_text.lower():
+                    summary_matches.append({
+                        "session": name,
+                        "type": "summary",
+                        "text": truncate_text(summary_text, 2000),
+                    })
+                    if len(summary_matches) >= bounded_limit:
+                        break
+        return {
+            "query": text,
+            "session": session or "",
+            "limit": bounded_limit,
+            "events": event_matches,
+            "summaries": summary_matches,
+        }, HTTPStatus.OK
+
+    def run_history_payload(self, session: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
+        refresh_errors = self.refresh_sessions()
+        if session and session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        scope = [session] if session else self.sessions
+        infos, errors = discover_sessions(scope)
+        runs: list[dict[str, Any]] = []
+        for name in scope:
+            info = infos.get(name)
+            if info is None:
+                continue
+            selected = info.selected_pane
+            agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
+            project = session_project_metadata(info, self.metadata_cache, allow_network=False)
+            transcript_mtime = 0.0
+            if agent and agent.transcript:
+                transcript_mtime = session_files.file_mtime(Path(agent.transcript))
+            runs.append({
+                "session": name,
+                "agent": asdict(agent) if agent else None,
+                "cwd": agent.cwd if agent and agent.cwd else selected.current_path if selected else "",
+                "tmux_target": selected.target if selected else "",
+                "tmux_command": selected.process_label or selected.command if selected else "",
+                "transcript_mtime": transcript_mtime,
+                "project": project,
+                "recent_events": self.event_log.tail(session=name, limit=5),
+            })
+        runs.sort(key=lambda item: (-float(item.get("transcript_mtime") or 0), item["session"]))
+        return {"session": session or "", "runs": runs, "errors": [*refresh_errors, *errors]}, HTTPStatus.OK
+
+    def session_files_payload(self, session: str | None = None, hours: float = 24.0) -> tuple[dict[str, Any], HTTPStatus]:
+        refresh_errors = self.refresh_sessions()
+        if session and session not in self.sessions:
+            return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
+        scope = [session] if session else self.sessions
+        infos, errors = discover_sessions(scope)
+        payload, status = session_files.session_files_payload(session, infos, hours)
+        payload["errors"] = [*refresh_errors, *errors, *payload.get("errors", [])]
+        return payload, status
 
     def client_event(self, event: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         session = event.get("session")
@@ -188,7 +291,7 @@ class TmuxWebtermApp:
                     continue
                 for badge in METADATA_BADGES:
                     if self.metadata_badge_change_should_pulse(previous_signature, next_signature, badge):
-                        self.metadata_badge_pulse_until.setdefault(session, {})[badge] = now + METADATA_BADGE_PULSE_SECONDS
+                        self.metadata_badge_pulse_until.setdefault(session, {})[badge] = now + self.metadata_badge_pulse_seconds()
                         state_changed = True
 
             if self.metadata_badge_signatures != next_signatures:
@@ -515,6 +618,15 @@ class TmuxWebtermApp:
                 lines.append("")
                 lines.append("recent transcript activity:")
                 lines.extend(f"- {line}" for line in recent[-8:])
+        recent_events = self.event_log.tail(session=session, limit=5)
+        if recent_events:
+            lines.append("")
+            lines.append("recent events:")
+            for event in recent_events[-5:]:
+                event_time = event.get("time", "")
+                event_type = event.get("type", "")
+                message = event.get("message", "")
+                lines.append(f"- {event_time} {event_type}: {message}".strip())
         if errors:
             lines.append("")
             lines.append("discovery warnings:")
@@ -780,13 +892,25 @@ class TmuxWebtermApp:
         return self.auto_approve_session_status(session), HTTPStatus.OK
 
     def start_auto_approve_worker(self, session: str, takeover: bool) -> tuple[AutoApproveWorker | None, dict[str, Any]]:
-        worker = AutoApproveWorker(session, event_callback=self.log_auto_event, owner_extra=self.control_server.owner_payload())
+        worker = AutoApproveWorker(
+            session,
+            interval=self.auto_approve_interval_seconds(),
+            event_callback=self.log_auto_event,
+            owner_extra=self.control_server.owner_payload(),
+            dangerously_yolo=self.dangerously_yolo,
+        )
         started, owner = worker.start()
         if started:
             return worker, worker.status()
         locked_owner = owner
         if takeover and self.request_auto_approve_release(session, owner):
-            worker = AutoApproveWorker(session, event_callback=self.log_auto_event, owner_extra=self.control_server.owner_payload())
+            worker = AutoApproveWorker(
+                session,
+                interval=self.auto_approve_interval_seconds(),
+                event_callback=self.log_auto_event,
+                owner_extra=self.control_server.owner_payload(),
+                dangerously_yolo=self.dangerously_yolo,
+            )
             started, owner = worker.start()
             if started:
                 self.log_event(session, "yolo_takeover", "YOLO moved from another server", {"owner": locked_owner or {}})
@@ -894,6 +1018,7 @@ class TmuxWebtermApp:
             "session_order": self.sessions,
             "sessions": {name: self.auto_approve_session_status(name) for name in self.sessions},
             "errors": refresh_errors,
+            "rules": self.yolo_rules_payload(),
         }, HTTPStatus.OK
 
     def stop_auto_approve_all(self) -> None:
