@@ -8,7 +8,7 @@ from yolomux_lib.settings import settings_payload
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
-            "appearance": {"ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "file_explorer_font_size": 1, "tab_width": 20},
+            "appearance": {"ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "file_explorer_font_size": 1, "tab_width": 20},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_ms": 3000},
             "editor": {"engine": "bad"},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
@@ -21,6 +21,8 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["terminal_font_size"] == 28
     assert settings["appearance"]["editor_font_size"] == 28
     assert settings["appearance"]["editor_color_scheme"] == "vscode-dark-plus"
+    assert settings["appearance"]["editor_dark_color_scheme"] == "vscode-dark-plus"
+    assert settings["appearance"]["editor_light_color_scheme"] == "github-light"
     assert settings["appearance"]["file_explorer_font_size"] == 8
     assert settings["appearance"]["tab_width"] == 120
     assert settings["file_explorer"]["root_mode"] == "fixed"
@@ -40,6 +42,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     payload = settings_payload(path)
 
     assert payload["settings"] == default_settings()
+    assert payload["settings"]["general"]["auto_focus"] is False
     assert path.exists()
     assert "YOLOmux user preferences" in path.read_text()
 

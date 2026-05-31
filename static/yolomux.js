@@ -162,6 +162,8 @@ let editorEngine = defaultEditorEngine;
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
 let preferencesSearchText = '';
+let preferencesResetConfirmVisible = false;
+let preferencesSearchFresh = true;
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
 let sessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let sessionFilesLoading = false;
@@ -219,7 +221,7 @@ let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
 let editorFontSize = initialSetting('appearance.editor_font_size', 13);
 let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
 let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
-let autoFocusEnabled = initialSetting('general.auto_focus', true);
+let autoFocusEnabled = initialSetting('general.auto_focus', false);
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;
@@ -500,6 +502,7 @@ let fileExplorerSelectionAnchor = null;
 let fileExplorerManualSelectionActive = false;
 let fileTreeRenamePath = null;
 let fileExplorerPathError = '';
+let fileExplorerLastListError = null;
 let fileImagePreviewPopover = null;
 let fileImagePreviewController = null;
 let fileExplorerInteractionGeneration = 0;
@@ -654,8 +657,21 @@ function normalizeEditorSchemeId(value) {
   return EDITOR_SCHEMES[normalized] ? normalized : defaultEditorScheme;
 }
 
+function normalizeEditorSchemeForMode(value, dark) {
+  const id = normalizeEditorSchemeId(value);
+  const scheme = EDITOR_SCHEMES[id];
+  if (scheme && scheme.dark === dark) return id;
+  return dark ? defaultEditorScheme : defaultLightEditorScheme;
+}
+
 function activeEditorScheme() {
   return EDITOR_SCHEMES[normalizeEditorSchemeId(fileEditorThemeMode)] || EDITOR_SCHEMES[defaultEditorScheme] || EDITOR_SCHEMES.dark;
+}
+
+function configuredEditorSchemeForMode(dark) {
+  const path = dark ? 'appearance.editor_dark_color_scheme' : 'appearance.editor_light_color_scheme';
+  const fallback = dark ? defaultEditorScheme : defaultLightEditorScheme;
+  return normalizeEditorSchemeForMode(initialSetting(path, fallback), dark);
 }
 
 function readStoredEditorThemeMode() {
@@ -691,9 +707,7 @@ function readConfiguredEditorEngine() {
 }
 
 function readConfiguredEditorScheme() {
-  const configured = nestedSetting(clientSettings, 'appearance.editor_color_scheme', '');
-  if (configured) return normalizeEditorSchemeId(configured);
-  return normalizeEditorSchemeId(initialSetting('appearance.editor_color_scheme', readStoredEditorThemeMode()));
+  return normalizeEditorSchemeId(readStoredEditorThemeMode());
 }
 
 function codeMirrorRequested() {
@@ -739,7 +753,7 @@ function clearFocusedTerminal(session) {
   updatePanelInactiveOverlays();
 }
 
-function setFocusedPanelItem(item) {
+function setFocusedPanelItem(item, options = {}) {
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   clearPendingFileEditorFocusExcept(item);
@@ -750,6 +764,9 @@ function setFocusedPanelItem(item) {
   updateSessionButtonStates();
   updatePanelInactiveOverlays();
   if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item);
+  if (isPreferencesItem(item) && options.focusPreferencesSearch !== false) {
+    focusFreshPreferencesSearchSoon();
+  }
 }
 
 function clearPendingFileEditorFocusExcept(item) {
@@ -3537,6 +3554,7 @@ function bindAppMenuHover(wrapper) {
     anchor: wrapper,
     popover: () => wrapper.querySelector(':scope > .app-menu-popover'),
     stateClass: '',
+    canOpen: () => autoFocusEnabled || appMenuIsOpen(),
     showDelay: () => (appMenuIsOpen() ? 0 : menuHoverOpenDelayMs),
     hideDelay: () => menuHoverCloseDelayMs,
     stillActive: () => wrapper.matches?.(':hover'),
@@ -3546,7 +3564,8 @@ function bindAppMenuHover(wrapper) {
       if (!currentWrapper.classList.contains('open')) openAppMenu(currentWrapper, {focusFirst: false, pinned: false});
     },
     onClose: () => {
-      if (!wrapper.matches?.(':hover')) closeAppMenus();
+      const menuId = wrapper.dataset.appMenu || '';
+      if (!wrapper.matches?.(':hover') && openAppMenuId === menuId) closeAppMenus();
     },
   });
 }
@@ -3637,17 +3656,20 @@ async function fetchDirectory(path, options = {}) {
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       fileExplorerPathError = payload.error || `Cannot open ${root} (${response.status})`;
+      fileExplorerLastListError = {path: root, status: response.status, error: fileExplorerPathError, network: false};
       console.warn('fs list failed', root, response.status, fileExplorerPathError);
       return null;
     }
     const payload = await response.json();
     const entries = payload.entries || [];
     fileExplorerPathError = '';
+    fileExplorerLastListError = null;
     markNewDirectoryEntries(root, entries);
     if (options.recordSignature !== false) recordDirectorySignature(root, entries);
     return entries;
   } catch (err) {
     fileExplorerPathError = `Cannot open ${root}: ${err}`;
+    fileExplorerLastListError = {path: root, status: 0, error: fileExplorerPathError, network: true};
     console.warn('fs list error', root, err);
     return null;
   }
@@ -4827,10 +4849,24 @@ function dirnameOf(path) {
 }
 
 async function fetchFileEntry(path) {
+  const result = await fetchFileEntryStatus(path);
+  return result.entry;
+}
+
+async function fetchFileEntryStatus(path) {
   const entries = await fetchDirectory(dirnameOf(path));
-  if (!Array.isArray(entries)) return null;
+  if (!Array.isArray(entries)) {
+    const error = fileExplorerLastListError;
+    return {
+      entry: null,
+      missing: error?.status === 404,
+      error: error?.error || `Cannot inspect ${path}`,
+      network: error?.network === true,
+    };
+  }
   const name = basenameOf(path);
-  return entries.find(entry => entry.name === name) || null;
+  const entry = entries.find(entry => entry.name === name) || null;
+  return {entry, missing: !entry, error: entry ? '' : `path not found: ${path}`, network: false};
 }
 
 function fileEntryChanged(state, entry) {
@@ -4950,16 +4986,28 @@ function fileErrorState(message) {
   };
 }
 
+function missingFileState(message = 'file deleted or moved on disk') {
+  const state = fileErrorState(message);
+  state.externalMissing = true;
+  return state;
+}
+
+function openFileIsMissing(path) {
+  return openFiles.get(path)?.externalMissing === true;
+}
+
 function clearOpenFileExternalState(state) {
   if (!state) return state;
   delete state.externalChanged;
   delete state.externalMissing;
+  delete state.externalError;
   return state;
 }
 
 function openFileStatus(state) {
   if (!state) return {message: '', level: ''};
   if (state.externalMissing) return {message: 'deleted on disk; unsaved edits kept', level: 'warn'};
+  if (state.externalError) return {message: `refresh failed; file state unknown: ${state.externalError}`, level: 'warn'};
   if (state.externalChanged) return {message: 'changed on disk; unsaved edits kept', level: 'warn'};
   if (state.dirty) return {message: 'modified', level: ''};
   if (state.kind === 'text') return {message: `${state.original.length} chars`, level: ''};
@@ -5023,7 +5071,11 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       const message = payload.error || response.status;
-      const state = response.status === 413 ? tooLargeFileState(entry?.size ?? null, String(message)) : fileErrorState(message);
+      const state = response.status === 413
+        ? tooLargeFileState(entry?.size ?? null, String(message))
+        : response.status === 404
+          ? missingFileState(String(message))
+          : fileErrorState(message);
       await openFilesSetAndShow(fullPath, state, openOptions);
       return;
     }
@@ -5042,8 +5094,12 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
 }
 
 async function openFileStateFromDisk(path, entry = null) {
-  const fileEntry = entry || await fetchFileEntry(path);
-  if (!fileEntry) return {missing: true};
+  const fetched = entry ? {entry, missing: false, error: '', network: false} : await fetchFileEntryStatus(path);
+  const fileEntry = fetched.entry;
+  if (!fileEntry) {
+    if (fetched.missing) return {missing: true};
+    return {state: fileErrorState(fetched.error || 'failed to inspect file')};
+  }
   if (Number(fileEntry.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(fileEntry.size));
     state.mtime = fileEntry.mtime || 0;
@@ -5065,7 +5121,11 @@ async function openFileStateFromDisk(path, entry = null) {
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       const message = String(payload.error || response.status);
-      const state = response.status === 413 ? tooLargeFileState(fileEntry.size ?? null, message) : fileErrorState(message);
+      const state = response.status === 413
+        ? tooLargeFileState(fileEntry.size ?? null, message)
+        : response.status === 404
+          ? missingFileState(message)
+          : fileErrorState(message);
       state.mtime = fileEntry.mtime || 0;
       state.size = fileEntry.size ?? null;
       return {state};
@@ -5090,9 +5150,17 @@ function markOpenFileMissing(path) {
   if (state.dirty) {
     state.externalMissing = true;
     delete state.externalChanged;
+    delete state.externalError;
   } else {
-    openFiles.set(path, fileErrorState('file deleted or moved on disk'));
+    openFiles.set(path, missingFileState());
   }
+  renderOpenFilePath(path);
+}
+
+function markOpenFileExternalError(path, error) {
+  const state = openFiles.get(path);
+  if (!state) return;
+  state.externalError = String(error || 'refresh failed');
   renderOpenFilePath(path);
 }
 
@@ -5120,15 +5188,21 @@ async function reloadOpenFileFromDisk(path, options = {}) {
 async function refreshOpenFilesIfChanged() {
   for (const [path, state] of Array.from(openFiles.entries())) {
     if (!state || state.loading) continue;
-    const entry = await fetchFileEntry(path);
+    const fetched = await fetchFileEntryStatus(path);
+    const entry = fetched.entry;
     if (!entry) {
-      if (state.externalMissing) continue;
-      markOpenFileMissing(path);
+      if (fetched.missing) {
+        if (state.externalMissing) continue;
+        markOpenFileMissing(path);
+      } else {
+        markOpenFileExternalError(path, fetched.error);
+      }
       continue;
     }
     if (!fileEntryChanged(state, entry)) {
-      if (state.externalChanged || state.externalMissing) {
+      if (state.externalChanged || state.externalMissing || state.externalError) {
         delete state.externalMissing;
+        delete state.externalError;
         if (!state.dirty) delete state.externalChanged;
         renderOpenFilePath(path);
       }
@@ -5143,6 +5217,7 @@ async function refreshOpenFilesIfChanged() {
       }
       state.externalChanged = externalChanged;
       delete state.externalMissing;
+      delete state.externalError;
       renderOpenFilePath(path);
       continue;
     }
@@ -6046,7 +6121,7 @@ function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
 function updateEditorThemeButton(button) {
   if (!button) return;
   const scheme = activeEditorScheme();
-  const nextScheme = EDITOR_SCHEMES[scheme.dark ? defaultLightEditorScheme : defaultEditorScheme] || scheme;
+  const nextScheme = EDITOR_SCHEMES[configuredEditorSchemeForMode(!scheme.dark)] || scheme;
   button.classList.toggle('theme-dark', scheme.dark);
   button.classList.toggle('theme-light', !scheme.dark);
   button.dataset.editorTheme = scheme.id;
@@ -6084,7 +6159,7 @@ function setFileEditorThemeMode(mode) {
 }
 
 function cycleEditorThemeMode() {
-  setFileEditorThemeMode(activeEditorScheme().dark ? defaultLightEditorScheme : defaultEditorScheme);
+  setFileEditorThemeMode(configuredEditorSchemeForMode(!activeEditorScheme().dark));
 }
 
 function updateEditorWrapButton(button) {
@@ -6246,7 +6321,7 @@ function applySettingsPayload(payload, options = {}) {
   editorFontSize = numberSetting('appearance.editor_font_size', 13);
   fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 13);
   terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
-  autoFocusEnabled = boolSetting('general.auto_focus', true);
+  autoFocusEnabled = boolSetting('general.auto_focus', false);
   const previousEditorEngine = editorEngine;
   const previousEditorScheme = fileEditorThemeMode;
   editorEngine = readConfiguredEditorEngine();
@@ -7711,7 +7786,7 @@ function activatePaneTab(side, session, options = {}) {
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
   next[side].active = session;
   applyLayoutSlots(next, {focusSession: session});
-  if (isPreferencesItem(session)) focusPreferencesSearchSoon();
+  if (isPreferencesItem(session)) focusFreshPreferencesSearchSoon();
   if (options.userInitiated && isTmuxSession(session)) focusTerminalFromUserAction(session, 25);
 }
 
@@ -7735,7 +7810,7 @@ async function selectSession(session) {
     return;
   }
   await activateTabInExistingPane(session);
-  if (shouldFocusPreferencesSearch) focusPreferencesSearchSoon();
+  if (shouldFocusPreferencesSearch) focusFreshPreferencesSearchSoon();
 }
 
 function sessionAgentKind(session) {
@@ -8296,7 +8371,7 @@ function focusPanel(session, options = {}) {
   if (isVirtualItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session);
-    if (isPreferencesItem(session)) focusPreferencesSearchSoon(panel);
+    if (isPreferencesItem(session)) focusFreshPreferencesSearchSoon(panel);
     return;
   }
   activateTab(session, 'terminal', {userInitiated: options.userInitiated === true});
@@ -9072,7 +9147,8 @@ function createPaneTab(side, item) {
   tab.role = 'button';
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
-  tab.className = `pane-tab ${virtualClass} ${active ? 'active' : ''}`;
+  const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
+  tab.className = `pane-tab ${virtualClass} ${missingFileClass} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
@@ -9092,7 +9168,7 @@ function createPaneTab(side, item) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? fileExplorerLabel() : isPrefs ? 'Preferences' : isChanges ? 'Changes' : isEditor ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isInfo ? 'Branch Info' : isFiles ? fileExplorerLabel() : isPrefs ? 'Preferences' : isChanges ? 'Changes' : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
@@ -9246,7 +9322,8 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
   const state = openFiles.get(path) || {};
   const dirty = state.dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${dirty}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
+  const missing = openFileIsMissing(path) ? '<span class="file-tab-missing-badge" title="missing on disk" aria-label="missing on disk">missing</span>' : '';
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
 }
 
 function tmuxPaneTabHtml(session, info, state, auto) {
@@ -9403,11 +9480,19 @@ function bindPanelShell(panel, session) {
   bindPanelPopover(panel);
   bindPaneFrameControls(panel, session);
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
-  panel.addEventListener('pointerdown', () => {
-    if (!isTmuxSession(session)) setFocusedPanelItem(session);
+  panel.addEventListener('pointerdown', event => {
+    if (!isTmuxSession(session)) {
+      setFocusedPanelItem(session, {
+        focusPreferencesSearch: !preferenceFocusTargetIsInteractive(event.target),
+      });
+    }
   }, {capture: true});
-  panel.addEventListener('focusin', () => {
-    if (!isTmuxSession(session)) setFocusedPanelItem(session);
+  panel.addEventListener('focusin', event => {
+    if (!isTmuxSession(session)) {
+      setFocusedPanelItem(session, {
+        focusPreferencesSearch: !preferenceFocusTargetIsInteractive(event.target),
+      });
+    }
   });
   const head = panel.querySelector('.panel-head');
   if (head) {
@@ -9737,7 +9822,7 @@ function createInfoPanel() {
   return panel;
 }
 
-function editorSchemePreferenceChoices() {
+function editorSchemePreferenceChoices(options = {}) {
   const preferredOrder = [
     'vscode-dark-plus',
     'one-dark',
@@ -9751,10 +9836,12 @@ function editorSchemePreferenceChoices() {
     'solarized-light',
   ];
   const ids = [...preferredOrder, ...EDITOR_SCHEME_IDS.filter(id => !preferredOrder.includes(id))];
-  return ids.map(id => {
-    const scheme = EDITOR_SCHEMES[id];
-    return {value: id, label: scheme.label, group: scheme.dark ? 'Dark' : 'Light'};
-  });
+  return ids
+    .filter(id => options.dark === undefined || EDITOR_SCHEMES[id]?.dark === options.dark)
+    .map(id => {
+      const scheme = EDITOR_SCHEMES[id];
+      return {value: id, label: scheme.label, group: scheme.dark ? 'Dark' : 'Light'};
+    });
 }
 
 function preferenceSections() {
@@ -9764,7 +9851,7 @@ function preferenceSections() {
       {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean', help: 'Log matched rules and actions without pressing an approval key.'},
     ]},
     {title: 'General', items: [
-      {path: 'general.auto_focus', label: 'Auto-focus active pane', type: 'boolean', help: 'Focus the active pane after tab switches and layout moves, including terminals, editors, Finder/File Explorer, Preferences, and other views.'},
+      {path: 'general.auto_focus', label: 'Auto-focus active pane', type: 'boolean', help: 'Focus panes and enable hover-open menus after tab switches, layout moves, and hover gestures. Off by default.'},
       {path: 'general.default_layout', label: 'Default layout', type: 'select', choices: ['single', 'grid', 'wall'], help: 'Preferred starting pane layout for new browser visits.'},
       {path: 'general.default_sessions', label: 'Default sessions', type: 'list', help: 'Preferred tmux sessions to open first, one session name per line.'},
     ]},
@@ -9772,7 +9859,8 @@ function preferenceSections() {
       {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: 'Font size for menus, tabs, and compact UI text. Values outside the range are clamped.'},
       {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by xterm.js panes. Values outside the range are clamped.'},
       {path: 'appearance.editor_font_size', label: 'Editor font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by editor text, code highlighting, and rendered previews.'},
-      {path: 'appearance.editor_color_scheme', label: 'Editor color scheme', type: 'select', choices: editorSchemePreferenceChoices(), help: 'Named CodeMirror and preview palette. GitHub Light is the high-contrast light option.'},
+      {path: 'appearance.editor_dark_color_scheme', label: 'Dark editor color scheme', type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: 'Dark palette used by the editor dark/light toggle.'},
+      {path: 'appearance.editor_light_color_scheme', label: 'Light editor color scheme', type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: 'Light palette used by the editor dark/light toggle. GitHub Light is the high-contrast default.'},
       {path: 'appearance.file_explorer_font_size', label: `${fileExplorerLabel()} font size`, type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: 'Font size used by Finder/File Explorer rows.'},
       {path: 'appearance.tab_width', label: 'Tab width', type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: 'Target width for pane tabs before they wrap to additional rows.'},
       {path: 'appearance.red_reminder_ms', label: 'Red reminder duration', type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: 'Duration of the red attention pulse for sessions that need input or approval. Set 0 to disable.'},
@@ -9912,7 +10000,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('yolo.')) add(['auto approve', 'approve', 'approval', 'permission', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger']);
   if (path === 'yolo.dry_run') add(['test', 'simulate', 'what would']);
   if (path === 'yolo.rule_file_path') add(['yaml', 'config']);
-  if (path === 'general.auto_focus') add(['click', 'focus', 'select pane', 'terminal', 'editor', 'finder', 'file explorer', 'preferences', 'everything']);
+  if (path === 'general.auto_focus') add(['click', 'focus', 'hover', 'menu', 'dropdown', 'select pane', 'terminal', 'editor', 'finder', 'file explorer', 'preferences', 'everything']);
   if (path === 'general.default_layout') add(['startup', 'launch', 'open', 'start', 'split', 'grid', 'wall']);
   if (path === 'general.default_sessions') add(['startup', 'launch', 'which sessions']);
   if (label.includes('quick')) add(['shortcuts', 'bookmarks', 'favorites']);
@@ -10037,18 +10125,34 @@ function preferencesPanelHtml() {
     }).join('');
   const readonly = readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : '';
   const resetDisabled = readOnlyMode ? ' disabled' : '';
+  const resetTitle = preferencesResetConfirmVisible ? 'Confirm GLOBAL reset' : 'GLOBAL reset';
+  const resetWarning = preferencesResetConfirmVisible
+    ? 'This is destructive for preferences: every setting will be reset to the built-in defaults.'
+    : 'Warning: resets every Preferences value to the built-in defaults, including YOLO, appearance, editor, Finder/File Explorer, notification, and performance settings.';
+  const resetAction = preferencesResetConfirmVisible ? `
+      <div class="preferences-reset-confirm">
+        <button type="button" class="preferences-reset-continue" data-preferences-reset-confirm${resetDisabled}>Continue reset</button>
+        <button type="button" class="preferences-reset-cancel" data-preferences-reset-cancel>Cancel</button>
+      </div>` : `<button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>Reset all defaults</button>`;
   return `
     <div class="preferences-search-row">
       <input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="Search settings" aria-label="Search settings">
       <button type="button" class="preferences-search-button" data-preferences-search-action>YOsearch</button>
-      <button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>Reset all</button>
     </div>
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
     <div class="preferences-status" data-level="${clientSettingsPayload.error || yoloRulesPayload.error ? 'error' : 'ok'}">${esc(preferenceStatusText())}</div>
-    <div class="preferences-sections">${sections}</div>`;
+    <div class="preferences-sections">${sections}</div>
+    <div class="preferences-global-reset${preferencesResetConfirmVisible ? ' confirming' : ''}" role="group" aria-label="GLOBAL reset warning">
+      <div>
+        <div class="preferences-global-reset-title">${resetTitle}</div>
+        <div class="preferences-global-reset-warning">${resetWarning}</div>
+      </div>
+      ${resetAction}
+    </div>`;
 }
 
 function createPreferencesPanel() {
+  preferencesSearchFresh = true;
   const panel = document.createElement('article');
   panel.className = 'panel preferences-panel';
   panel.id = `panel-${prefsItemId}`;
@@ -10074,18 +10178,32 @@ function createPreferencesPanel() {
   return panel;
 }
 
+function markPreferencesInteracted() {
+  preferencesSearchFresh = false;
+}
+
 function focusPreferencesSearch(panel = null) {
-  const root = panel || document.querySelector('.preferences-panel');
+  const root = panel && panel.isConnected !== false
+    ? panel
+    : (Array.from(document.querySelectorAll('.preferences-panel')).find(candidate => candidate.offsetParent !== null) || document.querySelector('.preferences-panel'));
   const search = root?.querySelector?.('[data-preferences-search]');
   if (!search) return false;
-  search.focus({preventScroll: true});
-  const position = search.value.length;
+  search.focus?.({preventScroll: true});
+  const position = String(search.value || '').length;
   search.setSelectionRange?.(position, position);
   return true;
 }
 
 function focusPreferencesSearchSoon(panel = null) {
+  focusPreferencesSearch(panel);
   requestAnimationFrame(() => focusPreferencesSearch(panel));
+  setTimeout(() => focusPreferencesSearch(panel), 0);
+  setTimeout(() => focusPreferencesSearch(panel), 80);
+}
+
+function focusFreshPreferencesSearchSoon(panel = null) {
+  if (!preferencesSearchFresh) return;
+  focusPreferencesSearchSoon(panel);
 }
 
 function renderPreferencesPanels(options = {}) {
@@ -10119,7 +10237,9 @@ function bindPreferencesPanel(panel) {
   panel.addEventListener('input', event => {
     const search = event.target.closest('[data-preferences-search]');
     if (search && panel.contains(search)) {
+      markPreferencesInteracted();
       preferencesSearchText = search.value || '';
+      preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true, focusSearch: true});
       return;
     }
@@ -10130,6 +10250,7 @@ function bindPreferencesPanel(panel) {
   panel.addEventListener('change', event => {
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
+    markPreferencesInteracted();
     savePreferenceControl(control);
   });
   panel.addEventListener('focusout', () => {
@@ -10141,13 +10262,35 @@ function bindPreferencesPanel(panel) {
     const searchAction = event.target.closest('[data-preferences-search-action]');
     if (searchAction && panel.contains(searchAction)) {
       event.preventDefault();
+      preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true, focusSearch: true});
       return;
     }
     const resetAll = event.target.closest('[data-preferences-reset-all]');
     if (resetAll && panel.contains(resetAll)) {
       event.preventDefault();
+      preferencesResetConfirmVisible = true;
+      renderPreferencesPanels({force: true});
+      setTimeout(() => {
+        const confirm = document.querySelector('[data-preferences-reset-confirm]');
+        confirm?.scrollIntoView?.({block: 'nearest', inline: 'nearest'});
+        confirm?.focus?.();
+      }, 0);
+      return;
+    }
+    const resetConfirm = event.target.closest('[data-preferences-reset-confirm]');
+    if (resetConfirm && panel.contains(resetConfirm)) {
+      event.preventDefault();
+      markPreferencesInteracted();
+      preferencesResetConfirmVisible = false;
       resetAllPreferences();
+      return;
+    }
+    const resetCancel = event.target.closest('[data-preferences-reset-cancel]');
+    if (resetCancel && panel.contains(resetCancel)) {
+      event.preventDefault();
+      preferencesResetConfirmVisible = false;
+      renderPreferencesPanels({force: true});
       return;
     }
     const copy = event.target.closest('[data-copy-path]');
@@ -10161,6 +10304,7 @@ function bindPreferencesPanel(panel) {
     const sectionToggle = event.target.closest('[data-preference-section-toggle]');
     if (sectionToggle && panel.contains(sectionToggle)) {
       event.preventDefault();
+      preferencesResetConfirmVisible = false;
       const title = sectionToggle.dataset.preferenceSectionToggle || '';
       if (collapsedPreferenceSections.has(title)) collapsedPreferenceSections.delete(title);
       else collapsedPreferenceSections.add(title);
@@ -10180,6 +10324,7 @@ function bindPreferencesPanel(panel) {
     const reset = event.target.closest('[data-setting-reset]');
     if (!reset || !panel.contains(reset)) return;
     event.preventDefault();
+    markPreferencesInteracted();
     resetPreference(reset.dataset.settingReset || '');
   });
 }
@@ -10375,7 +10520,11 @@ function bindChangesPanel(panel) {
 function activePreferenceControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-setting-path], [data-preferences-search], [data-preferences-search-action]') || null;
+  return active.closest?.('[data-setting-path], [data-preferences-search], [data-preferences-search-action], [data-preference-section-toggle], [data-preferences-reset-all], [data-preferences-reset-confirm], [data-preferences-reset-cancel]') || null;
+}
+
+function preferenceFocusTargetIsInteractive(target) {
+  return Boolean(target?.closest?.('input, textarea, select, button, a, [contenteditable="true"], [data-setting-path], [data-preferences-search], [data-preferences-search-action], [data-preference-section-toggle], [data-preferences-reset-all], [data-preferences-reset-confirm], [data-preferences-reset-cancel]'));
 }
 
 function clampPreferenceNumber(item, value) {
@@ -10460,10 +10609,18 @@ function savePreferenceControl(control) {
     control.reportValidity?.();
     return;
   }
-  saveSettingsPatch(settingPatch(path, valueFromPreferenceControl(control)), {
+  const value = valueFromPreferenceControl(control);
+  saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
-    .then(() => { statusEl.textContent = `saved ${path}`; })
+    .then(() => {
+      const scheme = activeEditorScheme();
+      if ((path === 'appearance.editor_dark_color_scheme' && scheme.dark)
+        || (path === 'appearance.editor_light_color_scheme' && !scheme.dark)) {
+        setFileEditorThemeMode(value);
+      }
+      statusEl.textContent = `saved ${path}`;
+    })
     .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
 }
 
@@ -10482,9 +10639,11 @@ function resetAllPreferences() {
   saveSettingsPatch(mergeSettingObjects({}, clientSettingsDefaults), {applyEditorDefaults: true})
     .then(() => {
       preferencesSearchText = '';
+      preferencesResetConfirmVisible = false;
       collapsedPreferenceSections = defaultCollapsedPreferenceSections();
       writeStoredCollapsedPreferenceSections();
-      renderPreferencesPanels({force: true, focusSearch: true});
+      setFileEditorThemeMode(configuredEditorSchemeForMode(true));
+      renderPreferencesPanels({force: true});
       statusEl.textContent = 'reset all preferences';
     })
     .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
@@ -11078,7 +11237,15 @@ function loadFileEditorState(path, panel, item) {
   state.loadingPromise = (async () => {
     const ext = fileExtensionOf(basenameOf(path));
     if (IMAGE_EXTENSIONS.has(ext)) {
-      const entry = await fetchFileEntry(path);
+      const fetched = await fetchFileEntryStatus(path);
+      const entry = fetched.entry;
+      if (!entry) {
+        if (fetched.missing) markOpenFileMissing(path);
+        else openFiles.set(path, fileErrorState(fetched.error || 'failed to inspect image'));
+        renderSessionButtons();
+        renderPaneTabStrips();
+        return;
+      }
       if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
         const state = tooLargeFileState(Number(entry.size));
         state.mtime = entry?.mtime || 0;
@@ -11096,7 +11263,11 @@ function loadFileEditorState(path, panel, item) {
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         const message = String(payload.error || response.status);
-        openFiles.set(path, response.status === 413 ? tooLargeFileState(null, message) : fileErrorState(message));
+        openFiles.set(path, response.status === 413
+          ? tooLargeFileState(null, message)
+          : response.status === 404
+            ? missingFileState(message)
+            : fileErrorState(message));
       } else {
         const payload = await response.json();
         openFiles.set(path, {
@@ -11131,7 +11302,7 @@ function updateFileEditorPanelChrome(panel, path) {
   }
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   if (reloadButton) {
-    reloadButton.hidden = !(state?.externalChanged || state?.externalMissing);
+    reloadButton.hidden = !(state?.externalChanged || state?.externalMissing || state?.externalError);
   }
 }
 

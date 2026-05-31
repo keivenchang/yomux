@@ -359,6 +359,7 @@ globalThis.__layoutTestApi = {
   setFileEditorViewMode,
   editorEngineForTest() { return editorEngine; },
   activeEditorSchemeForTest() { return activeEditorScheme(); },
+  configuredEditorSchemeForMode,
   editorSchemeCssVariables,
   editorThemeLabel,
   setFileEditorThemeMode,
@@ -379,18 +380,31 @@ globalThis.__layoutTestApi = {
   imageViewerItemFor,
   openFileEditorItems,
   pullRequestStatusLabel,
+  openFileStatus,
   renderTransportWarning,
   renderFileEditorPanel,
+  openFileIsMissing,
+  setOpenFileStateForTest(path, state) { openFiles.set(path, state); },
   renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = []) {
     renderTreeChildren(container, parentPath, entries, depth, {entriesByDir: new Map(entriesByDirPairs)});
   },
   rawFileUrl,
   rawFileDownloadUrl,
+  focusPreferencesSearch,
+  focusFreshPreferencesSearchSoon,
+  markPreferencesInteracted,
+  preferencesSearchFreshForTest() { return preferencesSearchFresh; },
+  setPreferencesSearchFreshForTest(value) { preferencesSearchFresh = Boolean(value); },
   preferenceItemMatches,
   preferenceSectionMatches,
   preferencesPanelHtmlForTest(query, collapsed = []) {
     preferencesSearchText = query || '';
     collapsedPreferenceSections = new Set(collapsed);
+    preferencesResetConfirmVisible = false;
+    return preferencesPanelHtml();
+  },
+  preferencesResetConfirmHtmlForTest() {
+    preferencesResetConfirmVisible = true;
     return preferencesPanelHtml();
   },
   registerFileEditorLayoutItem,
@@ -932,6 +946,46 @@ function makeFileTree(paths) {
 
 {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const menuStart = source.indexOf('function bindAppMenuHover(');
+  const menuEnd = source.indexOf('function openAppMenu(', menuStart);
+  assert.ok(menuStart > 0 && menuEnd > menuStart, 'could not locate bindAppMenuHover body');
+  const menuBody = source.slice(menuStart, menuEnd);
+  assert.ok(menuBody.includes('canOpen: () => autoFocusEnabled || appMenuIsOpen()'), 'menu hover-open is cold-disabled by auto-focus but still switches while a menu is manually open');
+  assert.ok(menuBody.includes('openAppMenuId === menuId'), 'old menu hover-close timers must not close a newer open menu');
+  const activePreferenceStart = source.indexOf('function activePreferenceControl(');
+  const activePreferenceEnd = source.indexOf('function clampPreferenceNumber(', activePreferenceStart);
+  assert.ok(activePreferenceStart > 0 && activePreferenceEnd > activePreferenceStart, 'could not locate activePreferenceControl body');
+  const activePreferenceBody = source.slice(activePreferenceStart, activePreferenceEnd);
+  assert.ok(activePreferenceBody.includes('[data-preference-section-toggle]'), 'preference section buttons are preserved through search focusout');
+  assert.ok(activePreferenceBody.includes('[data-preferences-reset-all]'), 'global reset button is preserved through search focusout');
+  assert.ok(activePreferenceBody.includes('[data-preferences-reset-confirm]'), 'global reset confirmation button is preserved through focusout');
+  assert.ok(source.slice(source.indexOf('function focusPreferencesSearch('), source.indexOf('function focusPreferencesSearchSoon(')).includes('panel && panel.isConnected !== false'), 'Preferences focus falls back to the rendered panel when called without a panel');
+  const focusedPanelStart = source.indexOf('function setFocusedPanelItem(');
+  const focusedPanelEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusedPanelStart);
+  assert.ok(focusedPanelStart > 0 && focusedPanelEnd > focusedPanelStart, 'could not locate setFocusedPanelItem body');
+  const focusedPanelBody = source.slice(focusedPanelStart, focusedPanelEnd);
+  assert.ok(focusedPanelBody.includes('options.focusPreferencesSearch !== false'), 'fresh Preferences search focus is part of shared pane focus');
+  assert.ok(focusedPanelBody.includes('focusFreshPreferencesSearchSoon()'), 'shared pane focus targets fresh Preferences search');
+  const panelShellStart = source.indexOf('function bindPanelShell(');
+  const panelShellEnd = source.indexOf('function createPanel(', panelShellStart);
+  assert.ok(panelShellStart > 0 && panelShellEnd > panelShellStart, 'could not locate bindPanelShell body');
+  const panelShellBody = source.slice(panelShellStart, panelShellEnd);
+  assert.ok(panelShellBody.includes('preferenceFocusTargetIsInteractive(event.target)'), 'clicking an existing Preferences control does not steal focus back to search');
+  const resetAllStart = source.indexOf('function resetAllPreferences(');
+  const resetAllEnd = source.indexOf('function createFileExplorerPanel(', resetAllStart);
+  assert.ok(resetAllStart > 0 && resetAllEnd > resetAllStart, 'could not locate resetAllPreferences body');
+  assert.equal(source.slice(resetAllStart, resetAllEnd).includes('focusSearch: true'), false, 'reset all is a settings interaction and does not re-arm fresh search focus');
+  const refreshStart = source.indexOf('async function refreshOpenFilesIfChanged(');
+  const refreshEnd = source.indexOf('function watchedFileExplorerDirectories(', refreshStart);
+  assert.ok(refreshStart > 0 && refreshEnd > refreshStart, 'could not locate refreshOpenFilesIfChanged body');
+  const refreshBody = source.slice(refreshStart, refreshEnd);
+  assert.ok(refreshBody.includes('const fetched = await fetchFileEntryStatus(path);'), 'open-file refresh uses a structured file lookup');
+  assert.ok(refreshBody.includes('if (fetched.missing)'), 'open-file refresh only marks missing after an explicit missing result');
+  assert.ok(refreshBody.includes('markOpenFileExternalError'), 'open-file refresh keeps network/list errors separate from deletion');
+}
+
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const start = source.indexOf('function updatePaneTabStrip(');
   const end = source.indexOf('function reconcilePaneTabChildren(', start);
   assert.ok(start > 0 && end > start, 'could not locate updatePaneTabStrip body');
@@ -1030,6 +1084,7 @@ function makeFileTree(paths) {
       return selector === '.file-editor-textarea-panel' ? textarea : null;
     },
   };
+  api.setAutoFocusEnabledForTest(true);
   api.setFocusedPanelItem('1');
   api.requestFileEditorPanelFocus(item);
   assert.equal(api.focusFileEditorPanelIfReady(panel, item), false);
@@ -1060,6 +1115,7 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux('', ['1']);
+  assert.equal(api.autoFocusEnabledForTest(), false, 'auto-focus is off by default');
   api.testElementForId('terminal-pane-1').classList.add('active');
   api.setAutoFocusEnabledForTest(false);
   api.selectPanelOnHover('1');
@@ -1068,6 +1124,7 @@ function makeFileTree(paths) {
   assert.equal(api.focusedPanelItemForTest(), null);
 
   const enabledApi = loadYolomux('', ['1']);
+  enabledApi.setAutoFocusEnabledForTest(true);
   enabledApi.testElementForId('terminal-pane-1').classList.add('active');
   enabledApi.selectPanelOnHover('1');
   assert.equal(enabledApi.focusedPanelItemForTest(), '1');
@@ -1197,20 +1254,35 @@ function makeFileTree(paths) {
   assert.ok(delayHtml.includes('data-preference-section="Performance"'), 'delay search shows Performance');
   assert.equal(/data-preference-section="Performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
   assert.ok(delayHtml.includes('Metadata refresh interval'), 'delay search surfaces refresh interval settings');
+  const preferencesCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 12px\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'YOsearch uses the normal UI font, not condensed tab text');
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
   assert.ok(preferencesHtml.includes('data-preferences-search-action>YOsearch</button>'), 'preferences search has an explicit YOsearch action');
+  assert.ok(preferencesHtml.indexOf('preferences-global-reset') > preferencesHtml.indexOf('preferences-sections'), 'preferences global reset is below the setting sections');
+  assert.ok(preferencesHtml.includes('GLOBAL reset'), 'preferences reset is labeled as global');
+  assert.ok(preferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
   assert.ok(preferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action');
+  assert.equal(preferencesHtml.includes('data-preferences-reset-confirm'), false, 'preferences do not show the destructive confirmation until requested');
+  const resetConfirmHtml = api.preferencesResetConfirmHtmlForTest();
+  assert.ok(resetConfirmHtml.includes('data-preferences-reset-confirm'), 'reset-all requires a second continue action');
+  assert.ok(resetConfirmHtml.includes('Continue reset'), 'reset-all confirmation names the continue action');
+  assert.ok(resetConfirmHtml.includes('preferences-global-reset confirming'), 'reset-all confirmation makes the warning visibly change');
   assert.ok(preferencesHtml.includes('preferences-setting-control setting-type-number'), 'number controls are identifiable for compact sizing');
   assert.ok(preferencesHtml.includes('data-setting-path="file_explorer.image_preview_max_px"'), 'preferences expose Finder image preview sizing');
   assert.ok(preferencesHtml.includes('Auto-focus active pane'), 'auto-focus setting names the whole active pane/view');
-  assert.ok(preferencesHtml.includes('terminals, editors, Finder/File Explorer, Preferences, and other views'), 'auto-focus help covers non-tmux views');
+  assert.ok(preferencesHtml.includes('enable hover-open menus'), 'auto-focus help covers menu hover behavior');
+  assert.ok(preferencesHtml.includes('Off by default'), 'auto-focus help explains the default');
   assert.equal(preferencesHtml.includes('Auto-focus terminals'), false, 'auto-focus setting is not terminal-only');
-  assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), 'preferences expose the editor scheme setting');
-  assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'editor schemes are grouped by dark palettes');
-  assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'editor schemes are grouped by light palettes');
+  assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_dark_color_scheme"'), 'preferences expose the dark editor scheme setting');
+  assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_light_color_scheme"'), 'preferences expose the light editor scheme setting');
+  assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
+  assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'dark editor schemes are grouped under Dark');
+  assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'light editor schemes are grouped under Light');
   assert.ok(preferencesHtml.indexOf('VS Code Dark+') < preferencesHtml.indexOf('One Dark'), 'preferred dark scheme appears first');
   assert.ok(preferencesHtml.includes('GitHub Light'), 'high-contrast light scheme is available');
+  assert.equal(api.configuredEditorSchemeForMode(true), 'vscode-dark-plus');
+  assert.equal(api.configuredEditorSchemeForMode(false), 'github-light');
   assert.equal(api.fileEditorThemeModeForTest(), 'vscode-dark-plus');
   assert.equal(api.activeEditorSchemeForTest().label, 'VS Code Dark+');
   api.setFileEditorThemeMode('github-light');
@@ -1230,6 +1302,36 @@ function makeFileTree(paths) {
   assert.equal(api.fileEditorThemeModeForTest(), 'github-light', 'theme toggle uses the selected high-contrast light scheme');
   api.setFileEditorThemeMode('light');
   assert.equal(api.fileEditorThemeModeForTest(), 'github-light', 'legacy light storage value maps to GitHub Light');
+  let focusedSearch = false;
+  let selection = null;
+  const search = {
+    value: 'abc',
+    focus(options) {
+      focusedSearch = options?.preventScroll === true;
+    },
+    setSelectionRange(start, end) {
+      selection = [start, end];
+    },
+  };
+  assert.equal(api.focusPreferencesSearch({isConnected: true, querySelector: selector => selector === '[data-preferences-search]' ? search : null}), true);
+  assert.equal(focusedSearch, true, 'Preferences search focus uses preventScroll');
+  assert.deepStrictEqual(selection, [3, 3], 'Preferences search focus moves caret to the end');
+  let freshFocusCount = 0;
+  const freshPanel = {
+    isConnected: true,
+    querySelector: selector => selector === '[data-preferences-search]' ? {
+      value: '',
+      focus() { freshFocusCount += 1; },
+      setSelectionRange() {},
+    } : null,
+  };
+  api.setPreferencesSearchFreshForTest(true);
+  api.focusFreshPreferencesSearchSoon(freshPanel);
+  assert.ok(freshFocusCount > 0, 'fresh Preferences panes focus Search when the pane is focused');
+  api.markPreferencesInteracted();
+  freshFocusCount = 0;
+  api.focusFreshPreferencesSearchSoon(freshPanel);
+  assert.equal(freshFocusCount, 0, 'Preferences stops auto-focusing Search after a user changes settings or search text');
   const hugeItem = {path: 'appearance.editor_font_size', label: 'Editor font size', help: 'Font size used by editor text.', suffix: 'px'};
   assert.equal(api.preferenceItemMatches(hugeItem, 'huge'), true, 'size aliases match font settings');
   const popupItem = {path: 'performance.tab_popover_show_delay_ms', label: 'Tab detail hover delay', help: 'Initial delay before details open.', suffix: 'ms'};
@@ -2084,6 +2186,14 @@ function makeFileTree(paths) {
   assert.equal(api.imageOpenUsesSharedViewer(), true);
   assert.equal(api.imageOpenUsesSharedViewer({forceNewTab: true}), false);
   assert.equal(api.imageOpenUsesSharedViewer({targetSlot: 'left'}), false);
+
+  api.setOpenFileStateForTest(imagePath, {kind: 'error', dirty: false, externalMissing: true, error: 'file deleted or moved on disk'});
+  assert.equal(api.openFileIsMissing(imagePath), true);
+  const missingHtml = api.fileEditorPaneTabHtml(fileItem);
+  assert.ok(missingHtml.includes('file-tab-missing-badge'), 'missing file tabs show a badge');
+  assert.ok(missingHtml.includes('a.png'), 'missing file tabs still show the basename');
+  assert.equal(api.openFileStatus({kind: 'text', externalError: 'network down'}).message.includes('file state unknown'), true);
+  assert.equal(api.openFileStatus({kind: 'text', externalError: 'network down'}).message.includes('deleted'), false, 'network/list refresh errors are not reported as deletion');
 }
 
 {

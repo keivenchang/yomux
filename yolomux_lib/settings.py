@@ -20,7 +20,7 @@ SETTINGS_DISPLAY_PATH = "~/.config/yolomux/settings.yaml"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "general": {
-        "auto_focus": True,
+        "auto_focus": False,
         "default_layout": "single",
         "default_sessions": [],
     },
@@ -29,6 +29,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "terminal_font_size": 13,
         "editor_font_size": 13,
         "editor_color_scheme": "vscode-dark-plus",
+        "editor_dark_color_scheme": "vscode-dark-plus",
+        "editor_light_color_scheme": "github-light",
         "file_explorer_font_size": 13,
         "tab_width": 240,
         "red_reminder_ms": 1550,
@@ -130,19 +132,35 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
         "one-light",
         "solarized-light",
     },
+    ("appearance", "editor_dark_color_scheme"): {
+        "dark",
+        "one-dark",
+        "dracula",
+        "monokai",
+        "vscode-dark-plus",
+        "nord",
+    },
+    ("appearance", "editor_light_color_scheme"): {
+        "github-light",
+        "vscode-light-plus",
+        "one-light",
+        "solarized-light",
+    },
     ("editor", "engine"): {"textarea", "codemirror"},
     ("file_explorer", "root_mode"): {"fixed", "sync"},
     ("file_explorer", "image_open_mode"): {"same-tab", "new-tab"},
 }
 
 SETTING_COMMENTS: dict[tuple[str, str], str] = {
-    ("general", "auto_focus"): "true/false. When false, layout switches do not move focus into the active pane, terminal, editor, Finder/File Explorer, or other view.",
+    ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
     ("general", "default_layout"): "single | grid | wall. Reserved default for new visits.",
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
     ("appearance", "ui_font_size"): "Pixels, 8-20. Drives tab and compact UI text.",
     ("appearance", "terminal_font_size"): "Pixels, 8-28. Applied live to xterm.js terminals.",
     ("appearance", "editor_font_size"): "Pixels, 8-28. Applied live to editor and preview panes.",
-    ("appearance", "editor_color_scheme"): "Editor color scheme. Default is VS Code Dark+. GitHub Light is the strongest light option.",
+    ("appearance", "editor_color_scheme"): "Legacy active editor color scheme. Kept for compatibility; new UI uses separate dark/light scheme defaults.",
+    ("appearance", "editor_dark_color_scheme"): "Dark editor scheme used by the editor dark/light toggle.",
+    ("appearance", "editor_light_color_scheme"): "Light editor scheme used by the editor dark/light toggle. Default is GitHub Light.",
     ("appearance", "file_explorer_font_size"): "Pixels, 8-24. Applied live to File Explorer/Finder.",
     ("appearance", "tab_width"): "Pixels, 120-420. Drives the pane tab width CSS variable.",
     ("appearance", "red_reminder_ms"): "Milliseconds, 0 disables the attention pulse cycle.",
