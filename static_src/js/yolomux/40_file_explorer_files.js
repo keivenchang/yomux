@@ -1410,7 +1410,6 @@ function replaceSharedImageViewerPath(path) {
     sharedImageViewerPath = null;
     if (!openFilePathHasOwner(previousPath)) {
       openFiles.delete(previousPath);
-      fileEditorPreviewMode.delete(previousPath);
       fileEditorViewMode.delete(previousPath);
       fileEditorImageMode.delete(previousPath);
     }
@@ -2838,7 +2837,6 @@ async function removeOpenFile(path, options = {}) {
   }
   if (!openFilePathHasOwner(path)) {
     openFiles.delete(path);
-    fileEditorPreviewMode.delete(path);
     fileEditorViewMode.delete(path);
     fileEditorImageMode.delete(path);
   }
@@ -2890,10 +2888,6 @@ function renameOpenFilePath(oldPath, newPath) {
   openFiles.set(newPath, state);
   if (fileEditorTabPaths.delete(oldPath)) fileEditorTabPaths.add(newPath);
   if (filePreviewTabPaths.delete(oldPath)) filePreviewTabPaths.add(newPath);
-  if (fileEditorPreviewMode.has(oldPath)) {
-    fileEditorPreviewMode.set(newPath, fileEditorPreviewMode.get(oldPath));
-    fileEditorPreviewMode.delete(oldPath);
-  }
   for (const [oldKey, newKey] of [[oldItem, newItem], [oldPreviewItem, newPreviewItem]]) {
     if (fileEditorViewMode.has(oldKey)) {
       fileEditorViewMode.set(newKey, fileEditorViewMode.get(oldKey));

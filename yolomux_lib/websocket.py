@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from .common import *
+import fcntl
+import struct
+import termios
+from typing import Any
 
 
 def set_pty_size(fd: int, rows: int, cols: int) -> None:
@@ -46,4 +49,3 @@ def make_ws_frame(payload: bytes, opcode: int = 2) -> bytes:
     else:
         header = struct.pack("!BBQ", first, 127, length)
     return header + payload
-

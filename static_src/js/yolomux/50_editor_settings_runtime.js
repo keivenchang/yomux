@@ -7,7 +7,7 @@ function editorViewModeFor(path, item = null) {
   if (!editorPreviewModeAvailable(path)) return 'edit';
   const mode = fileEditorViewMode.get(editorViewModeKey(path, item)) || fileEditorViewMode.get(path);
   if (editorViewModes.has(mode)) return mode;
-  return fileEditorPreviewMode.get(path) === true ? 'preview' : 'edit';
+  return 'edit';
 }
 
 function setFileEditorViewMode(path, mode, item = null) {
@@ -15,9 +15,6 @@ function setFileEditorViewMode(path, mode, item = null) {
   if (isFilePreviewItem(item)) mode = 'preview';
   if (mode !== 'edit' && !editorPreviewModeAvailable(path)) mode = 'edit';
   fileEditorViewMode.set(editorViewModeKey(path, item), mode);
-  if (!item || tabTypeForItem(item)?.key === 'file-editor') {
-    fileEditorPreviewMode.set(path, mode !== 'edit');
-  }
 }
 
 function updateEditorModeControl(control, path, state, item = null) {

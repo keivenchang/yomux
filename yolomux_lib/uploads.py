@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from .common import *
+import re
+from datetime import datetime
+from email.message import Message
+from pathlib import Path
+
+from .common import PASTE_UPLOAD_NAME_RE
+from .common import UPLOAD_MAX_FILES
+from .common import UPLOAD_SAFE_NAME_RE
+from .common import UploadedFile
 
 
 def sanitize_upload_filename(filename: str) -> str:

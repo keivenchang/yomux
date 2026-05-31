@@ -1,34 +1,30 @@
 from __future__ import annotations
 
-from .common import *
+import re
+import threading
+import time
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+from urllib.parse import urlparse
+
+from .common import AgentInfo
+from .common import MAIN_BRANCHES
+from .common import METADATA_CACHE_TTL_SECONDS
+from .common import OTHER_BRANCH_LIMIT
+from .common import PaneInfo
+from .common import SessionInfo
 from .common import _CACHE_MISS
-from .github_client import cached_metadata
-from .github_client import compact_description
-from .github_client import enrich_github_pull_request
+from .common import git
 from .github_client import extract_linear_ids
-from .github_client import failing_github_checks
-from .github_client import github_api_get
 from .github_client import github_checks_unknown
-from .github_client import github_commit_checks
-from .github_client import github_commit_check_payloads
 from .github_client import github_pull_request_by_branch
 from .github_client import github_pull_request_by_number
-from .github_client import github_pull_request_payload
 from .github_client import github_pull_request_url
-from .github_client import github_pull_requests_by_branch_payload
-from .github_client import github_token
-from .github_client import http_json
-from .github_client import normalize_github_pull_request
-from .github_client import passing_github_check_count
-from .github_client import pending_github_checks
-from .github_client import pull_request_status_label
-from .github_client import summarize_github_checks
-from .linear_client import fallback_linear_issue
-from .linear_client import linear_issue_from_api
+from .github_client import pull_request_status_label  # noqa: F401 - re-exported for existing metadata callers
+from .github_client import summarize_github_checks  # noqa: F401 - re-exported for existing metadata callers
 from .linear_client import linear_issue_metadata
-from .linear_client import linear_issue_url
-from .linear_client import linear_key
-from .sessions import discover_sessions
 from .workdir import numbered_session_workdir
 from .workdir import session_workdir
 

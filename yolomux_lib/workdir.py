@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from .common import *
+import os
+import re
+import shutil
+from pathlib import Path
+
+from .common import PROJECT_ROOT
 
 
 def resolved_upload_dir(path: Path, allow_home: bool = False) -> tuple[Path | None, bool]:

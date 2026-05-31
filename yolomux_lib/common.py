@@ -9,51 +9,21 @@ Python side so it can run from a normal host checkout.
 
 from __future__ import annotations
 
-import argparse
-import base64
 import collections
-import fcntl
-import html
-import json
 import os
-import pty
 import re
-import select
-import shutil
 import signal
 import socket
-import struct
 import subprocess
-import termios
-import threading
-import time
-import urllib.error
-import urllib.request
-from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import datetime
-from datetime import timedelta
-from datetime import timezone
-from email.message import Message
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from typing import Callable
-from urllib.parse import parse_qs
-from urllib.parse import quote
-from urllib.parse import urlencode
-from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from . import auth as _auth
 from .tmux_utils import list_tmux_session_names
 from .tmux_utils import run_cmd
-from .tmux_utils import session_sort_key
-from .tmux_utils import tmux
-from .tmux_utils import tmux_has_exact_session
-from .tmux_utils import tmux_session_target
 from .tmux_utils import unique_session_names
 
 
@@ -63,7 +33,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.1.28"
+YOLOMUX_VERSION = "0.1.29"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600

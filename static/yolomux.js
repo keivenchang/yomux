@@ -133,7 +133,9 @@ const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
   '.md': 'markdown', '.markdown': 'markdown',
   '.html': 'xml', '.htm': 'xml', '.xml': 'xml', '.svg': 'xml',
-  '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
+  '.py': 'python', '.pyw': 'python',
+  '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.jsx': 'javascript',
+  '.ts': 'typescript', '.tsx': 'typescript',
   '.json': 'json', '.css': 'css', '.scss': 'scss',
   '.rs': 'rust', '.go': 'go', '.c': 'c', '.h': 'c',
   '.cpp': 'cpp', '.hpp': 'cpp', '.cc': 'cpp',
@@ -161,8 +163,7 @@ let fileExplorerShowHidden = (() => {
   try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
   catch (_) { return false; }
 })();
-const fileEditorPreviewMode = new Map();  // legacy map: path -> true when not in edit mode
-const fileEditorViewMode = new Map();  // layout item or legacy path -> "edit" | "preview" | "split"
+const fileEditorViewMode = new Map();  // layout item or path -> "edit" | "preview" | "split"
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
@@ -517,29 +518,7 @@ function applyFileExplorerStaticLabels() {
   fileExplorerClose?.setAttribute('title', `Close ${label}`);
   applyPlatformControlClass(fileExplorerClose, 'close');
 }
-const syntaxLanguageByExtension = new Map([
-  ['.cjs', 'javascript'],
-  ['.css', 'css'],
-  ['.html', 'xml'],
-  ['.htm', 'xml'],
-  ['.js', 'javascript'],
-  ['.json', 'json'],
-  ['.jsx', 'javascript'],
-  ['.md', 'markdown'],
-  ['.markdown', 'markdown'],
-  ['.mjs', 'javascript'],
-  ['.py', 'python'],
-  ['.pyw', 'python'],
-  ['.rs', 'rust'],
-  ['.sh', 'bash'],
-  ['.svg', 'xml'],
-  ['.toml', 'ini'],
-  ['.ts', 'typescript'],
-  ['.tsx', 'typescript'],
-  ['.xml', 'xml'],
-  ['.yaml', 'yaml'],
-  ['.yml', 'yaml'],
-]);
+const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
@@ -5484,7 +5463,6 @@ function replaceSharedImageViewerPath(path) {
     sharedImageViewerPath = null;
     if (!openFilePathHasOwner(previousPath)) {
       openFiles.delete(previousPath);
-      fileEditorPreviewMode.delete(previousPath);
       fileEditorViewMode.delete(previousPath);
       fileEditorImageMode.delete(previousPath);
     }
@@ -6912,7 +6890,6 @@ async function removeOpenFile(path, options = {}) {
   }
   if (!openFilePathHasOwner(path)) {
     openFiles.delete(path);
-    fileEditorPreviewMode.delete(path);
     fileEditorViewMode.delete(path);
     fileEditorImageMode.delete(path);
   }
@@ -6964,10 +6941,6 @@ function renameOpenFilePath(oldPath, newPath) {
   openFiles.set(newPath, state);
   if (fileEditorTabPaths.delete(oldPath)) fileEditorTabPaths.add(newPath);
   if (filePreviewTabPaths.delete(oldPath)) filePreviewTabPaths.add(newPath);
-  if (fileEditorPreviewMode.has(oldPath)) {
-    fileEditorPreviewMode.set(newPath, fileEditorPreviewMode.get(oldPath));
-    fileEditorPreviewMode.delete(oldPath);
-  }
   for (const [oldKey, newKey] of [[oldItem, newItem], [oldPreviewItem, newPreviewItem]]) {
     if (fileEditorViewMode.has(oldKey)) {
       fileEditorViewMode.set(newKey, fileEditorViewMode.get(oldKey));
@@ -7005,7 +6978,7 @@ function editorViewModeFor(path, item = null) {
   if (!editorPreviewModeAvailable(path)) return 'edit';
   const mode = fileEditorViewMode.get(editorViewModeKey(path, item)) || fileEditorViewMode.get(path);
   if (editorViewModes.has(mode)) return mode;
-  return fileEditorPreviewMode.get(path) === true ? 'preview' : 'edit';
+  return 'edit';
 }
 
 function setFileEditorViewMode(path, mode, item = null) {
@@ -7013,9 +6986,6 @@ function setFileEditorViewMode(path, mode, item = null) {
   if (isFilePreviewItem(item)) mode = 'preview';
   if (mode !== 'edit' && !editorPreviewModeAvailable(path)) mode = 'edit';
   fileEditorViewMode.set(editorViewModeKey(path, item), mode);
-  if (!item || tabTypeForItem(item)?.key === 'file-editor') {
-    fileEditorPreviewMode.set(path, mode !== 'edit');
-  }
 }
 
 function updateEditorModeControl(control, path, state, item = null) {

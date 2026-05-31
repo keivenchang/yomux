@@ -15,7 +15,9 @@ from typing import Any
 import auto_approve_tmux
 
 from . import yolo_rules
-from .common import *
+from .common import AUTO_APPROVE_LOCK_DIR
+from .common import PROJECT_ROOT
+from .common import SERVER_HOSTNAME
 
 
 def auto_approve_lock_path(target: str) -> Path:

@@ -132,7 +132,9 @@ const MAX_FILE_PREVIEW_BYTES = 20 * 1024 * 1024;
 const HIGHLIGHTABLE_EXTENSIONS = {
   '.md': 'markdown', '.markdown': 'markdown',
   '.html': 'xml', '.htm': 'xml', '.xml': 'xml', '.svg': 'xml',
-  '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
+  '.py': 'python', '.pyw': 'python',
+  '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.jsx': 'javascript',
+  '.ts': 'typescript', '.tsx': 'typescript',
   '.json': 'json', '.css': 'css', '.scss': 'scss',
   '.rs': 'rust', '.go': 'go', '.c': 'c', '.h': 'c',
   '.cpp': 'cpp', '.hpp': 'cpp', '.cc': 'cpp',
@@ -160,8 +162,7 @@ let fileExplorerShowHidden = (() => {
   try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
   catch (_) { return false; }
 })();
-const fileEditorPreviewMode = new Map();  // legacy map: path -> true when not in edit mode
-const fileEditorViewMode = new Map();  // layout item or legacy path -> "edit" | "preview" | "split"
+const fileEditorViewMode = new Map();  // layout item or path -> "edit" | "preview" | "split"
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
@@ -516,29 +517,7 @@ function applyFileExplorerStaticLabels() {
   fileExplorerClose?.setAttribute('title', `Close ${label}`);
   applyPlatformControlClass(fileExplorerClose, 'close');
 }
-const syntaxLanguageByExtension = new Map([
-  ['.cjs', 'javascript'],
-  ['.css', 'css'],
-  ['.html', 'xml'],
-  ['.htm', 'xml'],
-  ['.js', 'javascript'],
-  ['.json', 'json'],
-  ['.jsx', 'javascript'],
-  ['.md', 'markdown'],
-  ['.markdown', 'markdown'],
-  ['.mjs', 'javascript'],
-  ['.py', 'python'],
-  ['.pyw', 'python'],
-  ['.rs', 'rust'],
-  ['.sh', 'bash'],
-  ['.svg', 'xml'],
-  ['.toml', 'ini'],
-  ['.ts', 'typescript'],
-  ['.tsx', 'typescript'],
-  ['.xml', 'xml'],
-  ['.yaml', 'yaml'],
-  ['.yml', 'yaml'],
-]);
+const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
