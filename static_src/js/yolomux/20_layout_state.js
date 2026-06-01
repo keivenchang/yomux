@@ -942,9 +942,10 @@ function renderNotifyToggle() {
   if (!notifyToggle) return;
   const supported = 'Notification' in window;
   notifyToggle.disabled = readOnlyMode;
-  notifyToggle.classList.toggle('active', notificationsEnabled);
-  notifyToggle.setAttribute('aria-pressed', notificationsEnabled ? 'true' : 'false');
-  notifyToggle.setAttribute('aria-label', 'Notify');
+  syncPressedButton(notifyToggle, notificationsEnabled, {
+    labelOn: 'Notify',
+    labelOff: 'Notify',
+  });
   const browserState = supported ? Notification.permission : 'unsupported';
   notifyToggle.title = readOnlyMode
     ? 'Notify is admin-only'
@@ -1055,13 +1056,6 @@ function keyboardShortcutCatalog() {
       {label: 'Close menu or dialog', keys: 'Esc'},
     ]},
   ];
-}
-
-function keyboardShortcutItems() {
-  return keyboardShortcutCatalog().flatMap((section, sectionIndex) => [
-    ...(sectionIndex ? [menuSeparator()] : []),
-    ...section.items.map(item => menuCommand(item.label, null, {disabled: true, detail: item.keys})),
-  ]);
 }
 
 function keyboardShortcutsHtml() {

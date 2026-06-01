@@ -172,9 +172,7 @@ function renderFileExplorerRootModeControls() {
   const title = sync ? 'Root mode: sync to focused tmux session' : 'Root mode: fixed';
   for (const button of fileExplorerRootModeButtons()) {
     button.textContent = label;
-    button.title = title;
-    button.setAttribute('aria-pressed', sync ? 'true' : 'false');
-    button.classList.toggle('active', sync);
+    syncPressedButton(button, sync, {labelOn: title, labelOff: title});
   }
   renderFileExplorerQuickAccessControls();
 }

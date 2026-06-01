@@ -1197,7 +1197,7 @@ function renderAutoApproveButton(session, payload) {
   const working = sessionYoloIsWorking(session, payload);
   for (const button of buttons) {
     const wasWorking = button.classList.contains('working');
-    button.classList.toggle('active', enabled);
+    syncPressedButton(button, enabled);
     button.classList.toggle('inactive', !enabled && !locked);
     button.classList.toggle('locked', locked);
     button.classList.toggle('working', working);

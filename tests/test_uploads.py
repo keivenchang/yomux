@@ -1,4 +1,4 @@
-from yolomux_lib.uploads import DEFAULT_UPLOAD_FILENAME_TEMPLATE
+from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from yolomux_lib.uploads import unique_upload_path
 
 

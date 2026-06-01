@@ -705,8 +705,7 @@ function createFileExplorerPanel() {
   const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
   const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
   if (hiddenBtn) {
-    hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
-    hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+    syncFileExplorerHiddenButton(hiddenBtn);
     hiddenBtn.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
@@ -721,9 +720,7 @@ function createFileExplorerPanel() {
     });
   }
   if (dateBtn) {
-    dateBtn.classList.toggle('active', fileExplorerTreeShowDates);
-    dateBtn.setAttribute('aria-pressed', fileExplorerTreeShowDates ? 'true' : 'false');
-    dateBtn.title = fileExplorerTreeShowDates ? 'Hide modified dates' : 'Show modified dates';
+    syncFileExplorerTreeDateButton(dateBtn);
   }
   const closeBtn = panel.querySelector('.file-explorer-panel-close');
   panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
@@ -762,16 +759,8 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   setFileExplorerPathElementValue(pathEl, root);
   setFileExplorerPathError(pathEl);
   renderFileExplorerRootModeControls();
-  if (hiddenBtn) {
-    hiddenBtn.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
-    hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
-    hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
-  }
-  if (dateBtn) {
-    dateBtn.setAttribute('aria-pressed', fileExplorerTreeShowDates ? 'true' : 'false');
-    dateBtn.classList.toggle('active', fileExplorerTreeShowDates);
-    dateBtn.title = fileExplorerTreeShowDates ? 'Hide modified dates' : 'Show modified dates';
-  }
+  syncFileExplorerHiddenButton(hiddenBtn);
+  syncFileExplorerTreeDateButton(dateBtn);
   if (sortSelect && sortSelect.value !== fileExplorerTreeSortMode) sortSelect.value = fileExplorerTreeSortMode;
   const entries = options.root === root && Array.isArray(options.entries)
     ? options.entries

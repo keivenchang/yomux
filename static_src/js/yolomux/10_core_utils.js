@@ -222,14 +222,39 @@ function readConfiguredEditorScheme() {
   return normalizeEditorSchemeId(readStoredEditorThemeMode());
 }
 
+function syncPressedButton(button, active, options = {}) {
+  if (!button) return;
+  const activeClass = options.activeClass || 'active';
+  button.classList.toggle(activeClass, active);
+  button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  const label = active ? options.labelOn : options.labelOff;
+  if (label) {
+    button.title = label;
+    button.setAttribute('aria-label', label);
+  }
+}
+
+function syncFileExplorerHiddenButton(button) {
+  syncPressedButton(button, fileExplorerShowHidden, {
+    labelOn: 'Hide dotfiles (.*)',
+    labelOff: 'Show hidden files (dotfiles)',
+  });
+}
+
+function syncFileExplorerTreeDateButton(button) {
+  syncPressedButton(button, fileExplorerTreeShowDates, {
+    labelOn: 'Hide modified dates',
+    labelOff: 'Show modified dates',
+  });
+}
+
 function renderTabMetaToggle() {
   document.body?.classList.toggle('tab-meta-hidden', !tabMetaVisible);
   if (!tabMetaToggle) return;
-  tabMetaToggle.classList.toggle('active', tabMetaVisible);
-  tabMetaToggle.setAttribute('aria-pressed', tabMetaVisible ? 'true' : 'false');
-  const label = tabMetaVisible ? 'Hide tab metadata' : 'Show tab metadata';
-  tabMetaToggle.setAttribute('aria-label', label);
-  tabMetaToggle.title = label;
+  syncPressedButton(tabMetaToggle, tabMetaVisible, {
+    labelOn: 'Hide tab metadata',
+    labelOff: 'Show tab metadata',
+  });
 }
 
 function toggleTabMetadata() {
@@ -652,7 +677,12 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
   button.setAttribute('role', 'menuitem');
   button.textContent = label;
   button.disabled = options.disabled === true;
-  if (options.checked === true) button.dataset.checked = 'true';
+  if (options.title) button.title = options.title;
+  if (options.checked !== undefined) {
+    button.setAttribute('role', 'menuitemcheckbox');
+    button.setAttribute('aria-checked', options.checked ? 'true' : 'false');
+    if (options.checked === true) button.dataset.checked = 'true';
+  }
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();

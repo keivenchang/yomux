@@ -5,13 +5,11 @@ from datetime import datetime
 from email.message import Message
 from pathlib import Path
 
+from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from .common import PASTE_UPLOAD_NAME_RE
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_SAFE_NAME_RE
 from .common import UploadedFile
-
-
-DEFAULT_UPLOAD_FILENAME_TEMPLATE = "{date:%Y%m%d}-{seq:03d}-{name}{ext}"
 
 
 def sanitize_upload_filename(filename: str) -> str:
@@ -21,6 +19,7 @@ def sanitize_upload_filename(filename: str) -> str:
     if not name or name in {".", ".."}:
         return "upload.bin"
     return name[:180]
+
 
 def upload_template_parts(filename: str) -> tuple[str, str, int]:
     path = Path(filename)
@@ -77,6 +76,7 @@ def unique_upload_path(target_dir: Path, filename: str, template: str | None = N
         if not candidate.exists():
             return candidate
     raise OSError(f"failed to choose unique upload name for {filename}")
+
 
 def unique_paste_upload_path(target_dir: Path, filename: str) -> Path | None:
     match = PASTE_UPLOAD_NAME_RE.fullmatch(filename)

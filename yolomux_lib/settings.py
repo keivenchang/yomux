@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from .common import CONFIG_DIR
+from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
@@ -73,7 +74,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "new_entry_highlight_ms": 60000,
     },
     "uploads": {
-        "filename_template": "{date:%Y%m%d}-{seq:03d}-{name}{ext}",
+        "filename_template": DEFAULT_UPLOAD_FILENAME_TEMPLATE,
     },
     "yolo": {
         "rule_file_path": "~/.config/yolomux/yolo-rules.yaml",

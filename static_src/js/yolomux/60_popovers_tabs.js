@@ -2,11 +2,7 @@ function toggleHiddenFiles() {
   fileExplorerShowHidden = !fileExplorerShowHidden;
   try { window.localStorage?.setItem(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0'); }
   catch (_) {}
-  if (fileExplorerHiddenToggle) {
-    fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
-    fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
-    fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
-  }
+  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
 
@@ -45,9 +41,7 @@ if (fileExplorerRootModeButton) {
 }
 renderFileExplorerRootModeControls();
 if (fileExplorerHiddenToggle) {
-  fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
-  fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
-  fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   fileExplorerHiddenToggle.addEventListener('click', toggleHiddenFiles);
 }
 

@@ -1,3 +1,4 @@
+from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from yolomux_lib.settings import default_settings
 from yolomux_lib.settings import read_settings_file
 from yolomux_lib.settings import save_settings
@@ -31,7 +32,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["editor"]["autosave"] is True
     assert settings["editor"]["autosave_delay_seconds"] == 60
     assert settings["file_explorer"]["refresh_ms"] == 3000
-    assert settings["uploads"]["filename_template"] == "{date:%Y%m%d}-{seq:03d}-{name}{ext}"
+    assert settings["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
     assert settings["performance"]["metadata_refresh_ms"] == 15000
     assert settings["performance"]["pane_state_refresh_ms"] == 1200

@@ -28,10 +28,7 @@ function updateEditorModeControl(control, path, state, item = null) {
     const nextMode = button.dataset.editorMode;
     const label = editorModeLabel(nextMode);
     const active = button.dataset.editorMode === mode;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-pressed', active ? 'true' : 'false');
-    button.title = label;
-    button.setAttribute('aria-label', label);
+    syncPressedButton(button, active, {labelOn: label, labelOff: label});
     setFileEditorIcon(button, editorModeIconClass(nextMode));
   });
 }
@@ -52,11 +49,10 @@ function editorModeIconClass(mode) {
 
 function updateEditorGutterButton(button) {
   if (!button) return;
-  button.classList.toggle('active', fileEditorLineNumbersEnabled);
-  button.setAttribute('aria-pressed', fileEditorLineNumbersEnabled ? 'true' : 'false');
-  const label = fileEditorLineNumbersEnabled ? 'Hide line numbers' : 'Show line numbers';
-  button.title = label;
-  button.setAttribute('aria-label', label);
+  syncPressedButton(button, fileEditorLineNumbersEnabled, {
+    labelOn: 'Hide line numbers',
+    labelOff: 'Show line numbers',
+  });
 }
 
 function setEditorContentMode(content, mode) {
@@ -203,11 +199,10 @@ function cycleEditorThemeMode() {
 
 function updateEditorWrapButton(button) {
   if (!button) return;
-  button.classList.toggle('active', fileEditorWrapEnabled);
-  button.setAttribute('aria-pressed', fileEditorWrapEnabled ? 'true' : 'false');
-  const label = fileEditorWrapEnabled ? 'Disable word wrap' : 'Enable word wrap';
-  button.title = label;
-  button.setAttribute('aria-label', label);
+  syncPressedButton(button, fileEditorWrapEnabled, {
+    labelOn: 'Disable word wrap',
+    labelOff: 'Enable word wrap',
+  });
   setFileEditorIcon(button, 'file-editor-icon-wrap');
 }
 
@@ -229,11 +224,8 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   const loading = state?.diffLoading === true;
   button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!active && !available && !loading);
   button.disabled = loading || (!available && active);
-  button.classList.toggle('active', active);
-  button.setAttribute('aria-pressed', active ? 'true' : 'false');
   const label = loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
-  button.title = label;
-  button.setAttribute('aria-label', label);
+  syncPressedButton(button, active, {labelOn: label, labelOff: label});
   setFileEditorIcon(button, 'file-editor-icon-diff');
 }
 

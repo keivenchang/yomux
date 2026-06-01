@@ -822,14 +822,39 @@ function readConfiguredEditorScheme() {
   return normalizeEditorSchemeId(readStoredEditorThemeMode());
 }
 
+function syncPressedButton(button, active, options = {}) {
+  if (!button) return;
+  const activeClass = options.activeClass || 'active';
+  button.classList.toggle(activeClass, active);
+  button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  const label = active ? options.labelOn : options.labelOff;
+  if (label) {
+    button.title = label;
+    button.setAttribute('aria-label', label);
+  }
+}
+
+function syncFileExplorerHiddenButton(button) {
+  syncPressedButton(button, fileExplorerShowHidden, {
+    labelOn: 'Hide dotfiles (.*)',
+    labelOff: 'Show hidden files (dotfiles)',
+  });
+}
+
+function syncFileExplorerTreeDateButton(button) {
+  syncPressedButton(button, fileExplorerTreeShowDates, {
+    labelOn: 'Hide modified dates',
+    labelOff: 'Show modified dates',
+  });
+}
+
 function renderTabMetaToggle() {
   document.body?.classList.toggle('tab-meta-hidden', !tabMetaVisible);
   if (!tabMetaToggle) return;
-  tabMetaToggle.classList.toggle('active', tabMetaVisible);
-  tabMetaToggle.setAttribute('aria-pressed', tabMetaVisible ? 'true' : 'false');
-  const label = tabMetaVisible ? 'Hide tab metadata' : 'Show tab metadata';
-  tabMetaToggle.setAttribute('aria-label', label);
-  tabMetaToggle.title = label;
+  syncPressedButton(tabMetaToggle, tabMetaVisible, {
+    labelOn: 'Hide tab metadata',
+    labelOff: 'Show tab metadata',
+  });
 }
 
 function toggleTabMetadata() {
@@ -1252,7 +1277,12 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
   button.setAttribute('role', 'menuitem');
   button.textContent = label;
   button.disabled = options.disabled === true;
-  if (options.checked === true) button.dataset.checked = 'true';
+  if (options.title) button.title = options.title;
+  if (options.checked !== undefined) {
+    button.setAttribute('role', 'menuitemcheckbox');
+    button.setAttribute('aria-checked', options.checked ? 'true' : 'false');
+    if (options.checked === true) button.dataset.checked = 'true';
+  }
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -2344,9 +2374,10 @@ function renderNotifyToggle() {
   if (!notifyToggle) return;
   const supported = 'Notification' in window;
   notifyToggle.disabled = readOnlyMode;
-  notifyToggle.classList.toggle('active', notificationsEnabled);
-  notifyToggle.setAttribute('aria-pressed', notificationsEnabled ? 'true' : 'false');
-  notifyToggle.setAttribute('aria-label', 'Notify');
+  syncPressedButton(notifyToggle, notificationsEnabled, {
+    labelOn: 'Notify',
+    labelOff: 'Notify',
+  });
   const browserState = supported ? Notification.permission : 'unsupported';
   notifyToggle.title = readOnlyMode
     ? 'Notify is admin-only'
@@ -2457,13 +2488,6 @@ function keyboardShortcutCatalog() {
       {label: 'Close menu or dialog', keys: 'Esc'},
     ]},
   ];
-}
-
-function keyboardShortcutItems() {
-  return keyboardShortcutCatalog().flatMap((section, sectionIndex) => [
-    ...(sectionIndex ? [menuSeparator()] : []),
-    ...section.items.map(item => menuCommand(item.label, null, {disabled: true, detail: item.keys})),
-  ]);
 }
 
 function keyboardShortcutsHtml() {
@@ -4367,9 +4391,7 @@ function renderFileExplorerRootModeControls() {
   const title = sync ? 'Root mode: sync to focused tmux session' : 'Root mode: fixed';
   for (const button of fileExplorerRootModeButtons()) {
     button.textContent = label;
-    button.title = title;
-    button.setAttribute('aria-pressed', sync ? 'true' : 'false');
-    button.classList.toggle('active', sync);
+    syncPressedButton(button, sync, {labelOn: title, labelOff: title});
   }
   renderFileExplorerQuickAccessControls();
 }
@@ -7394,10 +7416,7 @@ function updateEditorModeControl(control, path, state, item = null) {
     const nextMode = button.dataset.editorMode;
     const label = editorModeLabel(nextMode);
     const active = button.dataset.editorMode === mode;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-pressed', active ? 'true' : 'false');
-    button.title = label;
-    button.setAttribute('aria-label', label);
+    syncPressedButton(button, active, {labelOn: label, labelOff: label});
     setFileEditorIcon(button, editorModeIconClass(nextMode));
   });
 }
@@ -7418,11 +7437,10 @@ function editorModeIconClass(mode) {
 
 function updateEditorGutterButton(button) {
   if (!button) return;
-  button.classList.toggle('active', fileEditorLineNumbersEnabled);
-  button.setAttribute('aria-pressed', fileEditorLineNumbersEnabled ? 'true' : 'false');
-  const label = fileEditorLineNumbersEnabled ? 'Hide line numbers' : 'Show line numbers';
-  button.title = label;
-  button.setAttribute('aria-label', label);
+  syncPressedButton(button, fileEditorLineNumbersEnabled, {
+    labelOn: 'Hide line numbers',
+    labelOff: 'Show line numbers',
+  });
 }
 
 function setEditorContentMode(content, mode) {
@@ -7569,11 +7587,10 @@ function cycleEditorThemeMode() {
 
 function updateEditorWrapButton(button) {
   if (!button) return;
-  button.classList.toggle('active', fileEditorWrapEnabled);
-  button.setAttribute('aria-pressed', fileEditorWrapEnabled ? 'true' : 'false');
-  const label = fileEditorWrapEnabled ? 'Disable word wrap' : 'Enable word wrap';
-  button.title = label;
-  button.setAttribute('aria-label', label);
+  syncPressedButton(button, fileEditorWrapEnabled, {
+    labelOn: 'Disable word wrap',
+    labelOff: 'Enable word wrap',
+  });
   setFileEditorIcon(button, 'file-editor-icon-wrap');
 }
 
@@ -7595,11 +7612,8 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   const loading = state?.diffLoading === true;
   button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!active && !available && !loading);
   button.disabled = loading || (!available && active);
-  button.classList.toggle('active', active);
-  button.setAttribute('aria-pressed', active ? 'true' : 'false');
   const label = loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
-  button.title = label;
-  button.setAttribute('aria-label', label);
+  syncPressedButton(button, active, {labelOn: label, labelOff: label});
   setFileEditorIcon(button, 'file-editor-icon-diff');
 }
 
@@ -7820,11 +7834,7 @@ function toggleHiddenFiles() {
   fileExplorerShowHidden = !fileExplorerShowHidden;
   try { window.localStorage?.setItem(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0'); }
   catch (_) {}
-  if (fileExplorerHiddenToggle) {
-    fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
-    fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
-    fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
-  }
+  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
 
@@ -7863,9 +7873,7 @@ if (fileExplorerRootModeButton) {
 }
 renderFileExplorerRootModeControls();
 if (fileExplorerHiddenToggle) {
-  fileExplorerHiddenToggle.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
-  fileExplorerHiddenToggle.classList.toggle('active', fileExplorerShowHidden);
-  fileExplorerHiddenToggle.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   fileExplorerHiddenToggle.addEventListener('click', toggleHiddenFiles);
 }
 
@@ -12589,8 +12597,7 @@ function createFileExplorerPanel() {
   const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
   const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
   if (hiddenBtn) {
-    hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
-    hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
+    syncFileExplorerHiddenButton(hiddenBtn);
     hiddenBtn.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
@@ -12605,9 +12612,7 @@ function createFileExplorerPanel() {
     });
   }
   if (dateBtn) {
-    dateBtn.classList.toggle('active', fileExplorerTreeShowDates);
-    dateBtn.setAttribute('aria-pressed', fileExplorerTreeShowDates ? 'true' : 'false');
-    dateBtn.title = fileExplorerTreeShowDates ? 'Hide modified dates' : 'Show modified dates';
+    syncFileExplorerTreeDateButton(dateBtn);
   }
   const closeBtn = panel.querySelector('.file-explorer-panel-close');
   panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
@@ -12646,16 +12651,8 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   setFileExplorerPathElementValue(pathEl, root);
   setFileExplorerPathError(pathEl);
   renderFileExplorerRootModeControls();
-  if (hiddenBtn) {
-    hiddenBtn.setAttribute('aria-pressed', fileExplorerShowHidden ? 'true' : 'false');
-    hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
-    hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
-  }
-  if (dateBtn) {
-    dateBtn.setAttribute('aria-pressed', fileExplorerTreeShowDates ? 'true' : 'false');
-    dateBtn.classList.toggle('active', fileExplorerTreeShowDates);
-    dateBtn.title = fileExplorerTreeShowDates ? 'Hide modified dates' : 'Show modified dates';
-  }
+  syncFileExplorerHiddenButton(hiddenBtn);
+  syncFileExplorerTreeDateButton(dateBtn);
   if (sortSelect && sortSelect.value !== fileExplorerTreeSortMode) sortSelect.value = fileExplorerTreeSortMode;
   const entries = options.root === root && Array.isArray(options.entries)
     ? options.entries
@@ -15396,7 +15393,7 @@ function renderAutoApproveButton(session, payload) {
   const working = sessionYoloIsWorking(session, payload);
   for (const button of buttons) {
     const wasWorking = button.classList.contains('working');
-    button.classList.toggle('active', enabled);
+    syncPressedButton(button, enabled);
     button.classList.toggle('inactive', !enabled && !locked);
     button.classList.toggle('locked', locked);
     button.classList.toggle('working', working);
