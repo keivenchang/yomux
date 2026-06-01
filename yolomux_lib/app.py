@@ -43,6 +43,7 @@ from .common import SUMMARY_CODEX_EFFORT
 from .common import SUMMARY_CODEX_MODEL
 from .common import SUMMARY_CODEX_SERVICE_TIER
 from .common import UPLOAD_MAX_FILES
+from .common import UPLOAD_MAX_BYTES
 from .common import next_numbered_session_name
 from .common import tail_file_lines
 from .common import truncate_text
@@ -57,7 +58,6 @@ from .metadata import focus_root_for_session
 from .metadata import github_checks_unknown
 from .metadata import project_inventory
 from .metadata import pull_request_number_from_subject
-from .metadata import pull_request_status_label
 from .metadata import session_git_inventory
 from .metadata import session_project_metadata
 from .metadata import session_to_json
@@ -329,30 +329,31 @@ class TmuxWebtermApp:
             context_signature = yoagent_activity_payload_signature(activity_payload)
             context_changed = context_signature != state.get("activity_signature")
             seed = not session_id
+            next_session_id = session_id or (str(uuid.uuid4()) if backend == "claude" else "")
             prompt = build_yoagent_chat_prompt(question, activity_payload, settings, history) if seed else build_yoagent_resume_prompt(question, activity_payload, settings, context_changed)
-            started = time.monotonic()
-            next_session_id = session_id
-            if backend == "codex":
-                answer, error, captured_session_id = self.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed)
-                next_session_id = captured_session_id or session_id
-            else:
-                next_session_id = session_id or str(uuid.uuid4())
-                answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed)
-            if answer and yoagent_cli_answer_is_permission_blocked(answer):
-                answer = ""
-                error = "YO!agent backend tried to inspect files outside the supplied YOLOmux context; showing the No agent summary instead."
-            elapsed_ms = round((time.monotonic() - started) * 1000)
-            fallback_reason = yoagent_cli_fallback_reason(backend, error)
-            status = {
-                "backend": backend,
-                "resumed": not seed,
-                "seeded": seed,
-                "context_changed": context_changed,
-                "prompt_chars": len(prompt),
-                "elapsed_ms": elapsed_ms,
-                "session_id": next_session_id or None,
-                "per_server": True,
-            }
+
+        started = time.monotonic()
+        if backend == "codex":
+            answer, error, captured_session_id = self.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed)
+            next_session_id = captured_session_id or session_id
+        else:
+            answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed)
+        if answer and yoagent_cli_answer_is_permission_blocked(answer):
+            answer = ""
+            error = "YO!agent backend tried to inspect files outside the supplied YOLOmux context; showing the No agent summary instead."
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        fallback_reason = yoagent_cli_fallback_reason(backend, error)
+        status = {
+            "backend": backend,
+            "resumed": not seed,
+            "seeded": seed,
+            "context_changed": context_changed,
+            "prompt_chars": len(prompt),
+            "elapsed_ms": elapsed_ms,
+            "session_id": next_session_id or None,
+            "per_server": True,
+        }
+        with self.yoagent_cli_lock:
             if answer and next_session_id:
                 self.yoagent_cli_sessions[backend] = {
                     "session_id": next_session_id,
@@ -361,7 +362,7 @@ class TmuxWebtermApp:
                 }
             elif fallback_reason:
                 self.yoagent_cli_sessions.pop(backend, None)
-            return answer, fallback_reason, status
+        return answer, fallback_reason, status
 
     def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False) -> tuple[str, str, str]:
         if not shutil.which("codex"):
@@ -720,30 +721,49 @@ class TmuxWebtermApp:
         git_data = project.get("git") if isinstance(project.get("git"), dict) else {}
         pr = self.metadata_badge_pull_request(project)
         checks = pr.get("checks") if isinstance(pr.get("checks"), dict) else {}
-        failing = self.metadata_check_names(checks.get("failing"))
-        pending = self.metadata_check_names(checks.get("pending"))
-        status = "" if not pr or pr.get("source_only") else pull_request_status_label(pr)
-        check_state = str(checks.get("state") or "")
+        status = "" if not pr or pr.get("source_only") else self.metadata_badge_status_state(pr)
+        check_state = self.metadata_badge_ci_state(checks)
         return {
             "main": "main" if str(git_data.get("branch") or "") in {"main", "master"} else "",
             "pr": str(pr.get("number") or "") if pr else "",
             "status": status,
-            "ci": ":".join(
-                [
-                    status,
-                    check_state,
-                    str(checks.get("summary") or ""),
-                    "|".join(failing),
-                    "|".join(pending),
-                    str(checks.get("total") if checks.get("total") is not None else ""),
-                ]
-            ) if pr and check_state and check_state != "unknown" else "",
+            "ci": check_state if pr and check_state and check_state != "unknown" else "",
         }
 
     def metadata_badge_change_should_pulse(self, previous: dict[str, str], next_signature: dict[str, str], badge: str) -> bool:
-        if previous.get(badge, "") == next_signature.get(badge, ""):
+        previous_value = previous.get(badge, "")
+        next_value = next_signature.get(badge, "")
+        if previous_value == next_value:
             return False
-        return not self.metadata_badge_change_is_initial_enrichment(previous, next_signature, badge)
+        if self.metadata_badge_change_is_initial_enrichment(previous, next_signature, badge):
+            return False
+        if badge == "ci":
+            return previous_value in {"", "unknown", "pending", "running"} and next_value in {"passing", "failing"}
+        if badge == "status":
+            return previous_value in {"open", "draft"} and next_value in {"merged", "closed"}
+        if badge == "main":
+            return bool(next_value)
+        return False
+
+    def metadata_badge_status_state(self, pr: dict[str, Any]) -> str:
+        if pr.get("draft") is True:
+            return "draft"
+        if pr.get("merged") is True or isinstance(pr.get("merged_at"), str):
+            return "merged"
+        state = pr.get("state")
+        if state == "closed":
+            return "closed"
+        if state == "open":
+            return "open"
+        return state if isinstance(state, str) and state else "unknown"
+
+    def metadata_badge_ci_state(self, checks: dict[str, Any]) -> str:
+        state = str(checks.get("state") or "").strip().lower()
+        if state == "success":
+            return "passing"
+        if state == "failure":
+            return "failing"
+        return state
 
     def metadata_badge_change_is_initial_enrichment(self, previous: dict[str, str], next_signature: dict[str, str], badge: str) -> bool:
         previous_pr = previous.get("pr", "")
@@ -784,15 +804,6 @@ class TmuxWebtermApp:
             "checks": github_checks_unknown(),
             "source_only": True,
         }
-
-    def metadata_check_names(self, value: Any) -> list[str]:
-        if not isinstance(value, list):
-            return []
-        names = []
-        for item in value:
-            if isinstance(item, dict) and isinstance(item.get("name"), str):
-                names.append(item["name"])
-        return sorted(names)
 
     def warm_metadata_cache_async(self, sessions: dict[str, SessionInfo]) -> None:
         with self.metadata_warm_lock:
@@ -1190,6 +1201,10 @@ class TmuxWebtermApp:
             "files": saved,
         }, HTTPStatus.OK
 
+    def upload_max_bytes(self) -> int:
+        value = settings_payload().get("settings", {}).get("uploads", {}).get("max_bytes", UPLOAD_MAX_BYTES)
+        return int(value) if isinstance(value, (int, float)) and value > 0 else UPLOAD_MAX_BYTES
+
     def upload_target_dir(self, session: str) -> tuple[Path | None, str]:
         focus_root = focus_root_for_session(session)
         if focus_root:
@@ -1330,7 +1345,7 @@ class TmuxWebtermApp:
                 if transcript_state.get("key") != "idle":
                     screen_state = transcript_state
             return dict(prompt_state), dict(screen_state)
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": "", "error": str(exc)}
             screen = {"key": "error", "text": str(exc)}
             return prompt, screen

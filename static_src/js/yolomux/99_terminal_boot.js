@@ -213,6 +213,29 @@ function scrollYoagentChatToBottom(node = document.getElementById('yoagent-conte
   if (panelBody && panelBody !== node) panelBody.scrollTop = panelBody.scrollHeight;
 }
 
+function focusYoagentChatInput(node = document.getElementById('yoagent-content')) {
+  const input = node?.querySelector?.('[data-yoagent-chat-input]');
+  if (!input || input.disabled) return;
+  input.focus({preventScroll: true});
+  const end = input.value.length;
+  try { input.setSelectionRange(end, end); } catch (_) {}
+}
+
+function yoagentChatInputIsFocused(node = document.getElementById('yoagent-content')) {
+  const input = node?.querySelector?.('[data-yoagent-chat-input]');
+  return Boolean(input && document.activeElement === input);
+}
+
+function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-content')) {
+  if (!node) return false;
+  const globalRegion = node.querySelector('.yoagent-global');
+  const sessionsRegion = node.querySelector('.yoagent-session-summaries');
+  if (!globalRegion || !sessionsRegion) return false;
+  globalRegion.outerHTML = globalActivitySummaryHtml();
+  sessionsRegion.outerHTML = yoagentSessionSummariesHtml();
+  return true;
+}
+
 function renderYoagentPanel(options = {}) {
   const node = document.getElementById('yoagent-content');
   if (!node) return;
@@ -221,10 +244,15 @@ function renderYoagentPanel(options = {}) {
   const selectionStart = inputFocused ? input.selectionStart : null;
   const selectionEnd = inputFocused ? input.selectionEnd : null;
   if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
+  if (options.summaryOnly && inputFocused && refreshYoagentSummaryRegions(node)) return;
   node.innerHTML = `${globalActivitySummaryHtml()}${yoagentSessionSummariesHtml()}${yoagentChatHtml()}`;
   if (options.scrollBottom !== false) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));
     setTimeout(() => scrollYoagentChatToBottom(node), 0);
+  }
+  if (options.focusInput) {
+    requestAnimationFrame(() => focusYoagentChatInput(node));
+    return;
   }
   if (!inputFocused) return;
   const nextInput = node.querySelector('[data-yoagent-chat-input]');
@@ -637,6 +665,12 @@ async function uploadFiles(session, fileList, options = {}) {
   }
   const files = Array.from(fileList || []);
   if (!files.length) return;
+  const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
+  if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
+    statusEl.innerHTML = `<span class="err">upload failed: ${esc(`selected files total ${formatFileSize(totalBytes)}; limit is ${formatFileSize(uploadMaxBytes)}`)}</span>`;
+    showUploadRsyncRecommendation({session, sizeBytes: totalBytes});
+    return;
+  }
   const formData = new FormData();
   for (const file of files) {
     formData.append('files', file, file.name || 'upload.bin');

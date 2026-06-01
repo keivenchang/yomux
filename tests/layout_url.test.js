@@ -273,6 +273,9 @@ globalThis.__layoutTestApi = {
   backgroundTabItems,
   canPaneExpand,
   codeMirrorHtmlSemanticEmphasisExtension,
+  codeMirrorLanguageExtension,
+  codeMirrorHighlightExtension,
+  codeMirrorMarkdownCodeLanguages,
   codeMirrorSearchMatches,
   codeMirrorSearchMatchSummary,
   emptyPlaceholderPaneState,
@@ -291,6 +294,8 @@ globalThis.__layoutTestApi = {
   yoagentSessionSummariesHtml,
   yoagentChatHtml,
   setYoagentDraftForTest(value) { yoagentDraft = String(value || ''); },
+  setYoagentBusyForTest(value) { yoagentBusy = Boolean(value); },
+  setYoagentErrorForTest(value) { yoagentError = String(value || ''); },
   setYoagentNoticeForTest(value) { yoagentNotice = value; },
   sessionActivitySummary,
   fitAppMenuPopover,
@@ -316,6 +321,8 @@ globalThis.__layoutTestApi = {
   fuzzyHighlightHtml,
   fuzzySubsequenceMatch,
   fuzzySubsequenceScore,
+  lineDiffRows,
+  fileConflictCompareHtml,
   childPathParts,
   inactiveTabItems,
   infoItemId,
@@ -981,6 +988,33 @@ function makeFileTree(paths) {
   assert.deepStrictEqual(semanticRanges.map(range => [range.from, range.to]), [[11, 15], [29, 31]]);
   assert.ok(semanticRanges[0].style.includes('font-weight:700'));
   assert.ok(semanticRanges[1].style.includes('font-style:italic'));
+
+  const brokenLanguageApi = {
+    javascript() { throw new TypeError("Cannot read properties of undefined (reading 'parser')"); },
+    markdown() { throw new TypeError("Cannot read properties of undefined (reading 'parser')"); },
+    LanguageDescription: {
+      of() { throw new TypeError("Cannot read properties of undefined (reading 'parser')"); },
+    },
+    StreamLanguage: {
+      define() { throw new TypeError("Cannot read properties of undefined (reading 'parser')"); },
+    },
+  };
+  assert.deepStrictEqual(canonical(api.codeMirrorLanguageExtension(brokenLanguageApi, '/home/test/app.js')), [], 'broken JS language support falls back to editable plain text');
+  assert.deepStrictEqual(canonical(api.codeMirrorLanguageExtension(brokenLanguageApi, '/home/test/README.md')), [], 'broken Markdown language support falls back to editable plain text');
+  assert.deepStrictEqual(canonical(api.codeMirrorMarkdownCodeLanguages(brokenLanguageApi)), [], 'broken fenced-code language descriptions are skipped');
+  assert.deepStrictEqual(canonical(api.codeMirrorHighlightExtension({})), [], 'missing highlight support falls back without crashing');
+
+  const compareRows = canonical(api.lineDiffRows('one\ntwo\nfour', 'one\nthree\nfour'));
+  assert.deepStrictEqual(compareRows.map(row => [row.leftKind, row.rightKind]), [
+    ['same', 'same'],
+    ['added', 'blank'],
+    ['blank', 'removed'],
+    ['same', 'same'],
+  ], 'conflict compare dialog uses a real line diff');
+  const compareHtml = api.fileConflictCompareHtml('one\ntwo', 'one\nthree');
+  assert.ok(compareHtml.includes('file-compare-line added'), 'editor-only lines are marked green');
+  assert.ok(compareHtml.includes('file-compare-line removed'), 'disk-only lines are marked red');
+  assert.ok(compareHtml.includes('data-file-compare-scroll'), 'compare columns expose synchronized scroll targets');
 }
 
 {
@@ -1000,7 +1034,14 @@ function makeFileTree(paths) {
   assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
   assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
   assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), false);
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('function sanitizeMarkdownPreviewHtml'), 'Markdown previews pass through a sanitizer');
+  assert.ok(source.includes('MARKDOWN_PREVIEW_BLOCKED_TAGS'), 'Markdown sanitizer blocks executable/embedded HTML tags');
+  assert.equal(source.includes('container.innerHTML = window.marked.parse'), false, 'Markdown previews are not inserted with unsanitized marked HTML');
+  assert.ok(source.includes('container.replaceChildren(sanitizeMarkdownPreviewHtml(html));'), 'Markdown previews replace DOM with sanitized nodes');
   const htmlPreview = new TestElement('html-preview');
+  htmlPreview.scrollTop = 37;
+  htmlPreview.scrollLeft = 6;
   api.renderEditorPreviewPane(htmlPreview, '/home/test/index.html', '<style>h1{color:red}</style><h1>Hello</h1><script>window.bad = true</script>');
   assert.equal(htmlPreview.classList.contains('html-preview-body'), true);
   assert.equal(htmlPreview.classList.contains('code-preview-body'), false);
@@ -1008,6 +1049,8 @@ function makeFileTree(paths) {
   assert.equal(htmlPreview.children[0].className, 'file-editor-html-preview');
   assert.equal(htmlPreview.children[0].attributes.sandbox, '', 'HTML preview iframe is sandboxed with scripts disabled');
   assert.ok(htmlPreview.children[0].srcdoc.includes('<h1>Hello</h1>'), 'HTML preview renders markup through srcdoc');
+  assert.equal(htmlPreview.scrollTop, 37, 'HTML preview refresh preserves vertical scroll');
+  assert.equal(htmlPreview.scrollLeft, 6, 'HTML preview refresh preserves horizontal scroll');
   api.setFileEditorViewMode('/home/test/app.py', 'split');
   assert.equal(api.editorViewModeFor('/home/test/app.py'), 'edit');
   api.setFileEditorViewMode('/home/test/README.md', 'split');
@@ -1062,6 +1105,8 @@ function makeFileTree(paths) {
   assert.ok(start > 0 && end > start, 'could not locate renderFileEditorPanel body');
   assert.equal(source.slice(start, end).includes('.focus('), false, 'renderFileEditorPanel must not steal focus during refresh renders');
   assert.ok(source.includes('captureFileEditorPanelViewStateForItem(previous)'), 'switching pane tabs captures the outgoing CodeMirror viewport');
+  assert.ok(source.includes('const scrollTop = scrollDOM?.scrollTop || 0;'), 'external CodeMirror reload preserves scrollTop');
+  assert.ok(source.includes('view.requestMeasure({write: restoreScroll});'), 'external CodeMirror reload restores scroll after the document update');
   assert.ok(source.includes('view.requestMeasure'), 'CodeMirror viewport restore waits for a measured layout frame');
 }
 
@@ -1193,9 +1238,20 @@ function makeFileTree(paths) {
   assert.ok(source.includes('preserveScroll: sameImage'), 'image viewer refreshes preserve scroll on unchanged images');
   assert.ok(source.includes('captureFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is captured before pane/tab renders');
   assert.ok(source.includes('restoreFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is restored after pane/tab renders');
-  assert.ok(source.includes('refreshOpenEditorThemePanels'), 'global/editor theme changes refresh already-open CodeMirror panels');
-  assert.ok(source.includes('scheme: activeEditorScheme().id'), 'CodeMirror config signatures track the resolved active editor scheme');
+  assert.ok(source.includes('refreshOpenEditorThemePanels'), 'global/editor theme changes update already-open CodeMirror panels');
+  assert.ok(source.includes('function reconfigureCodeMirrorPanelTheme'), 'open CodeMirror panels reconfigure their theme compartment');
+  assert.ok(source.includes('Compartment: state.Compartment'), 'CodeMirror state Compartment is available for in-place theme updates');
+  assert.equal(source.includes('scheme: activeEditorScheme().id'), false, 'CodeMirror config signatures do not force panel rebuilds on theme-only changes');
+  assert.ok(source.includes('function yoagentChatNetworkError'), 'YO!agent chat distinguishes network failures from normal HTTP errors');
+  assert.ok(source.includes('focusInput: true'), 'YO!agent chat refocuses the input after responses and retryable failures');
+  assert.ok(source.includes('function refreshYoagentSummaryRegions'), 'YO!agent metadata refresh can update summaries without rebuilding the chat input');
+  assert.ok(source.includes('summaryOnly: true'), 'YO!agent metadata refresh requests summary-only panel updates');
   assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
+  assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
+  assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
+  assert.ok(source.includes('commandPaletteRecentKeyLimit = 100'), 'command palette recent-key cache is capped');
+  assert.ok(source.includes('restoreElementScrollPosition(container, scrollTop, scrollLeft);'), 'editor preview renders preserve scroll position');
+  assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');
 }
 
 {
@@ -1298,6 +1354,7 @@ function makeFileTree(paths) {
     session: '1',
     loaded: true,
     errors: [],
+    refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
     repos: [{repo: '/repo/app', count: 2, touched_count: 2}],
     files: [
       {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
@@ -1307,13 +1364,15 @@ function makeFileTree(paths) {
   assert.ok(api.changesPaneTabHtml().includes('changes-count-badge'));
   const changesHtml = api.changesPanelHtml();
   assert.ok(changesHtml.includes('/repo/app'));
-  assert.ok(changesHtml.includes('2 modified in session &#39;1&#39;'), 'Changes pane summary names the session explicitly');
+  assert.ok(changesHtml.includes('Modified in &#39;1&#39;: 2 files'), 'Changes pane summary names the session explicitly');
   assert.ok(changesHtml.includes('src/new.py'));
   assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
   assert.ok(changesHtml.includes('changes-file-agent'), 'changed-file rows show the agent icon slot');
   assert.ok(changesHtml.includes('changes-file-date'), 'changed-file rows wrap the date for skinny styling');
   assert.ok(changesHtml.includes('data-diff-ref-from'), 'Changes pane exposes FROM ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-to'), 'Changes pane exposes TO ref picker');
+  assert.ok(changesHtml.includes('data-diff-ref-from-select'), 'Changes pane exposes a scrollable FROM commit picker');
+  assert.ok(changesHtml.includes('older base commit'), 'Changes pane FROM picker includes recent commit subjects');
   const changedFilesSource = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), 'modified-file rows open from a double-click handler');
   const compactChangeHtml = api.changeFileRowHtml(
@@ -1324,6 +1383,8 @@ function makeFileTree(paths) {
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   assert.ok(changesHtml.includes('data-open-change-status="A"'), 'changed-file clicks carry status for deleted-file diff opens');
+  assert.ok(changedFilesSource.includes("const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';"), 'added/untracked changed files open through editable mode first');
+  assert.ok(changedFilesSource.includes("viewMode: isAddedChange ? 'edit' : 'diff'"), 'added changed files fall back to normal editor mode instead of forcing diff');
   api.setUploadedFilesCollapsedForTest(true);
   api.setSessionFilesPayloadForTest({
     session: '1',
@@ -1344,15 +1405,17 @@ function makeFileTree(paths) {
     session: '1',
     loaded: true,
     errors: [],
+    refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
     repos: [{repo: '/repo/app', count: 2, touched_count: 2}],
     files: [
       {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
     ],
   });
   assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified files'), 'Finder embeds a modified-files panel');
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('1 modified in session &#39;1&#39;'), 'Finder modified-files summary names the session explicitly');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified in &#39;1&#39;: 1 file'), 'Finder modified-files summary names the session explicitly');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-from-select'), 'Finder compact modified-files header exposes the FROM commit picker');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), 'Finder modified-files panel uses one density toggle');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row detailed'), 'Finder modified-files panel defaults to detailed rows');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
@@ -1518,6 +1581,10 @@ function makeFileTree(paths) {
   assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'YOsearch uses the normal UI font, not condensed tab text');
   assert.ok(preferencesCss.includes('--file-explorer-changes-min-block-size: 96px'), 'modified-files resizer shares a stable min-size token');
   assert.ok(preferencesCss.includes('--drop-outline: var(--accent-gold)'), 'drop-target outline color is tokenized');
+  assert.equal(/body\.theme-light\s+[^{]*(?:\.pane-tab|\.tabs|\.active-pane|\.panel-head)/.test(preferencesCss), false, 'global light theme does not restyle pane tab strips or active pane rings');
+  assert.ok(preferencesCss.includes('--pane-tab-active-bg: #76b900'), 'focused active pane tab uses full brand green fill');
+  assert.ok(preferencesCss.includes('--pane-tab-active-accent: #d9ff9a'), 'focused active pane tab keeps a brighter green top accent');
+  assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder or Changes panes');
   assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*#1d4ed8/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
   assert.ok(/\.file-editor-cross-split-panel,\s*\n\.file-editor-save-panel/.test(preferencesCss), 'side preview button uses the compact editor toolbar button sizing');
   assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
@@ -1527,6 +1594,7 @@ function makeFileTree(paths) {
   assert.ok(/\.yoagent-global\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent global summary fits narrow panes');
   assert.ok(/\.yoagent-session-summaries\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent session summaries fit narrow panes');
   assert.ok(/\.yoagent-chat\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent chat fits narrow panes');
+  assert.ok(/\.yoagent-chat\.empty\s*\{[\s\S]*grid-template-rows:\s*auto auto/.test(preferencesCss), 'empty YO!agent chat does not stretch an empty history row');
   assert.ok(preferencesCss.includes('body.editor-cursor-block .file-editor-codemirror .cm-cursor'), 'block cursor styling is available for CodeMirror');
   assert.ok(preferencesCss.includes('.file-editor-dialog-backdrop'), 'editor conflict and close decisions use the shared editor dialog');
   assert.equal(preferencesCss.includes('.app-menu-search-input'), false, 'Tabs menu no longer renders a sticky search input');
@@ -1555,6 +1623,11 @@ function makeFileTree(paths) {
   assert.ok(resetConfirmHtml.includes('preferences-global-reset confirming'), 'reset-all confirmation makes the warning visibly change');
   assert.ok(preferencesHtml.includes('preferences-setting-control setting-type-number'), 'number controls are identifiable for compact sizing');
   assert.ok(preferencesHtml.includes('data-setting-path="file_explorer.image_preview_max_px"'), 'preferences expose Finder image preview sizing');
+  assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
+  api.setClientSettingsPatchForTest({uploads: {max_bytes: 64 * 1024 * 1024}});
+  const largeUploadPreferencesHtml = api.preferencesPanelHtmlForTest('upload', []);
+  assert.ok(largeUploadPreferencesHtml.includes('preferences-setting-advisory'), 'large upload cap shows an rsync recommendation');
+  assert.ok(largeUploadPreferencesHtml.includes('rsync -avz'), 'large upload recommendation includes a copyable rsync command');
   assert.ok(preferencesHtml.includes('Auto-focus active pane'), 'auto-focus setting names the whole active pane/view');
   assert.ok(preferencesHtml.includes('enable hover-open menus'), 'auto-focus help covers menu hover behavior');
   assert.ok(preferencesHtml.includes('Off by default'), 'auto-focus help explains the default');
@@ -2781,12 +2854,14 @@ function makeFileTree(paths) {
     },
   };
   const html = api.tmuxPaneTabHtml('4', info, null, true);
+  const tabBadgeSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.equal(tabBadgeSource.includes('function pullRequestNumberIndicatorHtml'), false, 'tab PR number badge helper is removed');
   assert.ok(html.includes('>YO<'), 'tab includes YO marker');
   assert.equal(/session-yolo-marker[^"]*tab-symbol/.test(html), false, 'YO marker stays visible when metadata badges are hidden');
   assert.ok(html.includes('>4<'), 'tab includes session number');
   assert.ok(html.includes('>MAIN<'), 'tab marks default branch');
-  assert.ok(html.includes('pr-indicator'), 'tab shows PR number when no CI badge is available');
-  assert.ok(html.includes('>#9961<'), 'tab renders PR number as a standalone badge');
+  assert.equal(html.includes('pr-indicator'), false, 'open PR tabs do not show a separate PR number badge');
+  assert.equal(html.includes('>#9961<'), false, 'open PR tabs do not render PR number as a standalone badge');
   assert.equal(api.pullRequestStatusLabel({number: 9961, source_only: true, merged: true}), '');
   assert.equal(html.includes('MERGED'), false, 'main fallback does not show merged status');
   assert.equal(html.includes('(#9961)'), false, 'tab title strips duplicated PR suffix');
@@ -2810,7 +2885,7 @@ function makeFileTree(paths) {
   api.applyServerMetadataPulsesForTest('4', {main: 20000, pr: 20000});
   const metadataPulseHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
   assert.ok(metadataPulseHtml.includes('branch-indicator metadata-pulse'), 'MAIN badge pulses after metadata change');
-  assert.ok(metadataPulseHtml.includes('pr-indicator metadata-pulse'), 'PR number badge pulses after PR metadata change');
+  assert.equal(metadataPulseHtml.includes('pr-indicator metadata-pulse'), false, 'open PR number badge is not rendered or pulsed');
 
   const mergedInfo = {
     project: {
@@ -2832,9 +2907,10 @@ function makeFileTree(paths) {
   const ciPulseHtml = api.tmuxPaneTabHtml('9', ciInfo, {key: 'idle'}, true);
   assert.ok(ciPulseHtml.includes('pr-status-failing metadata-pulse'), 'CI badge is marked after CI change');
   assert.equal(ciPulseHtml.includes('>PR<'), false, 'CI badge avoids redundant PR text');
-  assert.ok(ciPulseHtml.includes('pr-indicator'), 'failing CI still shows the PR number badge');
-  assert.ok(ciPulseHtml.includes('>#13<'), 'CI badge does not suppress the PR number');
-  assert.ok(ciPulseHtml.indexOf('>CI</span>') < ciPulseHtml.indexOf('>#13<'), 'CI badge is before the PR number');
+  assert.equal(/class="[^"]*pr-indicator[^"]*"[^>]*>PR</.test(ciPulseHtml), false, 'CI tabs never render a standalone PR text pill');
+  assert.equal(ciPulseHtml.includes('pr-indicator'), false, 'failing CI suppresses the separate PR number badge');
+  assert.equal(ciPulseHtml.includes('>#13<'), false, 'failing CI suppresses the PR number chip');
+  assert.equal((ciPulseHtml.match(/>CI<\/span>/g) || []).length, 1, 'failing open PR renders exactly one CI badge');
   const passingInfo = {
     project: {
       git: {branch: 'feature'},
@@ -2844,11 +2920,12 @@ function makeFileTree(paths) {
   api.applyServerMetadataPulsesForTest('10', {ci: 20000});
   const passingHtml = api.tmuxPaneTabHtml('10', passingInfo, {key: 'idle'}, true);
   assert.equal(passingHtml.includes('>PR<'), false, 'passing CI avoids redundant PR text');
-  assert.ok(passingHtml.includes('pr-indicator'), 'passing CI still shows the PR number badge');
-  assert.ok(passingHtml.includes('>#14<'), 'passing CI badge does not suppress the PR number');
+  assert.equal(/class="[^"]*pr-indicator[^"]*"[^>]*>PR</.test(passingHtml), false, 'passing CI tabs never render a standalone PR text pill');
+  assert.equal(passingHtml.includes('pr-indicator'), false, 'passing CI suppresses the separate PR number badge');
+  assert.equal(passingHtml.includes('>#14<'), false, 'passing CI suppresses the PR number chip');
   assert.ok(passingHtml.includes('pr-status-passing metadata-pulse'), 'passing CI badge is green and marked after CI change');
   assert.ok(passingHtml.includes('>CI</span>'), 'passing CI renders a CI badge');
-  assert.ok(passingHtml.indexOf('>CI</span>') < passingHtml.indexOf('>#14<'), 'passing CI badge is before the PR number');
+  assert.equal((passingHtml.match(/>CI<\/span>/g) || []).length, 1, 'passing open PR renders exactly one CI badge');
   const pendingInfo = {
     project: {
       git: {branch: 'feature'},
@@ -2857,11 +2934,11 @@ function makeFileTree(paths) {
   };
   const pendingHtml = api.tmuxPaneTabHtml('11', pendingInfo, {key: 'idle'}, true);
   assert.equal(pendingHtml.includes('>PR<'), false, 'pending CI avoids redundant PR text');
-  assert.ok(pendingHtml.includes('pr-indicator'), 'pending CI still shows the PR number badge');
-  assert.ok(pendingHtml.includes('>#15<'), 'pending CI badge does not suppress the PR number');
+  assert.equal(pendingHtml.includes('pr-indicator'), false, 'pending CI suppresses the separate PR number badge');
+  assert.equal(pendingHtml.includes('>#15<'), false, 'pending CI suppresses the PR number chip');
   assert.ok(pendingHtml.includes('pr-status-pending'), 'pending CI badge is gold');
   assert.ok(pendingHtml.includes('>CI</span>'), 'pending CI renders a CI badge');
-  assert.ok(pendingHtml.indexOf('>CI</span>') < pendingHtml.indexOf('>#15<'), 'pending CI badge is before the PR number');
+  assert.equal((pendingHtml.match(/>CI<\/span>/g) || []).length, 1, 'pending open PR renders exactly one CI badge');
   const unknownCiInfo = {
     project: {
       git: {branch: 'feature'},
@@ -2869,8 +2946,8 @@ function makeFileTree(paths) {
     },
   };
   const unknownCiHtml = api.tmuxPaneTabHtml('12', unknownCiInfo, {key: 'idle'}, true);
-  assert.ok(unknownCiHtml.includes('pr-indicator'), 'PR number appears when CI state is unknown and no CI badge renders');
-  assert.ok(unknownCiHtml.includes('>#16<'), 'PR number badge uses #number format');
+  assert.equal(unknownCiHtml.includes('pr-indicator'), false, 'unknown open PR does not show a separate PR number badge');
+  assert.equal(unknownCiHtml.includes('>#16<'), false, 'unknown open PR does not show a #number chip');
 }
 
 {
@@ -2937,10 +3014,20 @@ function makeFileTree(paths) {
   assert.equal(api.yoagentChatHtml().includes('data-yoagent-chat-form'), false, 'No-agent YO!agent hides the chat form');
   assert.ok(api.yoagentChatHtml().includes('Set a Claude or Codex backend in Preferences to chat.'), 'No-agent YO!agent points users to backend settings');
   api.setClientSettingsPatchForTest({yoagent: {backend: 'claude'}});
-  assert.ok(api.yoagentChatHtml().includes('data-yoagent-chat-form'), 'Claude-backed YO!agent panel includes a chat form');
-  assert.ok(api.yoagentChatHtml().includes('Ask YO!agent'), 'Claude-backed YO!agent chat starts with an empty prompt');
+  const enabledChatHtml = api.yoagentChatHtml();
+  assert.ok(enabledChatHtml.includes('data-yoagent-chat-form'), 'Claude-backed YO!agent panel includes a chat form');
+  assert.ok(enabledChatHtml.includes('Ask YO!agent'), 'Claude-backed YO!agent chat starts with an empty prompt');
+  assert.ok(enabledChatHtml.includes('yoagent-chat empty'), 'empty YO!agent chat uses the compact empty layout');
+  assert.equal(enabledChatHtml.includes('yoagent-chat-toolbar'), false, 'YO!agent chat does not put Clear in a detached toolbar');
+  assert.ok(enabledChatHtml.indexOf('yoagent-chat-send') < enabledChatHtml.indexOf('yoagent-chat-clear'), 'YO!agent Ask and Clear buttons render together in the footer row');
+  api.setYoagentBusyForTest(true);
+  assert.ok(api.yoagentChatHtml().includes('yoagent-chat-spinner'), 'YO!agent busy state includes an animated spinner');
+  api.setYoagentBusyForTest(false);
   api.setYoagentDraftForTest('half typed question');
   assert.ok(api.yoagentChatHtml().includes('value="half typed question"'), 'YO!agent chat draft survives summary refresh re-renders');
+  api.setYoagentErrorForTest("Couldn't reach the YOLOmux server. Your question is still in the box; retry after the server is back.");
+  assert.ok(api.yoagentChatHtml().includes('data-yoagent-retry'), 'YO!agent network failures show a retry action without losing the draft');
+  api.setYoagentErrorForTest('');
   api.setYoagentNoticeForTest({backend: 'claude', reason: 'Claude CLI is not logged in. Run `claude login`.'});
   assert.ok(api.yoagentChatHtml().includes('yoagent-chat-notice'), 'YO!agent chat surfaces backend fallback notices');
   assert.ok(api.yoagentChatHtml().includes('claude'), 'YO!agent fallback notice includes the backend');

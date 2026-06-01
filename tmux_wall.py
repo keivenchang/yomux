@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import ipaddress
 import json
 import re
 import sys
@@ -40,6 +41,10 @@ STATIC_CONTENT_TYPES = {
     "tmux-wall.css": "text/css; charset=utf-8",
     "tmux-wall.js": "application/javascript; charset=utf-8",
 }
+UNAUTHENTICATED_REMOTE_BIND_ERROR = (
+    "tmux_wall.py has no authentication. Bind to 127.0.0.1/localhost, or pass "
+    "--allow-unauthenticated-non-loopback if you intentionally want to expose tmux snapshots."
+)
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,22 @@ def static_asset_version(asset: str) -> int:
         return int(path.stat().st_mtime)
     except OSError:
         return 0
+
+
+def is_loopback_bind_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def remote_bind_error(host: str, allow_unauthenticated_non_loopback: bool) -> str:
+    if allow_unauthenticated_non_loopback or is_loopback_bind_host(host):
+        return ""
+    return UNAUTHENTICATED_REMOTE_BIND_ERROR
 
 
 def list_panes() -> tuple[list[PaneInfo], str | None]:
@@ -483,6 +504,11 @@ def parse_args() -> argparse.Namespace:
         help='tmux targets, comma-separated or separate args. Example: --targets "project1:0.0,project2:0.0"',
     )
     parser.add_argument("--print-targets", action="store_true")
+    parser.add_argument(
+        "--allow-unauthenticated-non-loopback",
+        action="store_true",
+        help="Allow binding this unauthenticated wall server to a non-loopback address.",
+    )
     return parser.parse_args()
 
 
@@ -503,6 +529,11 @@ def main() -> int:
             label = f"{pane.command} {pane.current_path}" if pane else ""
             print(f"{target}\t{label}")
         return 0
+
+    bind_error = remote_bind_error(args.host, args.allow_unauthenticated_non_loopback)
+    if bind_error:
+        print(bind_error, file=sys.stderr)
+        return 2
 
     server = TmuxWallHTTPServer((args.host, args.port), app)
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host

@@ -35,7 +35,6 @@ from .common import SUMMARY_CODEX_MODEL
 from .common import SUMMARY_CODEX_SERVICE_TIER
 from .common import SUMMARY_CODEX_TIMEOUT_SECONDS
 from .common import SUMMARY_LOOKBACK_SECONDS
-from .common import UPLOAD_MAX_BYTES
 from .common import WEBSOCKET_GUID
 from .common import auth_setup_required
 from .common import parse_bool
@@ -56,10 +55,34 @@ from .websocket import read_ws_frame
 from .websocket import set_pty_size
 
 
+PTY_DIMENSION_MIN = 1
+PTY_DIMENSION_MAX = 1000
+
+
 def content_disposition_attachment(raw_path: str) -> str:
     name = Path(str(raw_path or "")).name or "download"
     safe = "".join(char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";", "/"} else "_" for char in name).strip()
     return f'attachment; filename="{safe or "download"}"'
+
+
+def parse_query_int(qs: dict[str, list[str]], name: str, default: int) -> tuple[int | None, str]:
+    raw = qs.get(name, [str(default)])[0]
+    try:
+        return int(raw), ""
+    except (TypeError, ValueError):
+        return None, f"{name} must be an integer"
+
+
+def clamp_pty_dimension(value: int) -> int:
+    return max(PTY_DIMENSION_MIN, min(value, PTY_DIMENSION_MAX))
+
+
+def ws_resize_dimensions(message: dict[str, Any], default_rows: int, default_cols: int) -> tuple[int, int] | None:
+    cols = message.get("cols")
+    rows = message.get("rows")
+    if not isinstance(cols, int) or isinstance(cols, bool) or not isinstance(rows, int) or isinstance(rows, bool):
+        return None
+    return clamp_pty_dimension(rows), clamp_pty_dimension(cols)
 
 
 class Handler(AuthMixin, BaseHTTPRequestHandler):
@@ -89,6 +112,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         required_role = "admin" if parsed.path == "/api/summary-stream" else "readonly"
         if not self.require_auth(required_role):
             return
+        if parsed.path.startswith("/api/fs/") and self.auth_readonly():
+            self.reject_forbidden(self.auth_identity(), "admin")
+            return
         if parsed.path == "/api/ping":
             self.write_json({"ok": True, "time": time.time()})
             return
@@ -105,28 +131,40 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/tmux":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
-            lines = int(qs.get("lines", ["90"])[0])
+            lines, error = parse_query_int(qs, "lines", 90)
+            if error:
+                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+                return
             payload, status = self.server.app.tmux_snapshot(session, lines)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/transcript":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
-            lines = int(qs.get("lines", ["120"])[0])
+            lines, error = parse_query_int(qs, "lines", 120)
+            if error:
+                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+                return
             payload, status = self.server.app.transcript_tail(session, lines)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/context":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
-            messages = int(qs.get("messages", ["40"])[0])
+            messages, error = parse_query_int(qs, "messages", 40)
+            if error:
+                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+                return
             payload, status = self.server.app.context_tail(session, messages)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/context-items":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
-            messages = int(qs.get("messages", ["40"])[0])
+            messages, error = parse_query_int(qs, "messages", 40)
+            if error:
+                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+                return
             payload, status = self.server.app.context_items(session, messages)
             self.write_json(payload, status=status)
             return
@@ -492,11 +530,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             content_length = int(content_length_text)
         except ValueError:
             return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
-        if content_length > UPLOAD_MAX_BYTES:
+        upload_max_bytes = self.server.app.upload_max_bytes()
+        if content_length > upload_max_bytes:
             self.close_connection = True
             return {
                 "session": session,
-                "error": f"upload is too large; limit is {UPLOAD_MAX_BYTES} bytes",
+                "error": f"upload is too large; limit is {upload_max_bytes} bytes",
             }, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
 
         body = self.rfile.read(content_length)
@@ -531,7 +570,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def stream_context_items(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         session = qs.get("session", [""])[0]
-        messages = int(qs.get("messages", ["40"])[0])
+        messages, error = parse_query_int(qs, "messages", 40)
+        if error:
+            self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+            return
         message_limit = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
         payload, status = self.server.app.transcript_tail(session, MAX_TRANSCRIPT_TAIL_LINES)
         if status != HTTPStatus.OK:
@@ -922,11 +964,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             except OSError:
                 pass
             if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+                terminate_process_group(process)
 
     def read_initial_ws_payloads(self) -> tuple[int, int, list[bytes]]:
         rows = DEFAULT_ROWS
@@ -952,11 +990,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 pending_payloads.append(payload)
                 continue
             if message.get("type") == "resize":
-                next_cols = message.get("cols")
-                next_rows = message.get("rows")
-                if isinstance(next_cols, int) and isinstance(next_rows, int):
-                    cols = next_cols
-                    rows = next_rows
+                dimensions = ws_resize_dimensions(message, rows, cols)
+                if dimensions:
+                    rows, cols = dimensions
                 continue
             pending_payloads.append(payload)
             break
@@ -980,9 +1016,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if filtered:
                     os.write(master_fd, filtered.encode("utf-8"))
         elif msg_type == "resize":
-            cols = message.get("cols")
-            rows = message.get("rows")
-            if isinstance(cols, int) and isinstance(rows, int):
+            dimensions = ws_resize_dimensions(message, DEFAULT_ROWS, DEFAULT_COLS)
+            if dimensions:
+                rows, cols = dimensions
                 set_pty_size(resize_fd, rows, cols)
                 try:
                     os.killpg(process.pid, signal.SIGWINCH)

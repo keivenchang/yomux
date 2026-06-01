@@ -65,10 +65,16 @@ def test_match_types_and_first_match_precedence():
 
 def test_hard_floor_blocks_unrelaxable_cases():
     assert yolo_rules.hard_floor_decision("rm -rf /")["action"] == "block"
+    assert yolo_rules.hard_floor_decision("rm -rf /*")["action"] == "block"
+    assert yolo_rules.hard_floor_decision("rm -rf //")["action"] == "block"
+    assert yolo_rules.hard_floor_decision("rm -rf ~/")["action"] == "block"
+    assert yolo_rules.hard_floor_decision("rm -rf /home")["action"] == "block"
+    assert yolo_rules.hard_floor_decision("rm --recursive --force /usr")["action"] == "block"
     assert yolo_rules.hard_floor_decision("dd if=/dev/zero of=/dev/sda")["action"] == "block"
     assert yolo_rules.hard_floor_decision("mkfs.ext4 /dev/sda1")["action"] == "block"
     assert yolo_rules.hard_floor_decision("echo foo > /dev/sda")["action"] == "block"
     assert yolo_rules.hard_floor_decision(":(){ :|:& };:")["action"] == "block"
+    assert yolo_rules.hard_floor_decision("bomb(){ bomb | bomb & }; bomb")["action"] == "block"
 
     permissive = ruleset({
         "default": "approve",

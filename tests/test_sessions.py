@@ -25,6 +25,17 @@ def test_find_recent_codex_transcript_keeps_tail_fallback(tmp_path):
     assert sessions.find_recent_codex_transcript(cwd, root=root) == transcript
 
 
+def test_find_recent_codex_transcript_refuses_global_newest_without_cwd(tmp_path):
+    root = tmp_path / "codex" / "sessions"
+    transcript = root / "2026" / "05" / "rollout-newest.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/repo/other"}}), encoding="utf-8")
+
+    assert sessions.find_recent_codex_transcript(None, root=root) is None
+    assert sessions.find_recent_codex_transcript("", root=root) is None
+    assert sessions.find_recent_codex_transcript("/repo/project", root=root) is None
+
+
 def test_codex_transcript_from_process_fd_prefers_open_rollout(tmp_path):
     root = tmp_path / "codex" / "sessions"
     transcript = root / "2026" / "05" / "rollout-owned.jsonl"

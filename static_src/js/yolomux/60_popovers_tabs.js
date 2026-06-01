@@ -342,13 +342,7 @@ function yoloMarkerHtml(session, auto, options = {}) {
 function pullRequestCompactBadgesHtml(session, pr) {
   const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
   const ciHtml = pullRequestCiIndicatorHtml(session, pr);
-  const prHtml = pullRequestNumberIndicatorHtml(session, pr);
-  return [statusHtml, ciHtml, prHtml].filter(Boolean).join('');
-}
-
-function pullRequestNumberIndicatorHtml(session, pr) {
-  if (!pr?.number) return '';
-  return `<span class="${metadataBadgeClasses(session, 'pr', 'ci-indicator tab-symbol pr-indicator')}">#${esc(pr.number)}</span>`;
+  return [statusHtml, ciHtml].filter(Boolean).join('');
 }
 
 function applySessionStateClasses(node, state) {

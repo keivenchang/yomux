@@ -1,6 +1,9 @@
 import json
+import os
 import subprocess
 import time
+
+os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
 
 from yolomux_lib.activity_summary import activity_signature
 from yolomux_lib.activity_summary import build_global_activity_summary
@@ -8,6 +11,7 @@ from yolomux_lib.activity_summary import build_session_activity_summary
 from yolomux_lib.activity_summary import build_yoagent_chat_prompt
 from yolomux_lib.activity_summary import build_yoagent_resume_prompt
 from yolomux_lib.activity_summary import deterministic_yoagent_reply
+from yolomux_lib.activity_summary import transcript_file_signature
 from yolomux_lib.activity_summary import yolomux_help_primer
 from yolomux_lib.activity_summary import yoagent_context_lines
 from yolomux_lib.common import AgentInfo
@@ -82,7 +86,9 @@ def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     assert summary["agent"] == "codex"
     assert summary["goal"] == "Fix editor colors"
     assert summary["files"] == {"count": 1, "added": 1, "removed": 1}
-    assert summary["local"].startswith("Codex gpt-5.5 session 5 is")
+    assert summary["activity_label"] == "recently active"
+    assert summary["active"] is True
+    assert summary["local"].startswith("Codex gpt-5.5 session 5 is recently active")
     assert "You last worked on this session" in summary["local"]
     assert summary["last_activity_text"]
     assert summary["last_activity_ts"]
@@ -94,6 +100,28 @@ def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     signature = activity_signature(info, project, files)
     assert signature["summary_format"] >= 2
     assert signature["files"][0][2] == "app.py"
+
+
+def test_session_activity_summary_only_calls_stale_sessions_idle(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("agent finished\n", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(transcript, (old, old))
+    info = SessionInfo(
+        session="8",
+        panes=[],
+        selected_pane=None,
+        agents=[make_agent("8", transcript, repo)],
+    )
+
+    summary = build_session_activity_summary(info, {"git": {"root": str(repo), "branch": "main"}}, {"files": []})
+
+    assert summary["activity_label"] == "idle"
+    assert summary["active"] is False
+    assert "session 8 is idle" in summary["local"]
+    assert "just now" not in summary["local"]
 
 
 def test_global_activity_summary_rolls_up_sessions():
@@ -112,6 +140,27 @@ def test_global_activity_summary_rolls_up_sessions():
     assert "Recommendation: keep session 1 focused on fix A" in global_summary["lines"][1]
     assert "You have not touched session 2" in global_summary["lines"][2]
     assert "ask it to summarize before resuming" in global_summary["lines"][2]
+
+
+def test_transcript_file_signature_uses_nanosecond_mtime(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("first\n", encoding="utf-8")
+    base_ns = 1_900_000_000_000_000_000
+    transcript.touch()
+
+    os.utime(transcript, ns=(base_ns, base_ns))
+    agent = make_agent("5", transcript, repo)
+    first = transcript_file_signature(agent)
+
+    transcript.write_text("secnd\n", encoding="utf-8")
+    os.utime(transcript, ns=(base_ns + 1, base_ns + 1))
+    second = transcript_file_signature(agent)
+
+    assert first["size"] == second["size"]
+    assert first["mtime"] == second["mtime"]
+    assert first["mtime_ns"] != second["mtime_ns"]
 
 
 def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
@@ -177,6 +226,8 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert "M static/yolomux.js" in changed_resume
     assert "Activity summary is unchanged" in unchanged_resume
     assert "M static/yolomux.js" not in unchanged_resume
+    assert "No AI backend is answering" in reply
+    assert "Set or log in a Claude/Codex backend" in reply
     assert "Your most recent work is about editor fixes" in reply
     assert "Recommendation" in reply
     assert "Codex session 5 is active" in reply
@@ -201,3 +252,7 @@ def test_yoagent_help_primer_and_deterministic_help_answers():
     context_reply = deterministic_yoagent_reply("where do your insights come from?", {}, {})
     assert "transcript JSONL" in context_reply
     assert "no detected agent or no transcript" in context_reply
+
+    fallback_reply = deterministic_yoagent_reply("date?", {"global": {"headline": "No recent work."}}, {})
+    assert fallback_reply.startswith("No AI backend is answering")
+    assert "No recent work." in fallback_reply

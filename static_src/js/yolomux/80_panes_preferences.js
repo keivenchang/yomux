@@ -1137,9 +1137,17 @@ function createYoagentPanel() {
   });
   panel.addEventListener('click', event => {
     const clear = event.target.closest('[data-yoagent-clear]');
-    if (!clear || !panel.contains(clear)) return;
-    event.preventDefault();
-    clearYoagentConversation();
+    if (clear && panel.contains(clear)) {
+      event.preventDefault();
+      clearYoagentConversation();
+      return;
+    }
+    const retry = event.target.closest('[data-yoagent-retry]');
+    if (retry && panel.contains(retry)) {
+      event.preventDefault();
+      const input = panel.querySelector('[data-yoagent-chat-input]');
+      sendYoagentChatMessage(input?.value || yoagentDraft);
+    }
   });
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
@@ -1266,22 +1274,40 @@ function yoagentChatEnabled() {
 function yoagentChatHtml() {
   const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
   const placeholder = readOnlyMode ? 'YO!agent chat requires admin access' : 'Ask about agents, repos, files, CI, blockers...';
-  const busy = yoagentBusy ? '<div class="yoagent-chat-status">YO!agent is answering...</div>' : '';
-  const error = yoagentError ? `<div class="yoagent-chat-error">${esc(yoagentError)}</div>` : '';
+  const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || yoagentBusy || yoagentError);
+  const busy = yoagentBusy
+    ? '<div class="yoagent-chat-status"><span class="yoagent-chat-spinner" aria-hidden="true"></span><span>YO!agent is answering...</span></div>'
+    : '';
+  const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
+    ? '<button type="button" class="yoagent-chat-retry" data-yoagent-retry>Retry</button>'
+    : '';
+  const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentError)}</span>${retry}</div>` : '';
   const clearDisabled = yoagentBusy || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
   const form = yoagentChatEnabled()
     ? `<form class="yoagent-chat-form" data-yoagent-chat-form>
       <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
-      <button type="submit" class="yoagent-chat-send"${disabled}>Ask</button>
+      <div class="yoagent-chat-actions">
+        <button type="submit" class="yoagent-chat-send"${disabled}>Ask</button>
+        <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>Clear conversation</button>
+      </div>
     </form>`
     : '';
-  return `<section class="yoagent-chat" aria-label="YO!agent chat">
-    <div class="yoagent-chat-toolbar">
-      <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>Clear conversation</button>
-    </div>
+  return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="YO!agent chat">
     <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
     ${form}
   </section>`;
+}
+
+function yoagentChatNetworkError(error) {
+  const text = String(error?.message || error || '');
+  return error instanceof TypeError || /failed to fetch|networkerror|load failed|fetch failed/i.test(text);
+}
+
+function yoagentChatErrorMessage(error) {
+  if (yoagentChatNetworkError(error)) {
+    return "Couldn't reach the YOLOmux server. Your question is still in the box; retry after the server is back.";
+  }
+  return `chat failed: ${error?.message || error}`;
 }
 
 async function clearYoagentConversation() {
@@ -1322,16 +1348,17 @@ async function sendYoagentChatMessage(rawText) {
     yoagentMessages.push({role: 'assistant', content: payload.answer || 'No answer.'});
     statusEl.textContent = `YO!agent answered with ${yoagentBackendLabel(payload.backend_used || payload.backend)}`;
   } catch (error) {
-    yoagentError = `chat failed: ${error}`;
+    if (yoagentChatNetworkError(error)) yoagentDraft = text;
+    yoagentError = yoagentChatErrorMessage(error);
   } finally {
     yoagentBusy = false;
-    renderYoagentPanel({preserveDraft: false, scrollBottom: true});
+    renderYoagentPanel({preserveDraft: true, scrollBottom: true, focusInput: true});
   }
 }
 
 async function refreshActivitySummary(options = {}) {
   activitySummaryRefreshing = true;
-  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   try {
     const response = await apiFetch(`/api/activity-summary${options.force ? '?force=1' : ''}`, {cache: 'no-store'});
     const payload = await response.json().catch(() => ({}));
@@ -1348,7 +1375,7 @@ async function refreshActivitySummary(options = {}) {
     activitySummaryRefreshing = false;
   }
   renderInfoPanel();
-  renderYoagentPanel();
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
 }
 
 function editorSchemePreferenceChoices(options = {}) {
@@ -1445,6 +1472,7 @@ function preferenceSections() {
     ]},
     {title: 'Uploads', items: [
       {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
+      {path: 'uploads.max_bytes', label: 'Upload size cap', type: 'number', min: 1048576, max: 536870912, step: 1048576, suffix: 'bytes', help: 'Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.'},
     ]},
     {title: 'YO!agent', items: [
       {path: 'yoagent.backend', label: 'YO!agent backend', type: 'select', choices: [
@@ -1669,7 +1697,24 @@ function preferenceControlHtml(item, query = '') {
     : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
-  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span></div>`;
+  const advisory = preferenceAdvisoryHtml(item, value);
+  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span>${advisory}</div>`;
+}
+
+function uploadRsyncExampleCommand() {
+  const host = serverHostname || '<host>';
+  const destination = homePath || '~';
+  return `rsync -avz <local-path> ${host}:${destination}/`;
+}
+
+function preferenceAdvisoryHtml(item, value) {
+  if (item.path !== 'uploads.max_bytes' || Number(value) <= uploadRsyncRecommendationBytes) return '';
+  const command = uploadRsyncExampleCommand();
+  return `<div class="preferences-setting-advisory">
+    <span>Large browser uploads are buffered in memory. Prefer rsync for files above ${esc(formatFileSize(uploadRsyncRecommendationBytes))}.</span>
+    <code>${esc(command)}</code>
+    <button type="button" class="preferences-inline-action" data-copy-text="${esc(command)}">Copy rsync example</button>
+  </div>`;
 }
 
 function preferencesAllDefault() {
@@ -1885,6 +1930,14 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copy.dataset.copyPath || '')
         .then(() => { statusEl.textContent = 'copied path'; })
+        .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+      return;
+    }
+    const copyText = event.target.closest('[data-copy-text]');
+    if (copyText && panel.contains(copyText)) {
+      event.preventDefault();
+      copyTextToClipboard(copyText.dataset.copyText || '')
+        .then(() => { statusEl.textContent = 'copied text'; })
         .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
       return;
     }

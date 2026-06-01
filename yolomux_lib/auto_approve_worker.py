@@ -277,17 +277,24 @@ class AutoApproveWorker:
         self.update(last_action=f"unknown prompt type: {prompt_type}")
         return False
 
-    def send_action(self, module: Any, action: str | None, selected_option: int = 1) -> None:
+    def send_action(self, module: Any, action: str | None, selected_option: int = 1) -> bool:
+        if selected_option > 0 and hasattr(module, "tmux_capture_pane") and hasattr(module, "selected_prompt_option"):
+            visible_text = module.tmux_capture_pane(self.target, visible_only=True)
+            current_option = module.selected_prompt_option(visible_text or "")
+            if current_option > 0 and current_option != selected_option:
+                self.update(last_action=f"approval option moved from {selected_option} to {current_option}; waiting for next capture")
+                return False
         option = 2 if action == "option2" else 1
         if hasattr(module, "tmux_send_option"):
             module.tmux_send_option(self.target, option, selected_option)
-            return
+            return True
         if action == "option2":
             module.tmux_send_option2(self.target, selected_option)
         elif selected_option > 1 and hasattr(module, "tmux_send_option1"):
             module.tmux_send_option1(self.target, selected_option)
         else:
             module.tmux_send_enter(self.target)
+        return True
 
     def handle_bash_prompt(
         self,
@@ -321,7 +328,8 @@ class AutoApproveWorker:
 
         if rule_action in {"approve", "decline"}:
             send_value = "option2" if rule_action == "decline" else action
-            self.send_action(module, send_value, selected_option)
+            if not self.send_action(module, send_value, selected_option):
+                return False
             self.last_hash = current_hash
             self.last_hash_at = time.monotonic()
             self.last_blocked_hash = ""
@@ -363,7 +371,8 @@ class AutoApproveWorker:
         return False
 
     def approve_prompt(self, module: Any, current_hash: str, action: str | None, prompt_type: str, selected_option: int = 1, prompt_source: str = "pane") -> bool:
-        self.send_action(module, action, selected_option)
+        if not self.send_action(module, action, selected_option):
+            return False
         self.last_hash = current_hash
         self.last_hash_at = time.monotonic()
         self.last_blocked_hash = ""
@@ -401,7 +410,8 @@ class AutoApproveWorker:
         self.update(error=decision.get("error") if decision.get("error") else None)
         if rule_action in {"approve", "decline"}:
             send_value = "option2" if rule_action == "decline" else action
-            self.send_action(module, send_value, selected_option)
+            if not self.send_action(module, send_value, selected_option):
+                return False
             self.last_hash = current_hash
             self.last_hash_at = time.monotonic()
             self.last_blocked_hash = ""

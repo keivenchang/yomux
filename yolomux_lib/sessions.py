@@ -280,7 +280,7 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
         return None
     files = sorted(root.glob("**/rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not cwd:
-        return files[0] if files else None
+        return None
     for path in files[:80]:
         if codex_transcript_header_cwd(path) == cwd:
             return path

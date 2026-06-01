@@ -34,6 +34,42 @@ def test_auto_approve_tmux_reexports_detector_helpers():
     assert auto_approve_tmux.prompt_hash is prompt_detector.prompt_hash
 
 
+def test_standalone_bash_decision_fails_closed_without_extracted_command(monkeypatch):
+    def unexpected_evaluate(*_args, **_kwargs):
+        raise AssertionError("missing commands must not fall through to rule evaluation")
+
+    monkeypatch.setattr(auto_approve_tmux.yolo_rules, "evaluate", unexpected_evaluate)
+
+    decision = auto_approve_tmux.standalone_bash_decision(None, "6")
+
+    assert decision["action"] == "ask"
+    assert decision["command_missing"] is True
+    assert decision["rule_name"] == "command extraction failed"
+
+
+def test_standalone_bash_decision_uses_yolo_rule_engine(monkeypatch):
+    calls = []
+
+    def fake_evaluate(cmd, prompt_type="bash", agent="", session="", dangerously_yolo=False):
+        calls.append((cmd, prompt_type, agent, session, dangerously_yolo))
+        return {
+            "action": "notify",
+            "rule_name": "custom default",
+            "risk": "unknown",
+            "source": "file",
+            "path": "/tmp/yolo-rules.yaml",
+        }
+
+    monkeypatch.setattr(auto_approve_tmux.yolo_rules, "evaluate", fake_evaluate)
+
+    decision = auto_approve_tmux.standalone_bash_decision("python3 script.py", "6")
+
+    assert calls == [("python3 script.py", "bash", "", "6", False)]
+    assert decision["action"] == "notify"
+    assert decision["rule_name"] == "custom default"
+    assert decision["command_missing"] is False
+
+
 def test_hybrid_approval_prompt_state_uses_recent_transcript_when_pane_header_is_missing(monkeypatch, tmp_path):
     transcript = tmp_path / "claude.jsonl"
     transcript.write_text(

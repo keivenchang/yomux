@@ -65,6 +65,7 @@ from yolomux_lib.prompt_detector import (
     visible_choice_prompt_text,
     yes_is_selected,
 )
+from yolomux_lib import yolo_rules
 from yolomux_lib.sessions import discover_sessions
 from yolomux_lib.tmux_utils import tmux_capture_pane
 from yolomux_lib.tmux_utils import tmux_exact_target_from_sessions
@@ -102,6 +103,35 @@ DEFAULT_PROMPT_SOURCE = "hybrid"
 
 # Re-export detector helpers from yolomux_lib.prompt_detector so existing
 # callers can keep importing them from this script.
+
+
+def standalone_bash_decision(cmd: str | None, target: str = "", dangerously_yolo: bool = False) -> dict[str, object]:
+    """Return the rule decision for standalone bash approval.
+
+    The standalone CLI predates the in-process worker and used to fall back to
+    approving when visual command extraction failed. Keep that path fail-closed:
+    no extracted command means no approval key is sent.
+    """
+    if not isinstance(cmd, str) or not cmd.strip():
+        return {
+            "action": "ask",
+            "rule_name": "command extraction failed",
+            "risk": "unknown",
+            "source": "prompt-detector",
+            "path": "",
+            "prompt_type": "bash",
+            "agent": "",
+            "session": target,
+            "dry_run": False,
+            "command_missing": True,
+        }
+    decision = yolo_rules.evaluate(cmd, "bash", "", target, dangerously_yolo=dangerously_yolo)
+    action = decision.get("action") if isinstance(decision.get("action"), str) else "ask"
+    if action not in yolo_rules.RULE_ACTIONS:
+        action = "ask"
+    decision["action"] = action
+    decision["command_missing"] = False
+    return decision
 
 # ---------------------------------------------------------------------------
 # Target resolution (multiple args, comma-separated, wildcards)
@@ -574,10 +604,13 @@ def main() -> None:
             else:  # bash prompt
                 state_command = prompt_state.get("command")
                 cmd = state_command if isinstance(state_command, str) and state_command.strip() else extract_command(pane_text)
+                decision = standalone_bash_decision(cmd, st.target)
+                rule_action = decision.get("action") if isinstance(decision.get("action"), str) else "ask"
+                if decision.get("error"):
+                    log.warning("[%s] YOLO rule error: %s", st.label, decision["error"])
 
-                if cmd is None:
-                    opt_label = "opt 2" if action == "option2" else "opt 1"
-                    if last_log_msg != f"[{st.label}] APPROVE (no cmd extracted, defaulting yes)":
+                if decision.get("command_missing"):
+                    if last_log_msg != f"[{st.label}] BLOCKED (no cmd extracted)":
                         pane_lines = pane_text.splitlines()
                         for i, line in enumerate(pane_lines):
                             if "Do you want to proceed" in line or "Would you like to run the following command" in line:
@@ -587,35 +620,41 @@ def main() -> None:
                                 for ctx in context:
                                     print(f"  | {ctx}")
                                 break
-                    if args.dry_run:
-                        log_dedup(logging.INFO, f"[{st.label}] WOULD APPROVE (no cmd extracted, {opt_label})")
-                    else:
-                        log_dedup(logging.INFO, f"[{st.label}] APPROVE (no cmd extracted, {opt_label})")
-                        _send(action)
-                    st.last_hash = current_hash
-                    st.last_hash_at = time.monotonic()
-                    st.last_blocked_hash = ""
-                    st.approved += 1
-                    if should_exit_once(st, "bash approval without command extraction"):
-                        return
-                    time.sleep(3)
-
-                elif is_dangerous(cmd):
-                    log.info("[%s] BLOCKED (dangerous): %s", st.label, cmd)
+                    log_dedup(logging.INFO, f"[{st.label}] BLOCKED (no cmd extracted; waiting for manual approval)")
                     st.last_hash = current_hash
                     st.last_hash_at = time.monotonic()
                     st.last_blocked_hash = current_hash
                     st.blocked += 1
-                    if should_exit_once(st, "dangerous-command block"):
+                    if should_exit_once(st, "bash prompt without command extraction"):
+                        return
+
+                elif rule_action in yolo_rules.PASSIVE_RULE_ACTIONS:
+                    if decision.get("would_action"):
+                        log.info("[%s] DRY-RUN would %s bash: %s", st.label, decision["would_action"], cmd)
+                    elif rule_action == "block":
+                        log.info("[%s] BLOCKED (%s): %s", st.label, decision.get("rule_name") or "rule", cmd)
+                    elif rule_action == "notify":
+                        log.info("[%s] NOTIFY (%s): %s", st.label, decision.get("rule_name") or "rule", cmd)
+                    elif rule_action == "off":
+                        log.info("[%s] YOLO OFF (%s): %s", st.label, decision.get("rule_name") or "rule", cmd)
+                    else:
+                        log.info("[%s] ASK (%s): %s", st.label, decision.get("rule_name") or "rule", cmd)
+                    st.last_hash = current_hash
+                    st.last_hash_at = time.monotonic()
+                    st.last_blocked_hash = current_hash
+                    st.blocked += 1
+                    if should_exit_once(st, f"bash {rule_action}"):
                         return
 
                 else:
-                    opt_label = "opt 2" if action == "option2" else "opt 1"
+                    send_action = "option2" if rule_action == "decline" else action
+                    opt_label = "opt 2" if send_action == "option2" else "opt 1"
+                    verb = "DECLINE" if rule_action == "decline" else "APPROVE"
                     if args.dry_run:
-                        log.info("[%s] WOULD APPROVE (%s): %s", st.label, opt_label, cmd)
+                        log.info("[%s] WOULD %s (%s): %s", st.label, verb, opt_label, cmd)
                     else:
-                        log.info("[%s] APPROVE (%s): %s", st.label, opt_label, cmd)
-                        _send(action)
+                        log.info("[%s] %s (%s): %s", st.label, verb, opt_label, cmd)
+                        _send(send_action)
                     st.last_hash = current_hash
                     st.last_hash_at = time.monotonic()
                     st.last_blocked_hash = ""

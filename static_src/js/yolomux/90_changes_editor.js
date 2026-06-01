@@ -68,12 +68,21 @@ function diffRefSuggestionsHtml(listId) {
   }).join('')}</datalist>`;
 }
 
+function diffRefSelectOptionsHtml(value, options = {}) {
+  const maxItems = options.compact ? 30 : 100;
+  return diffRefSuggestions().slice(0, maxItems).map(item => {
+    const label = [item.short, item.subject].filter(Boolean).join(' - ') || item.ref;
+    return `<option value="${esc(item.ref)}"${item.ref === value ? ' selected' : ''}>${esc(label)}</option>`;
+  }).join('');
+}
+
 function diffRefControlsHtml(options = {}) {
   const compact = options.compact === true;
   const className = compact ? 'diff-ref-controls compact' : 'diff-ref-controls';
   const listId = options.listId || (compact ? 'diff-ref-suggestions-compact' : 'diff-ref-suggestions');
   return `<span class="${className}" data-diff-ref-controls>
     <label class="diff-ref-control">FROM <input data-diff-ref-from type="text" list="${esc(listId)}" value="${esc(diffRefFrom)}" spellcheck="false" aria-label="Diff FROM ref"></label>
+    <select class="diff-ref-select" data-diff-ref-from-select aria-label="Pick a recent FROM commit">${diffRefSelectOptionsHtml(diffRefFrom, {compact})}</select>
     <label class="diff-ref-control">TO <input data-diff-ref-to type="text" list="${esc(listId)}" value="${esc(diffRefTo)}" spellcheck="false" aria-label="Diff TO ref"></label>
     ${diffRefSuggestionsHtml(listId)}
   </span>`;
@@ -112,8 +121,10 @@ function syncDiffRefControlValues(container) {
   const active = document.activeElement;
   const fromInput = container.querySelector?.('[data-diff-ref-from]');
   const toInput = container.querySelector?.('[data-diff-ref-to]');
+  const fromSelect = container.querySelector?.('[data-diff-ref-from-select]');
   if (fromInput && fromInput !== active) fromInput.value = diffRefFrom;
   if (toInput && toInput !== active) toInput.value = diffRefTo;
+  if (fromSelect && fromSelect !== active) fromSelect.value = diffRefFrom;
 }
 
 function fileExplorerSessionFilesTargetSession() {
@@ -372,7 +383,8 @@ function changesRepoGroupsHtml(files, options = {}) {
 function modifiedFilesSummaryText(files, session, loading, loaded) {
   if (loading) return 'loading...';
   if (!loaded) return 'not loaded';
-  return `${files.length} modified${session ? ` in session '${sessionLabel(session)}'` : ''}`;
+  const count = `${files.length} file${files.length === 1 ? '' : 's'}`;
+  return session ? `Modified in '${sessionLabel(session)}': ${count}` : `Modified: ${count}`;
 }
 
 function changesPanelHtml() {
@@ -463,8 +475,10 @@ function renderChangesPanels() {
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '') {
   const item = fileEditorItemFor(path);
-  setFileEditorViewMode(path, 'diff', item);
-  if (String(status || '').toUpperCase() === 'D') {
+  const normalizedStatus = String(status || '').toUpperCase();
+  const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';
+  setFileEditorViewMode(path, isAddedChange ? 'edit' : 'diff', item);
+  if (normalizedStatus === 'D') {
     await openFilesSetAndShow(path, {
       mtime: 0,
       size: 0,
@@ -475,9 +489,11 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '') {
       deleted: true,
     }, {item, ownerSession});
   } else {
-    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: 'diff'});
+    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: isAddedChange ? 'edit' : 'diff'});
   }
-  await refreshOpenFileDiff(path, {silent: true});
+  const diffReady = await refreshOpenFileDiff(path, {silent: true});
+  if (diffReady && !isAddedChange) setFileEditorViewMode(path, 'diff', item);
+  if (!diffReady && isAddedChange) setFileEditorViewMode(path, 'edit', item);
   renderOpenFilePath(path);
 }
 
@@ -501,6 +517,13 @@ function bindChangesPanel(panel) {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (diffRefInput && panel.contains(diffRefInput)) {
       commitDiffRefControls(diffRefInput.closest('[data-diff-ref-controls]') || panel);
+    }
+    const diffRefSelect = event.target.closest('[data-diff-ref-from-select]');
+    if (diffRefSelect && panel.contains(diffRefSelect)) {
+      const controls = diffRefSelect.closest('[data-diff-ref-controls]') || panel;
+      const fromInput = controls.querySelector?.('[data-diff-ref-from]');
+      if (fromInput) fromInput.value = diffRefSelect.value;
+      commitDiffRefControls(controls);
     }
   });
   panel.addEventListener('keydown', event => {
@@ -661,12 +684,35 @@ async function saveSettingsPatch(patch, options = {}) {
   refreshYoloRulesStatus({silent: true});
 }
 
+function showUploadRsyncRecommendation(options = {}) {
+  const command = uploadRsyncExampleCommand();
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.textContent = 'Copy rsync example';
+  action.addEventListener('click', event => {
+    event.stopPropagation();
+    copyTextToClipboard(command)
+      .then(() => { statusEl.textContent = 'copied rsync example'; })
+      .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+  });
+  const sizeText = options.sizeBytes ? `Selected upload size is ${formatFileSize(options.sizeBytes)}.` : '';
+  return showToast('Use rsync for large files', [
+    `${sizeText} Browser uploads are buffered in memory; current cap is ${formatFileSize(uploadMaxBytes)}.`,
+    command,
+  ], {
+    container: displayToastContainer(options.session || prefsItemId),
+    actions: [action],
+    countdownMs: 20000,
+  });
+}
+
 function savePreferenceControl(control) {
   const path = control.dataset.settingPath || '';
   if (control.dataset.settingType === 'number' && !validatePreferenceNumberControl(control)) {
     control.reportValidity?.();
     return;
   }
+  const previousValue = preferenceValue(path);
   const value = valueFromPreferenceControl(control);
   saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
@@ -676,6 +722,9 @@ function savePreferenceControl(control) {
       if ((path === 'appearance.editor_dark_color_scheme' && scheme.dark)
         || (path === 'appearance.editor_light_color_scheme' && !scheme.dark)) {
         setFileEditorThemeMode(value);
+      }
+      if (path === 'uploads.max_bytes' && Number(value) > uploadRsyncRecommendationBytes && Number(previousValue) <= uploadRsyncRecommendationBytes) {
+        showUploadRsyncRecommendation({sizeBytes: Number(value)});
       }
       statusEl.textContent = `saved ${path}`;
     })
@@ -1234,6 +1283,9 @@ function destroyCodeMirrorPanel(panel) {
     panel._cmView = null;
   }
   if (panel) {
+    panel._cmApi = null;
+    panel._cmThemeCompartment = null;
+    panel._cmThemeViews = [];
     panel._cmPath = '';
     panel._cmSignature = '';
     panel._cmMode = '';
@@ -1264,7 +1316,6 @@ function codeMirrorConfigSignature(path, options = {}) {
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
     readOnly: readOnlyMode,
-    scheme: activeEditorScheme().id,
   });
 }
 
@@ -1273,18 +1324,16 @@ function codeMirrorDiffLayout(container) {
   return width >= 800 ? 'side' : 'inline';
 }
 
-function codeMirrorReadOnlyExtensions(api, path) {
+function codeMirrorReadOnlyExtensions(api, path, panel = null) {
   return [
     api.drawSelection(),
     api.highlightActiveLine(),
     ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-    codeMirrorHighlightExtension(api),
     ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
-    codeMirrorHtmlSemanticEmphasisExtension(api, path),
     api.EditorState.readOnly.of(true),
     api.EditorView.editable.of(false),
     codeMirrorLanguageExtension(api, path),
-    codeMirrorThemeExtension(api),
+    codeMirrorThemedExtensions(api, panel, path),
   ];
 }
 
@@ -1302,7 +1351,62 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   const next = String(text || '');
   if (view.state.doc.toString() === next) return;
   if (options.cleanOnly && openFiles.get(options.path)?.dirty) return;
-  view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: next}});
+  const scrollDOM = view.scrollDOM;
+  const scrollTop = scrollDOM?.scrollTop || 0;
+  const scrollLeft = scrollDOM?.scrollLeft || 0;
+  const selection = view.state.selection;
+  const selectionFits = selection?.ranges?.every(range => (
+    range.anchor <= next.length && range.head <= next.length
+  ));
+  view.dispatch({
+    changes: {from: 0, to: view.state.doc.length, insert: next},
+    ...(selectionFits ? {selection} : {}),
+  });
+  const restoreScroll = () => {
+    if (!scrollDOM) return;
+    scrollDOM.scrollTop = scrollTop;
+    scrollDOM.scrollLeft = scrollLeft;
+  };
+  if (typeof view.requestMeasure === 'function') {
+    view.requestMeasure({write: restoreScroll});
+  } else {
+    requestAnimationFrame(restoreScroll);
+  }
+  requestAnimationFrame(restoreScroll);
+}
+
+function codeMirrorThemeExtensions(api, path) {
+  return [
+    codeMirrorHighlightExtension(api),
+    codeMirrorHtmlSemanticEmphasisExtension(api, path),
+    codeMirrorThemeExtension(api),
+  ];
+}
+
+function codeMirrorThemedExtensions(api, panel, path) {
+  const extensions = codeMirrorThemeExtensions(api, path);
+  if (!panel || !api.Compartment) return extensions;
+  panel._cmThemeCompartment = panel._cmThemeCompartment || new api.Compartment();
+  return panel._cmThemeCompartment.of(extensions);
+}
+
+function trackCodeMirrorThemeViews(panel, api, views) {
+  if (!panel) return;
+  panel._cmApi = api;
+  panel._cmThemeViews = views.filter(Boolean);
+}
+
+function reconfigureCodeMirrorPanelTheme(panel) {
+  const api = panel?._cmApi;
+  const path = panel?._cmPath;
+  const compartment = panel?._cmThemeCompartment;
+  const views = Array.isArray(panel?._cmThemeViews) ? panel._cmThemeViews : [];
+  if (!api || !path || !compartment || !views.length) return false;
+  const effect = compartment.reconfigure(codeMirrorThemeExtensions(api, path));
+  for (const view of views) {
+    try { view.dispatch({effects: effect}); } catch (_) {}
+  }
+  return true;
 }
 
 function diffOverviewChunks(diff, totalLines) {
@@ -1432,9 +1536,9 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   const currentText = state.diffFromRef && state.diffFromRef !== 'current' ? String(state.diffWorking || '') : String(state.content || '');
   const diffEditsAllowed = !state.diffFromRef || state.diffFromRef === 'current';
   const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});
-  installCodeMirrorDiffResizeObserver(panel, item, path, container);
   installCodeMirrorDiffCollapsedScrollGuard(panel, container);
   if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
+    installCodeMirrorDiffResizeObserver(panel, item, path, container);
     if (layout === 'side') {
       syncCodeMirrorDocument(panel._cmMergeView?.a, original);
       syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path});
@@ -1457,7 +1561,16 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     panel._cmMergeView = new api.MergeView({
       a: {
         doc: original,
-        extensions: codeMirrorReadOnlyExtensions(api, path),
+        extensions: [
+          api.drawSelection(),
+          api.highlightActiveLine(),
+          ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
+          ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+          api.EditorState.readOnly.of(true),
+          api.EditorView.editable.of(false),
+          codeMirrorLanguageExtension(api, path),
+          codeMirrorThemedExtensions(api, panel, path),
+        ],
       },
       b: {
         doc: currentText,
@@ -1466,7 +1579,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
               ...codeMirrorExtensions(api, panel, path),
               codeMirrorWorkingUpdateExtension(api, panel, path),
             ]
-          : codeMirrorReadOnlyExtensions(api, path),
+          : codeMirrorReadOnlyExtensions(api, path, panel),
       },
       parent: container,
       revertControls: 'a-to-b',
@@ -1475,6 +1588,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       collapseUnchanged: {margin: 3, minSize: 8},
     });
     panel._cmView = panel._cmMergeView.b;
+    trackCodeMirrorThemeViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
     panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
   } else {
     const cmState = api.EditorState.create({
@@ -1488,7 +1602,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           allowInlineDiffs: true,
           collapseUnchanged: {margin: 3, minSize: 8},
         }),
-        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path) : codeMirrorReadOnlyExtensions(api, path)),
+        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path) : codeMirrorReadOnlyExtensions(api, path, panel)),
       ],
     });
     panel._cmView = new api.EditorView({
@@ -1503,6 +1617,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       },
     });
     panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+    trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
   }
   panel._cmPath = path;
   panel._cmSignature = signature;
@@ -1552,6 +1667,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       panel._cmPath = path;
       panel._cmSignature = signature;
       panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+      trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
       updateCodeMirrorCursorStatus(panel);
     } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty) {
       panel._cmView.dispatch({
@@ -1741,10 +1857,10 @@ function loadFileEditorState(path, panel, item) {
       }
       if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
         const state = tooLargeFileState(Number(entry.size));
-        state.mtime = entry?.mtime || 0;
+        state.mtime = fileEntryMtime(entry);
         openFiles.set(path, state);
       } else {
-        openFiles.set(path, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
+        openFiles.set(path, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
       }
       renderFileEditorPanel(panel, item);
       renderSessionButtons();
@@ -1764,7 +1880,7 @@ function loadFileEditorState(path, panel, item) {
       } else {
         const payload = await response.json();
         openFiles.set(path, {
-          mtime: payload.mtime,
+          mtime: filePayloadMtime(payload),
           size: payload.size,
           kind: 'text',
           original: payload.content,
@@ -1859,12 +1975,109 @@ function markdownTextWithSourceAnchors(text) {
   }).join('\n');
 }
 
+const MARKDOWN_PREVIEW_BLOCKED_TAGS = new Set([
+  'applet',
+  'audio',
+  'base',
+  'button',
+  'canvas',
+  'embed',
+  'form',
+  'iframe',
+  'input',
+  'link',
+  'math',
+  'meta',
+  'object',
+  'option',
+  'script',
+  'select',
+  'source',
+  'style',
+  'svg',
+  'textarea',
+  'track',
+  'video',
+]);
+const MARKDOWN_PREVIEW_URL_ATTRS = new Set(['href', 'src', 'poster', 'xlink:href']);
+const MARKDOWN_PREVIEW_SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+const MARKDOWN_PREVIEW_SAFE_IMAGE_DATA = /^data:image\/(?:png|gif|jpe?g|webp);/i;
+
+function markdownPreviewUrlAllowed(value, tagName) {
+  const raw = String(value || '').trim();
+  if (!raw) return true;
+  if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return true;
+  try {
+    const base = globalThis.location?.href || 'http://localhost/';
+    const url = new URL(raw, base);
+    if (MARKDOWN_PREVIEW_SAFE_PROTOCOLS.has(url.protocol.toLowerCase())) return true;
+    return tagName === 'img' && url.protocol.toLowerCase() === 'data:' && MARKDOWN_PREVIEW_SAFE_IMAGE_DATA.test(raw);
+  } catch (_) {
+    return false;
+  }
+}
+
+function sanitizeMarkdownPreviewAttribute(element, attr) {
+  const name = String(attr?.name || '').toLowerCase();
+  if (!name) return;
+  const tagName = String(element.tagName || '').toLowerCase();
+  if (name.startsWith('on') || name === 'style' || name === 'srcdoc' || name === 'srcset' || name === 'formaction') {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (name.includes(':') && name !== 'xlink:href') {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (MARKDOWN_PREVIEW_URL_ATTRS.has(name) && !markdownPreviewUrlAllowed(attr.value, tagName)) {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (name === 'target' && element.getAttribute('target') === '_blank') {
+    element.setAttribute('rel', 'noopener noreferrer');
+  }
+}
+
+function sanitizeMarkdownPreviewNode(root) {
+  const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
+  const commentNode = globalThis.Node?.COMMENT_NODE || 8;
+  for (const child of Array.from(root?.childNodes || [])) {
+    if (child.nodeType === commentNode) {
+      child.remove();
+      continue;
+    }
+    if (child.nodeType !== elementNode) continue;
+    const tagName = String(child.tagName || '').toLowerCase();
+    if (MARKDOWN_PREVIEW_BLOCKED_TAGS.has(tagName)) {
+      child.remove();
+      continue;
+    }
+    for (const attr of Array.from(child.attributes || [])) {
+      sanitizeMarkdownPreviewAttribute(child, attr);
+    }
+    sanitizeMarkdownPreviewNode(child);
+  }
+}
+
+function sanitizeMarkdownPreviewHtml(html) {
+  const template = document.createElement('template');
+  if (!template.content) {
+    const fallback = document.createElement('div');
+    fallback.textContent = String(html ?? '');
+    return fallback;
+  }
+  template.innerHTML = String(html ?? '');
+  sanitizeMarkdownPreviewNode(template.content);
+  return template.content;
+}
+
 function renderMarkdownPreviewInto(container, text) {
   if (typeof window.marked === 'undefined') {
     container.textContent = 'marked.js not loaded (offline CDN?)';
     return;
   }
-  container.innerHTML = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+  const html = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+  container.replaceChildren(sanitizeMarkdownPreviewHtml(html));
   if (typeof window.hljs !== 'undefined') {
     container.querySelectorAll('pre code').forEach(block => {
       try { window.hljs.highlightElement(block); } catch (_) {}
@@ -1949,12 +2162,15 @@ function renderHtmlPreviewInto(container, text) {
 
 function renderEditorPreviewPane(container, path, text) {
   if (!container) return;
+  const scrollTop = container.scrollTop || 0;
+  const scrollLeft = container.scrollLeft || 0;
   container.classList.toggle('markdown-body', isMarkdownPath(path));
   container.classList.toggle('html-preview-body', isHtmlPath(path));
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
   if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text);
   else if (isHtmlPath(path)) renderHtmlPreviewInto(container, text);
   else renderEditorCodePreviewInto(container, path, text);
+  restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }
 
 function markdownInlineHighlightHtml(escaped) {
@@ -2367,7 +2583,7 @@ async function saveFileEditor(path, panel, options = {}) {
       return false;
     }
     const payload = await response.json();
-    state.mtime = payload.mtime;
+    state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
     state.original = state.content;
     state.dirty = false;

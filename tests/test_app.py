@@ -1,10 +1,19 @@
 from http import HTTPStatus
 import json
+import threading
 from types import SimpleNamespace
+
+import pytest
 
 from yolomux_lib import app as app_module
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import SessionInfo
+
+
+@pytest.fixture(autouse=True)
+def no_control_socket(monkeypatch):
+    monkeypatch.setattr(app_module.YolomuxControlServer, "start", lambda self: None)
+    monkeypatch.setattr(app_module.YolomuxControlServer, "stop", lambda self: None)
 
 
 def test_auto_approve_status_refreshes_session_order(monkeypatch):
@@ -63,6 +72,29 @@ def test_prompt_and_screen_status_uses_transcript_activity_when_visible_pane_is_
     assert prompt["visible"] is False
     assert screen["key"] == "working"
     assert "Bash" in screen["text"]
+
+
+def test_prompt_and_screen_status_reports_os_errors(monkeypatch):
+    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("tmux failed")))
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        prompt, screen = webapp.prompt_and_screen_status("6")
+    finally:
+        webapp.control_server.stop()
+
+    assert prompt["error"] == "tmux failed"
+    assert screen == {"key": "error", "text": "tmux failed"}
+
+
+def test_prompt_and_screen_status_does_not_hide_programmer_errors(monkeypatch):
+    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", lambda *_args, **_kwargs: "visible")
+    monkeypatch.setattr(app_module.auto_approve_tmux, "hybrid_approval_prompt_state", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bug")))
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        with pytest.raises(RuntimeError, match="bug"):
+            webapp.prompt_and_screen_status("6")
+    finally:
+        webapp.control_server.stop()
 
 
 def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp_path):
@@ -252,6 +284,41 @@ def test_yoagent_cli_backend_resumes_and_trims_context(monkeypatch):
     assert second_status["prompt_chars"] < first_status["prompt_chars"]
     assert "Activity summary is unchanged" in calls[1]["prompt"]
     assert "M static/yolomux.js" not in calls[1]["prompt"]
+
+
+def test_yoagent_cli_backend_does_not_hold_state_lock_during_cli(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    observed = []
+
+    def fake_claude(_prompt, session_id="", resume=False):
+        def probe_lock():
+            acquired = webapp.yoagent_cli_lock.acquire(timeout=0.1)
+            observed.append(acquired)
+            if acquired:
+                webapp.yoagent_cli_lock.release()
+
+        thread = threading.Thread(target=probe_lock)
+        thread.start()
+        thread.join()
+        return ("answer", "")
+
+    monkeypatch.setattr(webapp, "run_yoagent_claude_cli", fake_claude)
+    activity = {
+        "generated_at": "2026-05-31T00:00:00+00:00",
+        "session_order": ["5"],
+        "global": {"headline": "You have 1 AI agent working on editor fixes across yolomux."},
+        "sessions": {},
+        "errors": [],
+    }
+    try:
+        answer, reason, status = webapp.run_yoagent_cli_backend("claude", "status?", activity, {}, [])
+    finally:
+        webapp.control_server.stop()
+
+    assert answer == "answer"
+    assert reason == ""
+    assert observed == [True]
+    assert status["backend"] == "claude"
 
 
 def test_codex_event_session_id_extracts_common_shapes():

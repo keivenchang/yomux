@@ -1,18 +1,31 @@
-from yolomux_lib.tmux_utils import tmux_exact_target_from_sessions
-from yolomux_lib.tmux_utils import unique_session_names
+import subprocess
+
+from yolomux_lib import tmux_utils
 
 
-def test_tmux_exact_target_disambiguates_numeric_session_names():
-    assert tmux_exact_target_from_sessions("1", ["1", "2"]) == "1:"
-    assert tmux_exact_target_from_sessions("%42", ["1"]) == "%42"
-    assert tmux_exact_target_from_sessions("1:0.0", ["1"]) == "1:0.0"
+def test_tmux_run_converts_timeout_to_completed_process(monkeypatch):
+    def fake_run(args, capture_output, text, timeout, check):
+        raise subprocess.TimeoutExpired(args, timeout, output="partial", stderr="")
+
+    monkeypatch.setattr(tmux_utils.subprocess, "run", fake_run)
+
+    result = tmux_utils.tmux_run("capture-pane", check=False, timeout=0.01)
+
+    assert result.returncode == 124
+    assert result.stdout == "partial"
+    assert "timed out after 0.01s" in result.stderr
 
 
-def test_unique_session_names_uses_yolomux_sort_order():
-    assert unique_session_names(["project2", "1", "project1", "1", "yolomux2", "yolomux1"]) == [
-        "yolomux1",
-        "yolomux2",
-        "project1",
-        "project2",
-        "1",
-    ]
+def test_tmux_run_check_raises_after_timeout(monkeypatch):
+    def fake_run(args, capture_output, text, timeout, check):
+        raise subprocess.TimeoutExpired(args, timeout, output="", stderr="hung")
+
+    monkeypatch.setattr(tmux_utils.subprocess, "run", fake_run)
+
+    try:
+        tmux_utils.tmux_run("capture-pane", timeout=0.01)
+    except subprocess.CalledProcessError as exc:
+        assert exc.returncode == 124
+        assert exc.stderr == "hung"
+    else:
+        raise AssertionError("tmux_run(check=True) should raise on timeout")

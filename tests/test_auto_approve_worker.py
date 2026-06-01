@@ -59,6 +59,11 @@ class DummyHybridProcessModule(DummyProcessModule):
         return self.prompt_state
 
 
+class MovingOptionModule(DummyProcessModule):
+    def selected_prompt_option(self, _visible_text: str) -> int:
+        return 2
+
+
 def approving_decision(*_args: Any, **_kwargs: Any) -> dict[str, str]:
     return {
         "action": "approve",
@@ -106,6 +111,26 @@ def test_process_once_can_approve_when_codex_highlights_option2(monkeypatch):
     assert acted is True
     assert module.sent == [("option", "6", 1, 2)]
     assert worker.approved == 1
+
+
+def test_process_once_aborts_if_highlighted_option_moves_before_enter(monkeypatch):
+    module = MovingOptionModule({
+        "type": "bash",
+        "yes_selected": True,
+        "selected_option": 1,
+        "hash": "hash-moving",
+        "action": "option1",
+        "text": "Would you like to run the following command?",
+    })
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", approving_decision)
+
+    acted = worker.process_once(module)
+
+    assert acted is False
+    assert module.sent == []
+    assert worker.approved == 0
+    assert worker.last_action == "approval option moved from 1 to 2; waiting for next capture"
 
 
 def test_process_once_can_use_hybrid_transcript_prompt_when_pane_header_is_missing(monkeypatch):

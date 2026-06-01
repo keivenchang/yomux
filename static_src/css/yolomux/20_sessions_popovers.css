@@ -197,9 +197,9 @@
   align-items: center;
   justify-content: center;
   padding: 1px 0;
-  color: var(--auto-text);
-  background: var(--brand-green);
-  border: 1px solid var(--auto-border);
+  color: var(--pane-tab-yolo-text);
+  background: var(--pane-tab-yolo-bg);
+  border: 1px solid var(--pane-tab-yolo-border);
   border-radius: 2px;
   box-shadow: none;
   font: 800 var(--ui-font-size-2xs)/1.1 var(--mono-font);
@@ -268,7 +268,7 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 .ci-indicator.pr-status-pending,
 .ci-indicator.pr-status-draft {
   color: #161000;
-  background: var(--accent-gold);
+  background: var(--pane-tab-badge-gold);
   border-color: #ffe27a;
 }
 .ci-indicator.pr-status-passing {

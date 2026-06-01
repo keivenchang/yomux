@@ -537,29 +537,50 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     assert metrics["hiddenSymbolDisplay"] == "none"
     assert metrics["detailBg"] != "rgb(18, 24, 35)"
     assert metrics["detailCloseRightGap"] <= 3
-    light_metrics = browser.execute_script(
+    theme_metrics = browser.execute_script(
         """
-        document.body.classList.add('theme-light');
-        const activeTab = document.querySelector('.pane-tab.active');
-        const inactiveTab = document.querySelector('.pane-tab:not(.active)');
-        const panelHead = document.querySelector('.panel-head');
-        const toolbarActive = document.querySelector('.panel-head .tab.active:not(.auto-toggle)');
-        return {
-          activeTabBg: getComputedStyle(activeTab).backgroundColor,
-          activeTabColor: getComputedStyle(activeTab).color,
-          inactiveTabBg: getComputedStyle(inactiveTab).backgroundColor,
-          panelHeadBg: getComputedStyle(panelHead).backgroundColor,
-          toolbarActiveBg: getComputedStyle(toolbarActive).backgroundColor,
-          toolbarActiveBorder: getComputedStyle(toolbarActive).borderTopColor,
+        const originalPanel = document.querySelector('.panel.active-pane');
+        const inactivePanel = originalPanel.cloneNode(true);
+        inactivePanel.classList.remove('active-pane');
+        inactivePanel.style.marginTop = '12px';
+        document.body.appendChild(inactivePanel);
+        const readMetrics = () => {
+          const panel = document.querySelector('.panel.active-pane');
+          const activeTab = panel.querySelector('.pane-tab.active');
+          const inactiveActiveTab = inactivePanel.querySelector('.pane-tab.active');
+          const inactiveTab = panel.querySelector('.pane-tab:not(.active)');
+          const panelHead = panel.querySelector('.panel-head');
+          const toolbarActive = panel.querySelector('.panel-head .tab.active:not(.auto-toggle)');
+          const paneControl = panel.querySelector('.tabs .pc-window-control');
+          const zoomControl = panel.querySelector('.tabs .pc-zoom');
+          return {
+            panelBorder: getComputedStyle(panel).borderTopColor,
+            panelHeadBg: getComputedStyle(panelHead).backgroundColor,
+            activeTabBg: getComputedStyle(activeTab).backgroundColor,
+            activeTabColor: getComputedStyle(activeTab).color,
+            activeTabShadow: getComputedStyle(activeTab).boxShadow,
+            inactiveActiveTabBg: getComputedStyle(inactiveActiveTab).backgroundColor,
+            inactiveActiveTabColor: getComputedStyle(inactiveActiveTab).color,
+            inactiveActiveTabShadow: getComputedStyle(inactiveActiveTab).boxShadow,
+            inactiveTabBg: getComputedStyle(inactiveTab).backgroundColor,
+            inactiveTabBorder: getComputedStyle(inactiveTab).borderTopColor,
+            toolbarActiveBg: getComputedStyle(toolbarActive).backgroundColor,
+            toolbarActiveBorder: getComputedStyle(toolbarActive).borderTopColor,
+            paneControlBg: getComputedStyle(paneControl).backgroundColor,
+            paneControlBorder: getComputedStyle(paneControl).borderTopColor,
+            zoomControlBg: getComputedStyle(zoomControl).backgroundColor,
+          };
         };
+        const dark = readMetrics();
+        document.body.classList.add('theme-light');
+        return {dark, light: readMetrics()};
         """
     )
-    assert light_metrics["activeTabBg"] == "rgb(255, 255, 255)"
-    assert light_metrics["activeTabColor"] != "rgb(8, 18, 5)"
-    assert light_metrics["inactiveTabBg"] != "rgb(220, 239, 213)"
-    assert light_metrics["panelHeadBg"] != "rgb(61, 105, 0)"
-    assert light_metrics["toolbarActiveBg"] == "rgb(255, 255, 255)"
-    assert light_metrics["toolbarActiveBorder"] != "rgb(29, 78, 216)"
+    assert theme_metrics["light"] == theme_metrics["dark"]
+    assert theme_metrics["dark"]["activeTabBg"] == "rgb(118, 185, 0)"
+    assert theme_metrics["dark"]["activeTabShadow"] != "none"
+    assert theme_metrics["dark"]["inactiveActiveTabBg"] != theme_metrics["dark"]["activeTabBg"]
+    assert theme_metrics["dark"]["inactiveActiveTabShadow"] == "none"
 
 
 def test_pane_tabs_and_controls_stay_bounded_when_narrow(browser, tmp_path):

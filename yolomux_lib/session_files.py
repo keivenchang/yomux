@@ -182,8 +182,8 @@ def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = No
     return [base or git_diff_base(repo)], True, ""
 
 
-def git_recent_refs(repo: Path, limit: int = 20) -> list[dict[str, str]]:
-    result = run_cmd(["git", "-C", str(repo), "log", f"--max-count={max(1, min(limit, 50))}", "--pretty=format:%H%x1f%h%x1f%s"], timeout=5.0)
+def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, str]]:
+    result = run_cmd(["git", "-C", str(repo), "log", f"--max-count={max(1, min(limit, 200))}", "--pretty=format:%H%x1f%h%x1f%s"], timeout=5.0)
     refs = [{"ref": "current", "short": "current", "subject": "working tree"}, {"ref": "HEAD", "short": "HEAD", "subject": "current commit"}]
     if result.returncode != 0:
         return refs
@@ -202,21 +202,35 @@ def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = 
     diff_args, include_untracked, error = git_diff_args(repo, base, from_ref, to_ref)
     if error:
         return statuses, error
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--name-status", *diff_args], timeout=5.0)
+    diff = run_cmd(["git", "-C", str(repo), "diff", "--name-status", "-z", "--find-renames", "--find-copies", *diff_args], timeout=5.0)
     if diff.returncode == 0:
-        for line in diff.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) < 2:
+        parts = diff.stdout.split("\0")
+        index = 0
+        while index < len(parts):
+            status_text = parts[index]
+            index += 1
+            if not status_text:
                 continue
-            status = parts[0][0]
-            rel_path = parts[-1]
-            statuses[rel_path] = "D" if status == "D" else "M"
+            status = status_text[0]
+            if status in {"R", "C"}:
+                old_path = parts[index] if index < len(parts) else ""
+                new_path = parts[index + 1] if index + 1 < len(parts) else ""
+                index += 2
+                if status == "R" and old_path:
+                    statuses[old_path] = "D"
+                if new_path:
+                    statuses[new_path] = "A"
+                continue
+            rel_path = parts[index] if index < len(parts) else ""
+            index += 1
+            if rel_path:
+                statuses[rel_path] = "A" if status == "A" else "D" if status == "D" else "M"
     if include_untracked:
-        untracked = run_cmd(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard"], timeout=5.0)
+        untracked = run_cmd(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"], timeout=5.0)
     else:
         untracked = None
     if untracked and untracked.returncode == 0:
-        for rel_path in untracked.stdout.splitlines():
+        for rel_path in untracked.stdout.split("\0"):
             if rel_path:
                 statuses[rel_path] = "A"
     return statuses, ""
@@ -236,17 +250,30 @@ def git_numstat(repo: Path, base: str | None = None, from_ref: str | None = None
     diff_args, _, error = git_diff_args(repo, base, from_ref, to_ref)
     if error:
         return counts
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", *diff_args], timeout=5.0)
+    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", "-z", "--find-renames", "--find-copies", *diff_args], timeout=5.0)
     if diff.returncode != 0:
         return counts
-    for line in diff.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 3:
+    parts = diff.stdout.split("\0")
+    index = 0
+    while index < len(parts):
+        head = parts[index]
+        index += 1
+        if not head:
             continue
-        rel_path = parts[-1]
+        parts_head = head.split("\t", 2)
+        if len(parts_head) < 3:
+            continue
+        if parts_head[2]:
+            rel_path = parts_head[2]
+        else:
+            index += 1
+            rel_path = parts[index] if index < len(parts) else ""
+            index += 1
+        if not rel_path:
+            continue
         counts[rel_path] = {
-            "added": parse_numstat_value(parts[0]),
-            "removed": parse_numstat_value(parts[1]),
+            "added": parse_numstat_value(parts_head[0]),
+            "removed": parse_numstat_value(parts_head[1]),
         }
     return counts
 
@@ -356,14 +383,11 @@ def session_files_payload_for_info(
             }
 
     repos: dict[str, set[str]] = {}
-    outside_repo: list[dict[str, Any]] = []
     for path_text, metadata in touched.items():
         path = Path(path_text)
         repo_text = git_root_for_path(path)
         if repo_text:
             repos.setdefault(repo_text, set()).add(path_text)
-        else:
-            outside_repo.append(session_file_entry(info.session, metadata["agent"], metadata["status"], path, None, "tool"))
     for repo_text in session_candidate_repo_roots(info):
         repos.setdefault(repo_text, set())
 
@@ -404,7 +428,6 @@ def session_files_payload_for_info(
             "removed": line_total(repo_entries, "removed"),
         })
 
-    files.extend(outside_repo)
     files.sort(key=lambda item: (-float(item.get("mtime") or 0), item["repo"], item["path"]))
     payload_from_ref = selected_from or "default"
     payload_to_ref = selected_to or "base"

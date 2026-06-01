@@ -1,4 +1,10 @@
+import os
+import threading
+
+os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
+
 from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
+from yolomux_lib.common import UPLOAD_MAX_BYTES
 from yolomux_lib.settings import default_settings
 from yolomux_lib.settings import read_settings_file
 from yolomux_lib.settings import save_settings
@@ -15,6 +21,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "performance": {"metadata_refresh_ms": 15000, "pane_state_refresh_ms": 1200},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100},
+            "uploads": {"max_bytes": 999999999},
             "yoagent": {"backend": "wat", "invocation": "bad", "system_prompt": "Use facts", "intro": "Be terse", "format": "One line"},
             "yolo": {"prompt_source": "bad"},
         }
@@ -37,6 +44,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["editor"]["autosave_delay_seconds"] == 60
     assert settings["file_explorer"]["refresh_ms"] == 3000
     assert settings["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
+    assert settings["uploads"]["max_bytes"] == 512 * 1024 * 1024
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
     assert settings["performance"]["metadata_refresh_ms"] == 15000
     assert settings["performance"]["pane_state_refresh_ms"] == 1200
@@ -56,6 +64,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
 
     assert payload["settings"] == default_settings()
     assert payload["settings"]["general"]["auto_focus"] is False
+    assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "deterministic"
     assert "normal human status update" in payload["settings"]["yoagent"]["system_prompt"]
     assert "most recent work" in payload["settings"]["yoagent"]["intro"]
@@ -88,3 +97,32 @@ def test_save_settings_can_reset_all_values_to_defaults(tmp_path):
     reset = save_settings(default_settings(), path)
 
     assert reset["settings"] == default_settings()
+
+
+def test_save_settings_preserves_concurrent_section_updates(tmp_path):
+    path = tmp_path / "settings.yaml"
+    save_settings(default_settings(), path)
+
+    patches = [
+        {"appearance": {"terminal_font_size": 18}},
+        {"appearance": {"editor_font_size": 19}},
+        {"file_explorer": {"quick_access_paths": ["/tmp", "/var"]}},
+        {"terminal_editor": {"word_wrap": True}},
+        {"notifications": {"throttle_seconds": 17}},
+    ]
+    threads = [threading.Thread(target=save_settings, args=(patch, path)) for patch in patches]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    settings, error = read_settings_file(path)
+    assert error == ""
+    assert settings["appearance"]["terminal_font_size"] == 18
+    assert settings["appearance"]["editor_font_size"] == 19
+    assert settings["file_explorer"]["quick_access_paths"] == ["/tmp", "/var"]
+    assert settings["terminal_editor"]["word_wrap"] is True
+    assert settings["notifications"]["throttle_seconds"] == 17
+    assert not (tmp_path / "settings.yaml.tmp").exists()
+    assert list(tmp_path.glob(".settings.yaml.*.tmp")) == []

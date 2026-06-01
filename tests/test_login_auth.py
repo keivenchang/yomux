@@ -146,6 +146,10 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         assert status == HTTPStatus.OK
         assert "Set-Cookie" in headers
         assert json.loads(body)["ok"] is True
+
+        status, headers, body = request(port, "GET", f"/api/fs/list?{urlencode({'path': str(tmp_path)})}", headers=auth_header("guest", "guest"))
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body)["error"] == "admin access required"
     finally:
         stop_server(server, thread)
 

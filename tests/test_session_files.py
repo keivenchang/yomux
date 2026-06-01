@@ -1,6 +1,10 @@
 import json
+import os
 import subprocess
 import time
+
+os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
+os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
 
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
@@ -93,6 +97,69 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert by_path["new.txt"]["added"] == 1
     assert by_path["new.txt"]["removed"] == 0
     assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2, "added": 2, "removed": 1}]
+
+
+def test_session_files_payload_excludes_non_repo_transcript_artifacts(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    tracked.write_text("two\n", encoding="utf-8")
+    tmp_artifact = tmp_path / "scratch.txt"
+    tmp_artifact.write_text("scratch\n", encoding="utf-8")
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text(
+        f'{{"msg":"*** Begin Patch\\n*** Update File: tracked.txt\\n*** Add File: {tmp_artifact}\\n"}}\n',
+        encoding="utf-8",
+    )
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("codex", rollout, repo)])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    assert [item["path"] for item in payload["files"]] == ["tracked.txt"]
+    assert all(not str(item["abs_path"]).startswith(str(tmp_path / "scratch")) for item in payload["files"])
+
+
+def test_git_status_parses_renames_and_tab_paths(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    old_name = "old\tname.txt"
+    new_name = "new\tname.txt"
+    (repo / old_name).write_text("one\n", encoding="utf-8")
+    git(repo, "add", old_name)
+    git(repo, "commit", "-m", "base")
+    git(repo, "mv", old_name, new_name)
+
+    statuses, error = session_files.git_name_status(repo, "HEAD")
+
+    assert error == ""
+    assert statuses[old_name] == "D"
+    assert statuses[new_name] == "A"
+
+
+def test_git_numstat_parses_paths_with_tabs(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    name = "tab\tpath.txt"
+    (repo / name).write_text("one\n", encoding="utf-8")
+    git(repo, "add", name)
+    git(repo, "commit", "-m", "base")
+    (repo / name).write_text("one\ntwo\n", encoding="utf-8")
+
+    counts = session_files.git_numstat(repo, "HEAD")
+
+    assert counts[name] == {"added": 1, "removed": 0}
 
 
 def test_session_files_payload_marks_generated_upload_names(tmp_path):
@@ -188,6 +255,26 @@ def test_session_files_payload_accepts_explicit_commit_refs(tmp_path):
     assert payload["files"][0]["removed"] == 1
     assert payload["from_ref"] == newer
     assert payload["to_ref"] == older
+
+
+def test_git_recent_refs_exposes_more_than_twenty_commits(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    for index in range(25):
+        tracked.write_text(f"{index}\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", f"commit {index}")
+
+    refs = session_files.git_recent_refs(repo)
+
+    assert refs[0]["ref"] == "current"
+    assert refs[1]["ref"] == "HEAD"
+    assert len(refs) >= 27
+    assert any(item["subject"] == "commit 0" for item in refs)
 
 
 def test_session_files_payload_reports_invalid_ref_order(tmp_path):

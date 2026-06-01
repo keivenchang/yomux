@@ -20,13 +20,11 @@ def tmux(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[s
     return run_cmd(["tmux", *args], timeout=timeout)
 
 
-def tmux_run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["tmux", *args],
-        capture_output=True,
-        text=True,
-        check=check,
-    )
+def tmux_run(*args: str, check: bool = True, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
+    result = run_cmd(["tmux", *args], timeout=timeout)
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, result.args, output=result.stdout, stderr=result.stderr)
+    return result
 
 
 def tmux_session_target(session: str) -> str:

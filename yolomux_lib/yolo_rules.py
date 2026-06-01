@@ -48,7 +48,24 @@ DEFAULT_DANGEROUS_REGEXES = (
 )
 BLOCK_DEVICE_RE = re.compile(r"/dev/(?:sd[a-z]\d*|nvme\d+n\d+(?:p\d+)?|vd[a-z]\d*)")
 BLOCK_DEVICE_REDIRECT_RE = re.compile(r"(?:^|[\s;&|])(?:\d?>|>>)\s*/dev/(?:sd[a-z]|nvme\d|vd[a-z])")
-FORK_BOMB_RE = re.compile(r":\(\)\s*\{.*:\|:&\s*\}\s*;\s*:")
+DANGEROUS_ROOT_TARGETS = {
+    "/",
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/home",
+    "/lib",
+    "/lib64",
+    "/opt",
+    "/proc",
+    "/root",
+    "/sbin",
+    "/sys",
+    "/tmp",
+    "/usr",
+    "/var",
+}
 COMMAND_BOUNDARIES = {";", "&&", "||", "|", "&"}
 SHELL_COMMANDS = {"bash", "sh", "zsh", "dash", "fish"}
 WRAPPER_COMMANDS = {"sudo", "doas", "command", "builtin", "time", "nohup", "nice"}
@@ -482,7 +499,7 @@ def reload_rules() -> dict[str, Any]:
 def hard_floor_decision(cmd_line: str) -> dict[str, Any] | None:
     if not cmd_line.strip():
         return None
-    if FORK_BOMB_RE.search(cmd_line):
+    if fork_bomb_detected(cmd_line):
         return {"action": "block", "rule_name": "built-in hard floor: fork bomb", "risk": "process"}
     if BLOCK_DEVICE_REDIRECT_RE.search(cmd_line):
         return {"action": "block", "rule_name": "built-in hard floor: block-device redirect", "risk": "device"}
@@ -501,10 +518,51 @@ def hard_floor_decision(cmd_line: str) -> dict[str, Any] | None:
 
 
 def rm_targets_root(args: list[str]) -> bool:
-    flags = "".join(arg[1:] for arg in args if arg.startswith("-") and arg != "--")
-    has_recursive_or_force = "r" in flags.lower() or "f" in flags.lower()
-    has_root = any(arg == "/" for arg in args)
-    return has_root and has_recursive_or_force
+    flags: list[str] = []
+    targets: list[str] = []
+    after_options = False
+    for arg in args:
+        if not after_options and arg == "--":
+            after_options = True
+            continue
+        if not after_options and arg.startswith("-"):
+            flags.append(arg)
+            continue
+        targets.append(arg)
+    short_flags = "".join(flag[1:] for flag in flags if flag.startswith("-") and not flag.startswith("--"))
+    long_flags = {flag for flag in flags if flag.startswith("--")}
+    has_recursive_or_force = (
+        "r" in short_flags.lower()
+        or "R" in short_flags
+        or "f" in short_flags.lower()
+        or "--recursive" in long_flags
+        or "--force" in long_flags
+    )
+    return has_recursive_or_force and any(rm_target_is_root_like(target) for target in targets)
+
+
+def rm_target_is_root_like(target: str) -> bool:
+    text = str(target or "").strip().strip("'\"")
+    if not text:
+        return False
+    if text in {"~", "~/", "$HOME", "${HOME}"}:
+        return True
+    if re.fullmatch(r"/+\*+", text):
+        return True
+    if re.fullmatch(r"/+(?:\./?)*", text):
+        return True
+    normalized = re.sub(r"/+", "/", text).rstrip("/")
+    if normalized in DANGEROUS_ROOT_TARGETS:
+        return True
+    return any(normalized == f"{root}/*" for root in DANGEROUS_ROOT_TARGETS)
+
+
+def fork_bomb_detected(cmd_line: str) -> bool:
+    compact = re.sub(r"\s+", "", cmd_line or "")
+    return bool(
+        re.search(r"([A-Za-z_:][A-Za-z0-9_:.-]*)\(\)\{[^}]*\1\|\1&[^}]*\};?\1", compact)
+        or re.search(r"function([A-Za-z_][A-Za-z0-9_.-]*)\{[^}]*\1\|\1&[^}]*\};?\1", compact)
+    )
 
 
 def evaluate_ruleset(cmd_line: str, ruleset: YoloRuleset) -> dict[str, Any]:

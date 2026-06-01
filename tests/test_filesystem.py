@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -50,9 +51,36 @@ def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
     assert entries["repo"]["repo"]["branch"] == "feature/repo-row"
 
 
-def test_list_directory_root_has_no_parent():
+def test_list_directory_rejects_root_outside_default_allowlist():
+    with pytest.raises(FilesystemError) as info:
+        filesystem.list_directory("/")
+    assert info.value.status == 403
+
+
+def test_filesystem_allowlist_can_include_root(monkeypatch):
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, "/")
     payload = filesystem.list_directory("/")
     assert payload["parent"] is None
+
+
+def test_filesystem_blocks_secret_paths(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    secret = home / ".ssh" / "id_rsa"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(home))
+    with pytest.raises(FilesystemError) as info:
+        filesystem.read_file(str(secret))
+    assert info.value.status == 403
+
+
+def test_delete_path_refuses_configured_root(monkeypatch, tmp_path):
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(tmp_path))
+    with pytest.raises(FilesystemError) as info:
+        filesystem.delete_path(str(tmp_path))
+    assert info.value.status == 403
+    assert tmp_path.exists()
 
 
 def test_list_directory_rejects_relative():
@@ -161,6 +189,7 @@ def test_read_file_returns_text(tmp_path):
     assert payload["extension"] == ".md"
     assert payload["is_text_extension"] is True
     assert payload["size"] == file_path.stat().st_size
+    assert payload["mtime_ns"] == file_path.stat().st_mtime_ns
 
 
 def test_read_file_rejects_binary(tmp_path):
@@ -191,6 +220,7 @@ def test_write_file_creates_and_overwrites(tmp_path):
     result = filesystem.write_file(str(target), '{"a": 1}\n')
     assert target.read_text(encoding="utf-8") == '{"a": 1}\n'
     assert result["size"] == len('{"a": 1}\n')
+    assert result["mtime_ns"] == target.stat().st_mtime_ns
 
     second = filesystem.write_file(str(target), 'replaced')
     assert target.read_text(encoding="utf-8") == 'replaced'
@@ -223,6 +253,29 @@ def test_write_file_mtime_conflict(tmp_path):
     with pytest.raises(FilesystemError) as info:
         filesystem.write_file(str(target), "b", expected_mtime=stale_mtime)
     assert info.value.status == 409
+
+
+def test_write_file_mtime_conflict_uses_nanoseconds(tmp_path):
+    target = tmp_path / "race-ns.txt"
+    target.write_text("a", encoding="utf-8")
+    base_ns = 1_800_000_000_123_456_000
+    os.utime(target, ns=(base_ns, base_ns))
+    os.utime(target, ns=(base_ns + 1, base_ns + 1))
+
+    with pytest.raises(FilesystemError) as info:
+        filesystem.write_file(str(target), "b", expected_mtime=base_ns)
+
+    assert info.value.status == 409
+
+
+def test_write_file_accepts_legacy_second_mtime(tmp_path):
+    target = tmp_path / "race-legacy.txt"
+    target.write_text("a", encoding="utf-8")
+    legacy_mtime = int(target.stat().st_mtime)
+
+    result = filesystem.write_file(str(target), "b", expected_mtime=legacy_mtime)
+
+    assert result["size"] == 1
 
 
 def test_rename_path_same_directory(tmp_path):

@@ -264,10 +264,12 @@ Detection intentionally uses the visible tmux screen for presence checks, which 
 An optional read-only sidecar dashboard — useful when you only want a passive wall of terminal snapshots and JSON context, not the full interactive UI. It is a stdlib HTTP server that uses `tmux capture-pane` as the source, streams snapshots over Server-Sent Events, exposes JSON endpoints (for a future AI summarizer, without scraping the browser), optionally reads `container/show_project_containers.py` for container metadata, and serves `static/tmux-wall.css` / `static/tmux-wall.js`.
 
 ```bash
-python3 tmux_wall.py --host 0.0.0.0 --port 8765      # then open http://localhost:8765/
+python3 tmux_wall.py --port 8765                     # then open http://localhost:8765/
 python3 tmux_wall.py --print-targets                 # inspect target selection without starting
 python3 tmux_wall.py --targets project1:0.0,project2:0.0,project3:1.0,project4:0.0 --slots 6
 ```
+
+The wall has no login layer, so it refuses non-loopback binds by default. If you intentionally want to expose read-only tmux snapshots on `0.0.0.0`, pass `--allow-unauthenticated-non-loopback`.
 
 Without `--targets`, the server discovers panes from `project1` through `project4`, picks one agent pane per session first, then fills the remaining slots with other panes from those sessions. The wall API reference is in [`AGENTS.md`](AGENTS.md).
 

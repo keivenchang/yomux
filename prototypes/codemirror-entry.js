@@ -6,7 +6,7 @@
 // NODE_PATH=/tmp/yolomux-cm/node_modules /tmp/yolomux-cm/node_modules/.bin/esbuild prototypes/codemirror-entry.js --bundle --format=iife --global-name=YOLOmuxCodeMirrorBundle --outfile=static/codemirror.js --minify
 
 import {basicSetup} from "codemirror";
-import {EditorState} from "@codemirror/state";
+import {Compartment, EditorState} from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -75,6 +75,7 @@ window.YOLOmuxCodeMirror = {
   basicSetup,
   bracketMatching,
   closeSearchPanel,
+  Compartment,
   crosshairCursor,
   Decoration,
   css,

@@ -494,17 +494,22 @@ function fuzzyHighlightHtml(query, text) {
   return parts.join('');
 }
 
-function replaceHtmlPreservingScroll(element, html) {
+function restoreElementScrollPosition(element, scrollTop, scrollLeft) {
   if (!element) return;
-  const scrollTop = element.scrollTop || 0;
-  const scrollLeft = element.scrollLeft || 0;
-  element.innerHTML = html;
   element.scrollTop = scrollTop;
   element.scrollLeft = scrollLeft;
   requestAnimationFrame(() => {
     element.scrollTop = scrollTop;
     element.scrollLeft = scrollLeft;
   });
+}
+
+function replaceHtmlPreservingScroll(element, html) {
+  if (!element) return;
+  const scrollTop = element.scrollTop || 0;
+  const scrollLeft = element.scrollLeft || 0;
+  element.innerHTML = html;
+  restoreElementScrollPosition(element, scrollTop, scrollLeft);
 }
 
 function wsUrl(session) {

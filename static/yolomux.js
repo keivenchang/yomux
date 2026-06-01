@@ -209,6 +209,8 @@ const fileExplorerKnownEntryNames = new Map();
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
+const fileExplorerMemoryCacheLimit = 512;
+const commandPaletteRecentKeyLimit = 100;
 const pendingFileEditorFocus = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 let activeFile = null;
@@ -323,6 +325,8 @@ let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3000);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');
+let uploadMaxBytes = initialSetting('uploads.max_bytes', 20 * 1024 * 1024);
+const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
 let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
 let editorFontSize = initialSetting('appearance.editor_font_size', 13);
 let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
@@ -630,6 +634,18 @@ const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
 const attentionAlertTimers = new Map();
 const metadataBadgePulseUntil = new Map();
+
+function setLimitedMapEntry(map, key, value, limit) {
+  if (!map || !key) return;
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+  while (map.size > limit) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
 let infoBranchSort = {key: 'updated', dir: 'desc'};
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
@@ -1164,17 +1180,22 @@ function fuzzyHighlightHtml(query, text) {
   return parts.join('');
 }
 
-function replaceHtmlPreservingScroll(element, html) {
+function restoreElementScrollPosition(element, scrollTop, scrollLeft) {
   if (!element) return;
-  const scrollTop = element.scrollTop || 0;
-  const scrollLeft = element.scrollLeft || 0;
-  element.innerHTML = html;
   element.scrollTop = scrollTop;
   element.scrollLeft = scrollLeft;
   requestAnimationFrame(() => {
     element.scrollTop = scrollTop;
     element.scrollLeft = scrollLeft;
   });
+}
+
+function replaceHtmlPreservingScroll(element, html) {
+  if (!element) return;
+  const scrollTop = element.scrollTop || 0;
+  const scrollLeft = element.scrollLeft || 0;
+  element.innerHTML = html;
+  restoreElementScrollPosition(element, scrollTop, scrollLeft);
 }
 
 function wsUrl(session) {
@@ -2926,7 +2947,7 @@ function commandPaletteRecentBonus(item) {
 function rememberCommandPaletteItem(item) {
   if (!item || item.disabled) return;
   const key = item.key || `${item.group}:${item.label}`;
-  commandPaletteRecentKeys.set(key, ++commandPaletteRecentSequence);
+  setLimitedMapEntry(commandPaletteRecentKeys, key, ++commandPaletteRecentSequence, commandPaletteRecentKeyLimit);
 }
 
 function commandPaletteEffectiveMode() {
@@ -4541,7 +4562,7 @@ function directoryEntriesSignature(entries) {
 }
 
 function recordDirectorySignature(path, entries) {
-  fileExplorerDirectorySignatures.set(normalizeDirectoryPath(path), directoryEntriesSignature(entries));
+  setLimitedMapEntry(fileExplorerDirectorySignatures, normalizeDirectoryPath(path), directoryEntriesSignature(entries), fileExplorerMemoryCacheLimit);
 }
 
 function pruneExpiredNewFileEntries(now = Date.now()) {
@@ -4558,10 +4579,10 @@ function markNewDirectoryEntries(path, entries) {
   pruneExpiredNewFileEntries(now);
   if (previous && fileExplorerNewEntryHighlightMs > 0) {
     for (const name of names) {
-      if (!previous.has(name)) fileExplorerNewEntryUntil.set(childPath(root, name), now + fileExplorerNewEntryHighlightMs);
+      if (!previous.has(name)) setLimitedMapEntry(fileExplorerNewEntryUntil, childPath(root, name), now + fileExplorerNewEntryHighlightMs, fileExplorerMemoryCacheLimit);
     }
   }
-  fileExplorerKnownEntryNames.set(root, names);
+  setLimitedMapEntry(fileExplorerKnownEntryNames, root, names, fileExplorerMemoryCacheLimit);
 }
 
 function fileExplorerEntryIsNew(path) {
@@ -4618,7 +4639,7 @@ function hydrateFileExplorerRepoInfoCache() {
     for (const item of repos) {
       const path = normalizeDirectoryPath(item?.path || item?.repo?.root || '');
       const repo = normalizeFileExplorerRepoInfo(item?.repo, path);
-      if (path && repo) fileExplorerRepoInfoCache.set(path, repo);
+      if (path && repo) setLimitedMapEntry(fileExplorerRepoInfoCache, path, repo, fileExplorerMemoryCacheLimit);
     }
   } catch (_) {}
 }
@@ -4640,8 +4661,8 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   const info = normalizeFileExplorerRepoInfo(repo, normalized);
   if (!normalized || !info) return false;
   const repoRoot = normalizeDirectoryPath(info.root);
-  fileExplorerRepoInfoCache.set(normalized, info);
-  if (repoRoot && repoRoot !== normalized) fileExplorerRepoInfoCache.set(repoRoot, info);
+  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, info, fileExplorerMemoryCacheLimit);
+  if (repoRoot && repoRoot !== normalized) setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, info, fileExplorerMemoryCacheLimit);
   if (options.persist !== false) persistFileExplorerRepoInfoCache();
   return true;
 }
@@ -6108,10 +6129,18 @@ async function fetchFileEntryStatus(path) {
   return {entry, missing: !entry, error: entry ? '' : `path not found: ${path}`, network: false};
 }
 
+function fileEntryMtime(entry) {
+  return Number(entry?.mtime_ns || entry?.mtime || 0);
+}
+
+function filePayloadMtime(payload) {
+  return Number(payload?.mtime_ns || payload?.mtime || 0);
+}
+
 function fileEntryChanged(state, entry) {
   if (!state || !entry) return true;
   const stateMtime = Number(state.mtime || 0);
-  const entryMtime = Number(entry.mtime || 0);
+  const entryMtime = fileEntryMtime(entry);
   if (stateMtime !== entryMtime) return true;
   if (state.size == null || entry.size == null) return false;
   return Number(state.size) !== Number(entry.size);
@@ -6362,6 +6391,91 @@ function truncateDialogText(text, maxChars = 20000) {
   return `${value.slice(0, maxChars)}\n\n... truncated ${value.length - maxChars} chars ...`;
 }
 
+function diffDialogLines(text) {
+  const lines = String(text ?? '').split('\n');
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  return lines.length ? lines : [''];
+}
+
+function lineDiffRows(leftText, rightText) {
+  const left = diffDialogLines(leftText);
+  const right = diffDialogLines(rightText);
+  const cellCount = left.length * right.length;
+  if (cellCount > 1_000_000) {
+    const max = Math.max(left.length, right.length);
+    return Array.from({length: max}, (_, index) => {
+      const same = left[index] === right[index];
+      return {
+        left: left[index] ?? '',
+        right: right[index] ?? '',
+        leftKind: same ? 'same' : (index < left.length ? 'added' : 'blank'),
+        rightKind: same ? 'same' : (index < right.length ? 'removed' : 'blank'),
+      };
+    });
+  }
+  const dp = Array.from({length: left.length + 1}, () => new Uint16Array(right.length + 1));
+  for (let i = left.length - 1; i >= 0; i -= 1) {
+    for (let j = right.length - 1; j >= 0; j -= 1) {
+      dp[i][j] = left[i] === right[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const rows = [];
+  let i = 0;
+  let j = 0;
+  while (i < left.length || j < right.length) {
+    if (i < left.length && j < right.length && left[i] === right[j]) {
+      rows.push({left: left[i], right: right[j], leftKind: 'same', rightKind: 'same'});
+      i += 1;
+      j += 1;
+    } else if (j >= right.length || (i < left.length && dp[i + 1][j] >= dp[i][j + 1])) {
+      rows.push({left: left[i], right: '', leftKind: 'added', rightKind: 'blank'});
+      i += 1;
+    } else {
+      rows.push({left: '', right: right[j], leftKind: 'blank', rightKind: 'removed'});
+      j += 1;
+    }
+  }
+  return rows;
+}
+
+function fileCompareLineHtml(kind, text) {
+  return `<span class="file-compare-line ${esc(kind)}">${esc(text || ' ')}</span>`;
+}
+
+function fileConflictCompareHtml(editorText, diskText) {
+  const rows = lineDiffRows(truncateDialogText(editorText), truncateDialogText(diskText));
+  const editorHtml = rows.map(row => fileCompareLineHtml(row.leftKind, row.left)).join('');
+  const diskHtml = rows.map(row => fileCompareLineHtml(row.rightKind, row.right)).join('');
+  return `
+    <div class="file-editor-conflict-compare">
+      <section>
+        <h4>Unsaved editor</h4>
+        <pre data-file-compare-scroll>${editorHtml}</pre>
+      </section>
+      <section>
+        <h4>On disk</h4>
+        <pre data-file-compare-scroll>${diskHtml}</pre>
+      </section>
+    </div>`;
+}
+
+function bindFileConflictCompareScroll(root) {
+  const panes = Array.from(root?.querySelectorAll?.('[data-file-compare-scroll]') || []);
+  let syncing = false;
+  for (const pane of panes) {
+    pane.addEventListener('scroll', () => {
+      if (syncing) return;
+      syncing = true;
+      for (const other of panes) {
+        if (other === pane) continue;
+        other.scrollTop = pane.scrollTop;
+        other.scrollLeft = pane.scrollLeft;
+      }
+      syncing = false;
+    });
+  }
+}
+
 function showFileEditorDecisionDialog(options = {}) {
   const actions = Array.isArray(options.actions) && options.actions.length
     ? options.actions
@@ -6403,6 +6517,7 @@ function showFileEditorDecisionDialog(options = {}) {
     });
     document.addEventListener('keydown', onKeydown, true);
     document.body.appendChild(backdrop);
+    options.onMount?.(backdrop);
     const preferred = backdrop.querySelector('[data-dialog-action]:not(.danger)') || backdrop.querySelector('[data-dialog-action]');
     preferred?.focus?.({preventScroll: true});
   });
@@ -6413,26 +6528,16 @@ async function showFileConflictCompareDialog(path, panel = null) {
   const loaded = await openFileStateFromDisk(path);
   const diskState = loaded.state;
   const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? '(missing on disk)' : String(diskState?.error || 'unable to load disk version');
-  const bodyHtml = `
-    <div class="file-editor-conflict-compare">
-      <section>
-        <h4>Unsaved editor</h4>
-        <pre>${esc(truncateDialogText(state?.content || ''))}</pre>
-      </section>
-      <section>
-        <h4>On disk</h4>
-        <pre>${esc(truncateDialogText(diskText))}</pre>
-      </section>
-    </div>`;
   const action = await showFileEditorDecisionDialog({
     title: `Compare ${basenameOf(path)}`,
-    bodyHtml,
+    bodyHtml: fileConflictCompareHtml(state?.content || '', diskText),
     actions: [
       {id: 'overwrite', label: 'Overwrite disk', variant: 'danger'},
       {id: 'reload', label: 'Keep disk version'},
       {id: 'cancel', label: 'Cancel'},
     ],
     className: 'file-editor-compare-dialog',
+    onMount: bindFileConflictCompareScroll,
   });
   if (action === 'overwrite') return saveFileEditor(path, panel, {force: true});
   if (action === 'reload') return reloadOpenFileFromDisk(path, {force: true});
@@ -6623,12 +6728,12 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(entry.size));
-    state.mtime = entry?.mtime || 0;
+    state.mtime = fileEntryMtime(entry);
     await openFilesSetAndShow(fullPath, state, openOptions);
     return;
   }
   if (kind === 'image') {
-    await openFilesSetAndShow(fullPath, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null}, openOptions);
+    await openFilesSetAndShow(fullPath, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null}, openOptions);
     return;
   }
   try {
@@ -6646,7 +6751,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     }
     const payload = await response.json();
     await openFilesSetAndShow(fullPath, {
-      mtime: payload.mtime,
+      mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
@@ -6703,13 +6808,13 @@ async function openFileStateFromDisk(path, entry = null) {
   }
   if (Number(fileEntry.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(fileEntry.size));
-    state.mtime = fileEntry.mtime || 0;
+    state.mtime = fileEntryMtime(fileEntry);
     return {state};
   }
   const ext = fileExtensionOf(fileEntry.name || basenameOf(path));
   if (IMAGE_EXTENSIONS.has(ext)) {
     return {state: {
-      mtime: fileEntry.mtime || 0,
+      mtime: fileEntryMtime(fileEntry),
       size: fileEntry.size ?? null,
       kind: 'image',
       original: '',
@@ -6727,13 +6832,13 @@ async function openFileStateFromDisk(path, entry = null) {
         : response.status === 404
           ? missingFileState(message)
           : fileErrorState(message);
-      state.mtime = fileEntry.mtime || 0;
+      state.mtime = fileEntryMtime(fileEntry);
       state.size = fileEntry.size ?? null;
       return {state};
     }
     const payload = await response.json();
     return {state: {
-      mtime: payload.mtime,
+      mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
@@ -6817,7 +6922,7 @@ async function refreshOpenFilesIfChanged() {
       continue;
     }
     if (state.dirty) {
-      const externalChanged = {mtime: entry.mtime || 0, size: entry.size ?? null};
+      const externalChanged = {mtime: fileEntryMtime(entry), size: entry.size ?? null};
       if (state.externalChanged
         && state.externalChanged.mtime === externalChanged.mtime
         && state.externalChanged.size === externalChanged.size) {
@@ -6856,7 +6961,7 @@ async function refreshFileExplorerIfChanged() {
     entriesByDir.set(normalizedDirectory, entries);
     const signature = directoryEntriesSignature(entries);
     const previous = fileExplorerDirectorySignatures.get(normalizedDirectory);
-    fileExplorerDirectorySignatures.set(normalizedDirectory, signature);
+    setLimitedMapEntry(fileExplorerDirectorySignatures, normalizedDirectory, signature, fileExplorerMemoryCacheLimit);
     if (previous !== undefined && previous !== signature) changed = true;
   }
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, entriesByDir});
@@ -7049,6 +7154,7 @@ async function loadCodeMirrorApi() {
         importCodeMirrorModule('@lezer/highlight'),
       ]);
       return {
+        Compartment: state.Compartment,
         EditorState: state.EditorState,
         RangeSetBuilder: state.RangeSetBuilder,
         EditorView: view.EditorView,
@@ -7112,54 +7218,69 @@ async function loadCodeMirrorApi() {
 
 function codeMirrorMarkdownCodeLanguages(api) {
   if (!api?.LanguageDescription) return null;
-  const stream = mode => (mode && api.StreamLanguage ? api.StreamLanguage.define(mode) : null);
+  const stream = mode => safeCodeMirrorExtension('stream language', () => (mode && api.StreamLanguage ? api.StreamLanguage.define(mode) : null));
   const languageEntries = [
-    {name: 'JavaScript', alias: ['js', 'jsx', 'node'], support: () => api.javascript({jsx: true})},
-    {name: 'TypeScript', alias: ['ts', 'tsx'], support: () => api.javascript({typescript: true, jsx: true})},
-    {name: 'Python', alias: ['py'], support: () => api.python()},
-    {name: 'Rust', alias: ['rs'], support: () => api.rust()},
-    {name: 'JSON', alias: ['jsonc'], support: () => api.json()},
-    {name: 'HTML', alias: ['htm'], support: () => api.html()},
-    {name: 'CSS', alias: ['scss'], support: () => api.css()},
-    {name: 'XML', alias: ['svg'], support: () => api.xml()},
-    {name: 'YAML', alias: ['yml'], support: () => api.yaml()},
+    {name: 'JavaScript', alias: ['js', 'jsx', 'node'], support: () => api.javascript?.({jsx: true})},
+    {name: 'TypeScript', alias: ['ts', 'tsx'], support: () => api.javascript?.({typescript: true, jsx: true})},
+    {name: 'Python', alias: ['py'], support: () => api.python?.()},
+    {name: 'Rust', alias: ['rs'], support: () => api.rust?.()},
+    {name: 'JSON', alias: ['jsonc'], support: () => api.json?.()},
+    {name: 'HTML', alias: ['htm'], support: () => api.html?.()},
+    {name: 'CSS', alias: ['scss'], support: () => api.css?.()},
+    {name: 'XML', alias: ['svg'], support: () => api.xml?.()},
+    {name: 'YAML', alias: ['yml'], support: () => api.yaml?.()},
     {name: 'Shell', alias: ['sh', 'bash', 'zsh'], support: () => stream(api.shell)},
     {name: 'TOML', alias: ['ini'], support: () => stream(api.toml)},
   ];
   return languageEntries.flatMap(entry => {
-    const support = entry.support?.();
-    if (!support) return [];
-    return [api.LanguageDescription.of({
-      name: entry.name,
-      alias: entry.alias,
-      support,
-    })];
+    const support = safeCodeMirrorExtension(entry.name, () => entry.support?.());
+    if (codeMirrorExtensionIsEmpty(support)) return [];
+    const description = safeCodeMirrorExtension(entry.name, () => api.LanguageDescription.of({
+        name: entry.name,
+        alias: entry.alias,
+        support,
+      }));
+    return codeMirrorExtensionIsEmpty(description) ? [] : [description];
   });
+}
+
+function codeMirrorExtensionIsEmpty(extension) {
+  return !extension || (Array.isArray(extension) && extension.length === 0);
+}
+
+function safeCodeMirrorExtension(label, factory) {
+  try {
+    return factory?.() || [];
+  } catch (error) {
+    console.warn(`CodeMirror ${label} extension unavailable; using plain text`, error);
+    return [];
+  }
 }
 
 function codeMirrorLanguageExtension(api, path) {
   const language = codeMirrorLanguageName(path);
-  if (language === 'javascript') return api.javascript({jsx: true});
-  if (language === 'typescript') return api.javascript({typescript: true, jsx: true});
-  if (language === 'python') return api.python();
-  if (language === 'rust') return api.rust();
-  if (language === 'json') return api.json();
-  if (language === 'html') return api.html();
-  if (language === 'xml') return api.xml();
-  if (language === 'css') return api.css();
+  if (language === 'javascript') return safeCodeMirrorExtension(language, () => api.javascript?.({jsx: true}));
+  if (language === 'typescript') return safeCodeMirrorExtension(language, () => api.javascript?.({typescript: true, jsx: true}));
+  if (language === 'python') return safeCodeMirrorExtension(language, () => api.python?.());
+  if (language === 'rust') return safeCodeMirrorExtension(language, () => api.rust?.());
+  if (language === 'json') return safeCodeMirrorExtension(language, () => api.json?.());
+  if (language === 'html') return safeCodeMirrorExtension(language, () => api.html?.());
+  if (language === 'xml') return safeCodeMirrorExtension(language, () => api.xml?.());
+  if (language === 'css') return safeCodeMirrorExtension(language, () => api.css?.());
   if (language === 'markdown') {
     const codeLanguages = codeMirrorMarkdownCodeLanguages(api);
-    return codeLanguages?.length ? api.markdown({codeLanguages}) : api.markdown();
+    return safeCodeMirrorExtension(language, () => (codeLanguages?.length ? api.markdown?.({codeLanguages}) : api.markdown?.()));
   }
-  if (language === 'yaml') return api.yaml();
-  if (language === 'shell' && api.shell) return api.StreamLanguage.define(api.shell);
-  if (language === 'toml' && api.toml) return api.StreamLanguage.define(api.toml);
+  if (language === 'yaml') return safeCodeMirrorExtension(language, () => api.yaml?.());
+  if (language === 'shell' && api.shell) return safeCodeMirrorExtension(language, () => api.StreamLanguage?.define(api.shell));
+  if (language === 'toml' && api.toml) return safeCodeMirrorExtension(language, () => api.StreamLanguage?.define(api.toml));
   return [];
 }
 
 function codeMirrorHighlightExtension(api) {
+  if (!api?.syntaxHighlighting) return [];
   if (!api.HighlightStyle || !api.tags) {
-    return api.syntaxHighlighting(api.defaultHighlightStyle, {fallback: true});
+    return api.defaultHighlightStyle ? safeCodeMirrorExtension('default highlight', () => api.syntaxHighlighting(api.defaultHighlightStyle, {fallback: true})) : [];
   }
   const t = api.tags;
   const scheme = activeEditorScheme();
@@ -7172,7 +7293,7 @@ function codeMirrorHighlightExtension(api) {
   const tags = (...items) => items.filter(Boolean);
   const headingStyle = {tag: tags(t.heading, t.heading1, t.heading2), color: palette.heading, fontWeight: '700'};
   if (palette.headingBg) headingStyle.backgroundColor = palette.headingBg;
-  return api.syntaxHighlighting(api.HighlightStyle.define([
+  return safeCodeMirrorExtension('highlight', () => api.syntaxHighlighting(api.HighlightStyle.define([
     {tag: t.keyword, color: palette.keyword},
     {tag: tags(t.atom, t.bool, t.null), color: palette.atom},
     {tag: tags(t.string, t.special(t.string), t.regexp), color: palette.string},
@@ -7189,7 +7310,7 @@ function codeMirrorHighlightExtension(api) {
     {tag: tags(t.link, t.url), color: palette.link, textDecoration: 'underline'},
     {tag: tags(t.monospace, t.processingInstruction), color: palette.inlineCode, backgroundColor: palette.inlineCodeBg},
     {tag: t.invalid, color: palette.invalid},
-  ]), {fallback: true});
+  ]), {fallback: true}));
 }
 
 function codeMirrorThemeExtension(api) {
@@ -7607,7 +7728,6 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     api.foldGutter(),
     api.highlightActiveLine(),
     ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-    codeMirrorHighlightExtension(api),
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
     api.highlightSelectionMatches(),
@@ -7617,11 +7737,10 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     powerKeymap,
     api.keymap.of([api.indentWithTab, ...api.defaultKeymap, ...api.historyKeymap, ...api.searchKeymap]),
     ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
-    codeMirrorHtmlSemanticEmphasisExtension(api, path),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
     codeMirrorLanguageExtension(api, path),
-    codeMirrorThemeExtension(api),
+    codeMirrorThemedExtensions(api, panel, path),
   ];
 }
 
@@ -7909,8 +8028,13 @@ function refreshOpenEditorThemePanels() {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
     if (!path || openFiles.get(path)?.kind !== 'text') return;
-    captureFileEditorPanelViewState(item, panel);
-    renderFileEditorPanel(panel, item);
+    const state = openFiles.get(path);
+    const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
+    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    if (!reconfigured) {
+      captureFileEditorPanelViewState(item, panel);
+      renderFileEditorPanel(panel, item);
+    }
   });
 }
 
@@ -8140,6 +8264,7 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
+  uploadMaxBytes = numberSetting('uploads.max_bytes', 20 * 1024 * 1024);
   terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
   editorFontSize = numberSetting('appearance.editor_font_size', 13);
   fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 13);
@@ -8570,13 +8695,7 @@ function yoloMarkerHtml(session, auto, options = {}) {
 function pullRequestCompactBadgesHtml(session, pr) {
   const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
   const ciHtml = pullRequestCiIndicatorHtml(session, pr);
-  const prHtml = pullRequestNumberIndicatorHtml(session, pr);
-  return [statusHtml, ciHtml, prHtml].filter(Boolean).join('');
-}
-
-function pullRequestNumberIndicatorHtml(session, pr) {
-  if (!pr?.number) return '';
-  return `<span class="${metadataBadgeClasses(session, 'pr', 'ci-indicator tab-symbol pr-indicator')}">#${esc(pr.number)}</span>`;
+  return [statusHtml, ciHtml].filter(Boolean).join('');
 }
 
 function applySessionStateClasses(node, state) {
@@ -11731,9 +11850,17 @@ function createYoagentPanel() {
   });
   panel.addEventListener('click', event => {
     const clear = event.target.closest('[data-yoagent-clear]');
-    if (!clear || !panel.contains(clear)) return;
-    event.preventDefault();
-    clearYoagentConversation();
+    if (clear && panel.contains(clear)) {
+      event.preventDefault();
+      clearYoagentConversation();
+      return;
+    }
+    const retry = event.target.closest('[data-yoagent-retry]');
+    if (retry && panel.contains(retry)) {
+      event.preventDefault();
+      const input = panel.querySelector('[data-yoagent-chat-input]');
+      sendYoagentChatMessage(input?.value || yoagentDraft);
+    }
   });
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
@@ -11860,22 +11987,40 @@ function yoagentChatEnabled() {
 function yoagentChatHtml() {
   const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
   const placeholder = readOnlyMode ? 'YO!agent chat requires admin access' : 'Ask about agents, repos, files, CI, blockers...';
-  const busy = yoagentBusy ? '<div class="yoagent-chat-status">YO!agent is answering...</div>' : '';
-  const error = yoagentError ? `<div class="yoagent-chat-error">${esc(yoagentError)}</div>` : '';
+  const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || yoagentBusy || yoagentError);
+  const busy = yoagentBusy
+    ? '<div class="yoagent-chat-status"><span class="yoagent-chat-spinner" aria-hidden="true"></span><span>YO!agent is answering...</span></div>'
+    : '';
+  const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
+    ? '<button type="button" class="yoagent-chat-retry" data-yoagent-retry>Retry</button>'
+    : '';
+  const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentError)}</span>${retry}</div>` : '';
   const clearDisabled = yoagentBusy || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
   const form = yoagentChatEnabled()
     ? `<form class="yoagent-chat-form" data-yoagent-chat-form>
       <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
-      <button type="submit" class="yoagent-chat-send"${disabled}>Ask</button>
+      <div class="yoagent-chat-actions">
+        <button type="submit" class="yoagent-chat-send"${disabled}>Ask</button>
+        <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>Clear conversation</button>
+      </div>
     </form>`
     : '';
-  return `<section class="yoagent-chat" aria-label="YO!agent chat">
-    <div class="yoagent-chat-toolbar">
-      <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>Clear conversation</button>
-    </div>
+  return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="YO!agent chat">
     <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
     ${form}
   </section>`;
+}
+
+function yoagentChatNetworkError(error) {
+  const text = String(error?.message || error || '');
+  return error instanceof TypeError || /failed to fetch|networkerror|load failed|fetch failed/i.test(text);
+}
+
+function yoagentChatErrorMessage(error) {
+  if (yoagentChatNetworkError(error)) {
+    return "Couldn't reach the YOLOmux server. Your question is still in the box; retry after the server is back.";
+  }
+  return `chat failed: ${error?.message || error}`;
 }
 
 async function clearYoagentConversation() {
@@ -11916,16 +12061,17 @@ async function sendYoagentChatMessage(rawText) {
     yoagentMessages.push({role: 'assistant', content: payload.answer || 'No answer.'});
     statusEl.textContent = `YO!agent answered with ${yoagentBackendLabel(payload.backend_used || payload.backend)}`;
   } catch (error) {
-    yoagentError = `chat failed: ${error}`;
+    if (yoagentChatNetworkError(error)) yoagentDraft = text;
+    yoagentError = yoagentChatErrorMessage(error);
   } finally {
     yoagentBusy = false;
-    renderYoagentPanel({preserveDraft: false, scrollBottom: true});
+    renderYoagentPanel({preserveDraft: true, scrollBottom: true, focusInput: true});
   }
 }
 
 async function refreshActivitySummary(options = {}) {
   activitySummaryRefreshing = true;
-  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   try {
     const response = await apiFetch(`/api/activity-summary${options.force ? '?force=1' : ''}`, {cache: 'no-store'});
     const payload = await response.json().catch(() => ({}));
@@ -11942,7 +12088,7 @@ async function refreshActivitySummary(options = {}) {
     activitySummaryRefreshing = false;
   }
   renderInfoPanel();
-  renderYoagentPanel();
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
 }
 
 function editorSchemePreferenceChoices(options = {}) {
@@ -12039,6 +12185,7 @@ function preferenceSections() {
     ]},
     {title: 'Uploads', items: [
       {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
+      {path: 'uploads.max_bytes', label: 'Upload size cap', type: 'number', min: 1048576, max: 536870912, step: 1048576, suffix: 'bytes', help: 'Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.'},
     ]},
     {title: 'YO!agent', items: [
       {path: 'yoagent.backend', label: 'YO!agent backend', type: 'select', choices: [
@@ -12263,7 +12410,24 @@ function preferenceControlHtml(item, query = '') {
     : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
-  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span></div>`;
+  const advisory = preferenceAdvisoryHtml(item, value);
+  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span>${advisory}</div>`;
+}
+
+function uploadRsyncExampleCommand() {
+  const host = serverHostname || '<host>';
+  const destination = homePath || '~';
+  return `rsync -avz <local-path> ${host}:${destination}/`;
+}
+
+function preferenceAdvisoryHtml(item, value) {
+  if (item.path !== 'uploads.max_bytes' || Number(value) <= uploadRsyncRecommendationBytes) return '';
+  const command = uploadRsyncExampleCommand();
+  return `<div class="preferences-setting-advisory">
+    <span>Large browser uploads are buffered in memory. Prefer rsync for files above ${esc(formatFileSize(uploadRsyncRecommendationBytes))}.</span>
+    <code>${esc(command)}</code>
+    <button type="button" class="preferences-inline-action" data-copy-text="${esc(command)}">Copy rsync example</button>
+  </div>`;
 }
 
 function preferencesAllDefault() {
@@ -12482,6 +12646,14 @@ function bindPreferencesPanel(panel) {
         .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
       return;
     }
+    const copyText = event.target.closest('[data-copy-text]');
+    if (copyText && panel.contains(copyText)) {
+      event.preventDefault();
+      copyTextToClipboard(copyText.dataset.copyText || '')
+        .then(() => { statusEl.textContent = 'copied text'; })
+        .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+      return;
+    }
     const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
     if (yoloRuleOpen && panel.contains(yoloRuleOpen)) {
       event.preventDefault();
@@ -12586,12 +12758,21 @@ function diffRefSuggestionsHtml(listId) {
   }).join('')}</datalist>`;
 }
 
+function diffRefSelectOptionsHtml(value, options = {}) {
+  const maxItems = options.compact ? 30 : 100;
+  return diffRefSuggestions().slice(0, maxItems).map(item => {
+    const label = [item.short, item.subject].filter(Boolean).join(' - ') || item.ref;
+    return `<option value="${esc(item.ref)}"${item.ref === value ? ' selected' : ''}>${esc(label)}</option>`;
+  }).join('');
+}
+
 function diffRefControlsHtml(options = {}) {
   const compact = options.compact === true;
   const className = compact ? 'diff-ref-controls compact' : 'diff-ref-controls';
   const listId = options.listId || (compact ? 'diff-ref-suggestions-compact' : 'diff-ref-suggestions');
   return `<span class="${className}" data-diff-ref-controls>
     <label class="diff-ref-control">FROM <input data-diff-ref-from type="text" list="${esc(listId)}" value="${esc(diffRefFrom)}" spellcheck="false" aria-label="Diff FROM ref"></label>
+    <select class="diff-ref-select" data-diff-ref-from-select aria-label="Pick a recent FROM commit">${diffRefSelectOptionsHtml(diffRefFrom, {compact})}</select>
     <label class="diff-ref-control">TO <input data-diff-ref-to type="text" list="${esc(listId)}" value="${esc(diffRefTo)}" spellcheck="false" aria-label="Diff TO ref"></label>
     ${diffRefSuggestionsHtml(listId)}
   </span>`;
@@ -12630,8 +12811,10 @@ function syncDiffRefControlValues(container) {
   const active = document.activeElement;
   const fromInput = container.querySelector?.('[data-diff-ref-from]');
   const toInput = container.querySelector?.('[data-diff-ref-to]');
+  const fromSelect = container.querySelector?.('[data-diff-ref-from-select]');
   if (fromInput && fromInput !== active) fromInput.value = diffRefFrom;
   if (toInput && toInput !== active) toInput.value = diffRefTo;
+  if (fromSelect && fromSelect !== active) fromSelect.value = diffRefFrom;
 }
 
 function fileExplorerSessionFilesTargetSession() {
@@ -12890,7 +13073,8 @@ function changesRepoGroupsHtml(files, options = {}) {
 function modifiedFilesSummaryText(files, session, loading, loaded) {
   if (loading) return 'loading...';
   if (!loaded) return 'not loaded';
-  return `${files.length} modified${session ? ` in session '${sessionLabel(session)}'` : ''}`;
+  const count = `${files.length} file${files.length === 1 ? '' : 's'}`;
+  return session ? `Modified in '${sessionLabel(session)}': ${count}` : `Modified: ${count}`;
 }
 
 function changesPanelHtml() {
@@ -12981,8 +13165,10 @@ function renderChangesPanels() {
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '') {
   const item = fileEditorItemFor(path);
-  setFileEditorViewMode(path, 'diff', item);
-  if (String(status || '').toUpperCase() === 'D') {
+  const normalizedStatus = String(status || '').toUpperCase();
+  const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';
+  setFileEditorViewMode(path, isAddedChange ? 'edit' : 'diff', item);
+  if (normalizedStatus === 'D') {
     await openFilesSetAndShow(path, {
       mtime: 0,
       size: 0,
@@ -12993,9 +13179,11 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '') {
       deleted: true,
     }, {item, ownerSession});
   } else {
-    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: 'diff'});
+    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: isAddedChange ? 'edit' : 'diff'});
   }
-  await refreshOpenFileDiff(path, {silent: true});
+  const diffReady = await refreshOpenFileDiff(path, {silent: true});
+  if (diffReady && !isAddedChange) setFileEditorViewMode(path, 'diff', item);
+  if (!diffReady && isAddedChange) setFileEditorViewMode(path, 'edit', item);
   renderOpenFilePath(path);
 }
 
@@ -13019,6 +13207,13 @@ function bindChangesPanel(panel) {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (diffRefInput && panel.contains(diffRefInput)) {
       commitDiffRefControls(diffRefInput.closest('[data-diff-ref-controls]') || panel);
+    }
+    const diffRefSelect = event.target.closest('[data-diff-ref-from-select]');
+    if (diffRefSelect && panel.contains(diffRefSelect)) {
+      const controls = diffRefSelect.closest('[data-diff-ref-controls]') || panel;
+      const fromInput = controls.querySelector?.('[data-diff-ref-from]');
+      if (fromInput) fromInput.value = diffRefSelect.value;
+      commitDiffRefControls(controls);
     }
   });
   panel.addEventListener('keydown', event => {
@@ -13179,12 +13374,35 @@ async function saveSettingsPatch(patch, options = {}) {
   refreshYoloRulesStatus({silent: true});
 }
 
+function showUploadRsyncRecommendation(options = {}) {
+  const command = uploadRsyncExampleCommand();
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.textContent = 'Copy rsync example';
+  action.addEventListener('click', event => {
+    event.stopPropagation();
+    copyTextToClipboard(command)
+      .then(() => { statusEl.textContent = 'copied rsync example'; })
+      .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+  });
+  const sizeText = options.sizeBytes ? `Selected upload size is ${formatFileSize(options.sizeBytes)}.` : '';
+  return showToast('Use rsync for large files', [
+    `${sizeText} Browser uploads are buffered in memory; current cap is ${formatFileSize(uploadMaxBytes)}.`,
+    command,
+  ], {
+    container: displayToastContainer(options.session || prefsItemId),
+    actions: [action],
+    countdownMs: 20000,
+  });
+}
+
 function savePreferenceControl(control) {
   const path = control.dataset.settingPath || '';
   if (control.dataset.settingType === 'number' && !validatePreferenceNumberControl(control)) {
     control.reportValidity?.();
     return;
   }
+  const previousValue = preferenceValue(path);
   const value = valueFromPreferenceControl(control);
   saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
@@ -13194,6 +13412,9 @@ function savePreferenceControl(control) {
       if ((path === 'appearance.editor_dark_color_scheme' && scheme.dark)
         || (path === 'appearance.editor_light_color_scheme' && !scheme.dark)) {
         setFileEditorThemeMode(value);
+      }
+      if (path === 'uploads.max_bytes' && Number(value) > uploadRsyncRecommendationBytes && Number(previousValue) <= uploadRsyncRecommendationBytes) {
+        showUploadRsyncRecommendation({sizeBytes: Number(value)});
       }
       statusEl.textContent = `saved ${path}`;
     })
@@ -13752,6 +13973,9 @@ function destroyCodeMirrorPanel(panel) {
     panel._cmView = null;
   }
   if (panel) {
+    panel._cmApi = null;
+    panel._cmThemeCompartment = null;
+    panel._cmThemeViews = [];
     panel._cmPath = '';
     panel._cmSignature = '';
     panel._cmMode = '';
@@ -13782,7 +14006,6 @@ function codeMirrorConfigSignature(path, options = {}) {
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
     readOnly: readOnlyMode,
-    scheme: activeEditorScheme().id,
   });
 }
 
@@ -13791,18 +14014,16 @@ function codeMirrorDiffLayout(container) {
   return width >= 800 ? 'side' : 'inline';
 }
 
-function codeMirrorReadOnlyExtensions(api, path) {
+function codeMirrorReadOnlyExtensions(api, path, panel = null) {
   return [
     api.drawSelection(),
     api.highlightActiveLine(),
     ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-    codeMirrorHighlightExtension(api),
     ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
-    codeMirrorHtmlSemanticEmphasisExtension(api, path),
     api.EditorState.readOnly.of(true),
     api.EditorView.editable.of(false),
     codeMirrorLanguageExtension(api, path),
-    codeMirrorThemeExtension(api),
+    codeMirrorThemedExtensions(api, panel, path),
   ];
 }
 
@@ -13820,7 +14041,62 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   const next = String(text || '');
   if (view.state.doc.toString() === next) return;
   if (options.cleanOnly && openFiles.get(options.path)?.dirty) return;
-  view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: next}});
+  const scrollDOM = view.scrollDOM;
+  const scrollTop = scrollDOM?.scrollTop || 0;
+  const scrollLeft = scrollDOM?.scrollLeft || 0;
+  const selection = view.state.selection;
+  const selectionFits = selection?.ranges?.every(range => (
+    range.anchor <= next.length && range.head <= next.length
+  ));
+  view.dispatch({
+    changes: {from: 0, to: view.state.doc.length, insert: next},
+    ...(selectionFits ? {selection} : {}),
+  });
+  const restoreScroll = () => {
+    if (!scrollDOM) return;
+    scrollDOM.scrollTop = scrollTop;
+    scrollDOM.scrollLeft = scrollLeft;
+  };
+  if (typeof view.requestMeasure === 'function') {
+    view.requestMeasure({write: restoreScroll});
+  } else {
+    requestAnimationFrame(restoreScroll);
+  }
+  requestAnimationFrame(restoreScroll);
+}
+
+function codeMirrorThemeExtensions(api, path) {
+  return [
+    codeMirrorHighlightExtension(api),
+    codeMirrorHtmlSemanticEmphasisExtension(api, path),
+    codeMirrorThemeExtension(api),
+  ];
+}
+
+function codeMirrorThemedExtensions(api, panel, path) {
+  const extensions = codeMirrorThemeExtensions(api, path);
+  if (!panel || !api.Compartment) return extensions;
+  panel._cmThemeCompartment = panel._cmThemeCompartment || new api.Compartment();
+  return panel._cmThemeCompartment.of(extensions);
+}
+
+function trackCodeMirrorThemeViews(panel, api, views) {
+  if (!panel) return;
+  panel._cmApi = api;
+  panel._cmThemeViews = views.filter(Boolean);
+}
+
+function reconfigureCodeMirrorPanelTheme(panel) {
+  const api = panel?._cmApi;
+  const path = panel?._cmPath;
+  const compartment = panel?._cmThemeCompartment;
+  const views = Array.isArray(panel?._cmThemeViews) ? panel._cmThemeViews : [];
+  if (!api || !path || !compartment || !views.length) return false;
+  const effect = compartment.reconfigure(codeMirrorThemeExtensions(api, path));
+  for (const view of views) {
+    try { view.dispatch({effects: effect}); } catch (_) {}
+  }
+  return true;
 }
 
 function diffOverviewChunks(diff, totalLines) {
@@ -13950,9 +14226,9 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   const currentText = state.diffFromRef && state.diffFromRef !== 'current' ? String(state.diffWorking || '') : String(state.content || '');
   const diffEditsAllowed = !state.diffFromRef || state.diffFromRef === 'current';
   const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});
-  installCodeMirrorDiffResizeObserver(panel, item, path, container);
   installCodeMirrorDiffCollapsedScrollGuard(panel, container);
   if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
+    installCodeMirrorDiffResizeObserver(panel, item, path, container);
     if (layout === 'side') {
       syncCodeMirrorDocument(panel._cmMergeView?.a, original);
       syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path});
@@ -13975,7 +14251,16 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     panel._cmMergeView = new api.MergeView({
       a: {
         doc: original,
-        extensions: codeMirrorReadOnlyExtensions(api, path),
+        extensions: [
+          api.drawSelection(),
+          api.highlightActiveLine(),
+          ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
+          ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+          api.EditorState.readOnly.of(true),
+          api.EditorView.editable.of(false),
+          codeMirrorLanguageExtension(api, path),
+          codeMirrorThemedExtensions(api, panel, path),
+        ],
       },
       b: {
         doc: currentText,
@@ -13984,7 +14269,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
               ...codeMirrorExtensions(api, panel, path),
               codeMirrorWorkingUpdateExtension(api, panel, path),
             ]
-          : codeMirrorReadOnlyExtensions(api, path),
+          : codeMirrorReadOnlyExtensions(api, path, panel),
       },
       parent: container,
       revertControls: 'a-to-b',
@@ -13993,6 +14278,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       collapseUnchanged: {margin: 3, minSize: 8},
     });
     panel._cmView = panel._cmMergeView.b;
+    trackCodeMirrorThemeViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
     panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
   } else {
     const cmState = api.EditorState.create({
@@ -14006,7 +14292,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           allowInlineDiffs: true,
           collapseUnchanged: {margin: 3, minSize: 8},
         }),
-        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path) : codeMirrorReadOnlyExtensions(api, path)),
+        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path) : codeMirrorReadOnlyExtensions(api, path, panel)),
       ],
     });
     panel._cmView = new api.EditorView({
@@ -14021,6 +14307,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       },
     });
     panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+    trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
   }
   panel._cmPath = path;
   panel._cmSignature = signature;
@@ -14070,6 +14357,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       panel._cmPath = path;
       panel._cmSignature = signature;
       panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+      trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
       updateCodeMirrorCursorStatus(panel);
     } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty) {
       panel._cmView.dispatch({
@@ -14259,10 +14547,10 @@ function loadFileEditorState(path, panel, item) {
       }
       if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
         const state = tooLargeFileState(Number(entry.size));
-        state.mtime = entry?.mtime || 0;
+        state.mtime = fileEntryMtime(entry);
         openFiles.set(path, state);
       } else {
-        openFiles.set(path, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
+        openFiles.set(path, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
       }
       renderFileEditorPanel(panel, item);
       renderSessionButtons();
@@ -14282,7 +14570,7 @@ function loadFileEditorState(path, panel, item) {
       } else {
         const payload = await response.json();
         openFiles.set(path, {
-          mtime: payload.mtime,
+          mtime: filePayloadMtime(payload),
           size: payload.size,
           kind: 'text',
           original: payload.content,
@@ -14377,12 +14665,109 @@ function markdownTextWithSourceAnchors(text) {
   }).join('\n');
 }
 
+const MARKDOWN_PREVIEW_BLOCKED_TAGS = new Set([
+  'applet',
+  'audio',
+  'base',
+  'button',
+  'canvas',
+  'embed',
+  'form',
+  'iframe',
+  'input',
+  'link',
+  'math',
+  'meta',
+  'object',
+  'option',
+  'script',
+  'select',
+  'source',
+  'style',
+  'svg',
+  'textarea',
+  'track',
+  'video',
+]);
+const MARKDOWN_PREVIEW_URL_ATTRS = new Set(['href', 'src', 'poster', 'xlink:href']);
+const MARKDOWN_PREVIEW_SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+const MARKDOWN_PREVIEW_SAFE_IMAGE_DATA = /^data:image\/(?:png|gif|jpe?g|webp);/i;
+
+function markdownPreviewUrlAllowed(value, tagName) {
+  const raw = String(value || '').trim();
+  if (!raw) return true;
+  if (raw.startsWith('#') || raw.startsWith('/') || raw.startsWith('./') || raw.startsWith('../')) return true;
+  try {
+    const base = globalThis.location?.href || 'http://localhost/';
+    const url = new URL(raw, base);
+    if (MARKDOWN_PREVIEW_SAFE_PROTOCOLS.has(url.protocol.toLowerCase())) return true;
+    return tagName === 'img' && url.protocol.toLowerCase() === 'data:' && MARKDOWN_PREVIEW_SAFE_IMAGE_DATA.test(raw);
+  } catch (_) {
+    return false;
+  }
+}
+
+function sanitizeMarkdownPreviewAttribute(element, attr) {
+  const name = String(attr?.name || '').toLowerCase();
+  if (!name) return;
+  const tagName = String(element.tagName || '').toLowerCase();
+  if (name.startsWith('on') || name === 'style' || name === 'srcdoc' || name === 'srcset' || name === 'formaction') {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (name.includes(':') && name !== 'xlink:href') {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (MARKDOWN_PREVIEW_URL_ATTRS.has(name) && !markdownPreviewUrlAllowed(attr.value, tagName)) {
+    element.removeAttribute(attr.name);
+    return;
+  }
+  if (name === 'target' && element.getAttribute('target') === '_blank') {
+    element.setAttribute('rel', 'noopener noreferrer');
+  }
+}
+
+function sanitizeMarkdownPreviewNode(root) {
+  const elementNode = globalThis.Node?.ELEMENT_NODE || 1;
+  const commentNode = globalThis.Node?.COMMENT_NODE || 8;
+  for (const child of Array.from(root?.childNodes || [])) {
+    if (child.nodeType === commentNode) {
+      child.remove();
+      continue;
+    }
+    if (child.nodeType !== elementNode) continue;
+    const tagName = String(child.tagName || '').toLowerCase();
+    if (MARKDOWN_PREVIEW_BLOCKED_TAGS.has(tagName)) {
+      child.remove();
+      continue;
+    }
+    for (const attr of Array.from(child.attributes || [])) {
+      sanitizeMarkdownPreviewAttribute(child, attr);
+    }
+    sanitizeMarkdownPreviewNode(child);
+  }
+}
+
+function sanitizeMarkdownPreviewHtml(html) {
+  const template = document.createElement('template');
+  if (!template.content) {
+    const fallback = document.createElement('div');
+    fallback.textContent = String(html ?? '');
+    return fallback;
+  }
+  template.innerHTML = String(html ?? '');
+  sanitizeMarkdownPreviewNode(template.content);
+  return template.content;
+}
+
 function renderMarkdownPreviewInto(container, text) {
   if (typeof window.marked === 'undefined') {
     container.textContent = 'marked.js not loaded (offline CDN?)';
     return;
   }
-  container.innerHTML = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+  const html = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+  container.replaceChildren(sanitizeMarkdownPreviewHtml(html));
   if (typeof window.hljs !== 'undefined') {
     container.querySelectorAll('pre code').forEach(block => {
       try { window.hljs.highlightElement(block); } catch (_) {}
@@ -14467,12 +14852,15 @@ function renderHtmlPreviewInto(container, text) {
 
 function renderEditorPreviewPane(container, path, text) {
   if (!container) return;
+  const scrollTop = container.scrollTop || 0;
+  const scrollLeft = container.scrollLeft || 0;
   container.classList.toggle('markdown-body', isMarkdownPath(path));
   container.classList.toggle('html-preview-body', isHtmlPath(path));
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
   if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text);
   else if (isHtmlPath(path)) renderHtmlPreviewInto(container, text);
   else renderEditorCodePreviewInto(container, path, text);
+  restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }
 
 function markdownInlineHighlightHtml(escaped) {
@@ -14885,7 +15273,7 @@ async function saveFileEditor(path, panel, options = {}) {
       return false;
     }
     const payload = await response.json();
-    state.mtime = payload.mtime;
+    state.mtime = filePayloadMtime(payload);
     state.size = payload.size;
     state.original = state.content;
     state.dirty = false;
@@ -15122,6 +15510,29 @@ function scrollYoagentChatToBottom(node = document.getElementById('yoagent-conte
   if (panelBody && panelBody !== node) panelBody.scrollTop = panelBody.scrollHeight;
 }
 
+function focusYoagentChatInput(node = document.getElementById('yoagent-content')) {
+  const input = node?.querySelector?.('[data-yoagent-chat-input]');
+  if (!input || input.disabled) return;
+  input.focus({preventScroll: true});
+  const end = input.value.length;
+  try { input.setSelectionRange(end, end); } catch (_) {}
+}
+
+function yoagentChatInputIsFocused(node = document.getElementById('yoagent-content')) {
+  const input = node?.querySelector?.('[data-yoagent-chat-input]');
+  return Boolean(input && document.activeElement === input);
+}
+
+function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-content')) {
+  if (!node) return false;
+  const globalRegion = node.querySelector('.yoagent-global');
+  const sessionsRegion = node.querySelector('.yoagent-session-summaries');
+  if (!globalRegion || !sessionsRegion) return false;
+  globalRegion.outerHTML = globalActivitySummaryHtml();
+  sessionsRegion.outerHTML = yoagentSessionSummariesHtml();
+  return true;
+}
+
 function renderYoagentPanel(options = {}) {
   const node = document.getElementById('yoagent-content');
   if (!node) return;
@@ -15130,10 +15541,15 @@ function renderYoagentPanel(options = {}) {
   const selectionStart = inputFocused ? input.selectionStart : null;
   const selectionEnd = inputFocused ? input.selectionEnd : null;
   if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
+  if (options.summaryOnly && inputFocused && refreshYoagentSummaryRegions(node)) return;
   node.innerHTML = `${globalActivitySummaryHtml()}${yoagentSessionSummariesHtml()}${yoagentChatHtml()}`;
   if (options.scrollBottom !== false) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));
     setTimeout(() => scrollYoagentChatToBottom(node), 0);
+  }
+  if (options.focusInput) {
+    requestAnimationFrame(() => focusYoagentChatInput(node));
+    return;
   }
   if (!inputFocused) return;
   const nextInput = node.querySelector('[data-yoagent-chat-input]');
@@ -15546,6 +15962,12 @@ async function uploadFiles(session, fileList, options = {}) {
   }
   const files = Array.from(fileList || []);
   if (!files.length) return;
+  const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
+  if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
+    statusEl.innerHTML = `<span class="err">upload failed: ${esc(`selected files total ${formatFileSize(totalBytes)}; limit is ${formatFileSize(uploadMaxBytes)}`)}</span>`;
+    showUploadRsyncRecommendation({session, sizeBytes: totalBytes});
+    return;
+  }
   const formData = new FormData();
   for (const file of files) {
     formData.append('files', file, file.name || 'upload.bin');

@@ -275,13 +275,33 @@
   min-height: 220px;
   max-height: 54vh;
   margin: 0;
-  padding: 8px;
+  padding: 0;
   overflow: auto;
   background: #0f131b;
   border: 1px solid var(--line);
   font: var(--ui-font-size-xs)/1.35 var(--mono-font);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.file-compare-line {
+  display: block;
+  min-height: 1.35em;
+  padding: 1px 8px;
+  border-left: 3px solid transparent;
+}
+.file-compare-line.added {
+  color: #d9ffe0;
+  background: rgba(28, 146, 68, 0.24);
+  border-left-color: #35d36f;
+}
+.file-compare-line.removed {
+  color: #ffe0e4;
+  background: rgba(177, 40, 55, 0.26);
+  border-left-color: #ff5a6d;
+}
+.file-compare-line.blank {
+  color: transparent;
+  background: rgba(255, 255, 255, 0.025);
 }
 @media (max-width: 760px) {
   .file-editor-conflict-compare {
@@ -767,13 +787,17 @@ body.theme-light .file-explorer-changes-head {
   .file-explorer-changes-head .diff-ref-controls {
     grid-area: refs;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
     gap: 4px;
   }
   .file-explorer-changes-head .diff-ref-control {
     min-width: 0;
   }
   .file-explorer-changes-head .diff-ref-control input {
+    width: 100%;
+    min-width: 0;
+  }
+  .file-explorer-changes-head .diff-ref-select {
     width: 100%;
     min-width: 0;
   }

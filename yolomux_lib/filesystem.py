@@ -1,9 +1,8 @@
 """Filesystem browsing + read/write helpers for the File Explorer panel.
 
-All paths are validated to be absolute, NUL/CRLF-free, and resolved against
-the YOLOmux process's own permission view. Symlinks are followed (the user
-chose to navigate to them). No sandbox root — the explorer's FS scope is "/"
-(anywhere the YOLOmux user can read). Admin role is required for writes.
+All paths are validated to be absolute, NUL/CRLF-free, inside the configured
+filesystem roots, and not under known credential paths. Symlinks are followed
+for scope checks so a link inside an allowed tree cannot escape it.
 """
 
 from __future__ import annotations
@@ -15,6 +14,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .common import AUTH_CONFIG_PATH
+from .common import AUTH_COOKIE_SECRET_PATH
+from .common import CONFIG_DIR
 from .common import git
 from .common import is_generated_upload_name
 from .common import run_cmd
@@ -57,6 +59,7 @@ SEARCH_SKIP_DIRS = {
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
+FS_ROOTS_ENV = "YOLOMUX_FS_ROOTS"
 
 
 class FilesystemError(Exception):
@@ -72,7 +75,87 @@ def _validated_path(raw: str) -> Path:
         raise FilesystemError("path contains illegal characters")
     if not raw.startswith("/") and not raw.startswith("~"):
         raise FilesystemError("path must be absolute")
-    return Path(os.path.expanduser(raw))
+    path = Path(os.path.expanduser(raw))
+    _ensure_path_allowed(path)
+    return path
+
+
+def _normalized_scope_path(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _configured_fs_roots() -> tuple[Path, ...]:
+    raw = os.environ.get(FS_ROOTS_ENV, "")
+    values = [item for item in raw.split(os.pathsep) if item.strip()] if raw else [str(Path.home()), "/tmp"]
+    roots: list[Path] = []
+    for value in values:
+        try:
+            root = _normalized_scope_path(Path(os.path.expanduser(value.strip())))
+        except OSError:
+            continue
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
+def _secret_exact_paths() -> tuple[Path, ...]:
+    home = Path.home()
+    return tuple(_normalized_scope_path(path) for path in (
+        AUTH_CONFIG_PATH,
+        AUTH_COOKIE_SECRET_PATH,
+        CONFIG_DIR / "auth.yaml",
+        CONFIG_DIR / "auth-cookie-secret",
+        home / ".config" / "gitlab-token",
+        home / ".cache" / "huggingface" / "token",
+        home / ".docker" / "config.json",
+        home / ".ngc" / "config",
+    ))
+
+
+def _secret_directories() -> tuple[Path, ...]:
+    home = Path.home()
+    return tuple(_normalized_scope_path(path) for path in (
+        home / ".ssh",
+        home / ".gnupg",
+        home / ".config" / "gh",
+        home / ".config" / "git",
+        home / ".docker",
+        home / ".ngc",
+    ))
+
+
+def _path_is_secret(path: Path) -> bool:
+    resolved = _normalized_scope_path(path)
+    if any(resolved == secret for secret in _secret_exact_paths()):
+        return True
+    return any(resolved == secret or _path_is_within(resolved, secret) for secret in _secret_directories())
+
+
+def _ensure_path_allowed(path: Path) -> None:
+    resolved = _normalized_scope_path(path)
+    roots = _configured_fs_roots()
+    if not roots or not any(resolved == root or _path_is_within(resolved, root) for root in roots):
+        roots_text = ", ".join(str(root) for root in roots) or "(none)"
+        raise FilesystemError(f"path outside configured filesystem roots: {path} (allowed: {roots_text})", status=403)
+    if _path_is_secret(path):
+        raise FilesystemError(f"path is blocked because it may contain credentials: {path}", status=403)
+
+
+def _ensure_not_configured_root(path: Path, action: str) -> None:
+    resolved = _normalized_scope_path(path)
+    if resolved == Path("/"):
+        raise FilesystemError(f"refusing to {action} filesystem root", status=403)
+    for root in _configured_fs_roots():
+        if resolved == root:
+            raise FilesystemError(f"refusing to {action} configured filesystem root: {path}", status=403)
 
 
 def _repo_marker_is_real(marker_path: Path, marker: str) -> bool:
@@ -161,6 +244,7 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
         "kind": kind,
         "size": int(size),
         "mtime": int(st.st_mtime),
+        "mtime_ns": int(st.st_mtime_ns),
         "is_symlink": stat.S_ISLNK(mode),
     }
     if kind == "dir":
@@ -335,7 +419,8 @@ def read_file(raw_path: str) -> dict[str, Any]:
     if path.is_dir():
         raise FilesystemError(f"is a directory: {path}", status=400)
     try:
-        size = path.stat().st_size
+        file_stat = path.stat()
+        size = file_stat.st_size
     except OSError as exc:
         raise FilesystemError(str(exc), status=500)
     if size > MAX_READ_BYTES:
@@ -356,7 +441,8 @@ def read_file(raw_path: str) -> dict[str, Any]:
     return {
         "path": str(path),
         "size": int(size),
-        "mtime": int(path.stat().st_mtime),
+        "mtime": int(file_stat.st_mtime),
+        "mtime_ns": int(file_stat.st_mtime_ns),
         "content": content,
         "extension": path.suffix.lower(),
         "is_text_extension": path.suffix.lower() in TEXT_EXTENSIONS,
@@ -365,6 +451,7 @@ def read_file(raw_path: str) -> dict[str, Any]:
 
 def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -> dict[str, Any]:
     path = _validated_path(raw_path)
+    _ensure_not_configured_root(path, "write")
     if path.exists() and path.is_dir():
         raise FilesystemError(f"is a directory: {path}", status=400)
     if not isinstance(content, str):
@@ -373,8 +460,10 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
     if len(data) > MAX_WRITE_BYTES:
         raise FilesystemError(f"content too large ({len(data)} bytes; max {MAX_WRITE_BYTES})", status=413)
     if expected_mtime is not None and path.exists():
-        actual = int(path.stat().st_mtime)
-        if actual != expected_mtime:
+        actual_stat = path.stat()
+        actual = int(actual_stat.st_mtime_ns)
+        actual_legacy = int(actual_stat.st_mtime)
+        if expected_mtime not in {actual, actual_legacy}:
             raise FilesystemError(
                 f"file changed on disk (expected mtime {expected_mtime}, got {actual})",
                 status=409,
@@ -387,10 +476,12 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
         raise FilesystemError(str(exc), status=403)
     except OSError as exc:
         raise FilesystemError(str(exc), status=500)
+    file_stat = path.stat()
     return {
         "path": str(path),
         "size": len(data),
-        "mtime": int(path.stat().st_mtime),
+        "mtime": int(file_stat.st_mtime),
+        "mtime_ns": int(file_stat.st_mtime_ns),
     }
 
 
@@ -407,6 +498,7 @@ def _validated_child_name(raw_name: str) -> str:
 
 def delete_path(raw_path: str) -> dict[str, Any]:
     path = _validated_path(raw_path)
+    _ensure_not_configured_root(path, "delete")
     if not path.exists() and not path.is_symlink():
         raise FilesystemError(f"path not found: {path}", status=404)
     try:
@@ -425,6 +517,7 @@ def delete_path(raw_path: str) -> dict[str, Any]:
 
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     path = _validated_path(raw_path)
+    _ensure_not_configured_root(path, "rename")
     if not path.exists() and not path.is_symlink():
         raise FilesystemError(f"path not found: {path}", status=404)
     name = _validated_child_name(new_name)

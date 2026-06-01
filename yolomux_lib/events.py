@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import collections
+import fcntl
 import json
+import os
 import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -14,23 +18,60 @@ from .common import STATE_PATH
 from .common import truncate_text
 
 
-def read_yolomux_state() -> dict[str, Any]:
+_STATE_LOCK = threading.RLock()
+
+
+@contextmanager
+def locked_yolomux_state_file() -> Any:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = STATE_PATH.with_name(f".{STATE_PATH.name}.lock")
+    with _STATE_LOCK:
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _read_yolomux_state_unlocked() -> dict[str, Any]:
     try:
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return state if isinstance(state, dict) else {}
 
+
+def read_yolomux_state() -> dict[str, Any]:
+    with locked_yolomux_state_file():
+        return _read_yolomux_state_unlocked()
+
+
+def _write_yolomux_state_unlocked(state: dict[str, Any]) -> None:
+    tmp_path = STATE_PATH.with_name(f".{STATE_PATH.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(state, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(STATE_PATH)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def write_yolomux_state(state: dict[str, Any]) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp_path = STATE_PATH.with_name(f"{STATE_PATH.name}.tmp")
-    tmp_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp_path.replace(STATE_PATH)
+    with locked_yolomux_state_file():
+        _write_yolomux_state_unlocked(state)
+
 
 def update_yolomux_state(updates: dict[str, Any]) -> None:
-    state = read_yolomux_state()
-    state.update(updates)
-    write_yolomux_state(state)
+    with locked_yolomux_state_file():
+        state = _read_yolomux_state_unlocked()
+        state.update(updates)
+        _write_yolomux_state_unlocked(state)
 
 def utc_event_time() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")

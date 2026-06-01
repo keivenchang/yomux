@@ -20,6 +20,8 @@ PLACEHOLDER_AUTH_USERNAME = "user"
 PLACEHOLDER_AUTH_PASSWORD = "password"
 GUEST_AUTH_USERNAME = "guest"
 GUEST_AUTH_PASSWORD = "guest"
+PASSWORD_HASH_PREFIX = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = 210_000
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,7 @@ def normalize_auth_role(value: str) -> str:
 
 def auth_user_from_mapping(mapping: dict[str, str]) -> AuthUser | None:
     username = mapping.get("username", "").strip()
-    password = mapping.get("password", "")
+    password = mapping.get("password_hash", "") or mapping.get("password", "")
     role = normalize_auth_role(mapping.get("role", mapping.get("access", "readonly")))
     if not username or not password:
         return None
@@ -150,10 +152,11 @@ def auth_config_text(users: tuple[AuthUser, ...]) -> str:
         "users:",
     ]
     for user in users:
+        password_key = "password_hash" if auth_password_is_hash(user.password) else "password"
         lines.extend(
             [
                 f"  - username: {yaml_quote(user.username)}",
-                f"    password: {yaml_quote(user.password)}",
+                f"    {password_key}: {yaml_quote(user.password)}",
                 f"    role: {yaml_quote(user.role)}",
             ]
         )
@@ -182,7 +185,6 @@ def random_auth_password() -> str:
 def starter_auth_users() -> tuple[AuthUser, ...]:
     return (
         AuthUser(username=login_username(), password=random_auth_password(), role="admin"),
-        AuthUser(username=GUEST_AUTH_USERNAME, password=GUEST_AUTH_PASSWORD, role="readonly"),
     )
 
 
@@ -190,7 +192,7 @@ def commented_auth_config_text(users: tuple[AuthUser, ...]) -> str:
     lines = [
         "YOLOmux authentication is disabled until one or more account entries are uncommented.",
         "Uncomment and edit the account entries below, save the file, then refresh the browser.",
-        "Keep admin credentials private. The guest/guest account is readonly.",
+        "Keep admin credentials private. Add readonly accounts explicitly only when you need them.",
         "",
     ]
     for line in auth_config_text(users).splitlines():
@@ -208,7 +210,10 @@ def initialize_auth_config(path: Path) -> tuple[AuthUser, ...]:
         if legacy_placeholder_auth_active(users):
             write_auth_config(path, commented_auth_config_text(starter_auth_users()))
             return ()
-        return users
+        normalized = hash_plaintext_auth_users(users)
+        if normalized != users:
+            write_auth_config(path, auth_config_text(normalized))
+        return normalized
     write_auth_config(path, commented_auth_config_text(starter_auth_users()))
     return ()
 
@@ -219,6 +224,36 @@ def current_auth_users() -> tuple[AuthUser, ...]:
 
 def legacy_placeholder_auth_active(users: tuple[AuthUser, ...]) -> bool:
     return len(users) == 1 and users[0].username == PLACEHOLDER_AUTH_USERNAME and users[0].password == PLACEHOLDER_AUTH_PASSWORD
+
+
+def auth_password_is_hash(value: str) -> bool:
+    parts = str(value or "").split("$")
+    return len(parts) == 4 and parts[0] == PASSWORD_HASH_PREFIX
+
+
+def hash_auth_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), PASSWORD_HASH_ITERATIONS).hex()
+    return f"{PASSWORD_HASH_PREFIX}${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def auth_password_matches(password: str, stored: str) -> bool:
+    if not auth_password_is_hash(stored):
+        return hmac.compare_digest(password, stored)
+    _, iterations_text, salt, expected = stored.split("$", 3)
+    try:
+        iterations = int(iterations_text)
+    except ValueError:
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), iterations).hex()
+    return hmac.compare_digest(digest, expected)
+
+
+def hash_plaintext_auth_users(users: tuple[AuthUser, ...]) -> tuple[AuthUser, ...]:
+    return tuple(
+        user if auth_password_is_hash(user.password) else AuthUser(username=user.username, password=hash_auth_password(user.password), role=user.role)
+        for user in users
+    )
 
 
 def auth_setup_required() -> bool:
@@ -281,7 +316,7 @@ def auth_cookie_value(username: str, password: str) -> str:
 def auth_identity_for_credentials(username: str, password: str) -> AuthIdentity | None:
     for user in current_auth_users():
         username_matches = hmac.compare_digest(username, user.username)
-        password_matches = hmac.compare_digest(password, user.password)
+        password_matches = auth_password_matches(password, user.password)
         if username_matches and password_matches:
             return AuthIdentity(username=user.username, password=user.password, role=user.role)
     return None

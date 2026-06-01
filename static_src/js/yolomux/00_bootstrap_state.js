@@ -208,6 +208,8 @@ const fileExplorerKnownEntryNames = new Map();
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
+const fileExplorerMemoryCacheLimit = 512;
+const commandPaletteRecentKeyLimit = 100;
 const pendingFileEditorFocus = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 let activeFile = null;
@@ -322,6 +324,8 @@ let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3000);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');
+let uploadMaxBytes = initialSetting('uploads.max_bytes', 20 * 1024 * 1024);
+const uploadRsyncRecommendationBytes = 50 * 1024 * 1024;
 let terminalFontSize = initialSetting('appearance.terminal_font_size', 13);
 let editorFontSize = initialSetting('appearance.editor_font_size', 13);
 let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
@@ -629,6 +633,18 @@ const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
 const attentionAlertTimers = new Map();
 const metadataBadgePulseUntil = new Map();
+
+function setLimitedMapEntry(map, key, value, limit) {
+  if (!map || !key) return;
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+  while (map.size > limit) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
 let infoBranchSort = {key: 'updated', dir: 'desc'};
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;

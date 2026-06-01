@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import os
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +17,12 @@ import yaml
 
 from .common import CONFIG_DIR
 from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
+from .common import UPLOAD_MAX_BYTES
 
 
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
 SETTINGS_DISPLAY_PATH = "~/.config/yolomux/settings.yaml"
+_SETTINGS_LOCK = threading.RLock()
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "general": {
@@ -77,6 +82,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "uploads": {
         "filename_template": DEFAULT_UPLOAD_FILENAME_TEMPLATE,
+        "max_bytes": UPLOAD_MAX_BYTES,
     },
     "yoagent": {
         "backend": "deterministic",
@@ -132,6 +138,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("file_explorer", "image_preview_max_px"): (120, 1200),
     ("file_explorer", "refresh_ms"): (1000, 60000),
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
+    ("uploads", "max_bytes"): (1 * 1024 * 1024, 512 * 1024 * 1024),
 }
 
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
@@ -216,6 +223,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "refresh_ms"): "Milliseconds, 1000-60000. Refreshes changed File Explorer directories and open files; client-side jitter avoids synchronized polling.",
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
+    ("uploads", "max_bytes"): "Bytes, 1048576-536870912. Maximum buffered browser upload size. Prefer rsync for large files.",
     ("yoagent", "backend"): "deterministic | claude | codex. The deterministic internal value is shown as No agent; Claude/Codex use the selected invocation when available.",
     ("yoagent", "invocation"): "cli | api-key. CLI runs the local agent binary; api-key is reserved and falls back safely today.",
     ("yoagent", "system_prompt"): "System prompt used when YO!agent calls a model backend.",
@@ -338,25 +346,46 @@ def settings_template(settings: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_settings_file(settings: dict[str, Any], path: Path = SETTINGS_PATH) -> None:
-    sanitized = sanitize_settings(settings)
+@contextmanager
+def locked_settings_file(path: Path = SETTINGS_PATH) -> Any:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{int(time.time() * 1000)}.tmp")
+    lock_path = path.with_name(f".{path.name}.lock")
+    with _SETTINGS_LOCK:
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _write_settings_file_unlocked(settings: dict[str, Any], path: Path = SETTINGS_PATH) -> None:
+    sanitized = sanitize_settings(settings)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(settings_template(sanitized))
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, path)
         path.chmod(0o600)
     finally:
-        if tmp.exists():
+        try:
             tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
-def read_settings_file(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]:
+def write_settings_file(settings: dict[str, Any], path: Path = SETTINGS_PATH) -> None:
+    with locked_settings_file(path):
+        _write_settings_file_unlocked(settings, path)
+
+
+def _read_settings_file_unlocked(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]:
     if not path.exists():
-        write_settings_file(default_settings(), path)
+        _write_settings_file_unlocked(default_settings(), path)
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
@@ -364,8 +393,13 @@ def read_settings_file(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]
     return sanitize_settings(raw), ""
 
 
-def settings_payload(path: Path = SETTINGS_PATH) -> dict[str, Any]:
-    settings, error = read_settings_file(path)
+def read_settings_file(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]:
+    with locked_settings_file(path):
+        return _read_settings_file_unlocked(path)
+
+
+def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
+    settings, error = _read_settings_file_unlocked(path)
     stat = path.stat() if path.exists() else None
     return {
         "settings": settings,
@@ -377,8 +411,14 @@ def settings_payload(path: Path = SETTINGS_PATH) -> dict[str, Any]:
     }
 
 
+def settings_payload(path: Path = SETTINGS_PATH) -> dict[str, Any]:
+    with locked_settings_file(path):
+        return _settings_payload_unlocked(path)
+
+
 def save_settings(patch: Any, path: Path = SETTINGS_PATH) -> dict[str, Any]:
-    current, _ = read_settings_file(path)
-    next_settings = merge_settings(current, patch)
-    write_settings_file(next_settings, path)
-    return settings_payload(path)
+    with locked_settings_file(path):
+        current, _ = _read_settings_file_unlocked(path)
+        next_settings = merge_settings(current, patch)
+        _write_settings_file_unlocked(next_settings, path)
+        return _settings_payload_unlocked(path)

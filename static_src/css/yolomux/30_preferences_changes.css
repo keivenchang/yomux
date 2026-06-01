@@ -60,7 +60,8 @@
 }
 .changes-control select,
 .changes-refresh,
-.diff-ref-control input {
+.diff-ref-control input,
+.diff-ref-select {
   height: 24px;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -88,11 +89,21 @@
   padding: 0 5px;
   font-size: var(--ui-font-size-xs);
 }
+.diff-ref-select {
+  width: clamp(92px, 16vw, 220px);
+  min-width: 0;
+  padding: 0 5px;
+  font: var(--ui-font-size-xs) var(--mono-font);
+}
 .diff-ref-controls.compact {
   gap: 3px;
 }
 .diff-ref-controls.compact .diff-ref-control input {
   width: clamp(46px, 7vw, 82px);
+  height: 20px;
+}
+.diff-ref-controls.compact .diff-ref-select {
+  width: clamp(54px, 10vw, 110px);
   height: 20px;
 }
 .changes-refresh {
@@ -384,6 +395,27 @@
 }
 .preferences-setting-row:first-child {
   border-top: 0;
+}
+.preferences-setting-advisory {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  color: #2a1e00;
+  background: #ffe7a3;
+  border: 1px solid #c8941e;
+  border-radius: 4px;
+  font: var(--ui-font-size-xs)/1.3 var(--ui-font);
+}
+.preferences-setting-advisory code {
+  padding: 2px 4px;
+  color: #111827;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(42, 30, 0, 0.2);
+  border-radius: 3px;
+  font: 700 var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .preferences-setting-label {
   color: var(--text);
@@ -737,7 +769,8 @@ body.theme-light .preferences-setting-control select,
 body.theme-light .preferences-setting-control textarea,
 body.theme-light .changes-control select,
 body.theme-light .changes-refresh,
-body.theme-light .diff-ref-control input {
+body.theme-light .diff-ref-control input,
+body.theme-light .diff-ref-select {
   background: #ffffff;
   color: var(--text);
 }

@@ -577,7 +577,7 @@
   min-width: 0;
   max-width: 100%;
   display: grid;
-  grid-template-rows: auto minmax(140px, 1fr) auto;
+  grid-template-rows: minmax(140px, 1fr) auto;
   gap: 8px;
   padding: 8px 10px;
   color: var(--text);
@@ -585,10 +585,12 @@
   border: 1px solid var(--line);
   border-radius: 4px;
 }
-.yoagent-chat-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
+.yoagent-chat.empty {
+  grid-template-rows: auto auto;
+  align-content: start;
+}
+.yoagent-chat.empty .yoagent-chat-history {
+  overflow: visible;
 }
 .yoagent-chat-clear {
   height: 24px;
@@ -617,8 +619,40 @@
   color: var(--muted);
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
 }
+.yoagent-chat-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.yoagent-chat-spinner {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  border: 2px solid color-mix(in srgb, var(--muted) 35%, transparent);
+  border-top-color: var(--brand-green);
+  border-radius: 50%;
+  animation: yoagent-chat-spin 800ms linear infinite;
+}
+@keyframes yoagent-chat-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .yoagent-chat-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   color: var(--bad);
+}
+.yoagent-chat-retry {
+  height: 22px;
+  padding: 0 8px;
+  color: #071000;
+  background: var(--pane-tab-badge-gold);
+  border: 1px solid #ffe27a;
+  border-radius: 4px;
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .yoagent-chat-notice {
   padding: 7px 8px;
@@ -675,6 +709,14 @@
   border: 1px solid var(--auto-border);
   border-radius: 4px;
   font: 800 var(--ui-font-size-sm)/1 var(--ui-font);
+}
+.yoagent-chat-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.yoagent-chat-actions .yoagent-chat-clear {
+  height: 30px;
 }
 body.theme-light .info-pane {
   background: var(--bg);

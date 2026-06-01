@@ -89,7 +89,7 @@ function directoryEntriesSignature(entries) {
 }
 
 function recordDirectorySignature(path, entries) {
-  fileExplorerDirectorySignatures.set(normalizeDirectoryPath(path), directoryEntriesSignature(entries));
+  setLimitedMapEntry(fileExplorerDirectorySignatures, normalizeDirectoryPath(path), directoryEntriesSignature(entries), fileExplorerMemoryCacheLimit);
 }
 
 function pruneExpiredNewFileEntries(now = Date.now()) {
@@ -106,10 +106,10 @@ function markNewDirectoryEntries(path, entries) {
   pruneExpiredNewFileEntries(now);
   if (previous && fileExplorerNewEntryHighlightMs > 0) {
     for (const name of names) {
-      if (!previous.has(name)) fileExplorerNewEntryUntil.set(childPath(root, name), now + fileExplorerNewEntryHighlightMs);
+      if (!previous.has(name)) setLimitedMapEntry(fileExplorerNewEntryUntil, childPath(root, name), now + fileExplorerNewEntryHighlightMs, fileExplorerMemoryCacheLimit);
     }
   }
-  fileExplorerKnownEntryNames.set(root, names);
+  setLimitedMapEntry(fileExplorerKnownEntryNames, root, names, fileExplorerMemoryCacheLimit);
 }
 
 function fileExplorerEntryIsNew(path) {
@@ -166,7 +166,7 @@ function hydrateFileExplorerRepoInfoCache() {
     for (const item of repos) {
       const path = normalizeDirectoryPath(item?.path || item?.repo?.root || '');
       const repo = normalizeFileExplorerRepoInfo(item?.repo, path);
-      if (path && repo) fileExplorerRepoInfoCache.set(path, repo);
+      if (path && repo) setLimitedMapEntry(fileExplorerRepoInfoCache, path, repo, fileExplorerMemoryCacheLimit);
     }
   } catch (_) {}
 }
@@ -188,8 +188,8 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   const info = normalizeFileExplorerRepoInfo(repo, normalized);
   if (!normalized || !info) return false;
   const repoRoot = normalizeDirectoryPath(info.root);
-  fileExplorerRepoInfoCache.set(normalized, info);
-  if (repoRoot && repoRoot !== normalized) fileExplorerRepoInfoCache.set(repoRoot, info);
+  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, info, fileExplorerMemoryCacheLimit);
+  if (repoRoot && repoRoot !== normalized) setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, info, fileExplorerMemoryCacheLimit);
   if (options.persist !== false) persistFileExplorerRepoInfoCache();
   return true;
 }
@@ -1656,10 +1656,18 @@ async function fetchFileEntryStatus(path) {
   return {entry, missing: !entry, error: entry ? '' : `path not found: ${path}`, network: false};
 }
 
+function fileEntryMtime(entry) {
+  return Number(entry?.mtime_ns || entry?.mtime || 0);
+}
+
+function filePayloadMtime(payload) {
+  return Number(payload?.mtime_ns || payload?.mtime || 0);
+}
+
 function fileEntryChanged(state, entry) {
   if (!state || !entry) return true;
   const stateMtime = Number(state.mtime || 0);
-  const entryMtime = Number(entry.mtime || 0);
+  const entryMtime = fileEntryMtime(entry);
   if (stateMtime !== entryMtime) return true;
   if (state.size == null || entry.size == null) return false;
   return Number(state.size) !== Number(entry.size);
@@ -1910,6 +1918,91 @@ function truncateDialogText(text, maxChars = 20000) {
   return `${value.slice(0, maxChars)}\n\n... truncated ${value.length - maxChars} chars ...`;
 }
 
+function diffDialogLines(text) {
+  const lines = String(text ?? '').split('\n');
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  return lines.length ? lines : [''];
+}
+
+function lineDiffRows(leftText, rightText) {
+  const left = diffDialogLines(leftText);
+  const right = diffDialogLines(rightText);
+  const cellCount = left.length * right.length;
+  if (cellCount > 1_000_000) {
+    const max = Math.max(left.length, right.length);
+    return Array.from({length: max}, (_, index) => {
+      const same = left[index] === right[index];
+      return {
+        left: left[index] ?? '',
+        right: right[index] ?? '',
+        leftKind: same ? 'same' : (index < left.length ? 'added' : 'blank'),
+        rightKind: same ? 'same' : (index < right.length ? 'removed' : 'blank'),
+      };
+    });
+  }
+  const dp = Array.from({length: left.length + 1}, () => new Uint16Array(right.length + 1));
+  for (let i = left.length - 1; i >= 0; i -= 1) {
+    for (let j = right.length - 1; j >= 0; j -= 1) {
+      dp[i][j] = left[i] === right[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const rows = [];
+  let i = 0;
+  let j = 0;
+  while (i < left.length || j < right.length) {
+    if (i < left.length && j < right.length && left[i] === right[j]) {
+      rows.push({left: left[i], right: right[j], leftKind: 'same', rightKind: 'same'});
+      i += 1;
+      j += 1;
+    } else if (j >= right.length || (i < left.length && dp[i + 1][j] >= dp[i][j + 1])) {
+      rows.push({left: left[i], right: '', leftKind: 'added', rightKind: 'blank'});
+      i += 1;
+    } else {
+      rows.push({left: '', right: right[j], leftKind: 'blank', rightKind: 'removed'});
+      j += 1;
+    }
+  }
+  return rows;
+}
+
+function fileCompareLineHtml(kind, text) {
+  return `<span class="file-compare-line ${esc(kind)}">${esc(text || ' ')}</span>`;
+}
+
+function fileConflictCompareHtml(editorText, diskText) {
+  const rows = lineDiffRows(truncateDialogText(editorText), truncateDialogText(diskText));
+  const editorHtml = rows.map(row => fileCompareLineHtml(row.leftKind, row.left)).join('');
+  const diskHtml = rows.map(row => fileCompareLineHtml(row.rightKind, row.right)).join('');
+  return `
+    <div class="file-editor-conflict-compare">
+      <section>
+        <h4>Unsaved editor</h4>
+        <pre data-file-compare-scroll>${editorHtml}</pre>
+      </section>
+      <section>
+        <h4>On disk</h4>
+        <pre data-file-compare-scroll>${diskHtml}</pre>
+      </section>
+    </div>`;
+}
+
+function bindFileConflictCompareScroll(root) {
+  const panes = Array.from(root?.querySelectorAll?.('[data-file-compare-scroll]') || []);
+  let syncing = false;
+  for (const pane of panes) {
+    pane.addEventListener('scroll', () => {
+      if (syncing) return;
+      syncing = true;
+      for (const other of panes) {
+        if (other === pane) continue;
+        other.scrollTop = pane.scrollTop;
+        other.scrollLeft = pane.scrollLeft;
+      }
+      syncing = false;
+    });
+  }
+}
+
 function showFileEditorDecisionDialog(options = {}) {
   const actions = Array.isArray(options.actions) && options.actions.length
     ? options.actions
@@ -1951,6 +2044,7 @@ function showFileEditorDecisionDialog(options = {}) {
     });
     document.addEventListener('keydown', onKeydown, true);
     document.body.appendChild(backdrop);
+    options.onMount?.(backdrop);
     const preferred = backdrop.querySelector('[data-dialog-action]:not(.danger)') || backdrop.querySelector('[data-dialog-action]');
     preferred?.focus?.({preventScroll: true});
   });
@@ -1961,26 +2055,16 @@ async function showFileConflictCompareDialog(path, panel = null) {
   const loaded = await openFileStateFromDisk(path);
   const diskState = loaded.state;
   const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? '(missing on disk)' : String(diskState?.error || 'unable to load disk version');
-  const bodyHtml = `
-    <div class="file-editor-conflict-compare">
-      <section>
-        <h4>Unsaved editor</h4>
-        <pre>${esc(truncateDialogText(state?.content || ''))}</pre>
-      </section>
-      <section>
-        <h4>On disk</h4>
-        <pre>${esc(truncateDialogText(diskText))}</pre>
-      </section>
-    </div>`;
   const action = await showFileEditorDecisionDialog({
     title: `Compare ${basenameOf(path)}`,
-    bodyHtml,
+    bodyHtml: fileConflictCompareHtml(state?.content || '', diskText),
     actions: [
       {id: 'overwrite', label: 'Overwrite disk', variant: 'danger'},
       {id: 'reload', label: 'Keep disk version'},
       {id: 'cancel', label: 'Cancel'},
     ],
     className: 'file-editor-compare-dialog',
+    onMount: bindFileConflictCompareScroll,
   });
   if (action === 'overwrite') return saveFileEditor(path, panel, {force: true});
   if (action === 'reload') return reloadOpenFileFromDisk(path, {force: true});
@@ -2171,12 +2255,12 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(entry.size));
-    state.mtime = entry?.mtime || 0;
+    state.mtime = fileEntryMtime(entry);
     await openFilesSetAndShow(fullPath, state, openOptions);
     return;
   }
   if (kind === 'image') {
-    await openFilesSetAndShow(fullPath, {mtime: entry?.mtime || 0, kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null}, openOptions);
+    await openFilesSetAndShow(fullPath, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null}, openOptions);
     return;
   }
   try {
@@ -2194,7 +2278,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     }
     const payload = await response.json();
     await openFilesSetAndShow(fullPath, {
-      mtime: payload.mtime,
+      mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
@@ -2251,13 +2335,13 @@ async function openFileStateFromDisk(path, entry = null) {
   }
   if (Number(fileEntry.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(fileEntry.size));
-    state.mtime = fileEntry.mtime || 0;
+    state.mtime = fileEntryMtime(fileEntry);
     return {state};
   }
   const ext = fileExtensionOf(fileEntry.name || basenameOf(path));
   if (IMAGE_EXTENSIONS.has(ext)) {
     return {state: {
-      mtime: fileEntry.mtime || 0,
+      mtime: fileEntryMtime(fileEntry),
       size: fileEntry.size ?? null,
       kind: 'image',
       original: '',
@@ -2275,13 +2359,13 @@ async function openFileStateFromDisk(path, entry = null) {
         : response.status === 404
           ? missingFileState(message)
           : fileErrorState(message);
-      state.mtime = fileEntry.mtime || 0;
+      state.mtime = fileEntryMtime(fileEntry);
       state.size = fileEntry.size ?? null;
       return {state};
     }
     const payload = await response.json();
     return {state: {
-      mtime: payload.mtime,
+      mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
@@ -2365,7 +2449,7 @@ async function refreshOpenFilesIfChanged() {
       continue;
     }
     if (state.dirty) {
-      const externalChanged = {mtime: entry.mtime || 0, size: entry.size ?? null};
+      const externalChanged = {mtime: fileEntryMtime(entry), size: entry.size ?? null};
       if (state.externalChanged
         && state.externalChanged.mtime === externalChanged.mtime
         && state.externalChanged.size === externalChanged.size) {
@@ -2404,7 +2488,7 @@ async function refreshFileExplorerIfChanged() {
     entriesByDir.set(normalizedDirectory, entries);
     const signature = directoryEntriesSignature(entries);
     const previous = fileExplorerDirectorySignatures.get(normalizedDirectory);
-    fileExplorerDirectorySignatures.set(normalizedDirectory, signature);
+    setLimitedMapEntry(fileExplorerDirectorySignatures, normalizedDirectory, signature, fileExplorerMemoryCacheLimit);
     if (previous !== undefined && previous !== signature) changed = true;
   }
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, entriesByDir});
@@ -2597,6 +2681,7 @@ async function loadCodeMirrorApi() {
         importCodeMirrorModule('@lezer/highlight'),
       ]);
       return {
+        Compartment: state.Compartment,
         EditorState: state.EditorState,
         RangeSetBuilder: state.RangeSetBuilder,
         EditorView: view.EditorView,
@@ -2660,54 +2745,69 @@ async function loadCodeMirrorApi() {
 
 function codeMirrorMarkdownCodeLanguages(api) {
   if (!api?.LanguageDescription) return null;
-  const stream = mode => (mode && api.StreamLanguage ? api.StreamLanguage.define(mode) : null);
+  const stream = mode => safeCodeMirrorExtension('stream language', () => (mode && api.StreamLanguage ? api.StreamLanguage.define(mode) : null));
   const languageEntries = [
-    {name: 'JavaScript', alias: ['js', 'jsx', 'node'], support: () => api.javascript({jsx: true})},
-    {name: 'TypeScript', alias: ['ts', 'tsx'], support: () => api.javascript({typescript: true, jsx: true})},
-    {name: 'Python', alias: ['py'], support: () => api.python()},
-    {name: 'Rust', alias: ['rs'], support: () => api.rust()},
-    {name: 'JSON', alias: ['jsonc'], support: () => api.json()},
-    {name: 'HTML', alias: ['htm'], support: () => api.html()},
-    {name: 'CSS', alias: ['scss'], support: () => api.css()},
-    {name: 'XML', alias: ['svg'], support: () => api.xml()},
-    {name: 'YAML', alias: ['yml'], support: () => api.yaml()},
+    {name: 'JavaScript', alias: ['js', 'jsx', 'node'], support: () => api.javascript?.({jsx: true})},
+    {name: 'TypeScript', alias: ['ts', 'tsx'], support: () => api.javascript?.({typescript: true, jsx: true})},
+    {name: 'Python', alias: ['py'], support: () => api.python?.()},
+    {name: 'Rust', alias: ['rs'], support: () => api.rust?.()},
+    {name: 'JSON', alias: ['jsonc'], support: () => api.json?.()},
+    {name: 'HTML', alias: ['htm'], support: () => api.html?.()},
+    {name: 'CSS', alias: ['scss'], support: () => api.css?.()},
+    {name: 'XML', alias: ['svg'], support: () => api.xml?.()},
+    {name: 'YAML', alias: ['yml'], support: () => api.yaml?.()},
     {name: 'Shell', alias: ['sh', 'bash', 'zsh'], support: () => stream(api.shell)},
     {name: 'TOML', alias: ['ini'], support: () => stream(api.toml)},
   ];
   return languageEntries.flatMap(entry => {
-    const support = entry.support?.();
-    if (!support) return [];
-    return [api.LanguageDescription.of({
-      name: entry.name,
-      alias: entry.alias,
-      support,
-    })];
+    const support = safeCodeMirrorExtension(entry.name, () => entry.support?.());
+    if (codeMirrorExtensionIsEmpty(support)) return [];
+    const description = safeCodeMirrorExtension(entry.name, () => api.LanguageDescription.of({
+        name: entry.name,
+        alias: entry.alias,
+        support,
+      }));
+    return codeMirrorExtensionIsEmpty(description) ? [] : [description];
   });
+}
+
+function codeMirrorExtensionIsEmpty(extension) {
+  return !extension || (Array.isArray(extension) && extension.length === 0);
+}
+
+function safeCodeMirrorExtension(label, factory) {
+  try {
+    return factory?.() || [];
+  } catch (error) {
+    console.warn(`CodeMirror ${label} extension unavailable; using plain text`, error);
+    return [];
+  }
 }
 
 function codeMirrorLanguageExtension(api, path) {
   const language = codeMirrorLanguageName(path);
-  if (language === 'javascript') return api.javascript({jsx: true});
-  if (language === 'typescript') return api.javascript({typescript: true, jsx: true});
-  if (language === 'python') return api.python();
-  if (language === 'rust') return api.rust();
-  if (language === 'json') return api.json();
-  if (language === 'html') return api.html();
-  if (language === 'xml') return api.xml();
-  if (language === 'css') return api.css();
+  if (language === 'javascript') return safeCodeMirrorExtension(language, () => api.javascript?.({jsx: true}));
+  if (language === 'typescript') return safeCodeMirrorExtension(language, () => api.javascript?.({typescript: true, jsx: true}));
+  if (language === 'python') return safeCodeMirrorExtension(language, () => api.python?.());
+  if (language === 'rust') return safeCodeMirrorExtension(language, () => api.rust?.());
+  if (language === 'json') return safeCodeMirrorExtension(language, () => api.json?.());
+  if (language === 'html') return safeCodeMirrorExtension(language, () => api.html?.());
+  if (language === 'xml') return safeCodeMirrorExtension(language, () => api.xml?.());
+  if (language === 'css') return safeCodeMirrorExtension(language, () => api.css?.());
   if (language === 'markdown') {
     const codeLanguages = codeMirrorMarkdownCodeLanguages(api);
-    return codeLanguages?.length ? api.markdown({codeLanguages}) : api.markdown();
+    return safeCodeMirrorExtension(language, () => (codeLanguages?.length ? api.markdown?.({codeLanguages}) : api.markdown?.()));
   }
-  if (language === 'yaml') return api.yaml();
-  if (language === 'shell' && api.shell) return api.StreamLanguage.define(api.shell);
-  if (language === 'toml' && api.toml) return api.StreamLanguage.define(api.toml);
+  if (language === 'yaml') return safeCodeMirrorExtension(language, () => api.yaml?.());
+  if (language === 'shell' && api.shell) return safeCodeMirrorExtension(language, () => api.StreamLanguage?.define(api.shell));
+  if (language === 'toml' && api.toml) return safeCodeMirrorExtension(language, () => api.StreamLanguage?.define(api.toml));
   return [];
 }
 
 function codeMirrorHighlightExtension(api) {
+  if (!api?.syntaxHighlighting) return [];
   if (!api.HighlightStyle || !api.tags) {
-    return api.syntaxHighlighting(api.defaultHighlightStyle, {fallback: true});
+    return api.defaultHighlightStyle ? safeCodeMirrorExtension('default highlight', () => api.syntaxHighlighting(api.defaultHighlightStyle, {fallback: true})) : [];
   }
   const t = api.tags;
   const scheme = activeEditorScheme();
@@ -2720,7 +2820,7 @@ function codeMirrorHighlightExtension(api) {
   const tags = (...items) => items.filter(Boolean);
   const headingStyle = {tag: tags(t.heading, t.heading1, t.heading2), color: palette.heading, fontWeight: '700'};
   if (palette.headingBg) headingStyle.backgroundColor = palette.headingBg;
-  return api.syntaxHighlighting(api.HighlightStyle.define([
+  return safeCodeMirrorExtension('highlight', () => api.syntaxHighlighting(api.HighlightStyle.define([
     {tag: t.keyword, color: palette.keyword},
     {tag: tags(t.atom, t.bool, t.null), color: palette.atom},
     {tag: tags(t.string, t.special(t.string), t.regexp), color: palette.string},
@@ -2737,7 +2837,7 @@ function codeMirrorHighlightExtension(api) {
     {tag: tags(t.link, t.url), color: palette.link, textDecoration: 'underline'},
     {tag: tags(t.monospace, t.processingInstruction), color: palette.inlineCode, backgroundColor: palette.inlineCodeBg},
     {tag: t.invalid, color: palette.invalid},
-  ]), {fallback: true});
+  ]), {fallback: true}));
 }
 
 function codeMirrorThemeExtension(api) {
@@ -3155,7 +3255,6 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     api.foldGutter(),
     api.highlightActiveLine(),
     ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-    codeMirrorHighlightExtension(api),
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
     api.highlightSelectionMatches(),
@@ -3165,11 +3264,10 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     powerKeymap,
     api.keymap.of([api.indentWithTab, ...api.defaultKeymap, ...api.historyKeymap, ...api.searchKeymap]),
     ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
-    codeMirrorHtmlSemanticEmphasisExtension(api, path),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
     codeMirrorLanguageExtension(api, path),
-    codeMirrorThemeExtension(api),
+    codeMirrorThemedExtensions(api, panel, path),
   ];
 }
 

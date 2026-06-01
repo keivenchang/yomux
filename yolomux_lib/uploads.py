@@ -52,10 +52,11 @@ def format_upload_template(template: str, original_name: str, suffix: str, seque
 
 
 def unique_upload_path(target_dir: Path, filename: str, template: str | None = None) -> Path:
-    if template is None:
+    if template is None or template == DEFAULT_UPLOAD_FILENAME_TEMPLATE:
         paste_path = unique_paste_upload_path(target_dir, filename)
         if paste_path is not None:
             return paste_path
+    if template is None:
         path = target_dir / filename
         if not path.exists():
             return path

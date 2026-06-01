@@ -1347,7 +1347,7 @@ function commandPaletteRecentBonus(item) {
 function rememberCommandPaletteItem(item) {
   if (!item || item.disabled) return;
   const key = item.key || `${item.group}:${item.label}`;
-  commandPaletteRecentKeys.set(key, ++commandPaletteRecentSequence);
+  setLimitedMapEntry(commandPaletteRecentKeys, key, ++commandPaletteRecentSequence, commandPaletteRecentKeyLimit);
 }
 
 function commandPaletteEffectiveMode() {

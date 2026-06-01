@@ -26,6 +26,7 @@ YOAGENT_CONTEXT_GUARD = (
 )
 YOAGENT_README_PATH = Path(__file__).resolve().parents[1] / "README.md"
 YOAGENT_HELP_PRIMER_MAX_CHARS = 8_000
+RECENT_ACTIVITY_SECONDS = 5 * 60
 _YOAGENT_HELP_PRIMER_CACHE: str | None = None
 YOAGENT_CONTEXT_CHAIN_PRIMER = (
     "Context sourcing chain: YOLOmux starts from tmux sessions. Each tmux session is a YOLOmux Tab. "
@@ -102,13 +103,13 @@ def agent_for_summary(info: SessionInfo) -> AgentInfo | None:
 
 def transcript_file_signature(agent: AgentInfo | None) -> dict[str, Any]:
     if not agent or not agent.transcript:
-        return {"path": "", "mtime": 0.0, "size": 0}
+        return {"path": "", "mtime": 0.0, "mtime_ns": 0, "size": 0}
     path = Path(agent.transcript).expanduser()
     try:
         stat = path.stat()
     except OSError:
-        return {"path": str(path), "mtime": 0.0, "size": 0}
-    return {"path": str(path), "mtime": stat.st_mtime, "size": stat.st_size}
+        return {"path": str(path), "mtime": 0.0, "mtime_ns": 0, "size": 0}
+    return {"path": str(path), "mtime": stat.st_mtime, "mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
 
 
 def relative_age_text(timestamp: float | None, now: datetime | None = None) -> str:
@@ -147,6 +148,17 @@ def transcript_last_activity(agent: AgentInfo | None) -> dict[str, Any]:
         return {"timestamp": None, "text": "", "path": str(path)}
     latest = max(timestamps)
     return {"timestamp": latest.timestamp(), "text": relative_age_text(latest.timestamp()), "path": str(path)}
+
+
+def recent_activity_label(activity_state: dict[str, Any], last_activity: dict[str, Any], now: datetime | None = None) -> tuple[str, bool]:
+    if activity_state.get("key") == "working":
+        return "active", True
+    timestamp = last_activity.get("timestamp") if isinstance(last_activity, dict) else None
+    if isinstance(timestamp, (int, float)) and timestamp > 0:
+        current = now or datetime.now(timezone.utc)
+        if current.timestamp() - timestamp <= RECENT_ACTIVITY_SECONDS:
+            return "recently active", True
+    return "idle", False
 
 
 def activity_signature(info: SessionInfo, project: dict[str, Any], files_payload: dict[str, Any]) -> dict[str, Any]:
@@ -454,7 +466,7 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
     file_lines = changed_file_lines(files_payload)
     repos = repo_names(project, files_payload)
     agent_name = agent.kind if agent else "no agent"
-    state_label = "active" if activity_state.get("key") == "working" else "idle"
+    state_label, active = recent_activity_label(activity_state, last_activity)
     ci = ci_summary(project)
     status = project_status_sentence(project, files, activity_state.get("key") == "working")
     recent_files = f" Recent files: {', '.join(file_lines[:3])}." if file_lines else ""
@@ -486,7 +498,8 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
         "agent_model": agent.model if agent else "",
         "agent_label": agent_display_label(agent, agent_name),
         "agent_status": agent.status if agent else "",
-        "active": activity_state.get("key") == "working",
+        "active": active,
+        "activity_label": state_label,
         "state": activity_state,
         "last_activity": last_activity,
         "last_activity_text": last_activity.get("text") or "",
@@ -528,7 +541,7 @@ def build_global_activity_summary(session_summaries: list[dict[str, Any]], error
         if global_line:
             lines.append(global_line)
     for item in session_summaries:
-        status = "active" if item.get("active") else "idle"
+        status = str(item.get("activity_label") or ("active" if item.get("active") else "idle"))
         repos = item.get("repos") or []
         repo = repo_label(str(repos[0])) if repos else "no repo"
         files = item.get("files", {})
@@ -568,7 +581,7 @@ def yoagent_context_lines(activity_payload: dict[str, Any]) -> list[str]:
             files = files_sentence(summary.get("files") or {})
             work = str(summary.get("work") or summary.get("goal") or "").strip()
             status = str(summary.get("status_text") or "").strip()
-            state = "active" if summary.get("active") else "idle"
+            state = str(summary.get("activity_label") or ("active" if summary.get("active") else "idle"))
             parts = [f"session {session}: {agent} is {state}", f"repos: {repos}", f"changes: {files}"]
             last_activity = str(summary.get("last_activity_text") or "").strip()
             if last_activity:
@@ -696,4 +709,5 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
         local = str(summary.get("local") or "").strip()
         if local:
             sentences.append(f"Details: {local}")
-    return " ".join(sentences)
+    prefix = "No AI backend is answering; showing the activity summary. Set or log in a Claude/Codex backend in Preferences to chat."
+    return " ".join([prefix, *sentences])
