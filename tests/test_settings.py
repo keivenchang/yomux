@@ -9,21 +9,25 @@ from yolomux_lib.settings import settings_payload
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
-            "appearance": {"ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "file_explorer_font_size": 1, "tab_width": 20},
+            "appearance": {"theme": "neon", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "file_explorer_font_size": 1, "tab_width": 20},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_ms": 3000},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "performance": {"metadata_refresh_ms": 15000, "pane_state_refresh_ms": 1200},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100},
+            "yoagent": {"backend": "wat", "invocation": "bad", "system_prompt": "Use facts", "intro": "Be terse", "format": "One line"},
+            "yolo": {"prompt_source": "bad"},
         }
     )
 
+    assert settings["appearance"]["theme"] == "dark"
     assert settings["appearance"]["ui_font_size"] == 8
     assert settings["appearance"]["terminal_font_size"] == 28
     assert settings["appearance"]["editor_font_size"] == 28
     assert settings["appearance"]["editor_color_scheme"] == "dark"
     assert settings["appearance"]["editor_dark_color_scheme"] == "dark"
     assert settings["appearance"]["editor_light_color_scheme"] == "yolomux-light"
+    assert settings["appearance"]["editor_cursor_style"] == "line"
     assert settings["appearance"]["file_explorer_font_size"] == 8
     assert settings["appearance"]["tab_width"] == 120
     assert settings["file_explorer"]["root_mode"] == "fixed"
@@ -38,6 +42,12 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["performance"]["pane_state_refresh_ms"] == 1200
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False
+    assert settings["yoagent"]["backend"] == "deterministic"
+    assert settings["yoagent"]["invocation"] == "cli"
+    assert settings["yoagent"]["system_prompt"] == "Use facts"
+    assert settings["yoagent"]["intro"] == "Be terse"
+    assert settings["yoagent"]["format"] == "One line"
+    assert settings["yolo"]["prompt_source"] == "hybrid"
 
 
 def test_settings_round_trip_with_atomic_template(tmp_path):
@@ -46,6 +56,11 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
 
     assert payload["settings"] == default_settings()
     assert payload["settings"]["general"]["auto_focus"] is False
+    assert payload["settings"]["yoagent"]["backend"] == "deterministic"
+    assert "normal human status update" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "most recent work" in payload["settings"]["yoagent"]["intro"]
+    assert "Your most recent work is about" in payload["settings"]["yoagent"]["format"]
+    assert "You have not touched" in payload["settings"]["yoagent"]["format"]
     assert path.exists()
     assert "YOLOmux user preferences" in path.read_text()
 

@@ -482,8 +482,10 @@
   overflow: auto;
   padding: 8px 10px;
 }
-.yosup-global {
-  min-width: 720px;
+.yoagent-global {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   margin: 0 0 10px;
   padding: 8px 10px;
   color: #dfe6ef;
@@ -493,7 +495,7 @@
   border-radius: 4px;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
-.yosup-global-head {
+.yoagent-global-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -502,20 +504,190 @@
   color: #f4f7fb;
   font-weight: 800;
 }
-.yosup-generated,
-.yosup-empty {
+.yoagent-refresh-progress {
+  position: relative;
+  height: 3px;
+  margin: 2px 0 7px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--brand-green) 12%, var(--panel2));
+  border-radius: 999px;
+}
+.yoagent-refresh-progress::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: -35%;
+  width: 35%;
+  background: var(--brand-green);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--brand-green) 65%, transparent);
+  animation: yoagent-refresh-sweep 1s linear infinite;
+}
+@keyframes yoagent-refresh-sweep {
+  to { left: 100%; }
+}
+.yoagent-generated,
+.yoagent-empty {
   color: var(--muted);
   font-weight: 500;
 }
-.yosup-headline {
+.yoagent-headline {
   margin-bottom: 5px;
   color: #f4f7fb;
   font-size: var(--ui-font-size-sm);
   line-height: 1.35;
 }
-.yosup-line {
+.yoagent-line {
   padding: 2px 0;
   color: #d6dee9;
+}
+.yoagent-session-summaries {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.yoagent-session-summary {
+  padding: 7px 9px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--inactive-tab-border);
+  border-radius: 4px;
+}
+.yoagent-session-summary.active {
+  border-left-color: var(--brand-green);
+}
+.yoagent-session-summary-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font: 800 var(--ui-font-size-2xs)/1.2 var(--mono-font);
+  text-transform: uppercase;
+}
+.yoagent-session-summary-body {
+  overflow-wrap: anywhere;
+  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+}
+.yoagent-chat {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(140px, 1fr) auto;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.yoagent-chat-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.yoagent-chat-clear {
+  height: 24px;
+  padding: 0 8px;
+  color: var(--muted);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.yoagent-chat-clear:hover:not(:disabled),
+.yoagent-chat-clear:focus-visible {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--brand-green) 45%, var(--line));
+}
+.yoagent-chat-history {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.yoagent-chat-empty,
+.yoagent-chat-status,
+.yoagent-chat-error {
+  color: var(--muted);
+  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+}
+.yoagent-chat-error {
+  color: var(--bad);
+}
+.yoagent-chat-notice {
+  padding: 7px 8px;
+  color: #2a1e00;
+  background: #ffe7a3;
+  border: 1px solid #c8941e;
+  border-radius: 4px;
+  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+}
+.yoagent-chat-notice-backend {
+  font-weight: 800;
+}
+.yoagent-message {
+  display: grid;
+  gap: 3px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel2);
+}
+.yoagent-message.user {
+  border-color: color-mix(in srgb, var(--brand-green) 45%, var(--line));
+}
+.yoagent-message-role {
+  color: var(--muted);
+  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
+  text-transform: uppercase;
+}
+.yoagent-message-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
+}
+.yoagent-chat-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+.yoagent-chat-input {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.yoagent-chat-send {
+  height: 30px;
+  padding: 0 10px;
+  color: #071000;
+  background: var(--brand-green);
+  border: 1px solid var(--auto-border);
+  border-radius: 4px;
+  font: 800 var(--ui-font-size-sm)/1 var(--ui-font);
+}
+body.theme-light .info-pane {
+  background: var(--bg);
+}
+body.theme-light .yoagent-global {
+  color: var(--text);
+  background: #ffffff;
+  border-color: var(--line);
+}
+body.theme-light .yoagent-global-head,
+body.theme-light .yoagent-headline,
+body.theme-light .yoagent-line {
+  color: var(--text);
 }
 .info-row {
   display: grid;
@@ -970,15 +1142,34 @@
 .file-tree-row.kind-file {
   color: var(--muted);
 }
+.file-tree-row.kind-dir .file-tree-name {
+  color: var(--text);
+}
+.file-tree-row.kind-file .file-tree-name {
+  color: var(--muted);
+}
 .file-tree-row.is-repo .file-tree-name {
   color: var(--accent-gold);
-  font-weight: 700;
+  font-weight: 400;
 }
 .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
   color: #ffb454;
   text-decoration: underline;
   text-decoration-color: rgba(255, 180, 84, 0.55);
   text-underline-offset: 2px;
+}
+.file-tree-repo-meta {
+  color: var(--muted);
+}
+.file-tree-repo-branch {
+  font-family: var(--mono-font);
+  color: var(--text);
+  font-weight: 400;
+}
+.file-tree-repo-delta {
+  font-family: var(--mono-font);
+  color: var(--accent-gold);
+  font-weight: 400;
 }
 .file-tree-icon {
   display: inline-block;
@@ -1019,6 +1210,7 @@
 .file-tree-name {
   overflow: hidden;
   text-overflow: ellipsis;
+  color: currentColor;
 }
 .file-tree-git-status {
   margin-left: auto;
@@ -1051,6 +1243,68 @@
 }
 .file-tree-children {
   display: block;
+}
+body.theme-light .file-explorer,
+body.theme-light .file-explorer-tree-col {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--line);
+}
+body.theme-light .file-explorer-head {
+  color: var(--text);
+  background: var(--panel2);
+  border-color: var(--line);
+}
+body.theme-light .file-explorer-path,
+body.theme-light .file-explorer-path-inline {
+  color: var(--muted);
+  background: rgba(15, 23, 42, 0.035);
+}
+body.theme-light .file-explorer-path:focus,
+body.theme-light .file-explorer-path-inline:focus {
+  color: var(--text);
+  background: #ffffff;
+}
+body.theme-light .file-explorer-path.invalid,
+body.theme-light .file-explorer-path-inline.invalid {
+  color: var(--bad);
+}
+body.theme-light .file-tree-row:hover {
+  background: rgba(15, 23, 42, 0.05);
+}
+body.theme-light .file-tree-row.current-file:not(.selected) {
+  color: #173a13;
+  background: rgba(95, 152, 0, 0.12);
+}
+body.theme-light .file-tree-row.current-directory:not(.selected) {
+  color: #10230b;
+  background: rgba(95, 152, 0, 0.16);
+}
+body.theme-light .file-tree-row.new-entry:not(.selected) {
+  color: #4f3600;
+  background: rgba(183, 121, 31, 0.16);
+}
+body.theme-light .file-tree-row.git-modified:not(.selected) .file-tree-name {
+  color: #8a5a00;
+}
+body.theme-light .file-tree-row.git-untracked:not(.selected) .file-tree-name {
+  color: #166534;
+}
+body.theme-light .file-tree-row.git-deleted:not(.selected) .file-tree-name {
+  color: #b91c1c;
+}
+body.theme-light .file-tree-row.git-staged:not(.selected) .file-tree-name {
+  color: #2f7d20;
+}
+body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
+  color: #64748b;
+}
+body.theme-light .file-tree-row.kind-dir.expanded > .file-tree-icon,
+body.theme-light .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
+  color: var(--brand-green);
+}
+body.theme-light .file-tree-children::before {
+  border-left-color: rgba(100, 116, 139, 0.28);
 }
 /* File Explorer now contains a tree column (left) and an editor column
    that grows when a file is opened. Aside is a flex row of the two. */
@@ -1137,8 +1391,8 @@
   align-items: center;
   gap: 1px;
   min-width: 0;
-  flex: 0 1 auto;
-  overflow: hidden;
+  flex: 0 0 auto;
+  overflow: visible;
 }
 .file-explorer-quick-access-button {
   min-width: 24px;

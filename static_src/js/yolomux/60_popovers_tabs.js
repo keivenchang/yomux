@@ -342,8 +342,13 @@ function yoloMarkerHtml(session, auto, options = {}) {
 function pullRequestCompactBadgesHtml(session, pr) {
   const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
   const ciHtml = pullRequestCiIndicatorHtml(session, pr);
-  const prHtml = pullRequestPrIndicatorHtml(session, pr);
-  return [prHtml, statusHtml, ciHtml].filter(Boolean).join('');
+  const prHtml = pullRequestNumberIndicatorHtml(session, pr);
+  return [statusHtml, ciHtml, prHtml].filter(Boolean).join('');
+}
+
+function pullRequestNumberIndicatorHtml(session, pr) {
+  if (!pr?.number) return '';
+  return `<span class="${metadataBadgeClasses(session, 'pr', 'ci-indicator tab-symbol pr-indicator')}">#${esc(pr.number)}</span>`;
 }
 
 function applySessionStateClasses(node, state) {
@@ -566,7 +571,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
   rows.push(popoverPairRow('state', stateValue, 'agent', agentValue));
   const activity = sessionActivitySummary(session);
-  if (activity?.local) rows.push(popoverRow(yosupTabLabel, esc(activity.local)));
+  if (activity?.local) rows.push(popoverRow(yoagentTabLabel, esc(activity.local)));
   rows.push(popoverRow('path', displayPath));
   if (git?.branch) rows.push(popoverRow('branch', `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {

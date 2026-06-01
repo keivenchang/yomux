@@ -35,6 +35,21 @@ def test_list_directory_returns_entries(tmp_path):
     assert names["big.dat"]["kind"] == "file"
 
 
+def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "checkout", "-b", "feature/repo-row"], cwd=repo, check=True, capture_output=True, text=True)
+
+    payload = filesystem.list_directory(str(tmp_path))
+
+    entries = {entry["name"]: entry for entry in payload["entries"]}
+    assert entries["repo"]["is_repo"] is True
+    assert entries["repo"]["repo"]["root"] == str(repo)
+    assert entries["repo"]["repo"]["name"] == "repo"
+    assert entries["repo"]["repo"]["branch"] == "feature/repo-row"
+
+
 def test_list_directory_root_has_no_parent():
     payload = filesystem.list_directory("/")
     assert payload["parent"] is None

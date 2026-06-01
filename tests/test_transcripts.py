@@ -7,6 +7,8 @@ from datetime import timezone
 
 from yolomux_lib.transcripts import transcript_activity_state
 from yolomux_lib.transcripts import transcript_activity_state_from_text
+from yolomux_lib.transcripts import transcript_pending_approval
+from yolomux_lib.transcripts import transcript_pending_approval_from_text
 
 
 def jsonl(*records):
@@ -123,3 +125,81 @@ def test_transcript_activity_state_allows_recent_pending_tool(tmp_path):
 
     assert state["key"] == "working"
     assert "Bash" in state["text"]
+
+
+def test_transcript_pending_approval_extracts_claude_bash_command():
+    text = jsonl(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "python3 -m pytest tests/test_app.py"}},
+                ],
+            },
+        }
+    )
+
+    state = transcript_pending_approval_from_text(text, "claude")
+
+    assert state["visible"] is True
+    assert state["source"] == "transcript"
+    assert state["type"] == "bash"
+    assert state["command"] == "python3 -m pytest tests/test_app.py"
+    assert state["hash"]
+
+
+def test_transcript_pending_approval_extracts_file_tool_and_clears_result():
+    pending = jsonl(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Edit", "input": {"file_path": "/repo/README.md"}},
+                ],
+            },
+        }
+    )
+    completed = jsonl(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Edit", "input": {"file_path": "/repo/README.md"}},
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}],
+            },
+        },
+    )
+
+    assert transcript_pending_approval_from_text(pending, "claude")["type"] == "file"
+    assert transcript_pending_approval_from_text(completed, "claude")["visible"] is False
+
+
+def test_transcript_pending_approval_gates_stale_candidates(tmp_path):
+    old_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        jsonl(
+            {
+                "type": "assistant",
+                "timestamp": old_time.isoformat(),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "make test"}}],
+                },
+            }
+        ) + "\n",
+        encoding="utf-8",
+    )
+    os.utime(transcript, (old_time.timestamp(), old_time.timestamp()))
+
+    assert transcript_pending_approval(transcript, "claude")["visible"] is False

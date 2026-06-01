@@ -269,6 +269,15 @@ def yes_is_selected(pane_text: str) -> bool:
     return _approval_prompt_defaults_to_yes(pane_text) and not approval_prompt_has_later_activity(pane_text)
 
 
+def selected_prompt_option(pane_text: str) -> int:
+    matches = list(_SELECTED_CHOICE_NUMBER_RE.finditer(pane_text))
+    if matches:
+        return int(matches[-1].group(1))
+    if _approval_prompt_defaults_to_yes(pane_text) and not approval_prompt_has_later_activity(pane_text):
+        return 1
+    return 0
+
+
 PROMPT_ACTION = {
     "bash": "option1",
     "file": "option2",
@@ -367,6 +376,7 @@ _WORK_QUEUE_ROW_RE = re.compile(
 )
 _CHOICE_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?\d+[.:]\s+\S")
 _SELECTED_CHOICE_LINE_RE = re.compile(r"^\s*[❯›>]\s*\d+[.:]\s+\S")
+_SELECTED_CHOICE_NUMBER_RE = re.compile(r"^\s*[❯›>]\s*(\d+)[.:]\s+\S", re.MULTILINE)
 _YES_OPTION_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?1[.:]\s+Yes\b", re.IGNORECASE)
 _NO_OPTION_LINE_RE = re.compile(r"^\s*(?:[❯›>]\s*)?2[.:]\s+No\b", re.IGNORECASE)
 _FOOTER_LINE_RE = re.compile(
@@ -682,6 +692,7 @@ def approval_prompt_state(visible_text: str, pane_text: str | None = None) -> di
         "type": prompt_type or "",
         "text": prompt_text(visible_text, prompt_type) if prompt_type is not None else "",
         "yes_selected": selected if prompt_type is not None else False,
+        "selected_option": selected_prompt_option(visible_text) if prompt_type is not None else 0,
         "action": None,
         "command": None,
         "dangerous": False,
@@ -709,6 +720,7 @@ __all__ = [
     "is_dangerous",
     "prompt_hash",
     "prompt_text",
+    "selected_prompt_option",
     "stale_approval_behind_working",
     "visible_agent_working",
     "visible_choice_prompt_text",

@@ -70,7 +70,7 @@ def pane_fixture_html(width):
               <button class="tab">Tx</button>
               <button class="tab">AI</button>
               <button class="tab">Log</button>
-              <button class="tab panel-detail-toggle active">Info</button>
+              <button class="tab panel-detail-toggle pane-detail-toggle pc-window-control pc-minimize active"></button>
               <button class="tab pane-minimize pc-window-control pc-minimize"></button>
               <button class="tab pane-expand pc-window-control pc-zoom"></button>
             </div>
@@ -97,7 +97,8 @@ def menu_fixture_html():
                 <span class="session-button-name">{number}</span>
                 <span class="session-button-text">
                   <span class="session-state-badge">run</span>
-                  <span class="ci-indicator pr-indicator">PR</span>
+                  <span class="ci-indicator pr-status-passing">CI</span>
+                  <span class="ci-indicator pr-indicator">#10123</span>
                   <span class="session-button-dir tab-inline-detail">fix compact menu density</span>
                 </span>
               </span>
@@ -171,6 +172,7 @@ def pc_controls_fixture_html():
         <div class="file-explorer-tree-panel">
           <div id="collapsed-dir" class="file-tree-row kind-dir" aria-expanded="false"><span class="file-tree-icon">▸</span><span class="file-tree-name">Alpha</span></div>
           <div id="expanded-dir" class="file-tree-row kind-dir expanded" aria-expanded="true"><span class="file-tree-icon">▾</span><span class="file-tree-name">Bravo</span></div>
+          <div id="repo-dir" class="file-tree-row kind-dir is-repo repo-non-main"><span class="file-tree-icon">▸</span><span class="file-tree-name">yolomux <span class="file-tree-repo-meta">[<span class="file-tree-repo-branch">feature/repo-row</span> <span class="file-tree-repo-delta">+5/-3</span>]</span></span></div>
         </div>
         <div id="test-context-menu" class="terminal-context-menu" style="top: 220px; left: 24px;"></div>
         <div id="test-image-preview" class="file-image-preview-popover" style="top: 220px; left: 24px;"></div>
@@ -280,6 +282,7 @@ def codemirror_editor_controls_fixture_html():
                 <button type="button" data-editor-mode="edit"><span class="file-editor-icon file-editor-icon-edit"></span></button>
                 <button type="button" data-editor-mode="preview"><span class="file-editor-icon file-editor-icon-eye"></span></button>
                 <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
+                <button type="button" class="file-editor-cross-split-panel"><span class="file-editor-icon file-editor-icon-side-split"></span></button>
               </div>
               <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
               <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
@@ -388,7 +391,7 @@ def finder_click_toolbar_fixture_html():
               <button class="tab">Tx</button>
               <button class="tab">AI</button>
               <button class="tab">Log</button>
-              <button class="tab panel-detail-toggle active">Info</button>
+              <button class="tab panel-detail-toggle pane-detail-toggle pc-window-control pc-minimize active"></button>
               <button class="tab pane-actions"><span class="pane-actions-dots">...</span></button>
               <button class="tab pane-minimize pc-window-control pc-minimize"></button>
               <button class="tab pane-expand pc-window-control pc-zoom"></button>
@@ -534,6 +537,29 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     assert metrics["hiddenSymbolDisplay"] == "none"
     assert metrics["detailBg"] != "rgb(18, 24, 35)"
     assert metrics["detailCloseRightGap"] <= 3
+    light_metrics = browser.execute_script(
+        """
+        document.body.classList.add('theme-light');
+        const activeTab = document.querySelector('.pane-tab.active');
+        const inactiveTab = document.querySelector('.pane-tab:not(.active)');
+        const panelHead = document.querySelector('.panel-head');
+        const toolbarActive = document.querySelector('.panel-head .tab.active:not(.auto-toggle)');
+        return {
+          activeTabBg: getComputedStyle(activeTab).backgroundColor,
+          activeTabColor: getComputedStyle(activeTab).color,
+          inactiveTabBg: getComputedStyle(inactiveTab).backgroundColor,
+          panelHeadBg: getComputedStyle(panelHead).backgroundColor,
+          toolbarActiveBg: getComputedStyle(toolbarActive).backgroundColor,
+          toolbarActiveBorder: getComputedStyle(toolbarActive).borderTopColor,
+        };
+        """
+    )
+    assert light_metrics["activeTabBg"] == "rgb(255, 255, 255)"
+    assert light_metrics["activeTabColor"] != "rgb(8, 18, 5)"
+    assert light_metrics["inactiveTabBg"] != "rgb(220, 239, 213)"
+    assert light_metrics["panelHeadBg"] != "rgb(61, 105, 0)"
+    assert light_metrics["toolbarActiveBg"] == "rgb(255, 255, 255)"
+    assert light_metrics["toolbarActiveBorder"] != "rgb(29, 78, 216)"
 
 
 def test_pane_tabs_and_controls_stay_bounded_when_narrow(browser, tmp_path):
@@ -696,6 +722,25 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     )
     assert tree_metrics["collapsedColor"] != tree_metrics["expandedColor"]
     assert tree_metrics["iconSize"] > tree_metrics["nameSize"]
+    repo_row_metrics = browser.execute_script(
+        """
+        const name = document.querySelector('#repo-dir .file-tree-name');
+        const branch = document.querySelector('#repo-dir .file-tree-repo-branch');
+        const delta = document.querySelector('#repo-dir .file-tree-repo-delta');
+        return {
+          nameWeight: getComputedStyle(name).fontWeight,
+          branchWeight: getComputedStyle(branch).fontWeight,
+          deltaWeight: getComputedStyle(delta).fontWeight,
+          branchFont: getComputedStyle(branch).fontFamily,
+          nameColor: getComputedStyle(name).color,
+        };
+        """
+    )
+    assert repo_row_metrics["nameWeight"] in ("400", "normal")
+    assert repo_row_metrics["branchWeight"] in ("400", "normal")
+    assert repo_row_metrics["deltaWeight"] in ("400", "normal")
+    assert "mono" in repo_row_metrics["branchFont"].lower()
+    assert repo_row_metrics["nameColor"] != tree_metrics["collapsedColor"]
 
 
 def test_editor_pane_does_not_shift_grid_when_legacy_body_class_is_present(browser, tmp_path):
@@ -754,6 +799,12 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
         const findControl = document.querySelector('.file-editor-find-panel').getBoundingClientRect();
         const wrapControl = document.querySelector('.file-editor-wrap-panel').getBoundingClientRect();
         const modeControl = document.querySelector('[data-editor-mode="preview"]').getBoundingClientRect();
+        const modeButtonRects = Array.from(document.querySelectorAll('.file-editor-mode-control button')).map(button => button.getBoundingClientRect());
+        const modeIconDeltas = Array.from(document.querySelectorAll('.file-editor-mode-control button')).map(button => {
+          const buttonRect = button.getBoundingClientRect();
+          const iconRect = button.querySelector('.file-editor-icon').getBoundingClientRect();
+          return Math.abs((buttonRect.top + buttonRect.height / 2) - (iconRect.top + iconRect.height / 2));
+        });
         const elementAtCenter = rect => document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
         const tabRows = [];
         for (const tab of Array.from(document.querySelectorAll('.pane-tab'))) {
@@ -819,6 +870,9 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
           findControlClickable: Boolean(elementAtCenter(findControl)?.closest?.('.file-editor-find-panel')),
           wrapControlClickable: Boolean(elementAtCenter(wrapControl)?.closest?.('.file-editor-wrap-panel')),
           previewControlClickable: Boolean(elementAtCenter(modeControl)?.closest?.('[data-editor-mode="preview"]')),
+          modeButtonTopSpread: Math.max(...modeButtonRects.map(rect => rect.top)) - Math.min(...modeButtonRects.map(rect => rect.top)),
+          modeButtonHeightSpread: Math.max(...modeButtonRects.map(rect => rect.height)) - Math.min(...modeButtonRects.map(rect => rect.height)),
+          modeIconCenterMaxDelta: Math.max(...modeIconDeltas),
           tabRowCount: tabRows.length,
           lowerTabRowsUseFullWidth: tabRows.slice(1).some(row => Math.max(...row.rights) > actions.left + 20),
         };
@@ -881,6 +935,9 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["findControlClickable"]
     assert metrics["wrapControlClickable"]
     assert metrics["previewControlClickable"]
+    assert metrics["modeButtonTopSpread"] <= 1
+    assert metrics["modeButtonHeightSpread"] <= 1
+    assert metrics["modeIconCenterMaxDelta"] <= 1.5
 
 
 def test_codemirror_bundle_exports_decoration_for_html_semantic_marks(browser, tmp_path):

@@ -99,7 +99,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.write_json(self.server.app.transcripts_payload())
             return
         if parsed.path == "/api/activity-summary":
-            self.write_json(self.server.app.activity_summary_payload())
+            qs = parse_qs(parsed.query)
+            self.write_json(self.server.app.activity_summary_payload(force=parse_bool(qs.get("force", ["0"])[0])))
             return
         if parsed.path == "/api/tmux":
             qs = parse_qs(parsed.query)
@@ -407,6 +408,16 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if payload is None:
                 return
             self.write_json(self.server.app.save_settings(payload.get("settings", payload)))
+            return
+        if parsed.path == "/api/yoagent/chat":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            response, status = self.server.app.yoagent_chat(payload)
+            self.write_json(response, status=status)
+            return
+        if parsed.path == "/api/yoagent/reset":
+            self.write_json(self.server.app.reset_yoagent_chat())
             return
         if parsed.path == "/api/yolo-rules/reload":
             self.write_json(self.server.app.reload_yolo_rules())

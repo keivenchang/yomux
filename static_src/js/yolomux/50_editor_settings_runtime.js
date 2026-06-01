@@ -73,7 +73,8 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  const scheme = EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark;
+  const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
+  if (mode === editorThemeInheritMode) return `Inherit global theme (${scheme.label})`;
   return `${scheme.label} editor scheme`;
 }
 
@@ -161,7 +162,8 @@ function updateEditorThemeButton(button) {
   button.classList.toggle('theme-light', !scheme.dark);
   button.dataset.editorTheme = scheme.id;
   button.setAttribute('aria-pressed', scheme.dark ? 'false' : 'true');
-  button.title = `${editorThemeLabel()}; switch to ${nextScheme.label}`;
+  const nextAction = fileEditorThemeMode === editorThemeInheritMode ? `override to ${nextScheme.label}` : 'return to global theme';
+  button.title = `${editorThemeLabel()}; ${nextAction}`;
   button.setAttribute('aria-label', editorThemeLabel());
   setFileEditorIcon(button, 'file-editor-icon-theme');
 }
@@ -173,7 +175,17 @@ function updateImageViewerThemeButton(button) {
   button.setAttribute('aria-label', 'Toggle image background');
 }
 
-function applyEditorThemeMode() {
+function refreshOpenEditorThemePanels() {
+  document.querySelectorAll('.file-editor-panel').forEach(panel => {
+    const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
+    const path = fileItemPath(item);
+    if (!path || openFiles.get(path)?.kind !== 'text') return;
+    captureFileEditorPanelViewState(item, panel);
+    renderFileEditorPanel(panel, item);
+  });
+}
+
+function applyEditorThemeMode(options = {}) {
   const scheme = activeEditorScheme();
   applyEditorSchemeCssVariables(scheme);
   document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light');
@@ -181,20 +193,21 @@ function applyEditorThemeMode() {
   document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light');
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
+  if (options.refreshEditors) refreshOpenEditorThemePanels();
 }
 
 function setFileEditorThemeMode(mode) {
-  fileEditorThemeMode = normalizeEditorSchemeId(mode);
+  fileEditorThemeMode = normalizeEditorThemeMode(mode);
   writeStoredEditorThemeMode(fileEditorThemeMode);
-  applyEditorThemeMode();
-  document.querySelectorAll('.file-editor-panel').forEach(panel => {
-    const path = panel.dataset.filePath;
-    if (path && openFiles.get(path)?.kind === 'text') renderFileEditorPanel(panel, fileEditorItemFor(path));
-  });
+  applyEditorThemeMode({refreshEditors: true});
 }
 
 function cycleEditorThemeMode() {
-  setFileEditorThemeMode(configuredEditorSchemeForMode(!activeEditorScheme().dark));
+  if (fileEditorThemeMode === editorThemeInheritMode) {
+    setFileEditorThemeMode(configuredEditorSchemeForMode(!activeEditorScheme().dark));
+  } else {
+    setFileEditorThemeMode(editorThemeInheritMode);
+  }
 }
 
 function updateEditorWrapButton(button) {
@@ -222,8 +235,8 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   const active = editorViewModeFor(path, item) === 'diff';
   const available = openFileDiffAvailable(state);
   const loading = state?.diffLoading === true;
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!active && !available && !loading);
-  button.disabled = loading || (!available && active);
+  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!available && !(active && loading));
+  button.disabled = loading || !available;
   const label = loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
   setFileEditorIcon(button, 'file-editor-icon-diff');
@@ -294,6 +307,16 @@ function boolSetting(path, fallback) {
   return value === true || value === 'true' || value === 1;
 }
 
+function normalizeEditorCursorStyle(value) {
+  return value === 'block' ? 'block' : 'line';
+}
+
+function applyEditorCursorStyle() {
+  fileEditorCursorStyle = normalizeEditorCursorStyle(fileEditorCursorStyle);
+  document.body?.classList.remove('editor-cursor-line', 'editor-cursor-block');
+  document.body?.classList.add(`editor-cursor-${fileEditorCursorStyle}`);
+}
+
 function applyCssSettings() {
   const root = document.documentElement?.style;
   if (!root) return;
@@ -310,12 +333,40 @@ function applyCssSettings() {
   root.setProperty('--file-image-preview-max-size', `${Math.max(1, fileExplorerImagePreviewMaxPx)}px`);
 }
 
-function applyTerminalRuntimeSettings() {
+function applyGlobalThemeMode(options = {}) {
+  globalThemeMode = normalizeGlobalThemeMode(globalThemeMode);
+  const resolved = resolvedGlobalThemeMode();
+  document.body?.classList.remove('theme-system', 'theme-dark', 'theme-light', 'theme-resolved-dark', 'theme-resolved-light');
+  document.body?.classList.add(`theme-${globalThemeMode}`, `theme-resolved-${resolved}`);
+  if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
+  if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
+  if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
+}
+
+let globalThemeMediaListenerInstalled = false;
+
+function installGlobalThemeMediaListener() {
+  if (globalThemeMediaListenerInstalled) return;
+  const query = globalThemeMediaQuery();
+  if (!query) return;
+  const handler = () => {
+    if (normalizeGlobalThemeMode(globalThemeMode) !== 'system') return;
+    applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+    renderSessionButtons();
+    renderPaneTabStrips();
+  };
+  if (typeof query.addEventListener === 'function') query.addEventListener('change', handler);
+  else if (typeof query.addListener === 'function') query.addListener(handler);
+  globalThemeMediaListenerInstalled = true;
+}
+
+function applyTerminalRuntimeSettings(options = {}) {
   for (const [session, item] of terminals.entries()) {
     if (!item?.term) continue;
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
-    scheduleFit(session);
+    item.term.options.theme = terminalThemeForGlobalTheme();
+    if (options.fit !== false) scheduleFit(session);
   }
 }
 
@@ -367,7 +418,9 @@ function applySettingsPayload(payload, options = {}) {
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
   fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
   autoFocusEnabled = boolSetting('general.auto_focus', false);
-  const previousEditorScheme = fileEditorThemeMode;
+  const previousEditorSchemeId = activeEditorScheme().id;
+  globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
+  fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'line'));
   fileEditorThemeMode = readConfiguredEditorScheme();
   if (options.initial || options.applyEditorDefaults) {
     fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
@@ -375,7 +428,9 @@ function applySettingsPayload(payload, options = {}) {
   }
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
   applyCssSettings();
-  applyEditorThemeMode();
+  applyGlobalThemeMode({updateEditor: false, updateTerminals: false});
+  applyEditorThemeMode({refreshEditors: false});
+  applyEditorCursorStyle();
   applyTerminalRuntimeSettings();
   applyEditorWrapPreference();
   renderFileExplorerRootModeControls();
@@ -384,7 +439,7 @@ function applySettingsPayload(payload, options = {}) {
   renderSessionButtons();
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
-  if (previousEditorScheme !== fileEditorThemeMode) {
+  if (previousEditorSchemeId !== activeEditorScheme().id) {
     for (const [item, panel] of panelNodes.entries()) {
       if (isFileEditorItem(item)) renderFileEditorPanel(panel, item);
     }

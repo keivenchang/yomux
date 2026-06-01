@@ -159,11 +159,14 @@ function sessionFilesPayloadSignatureForPayload(payload) {
     Number(item.mtime || 0),
     Number(item.added || 0),
     Number(item.removed || 0),
+    item.uploaded === true ? 1 : 0,
   ]);
   const repos = (Array.isArray(payload?.repos) ? payload.repos : []).map(item => [
     item.repo || '',
     Number(item.count || 0),
     Number(item.touched_count || 0),
+    Number(item.added || 0),
+    Number(item.removed || 0),
   ]);
   return JSON.stringify({
     session: payload?.session || '',
@@ -300,12 +303,27 @@ function sortedSessionFiles(files) {
 
 function groupedSessionFiles(files) {
   const groups = new Map();
-  for (const item of sortedSessionFiles(files)) {
+  for (const item of files) {
     const repo = item.repo || 'Outside repo';
     if (!groups.has(repo)) groups.set(repo, []);
     groups.get(repo).push(item);
   }
   return Array.from(groups.entries());
+}
+
+function splitUploadedSessionFiles(files) {
+  const regular = [];
+  const uploaded = [];
+  for (const item of sortedSessionFiles(files)) {
+    if (item?.uploaded === true) uploaded.push(item);
+    else regular.push(item);
+  }
+  return {regular, uploaded};
+}
+
+function writeStoredUploadedFilesCollapsed() {
+  try { window.localStorage?.setItem(uploadedFilesCollapsedStorageKey, uploadedFilesCollapsed ? '1' : '0'); }
+  catch (_) {}
 }
 
 function changeFileRowHtml(item, options = {}) {
@@ -321,7 +339,7 @@ function changeFileRowHtml(item, options = {}) {
   const metaHtml = [diffHtml, dateHtml].filter(Boolean).join('');
   const compactClass = options.compact ? ' compact' : ' detailed';
   const actionAttr = absPath
-    ? ` data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" title="${esc(absPath)}"`
+    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" title="${esc(absPath)}"`
     : ' disabled';
   return `<button type="button" class="changes-file-row${compactClass}"${actionAttr}>
     <span class="changes-status changes-status-${esc(statusKey.toLowerCase())}">${esc(statusKey)}</span>
@@ -331,7 +349,8 @@ function changeFileRowHtml(item, options = {}) {
 }
 
 function changesRepoGroupsHtml(files, options = {}) {
-  return groupedSessionFiles(files).map(([repo, entries]) => {
+  const {regular, uploaded} = splitUploadedSessionFiles(files);
+  const repoHtml = groupedSessionFiles(regular).map(([repo, entries]) => {
     const rows = entries.map(item => changeFileRowHtml(item, options)).join('');
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
     return `<section class="changes-repo-group">
@@ -339,18 +358,29 @@ function changesRepoGroupsHtml(files, options = {}) {
       <div class="changes-file-list">${rows}</div>
     </section>`;
   }).join('');
+  if (!uploaded.length) return repoHtml;
+  const uploadedRows = uploadedFilesCollapsed ? '' : uploaded.map(item => changeFileRowHtml(item, options)).join('');
+  const uploadedHtml = `<section class="changes-repo-group changes-uploaded-group${uploadedFilesCollapsed ? ' collapsed' : ''}">
+      <button type="button" class="changes-repo-head changes-uploaded-toggle" data-uploaded-files-toggle aria-expanded="${uploadedFilesCollapsed ? 'false' : 'true'}">
+        <span><span class="changes-uploaded-caret">${uploadedFilesCollapsed ? '▸' : '▾'}</span> Uploaded files (${uploaded.length})</span><span>${uploadedFilesCollapsed ? 'collapsed' : uploaded.length}</span>
+      </button>
+      ${uploadedFilesCollapsed ? '' : `<div class="changes-file-list">${uploadedRows}</div>`}
+    </section>`;
+  return `${repoHtml}${uploadedHtml}`;
+}
+
+function modifiedFilesSummaryText(files, session, loading, loaded) {
+  if (loading) return 'loading...';
+  if (!loaded) return 'not loaded';
+  return `${files.length} modified${session ? ` in session '${sessionLabel(session)}'` : ''}`;
 }
 
 function changesPanelHtml() {
-  const target = sessionFilesTargetSession();
+  const target = sessionFilesPayload.session || sessionFilesTargetSession();
   const files = sessionFilesPayload.files || [];
   const loaded = sessionFilesPayload.loaded === true;
   const options = sessions.map(session => `<option value="${esc(session)}"${session === target ? ' selected' : ''}>${esc(sessionLabel(session))} ${esc(session)}</option>`).join('');
-  const summary = sessionFilesLoading
-    ? 'loading changed files...'
-    : loaded
-      ? `${files.length} changed file${files.length === 1 ? '' : 's'}`
-      : 'not loaded';
+  const summary = modifiedFilesSummaryText(files, target, sessionFilesLoading, loaded);
   const errorHtml = (sessionFilesPayload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const groups = changesRepoGroupsHtml(files);
   const empty = !sessionFilesLoading && loaded && !files.length ? '<div class="changes-empty">No AI-changed files found for this session.</div>' : '';
@@ -375,11 +405,7 @@ function fileExplorerChangesPanelHtml() {
   const files = payload.files || [];
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
-  const summary = loading
-    ? 'loading...'
-    : loaded
-      ? `${files.length} modified${session ? ` in ${sessionLabel(session)}` : ''}`
-      : 'not loaded';
+  const summary = modifiedFilesSummaryText(files, session, loading, loaded);
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? '<div class="changes-empty">No modified files for this session.</div>' : '';
   const compact = fileExplorerChangesDisplayMode === 'compact';
@@ -491,6 +517,15 @@ function bindChangesPanel(panel) {
     }
   });
   panel.addEventListener('click', async event => {
+    const uploadedToggle = event.target.closest('[data-uploaded-files-toggle]');
+    if (uploadedToggle && panel.contains(uploadedToggle)) {
+      event.preventDefault();
+      uploadedFilesCollapsed = !uploadedFilesCollapsed;
+      writeStoredUploadedFilesCollapsed();
+      renderChangesPanels();
+      renderFileExplorerChangesPanels();
+      return;
+    }
     const displayToggle = event.target.closest('[data-session-files-display-toggle]');
     if (displayToggle && panel.contains(displayToggle)) {
       event.preventDefault();
@@ -508,14 +543,34 @@ function bindChangesPanel(panel) {
       });
       return;
     }
+  });
+  panel.addEventListener('dragstart', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
-    if (fileRow && panel.contains(fileRow)) {
-      event.preventDefault();
-      const path = fileRow.dataset.openChangeFile;
-      if (path) {
-        const ownerSession = fileRow.dataset.openChangeSession || '';
-        await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '');
-      }
+    if (!fileRow || !panel.contains(fileRow)) return;
+    if (!event.dataTransfer) return;
+    const path = fileRow.dataset.openChangeFile || '';
+    if (!path) return;
+    closeFileImagePreview();
+    const payloadObject = {path, paths: [path], kind: 'file', name: basenameOf(path)};
+    dragFilePayloadState = normalizeFileDragPayload(payloadObject);
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData('application/x-yolomux-file', JSON.stringify(payloadObject));
+    event.dataTransfer.setData('text/plain', path);
+    startFileDragPreview(event, [path], {kind: 'file', name: basenameOf(path)});
+  });
+  panel.addEventListener('dragend', () => {
+    dragFilePayloadState = null;
+    stopCustomDragPreview();
+    clearDropPreview();
+  });
+  panel.addEventListener('dblclick', async event => {
+    const fileRow = event.target.closest('[data-open-change-file]');
+    if (!fileRow || !panel.contains(fileRow)) return;
+    event.preventDefault();
+    const path = fileRow.dataset.openChangeFile;
+    if (path) {
+      const ownerSession = fileRow.dataset.openChangeSession || '';
+      await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '');
     }
   });
 }
@@ -645,7 +700,7 @@ function resetAllPreferences() {
       preferencesResetConfirmVisible = false;
       collapsedPreferenceSections = defaultCollapsedPreferenceSections();
       writeStoredCollapsedPreferenceSections();
-      setFileEditorThemeMode(configuredEditorSchemeForMode(true));
+      setFileEditorThemeMode(editorThemeInheritMode);
       renderPreferencesPanels({force: true});
       statusEl.textContent = 'reset all preferences';
     })
@@ -856,6 +911,7 @@ function createFileEditorPanel(item) {
             <button type="button" data-editor-mode="edit" title="Edit" aria-label="Edit"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
             <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
             <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
+            <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
           </div>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
@@ -864,8 +920,6 @@ function createFileEditorPanel(item) {
           <button type="button" class="file-editor-diff-panel" title="Diff" aria-label="Diff" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
           <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
-          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="side" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-theme-panel" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
@@ -1127,6 +1181,14 @@ function captureFileEditorPanelViewState(item, panel) {
   });
 }
 
+function captureFileEditorPanelViewStateForItem(item) {
+  if (!isFileEditorItem(item)) return false;
+  const panel = panelNodes.get(item);
+  if (!panel) return false;
+  captureFileEditorPanelViewState(item, panel);
+  return true;
+}
+
 function restoreFileEditorPanelViewState(item, panel) {
   const state = fileEditorViewState.get(item);
   const view = panel?._cmView;
@@ -1144,8 +1206,20 @@ function restoreFileEditorPanelViewState(item, panel) {
     scrollDOM.scrollTop = Number(state.scrollTop || 0);
     scrollDOM.scrollLeft = Number(state.scrollLeft || 0);
   };
+  const measuredRestore = () => {
+    if (typeof view.requestMeasure === 'function') {
+      view.requestMeasure({
+        read: () => null,
+        write: restore,
+      });
+      return;
+    }
+    restore();
+  };
   restore();
-  requestAnimationFrame(restore);
+  measuredRestore();
+  requestAnimationFrame(measuredRestore);
+  requestAnimationFrame(() => requestAnimationFrame(measuredRestore));
 }
 
 function destroyCodeMirrorPanel(panel) {
@@ -1190,7 +1264,7 @@ function codeMirrorConfigSignature(path, options = {}) {
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
     readOnly: readOnlyMode,
-    scheme: fileEditorThemeMode,
+    scheme: activeEditorScheme().id,
   });
 }
 
@@ -1342,13 +1416,14 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   container.hidden = false;
   container.classList.add('file-editor-diff-codemirror');
   if (!state.diffLoaded && !state.diffLoading) await refreshOpenFileDiff(path, {silent: true});
+  if (panel._cmGeneration !== generation) return null;
   if (!openFileDiffAvailable(state) && !state.diffLoading) {
     setFileEditorPanelStatus(panel, state.diffError ? `diff unavailable: ${state.diffError}` : 'No diff for this file', 'warn');
     return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
   }
   const original = String(state.diffOriginal || '');
   const api = await loadCodeMirrorApi();
-  if (panel._cmGeneration !== generation) return false;
+  if (panel._cmGeneration !== generation) return null;
   if (!api.MergeView || !api.unifiedMergeView) {
     setFileEditorPanelStatus(panel, 'CodeMirror merge view is unavailable', 'error');
     return false;
@@ -1456,7 +1531,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   }
   try {
     const api = await loadCodeMirrorApi();
-    if (panel._cmGeneration !== generation) return false;
+    if (panel._cmGeneration !== generation) return null;
     if (!panel._cmView) {
       container.replaceChildren();
       const cmState = api.EditorState.create({
@@ -1488,7 +1563,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
     focusFileEditorPanelIfReady(panel, item);
     return true;
   } catch (error) {
-    if (panel._cmGeneration !== generation) return false;
+    if (panel._cmGeneration !== generation) return null;
     destroyCodeMirrorPanel(panel);
     container.hidden = true;
     setFileEditorPanelStatus(panel, `CodeMirror unavailable; showing read-only raw text (${error})`, 'error');
@@ -1575,6 +1650,13 @@ function renderFileEditorPanel(panel, item) {
     setFileEditorPanelStatus(panel, status, 'error');
     return;
   }
+  if (state.kind === 'text' && !state.diffLoaded && !state.diffLoading && !state.diffUnavailable) {
+    refreshOpenFileDiff(path, {silent: true});
+  }
+  if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && !openFileDiffAvailable(state)) {
+    setFileEditorViewMode(path, 'edit', item);
+  }
+  const mode = editorViewModeFor(path, item);
   updateEditorModeControl(modeControl, path, state, item);
   if (gutterButton) {
     gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text';
@@ -1587,11 +1669,12 @@ function renderFileEditorPanel(panel, item) {
   updateEditorFindButton(findButton, state);
   if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
   updateFileEditorDiffButton(diffButton, path, state, item);
-  if (state.kind === 'text' && !state.diffLoaded && !state.diffLoading && !state.diffUnavailable) {
-    refreshOpenFileDiff(path, {silent: true});
-  }
   if (crossSplitButton) {
     crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
+  }
+  if (diffRefPanel) {
+    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+    syncDiffRefControlValues(diffRefPanel);
   }
   updateFileEditorToolbarSeparators(panel);
   if (state.kind === 'image') {
@@ -1613,11 +1696,6 @@ function renderFileEditorPanel(panel, item) {
     imagePane.hidden = true;
     imagePane.replaceChildren();
   }
-  const mode = editorViewModeFor(path, item);
-  if (diffRefPanel) {
-    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
-    syncDiffRefControlValues(diffRefPanel);
-  }
   setEditorContentMode(content, mode);
   panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
   panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
@@ -1638,7 +1716,7 @@ function renderFileEditorPanel(panel, item) {
     }
     panel.classList.remove('syntax-highlighted');
     ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
-      if (!loaded) renderFileEditorRawPane(rawPane, path, state.content);
+      if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);
     });
   }
   const status = openFileStatus(state);
@@ -1743,14 +1821,12 @@ function updateFileEditorToolbarSeparators(panel) {
     '.file-editor-diff-panel',
     '.file-editor-diff-ref-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
-  const side = fileEditorToolbarControlVisible(panel, '.file-editor-cross-split-panel');
   const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel')
     || fileEditorToolbarControlVisible(panel, '.file-editor-reload-panel');
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
   const frame = true;
-  setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || side || theme || save || frame));
-  setFileEditorToolbarSeparator(panel, 'tools', tools && (side || theme || save || frame));
-  setFileEditorToolbarSeparator(panel, 'side', side && (theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'tools', tools && (theme || save || frame));
   setFileEditorToolbarSeparator(panel, 'theme', theme && (save || frame));
   setFileEditorToolbarSeparator(panel, 'save', save && frame);
 }
@@ -2169,6 +2245,17 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (mode !== 'preview' && mode !== 'split') continue;
     renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, content);
   }
+}
+
+function updateLinkedFilePreviewRings() {
+  for (const panel of panelNodes.values()) panel.classList.remove('preview-linked');
+  if (!focusedPanelItem || isFilePreviewItem(focusedPanelItem)) return;
+  const path = isFileEditorItem(focusedPanelItem) ? fileItemPath(focusedPanelItem) : '';
+  if (!path) return;
+  const previewItem = filePreviewItemFor(path);
+  if (!itemIsActivePaneTab(previewItem)) return;
+  const previewPanel = panelNodes.get(previewItem);
+  if (previewPanel) previewPanel.classList.add('preview-linked');
 }
 
 function syncCrossPaneFileEditorScroll(host, source) {

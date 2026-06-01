@@ -99,6 +99,39 @@ def _directory_is_repo(path: Path) -> bool:
     return False
 
 
+def git_repo_info(repo: Path, include_status: bool = True) -> dict[str, Any]:
+    branch = git(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=str(repo), timeout=1.0)
+    if branch.returncode != 0:
+        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=str(repo), timeout=1.0)
+    upstream = git(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd=str(repo), timeout=1.0)
+    ahead = 0
+    behind = 0
+    if upstream.returncode == 0:
+        counts = git(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], cwd=str(repo), timeout=2.0)
+        if counts.returncode == 0:
+            parts = counts.stdout.split()
+            if len(parts) >= 2:
+                try:
+                    ahead = int(parts[0])
+                    behind = int(parts[1])
+                except ValueError:
+                    ahead = 0
+                    behind = 0
+    dirty_count: int | None = None
+    if include_status:
+        status = git(["status", "--porcelain=v1"], cwd=str(repo), timeout=2.0)
+        dirty_count = len(status.stdout.splitlines()) if status.returncode == 0 else None
+    return {
+        "root": str(repo),
+        "name": repo.name,
+        "branch": branch.stdout.strip() if branch.returncode == 0 else "",
+        "dirty_count": dirty_count,
+        "upstream": upstream.stdout.strip() if upstream.returncode == 0 else "",
+        "ahead": ahead,
+        "behind": behind,
+    }
+
+
 def _entry_info(path: Path, name: str) -> dict[str, Any]:
     try:
         st = path.lstat()
@@ -132,6 +165,8 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
     }
     if kind == "dir":
         info["is_repo"] = _directory_is_repo(path)
+        if info["is_repo"]:
+            info["repo"] = git_repo_info(path, include_status=False)
     return info
 
 
@@ -432,31 +467,7 @@ def path_info(raw_path: str) -> dict[str, Any]:
             relative_path = path.relative_to(repo).as_posix()
         except ValueError:
             relative_path = ""
-        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=str(repo), timeout=1.0)
-        status = git(["status", "--porcelain=v1"], cwd=str(repo), timeout=2.0)
-        upstream = git(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd=str(repo), timeout=1.0)
-        ahead = 0
-        behind = 0
-        if upstream.returncode == 0:
-            counts = git(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], cwd=str(repo), timeout=2.0)
-            if counts.returncode == 0:
-                parts = counts.stdout.split()
-                if len(parts) >= 2:
-                    try:
-                        ahead = int(parts[0])
-                        behind = int(parts[1])
-                    except ValueError:
-                        ahead = 0
-                        behind = 0
-        repo_info = {
-            "root": str(repo),
-            "name": repo.name,
-            "branch": branch.stdout.strip() if branch.returncode == 0 else "",
-            "dirty_count": len(status.stdout.splitlines()) if status.returncode == 0 else None,
-            "upstream": upstream.stdout.strip() if upstream.returncode == 0 else "",
-            "ahead": ahead,
-            "behind": behind,
-        }
+        repo_info = git_repo_info(repo, include_status=True)
     return {
         "path": str(path),
         "name": path.name,

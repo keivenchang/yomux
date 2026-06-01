@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
+import uuid
 from dataclasses import asdict
 from datetime import datetime
 from datetime import timedelta
@@ -19,6 +23,10 @@ from . import yolo_rules
 from .activity_summary import activity_signature
 from .activity_summary import build_global_activity_summary
 from .activity_summary import build_session_activity_summary
+from .activity_summary import build_yoagent_chat_prompt
+from .activity_summary import build_yoagent_resume_prompt
+from .activity_summary import deterministic_yoagent_reply
+from .activity_summary import yoagent_context_lines
 from .auto_approve_worker import AutoApproveWorker
 from .auto_approve_worker import auto_approve_lock_message
 from .auto_approve_worker import auto_approve_lock_owner
@@ -31,6 +39,9 @@ from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import SUMMARY_MAX_PROMPT_CHARS
+from .common import SUMMARY_CODEX_EFFORT
+from .common import SUMMARY_CODEX_MODEL
+from .common import SUMMARY_CODEX_SERVICE_TIER
 from .common import UPLOAD_MAX_FILES
 from .common import next_numbered_session_name
 from .common import tail_file_lines
@@ -54,6 +65,7 @@ from .sessions import discover_sessions
 from .settings import save_settings
 from .settings import settings_payload
 from .transcripts import codex_summary_prompt
+from .transcripts import codex_event_text
 from .transcripts import compact_summary_lines
 from .transcripts import compact_transcript_items
 from .transcripts import compact_transcript_items_since
@@ -77,8 +89,61 @@ METADATA_BADGE_PULSE_SECONDS = 20.0
 METADATA_BADGES = ("main", "pr", "status", "ci")
 METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
 METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
+YOAGENT_CLI_TIMEOUT_SECONDS = 45
+YOAGENT_CLI_SESSION_IDLE_SECONDS = 300
+YOAGENT_AUTH_FAILURE_RE = re.compile(
+    r"(not\s+logged\s+in|log\s*in|login|required\s+auth|authentication|unauthorized|permission\s+denied|401)",
+    re.IGNORECASE,
+)
+YOAGENT_PERMISSION_BLOCK_RE = re.compile(
+    r"(?:i'?m\s+blocked|harness\s+denied|grant\s+.*permission|approve\s+the\s+next\s+bash|need\s+read(?:/bash)?\s+permission)",
+    re.IGNORECASE,
+)
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
+
+
+def yoagent_cli_auth_failure(text: str) -> bool:
+    return bool(YOAGENT_AUTH_FAILURE_RE.search(text or ""))
+
+
+def yoagent_cli_answer_is_permission_blocked(text: str) -> bool:
+    return bool(YOAGENT_PERMISSION_BLOCK_RE.search(text or ""))
+
+
+def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
+    text = truncate_text(" ".join(str(error or "").split()), 600)
+    if not text:
+        return ""
+    if not yoagent_cli_auth_failure(text):
+        return text
+    label = "Claude CLI" if backend == "claude" else "Codex CLI" if backend == "codex" else f"{backend} CLI"
+    login_command = "claude login" if backend == "claude" else "codex login" if backend == "codex" else f"{backend} login"
+    return f"{label} is not logged in. Run `{login_command}`; showing the No agent YO!agent summary."
+
+
+def codex_event_session_id(event: dict[str, Any]) -> str:
+    for key in ("session_id", "sessionId", "thread_id", "threadId", "conversation_id", "conversationId"):
+        value = event.get(key)
+        if isinstance(value, str) and value:
+            return value
+    for key in ("session", "thread", "conversation"):
+        value = event.get(key)
+        if isinstance(value, dict):
+            nested_id = value.get("id")
+            if isinstance(nested_id, str) and nested_id:
+                return nested_id
+            nested = codex_event_session_id(value)
+            if nested:
+                return nested
+    return ""
+
+
+def yoagent_activity_payload_signature(activity_payload: dict[str, Any]) -> str:
+    try:
+        return json.dumps(activity_payload, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        return str(activity_payload)
 
 
 def tmux_session_name_error(name: str) -> str | None:
@@ -105,6 +170,8 @@ class TmuxWebtermApp:
         self.metadata_badge_pulse_until: dict[str, dict[str, float]] = {}
         self.activity_summary_lock = threading.RLock()
         self.activity_summary_cache: dict[str, dict[str, Any]] = {}
+        self.yoagent_cli_lock = threading.RLock()
+        self.yoagent_cli_sessions: dict[str, dict[str, Any]] = {}
         self.load_metadata_badge_state()
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
@@ -153,12 +220,14 @@ class TmuxWebtermApp:
     def settings_payload(self) -> dict[str, Any]:
         return settings_payload()
 
-    def activity_summary_payload(self) -> dict[str, Any]:
+    def activity_summary_payload(self, force: bool = False) -> dict[str, Any]:
         sessions, errors = discover_sessions(self.sessions)
         self.warm_metadata_cache_async(sessions)
         summaries: dict[str, Any] = {}
         ordered_summaries: list[dict[str, Any]] = []
         with self.activity_summary_lock:
+            if force:
+                self.activity_summary_cache.clear()
             for session in self.sessions:
                 info = sessions.get(session)
                 if info is None:
@@ -187,6 +256,184 @@ class TmuxWebtermApp:
             "errors": errors,
         }
 
+    def yoagent_settings(self) -> dict[str, Any]:
+        settings = settings_payload().get("settings", {}).get("yoagent", {})
+        return settings if isinstance(settings, dict) else {}
+
+    def reset_yoagent_chat(self) -> dict[str, Any]:
+        with self.yoagent_cli_lock:
+            self.yoagent_cli_sessions.clear()
+        return {"ok": True}
+
+    def yoagent_chat(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        question = truncate_text(" ".join(str(payload.get("message") or payload.get("question") or "").split()), 4000)
+        if not question:
+            return {"error": "missing YO!agent message"}, HTTPStatus.BAD_REQUEST
+        raw_history = payload.get("history", [])
+        history = []
+        if isinstance(raw_history, list):
+            for item in raw_history[-8:]:
+                if not isinstance(item, dict):
+                    continue
+                role = "user" if item.get("role") == "user" else "assistant"
+                content = truncate_text(" ".join(str(item.get("content") or "").split()), 1000)
+                if content:
+                    history.append({"role": role, "content": content})
+        settings = self.yoagent_settings()
+        activity_payload = self.activity_summary_payload()
+        context_lines = yoagent_context_lines(activity_payload)
+        backend = str(settings.get("backend") or "deterministic").strip().lower()
+        invocation = str(settings.get("invocation") or "cli").strip().lower()
+        answer = ""
+        backend_used = "deterministic"
+        fallback_reason = ""
+        cli_status: dict[str, Any] = {}
+        if backend in {"codex", "claude"} and invocation == "cli":
+            answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(backend, question, activity_payload, settings, history)
+            if answer:
+                backend_used = backend
+        elif backend in {"codex", "claude"} and invocation != "cli":
+            fallback_reason = f"{backend} {invocation} invocation is not available yet"
+        if not answer:
+            answer = deterministic_yoagent_reply(question, activity_payload, settings)
+        return {
+            "answer": answer,
+            "backend": backend,
+            "backend_used": backend_used,
+            "fallback": bool(fallback_reason),
+            "fallback_reason": fallback_reason,
+            "cli": cli_status,
+            "context_lines": context_lines,
+            "generated_at": activity_payload.get("generated_at"),
+            "session_order": activity_payload.get("session_order", []),
+        }, HTTPStatus.OK
+
+    def run_yoagent_cli_backend(
+        self,
+        backend: str,
+        question: str,
+        activity_payload: dict[str, Any],
+        settings: dict[str, Any],
+        history: list[dict[str, str]],
+    ) -> tuple[str, str, dict[str, Any]]:
+        if backend not in {"codex", "claude"}:
+            return "", f"unknown backend: {backend}", {}
+
+        with self.yoagent_cli_lock:
+            now = time.monotonic()
+            state = self.yoagent_cli_sessions.get(backend, {})
+            if state and now - float(state.get("updated_monotonic") or 0) > YOAGENT_CLI_SESSION_IDLE_SECONDS:
+                state = {}
+                self.yoagent_cli_sessions.pop(backend, None)
+            session_id = str(state.get("session_id") or "")
+            context_signature = yoagent_activity_payload_signature(activity_payload)
+            context_changed = context_signature != state.get("activity_signature")
+            seed = not session_id
+            prompt = build_yoagent_chat_prompt(question, activity_payload, settings, history) if seed else build_yoagent_resume_prompt(question, activity_payload, settings, context_changed)
+            started = time.monotonic()
+            next_session_id = session_id
+            if backend == "codex":
+                answer, error, captured_session_id = self.run_yoagent_codex_cli(prompt, session_id=session_id, resume=not seed)
+                next_session_id = captured_session_id or session_id
+            else:
+                next_session_id = session_id or str(uuid.uuid4())
+                answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed)
+            if answer and yoagent_cli_answer_is_permission_blocked(answer):
+                answer = ""
+                error = "YO!agent backend tried to inspect files outside the supplied YOLOmux context; showing the No agent summary instead."
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            fallback_reason = yoagent_cli_fallback_reason(backend, error)
+            status = {
+                "backend": backend,
+                "resumed": not seed,
+                "seeded": seed,
+                "context_changed": context_changed,
+                "prompt_chars": len(prompt),
+                "elapsed_ms": elapsed_ms,
+                "session_id": next_session_id or None,
+                "per_server": True,
+            }
+            if answer and next_session_id:
+                self.yoagent_cli_sessions[backend] = {
+                    "session_id": next_session_id,
+                    "activity_signature": context_signature,
+                    "updated_monotonic": time.monotonic(),
+                }
+            elif fallback_reason:
+                self.yoagent_cli_sessions.pop(backend, None)
+            return answer, fallback_reason, status
+
+    def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False) -> tuple[str, str, str]:
+        if not shutil.which("codex"):
+            return "", "codex CLI not found", ""
+        common = [
+            "--json",
+            "-m",
+            SUMMARY_CODEX_MODEL,
+            "-c",
+            f'model_reasoning_effort="{SUMMARY_CODEX_EFFORT}"',
+            "-c",
+            f'service_tier="{SUMMARY_CODEX_SERVICE_TIER}"',
+            "--ignore-rules",
+        ]
+        if resume and session_id:
+            args = ["codex", "exec", "resume", *common, session_id, "-"]
+        else:
+            args = ["codex", "exec", *common, "--sandbox", "read-only", "--cd", str(PROJECT_ROOT), "-"]
+        try:
+            completed = subprocess.run(
+                args,
+                input=prompt,
+                cwd=str(PROJECT_ROOT),
+                env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
+                text=True,
+                capture_output=True,
+                timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return "", str(exc), ""
+        text_parts = []
+        captured_session_id = ""
+        for line in completed.stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            captured_session_id = captured_session_id or codex_event_session_id(event)
+            text = codex_event_text(event)
+            if text:
+                text_parts.append(text)
+        if text_parts:
+            return "\n".join(text_parts).strip(), "", captured_session_id
+        error = completed.stderr.strip() or f"codex exited {completed.returncode}"
+        return "", error, captured_session_id
+
+    def run_yoagent_claude_cli(self, prompt: str, session_id: str = "", resume: bool = False) -> tuple[str, str]:
+        if not shutil.which("claude"):
+            return "", "claude CLI not found"
+        args = ["claude", "-p"]
+        if resume and session_id:
+            args.extend(["--resume", session_id])
+        elif session_id:
+            args.extend(["--session-id", session_id])
+        args.append(prompt)
+        try:
+            completed = subprocess.run(
+                args,
+                cwd=str(PROJECT_ROOT),
+                env={**os.environ, "TERM": "xterm-256color", "NO_COLOR": "1"},
+                text=True,
+                capture_output=True,
+                timeout=YOAGENT_CLI_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return "", str(exc)
+        if completed.returncode == 0 and completed.stdout.strip():
+            return completed.stdout.strip(), ""
+        return "", completed.stderr.strip() or f"claude exited {completed.returncode}"
+
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         return save_settings(patch)
 
@@ -206,6 +453,10 @@ class TmuxWebtermApp:
             return float(value)
         except (TypeError, ValueError):
             return 0.5
+
+    def auto_approve_prompt_source(self) -> str:
+        value = settings_payload().get("settings", {}).get("yolo", {}).get("prompt_source", "hybrid")
+        return value if value in {"pane", "hybrid"} else "hybrid"
 
     def metadata_badge_pulse_seconds(self) -> float:
         value = settings_payload().get("settings", {}).get("appearance", {}).get("metadata_badge_pulse_seconds", METADATA_BADGE_PULSE_SECONDS)
@@ -1007,6 +1258,7 @@ class TmuxWebtermApp:
             event_callback=self.log_auto_event,
             owner_extra=self.control_server.owner_payload(),
             dangerously_yolo=self.dangerously_yolo,
+            prompt_source=self.auto_approve_prompt_source(),
         )
         started, owner = worker.start()
         if started:
@@ -1019,6 +1271,7 @@ class TmuxWebtermApp:
                 event_callback=self.log_auto_event,
                 owner_extra=self.control_server.owner_payload(),
                 dangerously_yolo=self.dangerously_yolo,
+                prompt_source=self.auto_approve_prompt_source(),
             )
             started, owner = worker.start()
             if started:
@@ -1066,10 +1319,10 @@ class TmuxWebtermApp:
                 prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": "", "error": "failed to capture pane"}
                 screen = {"key": "disconnected", "text": "failed to capture pane"}
                 return prompt, screen
-            prompt_state = module.approval_prompt_state(visible_text)
+            prompt_state = module.hybrid_approval_prompt_state(session, visible_text, prompt_source=self.auto_approve_prompt_source())
             if prompt_state.get("visible") and prompt_state.get("type") == "bash":
                 pane_text = module.tmux_capture_pane(session)
-                prompt_state = module.approval_prompt_state(visible_text, pane_text or visible_text)
+                prompt_state = module.hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
             screen_state = module.agent_screen_state(visible_text)
             if screen_state.get("key") == "idle":
                 infos, _errors = discover_sessions([session])

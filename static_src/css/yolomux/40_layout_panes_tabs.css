@@ -331,6 +331,15 @@ body.layout-resizing {
 .panel.needs-blocked-pane {
   --panel-ring-color: #ff3347;
 }
+.panel.preview-linked:not(.active-pane):not(.typing-ready-pane):not(.needs-input-pane):not(.needs-exec-pane):not(.needs-blocked-pane)::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  z-index: 19;
+  border: 1.5px solid color-mix(in srgb, var(--brand-green) 72%, transparent);
+  border-radius: inherit;
+  pointer-events: none;
+}
 .panel.active-pane::after,
 .panel.typing-ready-pane::after,
 .panel.needs-input-pane::after,
@@ -865,7 +874,7 @@ body.layout-resizing {
   min-width: 0;
   padding-inline: 3px;
 }
-.tabs .tab:not(.tmux-window-step):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-minimize):not(.pane-expand) {
+.tabs .tab:not(.tmux-window-step):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-detail-toggle):not(.pane-minimize):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
   padding-inline: 3px;
@@ -924,6 +933,7 @@ body.layout-resizing {
   color: currentColor;
 }
 .tabs .pane-close,
+.tabs .pane-detail-toggle,
 .tabs .pane-minimize,
 .tabs .pane-expand {
   position: relative;
@@ -934,6 +944,8 @@ body.layout-resizing {
 }
 .tabs .pane-close::before,
 .tabs .pane-close::after,
+.tabs .pane-detail-toggle::before,
+.tabs .pane-detail-toggle::after,
 .tabs .pane-minimize::before,
 .tabs .pane-minimize::after,
 .tabs .pane-expand::before,
@@ -958,6 +970,26 @@ body.layout-resizing {
 }
 .tabs .pane-minimize::after {
   display: none;
+}
+.tabs .pane-detail-toggle.active,
+.panel.active-pane .panel-head .tabs .pane-detail-toggle.active {
+  color: #dfe6ef;
+  background: var(--pc-control-bg);
+  border-color: var(--pc-control-border);
+}
+.tabs .pane-detail-toggle::before {
+  width: 10px;
+  height: 8px;
+  border: 1.4px solid currentColor;
+  border-radius: 2px;
+  background: transparent;
+  transform: translate(-50%, -50%);
+  clip-path: polygon(0 0, 72% 0, 100% 28%, 100% 100%, 0 100%);
+}
+.tabs .pane-detail-toggle::after {
+  width: 6px;
+  height: 1.3px;
+  transform: translate(-50%, calc(-50% + 2px));
 }
 .tabs .pane-expand::before {
   transform: translate(-50%, -50%) rotate(0deg);
@@ -1007,4 +1039,116 @@ body.layout-resizing {
   border-color: var(--auto-border);
   font-weight: 700;
   box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.28), 0 0 14px var(--auto-glow);
+}
+.panel-head .tabs .pane-detail-toggle.active,
+.panel.active-pane .panel-head .tabs .pane-detail-toggle.active {
+  color: #dfe6ef;
+  background: var(--pc-control-bg);
+  border-color: var(--pc-control-border);
+}
+.panel-head .tabs .pane-detail-toggle.active:hover,
+.panel.active-pane .panel-head .tabs .pane-detail-toggle.active:hover {
+  color: #ffffff;
+  background: var(--pc-control-hover-bg);
+  border-color: var(--pc-control-hover-border);
+}
+body.theme-light .panel.empty-pane-panel {
+  background: #edf2f8;
+  border-color: #9aa6b6;
+}
+body.theme-light .empty-pane-fill {
+  border-color: #9aa6b6;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.045), rgba(15, 23, 42, 0) 46%),
+    rgba(15, 23, 42, 0.018);
+}
+body.theme-light .panel-detail-row {
+  color: var(--text);
+  background: #eef3f9;
+}
+body.theme-light .panel-detail-close:hover,
+body.theme-light .panel-detail-close:focus-visible {
+  color: #0f172a;
+  background: rgba(15, 23, 42, 0.08);
+}
+body.theme-light .panel.typing-ready-pane {
+  border-color: #9aa6b6;
+}
+body.theme-light .panel.active-pane {
+  border-color: #6aa052;
+  box-shadow: inset 0 0 0 1px rgba(95, 152, 0, 0.74);
+}
+body.theme-light .panel-head,
+body.theme-light .panel.active-pane .panel-head {
+  color: #17202c;
+  background: #edf2f8;
+}
+body.theme-light .panel.active-pane .panel-head .meta,
+body.theme-light .panel.active-pane .panel-head .meta-branch,
+body.theme-light .panel.active-pane .panel-head .meta-path,
+body.theme-light .panel.active-pane .panel-head .session-button-dir,
+body.theme-light .panel.active-pane .panel-head .session-button-detail {
+  color: #17202c;
+}
+body.theme-light .pane-tab {
+  color: #17202c;
+  background: var(--pane-inactive-tab-bg);
+  border-color: var(--pane-inactive-tab-border);
+  border-bottom-color: var(--pane-inactive-tab-border);
+}
+body.theme-light .pane-tab:hover {
+  color: #0f172a;
+  background: var(--pane-inactive-tab-bg-hover);
+  border-color: #6b7788;
+}
+body.theme-light .pane-tab.active {
+  color: #0f172a;
+  background: #ffffff;
+  border-color: #6aa052;
+  border-bottom-color: #ffffff;
+  box-shadow: inset 0 3px 0 rgba(95, 152, 0, 0.82);
+}
+body.theme-light .pane-tab.active .session-button-name,
+body.theme-light .pane-tab.active .session-button-dir,
+body.theme-light .pane-tab.active .session-button-detail,
+body.theme-light .pane-tab.active .session-yolo-marker.active {
+  color: #0f172a;
+}
+body.theme-light .tab.active:not(.auto-toggle),
+body.theme-light .panel-head .tab.active:not(.auto-toggle),
+body.theme-light .panel.active-pane .panel-head .tab.active:not(.auto-toggle) {
+  color: #0f172a;
+  background: #ffffff;
+  border-color: #6aa052;
+  box-shadow: inset 0 2px 0 rgba(95, 152, 0, 0.72);
+}
+body.theme-light .tabs .pane-actions,
+body.theme-light .tabs .panel-tab-overflow,
+body.theme-light .tabs .pc-window-control,
+body.theme-light .panel-head .tabs .pane-detail-toggle.active,
+body.theme-light .panel.active-pane .panel-head .tabs .pane-detail-toggle.active {
+  color: #17202c;
+  background: var(--pc-control-bg);
+  border-color: var(--pc-control-border);
+}
+body.theme-light .tabs .pane-actions:hover,
+body.theme-light .tabs .pane-actions:focus-visible,
+body.theme-light .tabs .panel-tab-overflow:hover,
+body.theme-light .tabs .panel-tab-overflow:focus-visible,
+body.theme-light .tabs .pc-window-control:hover,
+body.theme-light .panel-head .tabs .pane-detail-toggle.active:hover,
+body.theme-light .panel.active-pane .panel-head .tabs .pane-detail-toggle.active:hover {
+  color: #0f172a;
+  background: var(--pc-control-hover-bg);
+  border-color: var(--pc-control-hover-border);
+}
+body.theme-light .tabs .pc-zoom {
+  color: #10230b;
+  background: var(--pc-zoom-bg);
+  border-color: var(--pc-zoom-border);
+}
+body.theme-light .tabs .pc-zoom:hover {
+  color: #10230b;
+  background: var(--pc-zoom-hover-bg);
+  border-color: var(--pc-zoom-hover-border);
 }

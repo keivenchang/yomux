@@ -615,7 +615,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -665,7 +665,7 @@ function openFileEditorItems() {
 }
 
 function computeLayoutItems() {
-  return [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {
@@ -1050,7 +1050,7 @@ function keyboardShortcutCatalog() {
       {label: 'Redo accept/reject chunk', keys: appShortcutText('Z', {shift: true})},
     ]},
     {section: 'Tabs / Panes', items: [
-      {label: 'Close active tab', keys: appShortcutText('W')},
+      {label: 'Close active editor/viewer tab', keys: `${appShortcutText('W')} · ${appShortcutText('Backspace')} outside text`},
       {label: 'Move or split tab', keys: 'Drag a tab'},
       {label: 'Session actions', keys: 'Right-click a tmux tab'},
       {label: 'Close menu or dialog', keys: 'Esc'},
@@ -1126,6 +1126,7 @@ function flattenMenuCommands(items, prefix = []) {
         label: [...prefix, item.label].join(' / '),
         detail: item.detail || '',
         key: `menu:${[...prefix, item.label].join('/')}`,
+        targetItem: item.targetItem || '',
         keybinding: commandPaletteKeybinding([...prefix, item.label].join(' / '), item.detail || ''),
         run: item.action,
       });
@@ -1155,7 +1156,10 @@ function commandPaletteCommandItems() {
     keybinding: 'Enter',
     run: () => selectSession(item),
   }));
-  const menuItems = appMenuTree().flatMap(menu => flattenMenuCommands(menu.items, [menu.label]));
+  const tabItemIds = new Set(commandPaletteAllTabItems());
+  const menuItems = appMenuTree()
+    .flatMap(menu => flattenMenuCommands(menu.items, [menu.label]))
+    .filter(item => !(item.targetItem && isVirtualItem(item.targetItem) && tabItemIds.has(item.targetItem)));
   const settingItems = preferenceSections().flatMap(section => section.items.map(item => ({
     group: 'Settings',
     label: `${section.title} / ${item.label}`,
@@ -1200,6 +1204,33 @@ function fileQuickOpenQueryParts(query = commandPaletteQuery) {
   };
 }
 
+function fileQuickOpenPathQuery(query = commandPaletteQuery) {
+  const text = fileQuickOpenQueryParts(query).query;
+  if (!text.startsWith('/') && !text.startsWith('~')) return {active: false, directory: '', filter: ''};
+  if (text === '~') return {active: true, directory: '~', filter: ''};
+  if (text.endsWith('/')) return {active: true, directory: text || '/', filter: ''};
+  const slash = text.lastIndexOf('/');
+  if (text.startsWith('~/') && slash <= 1) return {active: true, directory: '~', filter: text.slice(2)};
+  if (slash <= 0) return {active: true, directory: '/', filter: text.slice(1)};
+  return {active: true, directory: text.slice(0, slash) || '/', filter: text.slice(slash + 1)};
+}
+
+function joinDirectoryPath(directory, name) {
+  if (!directory || directory === '/') return `/${name}`;
+  if (directory === '~') return `~/${name}`;
+  return `${directory.replace(/\/+$/, '')}/${name}`;
+}
+
+function descendFileQuickOpenDirectory(path) {
+  const directory = normalizeDirectoryPath(path);
+  commandPaletteQuery = `${directory}${directory.endsWith('/') ? '' : '/'}`;
+  commandPaletteIndex = 0;
+  const input = commandPaletteNode?.querySelector?.('.command-palette-input');
+  if (input) input.value = commandPaletteQuery;
+  renderCommandPaletteResults();
+  refreshFileQuickOpenCandidates(commandPaletteQuery);
+}
+
 function revealOpenFileLineSoon(path, line) {
   if (!line) return;
   requestAnimationFrame(() => {
@@ -1225,18 +1256,19 @@ async function openFileQuickOpenPath(path, options = {}) {
 
 function fileQuickOpenItem(path, options = {}) {
   const label = basenameOf(path);
+  const isDir = options.kind === 'dir';
   const detail = compactHomePath(path);
   return {
     group: options.group || 'Files',
-    label,
+    label: isDir ? `${label}/` : label,
     detail,
     key: `file:${path}`,
-    iconText: fileIconFor(label),
-    keybinding: `${appShortcutText('Enter')} split`,
+    iconText: isDir ? '▸' : fileIconFor(label),
+    keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
     searchFields: [label, path, detail, options.relativePath || ''],
     sortBonus: Number(options.sortBonus || 0),
-    run: () => openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
-    splitRun: () => openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line, split: true}),
+    run: () => isDir ? descendFileQuickOpenDirectory(path) : openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
+    splitRun: isDir ? null : () => openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line, split: true}),
   };
 }
 
@@ -1263,6 +1295,7 @@ function fileQuickOpenItems() {
     add(fileQuickOpenItem(path, {
       group: 'Files',
       relativePath: file.relative_path || file.name || '',
+      kind: file.kind || 'file',
       sortBonus: file.uploaded === true ? -500 : 0,
     }));
   }
@@ -1326,6 +1359,8 @@ function commandPaletteSearchQuery(query = commandPaletteQuery) {
   const parts = fileQuickOpenQueryParts(query);
   if (parts.commandMode) return String(query || '').replace(/^>\s*/, '').trim();
   if (parts.symbolMode) return String(query || '').replace(/^@\s*/, '').trim();
+  const pathQuery = fileQuickOpenPathQuery(query);
+  if (pathQuery.active) return pathQuery.filter;
   return parts.query;
 }
 
@@ -1472,7 +1507,7 @@ function invokeCommandPaletteSelection(event = null) {
 function scheduleFileQuickOpenSearch(options = {}) {
   if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
   const run = () => {
-    if (commandPaletteMode === 'files' && !commandPaletteQuery.trim().startsWith('>')) refreshFileQuickOpenCandidates(commandPaletteSearchQuery());
+    if (commandPaletteMode === 'files' && !commandPaletteQuery.trim().startsWith('>')) refreshFileQuickOpenCandidates(commandPaletteQuery);
   };
   if (options.immediate) run();
   else fileQuickOpenDebounce = setTimeout(run, 160);
@@ -1485,12 +1520,31 @@ async function refreshFileQuickOpenCandidates(query = '') {
   fileQuickOpenLoading = true;
   renderCommandPaletteResults();
   try {
-    const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(root)}&query=${encodeURIComponent(query)}&limit=500`);
+    const pathQuery = fileQuickOpenPathQuery(query);
+    const response = pathQuery.active
+      ? await apiFetch(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`)
+      : await apiFetch(`/api/fs/search?root=${encodeURIComponent(root)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     if (requestId !== fileQuickOpenRequestId) return;
-    fileQuickOpenRoot = payload.root || root;
-    fileQuickOpenCandidates = Array.isArray(payload.files) ? payload.files : [];
+    if (pathQuery.active) {
+      fileQuickOpenRoot = payload.path || pathQuery.directory || root;
+      const filter = String(pathQuery.filter || '').toLowerCase();
+      fileQuickOpenCandidates = (Array.isArray(payload.entries) ? payload.entries : [])
+        .filter(entry => entry?.kind === 'file' || entry?.kind === 'dir')
+        .filter(entry => !filter || String(entry.name || '').toLowerCase().includes(filter))
+        .map(entry => ({
+          name: entry.name || '',
+          path: joinDirectoryPath(payload.path || pathQuery.directory || '/', entry.name || ''),
+          relative_path: entry.name || '',
+          kind: entry.kind || 'file',
+          size: entry.size,
+          mtime: entry.mtime,
+        }));
+    } else {
+      fileQuickOpenRoot = payload.root || root;
+      fileQuickOpenCandidates = Array.isArray(payload.files) ? payload.files : [];
+    }
     fileQuickOpenError = '';
   } catch (error) {
     if (requestId !== fileQuickOpenRequestId) return;

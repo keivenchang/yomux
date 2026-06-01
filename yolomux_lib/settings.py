@@ -26,12 +26,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "default_sessions": [],
     },
     "appearance": {
+        "theme": "dark",
         "ui_font_size": 13,
         "terminal_font_size": 13,
         "editor_font_size": 13,
         "editor_color_scheme": "dark",
         "editor_dark_color_scheme": "dark",
         "editor_light_color_scheme": "yolomux-light",
+        "editor_cursor_style": "line",
         "file_explorer_font_size": 13,
         "tab_width": 240,
         "red_reminder_ms": 1550,
@@ -76,9 +78,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "uploads": {
         "filename_template": DEFAULT_UPLOAD_FILENAME_TEMPLATE,
     },
+    "yoagent": {
+        "backend": "deterministic",
+        "invocation": "cli",
+        "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Help users operate YOLOmux using the supplied concepts and report only from the supplied agent activity context. Write like a normal human status update, not a metadata list. Do not run tools or inspect ~/.claude, ~/.codex, transcript directories, or any filesystem path. Do not say Sup. Do not invent missing facts.",
+        "intro": "Start with the user's most recent work, then say what is currently being changed and why. Use per-session last-worked timestamps to call out fresh and stale context. Give a concrete recommendation for what to work on next, plus one short tip for using AI agents more efficiently when useful.",
+        "format": "Prefer one short paragraph in this shape: Your most recent work is about <topic>, and you are currently making changes to <files or repos> in order to <goal>. Other work includes <other topics>. Session <id> was last worked <age> ago; session <id> is stale at <age>. You have not touched <area> for quite some time. Recommendation: <next best action>. Efficiency tip: <how to use the AI sessions better>. Omit any clause the context does not support. Put changed-file totals and active/idle agent count after the work summary. Avoid repeating repo, task, or session names.",
+    },
     "yolo": {
         "rule_file_path": "~/.config/yolomux/yolo-rules.yaml",
         "dry_run": False,
+        "prompt_source": "hybrid",
     },
 }
 
@@ -126,6 +136,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
 
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "grid", "wall"},
+    ("appearance", "theme"): {"system", "dark", "light"},
     ("appearance", "editor_color_scheme"): {
         "dark",
         "one-dark",
@@ -154,20 +165,26 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
         "one-light",
         "solarized-light",
     },
+    ("appearance", "editor_cursor_style"): {"line", "block"},
     ("file_explorer", "root_mode"): {"fixed", "sync"},
     ("file_explorer", "image_open_mode"): {"same-tab", "new-tab"},
+    ("yoagent", "backend"): {"deterministic", "claude", "codex"},
+    ("yoagent", "invocation"): {"cli", "api-key"},
+    ("yolo", "prompt_source"): {"pane", "hybrid"},
 }
 
 SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
     ("general", "default_layout"): "single | grid | wall. Reserved default for new visits.",
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
+    ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and terminal colors.",
     ("appearance", "ui_font_size"): "Pixels, 8-20. Drives tab and compact UI text.",
     ("appearance", "terminal_font_size"): "Pixels, 8-28. Applied live to xterm.js terminals.",
     ("appearance", "editor_font_size"): "Pixels, 8-28. Applied live to editor and preview panes.",
     ("appearance", "editor_color_scheme"): "Legacy active editor color scheme. Kept for compatibility; new UI uses separate dark/light scheme defaults.",
     ("appearance", "editor_dark_color_scheme"): "Dark editor scheme used by the editor dark/light toggle.",
     ("appearance", "editor_light_color_scheme"): "Light editor scheme used by the editor dark/light toggle. Default is YOLOmux Light.",
+    ("appearance", "editor_cursor_style"): "line | block. CodeMirror caret shape; both use the active editor cursor color.",
     ("appearance", "file_explorer_font_size"): "Pixels, 8-24. Applied live to File Explorer/Finder.",
     ("appearance", "tab_width"): "Pixels, 120-420. Drives the pane tab width CSS variable.",
     ("appearance", "red_reminder_ms"): "Milliseconds, 0 disables the attention pulse cycle.",
@@ -199,8 +216,14 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "refresh_ms"): "Milliseconds, 1000-60000. Refreshes changed File Explorer directories and open files; client-side jitter avoids synchronized polling.",
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
+    ("yoagent", "backend"): "deterministic | claude | codex. The deterministic internal value is shown as No agent; Claude/Codex use the selected invocation when available.",
+    ("yoagent", "invocation"): "cli | api-key. CLI runs the local agent binary; api-key is reserved and falls back safely today.",
+    ("yoagent", "system_prompt"): "System prompt used when YO!agent calls a model backend.",
+    ("yoagent", "intro"): "Instruction prefix added before the activity context.",
+    ("yoagent", "format"): "Output-format instruction added before the user's question.",
     ("yolo", "rule_file_path"): "Path to the YOLO rule YAML file. The file's top-level default: value controls fallback behavior.",
     ("yolo", "dry_run"): "true/false. Log rule decisions without acting.",
+    ("yolo", "prompt_source"): "pane | hybrid. pane uses visible tmux detection only; hybrid lets recent transcript JSONL rescue prompt type/command only when a selectable prompt is visible.",
 }
 
 

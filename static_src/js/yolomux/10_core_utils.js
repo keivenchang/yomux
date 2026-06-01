@@ -186,6 +186,55 @@ function normalizeEditorSchemeId(value) {
   return EDITOR_SCHEMES[normalized] ? normalized : defaultEditorScheme;
 }
 
+function normalizeGlobalThemeMode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['system', 'dark', 'light'].includes(normalized) ? normalized : defaultGlobalTheme;
+}
+
+function globalThemeMediaQuery() {
+  try { return window.matchMedia?.('(prefers-color-scheme: dark)') || null; }
+  catch (_) { return null; }
+}
+
+function systemPrefersDarkTheme() {
+  const query = globalThemeMediaQuery();
+  return query ? query.matches === true : true;
+}
+
+function resolvedGlobalThemeMode(mode = globalThemeMode) {
+  const normalized = normalizeGlobalThemeMode(mode);
+  if (normalized === 'system') return systemPrefersDarkTheme() ? 'dark' : 'light';
+  return normalized;
+}
+
+function globalThemeIsDark(mode = globalThemeMode) {
+  return resolvedGlobalThemeMode(mode) === 'dark';
+}
+
+function globalThemeLabel(mode = globalThemeMode) {
+  const normalized = normalizeGlobalThemeMode(mode);
+  if (normalized === 'system') return `System (${resolvedGlobalThemeMode(mode)})`;
+  return normalized === 'dark' ? 'Dark' : 'Light';
+}
+
+function nextGlobalThemeMode(mode = globalThemeMode) {
+  const normalized = normalizeGlobalThemeMode(mode);
+  if (normalized === 'system') return 'dark';
+  if (normalized === 'dark') return 'light';
+  return 'system';
+}
+
+function terminalThemeForGlobalTheme(mode = globalThemeMode) {
+  const theme = TERMINAL_THEMES[resolvedGlobalThemeMode(mode)] || TERMINAL_THEMES.dark;
+  return {...theme};
+}
+
+function normalizeEditorThemeMode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['inherit', 'system', 'global', 'auto', ''].includes(normalized)) return editorThemeInheritMode;
+  return normalizeEditorSchemeId(normalized);
+}
+
 function normalizeEditorSchemeForMode(value, dark) {
   const id = normalizeEditorSchemeId(value);
   const scheme = EDITOR_SCHEMES[id];
@@ -194,6 +243,10 @@ function normalizeEditorSchemeForMode(value, dark) {
 }
 
 function activeEditorScheme() {
+  if (fileEditorThemeMode === editorThemeInheritMode) {
+    const inherited = configuredEditorSchemeForMode(globalThemeIsDark());
+    return EDITOR_SCHEMES[inherited] || EDITOR_SCHEMES[defaultEditorScheme] || EDITOR_SCHEMES.dark;
+  }
   return EDITOR_SCHEMES[normalizeEditorSchemeId(fileEditorThemeMode)] || EDITOR_SCHEMES[defaultEditorScheme] || EDITOR_SCHEMES.dark;
 }
 
@@ -205,21 +258,21 @@ function configuredEditorSchemeForMode(dark) {
 
 function readStoredEditorThemeMode() {
   try {
-    const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey) || defaultEditorScheme;
-    return normalizeEditorSchemeId(value);
+    const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey);
+    return normalizeEditorThemeMode(value || editorThemeInheritMode);
   } catch (_) {
-    return defaultEditorScheme;
+    return editorThemeInheritMode;
   }
 }
 
 function writeStoredEditorThemeMode(mode) {
   try {
-    window.localStorage?.setItem(fileEditorThemeModeStorageKey, normalizeEditorSchemeId(mode));
+    window.localStorage?.setItem(fileEditorThemeModeStorageKey, normalizeEditorThemeMode(mode));
   } catch (_) {}
 }
 
 function readConfiguredEditorScheme() {
-  return normalizeEditorSchemeId(readStoredEditorThemeMode());
+  return normalizeEditorThemeMode(readStoredEditorThemeMode());
 }
 
 function syncPressedButton(button, active, options = {}) {
@@ -352,6 +405,7 @@ function updatePanelInactiveOverlays() {
     panel.classList.toggle('focused-pane', item === focusedPanelItem);
     panel.classList.toggle('active-pane', item === focusedPanelItem);
   }
+  if (typeof updateLinkedFilePreviewRings === 'function') updateLinkedFilePreviewRings();
 }
 
 function esc(value) {
@@ -388,6 +442,15 @@ function fuzzySubsequenceScore(query, text) {
   return match ? match.score : Number.NEGATIVE_INFINITY;
 }
 
+function fuzzyCanonicalPrefixText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function fuzzyFieldStartsWithQuery(query, text) {
+  const needle = fuzzyCanonicalPrefixText(query);
+  return Boolean(needle) && fuzzyCanonicalPrefixText(text).startsWith(needle);
+}
+
 function fuzzySearchScore(query, fields) {
   const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
   if (!tokens.length) return 0;
@@ -397,8 +460,11 @@ function fuzzySearchScore(query, fields) {
   for (const token of tokens) {
     let best = Number.NEGATIVE_INFINITY;
     for (const [index, value] of values.entries()) {
-      const fieldScore = fuzzySubsequenceScore(token, value);
-      if (Number.isFinite(fieldScore)) best = Math.max(best, fieldScore - index * 2);
+      let fieldScore = fuzzySubsequenceScore(token, value);
+      if (Number.isFinite(fieldScore) && fuzzyFieldStartsWithQuery(token, value)) {
+        fieldScore += index === 0 ? 20000 : 12000;
+      }
+      if (Number.isFinite(fieldScore)) best = Math.max(best, fieldScore - index * 20);
     }
     if (!Number.isFinite(best)) return Number.NEGATIVE_INFINITY;
     total += best;
@@ -827,6 +893,17 @@ function showSessionContextMenu(session, x, y, options = {}) {
   const renameAction = options.tab ? () => beginPaneTabRename(options.tab, session) : () => renameTmuxSession(session);
   for (const item of tmuxSessionActionCommands(session, {renameAction})) {
     appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
+  }
+  const viewItems = tmuxSessionViewCommands(session).filter(item => ['Transcript', 'AI summary', 'Event log'].includes(item.label));
+  if (viewItems.length) {
+    appendContextMenuSeparator(menu);
+    for (const item of viewItems) {
+      appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {
+        disabled: item.disabled,
+        checked: item.checked,
+        title: item.detail || '',
+      });
+    }
   }
   sessionContextMenu.open(menu, x, y);
 }

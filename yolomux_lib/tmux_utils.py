@@ -114,8 +114,20 @@ def tmux_send_enter(target: str) -> None:
     tmux_run("send-keys", "-t", tmux_exact_target(target), "Enter", check=False)
 
 
-def tmux_send_option2(target: str) -> None:
+def tmux_send_option(target: str, option: int, selected_option: int | None = None) -> None:
     exact_target = tmux_exact_target(target)
-    tmux_run("send-keys", "-t", exact_target, "Down")
-    time.sleep(0.3)
+    selected = selected_option if selected_option and selected_option > 0 else 1
+    delta = option - selected
+    key = "Down" if delta > 0 else "Up"
+    for _ in range(min(abs(delta), 6)):
+        tmux_run("send-keys", "-t", exact_target, key, check=False)
+        time.sleep(0.1)
     tmux_send_enter(exact_target)
+
+
+def tmux_send_option1(target: str, selected_option: int | None = None) -> None:
+    tmux_send_option(target, 1, selected_option)
+
+
+def tmux_send_option2(target: str, selected_option: int | None = None) -> None:
+    tmux_send_option(target, 2, selected_option)

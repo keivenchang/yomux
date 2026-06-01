@@ -22,12 +22,18 @@ function paneFrameControlsHtml(session, options = {}) {
   const disabledAttrs = label => ` type="button" disabled title="unavailable for ${esc(unavailableLabel)}" aria-label="${esc(label)}"`;
   const controls = [];
   const includeActions = options.actions ?? isTmuxSession(session);
+  const includeDetails = options.details === true;
   const includeMinimize = options.minimize !== false;
   const includeExpand = options.expand !== false;
   if (includeActions) {
     controls.push(disabled
       ? `<button class="tab pane-actions" ${disabledAttrs('Actions')}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
       : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="session actions" aria-label="Session actions"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
+  }
+  if (includeDetails) {
+    controls.push(disabled
+      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(infoTabLabel)}></button>`
+      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel)}" aria-label="${esc(infoTabLabel)}" aria-pressed="true"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -68,7 +74,6 @@ function panelControlsHtml(session, options = {}) {
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
-  const infoAttrs = disabled ? disabledAttrs(infoTabLabel) : ` type="button" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel)}" aria-label="${esc(infoTabLabel)}"`;
   const info = transcriptMeta.sessions?.[session];
   const terminalTitle = terminalTabTitle(session, info);
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
@@ -85,41 +90,13 @@ function panelControlsHtml(session, options = {}) {
       closeTitle: `close ${fileExplorerLabel()}`,
       closeLabel: `Close ${fileExplorerLabel()}`,
     })
-    : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), close: false});
+    : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), details: true, close: false});
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
           <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
           ${windowStepButtonHtml(session, 'next', steps.next, disabled)}
-          <button type="button" class="tab panel-tab-overflow" data-panel-tab-overflow="${esc(session)}" title="Transcript, AI summary, and event log" aria-label="Transcript, AI summary, and event log"><span class="pane-actions-dots" aria-hidden="true">...</span></button>
-          <button class="tab panel-detail-toggle active" ${infoAttrs}>Info</button>
           ${frameHtml}
         </div>`;
-}
-
-function showPanelTabOverflowMenu(session, x, y) {
-  closeTerminalContextMenu();
-  closeFileContextMenu();
-  closeSessionContextMenu();
-  const active = activeSessions.includes(session);
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu session-context-menu panel-tab-overflow-menu';
-  const disabledDetail = active ? '' : 'Open the tab in a pane first';
-  const add = (label, tabName, options = {}) => {
-    appendContextMenuButton(menu, label, () => {
-      if (active) activateTab(session, tabName, {userInitiated: true});
-    }, closeSessionContextMenu, {
-      disabled: !active || options.disabled,
-      checked: active && panelActiveTabName(session) === tabName,
-      title: options.disabled ? options.disabledTitle : disabledDetail,
-    });
-  };
-  add('Transcript', 'transcript');
-  add('AI summary', 'summary', {
-    disabled: readOnlyMode,
-    disabledTitle: 'AI summary requires admin access',
-  });
-  add('Event log', 'events');
-  sessionContextMenu.open(menu, x, y);
 }
 
 function virtualPanelControlsHtml(session, label) {
@@ -228,10 +205,33 @@ function renderInfoPanel() {
   });
 }
 
-function renderYosupPanel() {
-  const node = document.getElementById('yosup-content');
+function scrollYoagentChatToBottom(node = document.getElementById('yoagent-content')) {
+  const history = node?.querySelector?.('.yoagent-chat-history');
+  if (history) history.scrollTop = history.scrollHeight;
+  if (node) node.scrollTop = node.scrollHeight;
+  const panelBody = node?.closest?.('.info-pane, .panel-overlay-root, .panel');
+  if (panelBody && panelBody !== node) panelBody.scrollTop = panelBody.scrollHeight;
+}
+
+function renderYoagentPanel(options = {}) {
+  const node = document.getElementById('yoagent-content');
   if (!node) return;
-  node.innerHTML = globalActivitySummaryHtml();
+  const input = node.querySelector('[data-yoagent-chat-input]');
+  const inputFocused = input && document.activeElement === input;
+  const selectionStart = inputFocused ? input.selectionStart : null;
+  const selectionEnd = inputFocused ? input.selectionEnd : null;
+  if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
+  node.innerHTML = `${globalActivitySummaryHtml()}${yoagentSessionSummariesHtml()}${yoagentChatHtml()}`;
+  if (options.scrollBottom !== false) {
+    requestAnimationFrame(() => scrollYoagentChatToBottom(node));
+    setTimeout(() => scrollYoagentChatToBottom(node), 0);
+  }
+  if (!inputFocused) return;
+  const nextInput = node.querySelector('[data-yoagent-chat-input]');
+  nextInput?.focus?.({preventScroll: true});
+  if (nextInput && selectionStart !== null && selectionEnd !== null) {
+    try { nextInput.setSelectionRange(selectionStart, selectionEnd); } catch (_) {}
+  }
 }
 
 function infoBranchRows() {
@@ -343,13 +343,6 @@ function bindPanelControls(panel, session) {
   });
   panel.querySelectorAll('[data-window-dir]').forEach(button => {
     button.addEventListener('click', handleWindowStepButtonClick);
-  });
-  panel.querySelector('[data-panel-tab-overflow]')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    const button = event.currentTarget;
-    const rect = button.getBoundingClientRect();
-    showPanelTabOverflowMenu(button.dataset.panelTabOverflow || session, rect.left, rect.bottom + 4);
   });
   panel.querySelector('[data-pane-close]')?.addEventListener('click', event => {
     event.preventDefault();
@@ -1021,12 +1014,7 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
-    theme: {
-      background: '#11151d',
-      foreground: '#dfe6ef',
-      cursor: '#f5f7fb',
-      selectionBackground: '#3a4b64'
-    }
+    theme: terminalThemeForGlobalTheme()
   });
   term.open(container);
   installTerminalLinkProvider(term);
@@ -1294,7 +1282,7 @@ async function refreshTranscripts() {
     if (sessionsChanged) renderPanels(previousActive);
     renderSessionButtons();
     renderInfoPanel();
-    renderYosupPanel();
+    renderYoagentPanel();
     refreshActivitySummary({silent: true});
     for (const session of activeSessions.filter(isTmuxSession)) {
       const meta = document.getElementById(`meta-${session}`);
@@ -1619,7 +1607,7 @@ function refreshAll() {
 
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
-  applyEditorThemeMode();
+  installGlobalThemeMediaListener();
   applyFileExplorerStaticLabels();
   renderTransportWarning();
   renderTabMetaToggle();
@@ -1664,6 +1652,10 @@ function globalShortcutTargetAllowsPlatformAction(target) {
   return isMacPlatform() || globalShortcutTargetAllowsAppAction(target);
 }
 
+function itemCanCloseWithAppShortcut(item) {
+  return isFileEditorItem(item) || isFilePreviewItem(item) || isImageViewerItem(item);
+}
+
 function toggleFileExplorerShortcut() {
   if (itemInLayout(fileExplorerItemId)) {
     fileExplorerShortcutRestoreSlots = cloneLayoutSlots();
@@ -1703,10 +1695,17 @@ topbar?.addEventListener('pointerenter', () => {
   closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
 });
-document.addEventListener('keydown', event => {
+function handleGlobalShortcutKeydown(event) {
   const mod = appModifier(event);
-  const key = event.key.toLowerCase();
+  const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
+  if (mod && key === 'w') {
+    event.preventDefault();
+    event.stopPropagation();
+    const item = currentActiveMenuItem();
+    if (itemCanCloseWithAppShortcut(item)) removeSessionFromLayout(item);
+    return;
+  }
   if (mod && key === 'p' && platformActionAllowed) {
     event.preventDefault();
     if (event.shiftKey) openCommandPalette();
@@ -1714,10 +1713,10 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (mod && platformActionAllowed) {
-    if (key === 'w') {
+    if ((key === 'backspace' || key === 'delete') && globalShortcutTargetAllowsAppAction(event.target)) {
       event.preventDefault();
       const item = currentActiveMenuItem();
-      if (item) removeSessionFromLayout(item);
+      if (itemCanCloseWithAppShortcut(item)) removeSessionFromLayout(item);
       return;
     }
     if (key === 'b') {
@@ -1740,7 +1739,8 @@ document.addEventListener('keydown', event => {
     closeKeyboardShortcutsOverlay();
     closeAppMenus();
   }
-});
+}
+window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
 window.addEventListener('resize', () => {
   scheduleResponsiveLayoutPrune();
   scheduleAllTabStripOverflowChecks();

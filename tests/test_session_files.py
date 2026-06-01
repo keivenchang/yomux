@@ -92,7 +92,7 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert by_path["new.txt"]["status"] == "A"
     assert by_path["new.txt"]["added"] == 1
     assert by_path["new.txt"]["removed"] == 0
-    assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2}]
+    assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2, "added": 2, "removed": 1}]
 
 
 def test_session_files_payload_marks_generated_upload_names(tmp_path):
@@ -149,7 +149,7 @@ def test_session_files_payload_counts_branch_commits_since_main(tmp_path):
     assert by_path["tracked.txt"]["status"] == "M"
     assert by_path["tracked.txt"]["added"] == 1
     assert by_path["tracked.txt"]["removed"] == 1
-    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 1}]
+    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 1, "added": 1, "removed": 1}]
 
 
 def test_session_files_payload_accepts_explicit_commit_refs(tmp_path):
@@ -255,7 +255,7 @@ def test_session_files_payload_uses_session_repo_without_ai_attribution(tmp_path
 
     assert payload["files"][0]["path"] == "tracked.txt"
     assert payload["files"][0]["source"] == "git"
-    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 0}]
+    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 0, "added": 1, "removed": 1}]
 
 
 def test_session_files_payload_attributes_git_fallback_to_session_agent(tmp_path):

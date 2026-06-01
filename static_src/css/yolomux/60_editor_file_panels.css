@@ -387,6 +387,8 @@
   display: none;
 }
 .file-editor-mode-control button {
+  display: grid;
+  place-items: center;
   height: 20px;
   min-width: 20px;
   width: 20px;
@@ -398,6 +400,7 @@
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
+  line-height: 1;
   cursor: pointer;
 }
 .file-editor-mode-control button:last-child {
@@ -545,6 +548,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
   justify-content: flex-end;
   padding: 0;
   min-width: 0;
@@ -658,12 +662,25 @@ body.resizing-file-explorer-changes {
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
   padding: 5px;
 }
+body.theme-light .file-explorer-pane,
+body.theme-light .file-explorer-tree-panel {
+  color: var(--text);
+  background: var(--panel);
+}
+body.theme-light .file-explorer-changes-panel {
+  color: var(--text);
+  scrollbar-color: rgba(95, 152, 0, 0.62) rgba(15, 23, 42, 0.08);
+  background: color-mix(in srgb, var(--panel2) 76%, var(--panel) 24%);
+}
 .file-explorer-changes-panel::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 .file-explorer-changes-panel::-webkit-scrollbar-track {
   background: rgba(255, 255, 255, 0.06);
+}
+body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.08);
 }
 .file-explorer-changes-panel::-webkit-scrollbar-thumb {
   min-height: 32px;
@@ -692,6 +709,11 @@ body.resizing-file-explorer-changes {
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
+}
+body.theme-light .file-explorer-changes-head {
+  color: var(--text);
+  background: var(--panel2);
+  border-color: var(--line);
 }
 .file-explorer-changes-head .changes-title {
   min-width: 0;
@@ -730,7 +752,7 @@ body.resizing-file-explorer-changes {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-@container (max-width: 360px) {
+@container (max-width: 520px) {
   .file-explorer-changes-head {
     grid-template-columns: minmax(0, 1fr) auto auto;
     grid-template-areas:
@@ -777,6 +799,9 @@ body.resizing-file-explorer-changes {
     grid-area: summary;
     justify-self: start;
     width: 100%;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
   }
 }
 .file-explorer-changes-panel .changes-repo-group {
@@ -1003,8 +1028,12 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-insertedText {
   float: right;
   max-width: calc(100% - 4px);
   margin: 0 0 0 4px;
-  padding-top: 0;
+  padding: 1px 2px;
   overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--panel2) 84%, var(--bg) 16%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 6%, transparent);
 }
 .file-editor-panel-actions .pane-frame-controls {
   margin-left: 0;
@@ -1036,6 +1065,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-insertedText {
 .file-editor-gutter-panel,
 .file-editor-wrap-panel,
 .file-editor-find-panel,
+.file-editor-diff-panel,
 .file-editor-theme-panel,
 .file-editor-reload-panel,
 .file-editor-cross-split-panel,
@@ -1164,11 +1194,11 @@ body.editor-theme-light .file-editor-code-preview {
   --markdown-emphasis: var(--lt-markdown-emphasis);
 }
 body.editor-theme-light {
-  --drop-outline: #2563eb;
+  --drop-outline: #1d4ed8;
   --drop-outline-text: #0f2d69;
-  --drop-outline-bg: rgba(37, 99, 235, 0.14);
-  --drop-outline-strong: rgba(37, 99, 235, 0.98);
-  --drop-outline-shadow: rgba(37, 99, 235, 0.58);
+  --drop-outline-bg: rgba(29, 78, 216, 0.14);
+  --drop-outline-strong: rgba(29, 78, 216, 0.98);
+  --drop-outline-shadow: rgba(29, 78, 216, 0.58);
   --drop-outline-surface: rgba(239, 246, 255, 0.88);
 }
 body.editor-theme-light .file-editor-content .markdown-body h1,
@@ -1353,6 +1383,18 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {
   color: var(--muted) !important;
   background: var(--editor-gutter-bg) !important;
   border-right-color: var(--line) !important;
+}
+.file-editor-codemirror .cm-cursor,
+.file-editor-codemirror-panel .cm-cursor {
+  border-left-color: var(--editor-cursor) !important;
+}
+body.editor-cursor-block .file-editor-codemirror .cm-cursor,
+body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
+  width: 0.62ch !important;
+  margin-left: 0 !important;
+  border-left: 0 !important;
+  background: var(--editor-cursor) !important;
+  opacity: 0.78;
 }
 .file-editor-codemirror .cm-panels,
 .file-editor-codemirror-panel .cm-panels {

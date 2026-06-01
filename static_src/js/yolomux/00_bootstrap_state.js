@@ -43,14 +43,66 @@ const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
+const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
+const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
 const fileEditorLineNumbersStorageKey = 'yolomux.editorLineNumbers';
 const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1';
 const diffRefFromStorageKey = 'yolomux.diffRefFrom';
 const diffRefToStorageKey = 'yolomux.diffRefTo';
 const editorViewModes = new Set(['edit', 'preview', 'split', 'diff']);
+const defaultGlobalTheme = 'dark';
 const defaultEditorScheme = 'dark';
 const defaultLightEditorScheme = 'yolomux-light';
+const editorThemeInheritMode = 'inherit';
+const TERMINAL_THEMES = {
+  dark: {
+    background: '#11151d',
+    foreground: '#dfe6ef',
+    cursor: '#f5f7fb',
+    cursorAccent: '#11151d',
+    selectionBackground: '#3a4b64',
+    black: '#0f1115',
+    red: '#ff6673',
+    green: '#76b900',
+    yellow: '#f5c542',
+    blue: '#70a7ff',
+    magenta: '#d8a3ff',
+    cyan: '#7ee9ff',
+    white: '#e4e8ee',
+    brightBlack: '#667286',
+    brightRed: '#ff8a94',
+    brightGreen: '#9be33d',
+    brightYellow: '#ffe08a',
+    brightBlue: '#93c5fd',
+    brightMagenta: '#f0abfc',
+    brightCyan: '#a5f3fc',
+    brightWhite: '#ffffff',
+  },
+  light: {
+    background: '#ffffff',
+    foreground: '#111827',
+    cursor: '#0f172a',
+    cursorAccent: '#ffffff',
+    selectionBackground: '#cfe3ff',
+    black: '#17202c',
+    red: '#b91c1c',
+    green: '#2f7d20',
+    yellow: '#9a6700',
+    blue: '#064ea5',
+    magenta: '#7c3aed',
+    cyan: '#0e7490',
+    white: '#d8dee8',
+    brightBlack: '#5b6573',
+    brightRed: '#dc2626',
+    brightGreen: '#3f8f2d',
+    brightYellow: '#b7791f',
+    brightBlue: '#1d4ed8',
+    brightMagenta: '#9333ea',
+    brightCyan: '#0891b2',
+    brightWhite: '#ffffff',
+  },
+};
 const EDITOR_SCHEMES = {
   dark: {
     id: 'dark', label: 'YOLOmux Dark', dark: true,
@@ -103,9 +155,9 @@ const EDITOR_SCHEMES = {
   },
   'yolomux-light': {
     id: 'yolomux-light', label: 'YOLOmux Light', dark: false,
-    bg: '#fbf9f4', fg: '#2b2b2b', cursor: '#14532d', selection: 'rgba(118, 185, 0, 0.24)', activeLine: '#f2ede1',
-    gutterBg: '#f4efe6', lineNo: '#6b7280', panel: '#f4efe6', panel2: '#ebe3d4', line: '#d4c7ad', previewBg: '#fff8e8',
-    syntax: {comment: '#6b7280', keyword: '#7c3aed', string: '#166534', number: '#b45309', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#14532d', link: '#0369a1', inlineCode: '#6b7280', inlineCodeBg: '#e6dfcf', inlineCodeBorder: '#c8bfa8', atom: '#9d174d', property: '#2563eb', strong: '#c0392b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
+    bg: '#ffffff', fg: '#1f2937', cursor: '#0f3d22', selection: 'rgba(29, 78, 216, 0.22)', activeLine: '#f4f7fb',
+    gutterBg: '#f6f8fa', lineNo: '#64748b', panel: '#f6f8fa', panel2: '#eef2f7', line: '#d0d7de', previewBg: '#ffffff',
+    syntax: {comment: '#64748b', keyword: '#6d28d9', string: '#166534', number: '#a16207', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#0f3d22', headingBg: '#ffffff', link: '#075985', inlineCode: '#0f4c81', inlineCodeBg: '#eef6ff', inlineCodeBorder: '#8ab4f8', atom: '#9d174d', property: '#1d4ed8', strong: '#a11b1b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
     diff: {addFg: '#15803d', removeFg: '#b91c1c'},
   },
   'vscode-light-plus': {
@@ -162,6 +214,7 @@ let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = null;
 let filesystemRefreshInFlight = false;
+let fileExplorerRepoInfoCacheLoaded = false;
 let fileExplorerRootMode = readStoredFileExplorerRootMode();
 let fileExplorerShowHidden = (() => {
   try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
@@ -173,6 +226,7 @@ const fileEditorImageMode = new Map();  // path -> "original" when zoomed to nat
 let fileEditorWrapEnabled = readStoredEditorWrap();
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 let fileEditorThemeMode = readStoredEditorThemeMode();
+let fileEditorCursorStyle = 'line';
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
@@ -183,6 +237,14 @@ let preferencesSearchText = '';
 let preferencesResetConfirmVisible = false;
 let preferencesSearchFresh = true;
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
+let uploadedFilesCollapsed = (() => {
+  try {
+    const value = window.localStorage?.getItem(uploadedFilesCollapsedStorageKey);
+    return value == null ? true : value !== '0';
+  } catch (_) {
+    return true;
+  }
+})();
 let sessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let sessionFilesPayloadSignature = '';
@@ -217,6 +279,7 @@ let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
+let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
 fileEditorThemeMode = readConfiguredEditorScheme();
 fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
 fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
@@ -283,8 +346,9 @@ const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
 const infoTabLabel = 'Branch Info';
-const yosupItemId = '__yosup__';
-const yosupTabLabel = "YO'sup";
+const yoagentItemId = '__yoagent__';
+const legacyYosupItemId = '__yosup__';
+const yoagentTabLabel = 'YO!agent';
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
 const changesItemId = '__changes__';
@@ -315,20 +379,20 @@ const TAB_TYPES = [
     prunePriority: () => 0,
   },
   {
-    key: 'yosup',
-    id: yosupItemId,
-    aliases: ['yosup', 'yo', 'sup', yosupItemId],
-    match: item => item === yosupItemId,
-    label: () => yosupTabLabel,
+    key: 'yoagent',
+    id: yoagentItemId,
+    aliases: ['yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
+    match: item => item === yoagentItemId || item === legacyYosupItemId,
+    label: () => yoagentTabLabel,
     shortLabel: () => 'YO',
-    terminalTitle: () => `unavailable for ${yosupTabLabel}`,
+    terminalTitle: () => `unavailable for ${yoagentTabLabel}`,
     sortRank: 0.25,
-    param: () => 'yosup',
+    param: () => 'yoagent',
     detail: () => 'Casual AI activity summary',
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
-    createPanel: () => createYosupPanel(),
-    className: () => 'info yosup-item',
-    icon: 'yosup',
+    createPanel: () => createYoagentPanel(),
+    className: () => 'info yoagent-item',
+    icon: 'yoagent',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
     prunePriority: () => 0,
   },
@@ -549,11 +613,17 @@ function applyFileExplorerStaticLabels() {
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
+let layoutItems = [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
+let activitySummaryRefreshing = false;
+let yoagentMessages = [];
+let yoagentBusy = false;
+let yoagentError = '';
+let yoagentDraft = '';
+let yoagentNotice = null;
 let notificationsEnabled = false;
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();

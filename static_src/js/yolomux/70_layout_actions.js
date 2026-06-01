@@ -443,6 +443,10 @@ function replaceLayoutLeaf(node, slot, replacement) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  const previous = activeItemForSide(side);
+  if (previous && previous !== session && typeof captureFileEditorPanelViewStateForItem === 'function') {
+    captureFileEditorPanelViewStateForItem(previous);
+  }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
@@ -636,6 +640,14 @@ function pullRequestStatusClass(pr) {
   return 'pr-status-unknown';
 }
 
+function pullRequestCiStatusClass(pr) {
+  const state = String(pr?.checks?.state || '').toLowerCase();
+  if (['success', 'passing', 'passed', 'green'].includes(state)) return 'pr-status-passing';
+  if (['failure', 'failing', 'failed', 'red', 'error', 'cancelled', 'timed_out', 'action_required'].includes(state)) return 'pr-status-failing';
+  if (['pending', 'queued', 'in_progress', 'running', 'waiting', 'requested'].includes(state)) return 'pr-status-pending';
+  return pullRequestStatusClass(pr);
+}
+
 function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
@@ -643,17 +655,11 @@ function pullRequestStatusIndicatorHtml(session, pr) {
   return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${pullRequestStatusDisplay(pr)}</span>`;
 }
 
-function pullRequestPrIndicatorHtml(session, pr) {
-  if (!pr?.number) return '';
-  return `<span class="${metadataBadgeClasses(session, 'pr', `ci-indicator tab-symbol pr-indicator ${pullRequestStatusClass(pr)}`)}">#${esc(pr.number)}</span>`;
-}
-
 function pullRequestCiIndicatorHtml(session, pr) {
   if (pullRequestStatusLabel(pr).toLowerCase() === 'merged') return '';
   const state = pr?.checks?.state;
   if (!state || state === 'unknown') return '';
-  if (['success', 'passing', 'passed', 'green'].includes(String(state).toLowerCase())) return '';
-  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">CI</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestCiStatusClass(pr)}`)}">CI</span>`;
 }
 
 function pullRequestLinkHtml(pr) {
@@ -674,7 +680,7 @@ function pullRequestColumnLinkHtml(pr) {
 function pullRequestChecksHtml(pr) {
   const checks = pr?.checks;
   if (!checks || !checks.state || checks.state === 'unknown') return '';
-  const cls = pullRequestStatusClass(pr);
+  const cls = pullRequestCiStatusClass(pr);
   const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || `CI ${checks.state}`)}</span>`];
   const checkLinks = items => (items || []).map(item => (
     item?.name ? linkHtml(item.url || '', item.name, item.state || '') : ''
@@ -727,7 +733,7 @@ function projectMetaHtml(session, info) {
   if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">dirty ${git.dirty_count}</span>`);
   if (pr?.number) {
     if (pr.checks?.state && pr.checks.state !== 'unknown') {
-      parts.push(`<span class="meta-pr-status ${pullRequestStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
+      parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }
   for (const issue of project.linear || []) {
@@ -1314,24 +1320,30 @@ function slotIsFileExplorerPane(slot) {
   return isFileExplorerItem(activeItemForSide(slot));
 }
 
+function slotIsChangesPane(slot) {
+  return isChangesItem(activeItemForSide(slot));
+}
+
 function dropIntentInlineSize(intent) {
   if (!intent || typeof intent === 'string') return 0;
   const rect = intent.targetRect || intent.previewNode?.getBoundingClientRect?.();
   return Math.max(0, Number(rect?.width) || 0);
 }
 
-function itemCanSplitFileExplorerPane(item, intent) {
+function itemCanSplitSinglePurposePane(item, intent) {
   const zone = typeof intent === 'string' ? intent : intent?.zone;
   if (zone !== 'top' && zone !== 'bottom') return false;
-  if (isFileExplorerItem(item)) return false;
+  if (isFileExplorerItem(item) || isChangesItem(item)) return false;
   const inlineSize = dropIntentInlineSize(intent);
   return !inlineSize || inlineSize >= minWidthForLayoutItem(item);
 }
 
 function dropIntentAllowsSession(session, intent) {
   if (!isLayoutItem(session) || !intent?.targetSlot) return false;
-  if (!slotIsFileExplorerPane(intent.targetSlot)) return true;
-  return itemCanSplitFileExplorerPane(session, intent);
+  if (slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) {
+    return itemCanSplitSinglePurposePane(session, intent);
+  }
+  return true;
 }
 
 function clearDropPreview() {
@@ -1361,6 +1373,7 @@ function dropSessionAtEvent(event) {
     const intent = dropIntentForEvent(event);
     clearDropPreview();
     if (!intent?.targetSlot) return;
+    if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') return;
     const zone = slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle' ? 'right' : intent.zone;
     openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: zone});
     return;
@@ -1385,6 +1398,13 @@ function handleDropDragOver(event) {
   const filePayload = fileDragPayload(event);
   if (filePayload?.path) {
     const intent = dropIntentForEvent(event);
+    if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') {
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'none';
+      clearDropPreview();
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
@@ -1417,4 +1437,3 @@ function handleDropDragLeave(event) {
   if (current?.contains(event.relatedTarget)) return;
   clearDropPreview();
 }
-

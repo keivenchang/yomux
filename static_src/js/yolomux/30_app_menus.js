@@ -94,6 +94,7 @@ function menuTabCommand(item, options = {}) {
     ariaLabel: [itemLabel(item), detail].filter(Boolean).join(' - '),
     html: stripTitleAttrs(menuTabRowHtml(item, {...options, menu: true})),
     className: 'app-menu-tab-command',
+    targetItem: item,
   });
 }
 
@@ -143,6 +144,18 @@ function yoloRulePath() {
 
 function settingsConfigPath() {
   return clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
+}
+
+function cycleGlobalThemeSetting() {
+  const next = nextGlobalThemeMode();
+  saveSettingsPatch(settingPatch('appearance.theme', next))
+    .then(() => {
+      statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
+    })
+    .catch(error => {
+      statusEl.innerHTML = `<span class="err">theme save failed: ${esc(error)}</span>`;
+      refreshSettings({force: true});
+    });
 }
 
 function yoloRuleStatusDetail() {
@@ -247,6 +260,7 @@ function tmuxSessionViewCommands(session) {
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
+      checked: active && panelActiveTabName(session) === 'transcript',
       ariaLabel: ['Transcript', focusDetail].filter(Boolean).join(' - '),
     }),
     menuCommand('AI summary', () => {
@@ -254,6 +268,7 @@ function tmuxSessionViewCommands(session) {
     }, {
       disabled: readOnlyMode || !active,
       detail: readOnlyMode ? 'Admin only' : (active ? '' : disabledDetail),
+      checked: active && panelActiveTabName(session) === 'summary',
       ariaLabel: ['AI summary', focusDetail].filter(Boolean).join(' - '),
     }),
     menuCommand('Event log', () => {
@@ -261,6 +276,7 @@ function tmuxSessionViewCommands(session) {
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
+      checked: active && panelActiveTabName(session) === 'events',
       ariaLabel: ['Event log', focusDetail].filter(Boolean).join(' - '),
     }),
     menuCommand('Pane details', () => {
@@ -311,7 +327,11 @@ function tabSearchFields(item) {
     info.goal,
     pr?.title,
     pr?.url,
+    pr?.number ? 'PR' : '',
     pr?.number ? `PR ${pr.number}` : '',
+    pr?.number ? `PR#${pr.number}` : '',
+    pr?.number ? `#${pr.number}` : '',
+    pr?.number ? String(pr.number) : '',
     ...(Array.isArray(info.linear) ? info.linear : []),
   ].filter(Boolean);
 }
@@ -360,6 +380,15 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   return resultItems;
 }
 
+function fileMenuVirtualCommand(item, detail) {
+  return menuCommand(itemLabel(item), () => selectSession(item), {
+    checked: itemInLayout(item),
+    detail,
+    iconHtml: tabTypeIconHtml(item, {menu: true}),
+    targetItem: item,
+  });
+}
+
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const openItems = orderedPaneItems(activePaneItems());
@@ -373,26 +402,26 @@ function appMenuTree() {
           menuCommand(fileExplorerLabel(), () => selectSession(fileExplorerItemId), {
             checked: itemInLayout(fileExplorerItemId),
             detail: 'Browse files',
+            iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
+            targetItem: fileExplorerItemId,
           }),
-          menuTabCommand(infoItemId, {
-            checked: itemIsActivePaneTab(infoItemId),
-            detail: 'Open branch, PR, CI, and repo metadata',
-          }),
-          menuTabCommand(yosupItemId, {
-            checked: itemIsActivePaneTab(yosupItemId),
-            detail: 'Open the casual AI activity summary',
-          }),
+          fileMenuVirtualCommand(infoItemId, 'Open branch, PR, CI, and repo metadata'),
+          fileMenuVirtualCommand(yoagentItemId, 'Open the AI agent activity summary'),
           menuCommand('Open file', openFileQuickOpen, {
             detail: appShortcutText('P'),
+            iconHtml: appMenuUiIcon('document'),
           }),
           menuCommand('Preferences', () => selectSession(prefsItemId), {
             checked: itemInLayout(prefsItemId),
             detail: compactHomePath(settingsConfigPath()),
+            iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
+            targetItem: prefsItemId,
           }),
         ],
         [
           menuCommand('Log out', logOut, {
             detail: 'End this browser session',
+            iconHtml: appMenuUiIcon('logout'),
           }),
         ]
       ),
@@ -414,6 +443,9 @@ function appMenuTree() {
         }),
         menuCommand('Refresh', refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
+        }),
+        menuCommand(`Theme: ${globalThemeLabel()}`, cycleGlobalThemeSetting, {
+          detail: `Switch to ${globalThemeLabel(nextGlobalThemeMode())}`,
         }),
         menuSubmenu('Layout', [
           menuCommand('Single pane', setLayoutToSinglePane, {detail: 'Consolidate visible non-Finder tabs'}),

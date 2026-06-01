@@ -133,6 +133,20 @@
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
 }
+.changes-uploaded-toggle {
+  width: 100%;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+.changes-uploaded-toggle:hover,
+.changes-uploaded-toggle:focus-visible {
+  color: var(--brand-green);
+}
+.changes-uploaded-caret {
+  display: inline-block;
+  width: 12px;
+}
 .changes-file-list {
   display: grid;
 }
@@ -717,6 +731,52 @@
   font: var(--ui-font-size-sm) var(--mono-font);
   padding: 5px 6px;
 }
+body.theme-light .preferences-setting-control input[type="number"],
+body.theme-light .preferences-setting-control input[type="text"],
+body.theme-light .preferences-setting-control select,
+body.theme-light .preferences-setting-control textarea,
+body.theme-light .changes-control select,
+body.theme-light .changes-refresh,
+body.theme-light .diff-ref-control input {
+  background: #ffffff;
+  color: var(--text);
+}
+body.theme-light .info-refresh:hover,
+body.theme-light .info-refresh:focus-visible {
+  color: #10230b;
+}
+body.theme-light .changes-error {
+  color: #b91c1c;
+}
+body.theme-light .changes-body,
+body.theme-light .changes-toolbar,
+body.theme-light .changes-repo-group {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--line);
+}
+body.theme-light .changes-repo-head {
+  color: var(--text);
+  background: var(--panel2);
+}
+body.theme-light .changes-file-row {
+  color: var(--text);
+  border-top-color: rgba(100, 116, 139, 0.24);
+}
+body.theme-light .changes-file-row:hover {
+  background: rgba(95, 152, 0, 0.10);
+}
+body.theme-light .changes-diff-add {
+  color: #166534;
+}
+body.theme-light .changes-diff-remove {
+  color: #b91c1c;
+}
+body.theme-light .keyboard-shortcut-row kbd {
+  color: #17202c;
+  background: #f8fafc;
+  border-color: #c9d2df;
+}
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;
 }
@@ -731,7 +791,8 @@
 .preferences-setting-control.setting-type-select select {
   width: min(100%, 24ch);
 }
-.preferences-setting-control.setting-type-list textarea {
+.preferences-setting-control.setting-type-list textarea,
+.preferences-setting-control.setting-type-textarea textarea {
   width: 100%;
 }
 .preferences-setting-control textarea {
@@ -746,12 +807,17 @@
   grid-column: 1 / -1;
   margin-top: 3px;
 }
-.preferences-reset {
+.preferences-reset,
+.preferences-inline-action {
   min-width: 0;
   height: 24px;
   padding: 0 7px;
   border-radius: 4px;
   font-size: var(--ui-font-size-xs);
+}
+.preferences-inline-action {
+  border-color: rgba(118, 185, 0, 0.55);
+  color: #d9f99d;
 }
 .popover-value a:hover,
 .branch-link:hover {

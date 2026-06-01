@@ -42,6 +42,7 @@ async function openFileExplorerAt(path, options = {}) {
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
   try {
+    hydrateFileExplorerRepoInfoCache();
     const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
@@ -54,6 +55,7 @@ async function fetchDirectory(path, options = {}) {
     const entries = payload.entries || [];
     fileExplorerPathError = '';
     fileExplorerLastListError = null;
+    cacheFileExplorerRepoInfoEntries(root, entries);
     markNewDirectoryEntries(root, entries);
     if (options.recordSignature !== false) recordDirectorySignature(root, entries);
     return entries;
@@ -133,6 +135,75 @@ function scheduleNewEntryClassRemoval(row, path) {
 function normalizeDirectoryPath(path) {
   const text = String(path || '').replace(/\/+$/, '');
   return text || '/';
+}
+
+function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
+  if (!repo || typeof repo !== 'object') return null;
+  const root = normalizeDirectoryPath(repo.root || fallbackRoot);
+  if (!root) return null;
+  const dirtyCount = Number(repo.dirty_count);
+  const ahead = Number(repo.ahead);
+  const behind = Number(repo.behind);
+  return {
+    root,
+    name: String(repo.name || basenameOf(root) || ''),
+    branch: String(repo.branch || ''),
+    dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
+    upstream: String(repo.upstream || ''),
+    ahead: Number.isFinite(ahead) ? ahead : 0,
+    behind: Number.isFinite(behind) ? behind : 0,
+  };
+}
+
+function hydrateFileExplorerRepoInfoCache() {
+  if (fileExplorerRepoInfoCacheLoaded) return;
+  fileExplorerRepoInfoCacheLoaded = true;
+  try {
+    const raw = window.localStorage?.getItem(fileExplorerRepoInfoStorageKey);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const repos = Array.isArray(parsed?.repos) ? parsed.repos : [];
+    for (const item of repos) {
+      const path = normalizeDirectoryPath(item?.path || item?.repo?.root || '');
+      const repo = normalizeFileExplorerRepoInfo(item?.repo, path);
+      if (path && repo) fileExplorerRepoInfoCache.set(path, repo);
+    }
+  } catch (_) {}
+}
+
+function persistFileExplorerRepoInfoCache() {
+  try {
+    const repos = Array.from(fileExplorerRepoInfoCache.entries())
+      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.root) === path)
+      .sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath))
+      .slice(-200)
+      .map(([path, repo]) => ({path, repo}));
+    window.localStorage?.setItem(fileExplorerRepoInfoStorageKey, JSON.stringify({repos}));
+  } catch (_) {}
+}
+
+function cacheFileExplorerRepoInfo(path, repo, options = {}) {
+  hydrateFileExplorerRepoInfoCache();
+  const normalized = normalizeDirectoryPath(path || repo?.root || '');
+  const info = normalizeFileExplorerRepoInfo(repo, normalized);
+  if (!normalized || !info) return false;
+  const repoRoot = normalizeDirectoryPath(info.root);
+  fileExplorerRepoInfoCache.set(normalized, info);
+  if (repoRoot && repoRoot !== normalized) fileExplorerRepoInfoCache.set(repoRoot, info);
+  if (options.persist !== false) persistFileExplorerRepoInfoCache();
+  return true;
+}
+
+function cacheFileExplorerRepoInfoEntries(parentPath, entries) {
+  if (!Array.isArray(entries)) return;
+  hydrateFileExplorerRepoInfoCache();
+  let changed = false;
+  for (const entry of entries) {
+    if (entry?.kind !== 'dir' || entry.is_repo !== true || !entry.repo) continue;
+    const fullPath = childPath(parentPath, entry.name);
+    changed = cacheFileExplorerRepoInfo(fullPath, entry.repo, {persist: false}) || changed;
+  }
+  if (changed) persistFileExplorerRepoInfoCache();
 }
 
 function currentFileExplorerRoot() {
@@ -330,7 +401,7 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
     const info = await fetchFilePathInfo(normalized);
     if (normalizeDirectoryPath(fileExplorerRoot || normalized) !== normalized) return;
     const repo = info.repo || null;
-    fileExplorerRepoInfoCache.set(normalized, repo);
+    if (repo) cacheFileExplorerRepoInfo(normalized, repo);
     setFileExplorerRepoSummary(normalized, repo);
   } catch (_) {
     setFileExplorerRepoSummary(normalized, null);
@@ -342,7 +413,7 @@ async function updateRepoRowHoverTitle(row, path) {
   row.dataset.repoTitleLoaded = 'true';
   try {
     const info = await fetchFilePathInfo(path);
-    fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), info.repo || null);
+    if (info.repo) cacheFileExplorerRepoInfo(path, info.repo);
     const summary = repoInfoSummary(info.repo);
     if (summary) row.title = `${summary}\n${info.repo.root}`;
     updateFileTreeGitStatusRows();
@@ -654,10 +725,28 @@ function fileTreeNumstatText(path) {
 }
 
 function fileTreeRepoBranch(path) {
+  hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
   if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
   return repo.branch || 'detached';
+}
+
+function fileTreeRepoNumstat(path) {
+  const normalized = normalizeDirectoryPath(path);
+  const repos = Array.isArray(fileExplorerSessionFilesPayload?.repos) ? fileExplorerSessionFilesPayload.repos : [];
+  const repo = repos.find(item => normalizeDirectoryPath(item?.repo || '') === normalized);
+  let added = Number(repo?.added);
+  let removed = Number(repo?.removed);
+  if (!Number.isFinite(added) || !Number.isFinite(removed)) {
+    const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
+    const repoFiles = files.filter(item => normalizeDirectoryPath(item?.repo || '') === normalized);
+    added = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.added)) ? Number(item.added) : 0), 0);
+    removed = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.removed)) ? Number(item.removed) : 0), 0);
+  }
+  if (!Number.isFinite(added) || !Number.isFinite(removed)) return '';
+  if (added === 0 && removed === 0) return '';
+  return `+${added}/-${removed}`;
 }
 
 function fileTreeRepoBranchIsNonMain(path) {
@@ -665,13 +754,20 @@ function fileTreeRepoBranchIsNonMain(path) {
   return Boolean(branch && !['main', 'master'].includes(branch));
 }
 
-function fileTreeDisplayName(path, entry) {
+function fileTreeDisplayParts(path, entry) {
   if (entry.kind === 'dir' && entry.is_repo === true) {
     const branch = fileTreeRepoBranch(path);
-    return branch ? `${entry.name} (${branch})` : entry.name;
+    const numstat = fileTreeRepoNumstat(path);
+    const suffix = [branch, numstat].filter(Boolean).join(' ');
+    return {
+      text: suffix ? `${entry.name} [${suffix}]` : entry.name,
+      html: suffix
+        ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${branch ? `<span class="file-tree-repo-branch">${esc(branch)}</span>` : ''}${branch && numstat ? ' ' : ''}${numstat ? `<span class="file-tree-repo-delta">${esc(numstat)}</span>` : ''}]</span>`
+        : esc(entry.name),
+    };
   }
-  if (entry.kind === 'file') return `${entry.name}${fileTreeNumstatText(path)}`;
-  return entry.name;
+  const text = entry.kind === 'file' ? `${entry.name}${fileTreeNumstatText(path)}` : entry.name;
+  return {text, html: ''};
 }
 
 function fileTreeMtimeText(entry) {
@@ -760,7 +856,13 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   }
   icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
   if (icon.textContent !== iconText) icon.textContent = iconText;
-  if (name.textContent !== nameText) name.textContent = nameText;
+  if (options.nameHtml) {
+    if (name.innerHTML !== options.nameHtml) name.innerHTML = options.nameHtml;
+    if (!name.children?.length && name.textContent !== nameText) name.textContent = nameText;
+  } else if (name.textContent !== nameText || name.innerHTML) {
+    name.innerHTML = '';
+    name.textContent = nameText;
+  }
   status.textContent = options.gitStatus || '';
   status.hidden = !options.gitStatus;
   date.textContent = options.dateText || '';
@@ -809,9 +911,11 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
   const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-  updateFileTreeRowContents(row, icon, fileTreeDisplayName(fullPath, entry), {
+  const displayName = fileTreeDisplayParts(fullPath, entry);
+  updateFileTreeRowContents(row, icon, displayName.text, {
     gitStatus,
     iconClass: fileIconClassFor(entry.name, entry.kind),
+    nameHtml: displayName.html,
     dateText: fileExplorerTreeShowDates ? fileTreeMtimeText(entry) : '',
   });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
@@ -877,6 +981,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
 
 function renderTreeChildren(container, parentPath, entries, depth, options = {}) {
   if (!container) return;
+  cacheFileExplorerRepoInfoEntries(parentPath, entries);
   const entriesByDir = options.entriesByDir instanceof Map ? options.entriesByDir : null;
   const visible = sortedFileTreeEntries(entries);
   const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
@@ -1015,8 +1120,11 @@ function updateFileTreeGitStatusRows() {
     };
     row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(row.dataset.path));
     const name = row.querySelector(':scope > .file-tree-name');
-    const nextName = fileTreeDisplayName(row.dataset.path, entry);
-    if (name && name.textContent !== nextName) name.textContent = nextName;
+    const nextName = fileTreeDisplayParts(row.dataset.path, entry);
+    if (name && name.textContent !== nextName.text) {
+      if (nextName.html) name.innerHTML = nextName.html;
+      if (!name.children?.length) name.textContent = nextName.text;
+    }
   });
 }
 

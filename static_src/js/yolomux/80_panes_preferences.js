@@ -605,7 +605,7 @@ function bindPaneTabStrip(strip, side) {
     if (filePayload?.path) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (slotIsFileExplorerPane(side)) {
+      if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) {
         event.dataTransfer.dropEffect = 'none';
         clearPaneTabDropPreview(strip);
         return;
@@ -619,7 +619,7 @@ function bindPaneTabStrip(strip, side) {
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (slotIsFileExplorerPane(side)) {
+    if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) {
       event.dataTransfer.dropEffect = 'none';
       clearPaneTabDropPreview(strip);
       return;
@@ -638,7 +638,7 @@ function bindPaneTabStrip(strip, side) {
       clearPaneTabDropPreview(strip);
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (slotIsFileExplorerPane(side)) return;
+      if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) return;
       openDraggedFilesInEditor(filePayload, {targetSlot: side, targetIndex: paneTabDropIndex(strip, event, '')});
       return;
     }
@@ -647,7 +647,7 @@ function bindPaneTabStrip(strip, side) {
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (slotIsFileExplorerPane(side)) return;
+    if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) return;
     moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session), paneTabDropIndex(strip, event, payload.session));
   };
 }
@@ -771,6 +771,11 @@ function bindPanelShell(panel, session) {
         event.preventDefault();
         event.stopPropagation();
         clearDropPreview();
+        const targetSlot = head.dataset.dragSlot || slotForSession(session);
+        if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) {
+          event.dataTransfer.dropEffect = 'none';
+          return;
+        }
         event.dataTransfer.dropEffect = 'copy';
         head.classList.add('tab-drag-over');
         return;
@@ -782,7 +787,7 @@ function bindPanelShell(panel, session) {
       clearDropPreview();
       if (event.target.closest('.pane-tabs')) return;
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
-      if (slotIsFileExplorerPane(targetSlot)) {
+      if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) {
         event.dataTransfer.dropEffect = 'none';
         return;
       }
@@ -799,6 +804,7 @@ function bindPanelShell(panel, session) {
         event.preventDefault();
         event.stopPropagation();
         const targetSlot = head.dataset.dragSlot || slotForSession(session);
+        if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) return;
         if (targetSlot) openDraggedFilesInEditor(filePayload, {targetSlot});
         return;
       }
@@ -809,7 +815,7 @@ function bindPanelShell(panel, session) {
       event.stopPropagation();
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
       if (!targetSlot) return;
-      if (slotIsFileExplorerPane(targetSlot)) return;
+      if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) return;
       if (isFileExplorerItem(payload.session)) {
         dockFileExplorerPane();
         return;
@@ -1090,36 +1096,56 @@ function createInfoPanel() {
   return panel;
 }
 
-function createYosupPanel() {
+function createYoagentPanel() {
   const panel = document.createElement('article');
-  panel.className = 'panel info-panel yosup-panel';
-  panel.id = `panel-${yosupItemId}`;
+  panel.className = 'panel info-panel yoagent-panel';
+  panel.id = `panel-${yoagentItemId}`;
   panel.innerHTML = `
       <div class="panel-head">
-        ${virtualPanelControlsHtml(yosupItemId, yosupTabLabel)}
+        ${virtualPanelControlsHtml(yoagentItemId, yoagentTabLabel)}
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
-          <div id="panel-tab-${yosupItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yosupTabLabel)}</span></div>
-          <div id="meta-${yosupItemId}" class="meta">Casual roll-up of active AI agents and changed files</div>
+          <div id="panel-tab-${yoagentItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yoagentTabLabel)}</span></div>
+          <div id="meta-${yoagentItemId}" class="meta">Activity roll-up of active AI agents and changed files</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(yosupItemId)}" title="hide details" aria-label="hide details"></button>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(yoagentItemId)}" title="hide details" aria-label="hide details"></button>
       </div>
       <div class="info-pane panel-overlay-root">
-        <div id="panel-toasts-${yosupItemId}" class="panel-toast-stack"></div>
+        <div id="panel-toasts-${yoagentItemId}" class="panel-toast-stack"></div>
         <div class="transcript-head info-head">
-          <span>${esc(yosupTabLabel)}</span>
-          <button type="button" class="info-refresh" data-yosup-refresh title="Refresh AI activity summary">Refresh summary</button>
+          <span>${esc(yoagentTabLabel)}</span>
+          <button type="button" class="info-refresh" data-yoagent-refresh title="Refresh AI activity summary">Refresh summary</button>
         </div>
-        <div id="yosup-content" class="info-list yosup-list"></div>
+        <div id="yoagent-content" class="info-list yoagent-list"></div>
       </div>`;
-  bindPanelShell(panel, yosupItemId);
-  panel.querySelector('[data-yosup-refresh]')?.addEventListener('click', event => {
+  bindPanelShell(panel, yoagentItemId);
+  panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
-    refreshActivitySummary();
+    refreshActivitySummary({force: true});
   });
-  renderYosupPanel();
+  panel.addEventListener('submit', event => {
+    const form = event.target.closest('[data-yoagent-chat-form]');
+    if (!form || !panel.contains(form)) return;
+    event.preventDefault();
+    const input = form.querySelector('[data-yoagent-chat-input]');
+    const value = input?.value || '';
+    if (input) input.value = '';
+    yoagentDraft = '';
+    sendYoagentChatMessage(value);
+  });
+  panel.addEventListener('click', event => {
+    const clear = event.target.closest('[data-yoagent-clear]');
+    if (!clear || !panel.contains(clear)) return;
+    event.preventDefault();
+    clearYoagentConversation();
+  });
+  panel.addEventListener('input', event => {
+    const input = event.target.closest('[data-yoagent-chat-input]');
+    if (input && panel.contains(input)) yoagentDraft = input.value || '';
+  });
+  renderYoagentPanel();
   return panel;
 }
 
@@ -1129,8 +1155,8 @@ function sessionActivitySummary(session) {
 
 function activitySummaryLinesHtml(lines, options = {}) {
   const items = Array.isArray(lines) ? lines.filter(Boolean) : [];
-  if (!items.length) return options.empty ? `<div class="yosup-empty">${esc(options.empty)}</div>` : '';
-  return items.map(line => `<div class="yosup-line">${esc(line)}</div>`).join('');
+  if (!items.length) return options.empty ? `<div class="yoagent-empty">${esc(options.empty)}</div>` : '';
+  return items.map(line => `<div class="yoagent-line">${esc(line)}</div>`).join('');
 }
 
 function relativeActivityGeneratedText(payload = activitySummaryPayload) {
@@ -1158,19 +1184,156 @@ function globalActivitySummaryHtml() {
   const summary = activitySummaryPayload?.global || {};
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = summary.headline || lines[0] || '';
+  const detailLines = lines.filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)));
   const generated = relativeActivityGeneratedText();
-  return `<section class="yosup-global" aria-label="${esc(yosupTabLabel)} AI activity summary">
-    <div class="yosup-global-head">
-      <span>${esc(yosupTabLabel)}</span>
-      <span class="yosup-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
+  const refreshBar = activitySummaryRefreshing ? '<div class="yoagent-refresh-progress" aria-label="Refreshing summary"></div>' : '';
+  return `<section class="yoagent-global" aria-label="${esc(yoagentTabLabel)} AI activity summary">
+    <div class="yoagent-global-head">
+      <span>${esc(yoagentTabLabel)}</span>
+      <span class="yoagent-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
     </div>
-    ${headline ? `<div class="yosup-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
+    ${refreshBar}
+    ${headline ? `<div class="yoagent-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
+    ${activitySummaryLinesHtml(detailLines)}
   </section>`;
 }
 
-async function refreshActivitySummary(options = {}) {
+function yoagentSessionSummariesHtml() {
+  const sessions = activitySummaryPayload?.sessions || {};
+  const order = Array.isArray(activitySummaryPayload?.session_order) ? activitySummaryPayload.session_order : Object.keys(sessions);
+  const rows = order
+    .map(session => {
+      const summary = sessions?.[session];
+      if (!summary?.local) return '';
+      const status = summary.active ? 'active' : 'idle';
+      const files = summary.files?.count ? `${summary.files.count} files (+${summary.files.added || 0}/-${summary.files.removed || 0})` : 'no files yet';
+      return `<article class="yoagent-session-summary ${esc(status)}">
+        <div class="yoagent-session-summary-head">
+          <span>session ${esc(session)}</span>
+          <span>${esc(summary.agent_label || summary.agent || 'agent')}</span>
+          <span>${esc(files)}</span>
+        </div>
+        <div class="yoagent-session-summary-body">${esc(summary.local)}</div>
+      </article>`;
+    })
+    .filter(Boolean)
+    .join('');
+  return `<section class="yoagent-session-summaries" aria-label="Per-session AI activity summaries">
+    ${rows || '<div class="yoagent-empty">No per-session AI activity detected yet.</div>'}
+  </section>`;
+}
+
+function yoagentChatMessagesHtml() {
+  const messages = Array.isArray(yoagentMessages) ? yoagentMessages : [];
+  if (!messages.length) {
+    if (!yoagentChatEnabled()) {
+      return '<div class="yoagent-chat-empty">Set a Claude or Codex backend in Preferences to chat.</div>';
+    }
+    return '<div class="yoagent-chat-empty">Ask YO!agent what the running AI agents are doing.</div>';
+  }
+  return messages.map(message => {
+    const role = message.role === 'user' ? 'You' : yoagentTabLabel;
+    const roleClass = message.role === 'user' ? 'user' : 'assistant';
+    return `<div class="yoagent-message ${roleClass}">
+      <div class="yoagent-message-role">${esc(role)}</div>
+      <div class="yoagent-message-body">${esc(message.content || '')}</div>
+    </div>`;
+  }).join('');
+}
+
+function yoagentNoticeHtml() {
+  if (!yoagentNotice?.reason) return '';
+  const backend = yoagentNotice.backend ? `<span class="yoagent-chat-notice-backend">${esc(yoagentNotice.backend)}</span> ` : '';
+  return `<div class="yoagent-chat-notice">${backend}${esc(yoagentNotice.reason)}</div>`;
+}
+
+function yoagentBackendLabel(value) {
+  const key = String(value || '').toLowerCase();
+  if (key === 'deterministic') return 'No agent';
+  if (key === 'codex') return 'Codex';
+  if (key === 'claude') return 'Claude';
+  return value || 'No agent';
+}
+
+function yoagentBackendKey() {
+  return String(initialSetting('yoagent.backend', 'deterministic') || 'deterministic').trim().toLowerCase();
+}
+
+function yoagentChatEnabled() {
+  return ['claude', 'codex'].includes(yoagentBackendKey());
+}
+
+function yoagentChatHtml() {
+  const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
+  const placeholder = readOnlyMode ? 'YO!agent chat requires admin access' : 'Ask about agents, repos, files, CI, blockers...';
+  const busy = yoagentBusy ? '<div class="yoagent-chat-status">YO!agent is answering...</div>' : '';
+  const error = yoagentError ? `<div class="yoagent-chat-error">${esc(yoagentError)}</div>` : '';
+  const clearDisabled = yoagentBusy || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
+  const form = yoagentChatEnabled()
+    ? `<form class="yoagent-chat-form" data-yoagent-chat-form>
+      <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
+      <button type="submit" class="yoagent-chat-send"${disabled}>Ask</button>
+    </form>`
+    : '';
+  return `<section class="yoagent-chat" aria-label="YO!agent chat">
+    <div class="yoagent-chat-toolbar">
+      <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>Clear conversation</button>
+    </div>
+    <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
+    ${form}
+  </section>`;
+}
+
+async function clearYoagentConversation() {
+  yoagentMessages = [];
+  yoagentBusy = false;
+  yoagentError = '';
+  yoagentDraft = '';
+  yoagentNotice = null;
+  renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
-    const response = await apiFetch('/api/activity-summary', {cache: 'no-store'});
+    await apiFetch('/api/yoagent/reset', {method: 'POST'});
+    statusEl.textContent = 'cleared YO!agent conversation';
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">clear YO!agent failed: ${esc(error)}</span>`;
+  }
+}
+
+async function sendYoagentChatMessage(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text || yoagentBusy || readOnlyMode || !yoagentChatEnabled()) return;
+  yoagentMessages.push({role: 'user', content: text});
+  yoagentDraft = '';
+  yoagentBusy = true;
+  yoagentError = '';
+  yoagentNotice = null;
+  renderYoagentPanel({preserveDraft: false, scrollBottom: true});
+  try {
+    const response = await apiFetch('/api/yoagent/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: text, history: yoagentMessages.slice(-10)}),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    if (payload.fallback && payload.fallback_reason) {
+      yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
+    }
+    yoagentMessages.push({role: 'assistant', content: payload.answer || 'No answer.'});
+    statusEl.textContent = `YO!agent answered with ${yoagentBackendLabel(payload.backend_used || payload.backend)}`;
+  } catch (error) {
+    yoagentError = `chat failed: ${error}`;
+  } finally {
+    yoagentBusy = false;
+    renderYoagentPanel({preserveDraft: false, scrollBottom: true});
+  }
+}
+
+async function refreshActivitySummary(options = {}) {
+  activitySummaryRefreshing = true;
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  try {
+    const response = await apiFetch(`/api/activity-summary${options.force ? '?force=1' : ''}`, {cache: 'no-store'});
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     activitySummaryPayload = payload;
@@ -1181,9 +1344,11 @@ async function refreshActivitySummary(options = {}) {
       global: {lines: [`activity summary unavailable: ${String(error)}`]},
     };
     if (!options.silent) statusEl.innerHTML = `<span class="err">activity summary failed: ${esc(error)}</span>`;
+  } finally {
+    activitySummaryRefreshing = false;
   }
   renderInfoPanel();
-  renderYosupPanel();
+  renderYoagentPanel();
 }
 
 function editorSchemePreferenceChoices(options = {}) {
@@ -1211,26 +1376,39 @@ function editorSchemePreferenceChoices(options = {}) {
 
 function preferenceSections() {
   return [
-    {title: 'YOLO', items: [
-      {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text', help: 'YAML file with ordered first-match YOLO rules.'},
-      {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean', help: 'Log matched rules and actions without pressing an approval key.'},
-    ]},
     {title: 'General', items: [
       {path: 'general.auto_focus', label: 'Auto-focus active pane', type: 'boolean', help: 'Focus panes and enable hover-open menus after tab switches, layout moves, and hover gestures. Off by default.'},
       {path: 'general.default_layout', label: 'Default layout', type: 'select', choices: ['single', 'grid', 'wall'], help: 'Preferred starting pane layout for new browser visits.'},
       {path: 'general.default_sessions', label: 'Default sessions', type: 'list', help: 'Preferred tmux sessions to open first, one session name per line.'},
     ]},
     {title: 'Appearance', items: [
+      {path: 'appearance.theme', label: 'Global app theme', type: 'select', choices: [
+        {value: 'dark', label: 'Dark'},
+        {value: 'light', label: 'Light'},
+        {value: 'system', label: 'System'},
+      ], help: 'Theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and terminal colors.'},
       {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: 'Font size for menus, tabs, and compact UI text. Values outside the range are clamped.'},
       {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by xterm.js panes. Values outside the range are clamped.'},
       {path: 'appearance.editor_font_size', label: 'Editor font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by editor text, code highlighting, and rendered previews.'},
       {path: 'appearance.editor_dark_color_scheme', label: 'Dark editor color scheme', type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: 'Dark palette used by the editor dark/light toggle.'},
       {path: 'appearance.editor_light_color_scheme', label: 'Light editor color scheme', type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: 'Light palette used by the editor dark/light toggle.'},
+      {path: 'appearance.editor_cursor_style', label: 'Editor cursor style', type: 'select', choices: [
+        {value: 'line', label: 'Line'},
+        {value: 'block', label: 'Block'},
+      ], help: 'Caret shape for CodeMirror editors. Both styles use the active editor cursor color.'},
       {path: 'appearance.file_explorer_font_size', label: `${fileExplorerLabel()} font size`, type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: 'Font size used by Finder/File Explorer rows.'},
       {path: 'appearance.tab_width', label: 'Tab width', type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: 'Target width for pane tabs before they wrap to additional rows.'},
       {path: 'appearance.red_reminder_ms', label: 'Red reminder duration', type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: 'Duration of the red attention pulse for sessions that need input or approval. Set 0 to disable.'},
       {path: 'appearance.yolo_rotate_ms', label: 'Active YO rotation period', type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: 'How often the active YO indicator completes a rotation. Set 0 to disable.'},
       {path: 'appearance.metadata_badge_pulse_seconds', label: 'Badge pulse duration', type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: 'When branch, PR, status, or CI metadata changes, badges like PR and CI flash for this many seconds.'},
+    ]},
+    {title: 'YOLO', items: [
+      {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text', action: 'open-yolo-rule', help: 'YAML file with ordered first-match YOLO rules.'},
+      {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean', help: 'Log matched rules and actions without pressing an approval key.'},
+      {path: 'yolo.prompt_source', label: 'Approval prompt source', type: 'select', choices: [
+        {value: 'hybrid', label: 'Pane + transcript'},
+        {value: 'pane', label: 'Pane only'},
+      ], help: 'Hybrid keeps the visible pane as the trigger and uses recent transcript JSONL only to recover prompt type or command context.'},
     ]},
     {title: 'Performance', items: [
       {path: 'performance.metadata_refresh_ms', label: 'Metadata refresh interval', type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: 'How often YOLOmux refreshes branch, PR, cwd, and process metadata. Client-side jitter avoids synchronized polling.'},
@@ -1267,6 +1445,20 @@ function preferenceSections() {
     ]},
     {title: 'Uploads', items: [
       {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
+    ]},
+    {title: 'YO!agent', items: [
+      {path: 'yoagent.backend', label: 'YO!agent backend', type: 'select', choices: [
+        {value: 'deterministic', label: 'No agent'},
+        {value: 'codex', label: 'Codex'},
+        {value: 'claude', label: 'Claude'},
+      ], help: 'Backend used for YO!agent chat. No agent is local and always available.'},
+      {path: 'yoagent.invocation', label: 'YO!agent invocation', type: 'select', choices: [
+        {value: 'cli', label: 'CLI'},
+        {value: 'api-key', label: 'API key'},
+      ], help: 'CLI runs a local agent binary. API key mode is reserved and falls back safely today.'},
+      {path: 'yoagent.system_prompt', label: 'YO!agent system prompt', type: 'textarea', help: 'System prompt used when YO!agent calls a model backend.'},
+      {path: 'yoagent.intro', label: 'YO!agent intro', type: 'textarea', help: 'Instruction prefix before the activity context.'},
+      {path: 'yoagent.format', label: 'YO!agent answer format', type: 'textarea', help: 'Output-format instruction before the user question.'},
     ]},
   ];
 }
@@ -1328,6 +1520,7 @@ const preferenceSearchAliasGroups = [
   ['root', 'home', 'base', 'cwd'],
   ['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump'],
   ['yolo', 'autoapprove', 'approve', 'approval', 'permission', 'permissions', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger', 'dangerous'],
+  ['yoagent', 'yo agent', 'assistant', 'chat', 'summary', 'activity', 'prompt', 'backend', 'claude', 'codex'],
   ['dry', 'simulate', 'test'],
   ['startup', 'launch', 'open', 'start', 'split', 'grid', 'wall', 'layout'],
 ];
@@ -1368,6 +1561,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
   if (path === 'file_explorer.new_entry_highlight_ms') add(['new file', 'recent']);
   if (path.startsWith('yolo.')) add(['auto approve', 'approve', 'approval', 'permission', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger']);
+  if (path.startsWith('yoagent.')) add(['assistant', 'chat', 'summary', 'activity', 'prompt', 'backend', 'claude', 'codex']);
   if (path === 'yolo.dry_run') add(['test', 'simulate', 'what would']);
   if (path === 'yolo.rule_file_path') add(['yaml', 'config']);
   if (path === 'general.auto_focus') add(['click', 'focus', 'hover', 'menu', 'dropdown', 'select pane', 'terminal', 'editor', 'finder', 'file explorer', 'preferences', 'everything']);
@@ -1464,13 +1658,18 @@ function preferenceControlHtml(item, query = '') {
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
     control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
+  } else if (item.type === 'textarea') {
+    control = `<textarea ${baseAttrs} rows="3">${esc(String(value || ''))}</textarea>`;
   } else {
     control = `<input type="text" ${baseAttrs} value="${esc(value)}">`;
   }
   const resetDisabled = readOnlyMode || JSON.stringify(value) === JSON.stringify(defaultValue) ? ' disabled' : '';
+  const extraControl = item.action === 'open-yolo-rule'
+    ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${readOnlyMode ? ' disabled' : ''}>Open</button>`
+    : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
-  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span></div>`;
+  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span></div>`;
 }
 
 function preferencesAllDefault() {
@@ -1687,6 +1886,13 @@ function bindPreferencesPanel(panel) {
       copyTextToClipboard(copy.dataset.copyPath || '')
         .then(() => { statusEl.textContent = 'copied path'; })
         .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+      return;
+    }
+    const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
+    if (yoloRuleOpen && panel.contains(yoloRuleOpen)) {
+      event.preventDefault();
+      preferencesResetConfirmVisible = false;
+      openYoloRuleFile();
       return;
     }
     const sectionToggle = event.target.closest('[data-preference-section-toggle]');

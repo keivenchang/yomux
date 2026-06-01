@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from datetime import timezone
@@ -52,7 +53,10 @@ def compact_transcript_items_since(text: str, since: datetime) -> tuple[list[dic
     return items, stats
 
 TRANSCRIPT_ACTIVITY_RECENCY_SECONDS = 10.0
+TRANSCRIPT_APPROVAL_RECENCY_SECONDS = 20.0
 CLAUDE_TERMINAL_STOP_REASONS = {"end_turn", "stop_sequence", "max_tokens", "stop"}
+TRANSCRIPT_BASH_TOOL_NAMES = {"bash", "shell", "sh", "exec", "exec_command", "run_command", "terminal"}
+TRANSCRIPT_FILE_TOOL_NAMES = {"write", "edit", "multiedit", "notebookedit", "apply_patch", "patch"}
 
 
 def transcript_activity_state_from_text(text: str, kind: str = "") -> dict[str, Any]:
@@ -175,6 +179,166 @@ def session_transcript_activity_state(info: SessionInfo | None) -> dict[str, Any
     if agent is None:
         return {"key": "idle", "text": ""}
     return transcript_activity_state(agent.transcript, agent.kind)
+
+def transcript_pending_approval_from_text(text: str, kind: str = "") -> dict[str, Any]:
+    pending: dict[str, dict[str, Any]] = {}
+    synthetic_index = 0
+    for raw_line in text.splitlines():
+        try:
+            raw_item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw_item, dict):
+            continue
+        entry_type = str(raw_item.get("type") or "")
+        message = raw_item.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = str(block.get("type") or "")
+                    if block_type == "tool_use":
+                        synthetic_index += 1
+                        tool_id = str(block.get("id") or f"tool-{synthetic_index}")
+                        record = transcript_tool_approval_record(
+                            str(block.get("name") or "tool"),
+                            block.get("input"),
+                            tool_id,
+                            kind,
+                        )
+                        if record:
+                            pending[tool_id] = record
+                    elif block_type == "tool_result":
+                        tool_id = str(block.get("tool_use_id") or block.get("id") or "")
+                        if tool_id:
+                            pending.pop(tool_id, None)
+        payload = raw_item.get("payload")
+        if not isinstance(payload, dict) and entry_type in {"function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"}:
+            payload = raw_item
+        if isinstance(payload, dict):
+            payload_type = str(payload.get("type") or entry_type or "")
+            if payload_type in {"function_call", "custom_tool_call"}:
+                synthetic_index += 1
+                call_id = str(payload.get("call_id") or payload.get("id") or f"call-{synthetic_index}")
+                arguments = payload.get("arguments") if payload_type == "function_call" else payload.get("input")
+                record = transcript_tool_approval_record(
+                    str(payload.get("name") or "tool"),
+                    arguments,
+                    call_id,
+                    kind,
+                )
+                if record:
+                    pending[call_id] = record
+            elif payload_type in {"function_call_output", "custom_tool_call_output"}:
+                call_id = str(payload.get("call_id") or payload.get("id") or "")
+                if call_id:
+                    pending.pop(call_id, None)
+    if not pending:
+        return {"visible": False, "type": "", "text": "", "source": "transcript", "hash": ""}
+    record = list(pending.values())[-1]
+    record["visible"] = True
+    record["source"] = "transcript"
+    record["hash"] = transcript_approval_hash(record)
+    return record
+
+def transcript_pending_approval(path: Path | str | None, kind: str = "", recency_seconds: float = TRANSCRIPT_APPROVAL_RECENCY_SECONDS) -> dict[str, Any]:
+    if not path:
+        return {"visible": False, "type": "", "text": "", "source": "transcript", "hash": ""}
+    transcript_path = Path(path)
+    try:
+        text = tail_file_lines(transcript_path, 400)
+    except OSError:
+        return {"visible": False, "type": "", "text": "", "source": "transcript", "hash": ""}
+    state = transcript_pending_approval_from_text(text, kind)
+    if state.get("visible") is not True:
+        return state
+    if not transcript_activity_is_recent(transcript_path, text, recency_seconds=recency_seconds):
+        return {"visible": False, "type": "", "text": "", "source": "transcript", "hash": "", "reason": "transcript approval candidate is stale"}
+    state["transcript"] = str(transcript_path)
+    return state
+
+def transcript_tool_approval_record(name: str, tool_input: Any, tool_id: str, kind: str = "") -> dict[str, Any] | None:
+    tool_name = name.strip() or "tool"
+    normalized = tool_name.lower().replace("-", "_")
+    payload = transcript_tool_input_mapping(tool_input)
+    command = transcript_tool_command(normalized, payload, tool_input)
+    if normalized in TRANSCRIPT_BASH_TOOL_NAMES or command:
+        text = command or f"{kind or 'agent'} pending {tool_name}"
+        return {
+            "type": "bash",
+            "text": f"Transcript pending {tool_name}: {truncate_text(text, 220)}",
+            "command": command or text,
+            "tool": tool_name,
+            "tool_id": tool_id,
+            "yes_selected": False,
+            "selected_option": 0,
+            "action": "option1",
+            "dangerous": command is not None and False,
+        }
+    if normalized in TRANSCRIPT_FILE_TOOL_NAMES:
+        file_path = transcript_tool_file_path(payload, tool_input)
+        text = f"{tool_name} {file_path}".strip()
+        return {
+            "type": "file",
+            "text": f"Transcript pending {text}",
+            "command": "",
+            "tool": tool_name,
+            "tool_id": tool_id,
+            "yes_selected": False,
+            "selected_option": 0,
+            "action": "option2",
+            "dangerous": False,
+        }
+    return {
+        "type": "tool",
+        "text": f"Transcript pending {tool_name}",
+        "command": "",
+        "tool": tool_name,
+        "tool_id": tool_id,
+        "yes_selected": False,
+        "selected_option": 0,
+        "action": "option2",
+        "dangerous": False,
+    }
+
+def transcript_tool_input_mapping(tool_input: Any) -> dict[str, Any]:
+    if isinstance(tool_input, dict):
+        return tool_input
+    if isinstance(tool_input, str) and tool_input.strip():
+        try:
+            parsed = json.loads(tool_input)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+def transcript_tool_command(normalized_name: str, payload: dict[str, Any], raw_input: Any) -> str | None:
+    for key in ("command", "cmd", "shell_command"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if normalized_name in TRANSCRIPT_BASH_TOOL_NAMES and isinstance(raw_input, str) and raw_input.strip():
+        return raw_input.strip()
+    return None
+
+def transcript_tool_file_path(payload: dict[str, Any], raw_input: Any) -> str:
+    for key in ("file_path", "path", "target_file", "filename"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return truncate_text(str(raw_input or ""), 120)
+
+def transcript_approval_hash(record: dict[str, Any]) -> str:
+    parts = [
+        str(record.get("type") or ""),
+        str(record.get("tool") or ""),
+        str(record.get("tool_id") or ""),
+        str(record.get("command") or ""),
+        str(record.get("text") or ""),
+    ]
+    return hashlib.md5("\n".join(parts).encode("utf-8")).hexdigest()
 
 def parse_transcript_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():

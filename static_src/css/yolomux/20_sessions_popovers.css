@@ -281,11 +281,6 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   background: #c084fc;
   border-color: #e9d5ff;
 }
-.ci-indicator.pr-indicator {
-  color: #dfe6ef;
-  background: #1a2434;
-  border-color: #5f6f86;
-}
 .ci-indicator.branch-indicator {
   color: #071321;
   background: #9fd8ff;

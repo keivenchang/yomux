@@ -320,6 +320,15 @@ def session_file_entry(
     }
 
 
+def line_total(entries: list[dict[str, Any]], key: str) -> int:
+    total = 0
+    for entry in entries:
+        value = entry.get(key)
+        if isinstance(value, int):
+            total += value
+    return total
+
+
 def session_files_payload_for_info(
     info: SessionInfo,
     hours: float = 24.0,
@@ -391,6 +400,8 @@ def session_files_payload_for_info(
             "repo": str(repo),
             "count": len(repo_entries),
             "touched_count": len(repos[repo_text]),
+            "added": line_total(repo_entries, "added"),
+            "removed": line_total(repo_entries, "removed"),
         })
 
     files.extend(outside_repo)
@@ -434,9 +445,11 @@ def session_files_payload(
         refs_by_repo.update(payload.get("refs_by_repo", {}))
         for repo in payload["repos"]:
             key = repo["repo"]
-            existing = repos.setdefault(key, {"repo": key, "count": 0, "touched_count": 0})
+            existing = repos.setdefault(key, {"repo": key, "count": 0, "touched_count": 0, "added": 0, "removed": 0})
             existing["count"] += repo["count"]
             existing["touched_count"] += repo["touched_count"]
+            existing["added"] += repo.get("added", 0)
+            existing["removed"] += repo.get("removed", 0)
     files.sort(key=lambda item: (-float(item.get("mtime") or 0), item["session"], item["path"]))
     return {
         "session": "",

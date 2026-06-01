@@ -18,6 +18,7 @@ from . import yolo_rules
 from .common import AUTO_APPROVE_LOCK_DIR
 from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
+from .common import truncate_text
 
 
 def auto_approve_lock_path(target: str) -> Path:
@@ -126,11 +127,13 @@ class AutoApproveWorker:
         event_callback: Any = None,
         owner_extra: dict[str, Any] | None = None,
         dangerously_yolo: bool = False,
+        prompt_source: str = "hybrid",
     ):
         self.target = target
         self.interval = interval
         self.event_callback = event_callback
         self.dangerously_yolo = dangerously_yolo
+        self.prompt_source = prompt_source if prompt_source in {"pane", "hybrid"} else "hybrid"
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self.run, name=f"auto-approve-{target}", daemon=True)
         self.lock = threading.Lock()
@@ -172,6 +175,7 @@ class AutoApproveWorker:
                 "error": self.error,
                 "started_at": self.started_at,
                 "lock_owner": self.lock_owner,
+                "prompt_source": self.prompt_source,
             }
 
     def update(self, **values: Any) -> None:
@@ -222,22 +226,36 @@ class AutoApproveWorker:
             self.update(last_action="failed to capture pane")
             return False
 
-        prompt_state = module.approval_prompt_state(visible_text)
+        if hasattr(module, "hybrid_approval_prompt_state"):
+            prompt_state = module.hybrid_approval_prompt_state(self.target, visible_text, prompt_source=self.prompt_source)
+        else:
+            prompt_state = module.approval_prompt_state(visible_text)
         prompt_type = prompt_state.get("type") or None
         if prompt_type is None:
             self.last_hash = ""
             self.last_hash_at = 0.0
             self.last_blocked_hash = ""
-            self.update(last_action="idle")
+            reason = str(prompt_state.get("reason") or "")
+            self.update(last_action=f"idle; {reason}" if reason else "idle")
             return False
 
-        if not prompt_state.get("yes_selected"):
-            self.update(last_action="prompt found, Yes not selected")
+        action_value = prompt_state.get("action")
+        action = action_value if isinstance(action_value, str) and action_value else None
+        selected_value = prompt_state.get("selected_option")
+        selected_option = selected_value if isinstance(selected_value, int) else 0
+        prompt_source = str(prompt_state.get("source") or "pane")
+        if not prompt_state.get("yes_selected") and selected_option <= 0:
+            self.update(last_action="prompt found, no selectable approval option is highlighted")
             return False
 
         pane_text = module.tmux_capture_pane(self.target)
         if pane_text is None:
             pane_text = visible_text
+        if prompt_source == "pane" and hasattr(module, "hybrid_approval_prompt_state"):
+            prompt_state = module.hybrid_approval_prompt_state(self.target, visible_text, pane_text, prompt_source=self.prompt_source)
+            action_value = prompt_state.get("action")
+            if isinstance(action_value, str) and action_value:
+                action = action_value
 
         current_hash = str(prompt_state.get("hash") or "")
         now = time.monotonic()
@@ -250,24 +268,38 @@ class AutoApproveWorker:
         if current_hash == self.last_hash:
             self.update(last_action=f"approved prompt still visible after {module.PROMPT_RETRY_SECONDS:g}s; retrying")
 
-        action_value = prompt_state.get("action")
-        action = action_value if isinstance(action_value, str) and action_value else None
-
         if prompt_type == "bash":
-            return self.handle_bash_prompt(module, pane_text, current_hash, action)
+            command_value = prompt_state.get("command")
+            command = command_value if isinstance(command_value, str) and command_value.strip() else None
+            return self.handle_bash_prompt(module, pane_text, current_hash, action, selected_option, command=command, prompt_source=prompt_source)
         if prompt_type in {"file", "tool"}:
-            return self.handle_non_bash_prompt(module, str(prompt_state.get("text") or ""), current_hash, action, prompt_type)
+            return self.handle_non_bash_prompt(module, str(prompt_state.get("text") or ""), current_hash, action, prompt_type, selected_option, prompt_source=prompt_source)
         self.update(last_action=f"unknown prompt type: {prompt_type}")
         return False
 
-    def send_action(self, module: Any, action: str | None) -> None:
+    def send_action(self, module: Any, action: str | None, selected_option: int = 1) -> None:
+        option = 2 if action == "option2" else 1
+        if hasattr(module, "tmux_send_option"):
+            module.tmux_send_option(self.target, option, selected_option)
+            return
         if action == "option2":
-            module.tmux_send_option2(self.target)
+            module.tmux_send_option2(self.target, selected_option)
+        elif selected_option > 1 and hasattr(module, "tmux_send_option1"):
+            module.tmux_send_option1(self.target, selected_option)
         else:
             module.tmux_send_enter(self.target)
 
-    def handle_bash_prompt(self, module: Any, pane_text: str, current_hash: str, action: str | None) -> bool:
-        cmd = module.extract_command(pane_text)
+    def handle_bash_prompt(
+        self,
+        module: Any,
+        pane_text: str,
+        current_hash: str,
+        action: str | None,
+        selected_option: int = 1,
+        command: str | None = None,
+        prompt_source: str = "pane",
+    ) -> bool:
+        cmd = command or module.extract_command(pane_text)
         desc = "bash command" if cmd is None else truncate_text(cmd, 180)
         decision = yolo_rules.evaluate(cmd or "", "bash", "", self.target, dangerously_yolo=self.dangerously_yolo)
         rule_action = decision.get("action") if isinstance(decision.get("action"), str) else "ask"
@@ -283,12 +315,13 @@ class AutoApproveWorker:
             "ruleset_path": decision.get("path") or "",
             "dry_run": decision.get("dry_run") is True,
             "would_action": decision.get("would_action") or "",
+            "prompt_source": prompt_source,
         }
         self.update(error=decision.get("error") if decision.get("error") else None)
 
         if rule_action in {"approve", "decline"}:
             send_value = "option2" if rule_action == "decline" else action
-            self.send_action(module, send_value)
+            self.send_action(module, send_value, selected_option)
             self.last_hash = current_hash
             self.last_hash_at = time.monotonic()
             self.last_blocked_hash = ""
@@ -329,8 +362,8 @@ class AutoApproveWorker:
         self.update(last_action=f"unknown YOLO action {rule_action}; waiting for manual approval")
         return False
 
-    def approve_prompt(self, module: Any, current_hash: str, action: str | None, prompt_type: str) -> bool:
-        self.send_action(module, action)
+    def approve_prompt(self, module: Any, current_hash: str, action: str | None, prompt_type: str, selected_option: int = 1, prompt_source: str = "pane") -> bool:
+        self.send_action(module, action, selected_option)
         self.last_hash = current_hash
         self.last_hash_at = time.monotonic()
         self.last_blocked_hash = ""
@@ -344,11 +377,12 @@ class AutoApproveWorker:
             prompt_type=prompt_type,
             risk=risk,
             action=opt_label,
+            prompt_source=prompt_source,
         )
         self.stop_event.wait(3.0)
         return True
 
-    def handle_non_bash_prompt(self, module: Any, prompt_text: str, current_hash: str, action: str | None, prompt_type: str) -> bool:
+    def handle_non_bash_prompt(self, module: Any, prompt_text: str, current_hash: str, action: str | None, prompt_type: str, selected_option: int = 1, prompt_source: str = "pane") -> bool:
         decision = yolo_rules.evaluate(prompt_text or prompt_type, prompt_type, "", self.target, dangerously_yolo=self.dangerously_yolo)
         rule_action = decision.get("action") if isinstance(decision.get("action"), str) else "ask"
         if rule_action not in yolo_rules.RULE_ACTIONS:
@@ -362,11 +396,12 @@ class AutoApproveWorker:
             "ruleset_path": decision.get("path") or "",
             "dry_run": decision.get("dry_run") is True,
             "would_action": decision.get("would_action") or "",
+            "prompt_source": prompt_source,
         }
         self.update(error=decision.get("error") if decision.get("error") else None)
         if rule_action in {"approve", "decline"}:
             send_value = "option2" if rule_action == "decline" else action
-            self.send_action(module, send_value)
+            self.send_action(module, send_value, selected_option)
             self.last_hash = current_hash
             self.last_hash_at = time.monotonic()
             self.last_blocked_hash = ""

@@ -1,3 +1,4 @@
+import json
 import os
 
 os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
@@ -5,6 +6,8 @@ os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
 
 import auto_approve_tmux
 from yolomux_lib import prompt_detector
+from yolomux_lib.common import AgentInfo
+from yolomux_lib.common import SessionInfo
 
 
 def claude_bash_prompt_with_footer(*footer_lines):
@@ -29,6 +32,88 @@ def test_auto_approve_tmux_reexports_detector_helpers():
     assert auto_approve_tmux.extract_command is prompt_detector.extract_command
     assert auto_approve_tmux.approval_prompt_state is prompt_detector.approval_prompt_state
     assert auto_approve_tmux.prompt_hash is prompt_detector.prompt_hash
+
+
+def test_hybrid_approval_prompt_state_uses_recent_transcript_when_pane_header_is_missing(monkeypatch, tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "make test"}}],
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    info = SessionInfo(
+        session="6",
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session="6",
+                kind="claude",
+                pid=123,
+                pane_target="6:0.0",
+                command="claude",
+                cwd=None,
+                status=None,
+                session_id="session-6",
+                transcript=str(transcript),
+                error=None,
+            )
+        ],
+    )
+    monkeypatch.setattr(auto_approve_tmux, "discover_sessions", lambda sessions: ({"6": info}, []))
+
+    state = auto_approve_tmux.hybrid_approval_prompt_state("6", "❯ 1. Yes\n  2. No")
+
+    assert state["visible"] is True
+    assert state["source"] == "transcript"
+    assert state["type"] == "bash"
+    assert state["command"] == "make test"
+    assert state["selected_option"] == 1
+
+
+def test_hybrid_approval_prompt_state_does_not_use_transcript_without_visible_selector(monkeypatch, tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "make test"}}],
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    info = SessionInfo(
+        session="6",
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session="6",
+                kind="claude",
+                pid=123,
+                pane_target="6:0.0",
+                command="claude",
+                cwd=None,
+                status=None,
+                session_id="session-6",
+                transcript=str(transcript),
+                error=None,
+            )
+        ],
+    )
+    monkeypatch.setattr(auto_approve_tmux, "discover_sessions", lambda sessions: ({"6": info}, []))
+
+    state = auto_approve_tmux.hybrid_approval_prompt_state("6", "agent is thinking")
+
+    assert state["visible"] is False
+    assert state["type"] == ""
+    assert "no visible selectable prompt" in state["reason"]
 
 
 def test_extract_command_rejoins_wrapped_codex_command():
@@ -326,6 +411,26 @@ def test_action_for_prompt_preserves_codex_bash_option_policy():
         "  2. Yes, and don't ask again for commands that start with "
         "`'~/ai-config/claude/bin/dyn_gh_ops.py' pr-status --pr 9579` (p)\n"
     ) == "option1"
+
+
+def test_approval_prompt_state_reports_selected_codex_option():
+    visible_text = "\n".join([
+        "  Would you like to run the following command?",
+        "",
+        "  $ curl -sk -u yolomux:yolomux https://localhost:7777/",
+        "",
+        "  1. Yes, proceed (y)",
+        "› 2. Yes, and don't ask again for commands that start with `curl -sk -u` (p)",
+        "  3. No, and tell Codex what to do differently (esc)",
+    ])
+
+    state = prompt_detector.approval_prompt_state(visible_text)
+
+    assert state["visible"] is True
+    assert state["type"] == "bash"
+    assert state["yes_selected"] is False
+    assert state["selected_option"] == 2
+    assert state["action"] == "option1"
 
 
 def test_prompt_hash_includes_command_context():

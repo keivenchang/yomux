@@ -44,14 +44,66 @@ const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
+const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
+const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
 const fileEditorLineNumbersStorageKey = 'yolomux.editorLineNumbers';
 const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1';
 const diffRefFromStorageKey = 'yolomux.diffRefFrom';
 const diffRefToStorageKey = 'yolomux.diffRefTo';
 const editorViewModes = new Set(['edit', 'preview', 'split', 'diff']);
+const defaultGlobalTheme = 'dark';
 const defaultEditorScheme = 'dark';
 const defaultLightEditorScheme = 'yolomux-light';
+const editorThemeInheritMode = 'inherit';
+const TERMINAL_THEMES = {
+  dark: {
+    background: '#11151d',
+    foreground: '#dfe6ef',
+    cursor: '#f5f7fb',
+    cursorAccent: '#11151d',
+    selectionBackground: '#3a4b64',
+    black: '#0f1115',
+    red: '#ff6673',
+    green: '#76b900',
+    yellow: '#f5c542',
+    blue: '#70a7ff',
+    magenta: '#d8a3ff',
+    cyan: '#7ee9ff',
+    white: '#e4e8ee',
+    brightBlack: '#667286',
+    brightRed: '#ff8a94',
+    brightGreen: '#9be33d',
+    brightYellow: '#ffe08a',
+    brightBlue: '#93c5fd',
+    brightMagenta: '#f0abfc',
+    brightCyan: '#a5f3fc',
+    brightWhite: '#ffffff',
+  },
+  light: {
+    background: '#ffffff',
+    foreground: '#111827',
+    cursor: '#0f172a',
+    cursorAccent: '#ffffff',
+    selectionBackground: '#cfe3ff',
+    black: '#17202c',
+    red: '#b91c1c',
+    green: '#2f7d20',
+    yellow: '#9a6700',
+    blue: '#064ea5',
+    magenta: '#7c3aed',
+    cyan: '#0e7490',
+    white: '#d8dee8',
+    brightBlack: '#5b6573',
+    brightRed: '#dc2626',
+    brightGreen: '#3f8f2d',
+    brightYellow: '#b7791f',
+    brightBlue: '#1d4ed8',
+    brightMagenta: '#9333ea',
+    brightCyan: '#0891b2',
+    brightWhite: '#ffffff',
+  },
+};
 const EDITOR_SCHEMES = {
   dark: {
     id: 'dark', label: 'YOLOmux Dark', dark: true,
@@ -104,9 +156,9 @@ const EDITOR_SCHEMES = {
   },
   'yolomux-light': {
     id: 'yolomux-light', label: 'YOLOmux Light', dark: false,
-    bg: '#fbf9f4', fg: '#2b2b2b', cursor: '#14532d', selection: 'rgba(118, 185, 0, 0.24)', activeLine: '#f2ede1',
-    gutterBg: '#f4efe6', lineNo: '#6b7280', panel: '#f4efe6', panel2: '#ebe3d4', line: '#d4c7ad', previewBg: '#fff8e8',
-    syntax: {comment: '#6b7280', keyword: '#7c3aed', string: '#166534', number: '#b45309', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#14532d', link: '#0369a1', inlineCode: '#6b7280', inlineCodeBg: '#e6dfcf', inlineCodeBorder: '#c8bfa8', atom: '#9d174d', property: '#2563eb', strong: '#c0392b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
+    bg: '#ffffff', fg: '#1f2937', cursor: '#0f3d22', selection: 'rgba(29, 78, 216, 0.22)', activeLine: '#f4f7fb',
+    gutterBg: '#f6f8fa', lineNo: '#64748b', panel: '#f6f8fa', panel2: '#eef2f7', line: '#d0d7de', previewBg: '#ffffff',
+    syntax: {comment: '#64748b', keyword: '#6d28d9', string: '#166534', number: '#a16207', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#0f3d22', headingBg: '#ffffff', link: '#075985', inlineCode: '#0f4c81', inlineCodeBg: '#eef6ff', inlineCodeBorder: '#8ab4f8', atom: '#9d174d', property: '#1d4ed8', strong: '#a11b1b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
     diff: {addFg: '#15803d', removeFg: '#b91c1c'},
   },
   'vscode-light-plus': {
@@ -163,6 +215,7 @@ let activeFile = null;
 let sharedImageViewerPath = null;
 let fileExplorerRoot = null;
 let filesystemRefreshInFlight = false;
+let fileExplorerRepoInfoCacheLoaded = false;
 let fileExplorerRootMode = readStoredFileExplorerRootMode();
 let fileExplorerShowHidden = (() => {
   try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
@@ -174,6 +227,7 @@ const fileEditorImageMode = new Map();  // path -> "original" when zoomed to nat
 let fileEditorWrapEnabled = readStoredEditorWrap();
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 let fileEditorThemeMode = readStoredEditorThemeMode();
+let fileEditorCursorStyle = 'line';
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
@@ -184,6 +238,14 @@ let preferencesSearchText = '';
 let preferencesResetConfirmVisible = false;
 let preferencesSearchFresh = true;
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
+let uploadedFilesCollapsed = (() => {
+  try {
+    const value = window.localStorage?.getItem(uploadedFilesCollapsedStorageKey);
+    return value == null ? true : value !== '0';
+  } catch (_) {
+    return true;
+  }
+})();
 let sessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let sessionFilesPayloadSignature = '';
@@ -218,6 +280,7 @@ let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
+let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
 fileEditorThemeMode = readConfiguredEditorScheme();
 fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
 fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
@@ -284,8 +347,9 @@ const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
 const infoTabLabel = 'Branch Info';
-const yosupItemId = '__yosup__';
-const yosupTabLabel = "YO'sup";
+const yoagentItemId = '__yoagent__';
+const legacyYosupItemId = '__yosup__';
+const yoagentTabLabel = 'YO!agent';
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
 const changesItemId = '__changes__';
@@ -316,20 +380,20 @@ const TAB_TYPES = [
     prunePriority: () => 0,
   },
   {
-    key: 'yosup',
-    id: yosupItemId,
-    aliases: ['yosup', 'yo', 'sup', yosupItemId],
-    match: item => item === yosupItemId,
-    label: () => yosupTabLabel,
+    key: 'yoagent',
+    id: yoagentItemId,
+    aliases: ['yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
+    match: item => item === yoagentItemId || item === legacyYosupItemId,
+    label: () => yoagentTabLabel,
     shortLabel: () => 'YO',
-    terminalTitle: () => `unavailable for ${yosupTabLabel}`,
+    terminalTitle: () => `unavailable for ${yoagentTabLabel}`,
     sortRank: 0.25,
-    param: () => 'yosup',
+    param: () => 'yoagent',
     detail: () => 'Casual AI activity summary',
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
-    createPanel: () => createYosupPanel(),
-    className: () => 'info yosup-item',
-    icon: 'yosup',
+    createPanel: () => createYoagentPanel(),
+    className: () => 'info yoagent-item',
+    icon: 'yoagent',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
     prunePriority: () => 0,
   },
@@ -550,11 +614,17 @@ function applyFileExplorerStaticLabels() {
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
+let layoutItems = [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
+let activitySummaryRefreshing = false;
+let yoagentMessages = [];
+let yoagentBusy = false;
+let yoagentError = '';
+let yoagentDraft = '';
+let yoagentNotice = null;
 let notificationsEnabled = false;
 const sessionStateKeys = new Map();
 const notificationLastSent = new Map();
@@ -786,6 +856,55 @@ function normalizeEditorSchemeId(value) {
   return EDITOR_SCHEMES[normalized] ? normalized : defaultEditorScheme;
 }
 
+function normalizeGlobalThemeMode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['system', 'dark', 'light'].includes(normalized) ? normalized : defaultGlobalTheme;
+}
+
+function globalThemeMediaQuery() {
+  try { return window.matchMedia?.('(prefers-color-scheme: dark)') || null; }
+  catch (_) { return null; }
+}
+
+function systemPrefersDarkTheme() {
+  const query = globalThemeMediaQuery();
+  return query ? query.matches === true : true;
+}
+
+function resolvedGlobalThemeMode(mode = globalThemeMode) {
+  const normalized = normalizeGlobalThemeMode(mode);
+  if (normalized === 'system') return systemPrefersDarkTheme() ? 'dark' : 'light';
+  return normalized;
+}
+
+function globalThemeIsDark(mode = globalThemeMode) {
+  return resolvedGlobalThemeMode(mode) === 'dark';
+}
+
+function globalThemeLabel(mode = globalThemeMode) {
+  const normalized = normalizeGlobalThemeMode(mode);
+  if (normalized === 'system') return `System (${resolvedGlobalThemeMode(mode)})`;
+  return normalized === 'dark' ? 'Dark' : 'Light';
+}
+
+function nextGlobalThemeMode(mode = globalThemeMode) {
+  const normalized = normalizeGlobalThemeMode(mode);
+  if (normalized === 'system') return 'dark';
+  if (normalized === 'dark') return 'light';
+  return 'system';
+}
+
+function terminalThemeForGlobalTheme(mode = globalThemeMode) {
+  const theme = TERMINAL_THEMES[resolvedGlobalThemeMode(mode)] || TERMINAL_THEMES.dark;
+  return {...theme};
+}
+
+function normalizeEditorThemeMode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['inherit', 'system', 'global', 'auto', ''].includes(normalized)) return editorThemeInheritMode;
+  return normalizeEditorSchemeId(normalized);
+}
+
 function normalizeEditorSchemeForMode(value, dark) {
   const id = normalizeEditorSchemeId(value);
   const scheme = EDITOR_SCHEMES[id];
@@ -794,6 +913,10 @@ function normalizeEditorSchemeForMode(value, dark) {
 }
 
 function activeEditorScheme() {
+  if (fileEditorThemeMode === editorThemeInheritMode) {
+    const inherited = configuredEditorSchemeForMode(globalThemeIsDark());
+    return EDITOR_SCHEMES[inherited] || EDITOR_SCHEMES[defaultEditorScheme] || EDITOR_SCHEMES.dark;
+  }
   return EDITOR_SCHEMES[normalizeEditorSchemeId(fileEditorThemeMode)] || EDITOR_SCHEMES[defaultEditorScheme] || EDITOR_SCHEMES.dark;
 }
 
@@ -805,21 +928,21 @@ function configuredEditorSchemeForMode(dark) {
 
 function readStoredEditorThemeMode() {
   try {
-    const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey) || defaultEditorScheme;
-    return normalizeEditorSchemeId(value);
+    const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey);
+    return normalizeEditorThemeMode(value || editorThemeInheritMode);
   } catch (_) {
-    return defaultEditorScheme;
+    return editorThemeInheritMode;
   }
 }
 
 function writeStoredEditorThemeMode(mode) {
   try {
-    window.localStorage?.setItem(fileEditorThemeModeStorageKey, normalizeEditorSchemeId(mode));
+    window.localStorage?.setItem(fileEditorThemeModeStorageKey, normalizeEditorThemeMode(mode));
   } catch (_) {}
 }
 
 function readConfiguredEditorScheme() {
-  return normalizeEditorSchemeId(readStoredEditorThemeMode());
+  return normalizeEditorThemeMode(readStoredEditorThemeMode());
 }
 
 function syncPressedButton(button, active, options = {}) {
@@ -952,6 +1075,7 @@ function updatePanelInactiveOverlays() {
     panel.classList.toggle('focused-pane', item === focusedPanelItem);
     panel.classList.toggle('active-pane', item === focusedPanelItem);
   }
+  if (typeof updateLinkedFilePreviewRings === 'function') updateLinkedFilePreviewRings();
 }
 
 function esc(value) {
@@ -988,6 +1112,15 @@ function fuzzySubsequenceScore(query, text) {
   return match ? match.score : Number.NEGATIVE_INFINITY;
 }
 
+function fuzzyCanonicalPrefixText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function fuzzyFieldStartsWithQuery(query, text) {
+  const needle = fuzzyCanonicalPrefixText(query);
+  return Boolean(needle) && fuzzyCanonicalPrefixText(text).startsWith(needle);
+}
+
 function fuzzySearchScore(query, fields) {
   const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
   if (!tokens.length) return 0;
@@ -997,8 +1130,11 @@ function fuzzySearchScore(query, fields) {
   for (const token of tokens) {
     let best = Number.NEGATIVE_INFINITY;
     for (const [index, value] of values.entries()) {
-      const fieldScore = fuzzySubsequenceScore(token, value);
-      if (Number.isFinite(fieldScore)) best = Math.max(best, fieldScore - index * 2);
+      let fieldScore = fuzzySubsequenceScore(token, value);
+      if (Number.isFinite(fieldScore) && fuzzyFieldStartsWithQuery(token, value)) {
+        fieldScore += index === 0 ? 20000 : 12000;
+      }
+      if (Number.isFinite(fieldScore)) best = Math.max(best, fieldScore - index * 20);
     }
     if (!Number.isFinite(best)) return Number.NEGATIVE_INFINITY;
     total += best;
@@ -1427,6 +1563,17 @@ function showSessionContextMenu(session, x, y, options = {}) {
   const renameAction = options.tab ? () => beginPaneTabRename(options.tab, session) : () => renameTmuxSession(session);
   for (const item of tmuxSessionActionCommands(session, {renameAction})) {
     appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
+  }
+  const viewItems = tmuxSessionViewCommands(session).filter(item => ['Transcript', 'AI summary', 'Event log'].includes(item.label));
+  if (viewItems.length) {
+    appendContextMenuSeparator(menu);
+    for (const item of viewItems) {
+      appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {
+        disabled: item.disabled,
+        checked: item.checked,
+        title: item.detail || '',
+      });
+    }
   }
   sessionContextMenu.open(menu, x, y);
 }
@@ -2047,7 +2194,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -2097,7 +2244,7 @@ function openFileEditorItems() {
 }
 
 function computeLayoutItems() {
-  return [infoItemId, yosupItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {
@@ -2482,7 +2629,7 @@ function keyboardShortcutCatalog() {
       {label: 'Redo accept/reject chunk', keys: appShortcutText('Z', {shift: true})},
     ]},
     {section: 'Tabs / Panes', items: [
-      {label: 'Close active tab', keys: appShortcutText('W')},
+      {label: 'Close active editor/viewer tab', keys: `${appShortcutText('W')} · ${appShortcutText('Backspace')} outside text`},
       {label: 'Move or split tab', keys: 'Drag a tab'},
       {label: 'Session actions', keys: 'Right-click a tmux tab'},
       {label: 'Close menu or dialog', keys: 'Esc'},
@@ -2558,6 +2705,7 @@ function flattenMenuCommands(items, prefix = []) {
         label: [...prefix, item.label].join(' / '),
         detail: item.detail || '',
         key: `menu:${[...prefix, item.label].join('/')}`,
+        targetItem: item.targetItem || '',
         keybinding: commandPaletteKeybinding([...prefix, item.label].join(' / '), item.detail || ''),
         run: item.action,
       });
@@ -2587,7 +2735,10 @@ function commandPaletteCommandItems() {
     keybinding: 'Enter',
     run: () => selectSession(item),
   }));
-  const menuItems = appMenuTree().flatMap(menu => flattenMenuCommands(menu.items, [menu.label]));
+  const tabItemIds = new Set(commandPaletteAllTabItems());
+  const menuItems = appMenuTree()
+    .flatMap(menu => flattenMenuCommands(menu.items, [menu.label]))
+    .filter(item => !(item.targetItem && isVirtualItem(item.targetItem) && tabItemIds.has(item.targetItem)));
   const settingItems = preferenceSections().flatMap(section => section.items.map(item => ({
     group: 'Settings',
     label: `${section.title} / ${item.label}`,
@@ -2632,6 +2783,33 @@ function fileQuickOpenQueryParts(query = commandPaletteQuery) {
   };
 }
 
+function fileQuickOpenPathQuery(query = commandPaletteQuery) {
+  const text = fileQuickOpenQueryParts(query).query;
+  if (!text.startsWith('/') && !text.startsWith('~')) return {active: false, directory: '', filter: ''};
+  if (text === '~') return {active: true, directory: '~', filter: ''};
+  if (text.endsWith('/')) return {active: true, directory: text || '/', filter: ''};
+  const slash = text.lastIndexOf('/');
+  if (text.startsWith('~/') && slash <= 1) return {active: true, directory: '~', filter: text.slice(2)};
+  if (slash <= 0) return {active: true, directory: '/', filter: text.slice(1)};
+  return {active: true, directory: text.slice(0, slash) || '/', filter: text.slice(slash + 1)};
+}
+
+function joinDirectoryPath(directory, name) {
+  if (!directory || directory === '/') return `/${name}`;
+  if (directory === '~') return `~/${name}`;
+  return `${directory.replace(/\/+$/, '')}/${name}`;
+}
+
+function descendFileQuickOpenDirectory(path) {
+  const directory = normalizeDirectoryPath(path);
+  commandPaletteQuery = `${directory}${directory.endsWith('/') ? '' : '/'}`;
+  commandPaletteIndex = 0;
+  const input = commandPaletteNode?.querySelector?.('.command-palette-input');
+  if (input) input.value = commandPaletteQuery;
+  renderCommandPaletteResults();
+  refreshFileQuickOpenCandidates(commandPaletteQuery);
+}
+
 function revealOpenFileLineSoon(path, line) {
   if (!line) return;
   requestAnimationFrame(() => {
@@ -2657,18 +2835,19 @@ async function openFileQuickOpenPath(path, options = {}) {
 
 function fileQuickOpenItem(path, options = {}) {
   const label = basenameOf(path);
+  const isDir = options.kind === 'dir';
   const detail = compactHomePath(path);
   return {
     group: options.group || 'Files',
-    label,
+    label: isDir ? `${label}/` : label,
     detail,
     key: `file:${path}`,
-    iconText: fileIconFor(label),
-    keybinding: `${appShortcutText('Enter')} split`,
+    iconText: isDir ? '▸' : fileIconFor(label),
+    keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
     searchFields: [label, path, detail, options.relativePath || ''],
     sortBonus: Number(options.sortBonus || 0),
-    run: () => openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
-    splitRun: () => openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line, split: true}),
+    run: () => isDir ? descendFileQuickOpenDirectory(path) : openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
+    splitRun: isDir ? null : () => openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line, split: true}),
   };
 }
 
@@ -2695,6 +2874,7 @@ function fileQuickOpenItems() {
     add(fileQuickOpenItem(path, {
       group: 'Files',
       relativePath: file.relative_path || file.name || '',
+      kind: file.kind || 'file',
       sortBonus: file.uploaded === true ? -500 : 0,
     }));
   }
@@ -2758,6 +2938,8 @@ function commandPaletteSearchQuery(query = commandPaletteQuery) {
   const parts = fileQuickOpenQueryParts(query);
   if (parts.commandMode) return String(query || '').replace(/^>\s*/, '').trim();
   if (parts.symbolMode) return String(query || '').replace(/^@\s*/, '').trim();
+  const pathQuery = fileQuickOpenPathQuery(query);
+  if (pathQuery.active) return pathQuery.filter;
   return parts.query;
 }
 
@@ -2904,7 +3086,7 @@ function invokeCommandPaletteSelection(event = null) {
 function scheduleFileQuickOpenSearch(options = {}) {
   if (fileQuickOpenDebounce) clearTimeout(fileQuickOpenDebounce);
   const run = () => {
-    if (commandPaletteMode === 'files' && !commandPaletteQuery.trim().startsWith('>')) refreshFileQuickOpenCandidates(commandPaletteSearchQuery());
+    if (commandPaletteMode === 'files' && !commandPaletteQuery.trim().startsWith('>')) refreshFileQuickOpenCandidates(commandPaletteQuery);
   };
   if (options.immediate) run();
   else fileQuickOpenDebounce = setTimeout(run, 160);
@@ -2917,12 +3099,31 @@ async function refreshFileQuickOpenCandidates(query = '') {
   fileQuickOpenLoading = true;
   renderCommandPaletteResults();
   try {
-    const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(root)}&query=${encodeURIComponent(query)}&limit=500`);
+    const pathQuery = fileQuickOpenPathQuery(query);
+    const response = pathQuery.active
+      ? await apiFetch(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`)
+      : await apiFetch(`/api/fs/search?root=${encodeURIComponent(root)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     if (requestId !== fileQuickOpenRequestId) return;
-    fileQuickOpenRoot = payload.root || root;
-    fileQuickOpenCandidates = Array.isArray(payload.files) ? payload.files : [];
+    if (pathQuery.active) {
+      fileQuickOpenRoot = payload.path || pathQuery.directory || root;
+      const filter = String(pathQuery.filter || '').toLowerCase();
+      fileQuickOpenCandidates = (Array.isArray(payload.entries) ? payload.entries : [])
+        .filter(entry => entry?.kind === 'file' || entry?.kind === 'dir')
+        .filter(entry => !filter || String(entry.name || '').toLowerCase().includes(filter))
+        .map(entry => ({
+          name: entry.name || '',
+          path: joinDirectoryPath(payload.path || pathQuery.directory || '/', entry.name || ''),
+          relative_path: entry.name || '',
+          kind: entry.kind || 'file',
+          size: entry.size,
+          mtime: entry.mtime,
+        }));
+    } else {
+      fileQuickOpenRoot = payload.root || root;
+      fileQuickOpenCandidates = Array.isArray(payload.files) ? payload.files : [];
+    }
     fileQuickOpenError = '';
   } catch (error) {
     if (requestId !== fileQuickOpenRequestId) return;
@@ -3440,6 +3641,7 @@ function menuTabCommand(item, options = {}) {
     ariaLabel: [itemLabel(item), detail].filter(Boolean).join(' - '),
     html: stripTitleAttrs(menuTabRowHtml(item, {...options, menu: true})),
     className: 'app-menu-tab-command',
+    targetItem: item,
   });
 }
 
@@ -3489,6 +3691,18 @@ function yoloRulePath() {
 
 function settingsConfigPath() {
   return clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
+}
+
+function cycleGlobalThemeSetting() {
+  const next = nextGlobalThemeMode();
+  saveSettingsPatch(settingPatch('appearance.theme', next))
+    .then(() => {
+      statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
+    })
+    .catch(error => {
+      statusEl.innerHTML = `<span class="err">theme save failed: ${esc(error)}</span>`;
+      refreshSettings({force: true});
+    });
 }
 
 function yoloRuleStatusDetail() {
@@ -3593,6 +3807,7 @@ function tmuxSessionViewCommands(session) {
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
+      checked: active && panelActiveTabName(session) === 'transcript',
       ariaLabel: ['Transcript', focusDetail].filter(Boolean).join(' - '),
     }),
     menuCommand('AI summary', () => {
@@ -3600,6 +3815,7 @@ function tmuxSessionViewCommands(session) {
     }, {
       disabled: readOnlyMode || !active,
       detail: readOnlyMode ? 'Admin only' : (active ? '' : disabledDetail),
+      checked: active && panelActiveTabName(session) === 'summary',
       ariaLabel: ['AI summary', focusDetail].filter(Boolean).join(' - '),
     }),
     menuCommand('Event log', () => {
@@ -3607,6 +3823,7 @@ function tmuxSessionViewCommands(session) {
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
+      checked: active && panelActiveTabName(session) === 'events',
       ariaLabel: ['Event log', focusDetail].filter(Boolean).join(' - '),
     }),
     menuCommand('Pane details', () => {
@@ -3657,7 +3874,11 @@ function tabSearchFields(item) {
     info.goal,
     pr?.title,
     pr?.url,
+    pr?.number ? 'PR' : '',
     pr?.number ? `PR ${pr.number}` : '',
+    pr?.number ? `PR#${pr.number}` : '',
+    pr?.number ? `#${pr.number}` : '',
+    pr?.number ? String(pr.number) : '',
     ...(Array.isArray(info.linear) ? info.linear : []),
   ].filter(Boolean);
 }
@@ -3706,6 +3927,15 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   return resultItems;
 }
 
+function fileMenuVirtualCommand(item, detail) {
+  return menuCommand(itemLabel(item), () => selectSession(item), {
+    checked: itemInLayout(item),
+    detail,
+    iconHtml: tabTypeIconHtml(item, {menu: true}),
+    targetItem: item,
+  });
+}
+
 function appMenuTree() {
   const activeTmux = currentSessionActionTarget();
   const openItems = orderedPaneItems(activePaneItems());
@@ -3719,26 +3949,26 @@ function appMenuTree() {
           menuCommand(fileExplorerLabel(), () => selectSession(fileExplorerItemId), {
             checked: itemInLayout(fileExplorerItemId),
             detail: 'Browse files',
+            iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
+            targetItem: fileExplorerItemId,
           }),
-          menuTabCommand(infoItemId, {
-            checked: itemIsActivePaneTab(infoItemId),
-            detail: 'Open branch, PR, CI, and repo metadata',
-          }),
-          menuTabCommand(yosupItemId, {
-            checked: itemIsActivePaneTab(yosupItemId),
-            detail: 'Open the casual AI activity summary',
-          }),
+          fileMenuVirtualCommand(infoItemId, 'Open branch, PR, CI, and repo metadata'),
+          fileMenuVirtualCommand(yoagentItemId, 'Open the AI agent activity summary'),
           menuCommand('Open file', openFileQuickOpen, {
             detail: appShortcutText('P'),
+            iconHtml: appMenuUiIcon('document'),
           }),
           menuCommand('Preferences', () => selectSession(prefsItemId), {
             checked: itemInLayout(prefsItemId),
             detail: compactHomePath(settingsConfigPath()),
+            iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
+            targetItem: prefsItemId,
           }),
         ],
         [
           menuCommand('Log out', logOut, {
             detail: 'End this browser session',
+            iconHtml: appMenuUiIcon('logout'),
           }),
         ]
       ),
@@ -3760,6 +3990,9 @@ function appMenuTree() {
         }),
         menuCommand('Refresh', refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
+        }),
+        menuCommand(`Theme: ${globalThemeLabel()}`, cycleGlobalThemeSetting, {
+          detail: `Switch to ${globalThemeLabel(nextGlobalThemeMode())}`,
         }),
         menuSubmenu('Layout', [
           menuCommand('Single pane', setLayoutToSinglePane, {detail: 'Consolidate visible non-Finder tabs'}),
@@ -4261,6 +4494,7 @@ async function openFileExplorerAt(path, options = {}) {
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
   try {
+    hydrateFileExplorerRepoInfoCache();
     const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
@@ -4273,6 +4507,7 @@ async function fetchDirectory(path, options = {}) {
     const entries = payload.entries || [];
     fileExplorerPathError = '';
     fileExplorerLastListError = null;
+    cacheFileExplorerRepoInfoEntries(root, entries);
     markNewDirectoryEntries(root, entries);
     if (options.recordSignature !== false) recordDirectorySignature(root, entries);
     return entries;
@@ -4352,6 +4587,75 @@ function scheduleNewEntryClassRemoval(row, path) {
 function normalizeDirectoryPath(path) {
   const text = String(path || '').replace(/\/+$/, '');
   return text || '/';
+}
+
+function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
+  if (!repo || typeof repo !== 'object') return null;
+  const root = normalizeDirectoryPath(repo.root || fallbackRoot);
+  if (!root) return null;
+  const dirtyCount = Number(repo.dirty_count);
+  const ahead = Number(repo.ahead);
+  const behind = Number(repo.behind);
+  return {
+    root,
+    name: String(repo.name || basenameOf(root) || ''),
+    branch: String(repo.branch || ''),
+    dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
+    upstream: String(repo.upstream || ''),
+    ahead: Number.isFinite(ahead) ? ahead : 0,
+    behind: Number.isFinite(behind) ? behind : 0,
+  };
+}
+
+function hydrateFileExplorerRepoInfoCache() {
+  if (fileExplorerRepoInfoCacheLoaded) return;
+  fileExplorerRepoInfoCacheLoaded = true;
+  try {
+    const raw = window.localStorage?.getItem(fileExplorerRepoInfoStorageKey);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const repos = Array.isArray(parsed?.repos) ? parsed.repos : [];
+    for (const item of repos) {
+      const path = normalizeDirectoryPath(item?.path || item?.repo?.root || '');
+      const repo = normalizeFileExplorerRepoInfo(item?.repo, path);
+      if (path && repo) fileExplorerRepoInfoCache.set(path, repo);
+    }
+  } catch (_) {}
+}
+
+function persistFileExplorerRepoInfoCache() {
+  try {
+    const repos = Array.from(fileExplorerRepoInfoCache.entries())
+      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.root) === path)
+      .sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath))
+      .slice(-200)
+      .map(([path, repo]) => ({path, repo}));
+    window.localStorage?.setItem(fileExplorerRepoInfoStorageKey, JSON.stringify({repos}));
+  } catch (_) {}
+}
+
+function cacheFileExplorerRepoInfo(path, repo, options = {}) {
+  hydrateFileExplorerRepoInfoCache();
+  const normalized = normalizeDirectoryPath(path || repo?.root || '');
+  const info = normalizeFileExplorerRepoInfo(repo, normalized);
+  if (!normalized || !info) return false;
+  const repoRoot = normalizeDirectoryPath(info.root);
+  fileExplorerRepoInfoCache.set(normalized, info);
+  if (repoRoot && repoRoot !== normalized) fileExplorerRepoInfoCache.set(repoRoot, info);
+  if (options.persist !== false) persistFileExplorerRepoInfoCache();
+  return true;
+}
+
+function cacheFileExplorerRepoInfoEntries(parentPath, entries) {
+  if (!Array.isArray(entries)) return;
+  hydrateFileExplorerRepoInfoCache();
+  let changed = false;
+  for (const entry of entries) {
+    if (entry?.kind !== 'dir' || entry.is_repo !== true || !entry.repo) continue;
+    const fullPath = childPath(parentPath, entry.name);
+    changed = cacheFileExplorerRepoInfo(fullPath, entry.repo, {persist: false}) || changed;
+  }
+  if (changed) persistFileExplorerRepoInfoCache();
 }
 
 function currentFileExplorerRoot() {
@@ -4549,7 +4853,7 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
     const info = await fetchFilePathInfo(normalized);
     if (normalizeDirectoryPath(fileExplorerRoot || normalized) !== normalized) return;
     const repo = info.repo || null;
-    fileExplorerRepoInfoCache.set(normalized, repo);
+    if (repo) cacheFileExplorerRepoInfo(normalized, repo);
     setFileExplorerRepoSummary(normalized, repo);
   } catch (_) {
     setFileExplorerRepoSummary(normalized, null);
@@ -4561,7 +4865,7 @@ async function updateRepoRowHoverTitle(row, path) {
   row.dataset.repoTitleLoaded = 'true';
   try {
     const info = await fetchFilePathInfo(path);
-    fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), info.repo || null);
+    if (info.repo) cacheFileExplorerRepoInfo(path, info.repo);
     const summary = repoInfoSummary(info.repo);
     if (summary) row.title = `${summary}\n${info.repo.root}`;
     updateFileTreeGitStatusRows();
@@ -4873,10 +5177,28 @@ function fileTreeNumstatText(path) {
 }
 
 function fileTreeRepoBranch(path) {
+  hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
   if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
   return repo.branch || 'detached';
+}
+
+function fileTreeRepoNumstat(path) {
+  const normalized = normalizeDirectoryPath(path);
+  const repos = Array.isArray(fileExplorerSessionFilesPayload?.repos) ? fileExplorerSessionFilesPayload.repos : [];
+  const repo = repos.find(item => normalizeDirectoryPath(item?.repo || '') === normalized);
+  let added = Number(repo?.added);
+  let removed = Number(repo?.removed);
+  if (!Number.isFinite(added) || !Number.isFinite(removed)) {
+    const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
+    const repoFiles = files.filter(item => normalizeDirectoryPath(item?.repo || '') === normalized);
+    added = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.added)) ? Number(item.added) : 0), 0);
+    removed = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.removed)) ? Number(item.removed) : 0), 0);
+  }
+  if (!Number.isFinite(added) || !Number.isFinite(removed)) return '';
+  if (added === 0 && removed === 0) return '';
+  return `+${added}/-${removed}`;
 }
 
 function fileTreeRepoBranchIsNonMain(path) {
@@ -4884,13 +5206,20 @@ function fileTreeRepoBranchIsNonMain(path) {
   return Boolean(branch && !['main', 'master'].includes(branch));
 }
 
-function fileTreeDisplayName(path, entry) {
+function fileTreeDisplayParts(path, entry) {
   if (entry.kind === 'dir' && entry.is_repo === true) {
     const branch = fileTreeRepoBranch(path);
-    return branch ? `${entry.name} (${branch})` : entry.name;
+    const numstat = fileTreeRepoNumstat(path);
+    const suffix = [branch, numstat].filter(Boolean).join(' ');
+    return {
+      text: suffix ? `${entry.name} [${suffix}]` : entry.name,
+      html: suffix
+        ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${branch ? `<span class="file-tree-repo-branch">${esc(branch)}</span>` : ''}${branch && numstat ? ' ' : ''}${numstat ? `<span class="file-tree-repo-delta">${esc(numstat)}</span>` : ''}]</span>`
+        : esc(entry.name),
+    };
   }
-  if (entry.kind === 'file') return `${entry.name}${fileTreeNumstatText(path)}`;
-  return entry.name;
+  const text = entry.kind === 'file' ? `${entry.name}${fileTreeNumstatText(path)}` : entry.name;
+  return {text, html: ''};
 }
 
 function fileTreeMtimeText(entry) {
@@ -4979,7 +5308,13 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   }
   icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
   if (icon.textContent !== iconText) icon.textContent = iconText;
-  if (name.textContent !== nameText) name.textContent = nameText;
+  if (options.nameHtml) {
+    if (name.innerHTML !== options.nameHtml) name.innerHTML = options.nameHtml;
+    if (!name.children?.length && name.textContent !== nameText) name.textContent = nameText;
+  } else if (name.textContent !== nameText || name.innerHTML) {
+    name.innerHTML = '';
+    name.textContent = nameText;
+  }
   status.textContent = options.gitStatus || '';
   status.hidden = !options.gitStatus;
   date.textContent = options.dateText || '';
@@ -5028,9 +5363,11 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
   else row.removeAttribute('aria-current');
   const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-  updateFileTreeRowContents(row, icon, fileTreeDisplayName(fullPath, entry), {
+  const displayName = fileTreeDisplayParts(fullPath, entry);
+  updateFileTreeRowContents(row, icon, displayName.text, {
     gitStatus,
     iconClass: fileIconClassFor(entry.name, entry.kind),
+    nameHtml: displayName.html,
     dateText: fileExplorerTreeShowDates ? fileTreeMtimeText(entry) : '',
   });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
@@ -5096,6 +5433,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
 
 function renderTreeChildren(container, parentPath, entries, depth, options = {}) {
   if (!container) return;
+  cacheFileExplorerRepoInfoEntries(parentPath, entries);
   const entriesByDir = options.entriesByDir instanceof Map ? options.entriesByDir : null;
   const visible = sortedFileTreeEntries(entries);
   const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
@@ -5234,8 +5572,11 @@ function updateFileTreeGitStatusRows() {
     };
     row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(row.dataset.path));
     const name = row.querySelector(':scope > .file-tree-name');
-    const nextName = fileTreeDisplayName(row.dataset.path, entry);
-    if (name && name.textContent !== nextName) name.textContent = nextName;
+    const nextName = fileTreeDisplayParts(row.dataset.path, entry);
+    if (name && name.textContent !== nextName.text) {
+      if (nextName.html) name.innerHTML = nextName.html;
+      if (!name.children?.length) name.textContent = nextName.text;
+    }
   });
 }
 
@@ -7461,7 +7802,8 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
-  const scheme = EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark;
+  const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
+  if (mode === editorThemeInheritMode) return `Inherit global theme (${scheme.label})`;
   return `${scheme.label} editor scheme`;
 }
 
@@ -7549,7 +7891,8 @@ function updateEditorThemeButton(button) {
   button.classList.toggle('theme-light', !scheme.dark);
   button.dataset.editorTheme = scheme.id;
   button.setAttribute('aria-pressed', scheme.dark ? 'false' : 'true');
-  button.title = `${editorThemeLabel()}; switch to ${nextScheme.label}`;
+  const nextAction = fileEditorThemeMode === editorThemeInheritMode ? `override to ${nextScheme.label}` : 'return to global theme';
+  button.title = `${editorThemeLabel()}; ${nextAction}`;
   button.setAttribute('aria-label', editorThemeLabel());
   setFileEditorIcon(button, 'file-editor-icon-theme');
 }
@@ -7561,7 +7904,17 @@ function updateImageViewerThemeButton(button) {
   button.setAttribute('aria-label', 'Toggle image background');
 }
 
-function applyEditorThemeMode() {
+function refreshOpenEditorThemePanels() {
+  document.querySelectorAll('.file-editor-panel').forEach(panel => {
+    const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
+    const path = fileItemPath(item);
+    if (!path || openFiles.get(path)?.kind !== 'text') return;
+    captureFileEditorPanelViewState(item, panel);
+    renderFileEditorPanel(panel, item);
+  });
+}
+
+function applyEditorThemeMode(options = {}) {
   const scheme = activeEditorScheme();
   applyEditorSchemeCssVariables(scheme);
   document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light');
@@ -7569,20 +7922,21 @@ function applyEditorThemeMode() {
   document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light');
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
+  if (options.refreshEditors) refreshOpenEditorThemePanels();
 }
 
 function setFileEditorThemeMode(mode) {
-  fileEditorThemeMode = normalizeEditorSchemeId(mode);
+  fileEditorThemeMode = normalizeEditorThemeMode(mode);
   writeStoredEditorThemeMode(fileEditorThemeMode);
-  applyEditorThemeMode();
-  document.querySelectorAll('.file-editor-panel').forEach(panel => {
-    const path = panel.dataset.filePath;
-    if (path && openFiles.get(path)?.kind === 'text') renderFileEditorPanel(panel, fileEditorItemFor(path));
-  });
+  applyEditorThemeMode({refreshEditors: true});
 }
 
 function cycleEditorThemeMode() {
-  setFileEditorThemeMode(configuredEditorSchemeForMode(!activeEditorScheme().dark));
+  if (fileEditorThemeMode === editorThemeInheritMode) {
+    setFileEditorThemeMode(configuredEditorSchemeForMode(!activeEditorScheme().dark));
+  } else {
+    setFileEditorThemeMode(editorThemeInheritMode);
+  }
 }
 
 function updateEditorWrapButton(button) {
@@ -7610,8 +7964,8 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   const active = editorViewModeFor(path, item) === 'diff';
   const available = openFileDiffAvailable(state);
   const loading = state?.diffLoading === true;
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!active && !available && !loading);
-  button.disabled = loading || (!available && active);
+  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!available && !(active && loading));
+  button.disabled = loading || !available;
   const label = loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
   setFileEditorIcon(button, 'file-editor-icon-diff');
@@ -7682,6 +8036,16 @@ function boolSetting(path, fallback) {
   return value === true || value === 'true' || value === 1;
 }
 
+function normalizeEditorCursorStyle(value) {
+  return value === 'block' ? 'block' : 'line';
+}
+
+function applyEditorCursorStyle() {
+  fileEditorCursorStyle = normalizeEditorCursorStyle(fileEditorCursorStyle);
+  document.body?.classList.remove('editor-cursor-line', 'editor-cursor-block');
+  document.body?.classList.add(`editor-cursor-${fileEditorCursorStyle}`);
+}
+
 function applyCssSettings() {
   const root = document.documentElement?.style;
   if (!root) return;
@@ -7698,12 +8062,40 @@ function applyCssSettings() {
   root.setProperty('--file-image-preview-max-size', `${Math.max(1, fileExplorerImagePreviewMaxPx)}px`);
 }
 
-function applyTerminalRuntimeSettings() {
+function applyGlobalThemeMode(options = {}) {
+  globalThemeMode = normalizeGlobalThemeMode(globalThemeMode);
+  const resolved = resolvedGlobalThemeMode();
+  document.body?.classList.remove('theme-system', 'theme-dark', 'theme-light', 'theme-resolved-dark', 'theme-resolved-light');
+  document.body?.classList.add(`theme-${globalThemeMode}`, `theme-resolved-${resolved}`);
+  if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
+  if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
+  if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
+}
+
+let globalThemeMediaListenerInstalled = false;
+
+function installGlobalThemeMediaListener() {
+  if (globalThemeMediaListenerInstalled) return;
+  const query = globalThemeMediaQuery();
+  if (!query) return;
+  const handler = () => {
+    if (normalizeGlobalThemeMode(globalThemeMode) !== 'system') return;
+    applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+    renderSessionButtons();
+    renderPaneTabStrips();
+  };
+  if (typeof query.addEventListener === 'function') query.addEventListener('change', handler);
+  else if (typeof query.addListener === 'function') query.addListener(handler);
+  globalThemeMediaListenerInstalled = true;
+}
+
+function applyTerminalRuntimeSettings(options = {}) {
   for (const [session, item] of terminals.entries()) {
     if (!item?.term) continue;
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
-    scheduleFit(session);
+    item.term.options.theme = terminalThemeForGlobalTheme();
+    if (options.fit !== false) scheduleFit(session);
   }
 }
 
@@ -7755,7 +8147,9 @@ function applySettingsPayload(payload, options = {}) {
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
   fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
   autoFocusEnabled = boolSetting('general.auto_focus', false);
-  const previousEditorScheme = fileEditorThemeMode;
+  const previousEditorSchemeId = activeEditorScheme().id;
+  globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
+  fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'line'));
   fileEditorThemeMode = readConfiguredEditorScheme();
   if (options.initial || options.applyEditorDefaults) {
     fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
@@ -7763,7 +8157,9 @@ function applySettingsPayload(payload, options = {}) {
   }
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
   applyCssSettings();
-  applyEditorThemeMode();
+  applyGlobalThemeMode({updateEditor: false, updateTerminals: false});
+  applyEditorThemeMode({refreshEditors: false});
+  applyEditorCursorStyle();
   applyTerminalRuntimeSettings();
   applyEditorWrapPreference();
   renderFileExplorerRootModeControls();
@@ -7772,7 +8168,7 @@ function applySettingsPayload(payload, options = {}) {
   renderSessionButtons();
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
-  if (previousEditorScheme !== fileEditorThemeMode) {
+  if (previousEditorSchemeId !== activeEditorScheme().id) {
     for (const [item, panel] of panelNodes.entries()) {
       if (isFileEditorItem(item)) renderFileEditorPanel(panel, item);
     }
@@ -8174,8 +8570,13 @@ function yoloMarkerHtml(session, auto, options = {}) {
 function pullRequestCompactBadgesHtml(session, pr) {
   const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
   const ciHtml = pullRequestCiIndicatorHtml(session, pr);
-  const prHtml = pullRequestPrIndicatorHtml(session, pr);
-  return [prHtml, statusHtml, ciHtml].filter(Boolean).join('');
+  const prHtml = pullRequestNumberIndicatorHtml(session, pr);
+  return [statusHtml, ciHtml, prHtml].filter(Boolean).join('');
+}
+
+function pullRequestNumberIndicatorHtml(session, pr) {
+  if (!pr?.number) return '';
+  return `<span class="${metadataBadgeClasses(session, 'pr', 'ci-indicator tab-symbol pr-indicator')}">#${esc(pr.number)}</span>`;
 }
 
 function applySessionStateClasses(node, state) {
@@ -8398,7 +8799,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
   rows.push(popoverPairRow('state', stateValue, 'agent', agentValue));
   const activity = sessionActivitySummary(session);
-  if (activity?.local) rows.push(popoverRow(yosupTabLabel, esc(activity.local)));
+  if (activity?.local) rows.push(popoverRow(yoagentTabLabel, esc(activity.local)));
   rows.push(popoverRow('path', displayPath));
   if (git?.branch) rows.push(popoverRow('branch', `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {
@@ -9199,6 +9600,10 @@ function replaceLayoutLeaf(node, slot, replacement) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  const previous = activeItemForSide(side);
+  if (previous && previous !== session && typeof captureFileEditorPanelViewStateForItem === 'function') {
+    captureFileEditorPanelViewStateForItem(previous);
+  }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
@@ -9392,6 +9797,14 @@ function pullRequestStatusClass(pr) {
   return 'pr-status-unknown';
 }
 
+function pullRequestCiStatusClass(pr) {
+  const state = String(pr?.checks?.state || '').toLowerCase();
+  if (['success', 'passing', 'passed', 'green'].includes(state)) return 'pr-status-passing';
+  if (['failure', 'failing', 'failed', 'red', 'error', 'cancelled', 'timed_out', 'action_required'].includes(state)) return 'pr-status-failing';
+  if (['pending', 'queued', 'in_progress', 'running', 'waiting', 'requested'].includes(state)) return 'pr-status-pending';
+  return pullRequestStatusClass(pr);
+}
+
 function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
@@ -9399,17 +9812,11 @@ function pullRequestStatusIndicatorHtml(session, pr) {
   return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${pullRequestStatusDisplay(pr)}</span>`;
 }
 
-function pullRequestPrIndicatorHtml(session, pr) {
-  if (!pr?.number) return '';
-  return `<span class="${metadataBadgeClasses(session, 'pr', `ci-indicator tab-symbol pr-indicator ${pullRequestStatusClass(pr)}`)}">#${esc(pr.number)}</span>`;
-}
-
 function pullRequestCiIndicatorHtml(session, pr) {
   if (pullRequestStatusLabel(pr).toLowerCase() === 'merged') return '';
   const state = pr?.checks?.state;
   if (!state || state === 'unknown') return '';
-  if (['success', 'passing', 'passed', 'green'].includes(String(state).toLowerCase())) return '';
-  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">CI</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestCiStatusClass(pr)}`)}">CI</span>`;
 }
 
 function pullRequestLinkHtml(pr) {
@@ -9430,7 +9837,7 @@ function pullRequestColumnLinkHtml(pr) {
 function pullRequestChecksHtml(pr) {
   const checks = pr?.checks;
   if (!checks || !checks.state || checks.state === 'unknown') return '';
-  const cls = pullRequestStatusClass(pr);
+  const cls = pullRequestCiStatusClass(pr);
   const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || `CI ${checks.state}`)}</span>`];
   const checkLinks = items => (items || []).map(item => (
     item?.name ? linkHtml(item.url || '', item.name, item.state || '') : ''
@@ -9483,7 +9890,7 @@ function projectMetaHtml(session, info) {
   if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">dirty ${git.dirty_count}</span>`);
   if (pr?.number) {
     if (pr.checks?.state && pr.checks.state !== 'unknown') {
-      parts.push(`<span class="meta-pr-status ${pullRequestStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
+      parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }
   for (const issue of project.linear || []) {
@@ -10070,24 +10477,30 @@ function slotIsFileExplorerPane(slot) {
   return isFileExplorerItem(activeItemForSide(slot));
 }
 
+function slotIsChangesPane(slot) {
+  return isChangesItem(activeItemForSide(slot));
+}
+
 function dropIntentInlineSize(intent) {
   if (!intent || typeof intent === 'string') return 0;
   const rect = intent.targetRect || intent.previewNode?.getBoundingClientRect?.();
   return Math.max(0, Number(rect?.width) || 0);
 }
 
-function itemCanSplitFileExplorerPane(item, intent) {
+function itemCanSplitSinglePurposePane(item, intent) {
   const zone = typeof intent === 'string' ? intent : intent?.zone;
   if (zone !== 'top' && zone !== 'bottom') return false;
-  if (isFileExplorerItem(item)) return false;
+  if (isFileExplorerItem(item) || isChangesItem(item)) return false;
   const inlineSize = dropIntentInlineSize(intent);
   return !inlineSize || inlineSize >= minWidthForLayoutItem(item);
 }
 
 function dropIntentAllowsSession(session, intent) {
   if (!isLayoutItem(session) || !intent?.targetSlot) return false;
-  if (!slotIsFileExplorerPane(intent.targetSlot)) return true;
-  return itemCanSplitFileExplorerPane(session, intent);
+  if (slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) {
+    return itemCanSplitSinglePurposePane(session, intent);
+  }
+  return true;
 }
 
 function clearDropPreview() {
@@ -10117,6 +10530,7 @@ function dropSessionAtEvent(event) {
     const intent = dropIntentForEvent(event);
     clearDropPreview();
     if (!intent?.targetSlot) return;
+    if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') return;
     const zone = slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle' ? 'right' : intent.zone;
     openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: zone});
     return;
@@ -10141,6 +10555,13 @@ function handleDropDragOver(event) {
   const filePayload = fileDragPayload(event);
   if (filePayload?.path) {
     const intent = dropIntentForEvent(event);
+    if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') {
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'none';
+      clearDropPreview();
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
@@ -10173,7 +10594,6 @@ function handleDropDragLeave(event) {
   if (current?.contains(event.relatedTarget)) return;
   clearDropPreview();
 }
-
 function renderPanels(previousActive = [], options = {}) {
   movePanelsToPool();
   const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
@@ -10779,7 +11199,7 @@ function bindPaneTabStrip(strip, side) {
     if (filePayload?.path) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (slotIsFileExplorerPane(side)) {
+      if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) {
         event.dataTransfer.dropEffect = 'none';
         clearPaneTabDropPreview(strip);
         return;
@@ -10793,7 +11213,7 @@ function bindPaneTabStrip(strip, side) {
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (slotIsFileExplorerPane(side)) {
+    if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) {
       event.dataTransfer.dropEffect = 'none';
       clearPaneTabDropPreview(strip);
       return;
@@ -10812,7 +11232,7 @@ function bindPaneTabStrip(strip, side) {
       clearPaneTabDropPreview(strip);
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (slotIsFileExplorerPane(side)) return;
+      if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) return;
       openDraggedFilesInEditor(filePayload, {targetSlot: side, targetIndex: paneTabDropIndex(strip, event, '')});
       return;
     }
@@ -10821,7 +11241,7 @@ function bindPaneTabStrip(strip, side) {
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (slotIsFileExplorerPane(side)) return;
+    if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) return;
     moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session), paneTabDropIndex(strip, event, payload.session));
   };
 }
@@ -10945,6 +11365,11 @@ function bindPanelShell(panel, session) {
         event.preventDefault();
         event.stopPropagation();
         clearDropPreview();
+        const targetSlot = head.dataset.dragSlot || slotForSession(session);
+        if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) {
+          event.dataTransfer.dropEffect = 'none';
+          return;
+        }
         event.dataTransfer.dropEffect = 'copy';
         head.classList.add('tab-drag-over');
         return;
@@ -10956,7 +11381,7 @@ function bindPanelShell(panel, session) {
       clearDropPreview();
       if (event.target.closest('.pane-tabs')) return;
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
-      if (slotIsFileExplorerPane(targetSlot)) {
+      if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) {
         event.dataTransfer.dropEffect = 'none';
         return;
       }
@@ -10973,6 +11398,7 @@ function bindPanelShell(panel, session) {
         event.preventDefault();
         event.stopPropagation();
         const targetSlot = head.dataset.dragSlot || slotForSession(session);
+        if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) return;
         if (targetSlot) openDraggedFilesInEditor(filePayload, {targetSlot});
         return;
       }
@@ -10983,7 +11409,7 @@ function bindPanelShell(panel, session) {
       event.stopPropagation();
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
       if (!targetSlot) return;
-      if (slotIsFileExplorerPane(targetSlot)) return;
+      if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) return;
       if (isFileExplorerItem(payload.session)) {
         dockFileExplorerPane();
         return;
@@ -11264,36 +11690,56 @@ function createInfoPanel() {
   return panel;
 }
 
-function createYosupPanel() {
+function createYoagentPanel() {
   const panel = document.createElement('article');
-  panel.className = 'panel info-panel yosup-panel';
-  panel.id = `panel-${yosupItemId}`;
+  panel.className = 'panel info-panel yoagent-panel';
+  panel.id = `panel-${yoagentItemId}`;
   panel.innerHTML = `
       <div class="panel-head">
-        ${virtualPanelControlsHtml(yosupItemId, yosupTabLabel)}
+        ${virtualPanelControlsHtml(yoagentItemId, yoagentTabLabel)}
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
-          <div id="panel-tab-${yosupItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yosupTabLabel)}</span></div>
-          <div id="meta-${yosupItemId}" class="meta">Casual roll-up of active AI agents and changed files</div>
+          <div id="panel-tab-${yoagentItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yoagentTabLabel)}</span></div>
+          <div id="meta-${yoagentItemId}" class="meta">Activity roll-up of active AI agents and changed files</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(yosupItemId)}" title="hide details" aria-label="hide details"></button>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(yoagentItemId)}" title="hide details" aria-label="hide details"></button>
       </div>
       <div class="info-pane panel-overlay-root">
-        <div id="panel-toasts-${yosupItemId}" class="panel-toast-stack"></div>
+        <div id="panel-toasts-${yoagentItemId}" class="panel-toast-stack"></div>
         <div class="transcript-head info-head">
-          <span>${esc(yosupTabLabel)}</span>
-          <button type="button" class="info-refresh" data-yosup-refresh title="Refresh AI activity summary">Refresh summary</button>
+          <span>${esc(yoagentTabLabel)}</span>
+          <button type="button" class="info-refresh" data-yoagent-refresh title="Refresh AI activity summary">Refresh summary</button>
         </div>
-        <div id="yosup-content" class="info-list yosup-list"></div>
+        <div id="yoagent-content" class="info-list yoagent-list"></div>
       </div>`;
-  bindPanelShell(panel, yosupItemId);
-  panel.querySelector('[data-yosup-refresh]')?.addEventListener('click', event => {
+  bindPanelShell(panel, yoagentItemId);
+  panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
-    refreshActivitySummary();
+    refreshActivitySummary({force: true});
   });
-  renderYosupPanel();
+  panel.addEventListener('submit', event => {
+    const form = event.target.closest('[data-yoagent-chat-form]');
+    if (!form || !panel.contains(form)) return;
+    event.preventDefault();
+    const input = form.querySelector('[data-yoagent-chat-input]');
+    const value = input?.value || '';
+    if (input) input.value = '';
+    yoagentDraft = '';
+    sendYoagentChatMessage(value);
+  });
+  panel.addEventListener('click', event => {
+    const clear = event.target.closest('[data-yoagent-clear]');
+    if (!clear || !panel.contains(clear)) return;
+    event.preventDefault();
+    clearYoagentConversation();
+  });
+  panel.addEventListener('input', event => {
+    const input = event.target.closest('[data-yoagent-chat-input]');
+    if (input && panel.contains(input)) yoagentDraft = input.value || '';
+  });
+  renderYoagentPanel();
   return panel;
 }
 
@@ -11303,8 +11749,8 @@ function sessionActivitySummary(session) {
 
 function activitySummaryLinesHtml(lines, options = {}) {
   const items = Array.isArray(lines) ? lines.filter(Boolean) : [];
-  if (!items.length) return options.empty ? `<div class="yosup-empty">${esc(options.empty)}</div>` : '';
-  return items.map(line => `<div class="yosup-line">${esc(line)}</div>`).join('');
+  if (!items.length) return options.empty ? `<div class="yoagent-empty">${esc(options.empty)}</div>` : '';
+  return items.map(line => `<div class="yoagent-line">${esc(line)}</div>`).join('');
 }
 
 function relativeActivityGeneratedText(payload = activitySummaryPayload) {
@@ -11332,19 +11778,156 @@ function globalActivitySummaryHtml() {
   const summary = activitySummaryPayload?.global || {};
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = summary.headline || lines[0] || '';
+  const detailLines = lines.filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)));
   const generated = relativeActivityGeneratedText();
-  return `<section class="yosup-global" aria-label="${esc(yosupTabLabel)} AI activity summary">
-    <div class="yosup-global-head">
-      <span>${esc(yosupTabLabel)}</span>
-      <span class="yosup-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
+  const refreshBar = activitySummaryRefreshing ? '<div class="yoagent-refresh-progress" aria-label="Refreshing summary"></div>' : '';
+  return `<section class="yoagent-global" aria-label="${esc(yoagentTabLabel)} AI activity summary">
+    <div class="yoagent-global-head">
+      <span>${esc(yoagentTabLabel)}</span>
+      <span class="yoagent-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
     </div>
-    ${headline ? `<div class="yosup-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
+    ${refreshBar}
+    ${headline ? `<div class="yoagent-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
+    ${activitySummaryLinesHtml(detailLines)}
   </section>`;
 }
 
-async function refreshActivitySummary(options = {}) {
+function yoagentSessionSummariesHtml() {
+  const sessions = activitySummaryPayload?.sessions || {};
+  const order = Array.isArray(activitySummaryPayload?.session_order) ? activitySummaryPayload.session_order : Object.keys(sessions);
+  const rows = order
+    .map(session => {
+      const summary = sessions?.[session];
+      if (!summary?.local) return '';
+      const status = summary.active ? 'active' : 'idle';
+      const files = summary.files?.count ? `${summary.files.count} files (+${summary.files.added || 0}/-${summary.files.removed || 0})` : 'no files yet';
+      return `<article class="yoagent-session-summary ${esc(status)}">
+        <div class="yoagent-session-summary-head">
+          <span>session ${esc(session)}</span>
+          <span>${esc(summary.agent_label || summary.agent || 'agent')}</span>
+          <span>${esc(files)}</span>
+        </div>
+        <div class="yoagent-session-summary-body">${esc(summary.local)}</div>
+      </article>`;
+    })
+    .filter(Boolean)
+    .join('');
+  return `<section class="yoagent-session-summaries" aria-label="Per-session AI activity summaries">
+    ${rows || '<div class="yoagent-empty">No per-session AI activity detected yet.</div>'}
+  </section>`;
+}
+
+function yoagentChatMessagesHtml() {
+  const messages = Array.isArray(yoagentMessages) ? yoagentMessages : [];
+  if (!messages.length) {
+    if (!yoagentChatEnabled()) {
+      return '<div class="yoagent-chat-empty">Set a Claude or Codex backend in Preferences to chat.</div>';
+    }
+    return '<div class="yoagent-chat-empty">Ask YO!agent what the running AI agents are doing.</div>';
+  }
+  return messages.map(message => {
+    const role = message.role === 'user' ? 'You' : yoagentTabLabel;
+    const roleClass = message.role === 'user' ? 'user' : 'assistant';
+    return `<div class="yoagent-message ${roleClass}">
+      <div class="yoagent-message-role">${esc(role)}</div>
+      <div class="yoagent-message-body">${esc(message.content || '')}</div>
+    </div>`;
+  }).join('');
+}
+
+function yoagentNoticeHtml() {
+  if (!yoagentNotice?.reason) return '';
+  const backend = yoagentNotice.backend ? `<span class="yoagent-chat-notice-backend">${esc(yoagentNotice.backend)}</span> ` : '';
+  return `<div class="yoagent-chat-notice">${backend}${esc(yoagentNotice.reason)}</div>`;
+}
+
+function yoagentBackendLabel(value) {
+  const key = String(value || '').toLowerCase();
+  if (key === 'deterministic') return 'No agent';
+  if (key === 'codex') return 'Codex';
+  if (key === 'claude') return 'Claude';
+  return value || 'No agent';
+}
+
+function yoagentBackendKey() {
+  return String(initialSetting('yoagent.backend', 'deterministic') || 'deterministic').trim().toLowerCase();
+}
+
+function yoagentChatEnabled() {
+  return ['claude', 'codex'].includes(yoagentBackendKey());
+}
+
+function yoagentChatHtml() {
+  const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
+  const placeholder = readOnlyMode ? 'YO!agent chat requires admin access' : 'Ask about agents, repos, files, CI, blockers...';
+  const busy = yoagentBusy ? '<div class="yoagent-chat-status">YO!agent is answering...</div>' : '';
+  const error = yoagentError ? `<div class="yoagent-chat-error">${esc(yoagentError)}</div>` : '';
+  const clearDisabled = yoagentBusy || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
+  const form = yoagentChatEnabled()
+    ? `<form class="yoagent-chat-form" data-yoagent-chat-form>
+      <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
+      <button type="submit" class="yoagent-chat-send"${disabled}>Ask</button>
+    </form>`
+    : '';
+  return `<section class="yoagent-chat" aria-label="YO!agent chat">
+    <div class="yoagent-chat-toolbar">
+      <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>Clear conversation</button>
+    </div>
+    <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
+    ${form}
+  </section>`;
+}
+
+async function clearYoagentConversation() {
+  yoagentMessages = [];
+  yoagentBusy = false;
+  yoagentError = '';
+  yoagentDraft = '';
+  yoagentNotice = null;
+  renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
-    const response = await apiFetch('/api/activity-summary', {cache: 'no-store'});
+    await apiFetch('/api/yoagent/reset', {method: 'POST'});
+    statusEl.textContent = 'cleared YO!agent conversation';
+  } catch (error) {
+    statusEl.innerHTML = `<span class="err">clear YO!agent failed: ${esc(error)}</span>`;
+  }
+}
+
+async function sendYoagentChatMessage(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text || yoagentBusy || readOnlyMode || !yoagentChatEnabled()) return;
+  yoagentMessages.push({role: 'user', content: text});
+  yoagentDraft = '';
+  yoagentBusy = true;
+  yoagentError = '';
+  yoagentNotice = null;
+  renderYoagentPanel({preserveDraft: false, scrollBottom: true});
+  try {
+    const response = await apiFetch('/api/yoagent/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: text, history: yoagentMessages.slice(-10)}),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    if (payload.fallback && payload.fallback_reason) {
+      yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
+    }
+    yoagentMessages.push({role: 'assistant', content: payload.answer || 'No answer.'});
+    statusEl.textContent = `YO!agent answered with ${yoagentBackendLabel(payload.backend_used || payload.backend)}`;
+  } catch (error) {
+    yoagentError = `chat failed: ${error}`;
+  } finally {
+    yoagentBusy = false;
+    renderYoagentPanel({preserveDraft: false, scrollBottom: true});
+  }
+}
+
+async function refreshActivitySummary(options = {}) {
+  activitySummaryRefreshing = true;
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  try {
+    const response = await apiFetch(`/api/activity-summary${options.force ? '?force=1' : ''}`, {cache: 'no-store'});
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     activitySummaryPayload = payload;
@@ -11355,9 +11938,11 @@ async function refreshActivitySummary(options = {}) {
       global: {lines: [`activity summary unavailable: ${String(error)}`]},
     };
     if (!options.silent) statusEl.innerHTML = `<span class="err">activity summary failed: ${esc(error)}</span>`;
+  } finally {
+    activitySummaryRefreshing = false;
   }
   renderInfoPanel();
-  renderYosupPanel();
+  renderYoagentPanel();
 }
 
 function editorSchemePreferenceChoices(options = {}) {
@@ -11385,26 +11970,39 @@ function editorSchemePreferenceChoices(options = {}) {
 
 function preferenceSections() {
   return [
-    {title: 'YOLO', items: [
-      {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text', help: 'YAML file with ordered first-match YOLO rules.'},
-      {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean', help: 'Log matched rules and actions without pressing an approval key.'},
-    ]},
     {title: 'General', items: [
       {path: 'general.auto_focus', label: 'Auto-focus active pane', type: 'boolean', help: 'Focus panes and enable hover-open menus after tab switches, layout moves, and hover gestures. Off by default.'},
       {path: 'general.default_layout', label: 'Default layout', type: 'select', choices: ['single', 'grid', 'wall'], help: 'Preferred starting pane layout for new browser visits.'},
       {path: 'general.default_sessions', label: 'Default sessions', type: 'list', help: 'Preferred tmux sessions to open first, one session name per line.'},
     ]},
     {title: 'Appearance', items: [
+      {path: 'appearance.theme', label: 'Global app theme', type: 'select', choices: [
+        {value: 'dark', label: 'Dark'},
+        {value: 'light', label: 'Light'},
+        {value: 'system', label: 'System'},
+      ], help: 'Theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and terminal colors.'},
       {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: 'Font size for menus, tabs, and compact UI text. Values outside the range are clamped.'},
       {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by xterm.js panes. Values outside the range are clamped.'},
       {path: 'appearance.editor_font_size', label: 'Editor font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by editor text, code highlighting, and rendered previews.'},
       {path: 'appearance.editor_dark_color_scheme', label: 'Dark editor color scheme', type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: 'Dark palette used by the editor dark/light toggle.'},
       {path: 'appearance.editor_light_color_scheme', label: 'Light editor color scheme', type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: 'Light palette used by the editor dark/light toggle.'},
+      {path: 'appearance.editor_cursor_style', label: 'Editor cursor style', type: 'select', choices: [
+        {value: 'line', label: 'Line'},
+        {value: 'block', label: 'Block'},
+      ], help: 'Caret shape for CodeMirror editors. Both styles use the active editor cursor color.'},
       {path: 'appearance.file_explorer_font_size', label: `${fileExplorerLabel()} font size`, type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: 'Font size used by Finder/File Explorer rows.'},
       {path: 'appearance.tab_width', label: 'Tab width', type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: 'Target width for pane tabs before they wrap to additional rows.'},
       {path: 'appearance.red_reminder_ms', label: 'Red reminder duration', type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: 'Duration of the red attention pulse for sessions that need input or approval. Set 0 to disable.'},
       {path: 'appearance.yolo_rotate_ms', label: 'Active YO rotation period', type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: 'How often the active YO indicator completes a rotation. Set 0 to disable.'},
       {path: 'appearance.metadata_badge_pulse_seconds', label: 'Badge pulse duration', type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: 'When branch, PR, status, or CI metadata changes, badges like PR and CI flash for this many seconds.'},
+    ]},
+    {title: 'YOLO', items: [
+      {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text', action: 'open-yolo-rule', help: 'YAML file with ordered first-match YOLO rules.'},
+      {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean', help: 'Log matched rules and actions without pressing an approval key.'},
+      {path: 'yolo.prompt_source', label: 'Approval prompt source', type: 'select', choices: [
+        {value: 'hybrid', label: 'Pane + transcript'},
+        {value: 'pane', label: 'Pane only'},
+      ], help: 'Hybrid keeps the visible pane as the trigger and uses recent transcript JSONL only to recover prompt type or command context.'},
     ]},
     {title: 'Performance', items: [
       {path: 'performance.metadata_refresh_ms', label: 'Metadata refresh interval', type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: 'How often YOLOmux refreshes branch, PR, cwd, and process metadata. Client-side jitter avoids synchronized polling.'},
@@ -11441,6 +12039,20 @@ function preferenceSections() {
     ]},
     {title: 'Uploads', items: [
       {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
+    ]},
+    {title: 'YO!agent', items: [
+      {path: 'yoagent.backend', label: 'YO!agent backend', type: 'select', choices: [
+        {value: 'deterministic', label: 'No agent'},
+        {value: 'codex', label: 'Codex'},
+        {value: 'claude', label: 'Claude'},
+      ], help: 'Backend used for YO!agent chat. No agent is local and always available.'},
+      {path: 'yoagent.invocation', label: 'YO!agent invocation', type: 'select', choices: [
+        {value: 'cli', label: 'CLI'},
+        {value: 'api-key', label: 'API key'},
+      ], help: 'CLI runs a local agent binary. API key mode is reserved and falls back safely today.'},
+      {path: 'yoagent.system_prompt', label: 'YO!agent system prompt', type: 'textarea', help: 'System prompt used when YO!agent calls a model backend.'},
+      {path: 'yoagent.intro', label: 'YO!agent intro', type: 'textarea', help: 'Instruction prefix before the activity context.'},
+      {path: 'yoagent.format', label: 'YO!agent answer format', type: 'textarea', help: 'Output-format instruction before the user question.'},
     ]},
   ];
 }
@@ -11502,6 +12114,7 @@ const preferenceSearchAliasGroups = [
   ['root', 'home', 'base', 'cwd'],
   ['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump'],
   ['yolo', 'autoapprove', 'approve', 'approval', 'permission', 'permissions', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger', 'dangerous'],
+  ['yoagent', 'yo agent', 'assistant', 'chat', 'summary', 'activity', 'prompt', 'backend', 'claude', 'codex'],
   ['dry', 'simulate', 'test'],
   ['startup', 'launch', 'open', 'start', 'split', 'grid', 'wall', 'layout'],
 ];
@@ -11542,6 +12155,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
   if (path === 'file_explorer.new_entry_highlight_ms') add(['new file', 'recent']);
   if (path.startsWith('yolo.')) add(['auto approve', 'approve', 'approval', 'permission', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger']);
+  if (path.startsWith('yoagent.')) add(['assistant', 'chat', 'summary', 'activity', 'prompt', 'backend', 'claude', 'codex']);
   if (path === 'yolo.dry_run') add(['test', 'simulate', 'what would']);
   if (path === 'yolo.rule_file_path') add(['yaml', 'config']);
   if (path === 'general.auto_focus') add(['click', 'focus', 'hover', 'menu', 'dropdown', 'select pane', 'terminal', 'editor', 'finder', 'file explorer', 'preferences', 'everything']);
@@ -11638,13 +12252,18 @@ function preferenceControlHtml(item, query = '') {
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
     control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
+  } else if (item.type === 'textarea') {
+    control = `<textarea ${baseAttrs} rows="3">${esc(String(value || ''))}</textarea>`;
   } else {
     control = `<input type="text" ${baseAttrs} value="${esc(value)}">`;
   }
   const resetDisabled = readOnlyMode || JSON.stringify(value) === JSON.stringify(defaultValue) ? ' disabled' : '';
+  const extraControl = item.action === 'open-yolo-rule'
+    ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${readOnlyMode ? ' disabled' : ''}>Open</button>`
+    : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
-  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span></div>`;
+  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span></div>`;
 }
 
 function preferencesAllDefault() {
@@ -11863,6 +12482,13 @@ function bindPreferencesPanel(panel) {
         .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
       return;
     }
+    const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
+    if (yoloRuleOpen && panel.contains(yoloRuleOpen)) {
+      event.preventDefault();
+      preferencesResetConfirmVisible = false;
+      openYoloRuleFile();
+      return;
+    }
     const sectionToggle = event.target.closest('[data-preference-section-toggle]');
     if (sectionToggle && panel.contains(sectionToggle)) {
       event.preventDefault();
@@ -12051,11 +12677,14 @@ function sessionFilesPayloadSignatureForPayload(payload) {
     Number(item.mtime || 0),
     Number(item.added || 0),
     Number(item.removed || 0),
+    item.uploaded === true ? 1 : 0,
   ]);
   const repos = (Array.isArray(payload?.repos) ? payload.repos : []).map(item => [
     item.repo || '',
     Number(item.count || 0),
     Number(item.touched_count || 0),
+    Number(item.added || 0),
+    Number(item.removed || 0),
   ]);
   return JSON.stringify({
     session: payload?.session || '',
@@ -12192,12 +12821,27 @@ function sortedSessionFiles(files) {
 
 function groupedSessionFiles(files) {
   const groups = new Map();
-  for (const item of sortedSessionFiles(files)) {
+  for (const item of files) {
     const repo = item.repo || 'Outside repo';
     if (!groups.has(repo)) groups.set(repo, []);
     groups.get(repo).push(item);
   }
   return Array.from(groups.entries());
+}
+
+function splitUploadedSessionFiles(files) {
+  const regular = [];
+  const uploaded = [];
+  for (const item of sortedSessionFiles(files)) {
+    if (item?.uploaded === true) uploaded.push(item);
+    else regular.push(item);
+  }
+  return {regular, uploaded};
+}
+
+function writeStoredUploadedFilesCollapsed() {
+  try { window.localStorage?.setItem(uploadedFilesCollapsedStorageKey, uploadedFilesCollapsed ? '1' : '0'); }
+  catch (_) {}
 }
 
 function changeFileRowHtml(item, options = {}) {
@@ -12213,7 +12857,7 @@ function changeFileRowHtml(item, options = {}) {
   const metaHtml = [diffHtml, dateHtml].filter(Boolean).join('');
   const compactClass = options.compact ? ' compact' : ' detailed';
   const actionAttr = absPath
-    ? ` data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" title="${esc(absPath)}"`
+    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" title="${esc(absPath)}"`
     : ' disabled';
   return `<button type="button" class="changes-file-row${compactClass}"${actionAttr}>
     <span class="changes-status changes-status-${esc(statusKey.toLowerCase())}">${esc(statusKey)}</span>
@@ -12223,7 +12867,8 @@ function changeFileRowHtml(item, options = {}) {
 }
 
 function changesRepoGroupsHtml(files, options = {}) {
-  return groupedSessionFiles(files).map(([repo, entries]) => {
+  const {regular, uploaded} = splitUploadedSessionFiles(files);
+  const repoHtml = groupedSessionFiles(regular).map(([repo, entries]) => {
     const rows = entries.map(item => changeFileRowHtml(item, options)).join('');
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
     return `<section class="changes-repo-group">
@@ -12231,18 +12876,29 @@ function changesRepoGroupsHtml(files, options = {}) {
       <div class="changes-file-list">${rows}</div>
     </section>`;
   }).join('');
+  if (!uploaded.length) return repoHtml;
+  const uploadedRows = uploadedFilesCollapsed ? '' : uploaded.map(item => changeFileRowHtml(item, options)).join('');
+  const uploadedHtml = `<section class="changes-repo-group changes-uploaded-group${uploadedFilesCollapsed ? ' collapsed' : ''}">
+      <button type="button" class="changes-repo-head changes-uploaded-toggle" data-uploaded-files-toggle aria-expanded="${uploadedFilesCollapsed ? 'false' : 'true'}">
+        <span><span class="changes-uploaded-caret">${uploadedFilesCollapsed ? '▸' : '▾'}</span> Uploaded files (${uploaded.length})</span><span>${uploadedFilesCollapsed ? 'collapsed' : uploaded.length}</span>
+      </button>
+      ${uploadedFilesCollapsed ? '' : `<div class="changes-file-list">${uploadedRows}</div>`}
+    </section>`;
+  return `${repoHtml}${uploadedHtml}`;
+}
+
+function modifiedFilesSummaryText(files, session, loading, loaded) {
+  if (loading) return 'loading...';
+  if (!loaded) return 'not loaded';
+  return `${files.length} modified${session ? ` in session '${sessionLabel(session)}'` : ''}`;
 }
 
 function changesPanelHtml() {
-  const target = sessionFilesTargetSession();
+  const target = sessionFilesPayload.session || sessionFilesTargetSession();
   const files = sessionFilesPayload.files || [];
   const loaded = sessionFilesPayload.loaded === true;
   const options = sessions.map(session => `<option value="${esc(session)}"${session === target ? ' selected' : ''}>${esc(sessionLabel(session))} ${esc(session)}</option>`).join('');
-  const summary = sessionFilesLoading
-    ? 'loading changed files...'
-    : loaded
-      ? `${files.length} changed file${files.length === 1 ? '' : 's'}`
-      : 'not loaded';
+  const summary = modifiedFilesSummaryText(files, target, sessionFilesLoading, loaded);
   const errorHtml = (sessionFilesPayload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const groups = changesRepoGroupsHtml(files);
   const empty = !sessionFilesLoading && loaded && !files.length ? '<div class="changes-empty">No AI-changed files found for this session.</div>' : '';
@@ -12267,11 +12923,7 @@ function fileExplorerChangesPanelHtml() {
   const files = payload.files || [];
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
-  const summary = loading
-    ? 'loading...'
-    : loaded
-      ? `${files.length} modified${session ? ` in ${sessionLabel(session)}` : ''}`
-      : 'not loaded';
+  const summary = modifiedFilesSummaryText(files, session, loading, loaded);
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? '<div class="changes-empty">No modified files for this session.</div>' : '';
   const compact = fileExplorerChangesDisplayMode === 'compact';
@@ -12383,6 +13035,15 @@ function bindChangesPanel(panel) {
     }
   });
   panel.addEventListener('click', async event => {
+    const uploadedToggle = event.target.closest('[data-uploaded-files-toggle]');
+    if (uploadedToggle && panel.contains(uploadedToggle)) {
+      event.preventDefault();
+      uploadedFilesCollapsed = !uploadedFilesCollapsed;
+      writeStoredUploadedFilesCollapsed();
+      renderChangesPanels();
+      renderFileExplorerChangesPanels();
+      return;
+    }
     const displayToggle = event.target.closest('[data-session-files-display-toggle]');
     if (displayToggle && panel.contains(displayToggle)) {
       event.preventDefault();
@@ -12400,14 +13061,34 @@ function bindChangesPanel(panel) {
       });
       return;
     }
+  });
+  panel.addEventListener('dragstart', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
-    if (fileRow && panel.contains(fileRow)) {
-      event.preventDefault();
-      const path = fileRow.dataset.openChangeFile;
-      if (path) {
-        const ownerSession = fileRow.dataset.openChangeSession || '';
-        await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '');
-      }
+    if (!fileRow || !panel.contains(fileRow)) return;
+    if (!event.dataTransfer) return;
+    const path = fileRow.dataset.openChangeFile || '';
+    if (!path) return;
+    closeFileImagePreview();
+    const payloadObject = {path, paths: [path], kind: 'file', name: basenameOf(path)};
+    dragFilePayloadState = normalizeFileDragPayload(payloadObject);
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData('application/x-yolomux-file', JSON.stringify(payloadObject));
+    event.dataTransfer.setData('text/plain', path);
+    startFileDragPreview(event, [path], {kind: 'file', name: basenameOf(path)});
+  });
+  panel.addEventListener('dragend', () => {
+    dragFilePayloadState = null;
+    stopCustomDragPreview();
+    clearDropPreview();
+  });
+  panel.addEventListener('dblclick', async event => {
+    const fileRow = event.target.closest('[data-open-change-file]');
+    if (!fileRow || !panel.contains(fileRow)) return;
+    event.preventDefault();
+    const path = fileRow.dataset.openChangeFile;
+    if (path) {
+      const ownerSession = fileRow.dataset.openChangeSession || '';
+      await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '');
     }
   });
 }
@@ -12537,7 +13218,7 @@ function resetAllPreferences() {
       preferencesResetConfirmVisible = false;
       collapsedPreferenceSections = defaultCollapsedPreferenceSections();
       writeStoredCollapsedPreferenceSections();
-      setFileEditorThemeMode(configuredEditorSchemeForMode(true));
+      setFileEditorThemeMode(editorThemeInheritMode);
       renderPreferencesPanels({force: true});
       statusEl.textContent = 'reset all preferences';
     })
@@ -12748,6 +13429,7 @@ function createFileEditorPanel(item) {
             <button type="button" data-editor-mode="edit" title="Edit" aria-label="Edit"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
             <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
             <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
+            <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
           </div>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
@@ -12756,8 +13438,6 @@ function createFileEditorPanel(item) {
           <button type="button" class="file-editor-diff-panel" title="Diff" aria-label="Diff" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
           <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
-          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="side" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-theme-panel" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
@@ -13019,6 +13699,14 @@ function captureFileEditorPanelViewState(item, panel) {
   });
 }
 
+function captureFileEditorPanelViewStateForItem(item) {
+  if (!isFileEditorItem(item)) return false;
+  const panel = panelNodes.get(item);
+  if (!panel) return false;
+  captureFileEditorPanelViewState(item, panel);
+  return true;
+}
+
 function restoreFileEditorPanelViewState(item, panel) {
   const state = fileEditorViewState.get(item);
   const view = panel?._cmView;
@@ -13036,8 +13724,20 @@ function restoreFileEditorPanelViewState(item, panel) {
     scrollDOM.scrollTop = Number(state.scrollTop || 0);
     scrollDOM.scrollLeft = Number(state.scrollLeft || 0);
   };
+  const measuredRestore = () => {
+    if (typeof view.requestMeasure === 'function') {
+      view.requestMeasure({
+        read: () => null,
+        write: restore,
+      });
+      return;
+    }
+    restore();
+  };
   restore();
-  requestAnimationFrame(restore);
+  measuredRestore();
+  requestAnimationFrame(measuredRestore);
+  requestAnimationFrame(() => requestAnimationFrame(measuredRestore));
 }
 
 function destroyCodeMirrorPanel(panel) {
@@ -13082,7 +13782,7 @@ function codeMirrorConfigSignature(path, options = {}) {
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
     readOnly: readOnlyMode,
-    scheme: fileEditorThemeMode,
+    scheme: activeEditorScheme().id,
   });
 }
 
@@ -13234,13 +13934,14 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   container.hidden = false;
   container.classList.add('file-editor-diff-codemirror');
   if (!state.diffLoaded && !state.diffLoading) await refreshOpenFileDiff(path, {silent: true});
+  if (panel._cmGeneration !== generation) return null;
   if (!openFileDiffAvailable(state) && !state.diffLoading) {
     setFileEditorPanelStatus(panel, state.diffError ? `diff unavailable: ${state.diffError}` : 'No diff for this file', 'warn');
     return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
   }
   const original = String(state.diffOriginal || '');
   const api = await loadCodeMirrorApi();
-  if (panel._cmGeneration !== generation) return false;
+  if (panel._cmGeneration !== generation) return null;
   if (!api.MergeView || !api.unifiedMergeView) {
     setFileEditorPanelStatus(panel, 'CodeMirror merge view is unavailable', 'error');
     return false;
@@ -13348,7 +14049,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   }
   try {
     const api = await loadCodeMirrorApi();
-    if (panel._cmGeneration !== generation) return false;
+    if (panel._cmGeneration !== generation) return null;
     if (!panel._cmView) {
       container.replaceChildren();
       const cmState = api.EditorState.create({
@@ -13380,7 +14081,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
     focusFileEditorPanelIfReady(panel, item);
     return true;
   } catch (error) {
-    if (panel._cmGeneration !== generation) return false;
+    if (panel._cmGeneration !== generation) return null;
     destroyCodeMirrorPanel(panel);
     container.hidden = true;
     setFileEditorPanelStatus(panel, `CodeMirror unavailable; showing read-only raw text (${error})`, 'error');
@@ -13467,6 +14168,13 @@ function renderFileEditorPanel(panel, item) {
     setFileEditorPanelStatus(panel, status, 'error');
     return;
   }
+  if (state.kind === 'text' && !state.diffLoaded && !state.diffLoading && !state.diffUnavailable) {
+    refreshOpenFileDiff(path, {silent: true});
+  }
+  if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && !openFileDiffAvailable(state)) {
+    setFileEditorViewMode(path, 'edit', item);
+  }
+  const mode = editorViewModeFor(path, item);
   updateEditorModeControl(modeControl, path, state, item);
   if (gutterButton) {
     gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text';
@@ -13479,11 +14187,12 @@ function renderFileEditorPanel(panel, item) {
   updateEditorFindButton(findButton, state);
   if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
   updateFileEditorDiffButton(diffButton, path, state, item);
-  if (state.kind === 'text' && !state.diffLoaded && !state.diffLoading && !state.diffUnavailable) {
-    refreshOpenFileDiff(path, {silent: true});
-  }
   if (crossSplitButton) {
     crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
+  }
+  if (diffRefPanel) {
+    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+    syncDiffRefControlValues(diffRefPanel);
   }
   updateFileEditorToolbarSeparators(panel);
   if (state.kind === 'image') {
@@ -13505,11 +14214,6 @@ function renderFileEditorPanel(panel, item) {
     imagePane.hidden = true;
     imagePane.replaceChildren();
   }
-  const mode = editorViewModeFor(path, item);
-  if (diffRefPanel) {
-    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
-    syncDiffRefControlValues(diffRefPanel);
-  }
   setEditorContentMode(content, mode);
   panel.classList.toggle('editor-wrap', fileEditorWrapEnabled);
   panel.classList.toggle('editor-line-numbers', fileEditorLineNumbersEnabled);
@@ -13530,7 +14234,7 @@ function renderFileEditorPanel(panel, item) {
     }
     panel.classList.remove('syntax-highlighted');
     ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
-      if (!loaded) renderFileEditorRawPane(rawPane, path, state.content);
+      if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);
     });
   }
   const status = openFileStatus(state);
@@ -13635,14 +14339,12 @@ function updateFileEditorToolbarSeparators(panel) {
     '.file-editor-diff-panel',
     '.file-editor-diff-ref-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
-  const side = fileEditorToolbarControlVisible(panel, '.file-editor-cross-split-panel');
   const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel')
     || fileEditorToolbarControlVisible(panel, '.file-editor-reload-panel');
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
   const frame = true;
-  setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || side || theme || save || frame));
-  setFileEditorToolbarSeparator(panel, 'tools', tools && (side || theme || save || frame));
-  setFileEditorToolbarSeparator(panel, 'side', side && (theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || theme || save || frame));
+  setFileEditorToolbarSeparator(panel, 'tools', tools && (theme || save || frame));
   setFileEditorToolbarSeparator(panel, 'theme', theme && (save || frame));
   setFileEditorToolbarSeparator(panel, 'save', save && frame);
 }
@@ -14063,6 +14765,17 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
   }
 }
 
+function updateLinkedFilePreviewRings() {
+  for (const panel of panelNodes.values()) panel.classList.remove('preview-linked');
+  if (!focusedPanelItem || isFilePreviewItem(focusedPanelItem)) return;
+  const path = isFileEditorItem(focusedPanelItem) ? fileItemPath(focusedPanelItem) : '';
+  if (!path) return;
+  const previewItem = filePreviewItemFor(path);
+  if (!itemIsActivePaneTab(previewItem)) return;
+  const previewPanel = panelNodes.get(previewItem);
+  if (previewPanel) previewPanel.classList.add('preview-linked');
+}
+
 function syncCrossPaneFileEditorScroll(host, source) {
   const path = fileEditorPanelPath(host);
   if (!path || !fileEditorSourceCanDrive(host, source)) return;
@@ -14218,12 +14931,18 @@ function paneFrameControlsHtml(session, options = {}) {
   const disabledAttrs = label => ` type="button" disabled title="unavailable for ${esc(unavailableLabel)}" aria-label="${esc(label)}"`;
   const controls = [];
   const includeActions = options.actions ?? isTmuxSession(session);
+  const includeDetails = options.details === true;
   const includeMinimize = options.minimize !== false;
   const includeExpand = options.expand !== false;
   if (includeActions) {
     controls.push(disabled
       ? `<button class="tab pane-actions" ${disabledAttrs('Actions')}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
       : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="session actions" aria-label="Session actions"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
+  }
+  if (includeDetails) {
+    controls.push(disabled
+      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(infoTabLabel)}></button>`
+      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel)}" aria-label="${esc(infoTabLabel)}" aria-pressed="true"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -14264,7 +14983,6 @@ function panelControlsHtml(session, options = {}) {
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
-  const infoAttrs = disabled ? disabledAttrs(infoTabLabel) : ` type="button" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel)}" aria-label="${esc(infoTabLabel)}"`;
   const info = transcriptMeta.sessions?.[session];
   const terminalTitle = terminalTabTitle(session, info);
   const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
@@ -14281,41 +14999,13 @@ function panelControlsHtml(session, options = {}) {
       closeTitle: `close ${fileExplorerLabel()}`,
       closeLabel: `Close ${fileExplorerLabel()}`,
     })
-    : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), close: false});
+    : paneFrameControlsHtml(session, {disabled, actions: isTmuxSession(session), details: true, close: false});
   return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
           ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
           <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
           ${windowStepButtonHtml(session, 'next', steps.next, disabled)}
-          <button type="button" class="tab panel-tab-overflow" data-panel-tab-overflow="${esc(session)}" title="Transcript, AI summary, and event log" aria-label="Transcript, AI summary, and event log"><span class="pane-actions-dots" aria-hidden="true">...</span></button>
-          <button class="tab panel-detail-toggle active" ${infoAttrs}>Info</button>
           ${frameHtml}
         </div>`;
-}
-
-function showPanelTabOverflowMenu(session, x, y) {
-  closeTerminalContextMenu();
-  closeFileContextMenu();
-  closeSessionContextMenu();
-  const active = activeSessions.includes(session);
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu session-context-menu panel-tab-overflow-menu';
-  const disabledDetail = active ? '' : 'Open the tab in a pane first';
-  const add = (label, tabName, options = {}) => {
-    appendContextMenuButton(menu, label, () => {
-      if (active) activateTab(session, tabName, {userInitiated: true});
-    }, closeSessionContextMenu, {
-      disabled: !active || options.disabled,
-      checked: active && panelActiveTabName(session) === tabName,
-      title: options.disabled ? options.disabledTitle : disabledDetail,
-    });
-  };
-  add('Transcript', 'transcript');
-  add('AI summary', 'summary', {
-    disabled: readOnlyMode,
-    disabledTitle: 'AI summary requires admin access',
-  });
-  add('Event log', 'events');
-  sessionContextMenu.open(menu, x, y);
 }
 
 function virtualPanelControlsHtml(session, label) {
@@ -14424,10 +15114,33 @@ function renderInfoPanel() {
   });
 }
 
-function renderYosupPanel() {
-  const node = document.getElementById('yosup-content');
+function scrollYoagentChatToBottom(node = document.getElementById('yoagent-content')) {
+  const history = node?.querySelector?.('.yoagent-chat-history');
+  if (history) history.scrollTop = history.scrollHeight;
+  if (node) node.scrollTop = node.scrollHeight;
+  const panelBody = node?.closest?.('.info-pane, .panel-overlay-root, .panel');
+  if (panelBody && panelBody !== node) panelBody.scrollTop = panelBody.scrollHeight;
+}
+
+function renderYoagentPanel(options = {}) {
+  const node = document.getElementById('yoagent-content');
   if (!node) return;
-  node.innerHTML = globalActivitySummaryHtml();
+  const input = node.querySelector('[data-yoagent-chat-input]');
+  const inputFocused = input && document.activeElement === input;
+  const selectionStart = inputFocused ? input.selectionStart : null;
+  const selectionEnd = inputFocused ? input.selectionEnd : null;
+  if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
+  node.innerHTML = `${globalActivitySummaryHtml()}${yoagentSessionSummariesHtml()}${yoagentChatHtml()}`;
+  if (options.scrollBottom !== false) {
+    requestAnimationFrame(() => scrollYoagentChatToBottom(node));
+    setTimeout(() => scrollYoagentChatToBottom(node), 0);
+  }
+  if (!inputFocused) return;
+  const nextInput = node.querySelector('[data-yoagent-chat-input]');
+  nextInput?.focus?.({preventScroll: true});
+  if (nextInput && selectionStart !== null && selectionEnd !== null) {
+    try { nextInput.setSelectionRange(selectionStart, selectionEnd); } catch (_) {}
+  }
 }
 
 function infoBranchRows() {
@@ -14539,13 +15252,6 @@ function bindPanelControls(panel, session) {
   });
   panel.querySelectorAll('[data-window-dir]').forEach(button => {
     button.addEventListener('click', handleWindowStepButtonClick);
-  });
-  panel.querySelector('[data-panel-tab-overflow]')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    const button = event.currentTarget;
-    const rect = button.getBoundingClientRect();
-    showPanelTabOverflowMenu(button.dataset.panelTabOverflow || session, rect.left, rect.bottom + 4);
   });
   panel.querySelector('[data-pane-close]')?.addEventListener('click', event => {
     event.preventDefault();
@@ -15217,12 +15923,7 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
-    theme: {
-      background: '#11151d',
-      foreground: '#dfe6ef',
-      cursor: '#f5f7fb',
-      selectionBackground: '#3a4b64'
-    }
+    theme: terminalThemeForGlobalTheme()
   });
   term.open(container);
   installTerminalLinkProvider(term);
@@ -15490,7 +16191,7 @@ async function refreshTranscripts() {
     if (sessionsChanged) renderPanels(previousActive);
     renderSessionButtons();
     renderInfoPanel();
-    renderYosupPanel();
+    renderYoagentPanel();
     refreshActivitySummary({silent: true});
     for (const session of activeSessions.filter(isTmuxSession)) {
       const meta = document.getElementById(`meta-${session}`);
@@ -15815,7 +16516,7 @@ function refreshAll() {
 
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
-  applyEditorThemeMode();
+  installGlobalThemeMediaListener();
   applyFileExplorerStaticLabels();
   renderTransportWarning();
   renderTabMetaToggle();
@@ -15860,6 +16561,10 @@ function globalShortcutTargetAllowsPlatformAction(target) {
   return isMacPlatform() || globalShortcutTargetAllowsAppAction(target);
 }
 
+function itemCanCloseWithAppShortcut(item) {
+  return isFileEditorItem(item) || isFilePreviewItem(item) || isImageViewerItem(item);
+}
+
 function toggleFileExplorerShortcut() {
   if (itemInLayout(fileExplorerItemId)) {
     fileExplorerShortcutRestoreSlots = cloneLayoutSlots();
@@ -15899,10 +16604,17 @@ topbar?.addEventListener('pointerenter', () => {
   closeOtherSessionPopovers(null, {force: true});
   closeFileImagePreview();
 });
-document.addEventListener('keydown', event => {
+function handleGlobalShortcutKeydown(event) {
   const mod = appModifier(event);
-  const key = event.key.toLowerCase();
+  const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
+  if (mod && key === 'w') {
+    event.preventDefault();
+    event.stopPropagation();
+    const item = currentActiveMenuItem();
+    if (itemCanCloseWithAppShortcut(item)) removeSessionFromLayout(item);
+    return;
+  }
   if (mod && key === 'p' && platformActionAllowed) {
     event.preventDefault();
     if (event.shiftKey) openCommandPalette();
@@ -15910,10 +16622,10 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (mod && platformActionAllowed) {
-    if (key === 'w') {
+    if ((key === 'backspace' || key === 'delete') && globalShortcutTargetAllowsAppAction(event.target)) {
       event.preventDefault();
       const item = currentActiveMenuItem();
-      if (item) removeSessionFromLayout(item);
+      if (itemCanCloseWithAppShortcut(item)) removeSessionFromLayout(item);
       return;
     }
     if (key === 'b') {
@@ -15936,7 +16648,8 @@ document.addEventListener('keydown', event => {
     closeKeyboardShortcutsOverlay();
     closeAppMenus();
   }
-});
+}
+window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
 window.addEventListener('resize', () => {
   scheduleResponsiveLayoutPrune();
   scheduleAllTabStripOverflowChecks();
