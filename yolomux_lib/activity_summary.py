@@ -590,10 +590,27 @@ def yoagent_context_lines(activity_payload: dict[str, Any]) -> list[str]:
 YOAGENT_HISTORY_TURN_LIMIT = 4
 
 
+def yoagent_system_prompt(settings: dict[str, Any]) -> str:
+    return str(settings.get("system_prompt") or "You are YO!agent. Help users operate YOLOmux using the concepts below and report on the supplied activity context.")
+
+
+def yoagent_intro(settings: dict[str, Any]) -> str:
+    return str(settings.get("intro") or "Summarize the running AI agents and changed files.")
+
+
+def yoagent_output_format(settings: dict[str, Any]) -> str:
+    return str(settings.get("format") or "Keep answers short and factual.")
+
+
+def yoagent_concepts_prompt_block() -> list[str]:
+    return [
+        YOAGENT_CONTEXT_GUARD,
+        "YOLOmux concepts:",
+        yolomux_help_primer(),
+    ]
+
+
 def build_yoagent_chat_prompt(question: str, activity_payload: dict[str, Any], settings: dict[str, Any], history: list[dict[str, str]] | None = None) -> str:
-    system_prompt = str(settings.get("system_prompt") or "You are YO!agent. Help users operate YOLOmux using the concepts below and report on the supplied activity context.")
-    intro = str(settings.get("intro") or "Summarize the running AI agents and changed files.")
-    output_format = str(settings.get("format") or "Keep answers short and factual.")
     history_lines = []
     for item in (history or [])[-YOAGENT_HISTORY_TURN_LIMIT:]:
         role = "user" if item.get("role") == "user" else "assistant"
@@ -602,12 +619,10 @@ def build_yoagent_chat_prompt(question: str, activity_payload: dict[str, Any], s
             history_lines.append(f"{role}: {content}")
     context = "\n".join(yoagent_context_lines(activity_payload)) or "No AI agent activity is available."
     return "\n\n".join([
-        system_prompt,
-        intro,
-        output_format,
-        YOAGENT_CONTEXT_GUARD,
-        "YOLOmux concepts:",
-        yolomux_help_primer(),
+        yoagent_system_prompt(settings),
+        yoagent_intro(settings),
+        yoagent_output_format(settings),
+        *yoagent_concepts_prompt_block(),
         "Activity context:",
         context,
         "Recent chat:",
@@ -617,7 +632,6 @@ def build_yoagent_chat_prompt(question: str, activity_payload: dict[str, Any], s
 
 
 def build_yoagent_resume_prompt(question: str, activity_payload: dict[str, Any], settings: dict[str, Any], context_changed: bool) -> str:
-    output_format = str(settings.get("format") or "Keep answers short and factual.")
     if context_changed:
         context = "\n".join(yoagent_context_lines(activity_payload)) or "No AI agent activity is available."
         context_block = "Activity summary changed since the previous YO!agent turn. Use this current summarized state:\n" + context
@@ -625,10 +639,8 @@ def build_yoagent_resume_prompt(question: str, activity_payload: dict[str, Any],
         context_block = "Activity summary is unchanged since the previous YO!agent turn. Reuse the prior context in this resumed conversation."
     return "\n\n".join([
         "Continue the existing YO!agent conversation.",
-        output_format,
-        YOAGENT_CONTEXT_GUARD,
-        "YOLOmux concepts:",
-        yolomux_help_primer(),
+        yoagent_output_format(settings),
+        *yoagent_concepts_prompt_block(),
         context_block,
         f"User question: {question}",
     ])
