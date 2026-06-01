@@ -95,6 +95,35 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2}]
 
 
+def test_session_files_payload_marks_generated_upload_names(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    upload = repo / "20260531-001-diagram.png"
+    upload.write_bytes(b"png")
+    pane = PaneInfo(
+        session="s1",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="s1:0.0",
+        current_path=str(repo),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    assert payload["files"][0]["path"] == "20260531-001-diagram.png"
+    assert payload["files"][0]["uploaded"] is True
+
+
 def test_session_files_payload_counts_branch_commits_since_main(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

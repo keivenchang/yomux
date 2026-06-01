@@ -177,8 +177,10 @@ class TmuxWebtermApp:
             for session in list(self.activity_summary_cache):
                 if session not in sessions:
                     self.activity_summary_cache.pop(session, None)
+        generated = datetime.now(timezone.utc)
         return {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": generated.isoformat(),
+            "generated_ts": generated.timestamp(),
             "session_order": [session for session in self.sessions if session in summaries],
             "sessions": summaries,
             "global": build_global_activity_summary(ordered_summaries, errors),
@@ -899,9 +901,10 @@ class TmuxWebtermApp:
             return {"session": session, "error": f"upload target is not a directory: {target_dir}"}, HTTPStatus.NOT_FOUND
 
         saved: list[dict[str, Any]] = []
+        upload_template = settings_payload().get("settings", {}).get("uploads", {}).get("filename_template")
         for upload in files:
             safe_name = sanitize_upload_filename(upload.filename)
-            path = unique_upload_path(target_dir, safe_name)
+            path = unique_upload_path(target_dir, safe_name, str(upload_template or ""))
             try:
                 path.write_bytes(upload.content)
             except OSError as exc:

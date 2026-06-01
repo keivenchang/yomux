@@ -615,6 +615,10 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   --file-explorer-changes-min-block-size: 96px;
   --file-explorer-changes-resizer-size: 6px;
 }
+body.resizing-file-explorer-changes {
+  cursor: row-resize;
+  user-select: none;
+}
 .file-explorer-tree-panel {
   flex: 1;
   min-height: 0;
@@ -627,9 +631,17 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   flex: 0 0 var(--file-explorer-changes-resizer-size);
   min-height: var(--file-explorer-changes-resizer-size);
   cursor: row-resize;
+  touch-action: none;
+  user-select: none;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   background: linear-gradient(180deg, transparent, rgba(118, 185, 0, 0.16), transparent);
+}
+.file-explorer-changes-resizer::before {
+  content: "";
+  position: absolute;
+  inset-block: -3px;
+  inset-inline: 0;
 }
 .file-explorer-changes-resizer:hover,
 .file-explorer-pane.resizing-changes .file-explorer-changes-resizer {
@@ -834,6 +846,9 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   overflow: auto;
   background: var(--editor-scheme-bg);
 }
+.file-editor-diff-codemirror {
+  position: relative;
+}
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;
   min-height: 0;
@@ -880,13 +895,12 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-editor-diff-codemirror .cm-deletedChunk {
   position: relative;
-  padding-left: 52px;
+  padding-right: 58px;
 }
 .file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons {
   position: absolute !important;
   inset-block-start: 2px;
-  inset-inline-start: 5px;
-  inset-inline-end: auto !important;
+  inset-inline-end: 8px !important;
   z-index: 2;
   display: inline-flex;
   gap: 2px;
@@ -899,6 +913,53 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   padding: 0 4px;
   border-radius: 0;
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.file-editor-diff-codemirror .cm-collapsedLines {
+  touch-action: pan-y;
+}
+.file-editor-diff-codemirror .cm-diff-overview {
+  position: absolute;
+  inset-block: 8px;
+  inset-inline-end: 3px;
+  z-index: 4;
+  width: 4px;
+  pointer-events: auto;
+}
+.file-editor-diff-codemirror .cm-diff-overview-tick {
+  position: absolute;
+  inset-inline: 0;
+  min-height: 2px;
+  border-radius: 0;
+  cursor: pointer;
+}
+.file-editor-diff-codemirror .cm-diff-overview-tick.add {
+  background: #38d878;
+}
+.file-editor-diff-codemirror .cm-diff-overview-tick.remove {
+  background: #ff5d6c;
+}
+body.editor-theme-light .file-editor-diff-codemirror {
+  --code-diff-add: #00a152;
+  --code-diff-remove: #d81f32;
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk {
+  background: color-mix(in srgb, var(--code-diff-remove) 42%, transparent);
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedLine,
+body.editor-theme-light .file-editor-diff-codemirror .cm-inlineChangedLine,
+body.editor-theme-light .file-editor-diff-codemirror .cm-insertedChunk,
+body.editor-theme-light .file-editor-diff-codemirror .cm-insertedLine {
+  background: color-mix(in srgb, var(--code-diff-add) 40%, transparent);
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedText,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedText,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine {
+  background: color-mix(in srgb, var(--code-diff-remove) 60%, transparent);
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText,
+body.editor-theme-light .file-editor-diff-codemirror .cm-insertedText {
+  background: color-mix(in srgb, var(--code-diff-add) 56%, transparent);
 }
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {

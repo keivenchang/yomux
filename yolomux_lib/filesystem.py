@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import git
+from .common import is_generated_upload_name
 from .common import run_cmd
 
 MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
@@ -196,6 +197,7 @@ def _search_file_entry(root: Path, path: Path, tokens: list[str]) -> dict[str, A
         "kind": "file",
         "size": int(st.st_size),
         "mtime": int(st.st_mtime),
+        "uploaded": is_generated_upload_name(path),
     }
 
 

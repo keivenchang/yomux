@@ -19,7 +19,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 - Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state + tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/sessions.py`; repo/PR/CI metadata `yolomux_lib/metadata.py`; file ops `yolomux_lib/filesystem.py`; shared helpers + paths `yolomux_lib/common.py`; server-rendered HTML `yolomux_lib/web.py`; all frontend logic `static/yolomux.js` (+ `static/yolomux.css`); YOLO approval detector `auto_approve_tmux.py` and worker `yolomux_lib/auto_approve_worker.py`.
 - State lives in `~/.config/yolomux/state.json`; the YOLO event log (great for confirming state-machine behavior) is `~/.local/state/yolomux/events.jsonl`.
 - NAVIGATION RULE: line numbers in this TODO drift because the source changes constantly. Always GREP THE NAMED SYMBOL (`function foo`, `def foo`, an `id=`/class string) rather than trusting a line number. Numbers here were last verified 2026-05-29.
-- START HERE: the old EF1-EF6 easy-fix list and the follow-up easy-fix batches through 7 are complete. `DOIT.7.md` was removed after completion; `DOIT.8.md` tracks larger forward product features and deferred build-system refactors.
+- START HERE: the old EF1-EF6 easy-fix list and the follow-up batches through `DOIT.10.md` are complete or folded back into this TODO. There is no active `DOIT.*.md` task batch right now.
 
 ---
 
@@ -245,7 +245,7 @@ The per-pane window-step buttons (`<` / `>`, the `window-step` controls in `stat
 
 - [ ] [M] Add a per-session info drawer with full path, branch, dirty/ahead/behind counts, PR, CI, Linear/issue metadata, latest summary, and recent events.
 - [x] **Changed Files panel, phase 1 — list AI-attributed changed files and open plain files.** Landed 2026-05-30: backend `/api/session-files?session=N&hours=24` scans Claude Edit/Write/MultiEdit/NotebookEdit calls and Codex `apply_patch` Add/Update/Delete paths, resolves touched paths to git roots, merges repo state from `git diff --name-status HEAD` plus `git ls-files --others --exclude-standard`, falls back to tool-call paths outside repos, and returns `{repo, path, abs_path, status A/M/D, mtime, agent, session}`. The `Changes` virtual tab renders grouped repo sections, a selected-session control, recent/name sort, colored A/M/D badges, and row-click opening for changed/new files.
-- [ ] [L] **Changed Files panel, phase 2 — diff mode and mirrors.** Add the Cursor-style diff/plain toggle: tracked files -> `@codemirror/merge` editable diff (`git show HEAD:<relpath>` vs working file), new untracked files -> plain, deleted files -> removed content read-only. Also add the compact mirror in the per-session info drawer and an auto-detected count badge on the pane/menu when a session has uncommitted AI changes. DETAILED DESIGN -> **DOIT.9.md** (in-editor Diff button gated on repo+changes; changed-file click opens directly in diff mode; SIDE-BY-SIDE when the pane is wide / INLINE when narrow via `@codemirror/merge` `MergeView`/`unifiedMergeView`; HEAD base via `git show HEAD:<relpath>` added to `/api/fs/diff`; auto-update without flash). PREREQ: `@codemirror/merge` is not bundled yet — needs the CM bundle rebuild.
+- [x] **Changed Files panel, phase 2 — diff mode and mirrors.** Shipped through DOIT.9 on 2026-05-31: tracked files open in editable CodeMirror merge diff, changed-file clicks land directly in Diff mode, wide panes use side-by-side `MergeView`, narrow panes use inline `unifiedMergeView`, `/api/fs/diff` returns base/original content, diff refs support current/commit comparisons, light/dark diff styling is stronger, accept/reject controls sit at the right edge, the diff overview ruler shows change ticks, collapsed unchanged regions remain scrollable, and Undo/Redo is documented in shortcut help.
 - [x] [S] (shipped in DOIT.8 2026-05-31) Make PR/CI/issue links clickable, but keep local branch names as text unless a real remote branch/PR exists.
 - [x] [S] (shipped in DOIT.8 2026-05-31) Add an explicit refresh button for repo metadata plus background polling with sane intervals.
 - [x] Remove redundant info in the file-viewer detail/info panel. Today it repeats itself: the filename shows up as both the tab label AND the bold heading, and the full path shows up twice — once as the subtitle line under the heading and again in the `path` row (with the copy button). Show the filename once and the full path once. Keep the path row (it has the copy affordance) and drop the duplicate subtitle, or vice-versa. Also collapse `type: loading` / `status: loading` so a viewer that has no meaningful type/status does not show two placeholder "loading" rows.
@@ -265,13 +265,17 @@ The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py
 - [x] Line-number gutter option: add line numbers as an editor toggle. CodeMirror owns the gutter; numbers count SOURCE lines, and wrapped continuation rows are not numbered.
 - [x] Preview background tint: in Preview and Split-Preview, give the rendered side a gray background so the two halves are visually distinct at a glance (style `#fileEditorPreviewPane` / the preview half). Note: Split-Preview itself is the existing "Split-Preview" bullet above — this just adds the visual distinction.
 - [x] In-document Find. Shipped 2026-05-30 on the CodeMirror path: platform app modifier+F and the editor Find button open CodeMirror's in-file search panel with match count, previous/next, close, all-match highlighting, and replace controls on editable files.
-- [ ] [M] More editor options to consider (decide which to build — Find above is the headline):
-  - Replace / Replace all (platform app modifier+H) — pairs with Find; same bar with a replace row.
-  - Go to line (platform app modifier+G) — jump to + reveal a line number.
-  - Cursor position in the editor status bar: `line:col`, plus selection length / count.
-  - Toggle line comment (platform app modifier+/) per language (reuse the syntax language detection).
-  - Indent / outdent selection (`Tab` / `Shift+Tab`) + configurable tab width / spaces-for-tab.
-  - Line ops: duplicate (Shift+platform app modifier+D), move up/down (`Alt+↑/↓`), delete (Shift+platform app modifier+K).
+- [ ] [M] Editor power keys, round 2 (from DOIT.10 notes; all should use the platform app modifier: Cmd on Mac, Ctrl on PC, and must not steal Mac Ctrl from tmux):
+  - Multi-cursor: add next match (`Cmd+D` / `Ctrl+D`), select all occurrences (`Shift+Cmd+L` / `Shift+Ctrl+L`), add cursor above/below (`Alt+Cmd+↑/↓` / `Alt+Ctrl+↑/↓`), and cursor at end of each selected line (`Shift+Alt+I`).
+  - Line ops: move line (`Alt+↑/↓`), copy line (`Shift+Alt+↑/↓`), delete line (`Shift+Cmd+K` / `Shift+Ctrl+K`), insert line below/above (`Cmd+Enter` / `Shift+Cmd+Enter`, Ctrl on PC), and join lines with a non-Ctrl-on-Mac binding.
+  - Selection / structure: smart-select expand/shrink with a Cmd/Ctrl binding, and go to matching bracket (`Shift+Cmd+\` / `Shift+Ctrl+\`).
+  - Folding: fold/unfold (`Alt+Cmd+[` / `Alt+Cmd+]`, Ctrl on PC), fold all / unfold all if a non-confusing chord is added.
+  - Format / block comment: add only when a formatter or block-comment command is wired.
+  - Quick-open modes: `:NNN` go to line, `@sym` symbol search, and `>` command mode.
+  - In-file symbol jump (`Shift+Cmd+O` / `Shift+Ctrl+O`) and later breadcrumbs (`Shift+Cmd+;` / `Shift+Ctrl+;`).
+  - Avoid app-side Ctrl-letter bindings on Mac. Browser-reserved `Cmd+T/W/N/Q/Shift+N` remain best-effort in a browser tab and are only ownable in a PWA.
+  - Already shipped: Replace/Replace all, Go to line, cursor status, line comment, indent/outdent, Find, Undo/Redo, quick-open, command palette, Finder toggle, Preferences, and best-effort close-active-tab.
+  - Remaining editor display/options:
   - On-save hygiene (optional settings): trim trailing whitespace, ensure a final newline.
   - Reload-from-disk button when the file changed externally (the "changed on disk; unsaved edits kept" warn already exists — add a one-click reload).
   - Word / char / line count in the status bar.

@@ -31,6 +31,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["editor"]["autosave"] is True
     assert settings["editor"]["autosave_delay_seconds"] == 60
     assert settings["file_explorer"]["refresh_ms"] == 3000
+    assert settings["uploads"]["filename_template"] == "{date:%Y%m%d}-{seq:03d}-{name}{ext}"
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
     assert settings["performance"]["metadata_refresh_ms"] == 15000
     assert settings["performance"]["pane_state_refresh_ms"] == 1200

@@ -67,7 +67,7 @@ function writeStoredEditorLineNumbers(value) {
 }
 
 function defaultCollapsedPreferenceSections() {
-  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder']);
+  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder', 'Uploads']);
 }
 
 function readStoredCollapsedPreferenceSections() {
@@ -107,6 +107,35 @@ function writeStoredDiffRefs() {
   try {
     window.localStorage?.setItem(diffRefFromStorageKey, diffRefFrom);
     window.localStorage?.setItem(diffRefToStorageKey, diffRefTo);
+  } catch (_) {}
+}
+
+function readStoredFileExplorerTreeShowDates() {
+  try {
+    return window.localStorage?.getItem(fileExplorerTreeShowDatesStorageKey) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function writeStoredFileExplorerTreeShowDates(value) {
+  try {
+    window.localStorage?.setItem(fileExplorerTreeShowDatesStorageKey, value ? '1' : '0');
+  } catch (_) {}
+}
+
+function readStoredFileExplorerTreeSortMode() {
+  try {
+    const value = window.localStorage?.getItem(fileExplorerTreeSortStorageKey);
+    return ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az';
+  } catch (_) {
+    return 'az';
+  }
+}
+
+function writeStoredFileExplorerTreeSortMode(value) {
+  try {
+    window.localStorage?.setItem(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
   } catch (_) {}
 }
 
@@ -358,9 +387,20 @@ function fuzzyHighlightHtml(query, text) {
   const match = fuzzySubsequenceMatch(token, value);
   if (!match || !match.indexes.length) return esc(value);
   const indexes = new Set(match.indexes);
-  return Array.from(value).map((char, index) => indexes.has(index)
-    ? `<mark class="fuzzy-match">${esc(char)}</mark>`
-    : esc(char)).join('');
+  const chars = Array.from(value);
+  const parts = [];
+  let index = 0;
+  while (index < chars.length) {
+    if (!indexes.has(index)) {
+      parts.push(esc(chars[index]));
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (index < chars.length && indexes.has(index)) index += 1;
+    parts.push(`<mark class="fuzzy-match">${esc(chars.slice(start, index).join(''))}</mark>`);
+  }
+  return parts.join('');
 }
 
 function replaceHtmlPreservingScroll(element, html) {

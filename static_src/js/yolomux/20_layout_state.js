@@ -1026,16 +1026,95 @@ async function openProjectReadme() {
   await openFileInEditor(path, 'README.md');
 }
 
-function keyboardShortcutItems() {
+function keyboardShortcutCatalog() {
   return [
-    menuCommand('Command palette', null, {disabled: true, detail: `${appShortcutText('K')} or ${appShortcutText('P', {shift: true})}`}),
-    menuCommand('Save active editor', null, {disabled: true, detail: appShortcutText('S')}),
-    menuCommand(`Toggle ${fileExplorerLabel()}`, null, {disabled: true, detail: appShortcutText('B')}),
-    menuCommand('Open Preferences', null, {disabled: true, detail: appShortcutText(',')}),
-    menuCommand('Close menu or dialog', null, {disabled: true, detail: 'Esc'}),
-    menuCommand('Session actions', null, {disabled: true, detail: 'Right-click a tmux tab'}),
-    menuCommand('Move or split tab', null, {disabled: true, detail: 'Drag a tab'}),
+    {section: 'App', items: [
+      {label: 'Command palette', keys: appShortcutText('P', {shift: true})},
+      {label: 'File quick-open', keys: appShortcutText('P')},
+      {label: `Toggle ${fileExplorerLabel()}`, keys: appShortcutText('B')},
+      {label: 'Open Preferences', keys: appShortcutText(',')},
+      {label: 'Keyboard shortcuts', keys: '?'},
+    ]},
+    {section: 'Editor', items: [
+      {label: 'Save active editor', keys: appShortcutText('S')},
+      {label: 'Find', keys: appShortcutText('F')},
+      {label: 'Replace', keys: appShortcutText('H')},
+      {label: 'Go to line', keys: appShortcutText('G')},
+      {label: 'Toggle line comment', keys: appShortcutText('/')},
+      {label: 'Indent / outdent', keys: 'Tab / Shift+Tab'},
+      {label: 'Undo / redo', keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
+    ]},
+    {section: 'Diff', items: [
+      {label: 'Undo accept/reject chunk', keys: appShortcutText('Z')},
+      {label: 'Redo accept/reject chunk', keys: appShortcutText('Z', {shift: true})},
+    ]},
+    {section: 'Tabs / Panes', items: [
+      {label: 'Close active tab', keys: appShortcutText('W')},
+      {label: 'Move or split tab', keys: 'Drag a tab'},
+      {label: 'Session actions', keys: 'Right-click a tmux tab'},
+      {label: 'Close menu or dialog', keys: 'Esc'},
+    ]},
   ];
+}
+
+function keyboardShortcutItems() {
+  return keyboardShortcutCatalog().flatMap((section, sectionIndex) => [
+    ...(sectionIndex ? [menuSeparator()] : []),
+    ...section.items.map(item => menuCommand(item.label, null, {disabled: true, detail: item.keys})),
+  ]);
+}
+
+function keyboardShortcutsHtml() {
+  return keyboardShortcutCatalog().map(section => `
+    <section class="keyboard-shortcuts-section">
+      <h3>${esc(section.section)}</h3>
+      <div class="keyboard-shortcuts-list">
+        ${section.items.map(item => `
+          <div class="keyboard-shortcut-row">
+            <span>${esc(item.label)}</span>
+            <kbd>${esc(item.keys)}</kbd>
+          </div>`).join('')}
+      </div>
+    </section>`).join('');
+}
+
+function ensureKeyboardShortcutsOverlay() {
+  if (keyboardShortcutsNode) return keyboardShortcutsNode;
+  const node = document.createElement('div');
+  node.className = 'keyboard-shortcuts-overlay';
+  node.hidden = true;
+  node.innerHTML = `
+    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+      <div class="keyboard-shortcuts-head">
+        <h2>Keyboard shortcuts</h2>
+        <button type="button" class="keyboard-shortcuts-close" aria-label="Close keyboard shortcuts">×</button>
+      </div>
+      <div class="keyboard-shortcuts-body"></div>
+    </div>`;
+  node.addEventListener('mousedown', event => {
+    if (event.target === node) closeKeyboardShortcutsOverlay();
+  });
+  node.querySelector('.keyboard-shortcuts-close')?.addEventListener('click', closeKeyboardShortcutsOverlay);
+  document.body.appendChild(node);
+  keyboardShortcutsNode = node;
+  return node;
+}
+
+function openKeyboardShortcutsOverlay() {
+  const node = ensureKeyboardShortcutsOverlay();
+  closeAppMenus();
+  closeCommandPalette();
+  const body = node.querySelector('.keyboard-shortcuts-body');
+  if (body) body.innerHTML = keyboardShortcutsHtml();
+  node.hidden = false;
+  node.classList.add('open');
+  node.querySelector('.keyboard-shortcuts-close')?.focus?.({preventScroll: true});
+}
+
+function closeKeyboardShortcutsOverlay() {
+  if (!keyboardShortcutsNode) return;
+  keyboardShortcutsNode.hidden = true;
+  keyboardShortcutsNode.classList.remove('open');
 }
 
 function commandPaletteAllTabItems() {
@@ -1063,10 +1142,11 @@ function flattenMenuCommands(items, prefix = []) {
 
 function commandPaletteKeybinding(label, detail = '') {
   const text = `${label} ${detail}`;
-  if (/command palette/i.test(text)) return appShortcutText('K');
+  if (/command palette/i.test(text)) return appShortcutText('P', {shift: true});
   if (/open file/i.test(text)) return appShortcutText('P');
   if (/toggle .*file explorer|toggle .*finder/i.test(text)) return appShortcutText('B');
   if (/preferences/i.test(text)) return appShortcutText(',');
+  if (/keyboard shortcuts/i.test(text)) return '?';
   if (/close menu|dialog/i.test(text)) return 'Esc';
   return /\b(?:Ctrl|Cmd|Shift|Esc|Alt)[^,;]*/.exec(detail)?.[0] || '';
 }
@@ -1189,6 +1269,7 @@ function fileQuickOpenItems() {
     add(fileQuickOpenItem(path, {
       group: 'Files',
       relativePath: file.relative_path || file.name || '',
+      sortBonus: file.uploaded === true ? -500 : 0,
     }));
   }
   if (fileQuickOpenError) {

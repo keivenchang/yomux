@@ -1,5 +1,27 @@
+function sessionForFileRepo(path) {
+  const normalized = String(path || '');
+  if (!normalized) return '';
+  const matches = sessions
+    .map(session => {
+      const root = normalizeDirectoryPath(transcriptMeta.sessions?.[session]?.project?.git?.root || '');
+      const containsPath = root && (normalized === root || normalized.startsWith(`${root}/`));
+      return containsPath ? {session, root} : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.root.length - left.root.length);
+  return matches[0]?.session || '';
+}
+
 function sessionFilesTargetSession(options = {}) {
   if (!options.followActive && sessionFilesSelectedSession && sessions.includes(sessionFilesSelectedSession)) return sessionFilesSelectedSession;
+  if (options.followActive) {
+    const activeItem = currentActiveMenuItem();
+    const activePath = isFileEditorItem(activeItem) || isFilePreviewItem(activeItem) || isImageViewerItem(activeItem)
+      ? fileItemPath(activeItem)
+      : '';
+    const fileSession = sessionForFileRepo(activePath || '');
+    if (fileSession) return fileSession;
+  }
   const current = currentSessionActionTarget();
   if (current && sessions.includes(current)) return current;
   return sessions[0] || '';
@@ -260,10 +282,20 @@ function sessionFileDiffText(item) {
 
 function sortedSessionFiles(files) {
   const items = Array.isArray(files) ? files.slice() : [];
+  const uploadOrder = item => item?.uploaded === true ? 1 : 0;
   if (sessionFilesSortMode === 'name') {
-    return items.sort((left, right) => String(left.path || '').localeCompare(String(right.path || '')) || String(left.repo || '').localeCompare(String(right.repo || '')));
+    return items.sort((left, right) => uploadOrder(left) - uploadOrder(right)
+      || String(left.path || '').localeCompare(String(right.path || ''))
+      || String(left.repo || '').localeCompare(String(right.repo || '')));
   }
-  return items.sort((left, right) => Number(right.mtime || 0) - Number(left.mtime || 0) || String(left.path || '').localeCompare(String(right.path || '')));
+  return items.sort((left, right) => {
+    const uploadResult = uploadOrder(left) - uploadOrder(right);
+    if (uploadResult !== 0) return uploadResult;
+    const leftMtime = Number(left.mtime || 0);
+    const rightMtime = Number(right.mtime || 0);
+    const mtimeResult = left?.uploaded === true ? leftMtime - rightMtime : rightMtime - leftMtime;
+    return mtimeResult || String(left.path || '').localeCompare(String(right.path || ''));
+  });
 }
 
 function groupedSessionFiles(files) {
@@ -639,6 +671,13 @@ function createFileExplorerPanel() {
           <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="New folder" aria-label="New folder">▣</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="Refresh" aria-label="Refresh">↻</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
+          <button type="button" class="file-explorer-header-action file-explorer-date-toggle" data-file-explorer-tree-dates title="Show modified dates" aria-pressed="${fileExplorerTreeShowDates ? 'true' : 'false'}">date</button>
+          <select class="file-explorer-sort-select" data-file-explorer-tree-sort title="Sort tree" aria-label="Sort tree">
+            <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>A-Z</option>
+            <option value="za"${fileExplorerTreeSortMode === 'za' ? ' selected' : ''}>Z-A</option>
+            <option value="newest"${fileExplorerTreeSortMode === 'newest' ? ' selected' : ''}>new</option>
+            <option value="oldest"${fileExplorerTreeSortMode === 'oldest' ? ' selected' : ''}>old</option>
+          </select>
           <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(label)} root path">
           <span class="file-explorer-repo-summary" hidden></span>
           <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
@@ -664,6 +703,7 @@ function createFileExplorerPanel() {
   bindChangesPanel(panel);
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
   const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
+  const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
   if (hiddenBtn) {
     hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
     hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
@@ -679,6 +719,11 @@ function createFileExplorerPanel() {
       event.stopPropagation();
       toggleFileExplorerRootMode();
     });
+  }
+  if (dateBtn) {
+    dateBtn.classList.toggle('active', fileExplorerTreeShowDates);
+    dateBtn.setAttribute('aria-pressed', fileExplorerTreeShowDates ? 'true' : 'false');
+    dateBtn.title = fileExplorerTreeShowDates ? 'Hide modified dates' : 'Show modified dates';
   }
   const closeBtn = panel.querySelector('.file-explorer-panel-close');
   panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
@@ -710,6 +755,8 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   const treeEl = panel.querySelector('.file-explorer-tree-panel');
   const pathEl = panel.querySelector('.file-explorer-path-inline');
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
+  const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
+  const sortSelect = panel.querySelector('[data-file-explorer-tree-sort]');
   if (!treeEl) return;
   const root = normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
   setFileExplorerPathElementValue(pathEl, root);
@@ -720,6 +767,12 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
     hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
     hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
   }
+  if (dateBtn) {
+    dateBtn.setAttribute('aria-pressed', fileExplorerTreeShowDates ? 'true' : 'false');
+    dateBtn.classList.toggle('active', fileExplorerTreeShowDates);
+    dateBtn.title = fileExplorerTreeShowDates ? 'Hide modified dates' : 'Show modified dates';
+  }
+  if (sortSelect && sortSelect.value !== fileExplorerTreeSortMode) sortSelect.value = fileExplorerTreeSortMode;
   const entries = options.root === root && Array.isArray(options.entries)
     ? options.entries
     : await fetchDirectory(root);
@@ -749,8 +802,10 @@ function bindFileExplorerChangesResizer(panel) {
   handle.addEventListener('pointerdown', event => {
     event.preventDefault();
     event.stopPropagation();
-    handle.setPointerCapture?.(event.pointerId);
+    const pointerId = event.pointerId;
+    handle.setPointerCapture?.(pointerId);
     pane.classList.add('resizing-changes');
+    document.body?.classList.add('resizing-file-explorer-changes');
     const move = moveEvent => {
       const rect = pane.getBoundingClientRect();
       const height = Math.max(1, rect.height);
@@ -763,13 +818,15 @@ function bindFileExplorerChangesResizer(panel) {
     };
     const done = () => {
       pane.classList.remove('resizing-changes');
-      handle.removeEventListener('pointermove', move);
-      handle.removeEventListener('pointerup', done);
-      handle.removeEventListener('pointercancel', done);
+      document.body?.classList.remove('resizing-file-explorer-changes');
+      try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', done);
+      window.removeEventListener('pointercancel', done);
     };
-    handle.addEventListener('pointermove', move);
-    handle.addEventListener('pointerup', done);
-    handle.addEventListener('pointercancel', done);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
   });
 }
 
@@ -1185,6 +1242,94 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: next}});
 }
 
+function diffOverviewChunks(diff, totalLines) {
+  const chunks = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let current = null;
+  const pushCurrent = () => {
+    if (current) chunks.push(current);
+    current = null;
+  };
+  const addChunk = (kind, line) => {
+    const start = Math.max(1, Number(line || 1));
+    if (current && current.kind === kind && start <= current.end + 1) {
+      current.end = Math.max(current.end, start);
+      return;
+    }
+    pushCurrent();
+    current = {kind, start, end: start};
+  };
+  for (const line of String(diff || '').split('\n')) {
+    const hunk = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
+    if (hunk) {
+      pushCurrent();
+      oldLine = Math.max(1, Number(hunk[1]) || 1);
+      newLine = Math.max(1, Number(hunk[2]) || 1);
+      continue;
+    }
+    if (!newLine || line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) {
+      addChunk('add', newLine);
+      newLine += 1;
+    } else if (line.startsWith('-')) {
+      addChunk('remove', newLine || oldLine);
+      oldLine += 1;
+    } else {
+      pushCurrent();
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  pushCurrent();
+  return chunks.map(chunk => ({
+    ...chunk,
+    top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
+    height: Math.max(0.8, ((chunk.end - chunk.start + 1) / Math.max(1, totalLines)) * 100),
+  }));
+}
+
+function updateCodeMirrorDiffOverview(panel, container, state, currentText, original) {
+  container?.querySelector?.('.cm-diff-overview')?.remove();
+  const totalLines = Math.max(String(currentText || '').split('\n').length, String(original || '').split('\n').length, 1);
+  const chunks = diffOverviewChunks(state?.diff || '', totalLines);
+  if (!container || !chunks.length) return;
+  const overview = document.createElement('div');
+  overview.className = 'cm-diff-overview';
+  overview.setAttribute('aria-hidden', 'true');
+  for (const chunk of chunks) {
+    const tick = document.createElement('button');
+    tick.type = 'button';
+    tick.className = `cm-diff-overview-tick ${chunk.kind}`;
+    tick.style.top = `${chunk.top}%`;
+    tick.style.height = `${chunk.height}%`;
+    tick.title = `${chunk.kind === 'add' ? 'Added' : 'Removed'} lines ${chunk.start}-${chunk.end}`;
+    tick.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const scrollTarget = panel._cmView?.scrollDOM || container.querySelector('.cm-scroller') || container.querySelector('.cm-mergeView');
+      if (!scrollTarget) return;
+      const maxTop = Math.max(0, scrollTarget.scrollHeight - scrollTarget.clientHeight);
+      scrollTarget.scrollTop = Math.round(maxTop * (chunk.top / 100));
+    });
+    overview.appendChild(tick);
+  }
+  container.appendChild(overview);
+}
+
+function installCodeMirrorDiffCollapsedScrollGuard(panel, container) {
+  if (!container || container.dataset.diffCollapsedScrollGuard === 'true') return;
+  container.dataset.diffCollapsedScrollGuard = 'true';
+  container.addEventListener('wheel', event => {
+    if (!event.target?.closest?.('.cm-collapsedLines')) return;
+    const scrollTarget = event.target.closest('.cm-scroller') || event.target.closest('.cm-mergeView') || panel._cmView?.scrollDOM;
+    if (!scrollTarget) return;
+    const before = scrollTarget.scrollTop;
+    scrollTarget.scrollTop += event.deltaY;
+    if (scrollTarget.scrollTop !== before) event.preventDefault();
+  }, {passive: false});
+}
+
 function installCodeMirrorDiffResizeObserver(panel, item, path, container) {
   if (!window.ResizeObserver || panel._cmResizeObserver) return;
   let frame = 0;
@@ -1224,6 +1369,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   const diffEditsAllowed = !state.diffFromRef || state.diffFromRef === 'current';
   const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});
   installCodeMirrorDiffResizeObserver(panel, item, path, container);
+  installCodeMirrorDiffCollapsedScrollGuard(panel, container);
   if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
     if (layout === 'side') {
       syncCodeMirrorDocument(panel._cmMergeView?.a, original);
@@ -1231,6 +1377,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     } else {
       syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path});
     }
+    updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
     restoreFileEditorPanelViewState(item, panel);
     updateCodeMirrorCursorStatus(panel);
     focusFileEditorPanelIfReady(panel, item);
@@ -1241,6 +1388,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   container.replaceChildren();
   panel._cmDiffLayout = layout;
   installCodeMirrorDiffResizeObserver(panel, item, path, container);
+  installCodeMirrorDiffCollapsedScrollGuard(panel, container);
   if (layout === 'side') {
     panel._cmMergeView = new api.MergeView({
       a: {
@@ -1295,6 +1443,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmPath = path;
   panel._cmSignature = signature;
   panel._cmMode = 'diff';
+  updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
   restoreFileEditorPanelViewState(item, panel);
   updateCodeMirrorCursorStatus(panel);
   focusFileEditorPanelIfReady(panel, item);

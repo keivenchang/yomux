@@ -1877,7 +1877,8 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   padding: 0;
   color: #081205;
   background: #a6e35f;
-  border-radius: 2px;
+  border-radius: 0;
+  box-decoration-break: clone;
 }
 .command-palette-detail {
   color: #aeb8c7;
@@ -1893,6 +1894,94 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   padding: 18px 10px;
   color: var(--muted);
   text-align: center;
+}
+.keyboard-shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 270;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  padding: min(10vh, 82px) var(--popover-edge-gap) var(--popover-edge-gap);
+  background: rgba(0, 0, 0, 0.46);
+}
+.keyboard-shortcuts-overlay[hidden] {
+  display: none;
+}
+.keyboard-shortcuts-dialog {
+  width: min(760px, var(--popover-max-inline-size));
+  max-height: min(76vh, 820px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  color: var(--text);
+  background: #111820;
+  border: 1px solid #708093;
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+}
+.keyboard-shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--line);
+}
+.keyboard-shortcuts-head h2 {
+  margin: 0;
+  font: 800 var(--ui-font-size-lg)/1.2 var(--ui-font);
+}
+.keyboard-shortcuts-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.keyboard-shortcuts-close:hover,
+.keyboard-shortcuts-close:focus-visible {
+  border-color: var(--accent-gold);
+  background: rgba(255, 255, 255, 0.08);
+}
+.keyboard-shortcuts-body {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+.keyboard-shortcuts-section h3 {
+  margin: 0 0 6px;
+  color: var(--brand-green);
+  font: 800 var(--ui-font-size-xs)/1.1 var(--mono-font);
+  text-transform: uppercase;
+}
+.keyboard-shortcuts-list {
+  display: grid;
+  gap: 3px;
+}
+.keyboard-shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font: var(--ui-font-size-sm)/1.25 var(--ui-font);
+}
+.keyboard-shortcut-row kbd {
+  padding: 2px 5px;
+  color: #dfe6ef;
+  background: #0b1017;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
+  white-space: nowrap;
 }
 .preferences-setting-control {
   min-width: 0;
@@ -2045,7 +2134,8 @@ button:disabled {
   opacity: 0.55;
 }
 button:disabled:hover { border-color: var(--line); }
-6.grid {
+6
+.grid {
   height: 100%;
   min-height: 0;
   padding: 0 5px 5px;
@@ -2912,7 +3002,7 @@ body.layout-resizing {
   min-width: 0;
   padding-inline: 3px;
 }
-.tabs .tab:not(.tmux-window-step):not(.terminal-tab):not(.pane-actions):not(.pane-close):not(.pane-minimize):not(.pane-expand) {
+.tabs .tab:not(.tmux-window-step):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-minimize):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
   padding-inline: 3px;
@@ -2920,7 +3010,8 @@ body.layout-resizing {
 .tabs .panel-detail-toggle {
   min-width: 0;
 }
-.tabs .pane-actions {
+.tabs .pane-actions,
+.tabs .panel-tab-overflow {
   flex: 0 0 24px;
   min-width: 24px;
   max-width: 24px;
@@ -2956,13 +3047,17 @@ body.layout-resizing {
   transform: translateY(-2px);
 }
 .tabs .pane-actions:hover,
-.tabs .pane-actions:focus-visible {
+.tabs .pane-actions:focus-visible,
+.tabs .panel-tab-overflow:hover,
+.tabs .panel-tab-overflow:focus-visible {
   color: #ffffff;
   background: var(--pc-control-hover-bg);
   border-color: var(--pc-control-hover-border);
 }
 .tabs .pane-actions:hover .pane-actions-dots,
-.tabs .pane-actions:focus-visible .pane-actions-dots {
+.tabs .pane-actions:focus-visible .pane-actions-dots,
+.tabs .panel-tab-overflow:hover .pane-actions-dots,
+.tabs .panel-tab-overflow:focus-visible .pane-actions-dots {
   color: currentColor;
 }
 .tabs .pane-close,
@@ -4080,6 +4175,15 @@ body.layout-resizing {
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;
 }
+.file-tree-date {
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.file-tree-git-status:not([hidden]) + .file-tree-date:not([hidden]) {
+  margin-left: 4px;
+}
 .file-tree-children {
   position: relative;
 }
@@ -4132,11 +4236,31 @@ body.layout-resizing {
   width: 38px;
   flex-basis: 38px;
 }
+.file-explorer-date-toggle {
+  width: 34px;
+  flex-basis: 34px;
+}
 .file-explorer-header-action {
   width: 20px;
   flex-basis: 20px;
   padding: 0;
   line-height: 1;
+}
+.file-explorer-sort-select {
+  width: 50px;
+  height: 18px;
+  flex: 0 0 50px;
+  padding: 0 2px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.file-explorer-sort-select:hover,
+.file-explorer-sort-select:focus-visible {
+  color: var(--text);
+  border-color: var(--text);
 }
 .file-explorer-hidden-toggle:hover,
 .file-explorer-hidden-toggle:focus-visible,
@@ -4148,7 +4272,8 @@ body.layout-resizing {
   border-color: var(--text);
 }
 .file-explorer-hidden-toggle.active,
-.file-explorer-root-mode-toggle.active {
+.file-explorer-root-mode-toggle.active,
+.file-explorer-date-toggle.active {
   color: #061207;
   border-color: var(--brand-green);
   background: rgba(118, 185, 0, 0.88);
@@ -4814,6 +4939,10 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   --file-explorer-changes-min-block-size: 96px;
   --file-explorer-changes-resizer-size: 6px;
 }
+body.resizing-file-explorer-changes {
+  cursor: row-resize;
+  user-select: none;
+}
 .file-explorer-tree-panel {
   flex: 1;
   min-height: 0;
@@ -4826,9 +4955,17 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   flex: 0 0 var(--file-explorer-changes-resizer-size);
   min-height: var(--file-explorer-changes-resizer-size);
   cursor: row-resize;
+  touch-action: none;
+  user-select: none;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   background: linear-gradient(180deg, transparent, rgba(118, 185, 0, 0.16), transparent);
+}
+.file-explorer-changes-resizer::before {
+  content: "";
+  position: absolute;
+  inset-block: -3px;
+  inset-inline: 0;
 }
 .file-explorer-changes-resizer:hover,
 .file-explorer-pane.resizing-changes .file-explorer-changes-resizer {
@@ -5033,6 +5170,9 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   overflow: auto;
   background: var(--editor-scheme-bg);
 }
+.file-editor-diff-codemirror {
+  position: relative;
+}
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;
   min-height: 0;
@@ -5079,13 +5219,12 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .file-editor-diff-codemirror .cm-deletedChunk {
   position: relative;
-  padding-left: 52px;
+  padding-right: 58px;
 }
 .file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons {
   position: absolute !important;
   inset-block-start: 2px;
-  inset-inline-start: 5px;
-  inset-inline-end: auto !important;
+  inset-inline-end: 8px !important;
   z-index: 2;
   display: inline-flex;
   gap: 2px;
@@ -5098,6 +5237,53 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   padding: 0 4px;
   border-radius: 0;
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
+}
+.file-editor-diff-codemirror .cm-collapsedLines {
+  touch-action: pan-y;
+}
+.file-editor-diff-codemirror .cm-diff-overview {
+  position: absolute;
+  inset-block: 8px;
+  inset-inline-end: 3px;
+  z-index: 4;
+  width: 4px;
+  pointer-events: auto;
+}
+.file-editor-diff-codemirror .cm-diff-overview-tick {
+  position: absolute;
+  inset-inline: 0;
+  min-height: 2px;
+  border-radius: 0;
+  cursor: pointer;
+}
+.file-editor-diff-codemirror .cm-diff-overview-tick.add {
+  background: #38d878;
+}
+.file-editor-diff-codemirror .cm-diff-overview-tick.remove {
+  background: #ff5d6c;
+}
+body.editor-theme-light .file-editor-diff-codemirror {
+  --code-diff-add: #00a152;
+  --code-diff-remove: #d81f32;
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk {
+  background: color-mix(in srgb, var(--code-diff-remove) 42%, transparent);
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedLine,
+body.editor-theme-light .file-editor-diff-codemirror .cm-inlineChangedLine,
+body.editor-theme-light .file-editor-diff-codemirror .cm-insertedChunk,
+body.editor-theme-light .file-editor-diff-codemirror .cm-insertedLine {
+  background: color-mix(in srgb, var(--code-diff-add) 40%, transparent);
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedText,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedText,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine {
+  background: color-mix(in srgb, var(--code-diff-remove) 60%, transparent);
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText,
+body.editor-theme-light .file-editor-diff-codemirror .cm-insertedText {
+  background: color-mix(in srgb, var(--code-diff-add) 56%, transparent);
 }
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {

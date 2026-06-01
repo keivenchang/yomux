@@ -42,6 +42,8 @@ const fileExplorerQuickAccess = document.getElementById('fileExplorerQuickAccess
 const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
+const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
+const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
 const fileEditorLineNumbersStorageKey = 'yolomux.editorLineNumbers';
 const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1';
@@ -191,10 +193,13 @@ let fileExplorerSessionFilesLoading = false;
 let fileExplorerSessionFilesRequestId = 0;
 let sessionFilesSortMode = 'mtime';
 let sessionFilesSelectedSession = '';
+let fileExplorerTreeShowDates = readStoredFileExplorerTreeShowDates();
+let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'current');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'HEAD');
 let fileExplorerChangesDisplayMode = 'detailed';
 let commandPaletteNode = null;
+let keyboardShortcutsNode = null;
 let commandPaletteMode = 'command';
 let commandPaletteQuery = '';
 let commandPaletteIndex = 0;
@@ -662,7 +667,7 @@ function writeStoredEditorLineNumbers(value) {
 }
 
 function defaultCollapsedPreferenceSections() {
-  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder']);
+  return new Set(['General', 'Appearance', 'Performance', 'Notifications', 'Terminal / Editor', 'File Explorer', 'Finder', 'Uploads']);
 }
 
 function readStoredCollapsedPreferenceSections() {
@@ -702,6 +707,35 @@ function writeStoredDiffRefs() {
   try {
     window.localStorage?.setItem(diffRefFromStorageKey, diffRefFrom);
     window.localStorage?.setItem(diffRefToStorageKey, diffRefTo);
+  } catch (_) {}
+}
+
+function readStoredFileExplorerTreeShowDates() {
+  try {
+    return window.localStorage?.getItem(fileExplorerTreeShowDatesStorageKey) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function writeStoredFileExplorerTreeShowDates(value) {
+  try {
+    window.localStorage?.setItem(fileExplorerTreeShowDatesStorageKey, value ? '1' : '0');
+  } catch (_) {}
+}
+
+function readStoredFileExplorerTreeSortMode() {
+  try {
+    const value = window.localStorage?.getItem(fileExplorerTreeSortStorageKey);
+    return ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az';
+  } catch (_) {
+    return 'az';
+  }
+}
+
+function writeStoredFileExplorerTreeSortMode(value) {
+  try {
+    window.localStorage?.setItem(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
   } catch (_) {}
 }
 
@@ -953,9 +987,20 @@ function fuzzyHighlightHtml(query, text) {
   const match = fuzzySubsequenceMatch(token, value);
   if (!match || !match.indexes.length) return esc(value);
   const indexes = new Set(match.indexes);
-  return Array.from(value).map((char, index) => indexes.has(index)
-    ? `<mark class="fuzzy-match">${esc(char)}</mark>`
-    : esc(char)).join('');
+  const chars = Array.from(value);
+  const parts = [];
+  let index = 0;
+  while (index < chars.length) {
+    if (!indexes.has(index)) {
+      parts.push(esc(chars[index]));
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (index < chars.length && indexes.has(index)) index += 1;
+    parts.push(`<mark class="fuzzy-match">${esc(chars.slice(start, index).join(''))}</mark>`);
+  }
+  return parts.join('');
 }
 
 function replaceHtmlPreservingScroll(element, html) {
@@ -2383,16 +2428,95 @@ async function openProjectReadme() {
   await openFileInEditor(path, 'README.md');
 }
 
-function keyboardShortcutItems() {
+function keyboardShortcutCatalog() {
   return [
-    menuCommand('Command palette', null, {disabled: true, detail: `${appShortcutText('K')} or ${appShortcutText('P', {shift: true})}`}),
-    menuCommand('Save active editor', null, {disabled: true, detail: appShortcutText('S')}),
-    menuCommand(`Toggle ${fileExplorerLabel()}`, null, {disabled: true, detail: appShortcutText('B')}),
-    menuCommand('Open Preferences', null, {disabled: true, detail: appShortcutText(',')}),
-    menuCommand('Close menu or dialog', null, {disabled: true, detail: 'Esc'}),
-    menuCommand('Session actions', null, {disabled: true, detail: 'Right-click a tmux tab'}),
-    menuCommand('Move or split tab', null, {disabled: true, detail: 'Drag a tab'}),
+    {section: 'App', items: [
+      {label: 'Command palette', keys: appShortcutText('P', {shift: true})},
+      {label: 'File quick-open', keys: appShortcutText('P')},
+      {label: `Toggle ${fileExplorerLabel()}`, keys: appShortcutText('B')},
+      {label: 'Open Preferences', keys: appShortcutText(',')},
+      {label: 'Keyboard shortcuts', keys: '?'},
+    ]},
+    {section: 'Editor', items: [
+      {label: 'Save active editor', keys: appShortcutText('S')},
+      {label: 'Find', keys: appShortcutText('F')},
+      {label: 'Replace', keys: appShortcutText('H')},
+      {label: 'Go to line', keys: appShortcutText('G')},
+      {label: 'Toggle line comment', keys: appShortcutText('/')},
+      {label: 'Indent / outdent', keys: 'Tab / Shift+Tab'},
+      {label: 'Undo / redo', keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
+    ]},
+    {section: 'Diff', items: [
+      {label: 'Undo accept/reject chunk', keys: appShortcutText('Z')},
+      {label: 'Redo accept/reject chunk', keys: appShortcutText('Z', {shift: true})},
+    ]},
+    {section: 'Tabs / Panes', items: [
+      {label: 'Close active tab', keys: appShortcutText('W')},
+      {label: 'Move or split tab', keys: 'Drag a tab'},
+      {label: 'Session actions', keys: 'Right-click a tmux tab'},
+      {label: 'Close menu or dialog', keys: 'Esc'},
+    ]},
   ];
+}
+
+function keyboardShortcutItems() {
+  return keyboardShortcutCatalog().flatMap((section, sectionIndex) => [
+    ...(sectionIndex ? [menuSeparator()] : []),
+    ...section.items.map(item => menuCommand(item.label, null, {disabled: true, detail: item.keys})),
+  ]);
+}
+
+function keyboardShortcutsHtml() {
+  return keyboardShortcutCatalog().map(section => `
+    <section class="keyboard-shortcuts-section">
+      <h3>${esc(section.section)}</h3>
+      <div class="keyboard-shortcuts-list">
+        ${section.items.map(item => `
+          <div class="keyboard-shortcut-row">
+            <span>${esc(item.label)}</span>
+            <kbd>${esc(item.keys)}</kbd>
+          </div>`).join('')}
+      </div>
+    </section>`).join('');
+}
+
+function ensureKeyboardShortcutsOverlay() {
+  if (keyboardShortcutsNode) return keyboardShortcutsNode;
+  const node = document.createElement('div');
+  node.className = 'keyboard-shortcuts-overlay';
+  node.hidden = true;
+  node.innerHTML = `
+    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+      <div class="keyboard-shortcuts-head">
+        <h2>Keyboard shortcuts</h2>
+        <button type="button" class="keyboard-shortcuts-close" aria-label="Close keyboard shortcuts">×</button>
+      </div>
+      <div class="keyboard-shortcuts-body"></div>
+    </div>`;
+  node.addEventListener('mousedown', event => {
+    if (event.target === node) closeKeyboardShortcutsOverlay();
+  });
+  node.querySelector('.keyboard-shortcuts-close')?.addEventListener('click', closeKeyboardShortcutsOverlay);
+  document.body.appendChild(node);
+  keyboardShortcutsNode = node;
+  return node;
+}
+
+function openKeyboardShortcutsOverlay() {
+  const node = ensureKeyboardShortcutsOverlay();
+  closeAppMenus();
+  closeCommandPalette();
+  const body = node.querySelector('.keyboard-shortcuts-body');
+  if (body) body.innerHTML = keyboardShortcutsHtml();
+  node.hidden = false;
+  node.classList.add('open');
+  node.querySelector('.keyboard-shortcuts-close')?.focus?.({preventScroll: true});
+}
+
+function closeKeyboardShortcutsOverlay() {
+  if (!keyboardShortcutsNode) return;
+  keyboardShortcutsNode.hidden = true;
+  keyboardShortcutsNode.classList.remove('open');
 }
 
 function commandPaletteAllTabItems() {
@@ -2420,10 +2544,11 @@ function flattenMenuCommands(items, prefix = []) {
 
 function commandPaletteKeybinding(label, detail = '') {
   const text = `${label} ${detail}`;
-  if (/command palette/i.test(text)) return appShortcutText('K');
+  if (/command palette/i.test(text)) return appShortcutText('P', {shift: true});
   if (/open file/i.test(text)) return appShortcutText('P');
   if (/toggle .*file explorer|toggle .*finder/i.test(text)) return appShortcutText('B');
   if (/preferences/i.test(text)) return appShortcutText(',');
+  if (/keyboard shortcuts/i.test(text)) return '?';
   if (/close menu|dialog/i.test(text)) return 'Esc';
   return /\b(?:Ctrl|Cmd|Shift|Esc|Alt)[^,;]*/.exec(detail)?.[0] || '';
 }
@@ -2546,6 +2671,7 @@ function fileQuickOpenItems() {
     add(fileQuickOpenItem(path, {
       group: 'Files',
       relativePath: file.relative_path || file.name || '',
+      sortBonus: file.uploaded === true ? -500 : 0,
     }));
   }
   if (fileQuickOpenError) {
@@ -3650,14 +3776,16 @@ function appMenuTree() {
       label: 'Help',
       items: menuGroups(
         [menuCommand('Command palette', openCommandPalette, {
-          detail: `${appShortcutText('K')} or ${appShortcutText('P', {shift: true})}`,
+          detail: appShortcutText('P', {shift: true}),
         })],
         [
           menuCommand(`YOLOmux ${bootstrap.version || ''}`.trim(), null, {
             disabled: true,
             detail: bootstrap.versionCommitTime ? `Last commit: ${bootstrap.versionCommitTime}` : '',
           }),
-          menuSubmenu('Keyboard shortcuts', keyboardShortcutItems()),
+          menuCommand('Keyboard shortcuts', openKeyboardShortcutsOverlay, {
+            detail: '?',
+          }),
           menuCommand('Open README', openProjectReadme, {
             disabled: !projectReadmePath(),
             detail: 'Local README',
@@ -4718,6 +4846,7 @@ function fileTreeNumstatText(path) {
   const added = Number(match.added || 0);
   const removed = Number(match.removed || 0);
   if (!Number.isFinite(added) || !Number.isFinite(removed)) return '';
+  if (added === 0 && removed === 0) return '';
   return ` (+${added}/-${removed})`;
 }
 
@@ -4740,6 +4869,25 @@ function fileTreeDisplayName(path, entry) {
   }
   if (entry.kind === 'file') return `${entry.name}${fileTreeNumstatText(path)}`;
   return entry.name;
+}
+
+function fileTreeMtimeText(entry) {
+  return sessionFileTimeText(entry?.mtime);
+}
+
+function sortedFileTreeEntries(entries) {
+  const visible = entries.filter(entry => fileExplorerShowHidden || !entry.name.startsWith('.'));
+  const direction = fileExplorerTreeSortMode === 'za' ? -1 : 1;
+  return visible.sort((left, right) => {
+    const leftKind = left.kind === 'dir' ? 0 : 1;
+    const rightKind = right.kind === 'dir' ? 0 : 1;
+    if (leftKind !== rightKind) return leftKind - rightKind;
+    if (fileExplorerTreeSortMode === 'newest' || fileExplorerTreeSortMode === 'oldest') {
+      const mtimeResult = Number(right.mtime || 0) - Number(left.mtime || 0);
+      if (mtimeResult !== 0) return fileExplorerTreeSortMode === 'newest' ? mtimeResult : -mtimeResult;
+    }
+    return String(left.name || '').localeCompare(String(right.name || ''), undefined, {numeric: true, sensitivity: 'base'}) * direction;
+  });
 }
 
 function fileTreeGitStatusClass(status) {
@@ -4801,11 +4949,19 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     status.className = 'file-tree-git-status';
     row.appendChild(status);
   }
+  let date = row.querySelector(':scope > .file-tree-date');
+  if (!date) {
+    date = document.createElement('span');
+    date.className = 'file-tree-date changes-file-date';
+    row.appendChild(date);
+  }
   icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
   if (icon.textContent !== iconText) icon.textContent = iconText;
   if (name.textContent !== nameText) name.textContent = nameText;
   status.textContent = options.gitStatus || '';
   status.hidden = !options.gitStatus;
+  date.textContent = options.dateText || '';
+  date.hidden = !options.dateText;
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth) {
@@ -4853,6 +5009,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   updateFileTreeRowContents(row, icon, fileTreeDisplayName(fullPath, entry), {
     gitStatus,
     iconClass: fileIconClassFor(entry.name, entry.kind),
+    dateText: fileExplorerTreeShowDates ? fileTreeMtimeText(entry) : '',
   });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
     bindFileImagePreview(row, fullPath, entry);
@@ -4918,7 +5075,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
 function renderTreeChildren(container, parentPath, entries, depth, options = {}) {
   if (!container) return;
   const entriesByDir = options.entriesByDir instanceof Map ? options.entriesByDir : null;
-  const visible = entries.filter(e => fileExplorerShowHidden || !e.name.startsWith('.'));
+  const visible = sortedFileTreeEntries(entries);
   const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
   const nextNodes = [];
   for (const entry of visible) {
@@ -5319,7 +5476,7 @@ function bindFileExplorerHeaderActions(container = document) {
   if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
   if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
   container.addEventListener('click', event => {
-    const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse]');
+    const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates]');
     if (!action || !container.contains(action)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -5327,6 +5484,20 @@ function bindFileExplorerHeaderActions(container = document) {
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) refreshFileExplorerTrees();
     else if (action.matches('[data-file-explorer-collapse]')) collapseAllFileExplorerDirectories();
+    else if (action.matches('[data-file-explorer-tree-dates]')) {
+      fileExplorerTreeShowDates = !fileExplorerTreeShowDates;
+      writeStoredFileExplorerTreeShowDates(fileExplorerTreeShowDates);
+      refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+    }
+  });
+  container.addEventListener('change', event => {
+    const select = event.target.closest('[data-file-explorer-tree-sort]');
+    if (!select || !container.contains(select)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
+    writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
+    refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   });
 }
 
@@ -11128,19 +11299,38 @@ function activitySummaryLinesHtml(lines, options = {}) {
   return items.map(line => `<div class="yosup-line">${esc(line)}</div>`).join('');
 }
 
+function relativeActivityGeneratedText(payload = activitySummaryPayload) {
+  const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
+  if (!Number.isFinite(ts) || ts <= 0) return {text: 'not loaded', title: ''};
+  const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  const text = seconds < 60
+    ? 'last updated just now'
+    : seconds < 3600
+      ? `last updated ${Math.round(seconds / 60)} min ago`
+      : `last updated ${Math.round(seconds / 3600)} hr ago`;
+  let title = payload?.generated_at || '';
+  try {
+    title = new Intl.DateTimeFormat(undefined, {
+      timeZone: 'America/Los_Angeles',
+      dateStyle: 'medium',
+      timeStyle: 'medium',
+      timeZoneName: 'short',
+    }).format(new Date(ts * 1000));
+  } catch (_) {}
+  return {text, title};
+}
+
 function globalActivitySummaryHtml() {
   const summary = activitySummaryPayload?.global || {};
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = summary.headline || lines[0] || '';
-  const details = headline ? lines.filter((line, index) => index > 0 || line !== headline) : lines;
-  const generated = activitySummaryPayload?.generated_at ? `updated ${shortText(activitySummaryPayload.generated_at, 19)}` : 'not loaded';
+  const generated = relativeActivityGeneratedText();
   return `<section class="yosup-global" aria-label="${esc(yosupTabLabel)} AI activity summary">
     <div class="yosup-global-head">
       <span>${esc(yosupTabLabel)}</span>
-      <span class="yosup-generated">${esc(generated)}</span>
+      <span class="yosup-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
     </div>
     ${headline ? `<div class="yosup-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
-    ${activitySummaryLinesHtml(details)}
   </section>`;
 }
 
@@ -11241,6 +11431,9 @@ function preferenceSections() {
       {path: 'file_explorer.refresh_ms', label: `${fileExplorerLabel()} refresh interval`, type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: 'How often YOLOmux checks changed Finder/File Explorer directories and open files. Client-side jitter avoids synchronized polling.'},
       {path: 'file_explorer.new_entry_highlight_ms', label: 'New file highlight duration', type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: 'How long newly detected files or directories stay colored in Finder/File Explorer.'},
     ]},
+    {title: 'Uploads', items: [
+      {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
+    ]},
   ];
 }
 
@@ -11335,6 +11528,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('notifications.')) add(['notify', 'alert', 'toast', 'message', 'banner', 'sound', 'ding', 'ping', 'bell', 'beep', 'desktop', 'dismiss']);
   if (path.includes('throttle')) add(['mute', 'quiet', 'spam', 'cooldown', 'rate limit']);
   if (path.startsWith('file_explorer.')) add(['finder', 'files', 'tree', 'sidebar', 'browser', 'directory', 'folder', 'navigator']);
+  if (path.startsWith('uploads.')) add(['upload', 'paste', 'drop', 'filename', 'template', 'file']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
@@ -11688,8 +11882,30 @@ function bindPreferencesPanel(panel) {
     resetPreference(reset.dataset.settingReset || '');
   });
 }
+function sessionForFileRepo(path) {
+  const normalized = String(path || '');
+  if (!normalized) return '';
+  const matches = sessions
+    .map(session => {
+      const root = normalizeDirectoryPath(transcriptMeta.sessions?.[session]?.project?.git?.root || '');
+      const containsPath = root && (normalized === root || normalized.startsWith(`${root}/`));
+      return containsPath ? {session, root} : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.root.length - left.root.length);
+  return matches[0]?.session || '';
+}
+
 function sessionFilesTargetSession(options = {}) {
   if (!options.followActive && sessionFilesSelectedSession && sessions.includes(sessionFilesSelectedSession)) return sessionFilesSelectedSession;
+  if (options.followActive) {
+    const activeItem = currentActiveMenuItem();
+    const activePath = isFileEditorItem(activeItem) || isFilePreviewItem(activeItem) || isImageViewerItem(activeItem)
+      ? fileItemPath(activeItem)
+      : '';
+    const fileSession = sessionForFileRepo(activePath || '');
+    if (fileSession) return fileSession;
+  }
   const current = currentSessionActionTarget();
   if (current && sessions.includes(current)) return current;
   return sessions[0] || '';
@@ -11950,10 +12166,20 @@ function sessionFileDiffText(item) {
 
 function sortedSessionFiles(files) {
   const items = Array.isArray(files) ? files.slice() : [];
+  const uploadOrder = item => item?.uploaded === true ? 1 : 0;
   if (sessionFilesSortMode === 'name') {
-    return items.sort((left, right) => String(left.path || '').localeCompare(String(right.path || '')) || String(left.repo || '').localeCompare(String(right.repo || '')));
+    return items.sort((left, right) => uploadOrder(left) - uploadOrder(right)
+      || String(left.path || '').localeCompare(String(right.path || ''))
+      || String(left.repo || '').localeCompare(String(right.repo || '')));
   }
-  return items.sort((left, right) => Number(right.mtime || 0) - Number(left.mtime || 0) || String(left.path || '').localeCompare(String(right.path || '')));
+  return items.sort((left, right) => {
+    const uploadResult = uploadOrder(left) - uploadOrder(right);
+    if (uploadResult !== 0) return uploadResult;
+    const leftMtime = Number(left.mtime || 0);
+    const rightMtime = Number(right.mtime || 0);
+    const mtimeResult = left?.uploaded === true ? leftMtime - rightMtime : rightMtime - leftMtime;
+    return mtimeResult || String(left.path || '').localeCompare(String(right.path || ''));
+  });
 }
 
 function groupedSessionFiles(files) {
@@ -12329,6 +12555,13 @@ function createFileExplorerPanel() {
           <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="New folder" aria-label="New folder">▣</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="Refresh" aria-label="Refresh">↻</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
+          <button type="button" class="file-explorer-header-action file-explorer-date-toggle" data-file-explorer-tree-dates title="Show modified dates" aria-pressed="${fileExplorerTreeShowDates ? 'true' : 'false'}">date</button>
+          <select class="file-explorer-sort-select" data-file-explorer-tree-sort title="Sort tree" aria-label="Sort tree">
+            <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>A-Z</option>
+            <option value="za"${fileExplorerTreeSortMode === 'za' ? ' selected' : ''}>Z-A</option>
+            <option value="newest"${fileExplorerTreeSortMode === 'newest' ? ' selected' : ''}>new</option>
+            <option value="oldest"${fileExplorerTreeSortMode === 'oldest' ? ' selected' : ''}>old</option>
+          </select>
           <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(label)} root path">
           <span class="file-explorer-repo-summary" hidden></span>
           <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
@@ -12354,6 +12587,7 @@ function createFileExplorerPanel() {
   bindChangesPanel(panel);
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
   const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
+  const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
   if (hiddenBtn) {
     hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
     hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
@@ -12369,6 +12603,11 @@ function createFileExplorerPanel() {
       event.stopPropagation();
       toggleFileExplorerRootMode();
     });
+  }
+  if (dateBtn) {
+    dateBtn.classList.toggle('active', fileExplorerTreeShowDates);
+    dateBtn.setAttribute('aria-pressed', fileExplorerTreeShowDates ? 'true' : 'false');
+    dateBtn.title = fileExplorerTreeShowDates ? 'Hide modified dates' : 'Show modified dates';
   }
   const closeBtn = panel.querySelector('.file-explorer-panel-close');
   panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
@@ -12400,6 +12639,8 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   const treeEl = panel.querySelector('.file-explorer-tree-panel');
   const pathEl = panel.querySelector('.file-explorer-path-inline');
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
+  const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
+  const sortSelect = panel.querySelector('[data-file-explorer-tree-sort]');
   if (!treeEl) return;
   const root = normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
   setFileExplorerPathElementValue(pathEl, root);
@@ -12410,6 +12651,12 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
     hiddenBtn.classList.toggle('active', fileExplorerShowHidden);
     hiddenBtn.title = fileExplorerShowHidden ? 'Hide dotfiles (.*)' : 'Show hidden files (dotfiles)';
   }
+  if (dateBtn) {
+    dateBtn.setAttribute('aria-pressed', fileExplorerTreeShowDates ? 'true' : 'false');
+    dateBtn.classList.toggle('active', fileExplorerTreeShowDates);
+    dateBtn.title = fileExplorerTreeShowDates ? 'Hide modified dates' : 'Show modified dates';
+  }
+  if (sortSelect && sortSelect.value !== fileExplorerTreeSortMode) sortSelect.value = fileExplorerTreeSortMode;
   const entries = options.root === root && Array.isArray(options.entries)
     ? options.entries
     : await fetchDirectory(root);
@@ -12439,8 +12686,10 @@ function bindFileExplorerChangesResizer(panel) {
   handle.addEventListener('pointerdown', event => {
     event.preventDefault();
     event.stopPropagation();
-    handle.setPointerCapture?.(event.pointerId);
+    const pointerId = event.pointerId;
+    handle.setPointerCapture?.(pointerId);
     pane.classList.add('resizing-changes');
+    document.body?.classList.add('resizing-file-explorer-changes');
     const move = moveEvent => {
       const rect = pane.getBoundingClientRect();
       const height = Math.max(1, rect.height);
@@ -12453,13 +12702,15 @@ function bindFileExplorerChangesResizer(panel) {
     };
     const done = () => {
       pane.classList.remove('resizing-changes');
-      handle.removeEventListener('pointermove', move);
-      handle.removeEventListener('pointerup', done);
-      handle.removeEventListener('pointercancel', done);
+      document.body?.classList.remove('resizing-file-explorer-changes');
+      try { handle.releasePointerCapture?.(pointerId); } catch (_) {}
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', done);
+      window.removeEventListener('pointercancel', done);
     };
-    handle.addEventListener('pointermove', move);
-    handle.addEventListener('pointerup', done);
-    handle.addEventListener('pointercancel', done);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
   });
 }
 
@@ -12875,6 +13126,94 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: next}});
 }
 
+function diffOverviewChunks(diff, totalLines) {
+  const chunks = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let current = null;
+  const pushCurrent = () => {
+    if (current) chunks.push(current);
+    current = null;
+  };
+  const addChunk = (kind, line) => {
+    const start = Math.max(1, Number(line || 1));
+    if (current && current.kind === kind && start <= current.end + 1) {
+      current.end = Math.max(current.end, start);
+      return;
+    }
+    pushCurrent();
+    current = {kind, start, end: start};
+  };
+  for (const line of String(diff || '').split('\n')) {
+    const hunk = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
+    if (hunk) {
+      pushCurrent();
+      oldLine = Math.max(1, Number(hunk[1]) || 1);
+      newLine = Math.max(1, Number(hunk[2]) || 1);
+      continue;
+    }
+    if (!newLine || line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) {
+      addChunk('add', newLine);
+      newLine += 1;
+    } else if (line.startsWith('-')) {
+      addChunk('remove', newLine || oldLine);
+      oldLine += 1;
+    } else {
+      pushCurrent();
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  pushCurrent();
+  return chunks.map(chunk => ({
+    ...chunk,
+    top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
+    height: Math.max(0.8, ((chunk.end - chunk.start + 1) / Math.max(1, totalLines)) * 100),
+  }));
+}
+
+function updateCodeMirrorDiffOverview(panel, container, state, currentText, original) {
+  container?.querySelector?.('.cm-diff-overview')?.remove();
+  const totalLines = Math.max(String(currentText || '').split('\n').length, String(original || '').split('\n').length, 1);
+  const chunks = diffOverviewChunks(state?.diff || '', totalLines);
+  if (!container || !chunks.length) return;
+  const overview = document.createElement('div');
+  overview.className = 'cm-diff-overview';
+  overview.setAttribute('aria-hidden', 'true');
+  for (const chunk of chunks) {
+    const tick = document.createElement('button');
+    tick.type = 'button';
+    tick.className = `cm-diff-overview-tick ${chunk.kind}`;
+    tick.style.top = `${chunk.top}%`;
+    tick.style.height = `${chunk.height}%`;
+    tick.title = `${chunk.kind === 'add' ? 'Added' : 'Removed'} lines ${chunk.start}-${chunk.end}`;
+    tick.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const scrollTarget = panel._cmView?.scrollDOM || container.querySelector('.cm-scroller') || container.querySelector('.cm-mergeView');
+      if (!scrollTarget) return;
+      const maxTop = Math.max(0, scrollTarget.scrollHeight - scrollTarget.clientHeight);
+      scrollTarget.scrollTop = Math.round(maxTop * (chunk.top / 100));
+    });
+    overview.appendChild(tick);
+  }
+  container.appendChild(overview);
+}
+
+function installCodeMirrorDiffCollapsedScrollGuard(panel, container) {
+  if (!container || container.dataset.diffCollapsedScrollGuard === 'true') return;
+  container.dataset.diffCollapsedScrollGuard = 'true';
+  container.addEventListener('wheel', event => {
+    if (!event.target?.closest?.('.cm-collapsedLines')) return;
+    const scrollTarget = event.target.closest('.cm-scroller') || event.target.closest('.cm-mergeView') || panel._cmView?.scrollDOM;
+    if (!scrollTarget) return;
+    const before = scrollTarget.scrollTop;
+    scrollTarget.scrollTop += event.deltaY;
+    if (scrollTarget.scrollTop !== before) event.preventDefault();
+  }, {passive: false});
+}
+
 function installCodeMirrorDiffResizeObserver(panel, item, path, container) {
   if (!window.ResizeObserver || panel._cmResizeObserver) return;
   let frame = 0;
@@ -12914,6 +13253,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   const diffEditsAllowed = !state.diffFromRef || state.diffFromRef === 'current';
   const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});
   installCodeMirrorDiffResizeObserver(panel, item, path, container);
+  installCodeMirrorDiffCollapsedScrollGuard(panel, container);
   if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
     if (layout === 'side') {
       syncCodeMirrorDocument(panel._cmMergeView?.a, original);
@@ -12921,6 +13261,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     } else {
       syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path});
     }
+    updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
     restoreFileEditorPanelViewState(item, panel);
     updateCodeMirrorCursorStatus(panel);
     focusFileEditorPanelIfReady(panel, item);
@@ -12931,6 +13272,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   container.replaceChildren();
   panel._cmDiffLayout = layout;
   installCodeMirrorDiffResizeObserver(panel, item, path, container);
+  installCodeMirrorDiffCollapsedScrollGuard(panel, container);
   if (layout === 'side') {
     panel._cmMergeView = new api.MergeView({
       a: {
@@ -12985,6 +13327,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmPath = path;
   panel._cmSignature = signature;
   panel._cmMode = 'diff';
+  updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
   restoreFileEditorPanelViewState(item, panel);
   updateCodeMirrorCursorStatus(panel);
   focusFileEditorPanelIfReady(panel, item);
@@ -13946,12 +14289,36 @@ function panelControlsHtml(session, options = {}) {
           ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
           <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
           ${windowStepButtonHtml(session, 'next', steps.next, disabled)}
-          <button class="tab" ${tabAttrs('transcript', 'Transcript')}>Tx</button>
-          <button class="tab" ${tabAttrs('summary', 'AI summary')}>AI</button>
-          <button class="tab" ${tabAttrs('events', 'Event log')}>Log</button>
+          <button type="button" class="tab panel-tab-overflow" data-panel-tab-overflow="${esc(session)}" title="Transcript, AI summary, and event log" aria-label="Transcript, AI summary, and event log"><span class="pane-actions-dots" aria-hidden="true">...</span></button>
           <button class="tab panel-detail-toggle active" ${infoAttrs}>Info</button>
           ${frameHtml}
         </div>`;
+}
+
+function showPanelTabOverflowMenu(session, x, y) {
+  closeTerminalContextMenu();
+  closeFileContextMenu();
+  closeSessionContextMenu();
+  const active = activeSessions.includes(session);
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu session-context-menu panel-tab-overflow-menu';
+  const disabledDetail = active ? '' : 'Open the tab in a pane first';
+  const add = (label, tabName, options = {}) => {
+    appendContextMenuButton(menu, label, () => {
+      if (active) activateTab(session, tabName, {userInitiated: true});
+    }, closeSessionContextMenu, {
+      disabled: !active || options.disabled,
+      checked: active && panelActiveTabName(session) === tabName,
+      title: options.disabled ? options.disabledTitle : disabledDetail,
+    });
+  };
+  add('Transcript', 'transcript');
+  add('AI summary', 'summary', {
+    disabled: readOnlyMode,
+    disabledTitle: 'AI summary requires admin access',
+  });
+  add('Event log', 'events');
+  sessionContextMenu.open(menu, x, y);
 }
 
 function virtualPanelControlsHtml(session, label) {
@@ -13960,6 +14327,15 @@ function virtualPanelControlsHtml(session, label) {
           <button class="tab active terminal-tab" type="button" title="${esc(safeLabel)}" aria-label="${esc(safeLabel)}">${esc(safeLabel)}</button>
           ${paneFrameControlsHtml(session, {actions: false, close: false})}
         </div>`;
+}
+
+function panelActiveTabName(session) {
+  const activePane = document.getElementById(`panel-${session}`)?.querySelector('.tab-pane.active');
+  const id = activePane?.id || '';
+  if (id === `transcript-pane-${session}`) return 'transcript';
+  if (id === `summary-pane-${session}`) return 'summary';
+  if (id === `events-pane-${session}`) return 'events';
+  return 'terminal';
 }
 
 function createPanel(session) {
@@ -14166,6 +14542,13 @@ function bindPanelControls(panel, session) {
   });
   panel.querySelectorAll('[data-window-dir]').forEach(button => {
     button.addEventListener('click', handleWindowStepButtonClick);
+  });
+  panel.querySelector('[data-panel-tab-overflow]')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.currentTarget;
+    const rect = button.getBoundingClientRect();
+    showPanelTabOverflowMenu(button.dataset.panelTabOverflow || session, rect.left, rect.bottom + 4);
   });
   panel.querySelector('[data-pane-close]')?.addEventListener('click', event => {
     event.preventDefault();
@@ -14705,6 +15088,9 @@ function activateTab(session, name, options = {}) {
   if (name !== 'summary') stopSummaryStream(session);
   document.querySelectorAll(`[data-tab="${session}"]`).forEach(button => {
     button.classList.toggle('active', button.dataset.tabName === name);
+  });
+  document.querySelectorAll(`[data-panel-tab-overflow="${session}"]`).forEach(button => {
+    button.classList.toggle('active', ['transcript', 'summary', 'events'].includes(name));
   });
   for (const tabName of ['terminal', 'transcript', 'summary', 'events']) {
     const pane = document.getElementById(`${tabName}-pane-${session}`);
@@ -15520,11 +15906,6 @@ document.addEventListener('keydown', event => {
   const mod = appModifier(event);
   const key = event.key.toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
-  if (mod && key === 'k' && platformActionAllowed) {
-    event.preventDefault();
-    openCommandPalette();
-    return;
-  }
   if (mod && key === 'p' && platformActionAllowed) {
     event.preventDefault();
     if (event.shiftKey) openCommandPalette();
@@ -15532,6 +15913,12 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (mod && platformActionAllowed) {
+    if (key === 'w') {
+      event.preventDefault();
+      const item = currentActiveMenuItem();
+      if (item) removeSessionFromLayout(item);
+      return;
+    }
     if (key === 'b') {
       event.preventDefault();
       toggleFileExplorerShortcut();
@@ -15543,7 +15930,15 @@ document.addEventListener('keydown', event => {
       return;
     }
   }
-  if (event.key === 'Escape') closeAppMenus();
+  if (!mod && globalShortcutTargetAllowsAppAction(event.target) && (event.key === '?' || (event.key === '/' && event.shiftKey))) {
+    event.preventDefault();
+    openKeyboardShortcutsOverlay();
+    return;
+  }
+  if (event.key === 'Escape') {
+    closeKeyboardShortcutsOverlay();
+    closeAppMenus();
+  }
 });
 window.addEventListener('resize', () => {
   scheduleResponsiveLayoutPrune();

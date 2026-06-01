@@ -865,7 +865,7 @@ body.layout-resizing {
   min-width: 0;
   padding-inline: 3px;
 }
-.tabs .tab:not(.tmux-window-step):not(.terminal-tab):not(.pane-actions):not(.pane-close):not(.pane-minimize):not(.pane-expand) {
+.tabs .tab:not(.tmux-window-step):not(.terminal-tab):not(.pane-actions):not(.panel-tab-overflow):not(.pane-close):not(.pane-minimize):not(.pane-expand) {
   flex: 0 1 auto;
   min-width: 0;
   padding-inline: 3px;
@@ -873,7 +873,8 @@ body.layout-resizing {
 .tabs .panel-detail-toggle {
   min-width: 0;
 }
-.tabs .pane-actions {
+.tabs .pane-actions,
+.tabs .panel-tab-overflow {
   flex: 0 0 24px;
   min-width: 24px;
   max-width: 24px;
@@ -909,13 +910,17 @@ body.layout-resizing {
   transform: translateY(-2px);
 }
 .tabs .pane-actions:hover,
-.tabs .pane-actions:focus-visible {
+.tabs .pane-actions:focus-visible,
+.tabs .panel-tab-overflow:hover,
+.tabs .panel-tab-overflow:focus-visible {
   color: #ffffff;
   background: var(--pc-control-hover-bg);
   border-color: var(--pc-control-hover-border);
 }
 .tabs .pane-actions:hover .pane-actions-dots,
-.tabs .pane-actions:focus-visible .pane-actions-dots {
+.tabs .pane-actions:focus-visible .pane-actions-dots,
+.tabs .panel-tab-overflow:hover .pane-actions-dots,
+.tabs .panel-tab-overflow:focus-visible .pane-actions-dots {
   color: currentColor;
 }
 .tabs .pane-close,

@@ -879,7 +879,8 @@ function makeFileTree(paths) {
   api.activatePaneTab('slot2', '__files__');
   assert.equal(api.panelControlsHtml('6'), terminalToolbarBeforeFinderFocus);
   assert.ok(terminalToolbarBeforeFinderFocus.includes('data-tab-name="terminal"'));
-  assert.ok(terminalToolbarBeforeFinderFocus.includes('data-tab-name="summary"'));
+  assert.ok(terminalToolbarBeforeFinderFocus.includes('data-panel-tab-overflow="6"'));
+  assert.equal(terminalToolbarBeforeFinderFocus.includes('data-tab-name="summary"'), false);
 }
 
 {
@@ -1411,7 +1412,10 @@ function makeFileTree(paths) {
   assert.equal(preferencesCss.includes('.app-menu-search-input'), false, 'Tabs menu no longer renders a sticky search input');
   assert.ok(preferencesCss.includes('.command-palette-detail .fuzzy-match'), 'command palette highlights fuzzy matches in detail text');
   assert.ok(preferencesCss.includes('.file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons'), 'diff merge controls are positioned in the chunk margin');
+  assert.ok(preferencesCss.includes('inset-inline-end: 8px !important'), 'diff merge controls sit on the right edge');
+  assert.ok(preferencesCss.includes('.cm-diff-overview-tick'), 'diff overview ruler ticks are styled');
   assert.ok(/\.file-editor-diff-codemirror \.cm-merge-b \.cm-changedLine[\s\S]*var\(--code-diff-add\) 30%/.test(preferencesCss), 'diff added lines use stronger green fill');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedLine[\s\S]*var\(--code-diff-add\) 40%/.test(preferencesCss), 'light diff added lines are brighter');
   assert.ok(/\.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine[\s\S]*var\(--code-diff-remove\) 30%/.test(preferencesCss), 'diff removed lines use stronger red fill');
   assert.ok(preferencesCss.includes('.file-tree-row.repo-non-main'), 'Finder repo rows have non-main branch styling');
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
@@ -1725,9 +1729,12 @@ function makeFileTree(paths) {
   assert.ok(helpMenuLabels.includes('Keyboard shortcuts'));
   assert.ok(helpMenuLabels.includes('Open README'));
   const shortcutsMenu = helpMenu.items.find(item => item.label === 'Keyboard shortcuts');
-  assert.equal(shortcutsMenu.type, 'submenu');
-  assert.deepStrictEqual(canonical(shortcutsMenu.items.map(item => item.label)), ['Command palette', 'Save active editor', 'Toggle File Explorer', 'Open Preferences', 'Close menu or dialog', 'Session actions', 'Move or split tab']);
-  assert.ok(shortcutsMenu.items.find(item => item.label === 'Command palette').detail.includes(api.appShortcutText('P', {shift: true})));
+  assert.equal(shortcutsMenu.type, 'command');
+  assert.equal(shortcutsMenu.detail, '?');
+  assert.ok(source.includes('function keyboardShortcutCatalog()'), 'shortcut help is driven from one catalog');
+  assert.ok(source.includes("key === 'w'"), 'Cmd/Ctrl+W closes the active tab');
+  assert.equal(source.includes("key === 'k' && platformActionAllowed"), false, 'Cmd+K no longer opens the command palette');
+  assert.ok(source.includes("!mod && globalShortcutTargetAllowsAppAction(event.target) && (event.key === '?'"), 'question-mark shortcut does not fire while typing in editors or terminals');
   assert.equal(api.appModifier({ctrlKey: true, metaKey: false, altKey: false}), true, 'PC app modifier is Ctrl');
   assert.equal(api.appModifier({ctrlKey: false, metaKey: true, altKey: false}), false, 'PC app modifier ignores Cmd/meta');
   const macShortcutApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
@@ -1741,7 +1748,7 @@ function makeFileTree(paths) {
   assert.ok(api.fuzzySearchScore('hel', ['helloXandYyy']) > api.fuzzySearchScore('hel', ['h e l']), 'fuzzy matcher ranks contiguous matches higher');
   assert.deepStrictEqual(Array.from(api.fuzzySubsequenceMatch('xy', 'helloXandYyy').indexes), [5, 9], 'fuzzy matcher exposes matched indexes for result highlighting');
   assert.ok(api.fuzzyHighlightHtml('xy', 'helloXandYyy').includes('<mark class="fuzzy-match">X</mark>'), 'palette results highlight matched characters');
-  assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">1</mark>'), 'palette detail text can highlight PR-number matches');
+  assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">10144</mark>'), 'contiguous fuzzy matches render as one box');
   assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
   assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');
   api.setFileQuickOpenCandidatesForTest('/repo/app', [
@@ -1801,9 +1808,8 @@ function makeFileTree(paths) {
   assert.equal(api.fileIconClassFor('main.rs'), 'file-icon-code');
   assert.equal(api.fileIconClassFor('screenshot.png'), 'file-icon-image');
   const controlsHtml = api.panelControlsHtml('1');
-  assert.ok(controlsHtml.includes('title="Transcript" aria-label="Transcript"'));
-  assert.ok(controlsHtml.includes('title="AI summary" aria-label="AI summary"'));
-  assert.ok(controlsHtml.includes('title="Event log" aria-label="Event log"'));
+  assert.ok(controlsHtml.includes('data-panel-tab-overflow="1"'));
+  assert.ok(controlsHtml.includes('Transcript, AI summary, and event log'));
   assert.ok(controlsHtml.includes('title="Branch Info" aria-label="Branch Info"'));
   assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
   assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
@@ -2691,6 +2697,7 @@ function makeFileTree(paths) {
   assert.ok(api.globalActivitySummaryHtml().includes("YO&#39;sup"), 'global activity summary uses the YO summary label');
   assert.ok(api.globalActivitySummaryHtml().includes('3 files changed (+9/-2)'), 'global activity summary renders file totals');
   assert.ok(api.globalActivitySummaryHtml().includes("Sup! You&#39;ve got 2 AI agents on editor fixes"), 'global activity summary renders a casual human sentence');
+  assert.equal(api.globalActivitySummaryHtml().includes('Yo - session alpha'), false, 'global activity summary omits per-session detail lines');
   assert.equal(api.sessionActivitySummary('alpha').local, "Sup! Codex session alpha is active. It has been working on editor fixes. Changes so far: 2 files changed (+8/-1).");
   api.setTranscriptInfoForTest('alpha', {
     project: {

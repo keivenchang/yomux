@@ -1133,19 +1133,38 @@ function activitySummaryLinesHtml(lines, options = {}) {
   return items.map(line => `<div class="yosup-line">${esc(line)}</div>`).join('');
 }
 
+function relativeActivityGeneratedText(payload = activitySummaryPayload) {
+  const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
+  if (!Number.isFinite(ts) || ts <= 0) return {text: 'not loaded', title: ''};
+  const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  const text = seconds < 60
+    ? 'last updated just now'
+    : seconds < 3600
+      ? `last updated ${Math.round(seconds / 60)} min ago`
+      : `last updated ${Math.round(seconds / 3600)} hr ago`;
+  let title = payload?.generated_at || '';
+  try {
+    title = new Intl.DateTimeFormat(undefined, {
+      timeZone: 'America/Los_Angeles',
+      dateStyle: 'medium',
+      timeStyle: 'medium',
+      timeZoneName: 'short',
+    }).format(new Date(ts * 1000));
+  } catch (_) {}
+  return {text, title};
+}
+
 function globalActivitySummaryHtml() {
   const summary = activitySummaryPayload?.global || {};
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = summary.headline || lines[0] || '';
-  const details = headline ? lines.filter((line, index) => index > 0 || line !== headline) : lines;
-  const generated = activitySummaryPayload?.generated_at ? `updated ${shortText(activitySummaryPayload.generated_at, 19)}` : 'not loaded';
+  const generated = relativeActivityGeneratedText();
   return `<section class="yosup-global" aria-label="${esc(yosupTabLabel)} AI activity summary">
     <div class="yosup-global-head">
       <span>${esc(yosupTabLabel)}</span>
-      <span class="yosup-generated">${esc(generated)}</span>
+      <span class="yosup-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
     </div>
     ${headline ? `<div class="yosup-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
-    ${activitySummaryLinesHtml(details)}
   </section>`;
 }
 
@@ -1246,6 +1265,9 @@ function preferenceSections() {
       {path: 'file_explorer.refresh_ms', label: `${fileExplorerLabel()} refresh interval`, type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: 'How often YOLOmux checks changed Finder/File Explorer directories and open files. Client-side jitter avoids synchronized polling.'},
       {path: 'file_explorer.new_entry_highlight_ms', label: 'New file highlight duration', type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: 'How long newly detected files or directories stay colored in Finder/File Explorer.'},
     ]},
+    {title: 'Uploads', items: [
+      {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
+    ]},
   ];
 }
 
@@ -1340,6 +1362,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('notifications.')) add(['notify', 'alert', 'toast', 'message', 'banner', 'sound', 'ding', 'ping', 'bell', 'beep', 'desktop', 'dismiss']);
   if (path.includes('throttle')) add(['mute', 'quiet', 'spam', 'cooldown', 'rate limit']);
   if (path.startsWith('file_explorer.')) add(['finder', 'files', 'tree', 'sidebar', 'browser', 'directory', 'folder', 'navigator']);
+  if (path.startsWith('uploads.')) add(['upload', 'paste', 'drop', 'filename', 'template', 'file']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);

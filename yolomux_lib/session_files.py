@@ -13,6 +13,7 @@ from typing import Any
 
 from .common import AgentInfo
 from .common import SessionInfo
+from .common import is_generated_upload_name
 from .filesystem import git_root_for_path
 from .tmux_utils import run_cmd
 
@@ -315,6 +316,7 @@ def session_file_entry(
         "source": source,
         "added": added,
         "removed": removed,
+        "uploaded": is_generated_upload_name(path),
     }
 
 

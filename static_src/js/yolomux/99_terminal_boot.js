@@ -90,12 +90,36 @@ function panelControlsHtml(session, options = {}) {
           ${windowStepButtonHtml(session, 'prev', steps.prev, disabled)}
           <button class="tab active terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>
           ${windowStepButtonHtml(session, 'next', steps.next, disabled)}
-          <button class="tab" ${tabAttrs('transcript', 'Transcript')}>Tx</button>
-          <button class="tab" ${tabAttrs('summary', 'AI summary')}>AI</button>
-          <button class="tab" ${tabAttrs('events', 'Event log')}>Log</button>
+          <button type="button" class="tab panel-tab-overflow" data-panel-tab-overflow="${esc(session)}" title="Transcript, AI summary, and event log" aria-label="Transcript, AI summary, and event log"><span class="pane-actions-dots" aria-hidden="true">...</span></button>
           <button class="tab panel-detail-toggle active" ${infoAttrs}>Info</button>
           ${frameHtml}
         </div>`;
+}
+
+function showPanelTabOverflowMenu(session, x, y) {
+  closeTerminalContextMenu();
+  closeFileContextMenu();
+  closeSessionContextMenu();
+  const active = activeSessions.includes(session);
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu session-context-menu panel-tab-overflow-menu';
+  const disabledDetail = active ? '' : 'Open the tab in a pane first';
+  const add = (label, tabName, options = {}) => {
+    appendContextMenuButton(menu, label, () => {
+      if (active) activateTab(session, tabName, {userInitiated: true});
+    }, closeSessionContextMenu, {
+      disabled: !active || options.disabled,
+      checked: active && panelActiveTabName(session) === tabName,
+      title: options.disabled ? options.disabledTitle : disabledDetail,
+    });
+  };
+  add('Transcript', 'transcript');
+  add('AI summary', 'summary', {
+    disabled: readOnlyMode,
+    disabledTitle: 'AI summary requires admin access',
+  });
+  add('Event log', 'events');
+  sessionContextMenu.open(menu, x, y);
 }
 
 function virtualPanelControlsHtml(session, label) {
@@ -104,6 +128,15 @@ function virtualPanelControlsHtml(session, label) {
           <button class="tab active terminal-tab" type="button" title="${esc(safeLabel)}" aria-label="${esc(safeLabel)}">${esc(safeLabel)}</button>
           ${paneFrameControlsHtml(session, {actions: false, close: false})}
         </div>`;
+}
+
+function panelActiveTabName(session) {
+  const activePane = document.getElementById(`panel-${session}`)?.querySelector('.tab-pane.active');
+  const id = activePane?.id || '';
+  if (id === `transcript-pane-${session}`) return 'transcript';
+  if (id === `summary-pane-${session}`) return 'summary';
+  if (id === `events-pane-${session}`) return 'events';
+  return 'terminal';
 }
 
 function createPanel(session) {
@@ -310,6 +343,13 @@ function bindPanelControls(panel, session) {
   });
   panel.querySelectorAll('[data-window-dir]').forEach(button => {
     button.addEventListener('click', handleWindowStepButtonClick);
+  });
+  panel.querySelector('[data-panel-tab-overflow]')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.currentTarget;
+    const rect = button.getBoundingClientRect();
+    showPanelTabOverflowMenu(button.dataset.panelTabOverflow || session, rect.left, rect.bottom + 4);
   });
   panel.querySelector('[data-pane-close]')?.addEventListener('click', event => {
     event.preventDefault();
@@ -849,6 +889,9 @@ function activateTab(session, name, options = {}) {
   if (name !== 'summary') stopSummaryStream(session);
   document.querySelectorAll(`[data-tab="${session}"]`).forEach(button => {
     button.classList.toggle('active', button.dataset.tabName === name);
+  });
+  document.querySelectorAll(`[data-panel-tab-overflow="${session}"]`).forEach(button => {
+    button.classList.toggle('active', ['transcript', 'summary', 'events'].includes(name));
   });
   for (const tabName of ['terminal', 'transcript', 'summary', 'events']) {
     const pane = document.getElementById(`${tabName}-pane-${session}`);
@@ -1664,11 +1707,6 @@ document.addEventListener('keydown', event => {
   const mod = appModifier(event);
   const key = event.key.toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
-  if (mod && key === 'k' && platformActionAllowed) {
-    event.preventDefault();
-    openCommandPalette();
-    return;
-  }
   if (mod && key === 'p' && platformActionAllowed) {
     event.preventDefault();
     if (event.shiftKey) openCommandPalette();
@@ -1676,6 +1714,12 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (mod && platformActionAllowed) {
+    if (key === 'w') {
+      event.preventDefault();
+      const item = currentActiveMenuItem();
+      if (item) removeSessionFromLayout(item);
+      return;
+    }
     if (key === 'b') {
       event.preventDefault();
       toggleFileExplorerShortcut();
@@ -1687,7 +1731,15 @@ document.addEventListener('keydown', event => {
       return;
     }
   }
-  if (event.key === 'Escape') closeAppMenus();
+  if (!mod && globalShortcutTargetAllowsAppAction(event.target) && (event.key === '?' || (event.key === '/' && event.shiftKey))) {
+    event.preventDefault();
+    openKeyboardShortcutsOverlay();
+    return;
+  }
+  if (event.key === 'Escape') {
+    closeKeyboardShortcutsOverlay();
+    closeAppMenus();
+  }
 });
 window.addEventListener('resize', () => {
   scheduleResponsiveLayoutPrune();

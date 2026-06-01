@@ -72,6 +72,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "refresh_ms": 3000,
         "new_entry_highlight_ms": 60000,
     },
+    "uploads": {
+        "filename_template": "{date:%Y%m%d}-{seq:03d}-{name}{ext}",
+    },
     "yolo": {
         "rule_file_path": "~/.config/yolomux/yolo-rules.yaml",
         "dry_run": False,
@@ -194,6 +197,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "quick_access_paths"): "List of paths for File Explorer shortcuts.",
     ("file_explorer", "refresh_ms"): "Milliseconds, 1000-60000. Refreshes changed File Explorer directories and open files; client-side jitter avoids synchronized polling.",
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
+    ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
     ("yolo", "rule_file_path"): "Path to the YOLO rule YAML file. The file's top-level default: value controls fallback behavior.",
     ("yolo", "dry_run"): "true/false. Log rule decisions without acting.",
 }

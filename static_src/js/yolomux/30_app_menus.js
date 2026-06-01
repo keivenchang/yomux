@@ -454,14 +454,16 @@ function appMenuTree() {
       label: 'Help',
       items: menuGroups(
         [menuCommand('Command palette', openCommandPalette, {
-          detail: `${appShortcutText('K')} or ${appShortcutText('P', {shift: true})}`,
+          detail: appShortcutText('P', {shift: true}),
         })],
         [
           menuCommand(`YOLOmux ${bootstrap.version || ''}`.trim(), null, {
             disabled: true,
             detail: bootstrap.versionCommitTime ? `Last commit: ${bootstrap.versionCommitTime}` : '',
           }),
-          menuSubmenu('Keyboard shortcuts', keyboardShortcutItems()),
+          menuCommand('Keyboard shortcuts', openKeyboardShortcutsOverlay, {
+            detail: '?',
+          }),
           menuCommand('Open README', openProjectReadme, {
             disabled: !projectReadmePath(),
             detail: 'Local README',

@@ -116,6 +116,20 @@ def test_search_files_matches_absolute_path_segments(tmp_path):
     assert [item["relative_path"] for item in payload["files"]] == ["README.md"]
 
 
+def test_search_files_marks_generated_upload_names(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    upload = tmp_path / "20260531-001-diagram.png"
+    normal = tmp_path / "diagram.png"
+    upload.write_bytes(b"png")
+    normal.write_bytes(b"png")
+
+    payload = filesystem.search_files(str(tmp_path), "diagram", 20)
+    by_name = {item["name"]: item for item in payload["files"]}
+
+    assert by_name["20260531-001-diagram.png"]["uploaded"] is True
+    assert by_name["diagram.png"]["uploaded"] is False
+
+
 def test_search_files_rejects_non_directory(tmp_path):
     target = tmp_path / "note.md"
     target.write_text("x", encoding="utf-8")

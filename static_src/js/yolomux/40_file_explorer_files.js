@@ -651,6 +651,7 @@ function fileTreeNumstatText(path) {
   const added = Number(match.added || 0);
   const removed = Number(match.removed || 0);
   if (!Number.isFinite(added) || !Number.isFinite(removed)) return '';
+  if (added === 0 && removed === 0) return '';
   return ` (+${added}/-${removed})`;
 }
 
@@ -673,6 +674,25 @@ function fileTreeDisplayName(path, entry) {
   }
   if (entry.kind === 'file') return `${entry.name}${fileTreeNumstatText(path)}`;
   return entry.name;
+}
+
+function fileTreeMtimeText(entry) {
+  return sessionFileTimeText(entry?.mtime);
+}
+
+function sortedFileTreeEntries(entries) {
+  const visible = entries.filter(entry => fileExplorerShowHidden || !entry.name.startsWith('.'));
+  const direction = fileExplorerTreeSortMode === 'za' ? -1 : 1;
+  return visible.sort((left, right) => {
+    const leftKind = left.kind === 'dir' ? 0 : 1;
+    const rightKind = right.kind === 'dir' ? 0 : 1;
+    if (leftKind !== rightKind) return leftKind - rightKind;
+    if (fileExplorerTreeSortMode === 'newest' || fileExplorerTreeSortMode === 'oldest') {
+      const mtimeResult = Number(right.mtime || 0) - Number(left.mtime || 0);
+      if (mtimeResult !== 0) return fileExplorerTreeSortMode === 'newest' ? mtimeResult : -mtimeResult;
+    }
+    return String(left.name || '').localeCompare(String(right.name || ''), undefined, {numeric: true, sensitivity: 'base'}) * direction;
+  });
 }
 
 function fileTreeGitStatusClass(status) {
@@ -734,11 +754,19 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     status.className = 'file-tree-git-status';
     row.appendChild(status);
   }
+  let date = row.querySelector(':scope > .file-tree-date');
+  if (!date) {
+    date = document.createElement('span');
+    date.className = 'file-tree-date changes-file-date';
+    row.appendChild(date);
+  }
   icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
   if (icon.textContent !== iconText) icon.textContent = iconText;
   if (name.textContent !== nameText) name.textContent = nameText;
   status.textContent = options.gitStatus || '';
   status.hidden = !options.gitStatus;
+  date.textContent = options.dateText || '';
+  date.hidden = !options.dateText;
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth) {
@@ -786,6 +814,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   updateFileTreeRowContents(row, icon, fileTreeDisplayName(fullPath, entry), {
     gitStatus,
     iconClass: fileIconClassFor(entry.name, entry.kind),
+    dateText: fileExplorerTreeShowDates ? fileTreeMtimeText(entry) : '',
   });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
     bindFileImagePreview(row, fullPath, entry);
@@ -851,7 +880,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
 function renderTreeChildren(container, parentPath, entries, depth, options = {}) {
   if (!container) return;
   const entriesByDir = options.entriesByDir instanceof Map ? options.entriesByDir : null;
-  const visible = entries.filter(e => fileExplorerShowHidden || !e.name.startsWith('.'));
+  const visible = sortedFileTreeEntries(entries);
   const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
   const nextNodes = [];
   for (const entry of visible) {
@@ -1252,7 +1281,7 @@ function bindFileExplorerHeaderActions(container = document) {
   if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
   if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
   container.addEventListener('click', event => {
-    const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse]');
+    const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates]');
     if (!action || !container.contains(action)) return;
     event.preventDefault();
     event.stopPropagation();
@@ -1260,6 +1289,20 @@ function bindFileExplorerHeaderActions(container = document) {
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) refreshFileExplorerTrees();
     else if (action.matches('[data-file-explorer-collapse]')) collapseAllFileExplorerDirectories();
+    else if (action.matches('[data-file-explorer-tree-dates]')) {
+      fileExplorerTreeShowDates = !fileExplorerTreeShowDates;
+      writeStoredFileExplorerTreeShowDates(fileExplorerTreeShowDates);
+      refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+    }
+  });
+  container.addEventListener('change', event => {
+    const select = event.target.closest('[data-file-explorer-tree-sort]');
+    if (!select || !container.contains(select)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    fileExplorerTreeSortMode = ['az', 'za', 'newest', 'oldest'].includes(select.value) ? select.value : 'az';
+    writeStoredFileExplorerTreeSortMode(fileExplorerTreeSortMode);
+    refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   });
 }
 
