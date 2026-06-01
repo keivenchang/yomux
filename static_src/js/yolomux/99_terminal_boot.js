@@ -236,6 +236,10 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
   return true;
 }
 
+function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content')) {
+  return Boolean(yoagentBusy && node?.querySelector?.('.yoagent-chat-status'));
+}
+
 function renderYoagentPanel(options = {}) {
   const node = document.getElementById('yoagent-content');
   if (!node) return;
@@ -244,7 +248,11 @@ function renderYoagentPanel(options = {}) {
   const selectionStart = inputFocused ? input.selectionStart : null;
   const selectionEnd = inputFocused ? input.selectionEnd : null;
   if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
-  if (options.summaryOnly && inputFocused && refreshYoagentSummaryRegions(node)) return;
+  if (yoagentBusyUiIsMounted(node) && options.allowBusyRebuild !== true) {
+    refreshYoagentSummaryRegions(node);
+    return;
+  }
+  if (options.summaryOnly && refreshYoagentSummaryRegions(node)) return;
   node.innerHTML = `${globalActivitySummaryHtml()}${yoagentSessionSummariesHtml()}${yoagentChatHtml()}`;
   if (options.scrollBottom !== false) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));

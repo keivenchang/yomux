@@ -593,7 +593,20 @@ def _normal_ref(value: str | None, default: str) -> str:
 
 
 def _diff_refs(raw_from_ref: str | None, raw_to_ref: str | None) -> tuple[str, str]:
-    return _normal_ref(raw_from_ref, "current"), _normal_ref(raw_to_ref, "HEAD")
+    return _normal_ref(raw_from_ref, "HEAD"), _normal_ref(raw_to_ref, "current")
+
+
+def _refs_requested(from_ref: str | None, to_ref: str | None) -> bool:
+    return bool((from_ref or "").strip() or (to_ref or "").strip())
+
+
+def _diff_ref_resolution_error(error: Exception) -> bool:
+    message = str(error)
+    return (
+        message.startswith("unknown FROM ref:")
+        or message.startswith("unknown TO ref:")
+        or message.startswith("FROM ref must be older than TO ref")
+    )
 
 
 def _ref_exists(repo: Path, ref: str) -> bool:
@@ -602,17 +615,21 @@ def _ref_exists(repo: Path, ref: str) -> bool:
 
 
 def _ensure_ref_order(repo: Path, from_ref: str, to_ref: str) -> None:
-    if from_ref == "current":
-        if not _ref_exists(repo, to_ref):
-            raise FilesystemError(f"unknown TO ref: {to_ref}", status=400)
+    if to_ref == "current":
+        if from_ref == "current":
+            raise FilesystemError("FROM ref must be older than TO ref (current is the working tree)", status=400)
+        if not _ref_exists(repo, from_ref):
+            raise FilesystemError(f"unknown FROM ref: {from_ref}", status=400)
         return
+    if from_ref == "current":
+        raise FilesystemError("FROM ref must be older than TO ref (current is the working tree)", status=400)
     if not _ref_exists(repo, from_ref):
         raise FilesystemError(f"unknown FROM ref: {from_ref}", status=400)
     if not _ref_exists(repo, to_ref):
         raise FilesystemError(f"unknown TO ref: {to_ref}", status=400)
-    order = git(["merge-base", "--is-ancestor", to_ref, from_ref], cwd=str(repo), timeout=5.0)
+    order = git(["merge-base", "--is-ancestor", from_ref, to_ref], cwd=str(repo), timeout=5.0)
     if order.returncode != 0:
-        raise FilesystemError(f"TO ref must be older than FROM ref ({to_ref} is not an ancestor of {from_ref})", status=400)
+        raise FilesystemError(f"FROM ref must be older than TO ref ({from_ref} is not an ancestor of {to_ref})", status=400)
 
 
 def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
@@ -627,24 +644,30 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
         raise FilesystemError(f"path is outside repo: {path}", status=400)
     tracked = git(["ls-files", "--error-unmatch", "--", rel_path], cwd=str(repo), timeout=3.0)
     diff_from, diff_to = _diff_refs(from_ref, to_ref)
-    if not (diff_from == "current" and tracked.returncode != 0):
-        _ensure_ref_order(repo, diff_from, diff_to)
+    if not (diff_to == "current" and tracked.returncode != 0):
+        try:
+            _ensure_ref_order(repo, diff_from, diff_to)
+        except FilesystemError as error:
+            if not (_refs_requested(from_ref, to_ref) and _diff_ref_resolution_error(error)):
+                raise
+            diff_from, diff_to = _diff_refs(None, None)
+            _ensure_ref_order(repo, diff_from, diff_to)
     original = ""
     original_error = ""
     working = ""
     working_error = ""
-    if diff_from == "current" and tracked.returncode != 0:
+    if diff_to == "current" and tracked.returncode != 0:
         result = run_cmd(["git", "-C", str(repo), "diff", "--no-index", "--", "/dev/null", str(path)], timeout=5.0)
         untracked = True
     else:
-        if diff_from == "current":
-            result = git(["diff", diff_to, "--", rel_path], cwd=str(repo), timeout=5.0)
+        if diff_to == "current":
+            result = git(["diff", diff_from, "--", rel_path], cwd=str(repo), timeout=5.0)
             if tracked.returncode == 0:
-                original, original_error = _git_blob_text(repo, diff_to, rel_path, "original")
+                original, original_error = _git_blob_text(repo, diff_from, rel_path, "original")
         else:
-            result = git(["diff", diff_to, diff_from, "--", rel_path], cwd=str(repo), timeout=5.0)
-            original, original_error = _git_blob_text(repo, diff_to, rel_path, "original")
-            working, working_error = _git_blob_text(repo, diff_from, rel_path, "working")
+            result = git(["diff", diff_from, diff_to, "--", rel_path], cwd=str(repo), timeout=5.0)
+            original, original_error = _git_blob_text(repo, diff_from, rel_path, "original")
+            working, working_error = _git_blob_text(repo, diff_to, rel_path, "working")
         untracked = False
     if result.returncode not in {0, 1}:
         message = (result.stderr or result.stdout or "git diff failed").strip()

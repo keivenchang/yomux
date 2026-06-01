@@ -1242,16 +1242,25 @@ function revealOpenFileLineSoon(path, line) {
 
 async function openFileQuickOpenPath(path, options = {}) {
   const label = basenameOf(path);
+  let openedItem = null;
   if (options.split === true) {
     const targetSlot = largestPaneSlotForFileEditor();
     const splitBaseSlot = targetSlot || slotForSession(currentActiveMenuItem()) || largestPaneSlot();
-    await openFileInEditor(path, {name: label}, splitBaseSlot
-      ? {targetSlot: splitBaseSlot, targetZone: targetSlot ? 'middle' : 'right', forceNewTab: true}
-      : {forceNewTab: true});
+    openedItem = await openFileInEditor(path, {name: label}, splitBaseSlot
+      ? {targetSlot: splitBaseSlot, targetZone: targetSlot ? 'middle' : 'right', forceNewTab: true, userInitiated: true}
+      : {forceNewTab: true, userInitiated: true});
   } else {
-    await openFileInEditor(path, {name: label});
+    openedItem = await openFileInEditor(path, {name: label}, {userInitiated: true});
   }
+  focusQuickOpenedFile(openedItem);
   revealOpenFileLineSoon(path, options.line || null);
+}
+
+function focusQuickOpenedFile(item) {
+  if (!item) return;
+  focusPanel(item, {userInitiated: true});
+  renderPaneTabStrips();
+  requestAnimationFrame(() => focusPanel(item, {userInitiated: true}));
 }
 
 function fileQuickOpenItem(path, options = {}) {
@@ -1495,13 +1504,13 @@ function closeCommandPalette() {
   fileQuickOpenDebounce = null;
 }
 
-function invokeCommandPaletteSelection(event = null) {
+async function invokeCommandPaletteSelection(event = null) {
   const item = commandPaletteItemsCache[commandPaletteIndex];
   if (!item || item.disabled) return;
   rememberCommandPaletteItem(item);
   closeCommandPalette();
-  if (appModifier(event) && item.splitRun) item.splitRun();
-  else item.run?.();
+  const action = appModifier(event) && item.splitRun ? item.splitRun : item.run;
+  await Promise.resolve(action?.());
 }
 
 function scheduleFileQuickOpenSearch(options = {}) {

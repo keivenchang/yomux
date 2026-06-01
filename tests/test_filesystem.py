@@ -389,17 +389,35 @@ def test_diff_file_supports_commit_to_commit_refs(tmp_path):
     subprocess.run(["git", "commit", "-am", "two"], cwd=tmp_path, check=True, capture_output=True, text=True)
     newer = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
 
-    result = filesystem.diff_file(str(target), from_ref=newer, to_ref=older)
+    result = filesystem.diff_file(str(target), from_ref=older, to_ref=newer)
 
-    assert result["from_ref"] == newer
-    assert result["to_ref"] == older
+    assert result["from_ref"] == older
+    assert result["to_ref"] == newer
     assert result["original"] == "one\n"
     assert result["working"] == "two\n"
     assert "-one" in result["diff"]
     assert "+two" in result["diff"]
 
 
-def test_diff_file_rejects_to_ref_newer_than_from_ref(tmp_path):
+def test_diff_file_falls_back_when_requested_ref_is_unknown_in_repo(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target = tmp_path / "app.py"
+    target.write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "one"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    target.write_text("two\n", encoding="utf-8")
+
+    result = filesystem.diff_file(str(target), from_ref="not-in-this-repo", to_ref="current")
+
+    assert result["from_ref"] == "HEAD"
+    assert result["to_ref"] == "current"
+    assert "-one" in result["diff"]
+    assert "+two" in result["diff"]
+
+
+def test_diff_file_falls_back_when_requested_ref_order_is_invalid(tmp_path):
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
@@ -411,12 +429,14 @@ def test_diff_file_rejects_to_ref_newer_than_from_ref(tmp_path):
     target.write_text("two\n", encoding="utf-8")
     subprocess.run(["git", "commit", "-am", "two"], cwd=tmp_path, check=True, capture_output=True, text=True)
     newer = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    target.write_text("three\n", encoding="utf-8")
 
-    with pytest.raises(filesystem.FilesystemError) as excinfo:
-        filesystem.diff_file(str(target), from_ref=older, to_ref=newer)
+    result = filesystem.diff_file(str(target), from_ref=newer, to_ref=older)
 
-    assert excinfo.value.status == 400
-    assert "TO ref must be older" in str(excinfo.value)
+    assert result["from_ref"] == "HEAD"
+    assert result["to_ref"] == "current"
+    assert "-two" in result["diff"]
+    assert "+three" in result["diff"]
 
 
 def test_create_directory_rejects_existing_target(tmp_path):

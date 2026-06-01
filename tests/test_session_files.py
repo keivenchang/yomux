@@ -248,13 +248,55 @@ def test_session_files_payload_accepts_explicit_commit_refs(tmp_path):
     )
     info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
 
-    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), from_ref=newer, to_ref=older)
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), from_ref=older, to_ref=newer)
 
     assert payload["files"][0]["path"] == "tracked.txt"
     assert payload["files"][0]["added"] == 1
     assert payload["files"][0]["removed"] == 1
-    assert payload["from_ref"] == newer
-    assert payload["to_ref"] == older
+    assert payload["from_ref"] == older
+    assert payload["to_ref"] == newer
+    assert payload["repos"][0]["behind"] == 0
+    assert payload["repos"][0]["ahead"] == 1
+
+
+def test_session_files_payload_falls_back_when_requested_ref_is_unknown_in_repo(tmp_path):
+    repo1 = tmp_path / "repo1"
+    repo2 = tmp_path / "repo2"
+    for repo in (repo1, repo2):
+        repo.mkdir()
+        git(repo, "init")
+        git(repo, "config", "user.email", "test@example.com")
+        git(repo, "config", "user.name", "Test User")
+        tracked = repo / "tracked.txt"
+        tracked.write_text("one\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "one")
+        tracked.write_text("two\n", encoding="utf-8")
+    repo1_from = git(repo1, "rev-parse", "HEAD").stdout.strip()
+    panes = []
+    for index, repo in enumerate((repo1, repo2)):
+        panes.append(
+            PaneInfo(
+                session="s1",
+                window="0",
+                pane=str(index),
+                pane_id=f"%{index}",
+                target=f"s1:0.{index}",
+                current_path=str(repo),
+                command="zsh",
+                active=index == 0,
+                window_active=True,
+                title="",
+                pid=11 + index,
+            )
+        )
+    info = SessionInfo(session="s1", panes=panes, selected_pane=panes[0], agents=[])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), from_ref=repo1_from, to_ref="current")
+
+    assert payload["errors"] == []
+    assert {item["repo"] for item in payload["files"]} == {str(repo1), str(repo2)}
+    assert all(item["path"] == "tracked.txt" for item in payload["files"])
 
 
 def test_git_recent_refs_exposes_more_than_twenty_commits(tmp_path):
@@ -271,8 +313,8 @@ def test_git_recent_refs_exposes_more_than_twenty_commits(tmp_path):
 
     refs = session_files.git_recent_refs(repo)
 
-    assert refs[0]["ref"] == "current"
-    assert refs[1]["ref"] == "HEAD"
+    assert refs[0]["ref"] == "HEAD"
+    assert refs[1]["ref"] == "current"
     assert len(refs) >= 27
     assert any(item["subject"] == "commit 0" for item in refs)
 
@@ -306,10 +348,10 @@ def test_session_files_payload_reports_invalid_ref_order(tmp_path):
     )
     info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
 
-    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), from_ref=older, to_ref=newer)
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), from_ref=newer, to_ref=older)
 
     assert payload["files"] == []
-    assert any("TO ref must be older" in error for error in payload["errors"])
+    assert payload["errors"] == []
 
 
 def test_session_files_payload_uses_session_repo_without_ai_attribution(tmp_path):

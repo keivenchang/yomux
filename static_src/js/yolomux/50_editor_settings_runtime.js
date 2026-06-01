@@ -330,7 +330,7 @@ function applyCssSettings() {
   root.setProperty('--tab-label-size', `${uiFontSize}px`);
   root.setProperty('--editor-font-size', `${editorFontSize}px`);
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
-  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 240)}px`);
+  root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 180)}px`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
@@ -426,6 +426,7 @@ function applySettingsPayload(payload, options = {}) {
   autoFocusEnabled = boolSetting('general.auto_focus', false);
   const previousEditorSchemeId = activeEditorScheme().id;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
+  terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'line'));
   fileEditorThemeMode = readConfiguredEditorScheme();
   if (options.initial || options.applyEditorDefaults) {

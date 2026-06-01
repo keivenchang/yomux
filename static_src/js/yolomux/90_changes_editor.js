@@ -29,8 +29,8 @@ function sessionFilesTargetSession(options = {}) {
 
 function diffRefParams() {
   return {
-    from: cleanDiffRef(diffRefFrom, 'current'),
-    to: cleanDiffRef(diffRefTo, 'HEAD'),
+    from: cleanDiffRef(diffRefFrom, 'HEAD'),
+    to: cleanDiffRef(diffRefTo, 'current'),
   };
 }
 
@@ -41,8 +41,8 @@ function diffRefQueryString() {
 
 function diffRefSuggestions() {
   const suggestions = [
+    {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
     {ref: 'current', short: 'current', subject: 'working tree'},
-    {ref: 'HEAD', short: 'HEAD', subject: 'current commit'},
   ];
   const seen = new Set(suggestions.map(item => item.ref));
   for (const payload of [sessionFilesPayload, fileExplorerSessionFilesPayload]) {
@@ -68,29 +68,69 @@ function diffRefSuggestionsHtml(listId) {
   }).join('')}</datalist>`;
 }
 
+function diffRefShaLike(value) {
+  return /^[0-9a-f]{7,40}$/i.test(String(value || '').trim());
+}
+
+function diffRefSameCommit(value, candidate) {
+  const left = cleanDiffRef(value, '');
+  const right = cleanDiffRef(candidate, '');
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return diffRefShaLike(left) && diffRefShaLike(right) && (left.startsWith(right) || right.startsWith(left));
+}
+
+function diffRefOptionMatches(value, item) {
+  return diffRefSameCommit(value, item?.ref) || diffRefSameCommit(value, item?.short);
+}
+
+function canonicalDiffRefValue(value, suggestions) {
+  const ref = cleanDiffRef(value, '');
+  if (!ref) return '';
+  return suggestions.find(item => diffRefOptionMatches(ref, item))?.ref || ref;
+}
+
 function diffRefSelectOptionsHtml(value, options = {}) {
   const maxItems = options.compact ? 30 : 100;
-  return diffRefSuggestions().slice(0, maxItems).map(item => {
+  const suggestions = Array.isArray(options.suggestions) ? options.suggestions : diffRefSuggestions();
+  const items = suggestions.slice(0, maxItems);
+  if (value && !items.some(item => diffRefOptionMatches(value, item))) {
+    items.unshift({ref: value, short: value.slice(0, 9), subject: 'selected ref'});
+  }
+  return items.map(item => {
     const label = [item.short, item.subject].filter(Boolean).join(' - ') || item.ref;
-    return `<option value="${esc(item.ref)}"${item.ref === value ? ' selected' : ''}>${esc(label)}</option>`;
+    return `<option value="${esc(item.ref)}"${diffRefOptionMatches(value, item) ? ' selected' : ''}>${esc(label)}</option>`;
   }).join('');
+}
+
+function diffRefFromSuggestions() {
+  return diffRefSuggestions().filter(item => item.ref !== 'current');
+}
+
+function diffRefToSuggestions(fromRef = diffRefFrom) {
+  const suggestions = diffRefSuggestions();
+  const current = suggestions.find(item => item.ref === 'current') || {ref: 'current', short: 'current', subject: 'working tree'};
+  const ordered = [current, ...suggestions.filter(item => item.ref !== 'current')];
+  const from = cleanDiffRef(fromRef, '');
+  const fromIndex = ordered.findIndex(item => diffRefOptionMatches(from, item));
+  if (fromIndex < 0) return [current];
+  return ordered.slice(0, Math.max(1, fromIndex));
 }
 
 function diffRefControlsHtml(options = {}) {
   const compact = options.compact === true;
   const className = compact ? 'diff-ref-controls compact' : 'diff-ref-controls';
-  const listId = options.listId || (compact ? 'diff-ref-suggestions-compact' : 'diff-ref-suggestions');
   return `<span class="${className}" data-diff-ref-controls>
-    <label class="diff-ref-control">FROM <input data-diff-ref-from type="text" list="${esc(listId)}" value="${esc(diffRefFrom)}" spellcheck="false" aria-label="Diff FROM ref"></label>
-    <select class="diff-ref-select" data-diff-ref-from-select aria-label="Pick a recent FROM commit">${diffRefSelectOptionsHtml(diffRefFrom, {compact})}</select>
-    <label class="diff-ref-control">TO <input data-diff-ref-to type="text" list="${esc(listId)}" value="${esc(diffRefTo)}" spellcheck="false" aria-label="Diff TO ref"></label>
-    ${diffRefSuggestionsHtml(listId)}
+    <label class="diff-ref-control">FROM <select class="diff-ref-select" data-diff-ref-from data-diff-ref-from-select aria-label="Pick an older FROM commit">${diffRefSelectOptionsHtml(diffRefFrom, {compact, suggestions: diffRefFromSuggestions()})}</select></label>
+    <label class="diff-ref-control">TO <select class="diff-ref-select" data-diff-ref-to data-diff-ref-to-select aria-label="Pick a newer TO ref">${diffRefSelectOptionsHtml(diffRefTo, {compact, suggestions: diffRefToSuggestions(diffRefFrom)})}</select></label>
   </span>`;
 }
 
 function setDiffRefs(fromRef, toRef, options = {}) {
-  const nextFrom = cleanDiffRef(fromRef, 'current');
-  const nextTo = cleanDiffRef(toRef, 'HEAD');
+  const nextFrom = canonicalDiffRefValue(cleanDiffRef(fromRef, 'HEAD'), diffRefFromSuggestions()) || 'HEAD';
+  const toSuggestions = diffRefToSuggestions(nextFrom);
+  let nextTo = canonicalDiffRefValue(cleanDiffRef(toRef, 'current'), toSuggestions) || 'current';
+  if (!toSuggestions.some(item => diffRefOptionMatches(nextTo, item))) nextTo = 'current';
   if (nextFrom === diffRefFrom && nextTo === diffRefTo && options.force !== true) return false;
   diffRefFrom = nextFrom;
   diffRefTo = nextTo;
@@ -122,9 +162,11 @@ function syncDiffRefControlValues(container) {
   const fromInput = container.querySelector?.('[data-diff-ref-from]');
   const toInput = container.querySelector?.('[data-diff-ref-to]');
   const fromSelect = container.querySelector?.('[data-diff-ref-from-select]');
+  const toSelect = container.querySelector?.('[data-diff-ref-to-select]');
   if (fromInput && fromInput !== active) fromInput.value = diffRefFrom;
   if (toInput && toInput !== active) toInput.value = diffRefTo;
-  if (fromSelect && fromSelect !== active) fromSelect.value = diffRefFrom;
+  if (fromSelect && fromSelect !== active) fromSelect.value = canonicalDiffRefValue(diffRefFrom, diffRefFromSuggestions()) || diffRefFrom;
+  if (toSelect && toSelect !== active) toSelect.value = canonicalDiffRefValue(diffRefTo, diffRefToSuggestions(diffRefFrom)) || diffRefTo;
 }
 
 function fileExplorerSessionFilesTargetSession() {
@@ -178,6 +220,8 @@ function sessionFilesPayloadSignatureForPayload(payload) {
     Number(item.touched_count || 0),
     Number(item.added || 0),
     Number(item.removed || 0),
+    Number.isFinite(Number(item.behind)) ? Number(item.behind) : null,
+    Number.isFinite(Number(item.ahead)) ? Number(item.ahead) : null,
   ]);
   return JSON.stringify({
     session: payload?.session || '',
@@ -337,11 +381,153 @@ function writeStoredUploadedFilesCollapsed() {
   catch (_) {}
 }
 
+function writeStoredChangesFolderCollapsed() {
+  try { window.localStorage?.setItem(changesFolderCollapsedStorageKey, JSON.stringify(Array.from(changesFolderCollapsed).sort())); }
+  catch (_) {}
+}
+
+function changeStatusClassKey(statusKey) {
+  const key = String(statusKey || 'M').toLowerCase();
+  return /^[a-z0-9_-]+$/.test(key) ? key : 'unknown';
+}
+
+function changeFileParentLabel(relPath) {
+  const rel = String(relPath || '');
+  const index = rel.lastIndexOf('/');
+  return index > 0 ? rel.slice(0, index) : '';
+}
+
+function changeFileTotals(files) {
+  let added = 0;
+  let removed = 0;
+  for (const item of Array.isArray(files) ? files : []) {
+    const add = Number(item?.added);
+    const remove = Number(item?.removed);
+    if (Number.isFinite(add)) added += add;
+    if (Number.isFinite(remove)) removed += remove;
+  }
+  return {added, removed};
+}
+
+function diffRefDisplayText(ref) {
+  const value = cleanDiffRef(ref, '');
+  if (!value || value === 'default') return 'Default base';
+  if (value === 'base') return 'Base';
+  if (value === 'current') return 'Working Tree';
+  return value.length > 12 && /^[0-9a-f]{13,40}$/i.test(value) ? value.slice(0, 9) : value;
+}
+
+function comparisonTitleHtml(payload) {
+  const from = diffRefDisplayText(payload?.from_ref || diffRefFrom);
+  const to = diffRefDisplayText(payload?.to_ref || diffRefTo);
+  return `Comparing ${esc(from)} with ${esc(to)}`;
+}
+
+function changesSummaryHtml(files, session, loading, loaded) {
+  if (loading) return 'loading...';
+  if (!loaded) return 'not loaded';
+  const count = `${files.length} file${files.length === 1 ? '' : 's'} changed`;
+  const {added, removed} = changeFileTotals(files);
+  const scope = session ? ` in '${sessionLabel(session)}'` : '';
+  return `${esc(count)}${esc(scope)} <span class="changes-summary-separator">·</span> <span class="changes-diff-add">+${added}</span> <span class="changes-diff-remove">-${removed}</span>`;
+}
+
+function changesRepoMetaHtml(repoInfo) {
+  const pieces = [];
+  if (Number.isFinite(Number(repoInfo?.behind))) pieces.push(`<span>Behind ${Number(repoInfo.behind)} commit${Number(repoInfo.behind) === 1 ? '' : 's'}</span>`);
+  if (Number.isFinite(Number(repoInfo?.ahead))) pieces.push(`<span>Ahead ${Number(repoInfo.ahead)} commit${Number(repoInfo.ahead) === 1 ? '' : 's'}</span>`);
+  return pieces.length ? `<span class="changes-repo-compare-meta">${pieces.join('')}</span>` : '';
+}
+
+function repoPayloadByPath(payload) {
+  const map = new Map();
+  for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) map.set(repo.repo || 'Outside repo', repo);
+  return map;
+}
+
+function changesComparisonHeaderHtml(payload, files, options = {}) {
+  const loaded = payload?.loaded === true;
+  const loading = options.loading === true;
+  const summary = changesSummaryHtml(files, payload?.session || '', loading, loaded);
+  return `<section class="changes-comparison-head">
+    <div class="changes-comparison-title">${comparisonTitleHtml(payload || {})}</div>
+    <div class="changes-comparison-summary">${summary}</div>
+  </section>`;
+}
+
+function changeTreeNode(name, path) {
+  return {name, path, children: new Map(), files: []};
+}
+
+function changeTreeForEntries(entries) {
+  const root = changeTreeNode('', '');
+  for (const item of entries) {
+    const rel = String(item?.path || item?.abs_path || '').split('/').filter(Boolean);
+    const fileName = rel.pop() || basenameOf(item?.abs_path || item?.path || '');
+    let node = root;
+    let currentPath = '';
+    for (const part of rel) {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      if (!node.children.has(part)) node.children.set(part, changeTreeNode(part, currentPath));
+      node = node.children.get(part);
+    }
+    node.files.push({...item, __displayName: fileName});
+  }
+  return root;
+}
+
+function changeTreeFileCount(node) {
+  let count = node.files.length;
+  for (const child of node.children.values()) count += changeTreeFileCount(child);
+  return count;
+}
+
+function compressedChangeFolder(node) {
+  const names = [node.name];
+  let current = node;
+  while (!current.files.length && current.children.size === 1) {
+    const child = Array.from(current.children.values())[0];
+    names.push(child.name);
+    current = child;
+  }
+  return {label: names.join('/'), node: current, path: current.path};
+}
+
+function changesFolderCollapseKey(context, path) {
+  return [context.session || '', context.repo || '', path || ''].join('|');
+}
+
+function changesTreeChildrenHtml(node, context, depth) {
+  const folders = Array.from(node.children.values()).sort((left, right) => left.name.localeCompare(right.name, undefined, {numeric: true, sensitivity: 'base'}));
+  const folderHtml = folders.map(child => changesFolderHtml(child, context, depth)).join('');
+  const fileHtml = node.files.map(item => changeFileRowHtml(item, {...context, depth})).join('');
+  return `${folderHtml}${fileHtml}`;
+}
+
+function changesFolderHtml(node, context, depth) {
+  const folder = compressedChangeFolder(node);
+  const key = changesFolderCollapseKey(context, folder.path);
+  const collapsed = changesFolderCollapsed.has(key);
+  const count = changeTreeFileCount(folder.node);
+  const children = collapsed ? '' : changesTreeChildrenHtml(folder.node, context, depth + 1);
+  return `<div class="changes-tree-folder${collapsed ? ' collapsed' : ''}" style="--changes-tree-depth:${depth}">
+    <button type="button" class="changes-tree-folder-row" data-changes-folder-toggle="${esc(key)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+      <span class="changes-tree-caret">${collapsed ? '▸' : '▾'}</span>
+      <span class="changes-tree-folder-icon">▸</span>
+      <span class="changes-tree-folder-name">${esc(folder.label)}/</span>
+      <span class="changes-tree-folder-count">${count}</span>
+    </button>
+    ${children ? `<div class="changes-tree-children">${children}</div>` : ''}
+  </div>`;
+}
+
 function changeFileRowHtml(item, options = {}) {
   const statusKey = String(item.status || 'M').toUpperCase();
+  const statusClass = changeStatusClassKey(statusKey);
   const absPath = item.abs_path || item.path || '';
-  const name = basenameOf(absPath || item.path || '');
+  const name = item.__displayName || basenameOf(absPath || item.path || '');
   const rel = item.path || absPath;
+  const parentLabel = changeFileParentLabel(rel);
   const timeText = sessionFileTimeText(item.mtime);
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentHtml = agentIcon(String(item.agent || '').toLowerCase());
@@ -349,24 +535,32 @@ function changeFileRowHtml(item, options = {}) {
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
   const metaHtml = [diffHtml, dateHtml].filter(Boolean).join('');
   const compactClass = options.compact ? ' compact' : ' detailed';
+  const depth = Math.max(0, Number(options.depth) || 0);
+  const icon = fileIconFor(name);
+  const iconClass = fileIconClassFor(name, 'file');
   const actionAttr = absPath
     ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" title="${esc(absPath)}"`
     : ' disabled';
-  return `<button type="button" class="changes-file-row${compactClass}"${actionAttr}>
-    <span class="changes-status changes-status-${esc(statusKey.toLowerCase())}">${esc(statusKey)}</span>
-    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span><span class="changes-file-path">${esc(rel)}</span></span>
+  return `<button type="button" class="changes-file-row${compactClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
+    <span class="changes-status changes-status-${esc(statusClass)}">${esc(statusKey)}</span>
+    <span class="changes-file-icon ${esc(iconClass)}" aria-hidden="true">${esc(icon)}</span>
+    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span><span class="changes-file-path">${esc(parentLabel || rel)}</span></span>
     <span class="changes-file-meta">${metaHtml}</span>
   </button>`;
 }
 
 function changesRepoGroupsHtml(files, options = {}) {
   const {regular, uploaded} = splitUploadedSessionFiles(files);
+  const payload = options.payload || {};
+  const repoMap = repoPayloadByPath(payload);
   const repoHtml = groupedSessionFiles(regular).map(([repo, entries]) => {
-    const rows = entries.map(item => changeFileRowHtml(item, options)).join('');
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
+    const repoInfo = repoMap.get(repo) || {};
+    const tree = changeTreeForEntries(entries);
+    const rows = changesTreeChildrenHtml(tree, {session: payload.session || '', repo, compact: options.compact === true}, 0);
     return `<section class="changes-repo-group">
-      <div class="changes-repo-head"><span>${esc(repoLabel)}</span><span>${entries.length}</span></div>
-      <div class="changes-file-list">${rows}</div>
+      <div class="changes-repo-head"><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></div>
+      <div class="changes-file-list changes-tree">${rows}</div>
     </section>`;
   }).join('');
   if (!uploaded.length) return repoHtml;
@@ -380,21 +574,15 @@ function changesRepoGroupsHtml(files, options = {}) {
   return `${repoHtml}${uploadedHtml}`;
 }
 
-function modifiedFilesSummaryText(files, session, loading, loaded) {
-  if (loading) return 'loading...';
-  if (!loaded) return 'not loaded';
-  const count = `${files.length} file${files.length === 1 ? '' : 's'}`;
-  return session ? `Modified in '${sessionLabel(session)}': ${count}` : `Modified: ${count}`;
-}
-
 function changesPanelHtml() {
   const target = sessionFilesPayload.session || sessionFilesTargetSession();
   const files = sessionFilesPayload.files || [];
   const loaded = sessionFilesPayload.loaded === true;
   const options = sessions.map(session => `<option value="${esc(session)}"${session === target ? ' selected' : ''}>${esc(sessionLabel(session))} ${esc(session)}</option>`).join('');
-  const summary = modifiedFilesSummaryText(files, target, sessionFilesLoading, loaded);
+  const summary = changesSummaryHtml(files, target, sessionFilesLoading, loaded);
   const errorHtml = (sessionFilesPayload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
-  const groups = changesRepoGroupsHtml(files);
+  const comparison = changesComparisonHeaderHtml(sessionFilesPayload, files, {loading: sessionFilesLoading});
+  const groups = changesRepoGroupsHtml(files, {payload: sessionFilesPayload});
   const empty = !sessionFilesLoading && loaded && !files.length ? '<div class="changes-empty">No AI-changed files found for this session.</div>' : '';
   return `
     <div class="changes-toolbar">
@@ -405,8 +593,9 @@ function changesPanelHtml() {
       </select></label>
       ${diffRefControlsHtml()}
       <button type="button" class="changes-refresh" data-session-files-refresh>Refresh</button>
-      <span class="changes-summary">${esc(summary)}</span>
+      <span class="changes-summary">${summary}</span>
     </div>
+    ${comparison}
     ${errorHtml}
     ${empty || groups}`;
 }
@@ -417,7 +606,7 @@ function fileExplorerChangesPanelHtml() {
   const files = payload.files || [];
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
-  const summary = modifiedFilesSummaryText(files, session, loading, loaded);
+  const summary = changesSummaryHtml(files, session, loading, loaded);
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? '<div class="changes-empty">No modified files for this session.</div>' : '';
   const compact = fileExplorerChangesDisplayMode === 'compact';
@@ -429,10 +618,11 @@ function fileExplorerChangesPanelHtml() {
       ${diffRefControlsHtml({compact: true})}
       <button type="button" class="changes-display-toggle${compact ? ' compact' : ' detailed'}" data-session-files-display-toggle title="${esc(densityTitle)}" aria-label="${esc(densityTitle)}" aria-pressed="${compact ? 'true' : 'false'}">${esc(densityIcon)}</button>
       <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
-      <span class="changes-summary">${esc(summary)}</span>
+      <span class="changes-summary">${summary}</span>
     </div>
+    ${changesComparisonHeaderHtml(payload, files, {loading})}
     ${errorHtml}
-    ${empty || changesRepoGroupsHtml(files, {compact})}`;
+    ${empty || changesRepoGroupsHtml(files, {compact, payload})}`;
 }
 
 function createChangesPanel() {
@@ -516,14 +706,10 @@ function bindChangesPanel(panel) {
     }
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (diffRefInput && panel.contains(diffRefInput)) {
+      event.preventDefault();
+      event.stopPropagation();
       commitDiffRefControls(diffRefInput.closest('[data-diff-ref-controls]') || panel);
-    }
-    const diffRefSelect = event.target.closest('[data-diff-ref-from-select]');
-    if (diffRefSelect && panel.contains(diffRefSelect)) {
-      const controls = diffRefSelect.closest('[data-diff-ref-controls]') || panel;
-      const fromInput = controls.querySelector?.('[data-diff-ref-from]');
-      if (fromInput) fromInput.value = diffRefSelect.value;
-      commitDiffRefControls(controls);
+      return;
     }
   });
   panel.addEventListener('keydown', event => {
@@ -545,6 +731,17 @@ function bindChangesPanel(panel) {
       event.preventDefault();
       uploadedFilesCollapsed = !uploadedFilesCollapsed;
       writeStoredUploadedFilesCollapsed();
+      renderChangesPanels();
+      renderFileExplorerChangesPanels();
+      return;
+    }
+    const folderToggle = event.target.closest('[data-changes-folder-toggle]');
+    if (folderToggle && panel.contains(folderToggle)) {
+      event.preventDefault();
+      const key = folderToggle.dataset.changesFolderToggle || '';
+      if (changesFolderCollapsed.has(key)) changesFolderCollapsed.delete(key);
+      else changesFolderCollapsed.add(key);
+      writeStoredChangesFolderCollapsed();
       renderChangesPanels();
       renderFileExplorerChangesPanels();
       return;
@@ -1045,10 +1242,11 @@ function createFileEditorPanel(item) {
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {
     const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
-    if (!input) return;
-    event.preventDefault();
-    event.stopPropagation();
-    commitDiffRefControls(diffRefPanel);
+    if (input) {
+      event.preventDefault();
+      event.stopPropagation();
+      commitDiffRefControls(diffRefPanel);
+    }
   });
   diffRefPanel?.addEventListener('keydown', event => {
     const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -1289,6 +1487,7 @@ function destroyCodeMirrorPanel(panel) {
     panel._cmPath = '';
     panel._cmSignature = '';
     panel._cmMode = '';
+    panel._cmPlainFallback = false;
   }
 }
 
@@ -1390,6 +1589,80 @@ function codeMirrorThemedExtensions(api, panel, path) {
   return panel._cmThemeCompartment.of(extensions);
 }
 
+function codeMirrorThemeOnlyExtensions(api, panel) {
+  const extensions = [codeMirrorThemeExtension(api)];
+  if (!panel || !api.Compartment) return extensions;
+  panel._cmThemeCompartment = panel._cmThemeCompartment || new api.Compartment();
+  return panel._cmThemeCompartment.of(extensions);
+}
+
+function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
+  const save = options.save || (() => saveFileEditor(path, panel));
+  const saveKeymap = safeCodeMirrorExtension('save keymap', () => api.keymap.of([{
+    key: 'Mod-s',
+    run() {
+      save();
+      return true;
+    },
+  }]));
+  const findKeymap = safeCodeMirrorExtension('find keymap', () => (api.openSearchPanel ? api.keymap.of([{
+    key: 'Mod-f',
+    run(view) {
+      return openCodeMirrorFindForView(api, view);
+    },
+  }]) : []));
+  const defaultKeymap = safeCodeMirrorExtension('default keymap', () => api.keymap.of([
+    api.indentWithTab,
+    ...(Array.isArray(api.defaultKeymap) ? api.defaultKeymap : []),
+    ...(Array.isArray(api.historyKeymap) ? api.historyKeymap : []),
+    ...(Array.isArray(api.searchKeymap) ? api.searchKeymap : []),
+  ].filter(Boolean)));
+  return [
+    safeCodeMirrorExtension('history', () => api.history?.()),
+    safeCodeMirrorExtension('selection drawing', () => api.drawSelection()),
+    safeCodeMirrorExtension('drop cursor', () => api.dropCursor?.()),
+    safeCodeMirrorExtension('active line', () => api.highlightActiveLine()),
+    ...(fileEditorLineNumbersEnabled ? [
+      safeCodeMirrorExtension('line numbers', () => api.lineNumbers?.()),
+      safeCodeMirrorExtension('active line gutter', () => api.highlightActiveLineGutter?.()),
+    ] : []),
+    safeCodeMirrorExtension('search', () => api.search({top: true})),
+    codeMirrorSearchPanelEnhancementExtension(api),
+    safeCodeMirrorExtension('search matches', () => api.highlightSelectionMatches?.()),
+    saveKeymap,
+    findKeymap,
+    defaultKeymap,
+    ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+    safeCodeMirrorExtension('read only', () => api.EditorState.readOnly.of(readOnlyMode)),
+    safeCodeMirrorExtension('editable', () => api.EditorView.editable.of(!readOnlyMode)),
+    codeMirrorThemeOnlyExtensions(api, panel),
+    codeMirrorWorkingUpdateExtension(api, panel, path),
+  ];
+}
+
+function createEditableCodeMirrorState(api, panel, path, doc) {
+  try {
+    return {
+      state: api.EditorState.create({
+        doc,
+        extensions: codeMirrorExtensions(api, panel, path),
+      }),
+      plain: false,
+    };
+  } catch (error) {
+    console.warn('CodeMirror language parser failed; retrying plain editable editor', error);
+    if (panel) panel._cmThemeCompartment = null;
+    return {
+      state: api.EditorState.create({
+        doc,
+        extensions: codeMirrorPlainEditableExtensions(api, panel, path),
+      }),
+      plain: true,
+      error,
+    };
+  }
+}
+
 function trackCodeMirrorThemeViews(panel, api, views) {
   if (!panel) return;
   panel._cmApi = api;
@@ -1402,7 +1675,8 @@ function reconfigureCodeMirrorPanelTheme(panel) {
   const compartment = panel?._cmThemeCompartment;
   const views = Array.isArray(panel?._cmThemeViews) ? panel._cmThemeViews : [];
   if (!api || !path || !compartment || !views.length) return false;
-  const effect = compartment.reconfigure(codeMirrorThemeExtensions(api, path));
+  const extensions = panel?._cmPlainFallback ? [codeMirrorThemeExtension(api)] : codeMirrorThemeExtensions(api, path);
+  const effect = compartment.reconfigure(extensions);
   for (const view of views) {
     try { view.dispatch({effects: effect}); } catch (_) {}
   }
@@ -1533,8 +1807,9 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     return false;
   }
   const layout = codeMirrorDiffLayout(container);
-  const currentText = state.diffFromRef && state.diffFromRef !== 'current' ? String(state.diffWorking || '') : String(state.content || '');
-  const diffEditsAllowed = !state.diffFromRef || state.diffFromRef === 'current';
+  const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';
+  const currentText = diffTargetIsCurrent ? String(state.content || '') : String(state.diffWorking || '');
+  const diffEditsAllowed = diffTargetIsCurrent;
   const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});
   installCodeMirrorDiffCollapsedScrollGuard(panel, container);
   if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
@@ -1649,12 +1924,9 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
     if (panel._cmGeneration !== generation) return null;
     if (!panel._cmView) {
       container.replaceChildren();
-      const cmState = api.EditorState.create({
-        doc: currentText,
-        extensions: codeMirrorExtensions(api, panel, path),
-      });
+      const createdState = createEditableCodeMirrorState(api, panel, path, currentText);
       panel._cmView = new api.EditorView({
-        state: cmState,
+        state: createdState.state,
         parent: container,
         dispatch(transaction) {
           panel._cmView.update([transaction]);
@@ -1666,9 +1938,13 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       });
       panel._cmPath = path;
       panel._cmSignature = signature;
+      panel._cmPlainFallback = Boolean(createdState.plain);
       panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
       updateCodeMirrorCursorStatus(panel);
+      if (createdState.plain) {
+        setFileEditorPanelStatus(panel, 'CodeMirror language parser failed; editing as plain text', 'warn');
+      }
     } else if (panel._cmView.state.doc.toString() !== currentText && !state.dirty) {
       panel._cmView.dispatch({
         changes: {from: 0, to: panel._cmView.state.doc.length, insert: currentText},

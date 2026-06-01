@@ -273,9 +273,12 @@ globalThis.__layoutTestApi = {
   backgroundTabItems,
   canPaneExpand,
   codeMirrorHtmlSemanticEmphasisExtension,
+  codeMirrorApiIsUsable,
   codeMirrorLanguageExtension,
   codeMirrorHighlightExtension,
   codeMirrorMarkdownCodeLanguages,
+  createEditableCodeMirrorState,
+  codeMirrorPlainEditableExtensions,
   codeMirrorSearchMatches,
   codeMirrorSearchMatchSummary,
   emptyPlaceholderPaneState,
@@ -289,6 +292,10 @@ globalThis.__layoutTestApi = {
   fileExplorerChangesPanelHtml,
   changeFileRowHtml,
   diffRefControlsHtml,
+  diffRefSelectOptionsHtml,
+  diffRefParams,
+  diffRefFromSuggestions,
+  diffRefToSuggestions,
   parseUnifiedDiffLineClasses,
   globalActivitySummaryHtml,
   yoagentSessionSummariesHtml,
@@ -393,6 +400,7 @@ globalThis.__layoutTestApi = {
   bodyChildren() { return document.body.children; },
   defaultLayoutSlots,
   dedentSelectionText,
+  dropIntentForEvent,
   dropIntentAllowsSession,
   directoryEntriesSignature,
   editorWrapValue,
@@ -420,6 +428,8 @@ globalThis.__layoutTestApi = {
   terminalThemeForGlobalTheme,
   globalThemeModeForTest() { return globalThemeMode; },
   setGlobalThemeModeForTest(value) { globalThemeMode = normalizeGlobalThemeMode(value); },
+  terminalThemeModeForTest() { return terminalThemeMode; },
+  setTerminalThemeModeForTest(value) { terminalThemeMode = normalizeTerminalThemeMode(value); },
   expandPaneFromLayout,
   infoBranchRows,
   fileContextMenuState,
@@ -446,6 +456,7 @@ globalThis.__layoutTestApi = {
     fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), repo);
   },
   setUploadedFilesCollapsedForTest(value) { uploadedFilesCollapsed = Boolean(value); },
+  setChangesFolderCollapsedForTest(keys) { changesFolderCollapsed = new Set((keys || []).map(String)); },
   rawFileUrl,
   rawFileDownloadUrl,
   focusPreferencesSearch,
@@ -500,6 +511,8 @@ globalThis.__layoutTestApi = {
   handleDropDragOver,
   installFilePathDropTarget,
   showPaneTabDropPreview,
+  showDropPreview,
+  clearDropPreview,
   shouldPreserveSourceSlotForSplit,
   startSessionDrag,
   startFileTreeDrag,
@@ -515,6 +528,8 @@ globalThis.__layoutTestApi = {
   transcriptPathRowHtml,
   splitNode,
   splitSessionAtSlot,
+  splitSessionAtLayoutBoundary,
+  splitSessionAtGutter,
   updateActiveSessionParam,
   paneTabDropIndex,
   paneTabDropPlacement,
@@ -602,6 +617,9 @@ globalThis.__layoutTestApi = {
   },
   setGridPreviewNodesForTest(nodes) {
     grid.querySelectorAll = () => nodes;
+  },
+  gridForTest() {
+    return grid;
   },
   setLayoutColumnRectsForTest(rects) {
     grid.querySelector = selector => {
@@ -1003,6 +1021,59 @@ function makeFileTree(paths) {
   assert.deepStrictEqual(canonical(api.codeMirrorLanguageExtension(brokenLanguageApi, '/home/test/README.md')), [], 'broken Markdown language support falls back to editable plain text');
   assert.deepStrictEqual(canonical(api.codeMirrorMarkdownCodeLanguages(brokenLanguageApi)), [], 'broken fenced-code language descriptions are skipped');
   assert.deepStrictEqual(canonical(api.codeMirrorHighlightExtension({})), [], 'missing highlight support falls back without crashing');
+  assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), true, 'CodeMirror API validation accepts critical editor/search exports');
+  assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}}, EditorView: {theme() {}}}), false, 'CodeMirror API validation rejects partial bundles');
+  const parserCrashApi = {
+    EditorState: {
+      create(config) {
+        if (JSON.stringify(config.extensions).includes('bad-language')) {
+          throw new TypeError("Cannot read properties of undefined (reading 'parser')");
+        }
+        return {
+          doc: {toString: () => String(config.doc || ''), length: String(config.doc || '').length},
+          selection: {main: {head: 0}, ranges: []},
+          extensions: config.extensions,
+        };
+      },
+      readOnly: {of(value) { return ['readOnly', value]; }},
+    },
+    EditorView: {
+      theme() { return 'theme'; },
+      lineWrapping: 'wrap',
+      editable: {of(value) { return ['editable', value]; }},
+      updateListener: {of(listener) { return ['listener', listener]; }},
+    },
+    Compartment: class {
+      of(extension) { return ['compartment', extension]; }
+      reconfigure(extension) { return ['reconfigure', extension]; }
+    },
+    keymap: {of(entries) { return ['keymap', entries]; }},
+    history() { return 'history'; },
+    drawSelection() { return 'drawSelection'; },
+    dropCursor() { return 'dropCursor'; },
+    rectangularSelection() { return 'rectangularSelection'; },
+    crosshairCursor() { return 'crosshairCursor'; },
+    indentOnInput() { return 'indentOnInput'; },
+    bracketMatching() { return 'bracketMatching'; },
+    foldGutter() { return 'foldGutter'; },
+    highlightActiveLine() { return 'highlightActiveLine'; },
+    lineNumbers() { return 'lineNumbers'; },
+    highlightActiveLineGutter() { return 'highlightActiveLineGutter'; },
+    search() { return 'search'; },
+    highlightSelectionMatches() { return 'highlightSelectionMatches'; },
+    indentWithTab: 'indentWithTab',
+    defaultKeymap: [],
+    historyKeymap: [],
+    searchKeymap: [],
+    openSearchPanel() { return true; },
+    markdown() { return 'bad-language'; },
+  };
+  const parserCrashPanel = {};
+  const fallbackState = api.createEditableCodeMirrorState(parserCrashApi, parserCrashPanel, '/home/test/DOIT.2.md', '```bash\\necho hi\\n```');
+  assert.equal(fallbackState.plain, true, 'CodeMirror parser crashes retry as plain editable state');
+  assert.equal(fallbackState.state.doc.toString(), '```bash\\necho hi\\n```');
+  assert.equal(JSON.stringify(fallbackState.state.extensions).includes('bad-language'), false, 'plain retry removes the failing language extension');
+  assert.ok(api.codeMirrorPlainEditableExtensions(parserCrashApi, {}, '/home/test/DOIT.2.md').length > 0, 'plain editable fallback keeps editor controls available');
 
   const compareRows = canonical(api.lineDiffRows('one\ntwo\nfour', 'one\nthree\nfour'));
   assert.deepStrictEqual(compareRows.map(row => [row.leftKind, row.rightKind]), [
@@ -1252,6 +1323,9 @@ function makeFileTree(paths) {
   assert.ok(source.includes('commandPaletteRecentKeyLimit = 100'), 'command palette recent-key cache is capped');
   assert.ok(source.includes('restoreElementScrollPosition(container, scrollTop, scrollLeft);'), 'editor preview renders preserve scroll position');
   assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');
+  assert.ok(source.includes('openedItem = await openFileInEditor(path, {name: label}, {userInitiated: true});'), 'quick-open waits for file opens and passes user intent');
+  assert.ok(source.includes('focusQuickOpenedFile(openedItem);'), 'quick-open focuses the opened file after the async open resolves');
+  assert.ok(source.includes('await Promise.resolve(action?.());'), 'command palette selection awaits async run handlers before focus settles');
 }
 
 {
@@ -1355,7 +1429,7 @@ function makeFileTree(paths) {
     loaded: true,
     errors: [],
     refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
-    repos: [{repo: '/repo/app', count: 2, touched_count: 2}],
+    repos: [{repo: '/repo/app', count: 2, touched_count: 2, added: 10, removed: 1, behind: 0, ahead: 2}],
     files: [
       {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
       {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200, added: 8, removed: 0},
@@ -1364,15 +1438,34 @@ function makeFileTree(paths) {
   assert.ok(api.changesPaneTabHtml().includes('changes-count-badge'));
   const changesHtml = api.changesPanelHtml();
   assert.ok(changesHtml.includes('/repo/app'));
-  assert.ok(changesHtml.includes('Modified in &#39;1&#39;: 2 files'), 'Changes pane summary names the session explicitly');
-  assert.ok(changesHtml.includes('src/new.py'));
+  assert.ok(changesHtml.includes('2 files changed in &#39;1&#39;'), 'Changes pane summary names the session explicitly');
+  assert.ok(changesHtml.includes('changes-comparison-title">Comparing HEAD with Working Tree'), 'Changes pane shows the comparison header');
+  assert.ok(changesHtml.includes('Behind 0 commits'), 'Changes pane shows behind count');
+  assert.ok(changesHtml.includes('Ahead 2 commits'), 'Changes pane shows ahead count');
+  assert.ok(changesHtml.includes('changes-tree-folder-name">src/'), 'Changes pane groups nested paths under folders');
+  assert.ok(changesHtml.includes('data-changes-folder-toggle="1|/repo/app|src"'), 'Changes tree folders are collapsible by a stable key');
+  assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'), 'file leaves keep the open-file action');
   assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
   assert.ok(changesHtml.includes('changes-file-agent'), 'changed-file rows show the agent icon slot');
+  assert.ok(changesHtml.includes('changes-file-icon'), 'changed-file rows show a file-type icon slot');
   assert.ok(changesHtml.includes('changes-file-date'), 'changed-file rows wrap the date for skinny styling');
+  api.setChangesFolderCollapsedForTest(['1|/repo/app|src']);
+  const collapsedChangesHtml = api.changesPanelHtml();
+  assert.ok(collapsedChangesHtml.includes('changes-tree-folder collapsed'), 'collapsed changed-file folders keep their state');
+  assert.equal(collapsedChangesHtml.includes('data-open-change-file="/repo/app/src/new.py"'), false, 'collapsed changed-file folders hide file leaves');
+  api.setChangesFolderCollapsedForTest([]);
   assert.ok(changesHtml.includes('data-diff-ref-from'), 'Changes pane exposes FROM ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-to'), 'Changes pane exposes TO ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-from-select'), 'Changes pane exposes a scrollable FROM commit picker');
+  assert.ok(changesHtml.includes('data-diff-ref-to-select'), 'Changes pane exposes a newer-target TO picker');
+  assert.equal(/<input[^>]*data-diff-ref-from/.test(changesHtml), false, 'FROM control is one select, not a duplicated input plus select');
+  assert.equal(/<input[^>]*data-diff-ref-to/.test(changesHtml), false, 'TO control is one select, not a duplicated input plus select');
   assert.ok(changesHtml.includes('older base commit'), 'Changes pane FROM picker includes recent commit subjects');
+  assert.equal(api.diffRefFromSuggestions().some(item => item.ref === 'current'), false, 'FROM picker does not suggest current as the older base');
+  assert.equal(api.diffRefToSuggestions('HEAD').map(item => item.ref).join(','), 'current', 'TO picker only offers refs newer than the selected FROM base');
+  const duplicateShaOptions = api.diffRefSelectOptionsHtml('abc123def4567890', {suggestions: [{ref: 'abc123d', short: 'abc123d', subject: 'same commit'}]});
+  assert.equal((duplicateShaOptions.match(/<option/g) || []).length, 1, 'diff ref picker dedupes full SHA and short SHA for the same commit');
+  assert.equal(duplicateShaOptions.includes('selected ref'), false, 'diff ref picker does not add a synthetic duplicate for a selected SHA already in suggestions');
   const changedFilesSource = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), 'modified-file rows open from a double-click handler');
   const compactChangeHtml = api.changeFileRowHtml(
@@ -1390,7 +1483,7 @@ function makeFileTree(paths) {
     session: '1',
     loaded: true,
     errors: [],
-    repos: [{repo: '/repo/app', count: 1, touched_count: 1}],
+    repos: [{repo: '/repo/app', count: 1, touched_count: 1, added: 2, removed: 1}],
     files: [
       {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
       {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: '20260531-028.png', abs_path: '/repo/app/20260531-028.png', mtime: 200, added: 0, removed: 0, uploaded: true},
@@ -1406,24 +1499,29 @@ function makeFileTree(paths) {
     loaded: true,
     errors: [],
     refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
-    repos: [{repo: '/repo/app', count: 2, touched_count: 2}],
+    repos: [{repo: '/repo/app', count: 2, touched_count: 2, added: 2, removed: 1, behind: 0, ahead: 1}],
     files: [
       {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
     ],
   });
   assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified files'), 'Finder embeds a modified-files panel');
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified in &#39;1&#39;: 1 file'), 'Finder modified-files summary names the session explicitly');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('1 file changed in &#39;1&#39;'), 'Finder modified-files summary names the session explicitly');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('Ahead 1 commit'), 'Finder modified-files panel shows repo ahead counts');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-from-select'), 'Finder compact modified-files header exposes the FROM commit picker');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-to-select'), 'Finder compact modified-files header exposes the TO picker');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), 'Finder modified-files panel uses one density toggle');
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row detailed'), 'Finder modified-files panel defaults to detailed rows');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row compact'), 'Finder modified-files panel defaults to compact rows');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
   const changedFilesCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.changes-status\s*\{[\s\S]*width:\s*13px/.test(changedFilesCss), 'modified-file status chips are skinny');
   assert.ok(/\.changes-file-name\s*\{[\s\S]*font-weight:\s*500/.test(changedFilesCss), 'modified-file names are not bold');
+  assert.ok(/\.changes-tree-folder-row\s*\{[\s\S]*grid-template-columns:\s*12px 16px minmax\(0, 1fr\) auto/.test(changedFilesCss), 'modified-file folders use a compact GitLens-style tree row');
+  assert.ok(changedFilesCss.includes('.changes-status-r,'), 'modified-file rename/copy statuses get distinct colors');
+  assert.ok(changedFilesCss.includes('body.theme-light .changes-comparison-head'), 'light theme explicitly restyles the Changes comparison header');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*overflow-y:\s*scroll/.test(changedFilesCss), 'Finder modified-files scrollbar stays visible');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*scrollbar-gutter:\s*stable/.test(changedFilesCss), 'Finder modified-files reserves scrollbar gutter');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*container-type:\s*inline-size/.test(changedFilesCss), 'Finder modified-files header uses pane-width container queries');
@@ -1455,6 +1553,8 @@ function makeFileTree(paths) {
   assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
   assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
   assert.ok(appSource.includes('/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}'), 'editor diff requests carry FROM/TO refs');
+  assert.ok(appSource.includes("const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';"), 'diff editor editability follows TO=current after the FROM/TO flip');
+  assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent;'), 'diff editor allows edits on the new/current side');
   assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');
   assert.ok(/switchFileExplorerChangesSession\(item\)/.test(appSource), 'tmux focus switches the Finder modified-files session immediately');
   assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'tmux focus forces a fresh Finder modified-files fetch even if an older request is in flight');
@@ -1581,14 +1681,49 @@ function makeFileTree(paths) {
   assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'YOsearch uses the normal UI font, not condensed tab text');
   assert.ok(preferencesCss.includes('--file-explorer-changes-min-block-size: 96px'), 'modified-files resizer shares a stable min-size token');
   assert.ok(preferencesCss.includes('--drop-outline: var(--accent-gold)'), 'drop-target outline color is tokenized');
+  assert.ok(/\.grid\.drop-preview::before/.test(preferencesCss), 'root layout drops have a full-layout preview overlay');
+  assert.ok(/\.grid\.drop-preview-gutter::before\s*\{[\s\S]*--drop-preview-left/.test(preferencesCss), 'split-bar drops use explicit full-span preview geometry');
   assert.equal(/body\.theme-light\s+[^{]*(?:\.pane-tab|\.tabs|\.active-pane|\.panel-head)/.test(preferencesCss), false, 'global light theme does not restyle pane tab strips or active pane rings');
-  assert.ok(preferencesCss.includes('--pane-tab-active-bg: #76b900'), 'focused active pane tab uses full brand green fill');
-  assert.ok(preferencesCss.includes('--pane-tab-active-accent: #d9ff9a'), 'focused active pane tab keeps a brighter green top accent');
+  assert.ok(preferencesCss.includes('--pane-tab-active-bg: #86d600'), 'focused active pane tab uses a brighter brand green fill');
+  assert.ok(preferencesCss.includes('--pane-tab-active-accent: #86d600'), 'focused active pane tab accent token is the same green, not yellow/lime');
+  assert.equal(preferencesCss.includes('box-shadow: inset 0 2px 0 var(--pane-tab-active-accent)'), false, 'focused active pane tabs do not paint a contrasting top line');
+  assert.ok(preferencesCss.includes('--pane-tab-width: 180px'), 'pane tabs default to the compact 180px width');
+  assert.ok(changedFilesSource.includes("numberSetting('appearance.tab_width', 180)"), 'runtime settings fallback keeps the 180px tab width default');
+  assert.ok(/body\.theme-dark\s*\{[\s\S]*--pane-tab-strip-bg:\s*#1f3026/.test(preferencesCss), 'dark theme uses a greenish dark pane tab-strip background');
+  assert.ok(/body\.theme-light\s*\{[\s\S]*--pane-tab-strip-bg:\s*#cfd4dd/.test(preferencesCss), 'light theme uses a bright pane tab-strip background');
+  assert.ok(preferencesCss.includes('--pane-tab-unfocused-active-bg: #285a2f'), 'unfocused active tabs use dark green, not gray');
+  assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
+  assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 2px'), 'active pane ring uses a thin shared width token');
+  assert.ok(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'focused panes keep the same bright tab-strip background');
+  assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
   assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder or Changes panes');
+  assert.ok(preferencesCss.includes('--pane-split-gap: 0px'), 'pane split layout collapses gap through a shared token');
+  assert.ok(preferencesCss.includes('--pane-resizer-size: 2px'), 'pane splitter size is tokenized and compact');
+  assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(255, 225, 77, 0.72)'), 'dark pane splitter is a visible bright-yellow divider at rest');
+  assert.ok(preferencesCss.includes('--pane-resizer-hover-bg: rgba(255, 225, 77, 0.96)'), 'dark pane splitter turns brighter on hover/resize');
+  assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(217, 119, 6, 0.78)'), 'light pane splitter uses readable amber at rest');
+  assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 5px'), 'pane splitter hover width is tokenized');
+  assert.ok(preferencesCss.includes('--pane-tile-radius: 2px'), 'panes use tile-scale rounding instead of card corners');
+  assert.ok(/\.layout-column\s*\{[\s\S]*gap:\s*var\(--pane-split-gap\)/.test(preferencesCss), 'pane split layout reads the compact gap token');
+  assert.ok(/\.layout-resizer\s*\{[\s\S]*flex:\s*0 0 var\(--pane-resizer-size\)/.test(preferencesCss), 'pane splitters read the compact size token');
+  assert.ok(/\.resizer-row::before\s*\{[\s\S]*left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(preferencesCss), 'row splitters draw a tokenized centered visible line');
+  assert.ok(/\.resizer-row:hover::before,[\s\S]*var\(--pane-resizer-hover-line-size\)/.test(preferencesCss), 'row splitters widen on hover without increasing the resting seam');
+  assert.ok(preferencesCss.includes('--pc-control-fg: #1f2937'), 'light mode uses a dark foreground for pane action controls');
+  assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: #1f2937'), 'light mode uses dark status text');
+  assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
+  assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
   assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*#1d4ed8/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
   assert.ok(/\.file-editor-cross-split-panel,\s*\n\.file-editor-save-panel/.test(preferencesCss), 'side preview button uses the compact editor toolbar button sizing');
   assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
   assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
+  assert.ok(preferencesCss.includes('--code-diff-add: #3fb950'), 'dark diff add base is vivid green');
+  assert.ok(preferencesCss.includes('--code-diff-remove: #f85149'), 'dark diff remove base is vivid red');
+  assert.equal(preferencesCss.includes('--code-diff-add: #98c379'), false, 'muted one-dark diff green must not return as the YOLOmux dark default');
+  assert.equal(preferencesCss.includes('--code-diff-remove: #e06c75'), false, 'muted one-dark diff red must not return as the YOLOmux dark default');
+  assert.ok(preferencesCss.includes('var(--code-diff-remove) 60%'), 'dark diff removed-line color is prominent');
+  assert.ok(preferencesCss.includes('var(--code-diff-add) 58%'), 'dark diff added-line color is prominent');
+  assert.ok(preferencesCss.includes('var(--code-diff-remove) 72%'), 'dark diff removed-token color is stronger than the line tint');
+  assert.ok(preferencesCss.includes('var(--code-diff-add) 70%'), 'dark diff added-token color is stronger than the line tint');
   assert.ok(preferencesCss.includes('.file-editor-icon-side-split'), 'cross-pane side preview has a distinct icon');
   assert.ok(preferencesCss.includes('.panel.preview-linked:not(.active-pane)'), 'paired side-preview pane gets a thinner linked ring');
   assert.ok(/\.yoagent-global\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent global summary fits narrow panes');
@@ -1602,9 +1737,12 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('.file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons'), 'diff merge controls are positioned in the chunk margin');
   assert.ok(preferencesCss.includes('inset-inline-end: 8px !important'), 'diff merge controls sit on the right edge');
   assert.ok(preferencesCss.includes('.cm-diff-overview-tick'), 'diff overview ruler ticks are styled');
-  assert.ok(/\.file-editor-diff-codemirror \.cm-merge-b \.cm-changedLine[\s\S]*var\(--code-diff-add\) 30%/.test(preferencesCss), 'diff added lines use stronger green fill');
-  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedLine[\s\S]*var\(--code-diff-add\) 40%/.test(preferencesCss), 'light diff added lines are brighter');
-  assert.ok(/\.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine[\s\S]*var\(--code-diff-remove\) 30%/.test(preferencesCss), 'diff removed lines use stronger red fill');
+  assert.ok(/--diff-add-line-bg:\s*color-mix\(in srgb, var\(--code-diff-add\) 58%/.test(preferencesCss), 'diff added lines use stronger green fill');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#e6ffec/.test(preferencesCss), 'light diff added lines use GitHub-soft green');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#ffebe9/.test(preferencesCss), 'light diff removed lines use GitHub-soft red');
+  assert.ok(/--diff-remove-line-bg:\s*color-mix\(in srgb, var\(--code-diff-remove\) 60%/.test(preferencesCss), 'diff removed lines use stronger red fill');
+  assert.ok(preferencesCss.includes('clip-path: inset(0 -100vw)'), 'diff line backgrounds extend to the full editor width');
+  assert.ok(preferencesCss.includes('.file-editor-diff-codemirror .cm-insertedLine .cm-insertedText'), 'whole-line inserted rows suppress ragged token overlays');
   assert.ok(preferencesCss.includes('.file-tree-row.repo-non-main'), 'Finder repo rows have non-main branch styling');
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
@@ -1633,6 +1771,7 @@ function makeFileTree(paths) {
   assert.ok(preferencesHtml.includes('Off by default'), 'auto-focus help explains the default');
   assert.equal(preferencesHtml.includes('Auto-focus terminals'), false, 'auto-focus setting is not terminal-only');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.theme"'), 'preferences expose the global app theme setting');
+  assert.ok(preferencesHtml.includes('data-setting-path="appearance.terminal_theme"'), 'preferences expose the terminal color theme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_dark_color_scheme"'), 'preferences expose the dark editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_light_color_scheme"'), 'preferences expose the light editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_cursor_style"'), 'preferences expose the editor cursor style setting');
@@ -1640,6 +1779,12 @@ function makeFileTree(paths) {
   assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave_delay_seconds"'), 'preferences expose editor autosave delay');
   assert.ok(preferencesHtml.includes('data-setting-path="yoagent.backend"'), 'preferences expose YO!agent backend');
   assert.ok(preferencesHtml.includes('data-setting-path="yoagent.system_prompt"'), 'preferences expose YO!agent prompt');
+  assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.system_prompt"[\s\S]*rows="12"/.test(preferencesHtml), 'YO!agent system prompt renders as a tall full-width row');
+  assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.intro"[\s\S]*rows="12"/.test(preferencesHtml), 'YO!agent intro renders as a tall full-width row');
+  assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.format"[\s\S]*rows="12"/.test(preferencesHtml), 'YO!agent format renders as a tall full-width row');
+  assert.ok(/data-setting-path="file_explorer\.quick_access_paths"[\s\S]*data-setting-type="list"[\s\S]*rows="3"/.test(preferencesHtml), 'list settings keep compact textarea rows');
+  assert.ok(/\.preferences-setting-row--wide\s*\{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(preferencesCss), 'wide preference rows stack to one column');
+  assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control textarea\s*\{[\s\S]*grid-column:\s*1 \/ -1[\s\S]*min-height:\s*min\(34vh, 15lh\)/.test(preferencesCss), 'wide textarea controls span the row and stay tall');
   assert.ok(preferencesHtml.includes('No agent'), 'Preferences rename the local YO!agent backend to No agent');
   assert.equal(preferencesHtml.includes('Deterministic'), false, 'Preferences do not expose the internal deterministic backend label');
   assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
@@ -1651,8 +1796,15 @@ function makeFileTree(paths) {
   assert.equal(api.globalThemeIsDark(), true, 'global theme defaults dark');
   assert.equal(api.globalThemeLabel(), 'Dark');
   assert.equal(api.nextGlobalThemeMode(), 'light');
-  assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff');
-  assert.equal(api.terminalThemeForGlobalTheme('light').blue, '#064ea5');
+  assert.equal(api.terminalThemeModeForTest(), 'dark', 'terminal theme defaults dark');
+  assert.equal(api.terminalThemeForGlobalTheme('light').background, '#11151d', 'light app theme keeps terminals dark by default');
+  api.setTerminalThemeModeForTest('light');
+  assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'terminal light theme is explicit opt-in');
+  assert.equal(api.terminalThemeForGlobalTheme('dark').blue, '#064ea5');
+  api.setTerminalThemeModeForTest('follow-app');
+  assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app maps to the resolved app theme');
+  assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#11151d');
+  api.setTerminalThemeModeForTest('dark');
   api.setGlobalThemeModeForTest('light');
   api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
   assert.ok(api.bodyClassListForTest().contains('theme-light'), 'global light theme marks the body');
@@ -1664,6 +1816,12 @@ function makeFileTree(paths) {
   api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
   assert.equal(api.fileEditorThemeModeForTest(), 'inherit');
   assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Dark');
+  assert.equal(api.activeEditorSchemeForTest().activeLine, 'rgba(255, 255, 255, 0.04)');
+  assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(87, 112, 148, 0.46)');
+  assert.equal(api.activeEditorSchemeForTest().diff.addFg, '#3fb950');
+  assert.equal(api.activeEditorSchemeForTest().diff.removeFg, '#f85149');
+  assert.equal(api.activeEditorSchemeForTest().activeLine.includes('118, 185, 0'), false, 'YOLOmux dark active line is no longer green');
+  assert.equal(api.activeEditorSchemeForTest().selection.includes('118, 185, 0'), false, 'YOLOmux dark selection is no longer green');
   api.setFileEditorThemeMode('github-light');
   assert.equal(api.fileEditorThemeModeForTest(), 'github-light');
   assert.equal(api.activeEditorSchemeForTest().label, 'GitHub Light');
@@ -1880,7 +2038,7 @@ function makeFileTree(paths) {
   assert.ok(tmuxMenuLabels.includes('Event log'));
   assert.ok(tmuxMenuLabels.includes('Pane details'));
   assert.ok(tmuxMenuLabels.includes("Rename tmux session '1'"));
-  assert.ok(tmuxMenuLabels.includes('Kill session'));
+  assert.ok(tmuxMenuLabels.includes("Kill tmux session '1'"));
   assert.equal(tmuxMenuLabels.includes("Enable YOLO for Tmux Session '1'"), false);
   assert.ok(tmuxMenuLabels.includes('Resume session'));
   assert.equal(tmuxMenu.badgeText, undefined);
@@ -2035,14 +2193,16 @@ function makeFileTree(paths) {
   assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO off');
   assert.equal(namedSessionApi.appMenuTree().find(menu => menu.id === 'tmux').items.some(item => item.label === "Enable YOLO for Tmux Session 'dynamo2'"), false);
   const sessionActions = api.tmuxSessionActionCommands('1');
-  assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Kill session"]);
+  assert.deepStrictEqual(canonical(sessionActions.map(item => item.label)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Kill tmux session '1'"]);
   assert.equal(sessionActions.some(item => item.disabled), false);
   assert.equal(sessionActions.find(item => item.label === "Rename tmux session '1'").detail, '');
   const bodyChildCount = api.bodyChildren().length;
   api.showSessionContextMenu('1', 10, 10);
   const contextMenu = api.bodyChildren()[bodyChildCount];
-  assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Kill session", 'Transcript', 'AI summary', 'Event log']);
+  assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", 'Transcript', 'AI summary', 'Event log', "Kill tmux session '1'"]);
   assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
+  const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
+  assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');
   const sessionViews = api.tmuxSessionViewCommands('1');
   assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ['Transcript', 'AI summary', 'Event log', 'Pane details']);
   assert.equal(api.fileIconFor('screenshot.png'), '🖼');
@@ -2643,6 +2803,154 @@ function makeFileTree(paths) {
   assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes(editorItem))), [{tabs: [editorItem], active: editorItem}]);
   assert.ok(JSON.stringify(editorSplit.tree).includes('"split":"column"'));
 
+  const fullSpanA = api.registerFileEditorLayoutItem('/home/test/full-span-a.md');
+  const fullSpanB = api.registerFileEditorLayoutItem('/home/test/full-span-b.md');
+  const fullSpanC = api.registerFileEditorLayoutItem('/home/test/full-span-c.md');
+  const fullSpanD = api.registerFileEditorLayoutItem('/home/test/full-span-d.md');
+  const fullSpanSlots = api.emptyLayoutSlots();
+  fullSpanSlots[api.layoutTreeKey] = api.splitNode(
+    'row',
+    api.splitNode('column', api.leafNode('slot1'), api.leafNode('slot2'), 50),
+    api.splitNode('column', api.leafNode('slot3'), api.leafNode('slot4'), 50),
+    50,
+  );
+  fullSpanSlots.slot1 = api.paneStateWithTabs([fullSpanA], fullSpanA);
+  fullSpanSlots.slot2 = api.paneStateWithTabs([fullSpanB], fullSpanB);
+  fullSpanSlots.slot3 = api.paneStateWithTabs([fullSpanC], fullSpanC);
+  fullSpanSlots.slot4 = api.paneStateWithTabs([fullSpanD], fullSpanD);
+  api.setLayoutSlotsForTest(fullSpanSlots);
+  api.splitSessionAtLayoutBoundary('__info__', 'right');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {
+      split: 'row',
+      pct: 50,
+      children: [
+        {
+          split: 'row',
+          pct: 50,
+          children: [
+            {split: 'column', pct: 50, children: [{slot: 'slot1'}, {slot: 'slot2'}]},
+            {split: 'column', pct: 50, children: [{slot: 'slot3'}, {slot: 'slot4'}]},
+          ],
+        },
+        {slot: 'slot5'},
+      ],
+    },
+    panes: {
+      slot1: {tabs: [fullSpanA], active: fullSpanA},
+      slot2: {tabs: [fullSpanB], active: fullSpanB},
+      slot3: {tabs: [fullSpanC], active: fullSpanC},
+      slot4: {tabs: [fullSpanD], active: fullSpanD},
+      slot5: {tabs: ['__info__'], active: '__info__'},
+    },
+  });
+
+  api.setLayoutSlotsForTest(fullSpanSlots);
+  api.splitSessionAtGutter('__yoagent__', '', 'right');
+  const gutterSplit = api.serialize(api.currentSlots());
+  assert.equal(gutterSplit.tree.split, 'row');
+  assert.deepStrictEqual(canonical(gutterSplit.tree.children[0]), {
+    split: 'column',
+    pct: 50,
+    children: [{slot: 'slot1'}, {slot: 'slot2'}],
+  });
+  assert.deepStrictEqual(canonical(gutterSplit.tree.children[1]), {
+    split: 'row',
+    pct: 50,
+    children: [
+      {slot: 'slot5'},
+      {split: 'column', pct: 50, children: [{slot: 'slot3'}, {slot: 'slot4'}]},
+    ],
+  });
+  assert.deepStrictEqual(canonical(gutterSplit.panes.slot5), {tabs: ['__yoagent__'], active: '__yoagent__'});
+
+  const dockedBoundarySlots = api.emptyLayoutSlots();
+  dockedBoundarySlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
+  dockedBoundarySlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  dockedBoundarySlots.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(dockedBoundarySlots);
+  api.splitSessionAtLayoutBoundary('__info__', 'bottom');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {
+      split: 'row',
+      pct: 22,
+      children: [
+        {slot: 'left'},
+        {split: 'column', pct: 50, children: [{slot: 'slot1'}, {slot: 'slot2'}]},
+      ],
+    },
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot1: {tabs: ['1'], active: '1'},
+      slot2: {tabs: ['__info__'], active: '__info__'},
+    },
+  });
+
+  const dockedBoundaryTopSlots = api.emptyLayoutSlots();
+  dockedBoundaryTopSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
+  dockedBoundaryTopSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  dockedBoundaryTopSlots.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(dockedBoundaryTopSlots);
+  api.splitSessionAtLayoutBoundary('__yoagent__', 'top');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).tree), {
+    split: 'row',
+    pct: 22,
+    children: [
+      {slot: 'left'},
+      {split: 'column', pct: 50, children: [{slot: 'slot2'}, {slot: 'slot1'}]},
+    ],
+  });
+
+  const dockedBoundaryMoveOnlyContent = api.emptyLayoutSlots();
+  dockedBoundaryMoveOnlyContent[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
+  dockedBoundaryMoveOnlyContent.left = api.paneStateWithTabs(['__files__'], '__files__');
+  dockedBoundaryMoveOnlyContent.slot1 = api.paneStateWithTabs(['__info__'], '__info__');
+  api.setLayoutSlotsForTest(dockedBoundaryMoveOnlyContent);
+  api.splitSessionAtLayoutBoundary('__info__', 'bottom', 'slot1');
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {slot: 'slot2'}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot2: {tabs: ['__info__'], active: '__info__'},
+    },
+  });
+
+  api.setLayoutSlotsForTest(fullSpanSlots);
+  const boundarySlot = new TestElement('boundary-slot');
+  boundarySlot.classList.add('drop-slot');
+  boundarySlot.dataset.slot = 'slot4';
+  boundarySlot.rect = {left: 620, top: 0, right: 1200, bottom: 800, width: 580, height: 800};
+  const boundaryEvent = dragEvent(1192, '__info__');
+  boundaryEvent.target = boundarySlot;
+  boundaryEvent.clientY = 400;
+  const boundaryIntent = api.dropIntentForEvent(boundaryEvent, {allowBoundary: true});
+  assert.equal(boundaryIntent.boundary, 'root');
+  assert.equal(boundaryIntent.zone, 'right');
+  api.showDropPreview(boundaryIntent);
+  assert.ok(api.gridForTest().classList.contains('drop-preview-root'), 'outer-edge session drags show a root full-span preview');
+  assert.equal(api.gridForTest().dataset.dropLabel, 'full right');
+  api.clearDropPreview();
+  assert.equal(api.gridForTest().classList.contains('drop-preview-root'), false);
+  assert.equal('dropLabel' in api.gridForTest().dataset, false);
+
+  const resizer = new TestElement('root-resizer');
+  resizer.classList.add('layout-resizer');
+  resizer.dataset.splitPath = '';
+  resizer.rect = {left: 598, top: 0, right: 602, bottom: 800, width: 4, height: 800};
+  const gutterEvent = dragEvent(601, '__yoagent__');
+  gutterEvent.target = resizer;
+  gutterEvent.clientY = 400;
+  const gutterIntent = api.dropIntentForEvent(gutterEvent, {allowBoundary: true});
+  assert.equal(gutterIntent.boundary, 'gutter');
+  assert.equal(gutterIntent.zone, 'right');
+  assert.equal(gutterIntent.splitPath, '');
+  api.showDropPreview(gutterIntent);
+  assert.ok(api.gridForTest().classList.contains('drop-preview-gutter'), 'split-bar session drags show a full-span gutter preview');
+  assert.equal(api.gridForTest().dataset.dropLabel, 'full span');
+  assert.ok(api.gridForTest().style.getPropertyValue('--drop-preview-width'), 'gutter preview geometry is explicit');
+  api.clearDropPreview();
+
+  api.setLayoutSlotsForTest(finderOnly);
   const finderStrip = tabStrip([tabElement('__files__', 100, 120)]);
   api.bindPaneTabStrip(finderStrip, 'left');
   const event = dragEvent(125, '1');
@@ -3022,6 +3330,8 @@ function makeFileTree(paths) {
   assert.ok(enabledChatHtml.indexOf('yoagent-chat-send') < enabledChatHtml.indexOf('yoagent-chat-clear'), 'YO!agent Ask and Clear buttons render together in the footer row');
   api.setYoagentBusyForTest(true);
   assert.ok(api.yoagentChatHtml().includes('yoagent-chat-spinner'), 'YO!agent busy state includes an animated spinner');
+  assert.ok(api.yoagentChatHtml().includes('thinking...'), 'YO!agent busy state uses concise thinking text');
+  assert.ok(api.yoagentChatHtml().includes('session-yolo-marker active working'), 'YO!agent busy spinner reuses the YO tab working marker');
   api.setYoagentBusyForTest(false);
   api.setYoagentDraftForTest('half typed question');
   assert.ok(api.yoagentChatHtml().includes('value="half typed question"'), 'YO!agent chat draft survives summary refresh re-renders');

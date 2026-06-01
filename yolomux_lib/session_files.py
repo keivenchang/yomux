@@ -149,7 +149,7 @@ def refs_requested(from_ref: str | None = None, to_ref: str | None = None) -> bo
 
 
 def diff_refs(from_ref: str | None = None, to_ref: str | None = None) -> tuple[str, str]:
-    return normal_ref(from_ref, "current"), normal_ref(to_ref, "HEAD")
+    return normal_ref(from_ref, "HEAD"), normal_ref(to_ref, "current")
 
 
 def git_ref_exists(repo: Path, ref: str) -> bool:
@@ -158,22 +158,26 @@ def git_ref_exists(repo: Path, ref: str) -> bool:
 
 
 def validate_diff_refs(repo: Path, from_ref: str, to_ref: str) -> str:
+    if to_ref == "current":
+        if from_ref == "current":
+            return "FROM ref must be older than TO ref (current is the working tree)"
+        return "" if git_ref_exists(repo, from_ref) else f"unknown FROM ref: {from_ref}"
     if from_ref == "current":
-        return "" if git_ref_exists(repo, to_ref) else f"unknown TO ref: {to_ref}"
+        return "FROM ref must be older than TO ref (current is the working tree)"
     if not git_ref_exists(repo, from_ref):
         return f"unknown FROM ref: {from_ref}"
     if not git_ref_exists(repo, to_ref):
         return f"unknown TO ref: {to_ref}"
-    order = run_cmd(["git", "-C", str(repo), "merge-base", "--is-ancestor", to_ref, from_ref], timeout=5.0)
+    order = run_cmd(["git", "-C", str(repo), "merge-base", "--is-ancestor", from_ref, to_ref], timeout=5.0)
     if order.returncode != 0:
-        return f"TO ref must be older than FROM ref ({to_ref} is not an ancestor of {from_ref})"
+        return f"FROM ref must be older than TO ref ({from_ref} is not an ancestor of {to_ref})"
     return ""
 
 
 def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> tuple[list[str], bool, str]:
     if refs_requested(from_ref, to_ref):
-        newer, older = diff_refs(from_ref, to_ref)
-        error = validate_diff_refs(repo, newer, older)
+        older, newer = diff_refs(from_ref, to_ref)
+        error = validate_diff_refs(repo, older, newer)
         if error:
             return [], False, error
         if newer == "current":
@@ -184,7 +188,7 @@ def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = No
 
 def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, str]]:
     result = run_cmd(["git", "-C", str(repo), "log", f"--max-count={max(1, min(limit, 200))}", "--pretty=format:%H%x1f%h%x1f%s"], timeout=5.0)
-    refs = [{"ref": "current", "short": "current", "subject": "working tree"}, {"ref": "HEAD", "short": "HEAD", "subject": "current commit"}]
+    refs = [{"ref": "HEAD", "short": "HEAD", "subject": "base commit"}, {"ref": "current", "short": "current", "subject": "working tree"}]
     if result.returncode != 0:
         return refs
     seen = {"current", "HEAD"}
@@ -195,6 +199,14 @@ def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, str]]:
         refs.append({"ref": parts[0], "short": parts[1], "subject": parts[2]})
         seen.add(parts[0])
     return refs
+
+
+def diff_ref_resolution_error(message: str) -> bool:
+    return (
+        message.startswith("unknown FROM ref:")
+        or message.startswith("unknown TO ref:")
+        or message.startswith("FROM ref must be older than TO ref")
+    )
 
 
 def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = None, to_ref: str | None = None) -> tuple[dict[str, str], str]:
@@ -276,6 +288,33 @@ def git_numstat(repo: Path, base: str | None = None, from_ref: str | None = None
             "removed": parse_numstat_value(parts_head[1]),
         }
     return counts
+
+
+def git_ahead_behind(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, int]:
+    if refs_requested(from_ref, to_ref):
+        older, newer = diff_refs(from_ref, to_ref)
+        left_ref = older
+        right_ref = "HEAD" if newer == "current" else newer
+    else:
+        upstream = run_cmd(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], timeout=3.0)
+        if upstream.returncode != 0 or not upstream.stdout.strip():
+            return {}
+        left_ref = upstream.stdout.strip()
+        right_ref = "HEAD"
+    if not git_ref_exists(repo, left_ref) or not git_ref_exists(repo, right_ref):
+        return {}
+    result = run_cmd(["git", "-C", str(repo), "rev-list", "--left-right", "--count", f"{left_ref}...{right_ref}"], timeout=5.0)
+    if result.returncode != 0:
+        return {}
+    parts = result.stdout.strip().split()
+    if len(parts) < 2:
+        return {}
+    try:
+        behind = int(parts[0])
+        ahead = int(parts[1])
+    except ValueError:
+        return {}
+    return {"behind": behind, "ahead": ahead}
 
 
 def untracked_added_line_count(path: Path) -> int | None:
@@ -400,10 +439,16 @@ def session_files_payload_for_info(
         refs_by_repo[str(repo)] = git_recent_refs(repo)
         diff_base = "" if refs_active else git_diff_base(repo)
         statuses, status_error = git_name_status(repo, diff_base or None, selected_from or None, selected_to or None)
-        if status_error:
+        if status_error and refs_active and diff_ref_resolution_error(status_error):
+            fallback_base = git_diff_base(repo)
+            statuses, status_error = git_name_status(repo, fallback_base)
+            numstat = git_numstat(repo, fallback_base) if not status_error else {}
+        elif status_error:
             errors.append(f"{repo.name}: {status_error}")
             statuses = {}
-        numstat = git_numstat(repo, diff_base or None, selected_from or None, selected_to or None)
+            numstat = {}
+        else:
+            numstat = git_numstat(repo, diff_base or None, selected_from or None, selected_to or None)
         repo_entries: list[dict[str, Any]] = []
         for rel_path, status in statuses.items():
             path = (repo / rel_path).resolve(strict=False)
@@ -420,13 +465,15 @@ def session_files_payload_for_info(
             repo_entries.append(session_file_entry(info.session, agent, status, path, repo, "git", added, removed))
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(repo_entries)
-        repo_payloads.append({
+        repo_payload = {
             "repo": str(repo),
             "count": len(repo_entries),
             "touched_count": len(repos[repo_text]),
             "added": line_total(repo_entries, "added"),
             "removed": line_total(repo_entries, "removed"),
-        })
+        }
+        repo_payload.update(git_ahead_behind(repo, selected_from or None, selected_to or None))
+        repo_payloads.append(repo_payload)
 
     files.sort(key=lambda item: (-float(item.get("mtime") or 0), item["repo"], item["path"]))
     payload_from_ref = selected_from or "default"

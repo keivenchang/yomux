@@ -1276,7 +1276,7 @@ function yoagentChatHtml() {
   const placeholder = readOnlyMode ? 'YO!agent chat requires admin access' : 'Ask about agents, repos, files, CI, blockers...';
   const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || yoagentBusy || yoagentError);
   const busy = yoagentBusy
-    ? '<div class="yoagent-chat-status"><span class="yoagent-chat-spinner" aria-hidden="true"></span><span>YO!agent is answering...</span></div>'
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">YO</span><span>thinking...</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
     ? '<button type="button" class="yoagent-chat-retry" data-yoagent-retry>Retry</button>'
@@ -1413,7 +1413,12 @@ function preferenceSections() {
         {value: 'dark', label: 'Dark'},
         {value: 'light', label: 'Light'},
         {value: 'system', label: 'System'},
-      ], help: 'Theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and terminal colors.'},
+      ], help: 'Theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and editor defaults.'},
+      {path: 'appearance.terminal_theme', label: 'Terminal color theme', type: 'select', choices: [
+        {value: 'dark', label: 'Dark'},
+        {value: 'light', label: 'Light'},
+        {value: 'follow-app', label: 'Follow app'},
+      ], help: 'xterm.js color palette. Dark is the default because Claude, Codex, vim, and other full-screen terminal apps usually assume a dark terminal.'},
       {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: 'Font size for menus, tabs, and compact UI text. Values outside the range are clamped.'},
       {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by xterm.js panes. Values outside the range are clamped.'},
       {path: 'appearance.editor_font_size', label: 'Editor font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by editor text, code highlighting, and rendered previews.'},
@@ -1576,7 +1581,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
-  if (path === 'terminal_editor.scrollback' || path === 'appearance.terminal_font_size') add(['shell', 'history', 'buffer', 'backlog', 'lines', 'terminal']);
+  if (path === 'terminal_editor.scrollback' || path === 'appearance.terminal_font_size' || path === 'appearance.terminal_theme') add(['shell', 'history', 'buffer', 'backlog', 'lines', 'terminal', 'tui', 'ansi', 'xterm', 'codex', 'claude']);
   if (path.startsWith('editor.') || path.includes('editor_') || path.startsWith('terminal_editor.')) add(['code', 'edit', 'codemirror', 'monaco']);
   if (path === 'terminal_editor.word_wrap') add(['softwrap', 'wrapping']);
   if (path === 'terminal_editor.line_numbers') add(['numbers', 'gutter']);
@@ -1687,7 +1692,7 @@ function preferenceControlHtml(item, query = '') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
     control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
   } else if (item.type === 'textarea') {
-    control = `<textarea ${baseAttrs} rows="3">${esc(String(value || ''))}</textarea>`;
+    control = `<textarea ${baseAttrs} rows="12">${esc(String(value || ''))}</textarea>`;
   } else {
     control = `<input type="text" ${baseAttrs} value="${esc(value)}">`;
   }
@@ -1698,7 +1703,8 @@ function preferenceControlHtml(item, query = '') {
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
   const advisory = preferenceAdvisoryHtml(item, value);
-  return `<div class="preferences-setting-row"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span>${advisory}</div>`;
+  const rowClass = item.type === 'textarea' ? ' preferences-setting-row--wide' : '';
+  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span>${advisory}</div>`;
 }
 
 function uploadRsyncExampleCommand() {

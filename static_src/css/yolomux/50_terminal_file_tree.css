@@ -143,6 +143,14 @@
   color: #081205;
   background: var(--brand-green);
 }
+.terminal-context-menu button.danger {
+  color: #ffd6dc;
+}
+.terminal-context-menu button.danger:hover,
+.terminal-context-menu button.danger:focus-visible {
+  color: #1d0307;
+  background: var(--bad);
+}
 .terminal-context-menu button:disabled {
   opacity: 0.42;
   cursor: default;
@@ -625,18 +633,9 @@
   gap: 7px;
 }
 .yoagent-chat-spinner {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
-  border: 2px solid color-mix(in srgb, var(--muted) 35%, transparent);
-  border-top-color: var(--brand-green);
-  border-radius: 50%;
-  animation: yoagent-chat-spin 800ms linear infinite;
-}
-@keyframes yoagent-chat-spin {
-  to {
-    transform: rotate(360deg);
-  }
+  min-width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
 }
 .yoagent-chat-error {
   display: flex;

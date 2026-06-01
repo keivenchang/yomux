@@ -408,6 +408,30 @@ def finder_click_toolbar_fixture_html():
     """
 
 
+def split_seam_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          .layout-root {{ width: 420px; height: 360px; }}
+        </style>
+      </head>
+      <body>
+        <div class="layout-root split-column">
+          <section class="layout-column"><article id="top-panel" class="panel"></article></section>
+          <div id="split-resizer" class="layout-resizer resizer-column"></div>
+          <section class="layout-column"><article id="bottom-panel" class="panel"></article></section>
+        </div>
+      </body>
+    </html>
+    """
+
+
 def load_fixture(browser, tmp_path, width):
     page = tmp_path / f"pane-{width}.html"
     page.write_text(pane_fixture_html(width), encoding="utf-8")
@@ -521,15 +545,21 @@ def load_finder_click_toolbar_fixture(browser, tmp_path):
     browser.get(page.as_uri())
 
 
+def load_split_seam_fixture(browser, tmp_path):
+    page = tmp_path / "split-seam.html"
+    page.write_text(split_seam_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
 def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     metrics = load_fixture(browser, tmp_path, 860)
     assert metrics["toolbar"]["right"] <= metrics["panel"]["right"]
-    assert [row["count"] for row in metrics["rows"]] == [2, 3, 1]
+    assert [row["count"] for row in metrics["rows"]] == [3, 3]
 
     first_row = metrics["rows"][0]
     assert max(first_row["rights"]) < metrics["toolbar"]["left"]
     lower_row_rights = [right for row in metrics["rows"][1:] for right in row["rights"]]
-    assert max(lower_row_rights) > metrics["toolbar"]["left"]
+    assert max(lower_row_rights) <= metrics["panel"]["right"]
     assert metrics["toolbarCenterDelta"] <= 2
     assert metrics["tabHeadBottomGap"] <= 2
     assert metrics["detailRow"]["height"] <= 20
@@ -576,17 +606,52 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
         return {dark, light: readMetrics()};
         """
     )
-    assert theme_metrics["light"] == theme_metrics["dark"]
-    assert theme_metrics["dark"]["activeTabBg"] == "rgb(118, 185, 0)"
-    assert theme_metrics["dark"]["activeTabShadow"] != "none"
+    assert theme_metrics["dark"]["panelHeadBg"] == "rgb(31, 48, 38)"
+    assert theme_metrics["light"]["panelHeadBg"] == "rgb(207, 212, 221)"
+    for key, value in theme_metrics["dark"].items():
+        if key != "panelHeadBg":
+            assert theme_metrics["light"][key] == value
+    assert theme_metrics["dark"]["activeTabBg"] == "rgb(134, 214, 0)"
+    assert theme_metrics["dark"]["activeTabShadow"] == "none"
+    assert theme_metrics["dark"]["inactiveActiveTabBg"] == "rgb(40, 90, 47)"
     assert theme_metrics["dark"]["inactiveActiveTabBg"] != theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["dark"]["inactiveActiveTabShadow"] == "none"
+
+
+def test_split_pane_seam_is_a_compact_tile_divider(browser, tmp_path):
+    load_split_seam_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const topPanel = document.getElementById('top-panel');
+        const bottomPanel = document.getElementById('bottom-panel');
+        const resizer = document.getElementById('split-resizer');
+        const topRect = topPanel.getBoundingClientRect();
+        const bottomRect = bottomPanel.getBoundingClientRect();
+        const resizerRect = resizer.getBoundingClientRect();
+        const topStyle = getComputedStyle(topPanel);
+        const bottomStyle = getComputedStyle(bottomPanel);
+        return {
+          seamGap: bottomRect.top - topRect.bottom,
+          resizerHeight: resizerRect.height,
+          topBottomBorder: topStyle.borderBottomWidth,
+          bottomTopBorder: bottomStyle.borderTopWidth,
+          topBottomRadius: topStyle.borderBottomLeftRadius,
+          bottomTopRadius: bottomStyle.borderTopLeftRadius,
+        };
+        """
+    )
+    assert metrics["resizerHeight"] <= 2
+    assert metrics["seamGap"] <= 2.5
+    assert metrics["topBottomBorder"] == "0px"
+    assert metrics["bottomTopBorder"] == "0px"
+    assert metrics["topBottomRadius"] == "0px"
+    assert metrics["bottomTopRadius"] == "0px"
 
 
 def test_pane_tabs_and_controls_stay_bounded_when_narrow(browser, tmp_path):
     metrics = load_fixture(browser, tmp_path, 493)
     assert metrics["toolbar"]["right"] <= metrics["panel"]["right"]
-    assert [row["count"] for row in metrics["rows"]] == [1, 1, 1, 1, 1, 1]
+    assert [row["count"] for row in metrics["rows"]] == [1, 2, 2, 1]
     assert all(tab["right"] <= metrics["panel"]["right"] for tab in metrics["tabs"])
     assert metrics["toolbarCenterDelta"] <= 2
     assert metrics["tabHeadBottomGap"] <= 2
@@ -704,6 +769,23 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert dots_center_delta["background"] != "rgba(0, 0, 0, 0)"
     assert dots_center_delta["borderColor"] != "rgba(0, 0, 0, 0)"
     assert dots_center_delta["dotsColor"] != dots_center_delta["hashColor"]
+    light_control = browser.execute_script(
+        """
+        document.body.classList.add('theme-light');
+        const actionsStyle = getComputedStyle(document.getElementById('pane-actions'));
+        const closeStyle = getComputedStyle(document.getElementById('finder-close'));
+        return {
+          actionsColor: actionsStyle.color,
+          actionsBg: actionsStyle.backgroundColor,
+          closeColor: closeStyle.color,
+          closeBg: closeStyle.backgroundColor,
+        };
+        """
+    )
+    assert light_control["actionsColor"] == "rgb(31, 41, 55)"
+    assert light_control["actionsColor"] != light_control["actionsBg"]
+    assert light_control["closeColor"] == "rgb(31, 41, 55)"
+    assert light_control["closeColor"] != light_control["closeBg"]
     z_indexes = browser.execute_script(
         """
         return {
@@ -928,7 +1010,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["markerContent"] in ("none", '""')
     assert metrics["markerHeight"] > 0
     assert metrics["markerColor"] != "rgb(0, 0, 0)"
-    assert metrics["panelRingWidth"] >= 3
+    assert 1.5 <= metrics["panelRingWidth"] <= 2.5
     assert metrics["searchLabel"] in ("none", '""')
     assert metrics["editorBg"] != "rgb(15, 17, 21)"
     assert metrics["editorColor"] != "rgb(228, 232, 238)"
@@ -985,6 +1067,24 @@ def test_codemirror_bundle_exports_decoration_for_html_semantic_marks(browser, t
 
 def test_clicking_finder_does_not_change_terminal_pane_toolbar(browser, tmp_path):
     load_finder_click_toolbar_fixture(browser, tmp_path)
+    light_metrics = browser.execute_script(
+        """
+        document.body.classList.add('theme-light');
+        const detail = document.querySelector('#terminal-panel .panel-detail-row');
+        const meta = detail.querySelector('.meta');
+        const action = document.querySelector('#terminal-panel .pane-actions');
+        return {
+          detailBg: getComputedStyle(detail).backgroundColor,
+          metaColor: getComputedStyle(meta).color,
+          actionColor: getComputedStyle(action).color,
+          actionBg: getComputedStyle(action).backgroundColor,
+        };
+        """
+    )
+    assert light_metrics["detailBg"] == "rgb(220, 232, 210)"
+    assert light_metrics["metaColor"] == "rgb(31, 41, 55)"
+    assert light_metrics["actionColor"] == "rgb(31, 41, 55)"
+    assert light_metrics["actionColor"] != light_metrics["actionBg"]
     before = browser.execute_script(
         """
         const toolbar = document.getElementById('terminal-toolbar');

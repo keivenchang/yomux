@@ -32,6 +32,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "appearance": {
         "theme": "dark",
+        "terminal_theme": "dark",
         "ui_font_size": 13,
         "terminal_font_size": 13,
         "editor_font_size": 13,
@@ -40,7 +41,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "editor_light_color_scheme": "yolomux-light",
         "editor_cursor_style": "line",
         "file_explorer_font_size": 13,
-        "tab_width": 240,
+        "tab_width": 180,
         "red_reminder_ms": 1550,
         "yolo_rotate_ms": 20000,
         "metadata_badge_pulse_seconds": 20,
@@ -144,6 +145,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "grid", "wall"},
     ("appearance", "theme"): {"system", "dark", "light"},
+    ("appearance", "terminal_theme"): {"dark", "light", "follow-app"},
     ("appearance", "editor_color_scheme"): {
         "dark",
         "one-dark",
@@ -184,7 +186,8 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
     ("general", "default_layout"): "single | grid | wall. Reserved default for new visits.",
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
-    ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and terminal colors.",
+    ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and editor defaults.",
+    ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Default dark because full-screen terminal apps usually assume a dark terminal.",
     ("appearance", "ui_font_size"): "Pixels, 8-20. Drives tab and compact UI text.",
     ("appearance", "terminal_font_size"): "Pixels, 8-28. Applied live to xterm.js terminals.",
     ("appearance", "editor_font_size"): "Pixels, 8-28. Applied live to editor and preview panes.",

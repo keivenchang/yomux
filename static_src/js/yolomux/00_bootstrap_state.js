@@ -45,6 +45,7 @@ const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
+const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
 const fileEditorLineNumbersStorageKey = 'yolomux.editorLineNumbers';
 const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1';
@@ -52,6 +53,7 @@ const diffRefFromStorageKey = 'yolomux.diffRefFrom';
 const diffRefToStorageKey = 'yolomux.diffRefTo';
 const editorViewModes = new Set(['edit', 'preview', 'split', 'diff']);
 const defaultGlobalTheme = 'dark';
+const defaultTerminalTheme = 'dark';
 const defaultEditorScheme = 'dark';
 const defaultLightEditorScheme = 'yolomux-light';
 const editorThemeInheritMode = 'inherit';
@@ -106,10 +108,10 @@ const TERMINAL_THEMES = {
 const EDITOR_SCHEMES = {
   dark: {
     id: 'dark', label: 'YOLOmux Dark', dark: true,
-    bg: '#0f1115', fg: '#ffffff', cursor: '#ffffff', selection: 'rgba(118, 185, 0, 0.30)', activeLine: 'rgba(118, 185, 0, 0.10)',
+    bg: '#0f1115', fg: '#ffffff', cursor: '#ffffff', selection: 'rgba(87, 112, 148, 0.46)', activeLine: 'rgba(255, 255, 255, 0.04)',
     gutterBg: '#151922', lineNo: '#9aa5b1', panel: '#151922', panel2: '#1e2430', line: '#303948', previewBg: '#151922',
     syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ff5c5c', emphasis: '#ffffff', invalid: '#ff6673'},
-    diff: {addFg: '#98c379', removeFg: '#e06c75'},
+    diff: {addFg: '#3fb950', removeFg: '#f85149'},
   },
   'one-dark': {
     id: 'one-dark', label: 'One Dark', dark: true,
@@ -247,6 +249,15 @@ let uploadedFilesCollapsed = (() => {
     return true;
   }
 })();
+let changesFolderCollapsed = (() => {
+  try {
+    const value = window.localStorage?.getItem(changesFolderCollapsedStorageKey);
+    const parsed = value ? JSON.parse(value) : [];
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch (_) {
+    return new Set();
+  }
+})();
 let sessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let sessionFilesPayloadSignature = '';
@@ -258,9 +269,9 @@ let sessionFilesSortMode = 'mtime';
 let sessionFilesSelectedSession = '';
 let fileExplorerTreeShowDates = readStoredFileExplorerTreeShowDates();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
-let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'current');
-let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'HEAD');
-let fileExplorerChangesDisplayMode = 'detailed';
+let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
+let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
+let fileExplorerChangesDisplayMode = 'compact';
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
 let commandPaletteMode = 'command';
@@ -282,6 +293,7 @@ let clientSettings = clientSettingsPayload.settings || {};
 let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
+let terminalThemeMode = initialSetting('appearance.terminal_theme', defaultTerminalTheme);
 fileEditorThemeMode = readConfiguredEditorScheme();
 fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
 fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
@@ -346,6 +358,9 @@ const minSplitPaneWidthPx = 320;
 const minSplitPaneHeightPx = 220;
 const defaultSplitPercent = 50;
 const fileExplorerSplitPercent = 22;
+const layoutBoundaryDropFraction = 0.08;
+const layoutBoundaryDropMinPx = 28;
+const layoutBoundaryDropMaxPx = 64;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';

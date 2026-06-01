@@ -390,6 +390,14 @@ async function dropSessionWithIntent(session, intent, sourceSlot = null) {
     await openFileExplorerPane();
     return;
   }
+  if (intent?.boundary === 'gutter') {
+    await splitSessionAtGutter(session, intent.splitPath, intent.zone, sourceSlot);
+    return;
+  }
+  if (intent?.boundary === 'root') {
+    await splitSessionAtLayoutBoundary(session, intent.zone, sourceSlot);
+    return;
+  }
   if (!intent?.targetSlot || intent.zone === 'middle') {
     await moveSessionToSlot(session, intent?.targetSlot || slotForNewSession(), sourceSlot);
     return;
@@ -407,6 +415,30 @@ function splitPercentForNewItem(session, zone, pct = null) {
 
 function shouldPreserveSourceSlotForSplit(sourceSlot, targetSlot) {
   return Boolean(sourceSlot && sourceSlot !== targetSlot && isFileExplorerItem(activeItemForSide(targetSlot)));
+}
+
+function dockedFileExplorerRootSplit(node, slots = layoutSlots) {
+  if (!node || node.split !== 'row' || !Array.isArray(node.children) || node.children.length !== 2) return null;
+  const finderIndex = node.children.findIndex(child => child?.slot && isFileExplorerItem(activeItemForSide(child.slot, slots)));
+  if (finderIndex < 0) return null;
+  return {
+    finderIndex,
+    contentIndex: finderIndex === 0 ? 1 : 0,
+    pct: Number.isFinite(Number(node.pct)) ? Number(node.pct) : fileExplorerSplitPercent,
+  };
+}
+
+function splitRootPreservingDockedFileExplorer(root, newNode, session, zone, pct = null, slots = layoutSlots) {
+  const docked = (zone === 'top' || zone === 'bottom') ? dockedFileExplorerRootSplit(root, slots) : null;
+  if (!docked) return null;
+  const children = [...(root.children || [])];
+  const contentNode = children[docked.contentIndex];
+  if (!contentNode) return null;
+  const splitPct = splitPercentForNewItem(session, zone, pct);
+  children[docked.contentIndex] = zone === 'bottom'
+    ? splitNode('column', contentNode, newNode, splitPct)
+    : splitNode('column', newNode, contentNode, splitPct);
+  return splitNode('row', children[0], children[1], docked.pct);
 }
 
 async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, pct = null) {
@@ -434,10 +466,87 @@ async function splitSessionAtSlot(session, targetSlot, zone, sourceSlot = null, 
   applyLayoutSlots(next, {focusSession: session, prune: false});
 }
 
+async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pct = null) {
+  if (!isLayoutItem(session) || !layoutSplitZone(zone)) return;
+  if (isTmuxSession(session)) {
+    const ensured = await ensureSession(session);
+    if (!ensured) return;
+  }
+  const next = layoutWithoutItem(session);
+  const root = next[layoutTreeKey] || legacyLayoutTree(next);
+  if (!root) {
+    await moveSessionToSlot(session, sourceSlot || slotForNewSession(), sourceSlot);
+    return;
+  }
+  const newSlot = nextLayoutSlot(next);
+  next[newSlot] = paneStateWithTabs([session], session);
+  const newNode = leafNode(newSlot);
+  const direction = layoutSplitDirectionForZone(zone);
+  const splitPct = splitPercentForNewItem(session, zone, pct);
+  next[layoutTreeKey] = splitRootPreservingDockedFileExplorer(root, newNode, session, zone, pct, next)
+    || (zone === 'right' || zone === 'bottom'
+    ? splitNode(direction, root, newNode, splitPct)
+    : splitNode(direction, newNode, root, splitPct));
+  applyLayoutSlots(next, {focusSession: session, prune: false});
+}
+
+async function splitSessionAtGutter(session, splitPath, zone, sourceSlot = null, pct = null) {
+  if (!isLayoutItem(session) || !layoutSplitZone(zone)) return;
+  if (isTmuxSession(session)) {
+    const ensured = await ensureSession(session);
+    if (!ensured) return;
+  }
+  const next = layoutWithoutItem(session);
+  const root = next[layoutTreeKey] || legacyLayoutTree(next);
+  const target = layoutNodeAtPath(splitPath, root);
+  if (!root || !target?.children?.length) {
+    await splitSessionAtLayoutBoundary(session, zone, sourceSlot, pct);
+    return;
+  }
+  const newSlot = nextLayoutSlot(next);
+  next[newSlot] = paneStateWithTabs([session], session);
+  const replacement = splitLayoutNodeAtGutter(target, leafNode(newSlot), session, zone, pct);
+  next[layoutTreeKey] = replaceLayoutNodeAtPath(root, splitPath, replacement);
+  applyLayoutSlots(next, {focusSession: session, prune: false});
+}
+
+function layoutSplitZone(zone) {
+  return zone === 'top' || zone === 'bottom' || zone === 'left' || zone === 'right';
+}
+
+function layoutSplitDirectionForZone(zone) {
+  return zone === 'left' || zone === 'right' ? 'row' : 'column';
+}
+
+function splitLayoutNodeAtGutter(node, newNode, session, zone, pct = null) {
+  const direction = node.split === 'column' ? 'column' : 'row';
+  const first = node.children?.[0] || null;
+  const second = node.children?.[1] || null;
+  if (!first || !second) return newNode;
+  const insertAfterFirst = direction === 'row' ? zone === 'left' : zone === 'top';
+  if (insertAfterFirst) {
+    const nestedZone = direction === 'row' ? 'right' : 'bottom';
+    return splitNode(direction, splitNode(direction, first, newNode, splitPercentForNewItem(session, nestedZone, pct)), second, node.pct);
+  }
+  const nestedZone = direction === 'row' ? 'left' : 'top';
+  return splitNode(direction, first, splitNode(direction, newNode, second, splitPercentForNewItem(session, nestedZone, pct)), node.pct);
+}
+
 function replaceLayoutLeaf(node, slot, replacement) {
   if (!node) return replacement;
   if (node.slot) return node.slot === slot ? replacement : node;
   const children = (node.children || []).map(child => replaceLayoutLeaf(child, slot, replacement));
+  return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
+}
+
+function replaceLayoutNodeAtPath(node, path, replacement) {
+  if (!path) return replacement;
+  if (!node?.children) return node;
+  const parts = String(path).split('.');
+  const index = Number(parts[0]);
+  if (!Number.isInteger(index) || index < 0 || index > 1) return node;
+  const children = [...node.children];
+  children[index] = replaceLayoutNodeAtPath(children[index], parts.slice(1).join('.'), replacement);
   return splitNode(node.split === 'column' ? 'column' : 'row', children[0], children[1], node.pct);
 }
 
@@ -1295,6 +1404,52 @@ function slotForDropEvent(event) {
   return event.clientX < rect.left + rect.width / 2 ? 'left' : 'right';
 }
 
+function layoutBoundaryDropBandPx(size) {
+  const scaled = Math.max(0, Number(size) || 0) * layoutBoundaryDropFraction;
+  return Math.min(layoutBoundaryDropMaxPx, Math.max(layoutBoundaryDropMinPx, scaled));
+}
+
+function rootBoundaryDropZoneForEvent(event, rect) {
+  if (!rect.width || !rect.height) return null;
+  const insideX = event.clientX >= rect.left && event.clientX <= rect.right;
+  const insideY = event.clientY >= rect.top && event.clientY <= rect.bottom;
+  if (!insideX || !insideY) return null;
+  const xBand = layoutBoundaryDropBandPx(rect.width);
+  const yBand = layoutBoundaryDropBandPx(rect.height);
+  const candidates = [
+    {zone: 'left', distance: Math.abs(event.clientX - rect.left), active: event.clientX <= rect.left + xBand},
+    {zone: 'right', distance: Math.abs(rect.right - event.clientX), active: event.clientX >= rect.right - xBand},
+    {zone: 'top', distance: Math.abs(event.clientY - rect.top), active: event.clientY <= rect.top + yBand},
+    {zone: 'bottom', distance: Math.abs(rect.bottom - event.clientY), active: event.clientY >= rect.bottom - yBand},
+  ].filter(candidate => candidate.active);
+  candidates.sort((left, right) => left.distance - right.distance);
+  return candidates[0]?.zone || null;
+}
+
+function rootBoundaryDropIntentForEvent(event) {
+  const targetRect = grid.getBoundingClientRect();
+  const zone = rootBoundaryDropZoneForEvent(event, targetRect);
+  if (!zone) return null;
+  return {targetSlot: slotForDropEvent(event), zone, previewNode: grid, targetRect, boundary: 'root'};
+}
+
+function gutterDropZoneForEvent(event, node, rect) {
+  if (!node?.children?.length || !rect.width || !rect.height) return null;
+  if (node.split === 'column') return event.clientY < rect.top + rect.height / 2 ? 'top' : 'bottom';
+  return event.clientX < rect.left + rect.width / 2 ? 'left' : 'right';
+}
+
+function gutterDropIntentForEvent(event) {
+  const resizer = event.target?.closest?.('.layout-resizer');
+  const splitPath = resizer?.dataset?.splitPath;
+  if (!resizer || splitPath === undefined) return null;
+  const targetRect = resizer.getBoundingClientRect();
+  const node = layoutNodeAtPath(splitPath);
+  const zone = gutterDropZoneForEvent(event, node, targetRect);
+  if (!zone) return null;
+  return {targetSlot: slotForDropEvent(event), zone, previewNode: grid, targetRect, boundary: 'gutter', splitPath};
+}
+
 function dropZoneForRect(event, rect) {
   if (!rect.width || !rect.height) return 'middle';
   const x = (event.clientX - rect.left) / rect.width;
@@ -1306,8 +1461,14 @@ function dropZoneForRect(event, rect) {
   return 'middle';
 }
 
-function dropIntentForEvent(event) {
-  const slotNode = event.target.closest('.drop-slot');
+function dropIntentForEvent(event, options = {}) {
+  if (options.allowBoundary === true) {
+    const rootIntent = rootBoundaryDropIntentForEvent(event);
+    if (rootIntent) return rootIntent;
+    const gutterIntent = gutterDropIntentForEvent(event);
+    if (gutterIntent) return gutterIntent;
+  }
+  const slotNode = event.target?.closest?.('.drop-slot');
   if (slotNode?.dataset.slot) {
     const targetSlot = slotNode.dataset.slot;
     const targetRect = slotNode.getBoundingClientRect();
@@ -1339,7 +1500,9 @@ function itemCanSplitSinglePurposePane(item, intent) {
 }
 
 function dropIntentAllowsSession(session, intent) {
-  if (!isLayoutItem(session) || !intent?.targetSlot) return false;
+  if (!isLayoutItem(session)) return false;
+  if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
+  if (!intent?.targetSlot) return false;
   if (slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) {
     return itemCanSplitSinglePurposePane(session, intent);
   }
@@ -1347,22 +1510,63 @@ function dropIntentAllowsSession(session, intent) {
 }
 
 function clearDropPreview() {
-  grid.querySelectorAll('.drag-over, .tab-drag-over, .tab-drop-preview, .drop-preview, .drop-preview-top, .drop-preview-bottom, .drop-preview-left, .drop-preview-right, .drop-preview-middle').forEach(node => {
-    node.classList.remove('drag-over', 'tab-drag-over', 'tab-drop-preview', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle');
+  const classes = ['drag-over', 'tab-drag-over', 'tab-drop-preview', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle', 'drop-preview-root', 'drop-preview-gutter'];
+  const nodes = new Set([grid]);
+  for (const className of classes) {
+    grid.querySelectorAll(`.${className}`).forEach(node => nodes.add(node));
+  }
+  nodes.forEach(node => {
+    node.classList.remove(...classes);
     node.style?.removeProperty('--tab-drop-x');
     node.style?.removeProperty('--tab-drop-y');
     node.style?.removeProperty('--tab-drop-height');
+    node.style?.removeProperty('--drop-preview-left');
+    node.style?.removeProperty('--drop-preview-top');
+    node.style?.removeProperty('--drop-preview-width');
+    node.style?.removeProperty('--drop-preview-height');
     if (node.dataset) delete node.dataset.dropLabel;
   });
 }
 
+function applyGutterDropPreviewGeometry(node, intent) {
+  if (intent?.boundary !== 'gutter' || node !== grid) return;
+  const gridRect = grid.getBoundingClientRect();
+  const targetRect = intent.targetRect || gridRect;
+  const isHorizontalBand = intent.zone === 'left' || intent.zone === 'right';
+  const inlineSize = isHorizontalBand ? gridRect.width : gridRect.height;
+  const bandSize = Math.max(layoutBoundaryDropMinPx * 2, Math.min(layoutBoundaryDropMaxPx * 3, inlineSize * 0.24));
+  if (isHorizontalBand) {
+    const center = targetRect.left + targetRect.width / 2 - gridRect.left;
+    const left = Math.max(6, Math.min(gridRect.width - bandSize - 6, center - bandSize / 2));
+    node.style.setProperty('--drop-preview-left', `${Math.round(left)}px`);
+    node.style.setProperty('--drop-preview-top', '6px');
+    node.style.setProperty('--drop-preview-width', `${Math.round(bandSize)}px`);
+    node.style.setProperty('--drop-preview-height', 'calc(100% - 12px)');
+  } else {
+    const center = targetRect.top + targetRect.height / 2 - gridRect.top;
+    const top = Math.max(6, Math.min(gridRect.height - bandSize - 6, center - bandSize / 2));
+    node.style.setProperty('--drop-preview-left', '6px');
+    node.style.setProperty('--drop-preview-top', `${Math.round(top)}px`);
+    node.style.setProperty('--drop-preview-width', 'calc(100% - 12px)');
+    node.style.setProperty('--drop-preview-height', `${Math.round(bandSize)}px`);
+  }
+}
+
 function showDropPreview(intent) {
   clearDropPreview();
-  const node = intent?.previewNode;
+  const node = intent?.boundary ? grid : intent?.previewNode;
   if (!node) return;
   const zone = intent.zone || 'middle';
   node.classList.add('drag-over', 'drop-preview', `drop-preview-${zone}`);
-  node.dataset.dropLabel = zone === 'middle' ? 'take over' : zone;
+  if (intent.boundary) node.classList.add(`drop-preview-${intent.boundary}`);
+  node.dataset.dropLabel = intent.boundary === 'root'
+    ? `full ${zone}`
+    : intent.boundary === 'gutter'
+      ? 'full span'
+      : zone === 'middle'
+        ? 'take over'
+        : zone;
+  applyGutterDropPreviewGeometry(node, intent);
 }
 
 function dropSessionAtEvent(event) {
@@ -1370,7 +1574,7 @@ function dropSessionAtEvent(event) {
   if (filePayload?.path) {
     event.preventDefault();
     event.stopPropagation();
-    const intent = dropIntentForEvent(event);
+    const intent = dropIntentForEvent(event, {allowBoundary: false});
     clearDropPreview();
     if (!intent?.targetSlot) return;
     if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') return;
@@ -1380,7 +1584,7 @@ function dropSessionAtEvent(event) {
   }
   const payload = dragPayload(event);
   if (!payload?.session) return;
-  if (event.target.closest('.panel-head')) {
+  if (event.target?.closest?.('.panel-head')) {
     event.preventDefault();
     event.stopPropagation();
     clearDropPreview();
@@ -1388,7 +1592,7 @@ function dropSessionAtEvent(event) {
   }
   event.preventDefault();
   event.stopPropagation();
-  const intent = dropIntentForEvent(event);
+  const intent = dropIntentForEvent(event, {allowBoundary: true});
   clearDropPreview();
   if (!dropIntentAllowsSession(payload.session, intent)) return;
   dropSessionWithIntent(payload.session, intent, payload.sourceSlot || slotForSession(payload.session));
@@ -1397,7 +1601,7 @@ function dropSessionAtEvent(event) {
 function handleDropDragOver(event) {
   const filePayload = fileDragPayload(event);
   if (filePayload?.path) {
-    const intent = dropIntentForEvent(event);
+    const intent = dropIntentForEvent(event, {allowBoundary: false});
     if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') {
       event.preventDefault();
       event.stopPropagation();
@@ -1413,14 +1617,14 @@ function handleDropDragOver(event) {
   }
   const payload = dragPayload(event);
   if (!payload?.session) return;
-  if (event.target.closest('.panel-head')) {
+  if (event.target?.closest?.('.panel-head')) {
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'none';
     clearDropPreview();
     return;
   }
-  const intent = dropIntentForEvent(event);
+  const intent = dropIntentForEvent(event, {allowBoundary: true});
   event.preventDefault();
   event.stopPropagation();
   if (!dropIntentAllowsSession(payload.session, intent)) {

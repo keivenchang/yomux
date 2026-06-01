@@ -2251,17 +2251,17 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   if (openFiles.has(fullPath)) {
     await showFileEditorPaneForPath(fullPath, openOptions);
     if (options.viewMode) renderOpenFilePath(fullPath);
-    return;
+    return item;
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
     const state = tooLargeFileState(Number(entry.size));
     state.mtime = fileEntryMtime(entry);
     await openFilesSetAndShow(fullPath, state, openOptions);
-    return;
+    return item;
   }
   if (kind === 'image') {
     await openFilesSetAndShow(fullPath, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null}, openOptions);
-    return;
+    return item;
   }
   try {
     const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
@@ -2274,7 +2274,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
           ? missingFileState(String(message))
           : fileErrorState(message);
       await openFilesSetAndShow(fullPath, state, openOptions);
-      return;
+      return item;
     }
     const payload = await response.json();
     await openFilesSetAndShow(fullPath, {
@@ -2285,8 +2285,10 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
       content: payload.content,
       dirty: false,
     }, openOptions);
+    return item;
   } catch (err) {
     showFileOpenError(fullPath, err);
+    return null;
   }
 }
 
@@ -2614,12 +2616,29 @@ async function importCodeMirrorModule(path) {
   return import(`https://esm.sh/${path}`);
 }
 
-function loadCodeMirrorBundleScript() {
-  if (window.YOLOmuxCodeMirror) return Promise.resolve(window.YOLOmuxCodeMirror);
+function codeMirrorApiIsUsable(api) {
+  return Boolean(
+    api?.EditorState?.create
+    && api?.EditorState?.readOnly?.of
+    && api?.EditorView?.theme
+    && api?.EditorView?.editable?.of
+    && api?.keymap?.of
+    && api?.drawSelection
+    && api?.highlightActiveLine
+    && api?.search
+    && api?.openSearchPanel
+  );
+}
+
+function loadCodeMirrorBundleScript(options = {}) {
+  if (!options.force && codeMirrorApiIsUsable(window.YOLOmuxCodeMirror)) return Promise.resolve(window.YOLOmuxCodeMirror);
+  if (options.force) codeMirrorBundlePromise = null;
   if (!codeMirrorBundlePromise) {
     codeMirrorBundlePromise = new Promise((resolve, reject) => {
       const script = document.createElement('script');
-      script.src = bootstrap.codeMirrorAssetUrl || '/static/codemirror.js';
+      const assetUrl = bootstrap.codeMirrorAssetUrl || '/static/codemirror.js';
+      const separator = assetUrl.includes('?') ? '&' : '?';
+      script.src = options.force ? `${assetUrl}${separator}retry=${Date.now()}` : assetUrl;
       script.async = true;
       script.onload = () => resolve(window.YOLOmuxCodeMirror || null);
       script.onerror = () => reject(new Error(`CodeMirror bundle failed to load: ${script.src}`));
@@ -2630,12 +2649,15 @@ function loadCodeMirrorBundleScript() {
 }
 
 async function loadCodeMirrorApi() {
-  if (window.YOLOmuxCodeMirror) return window.YOLOmuxCodeMirror;
+  if (codeMirrorApiIsUsable(window.YOLOmuxCodeMirror)) return window.YOLOmuxCodeMirror;
   if (!codeMirrorApiPromise) {
     codeMirrorApiPromise = (async () => {
       try {
-        await loadCodeMirrorBundleScript();
-        if (window.YOLOmuxCodeMirror) return window.YOLOmuxCodeMirror;
+        let bundledApi = await loadCodeMirrorBundleScript();
+        if (codeMirrorApiIsUsable(bundledApi)) return bundledApi;
+        bundledApi = await loadCodeMirrorBundleScript({force: true});
+        if (codeMirrorApiIsUsable(bundledApi)) return bundledApi;
+        console.warn('CodeMirror bundle missing critical exports; falling back to ESM imports');
       } catch (err) {
         console.warn(err);
       }
@@ -2680,7 +2702,7 @@ async function loadCodeMirrorApi() {
         importCodeMirrorModule('@codemirror/legacy-modes/mode/toml'),
         importCodeMirrorModule('@lezer/highlight'),
       ]);
-      return {
+      const api = {
         Compartment: state.Compartment,
         EditorState: state.EditorState,
         RangeSetBuilder: state.RangeSetBuilder,
@@ -2738,9 +2760,17 @@ async function loadCodeMirrorApi() {
         toml: tomlMode.toml,
         basicSetup: cm.basicSetup,
       };
+      if (!codeMirrorApiIsUsable(api)) throw new Error('CodeMirror API missing critical exports');
+      window.YOLOmuxCodeMirror = api;
+      return api;
     })();
   }
-  return codeMirrorApiPromise;
+  try {
+    return await codeMirrorApiPromise;
+  } catch (error) {
+    codeMirrorApiPromise = null;
+    throw error;
+  }
 }
 
 function codeMirrorMarkdownCodeLanguages(api) {

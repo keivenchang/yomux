@@ -884,10 +884,10 @@ body.theme-light .file-explorer-changes-head {
   background: rgba(118, 185, 0, 0.88);
 }
 .cm-yolomux-diff-add {
-  background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
+  background: color-mix(in srgb, var(--code-diff-add) 58%, transparent);
 }
 .cm-yolomux-diff-remove {
-  background: color-mix(in srgb, var(--code-diff-remove) 32%, transparent);
+  background: color-mix(in srgb, var(--code-diff-remove) 60%, transparent);
 }
 .file-editor-diff-codemirror .cm-mergeView {
   height: 100%;
@@ -897,6 +897,10 @@ body.theme-light .file-explorer-changes-head {
 }
 .file-editor-diff-codemirror {
   position: relative;
+  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 58%, transparent);
+  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 60%, transparent);
+  --diff-add-text-bg: color-mix(in srgb, var(--code-diff-add) 70%, transparent);
+  --diff-remove-text-bg: color-mix(in srgb, var(--code-diff-remove) 72%, transparent);
 }
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;
@@ -920,23 +924,42 @@ body.theme-light .file-explorer-changes-head {
   background: var(--brand-green);
 }
 .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
-.file-editor-diff-codemirror .cm-deletedChunk {
-  background: color-mix(in srgb, var(--code-diff-remove) 30%, transparent);
+.file-editor-diff-codemirror .cm-deletedChunk,
+.file-editor-diff-codemirror .cm-deletedLine {
+  --diff-full-line-bg: var(--diff-remove-line-bg);
+  background: var(--diff-full-line-bg);
 }
 .file-editor-diff-codemirror .cm-merge-b .cm-changedLine,
 .file-editor-diff-codemirror .cm-inlineChangedLine,
 .file-editor-diff-codemirror .cm-insertedChunk,
 .file-editor-diff-codemirror .cm-insertedLine {
-  background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
+  --diff-full-line-bg: var(--diff-add-line-bg);
+  background: var(--diff-full-line-bg);
+}
+.file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
+.file-editor-diff-codemirror .cm-merge-b .cm-changedLine,
+.file-editor-diff-codemirror .cm-inlineChangedLine,
+.file-editor-diff-codemirror .cm-deletedChunk,
+.file-editor-diff-codemirror .cm-insertedChunk,
+.file-editor-diff-codemirror .cm-deletedLine,
+.file-editor-diff-codemirror .cm-insertedLine {
+  box-shadow: -100vw 0 0 var(--diff-full-line-bg), 100vw 0 0 var(--diff-full-line-bg);
+  clip-path: inset(0 -100vw);
 }
 .file-editor-diff-codemirror .cm-merge-a .cm-changedText,
-.file-editor-diff-codemirror .cm-deletedText,
-.file-editor-diff-codemirror .cm-deletedLine {
-  background: color-mix(in srgb, var(--code-diff-remove) 44%, transparent);
+.file-editor-diff-codemirror .cm-deletedText {
+  background: var(--diff-remove-text-bg);
 }
 .file-editor-diff-codemirror .cm-merge-b .cm-changedText,
 .file-editor-diff-codemirror .cm-insertedText {
-  background: color-mix(in srgb, var(--code-diff-add) 44%, transparent);
+  background: var(--diff-add-text-bg);
+}
+.file-editor-diff-codemirror .cm-insertedLine .cm-changedText,
+.file-editor-diff-codemirror .cm-insertedLine .cm-insertedText,
+.file-editor-diff-codemirror .cm-deletedLine .cm-changedText,
+.file-editor-diff-codemirror .cm-deletedLine .cm-deletedText,
+.file-editor-diff-codemirror .cm-deletedChunk .cm-deletedText {
+  background: transparent;
 }
 .file-editor-diff-codemirror .cm-changedLineGutter,
 .file-editor-diff-codemirror .cm-deletedLineGutter {
@@ -990,25 +1013,18 @@ body.theme-light .file-explorer-changes-head {
 body.editor-theme-light .file-editor-diff-codemirror {
   --code-diff-add: #00a152;
   --code-diff-remove: #d81f32;
+  --diff-add-line-bg: #e6ffec;
+  --diff-remove-line-bg: #ffebe9;
+  --diff-add-text-bg: #aceebb;
+  --diff-remove-text-bg: #ffcecb;
 }
-body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
-body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk {
-  background: color-mix(in srgb, var(--code-diff-remove) 42%, transparent);
+body.editor-theme-light .file-editor-diff-codemirror .cm-changedLineGutter {
+  color: #116329;
+  background: #dafbe1;
 }
-body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedLine,
-body.editor-theme-light .file-editor-diff-codemirror .cm-inlineChangedLine,
-body.editor-theme-light .file-editor-diff-codemirror .cm-insertedChunk,
-body.editor-theme-light .file-editor-diff-codemirror .cm-insertedLine {
-  background: color-mix(in srgb, var(--code-diff-add) 40%, transparent);
-}
-body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedText,
-body.editor-theme-light .file-editor-diff-codemirror .cm-deletedText,
-body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine {
-  background: color-mix(in srgb, var(--code-diff-remove) 60%, transparent);
-}
-body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText,
-body.editor-theme-light .file-editor-diff-codemirror .cm-insertedText {
-  background: color-mix(in srgb, var(--code-diff-add) 56%, transparent);
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
+  color: #82071e;
+  background: #ffebe9;
 }
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {

@@ -103,6 +103,7 @@ function tmuxSessionActionCommands(session, options = {}) {
   const autoPayload = hasSession ? autoApproveStates.get(session) : null;
   const autoHere = hasSession ? autoApproveEnabledHere(autoPayload) : false;
   const includeYolo = options.includeYolo !== false;
+  const includeKill = options.includeKill !== false;
   const readonlyDetail = 'Admin only';
   const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
   const visibleDetail = readOnlyMode ? readonlyDetail : (hasSession ? '' : 'No tmux tab focused');
@@ -127,14 +128,23 @@ function tmuxSessionActionCommands(session, options = {}) {
       disabled: readOnlyMode || !hasSession,
       detail: visibleDetail,
       ariaLabel: [renameLabel, focusDetail].filter(Boolean).join(' - '),
-    }),
-    menuCommand('Kill session', () => killTmuxSession(session), {
-      disabled: readOnlyMode || !hasSession,
-      detail: visibleDetail,
-      ariaLabel: ['Kill session', focusDetail].filter(Boolean).join(' - '),
-    }),
+    })
   );
+  if (includeKill) commands.push(tmuxSessionKillCommand(session));
   return commands;
+}
+
+function tmuxSessionKillCommand(session) {
+  const hasSession = isTmuxSession(session);
+  const readonlyDetail = 'Admin only';
+  const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
+  const visibleDetail = readOnlyMode ? readonlyDetail : (hasSession ? '' : 'No tmux tab focused');
+  const label = hasSession ? `Kill tmux session '${session}'` : 'Kill tmux session';
+  return menuCommand(label, () => killTmuxSession(session), {
+    disabled: readOnlyMode || !hasSession,
+    detail: visibleDetail,
+    ariaLabel: [label, focusDetail].filter(Boolean).join(' - '),
+  });
 }
 
 function yoloRulePath() {

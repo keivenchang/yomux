@@ -224,8 +224,18 @@ function nextGlobalThemeMode(mode = globalThemeMode) {
   return 'system';
 }
 
+function normalizeTerminalThemeMode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['dark', 'light', 'follow-app'].includes(normalized) ? normalized : defaultTerminalTheme;
+}
+
+function resolvedTerminalThemeMode(mode = terminalThemeMode, appMode = globalThemeMode) {
+  const normalized = normalizeTerminalThemeMode(mode);
+  return normalized === 'follow-app' ? resolvedGlobalThemeMode(appMode) : normalized;
+}
+
 function terminalThemeForGlobalTheme(mode = globalThemeMode) {
-  const theme = TERMINAL_THEMES[resolvedGlobalThemeMode(mode)] || TERMINAL_THEMES.dark;
+  const theme = TERMINAL_THEMES[resolvedTerminalThemeMode(terminalThemeMode, mode)] || TERMINAL_THEMES.dark;
   return {...theme};
 }
 
@@ -745,6 +755,7 @@ function createContextMenuController() {
 function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
   const button = document.createElement('button');
   button.type = 'button';
+  if (options.className) button.className = options.className;
   button.setAttribute('role', 'menuitem');
   button.textContent = label;
   button.disabled = options.disabled === true;
@@ -896,19 +907,19 @@ function showSessionContextMenu(session, x, y, options = {}) {
   menu.className = 'terminal-context-menu session-context-menu';
   menu.setAttribute('role', 'menu');
   const renameAction = options.tab ? () => beginPaneTabRename(options.tab, session) : () => renameTmuxSession(session);
-  for (const item of tmuxSessionActionCommands(session, {renameAction})) {
+  for (const item of tmuxSessionActionCommands(session, {renameAction, includeKill: false})) {
     appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
   }
   const viewItems = tmuxSessionViewCommands(session).filter(item => ['Transcript', 'AI summary', 'Event log'].includes(item.label));
-  if (viewItems.length) {
-    appendContextMenuSeparator(menu);
-    for (const item of viewItems) {
-      appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {
-        disabled: item.disabled,
-        checked: item.checked,
-        title: item.detail || '',
-      });
-    }
+  for (const item of viewItems) {
+    appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {
+      disabled: item.disabled,
+      checked: item.checked,
+      title: item.detail || '',
+    });
   }
+  appendContextMenuSeparator(menu);
+  const killItem = tmuxSessionKillCommand(session);
+  appendContextMenuButton(menu, killItem.label, killItem.action, closeSessionContextMenu, {disabled: killItem.disabled, className: 'danger'});
   sessionContextMenu.open(menu, x, y);
 }

@@ -15,7 +15,7 @@ from yolomux_lib.settings import settings_payload
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
-            "appearance": {"theme": "neon", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "file_explorer_font_size": 1, "tab_width": 20},
+            "appearance": {"theme": "neon", "terminal_theme": "neon", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "file_explorer_font_size": 1, "tab_width": 20},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_ms": 3000},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "performance": {"metadata_refresh_ms": 15000, "pane_state_refresh_ms": 1200},
@@ -28,6 +28,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     )
 
     assert settings["appearance"]["theme"] == "dark"
+    assert settings["appearance"]["terminal_theme"] == "dark"
     assert settings["appearance"]["ui_font_size"] == 8
     assert settings["appearance"]["terminal_font_size"] == 28
     assert settings["appearance"]["editor_font_size"] == 28
@@ -64,6 +65,8 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
 
     assert payload["settings"] == default_settings()
     assert payload["settings"]["general"]["auto_focus"] is False
+    assert payload["settings"]["appearance"]["terminal_theme"] == "dark"
+    assert payload["settings"]["appearance"]["tab_width"] == 180
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "deterministic"
     assert "normal human status update" in payload["settings"]["yoagent"]["system_prompt"]
