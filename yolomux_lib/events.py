@@ -100,6 +100,7 @@ def safe_event_details(details: dict[str, Any]) -> dict[str, Any]:
 class EventLog:
     def __init__(self, path: Path):
         self.path = path
+        self.lock_path = path.with_name(f".{path.name}.lock")
         self.lock = threading.Lock()
 
     def append(self, session: str | None, event_type: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -113,8 +114,13 @@ class EventLog:
         line = json.dumps(event, sort_keys=True, ensure_ascii=False)
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            with self.lock_path.open("a+", encoding="utf-8") as lock_handle:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    with self.path.open("a", encoding="utf-8") as handle:
+                        handle.write(line + "\n")
+                finally:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
         return event
 
     def tail(self, session: str | None = None, limit: int = 100) -> list[dict[str, Any]]:

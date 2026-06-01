@@ -1248,6 +1248,26 @@ body.theme-light .yoagent-line {
 .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
   color: var(--brand-green);
 }
+.file-tree-row.indexed-directory:not(.selected) .file-tree-name {
+  color: #c4f970;
+  font-weight: 700;
+}
+.file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
+  position: relative;
+  color: #c4f970;
+  text-shadow: 0 0 8px rgba(196, 249, 112, 0.35);
+}
+.file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-gold);
+  box-shadow: 0 0 0 1px rgba(12, 15, 20, 0.9), 0 0 7px rgba(245, 197, 66, 0.75);
+}
 .file-tree-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1343,6 +1363,16 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
 body.theme-light .file-tree-row.kind-dir.expanded > .file-tree-icon,
 body.theme-light .file-tree-row.kind-dir[aria-expanded="true"] > .file-tree-icon {
   color: var(--brand-green);
+}
+body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
+  color: #2f7d20;
+}
+body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
+  color: #2f7d20;
+  text-shadow: none;
+}
+body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed::after {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.95), 0 0 6px rgba(122, 160, 0, 0.55);
 }
 body.theme-light .file-tree-children::before {
   border-left-color: rgba(100, 116, 139, 0.28);

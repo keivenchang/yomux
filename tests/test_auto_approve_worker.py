@@ -1,6 +1,8 @@
 import os
 from typing import Any
 
+import pytest
+
 os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
 os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
 
@@ -73,6 +75,16 @@ def approving_decision(*_args: Any, **_kwargs: Any) -> dict[str, str]:
     }
 
 
+def rule_decision(action: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "action": action,
+        "rule_name": extra.pop("rule_name", f"test {action}"),
+        "risk": extra.pop("risk", "test"),
+        "source": extra.pop("source", "test"),
+        **extra,
+    }
+
+
 def test_bash_prompt_handler_truncates_command_without_crashing(monkeypatch):
     module = DummyApproveModule()
     events: list[tuple[str, str, str, dict[str, Any]]] = []
@@ -92,6 +104,135 @@ def test_bash_prompt_handler_truncates_command_without_crashing(monkeypatch):
     assert worker.last_action.startswith("approved bash: curl -sk -u")
     assert events[0][1] == "approval_approved"
     assert events[0][3]["command"] == "curl -sk -u yolomux:yolomux https://localhost:7777/"
+
+
+def test_bash_prompt_decline_sends_no_option(monkeypatch):
+    module = DummyApproveModule()
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    monkeypatch.setattr(worker.stop_event, "wait", lambda _delay: False)
+    monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", lambda *_args, **_kwargs: rule_decision("decline"))
+
+    acted = worker.handle_bash_prompt(module, "rm file.txt", "hash-1", "option1", selected_option=1, command="rm file.txt")
+
+    assert acted is True
+    assert module.sent == [("option", "6", 2, 1)]
+    assert worker.approved == 1
+    assert worker.last_action == "declined bash: rm file.txt"
+
+
+def test_bash_prompt_passive_actions_do_not_send_keys(monkeypatch):
+    for action in ("block", "notify", "ask", "off"):
+        module = DummyApproveModule()
+        worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+        monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", lambda *_args, action=action, **_kwargs: rule_decision(action))
+
+        acted = worker.handle_bash_prompt(module, "rm file.txt", f"hash-{action}", "option1", selected_option=1, command="rm file.txt")
+
+        assert acted is True
+        assert module.sent == []
+        assert worker.blocked == 1
+        assert worker.last_blocked_hash == f"hash-{action}"
+
+
+def test_bash_prompt_dry_run_does_not_send_key(monkeypatch):
+    module = DummyApproveModule()
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    monkeypatch.setattr(
+        auto_approve_worker.yolo_rules,
+        "evaluate",
+        lambda *_args, **_kwargs: rule_decision("ask", dry_run=True, would_action="approve"),
+    )
+
+    acted = worker.handle_bash_prompt(module, "make test", "hash-dry-run", "option1", selected_option=1, command="make test")
+
+    assert acted is True
+    assert module.sent == []
+    assert worker.blocked == 1
+    assert worker.last_action == "dry-run would approve bash: make test"
+
+
+def test_non_bash_prompt_passive_action_does_not_send_key(monkeypatch):
+    module = DummyApproveModule()
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    monkeypatch.setattr(auto_approve_worker.yolo_rules, "evaluate", lambda *_args, **_kwargs: rule_decision("block", rule_name="block file edit"))
+
+    acted = worker.handle_non_bash_prompt(module, "Edit /repo/app.py", "hash-file", "option1", "file", selected_option=1)
+
+    assert acted is True
+    assert module.sent == []
+    assert worker.blocked == 1
+    assert worker.last_action == "block file: block file edit"
+
+
+def test_auto_approve_process_lock_blocks_second_owner(monkeypatch, tmp_path):
+    monkeypatch.setattr(auto_approve_worker, "AUTO_APPROVE_LOCK_DIR", tmp_path)
+    first = auto_approve_worker.AutoApproveProcessLock("6", {"owner": "first"})
+    second = auto_approve_worker.AutoApproveProcessLock("6", {"owner": "second"})
+    try:
+        acquired, owner = first.acquire()
+        assert acquired is True
+        assert owner is None
+
+        acquired, owner = second.acquire()
+
+        assert acquired is False
+        assert owner["target"] == "6"
+        assert owner["owner"] == "first"
+    finally:
+        first.release()
+        second.release()
+
+
+def test_emit_event_logs_expected_io_failure(caplog):
+    worker = auto_approve_worker.AutoApproveWorker(
+        "6",
+        event_callback=lambda *_args: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    worker.emit_event("worker_error", "auto approve error")
+
+    assert "disk full" in caplog.text
+
+
+def test_emit_event_does_not_swallow_programming_error():
+    worker = auto_approve_worker.AutoApproveWorker(
+        "6",
+        event_callback=lambda *_args: (_ for _ in ()).throw(AssertionError("bug")),
+    )
+
+    with pytest.raises(AssertionError):
+        worker.emit_event("worker_error", "auto approve error")
+
+
+def test_run_retries_expected_poll_error(monkeypatch):
+    events: list[tuple[str, str, str, dict[str, Any]]] = []
+    worker = auto_approve_worker.AutoApproveWorker(
+        "6",
+        interval=0.01,
+        event_callback=lambda target, event_type, message, details: events.append((target, event_type, message, details)),
+    )
+
+    monkeypatch.setattr(worker, "process_once", lambda _module: (_ for _ in ()).throw(OSError("tmux vanished")))
+
+    def stop_after_wait(_delay: float) -> bool:
+        worker.stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker.stop_event, "wait", stop_after_wait)
+
+    worker.run()
+
+    assert worker.error == "tmux vanished"
+    assert worker.last_action == "auto approve error"
+    assert events == [("6", "worker_error", "auto approve error", {"error": "tmux vanished"})]
+
+
+def test_run_does_not_swallow_programming_error(monkeypatch):
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    monkeypatch.setattr(worker, "process_once", lambda _module: (_ for _ in ()).throw(AssertionError("bug")))
+
+    with pytest.raises(AssertionError):
+        worker.run()
 
 
 def test_process_once_can_approve_when_codex_highlights_option2(monkeypatch):

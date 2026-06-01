@@ -154,6 +154,58 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         stop_server(server, thread)
 
 
+def test_readonly_identity_cannot_call_mutating_post(monkeypatch, tmp_path):
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(
+            port,
+            "POST",
+            "/api/create-session?agent=term",
+            headers=auth_header("guest", "guest"),
+        )
+
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body) == {"error": "admin access required", "role": "readonly"}
+    finally:
+        stop_server(server, thread)
+
+
+def test_forged_auth_cookie_is_rejected(monkeypatch, tmp_path):
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        cookie = _login_and_extract_auth_cookie(port)
+        forged_cookie = cookie[:-1] + ("0" if cookie[-1] != "0" else "1")
+
+        status, _headers, body = request(port, "GET", "/api/ping", headers={"Cookie": forged_cookie})
+
+        assert status == HTTPStatus.UNAUTHORIZED
+        assert json.loads(body)["error"] == "authentication required"
+    finally:
+        stop_server(server, thread)
+
+
+def test_login_next_path_blocks_open_redirects(monkeypatch, tmp_path):
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        for unsafe_next in ("//evil.example/path", "/safe\r\nLocation: //evil.example"):
+            body = urlencode({"username": "keivenc", "password": "random-password", "next": unsafe_next})
+            status, headers, _body = request(
+                port,
+                "POST",
+                "/login",
+                body=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+            assert status == HTTPStatus.SEE_OTHER
+            assert headers["Location"] == "/"
+    finally:
+        stop_server(server, thread)
+
+
 def test_logout_clears_current_and_legacy_auth_cookies(monkeypatch, tmp_path):
     server, thread = start_server(monkeypatch, tmp_path)
     port = server.server_address[1]

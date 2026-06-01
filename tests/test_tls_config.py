@@ -35,6 +35,77 @@ def test_tls_rejects_self_signed_with_explicit_cert():
         cli.tls_cert_key_paths(cli_args(self_signed=True, cert=Path("/tmp/cert.pem"), key=Path("/tmp/key.pem")))
 
 
+def test_parse_args_supports_sessions_dangerous_yolo_and_self_signed(monkeypatch):
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        ["yolomux.py", "--host", "0.0.0.0", "--port", "7778", "--sessions", "1,2", "ant", "--dang", "--self-signed"],
+    )
+
+    args = cli.parse_args()
+
+    assert args.host == "0.0.0.0"
+    assert args.port == 7778
+    assert args.sessions == ["1,2", "ant"]
+    assert args.dangerously_yolo is True
+    assert args.self_signed is True
+
+
+def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
+    captured = {}
+    args = argparse.Namespace(
+        host="0.0.0.0",
+        port=7778,
+        sessions=["1,2", "ant"],
+        dangerously_yolo=True,
+        self_signed=False,
+        cert=None,
+        key=None,
+        print_transcripts=False,
+    )
+
+    class FakeApp:
+        def __init__(self, sessions, dangerously_yolo=False):
+            captured["sessions"] = sessions
+            captured["dangerously_yolo"] = dangerously_yolo
+
+        def restore_auto_approve(self):
+            return []
+
+        def stop_auto_approve_all(self):
+            captured["stopped"] = True
+
+    class FakeServer:
+        def __init__(self, address, app, tls_context=None):
+            captured["address"] = address
+            captured["app"] = app
+            captured["tls_context"] = tls_context
+
+        def serve_forever(self):
+            captured["served"] = True
+
+        def server_close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(cli, "parse_args", lambda: args)
+    monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (None, ""))
+    monkeypatch.setattr(cli, "TmuxWebtermApp", FakeApp)
+    monkeypatch.setattr(cli, "TmuxWebtermHTTPServer", FakeServer)
+    monkeypatch.setattr(cli, "auth_setup_required", lambda: False)
+
+    assert cli.main() == 0
+
+    output = capsys.readouterr().out
+    assert captured["sessions"] == ["1", "2", "ant"]
+    assert captured["dangerously_yolo"] is True
+    assert captured["address"] == ("0.0.0.0", 7778)
+    assert captured["tls_context"] is None
+    assert captured["served"] is True
+    assert captured["stopped"] is True
+    assert captured["closed"] is True
+    assert "DANGEROUS YOLO mode is enabled" in output
+
+
 def test_self_signed_cert_generation_is_persistent(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/openssl")

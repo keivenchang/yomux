@@ -149,6 +149,26 @@ def test_transcript_pending_approval_extracts_claude_bash_command():
     assert state["hash"]
 
 
+def test_transcript_pending_approval_marks_dangerous_hard_floor_command():
+    text = jsonl(
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "rm -rf /"}},
+                ],
+            },
+        }
+    )
+
+    state = transcript_pending_approval_from_text(text, "claude")
+
+    assert state["visible"] is True
+    assert state["type"] == "bash"
+    assert state["dangerous"] is True
+
+
 def test_transcript_pending_approval_extracts_file_tool_and_clears_result():
     pending = jsonl(
         {

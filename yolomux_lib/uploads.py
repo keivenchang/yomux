@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from .common import PASTE_UPLOAD_NAME_RE
+from .common import UPLOAD_MAX_BYTES
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_SAFE_NAME_RE
 from .common import UploadedFile
@@ -103,7 +104,10 @@ def header_value_and_params(header_name: str, value: str) -> tuple[str, dict[str
     for key, param_value in params[1:]:
         if not key:
             continue
-        parsed_params[str(key).lower()] = str(param_value)
+        if isinstance(param_value, tuple):
+            parsed_params[str(key).lower()] = str(param_value[2] if len(param_value) >= 3 else "")
+        else:
+            parsed_params[str(key).lower()] = str(param_value)
     return primary, parsed_params
 
 def parse_multipart_headers(header_block: bytes) -> dict[str, str]:
@@ -114,7 +118,7 @@ def parse_multipart_headers(header_block: bytes) -> dict[str, str]:
             headers[name.strip().lower()] = value.strip()
     return headers
 
-def parse_multipart_upload(content_type: str, body: bytes) -> list[UploadedFile]:
+def parse_multipart_upload(content_type: str, body: bytes, max_part_bytes: int = UPLOAD_MAX_BYTES) -> list[UploadedFile]:
     media_type, params = header_value_and_params("content-type", content_type)
     if media_type != "multipart/form-data":
         raise ValueError("expected multipart/form-data")
@@ -145,7 +149,9 @@ def parse_multipart_upload(content_type: str, body: bytes) -> list[UploadedFile]
         filename = disposition_params.get("filename") or disposition_params.get("filename*") or ""
         if not filename:
             continue
-        files.append(UploadedFile(filename=filename, content=content))
-        if len(files) > UPLOAD_MAX_FILES:
+        if len(files) >= UPLOAD_MAX_FILES:
             raise ValueError(f"too many files; limit is {UPLOAD_MAX_FILES}")
+        if len(content) > max_part_bytes:
+            raise ValueError(f"file is too large; limit is {max_part_bytes} bytes")
+        files.append(UploadedFile(filename=filename, content=content))
     return files

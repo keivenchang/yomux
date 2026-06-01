@@ -69,6 +69,27 @@ DANGEROUS_ROOT_TARGETS = {
 COMMAND_BOUNDARIES = {";", "&&", "||", "|", "&"}
 SHELL_COMMANDS = {"bash", "sh", "zsh", "dash", "fish"}
 WRAPPER_COMMANDS = {"sudo", "doas", "command", "builtin", "time", "nohup", "nice"}
+KUBECTL_FLAGS_WITH_VALUE = {
+    "-c",
+    "-n",
+    "--as",
+    "--as-group",
+    "--as-uid",
+    "--cache-dir",
+    "--cluster",
+    "--container",
+    "--context",
+    "--field-manager",
+    "--kubeconfig",
+    "--namespace",
+    "--pod-running-timeout",
+    "--profile",
+    "--profile-output",
+    "--request-timeout",
+    "--server",
+    "--token",
+    "--user",
+}
 
 
 @dataclass(frozen=True)
@@ -267,13 +288,48 @@ def docker_payload(command: str, args: tuple[str, ...]) -> str | None:
     return None
 
 
+def next_kubectl_arg_index(args: tuple[str, ...], index: int) -> int:
+    token = args[index]
+    if token == "--":
+        return index
+    if not token.startswith("-"):
+        return index
+    if "=" in token:
+        return index + 1
+    return index + 2 if token in KUBECTL_FLAGS_WITH_VALUE and index + 1 < len(args) else index + 1
+
+
+def kubectl_exec_arg_index(args: tuple[str, ...]) -> int | None:
+    index = 0
+    while index < len(args):
+        if args[index] == "exec":
+            return index
+        next_index = next_kubectl_arg_index(args, index)
+        if next_index == index:
+            return None
+        index = next_index
+    return None
+
+
 def kubectl_payload(command: str, args: tuple[str, ...]) -> str | None:
-    if command != "kubectl" or not args or args[0] != "exec":
+    if command != "kubectl" or not args:
         return None
+    exec_index = kubectl_exec_arg_index(args)
+    if exec_index is None:
+        return None
+    index = exec_index + 1
+    while index < len(args):
+        next_index = next_kubectl_arg_index(args, index)
+        if next_index == index:
+            break
+        index = next_index
+    if index >= len(args) or args[index] == "--":
+        return None
+    index += 1
     if "--" in args:
-        index = args.index("--") + 1
-    else:
-        index = 2
+        dash_index = args.index("--")
+        if dash_index > exec_index:
+            index = dash_index + 1
     if index >= len(args):
         return None
     return args[index] if len(args) - index == 1 else shell_join(list(args[index:]))

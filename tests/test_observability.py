@@ -1,6 +1,7 @@
 import threading
 from http import HTTPStatus
 
+from yolomux_lib import events as events_module
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
@@ -31,6 +32,21 @@ def test_event_log_search_filters_session_and_details(tmp_path):
     assert matches[0]["session"] == "s1"
     assert matches[0]["details"]["prompt"] == "run tests"
     assert log.search("deploy", session="s1") == []
+
+
+def test_event_log_append_uses_process_lock(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_flock(_fd, operation):
+        calls.append(operation)
+
+    monkeypatch.setattr(events_module.fcntl, "flock", fake_flock)
+    log = EventLog(tmp_path / "events.jsonl")
+
+    log.append("s1", "state_changed", "Needs approval", {})
+
+    assert calls == [events_module.fcntl.LOCK_EX, events_module.fcntl.LOCK_UN]
+    assert (tmp_path / ".events.jsonl.lock").exists()
 
 
 def test_search_payload_combines_events_and_current_summaries(tmp_path):

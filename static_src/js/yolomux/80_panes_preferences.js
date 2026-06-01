@@ -1357,14 +1357,19 @@ async function sendYoagentChatMessage(rawText) {
 }
 
 async function refreshActivitySummary(options = {}) {
+  if (activitySummaryRefreshing && options.force !== true) return;
+  const requestId = ++activitySummaryRequestId;
+  const requestIsCurrent = () => requestId === activitySummaryRequestId;
   activitySummaryRefreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   try {
     const response = await apiFetch(`/api/activity-summary${options.force ? '?force=1' : ''}`, {cache: 'no-store'});
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
+    if (!requestIsCurrent()) return;
     activitySummaryPayload = payload;
   } catch (error) {
+    if (!requestIsCurrent()) return;
     activitySummaryPayload = {
       ...activitySummaryPayload,
       errors: [String(error)],
@@ -1372,24 +1377,26 @@ async function refreshActivitySummary(options = {}) {
     };
     if (!options.silent) statusEl.innerHTML = `<span class="err">activity summary failed: ${esc(error)}</span>`;
   } finally {
-    activitySummaryRefreshing = false;
+    if (requestIsCurrent()) {
+      activitySummaryRefreshing = false;
+      renderInfoPanel();
+      renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
+    }
   }
-  renderInfoPanel();
-  renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
 }
 
 function editorSchemePreferenceChoices(options = {}) {
   const preferredOrder = [
     'dark',
-    'yolomux-light',
     'vscode-dark-plus',
     'one-dark',
     'dracula',
     'monokai',
     'nord',
+    'vscode-light-plus',
+    'yolomux-light',
     'github-light',
     'one-light',
-    'vscode-light-plus',
     'solarized-light',
   ];
   const ids = [...preferredOrder, ...EDITOR_SCHEME_IDS.filter(id => !preferredOrder.includes(id))];

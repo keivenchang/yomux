@@ -3,8 +3,10 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -19,6 +21,11 @@ from .common import AUTO_APPROVE_LOCK_DIR
 from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import truncate_text
+
+
+LOGGER = logging.getLogger(__name__)
+EXPECTED_AUTO_APPROVE_ERRORS = (OSError, subprocess.SubprocessError, TimeoutError, json.JSONDecodeError)
+EXPECTED_EVENT_CALLBACK_ERRORS = (OSError,)
 
 
 def auto_approve_lock_path(target: str) -> Path:
@@ -188,7 +195,8 @@ class AutoApproveWorker:
             return
         try:
             self.event_callback(self.target, event_type, message, details)
-        except Exception:
+        except EXPECTED_EVENT_CALLBACK_ERRORS as exc:
+            LOGGER.warning("auto approve event callback failed for %s %s: %s", self.target, event_type, exc)
             return
 
     def run(self) -> None:
@@ -213,7 +221,7 @@ class AutoApproveWorker:
                         t = min(idle_secs / ramp_duration, 1.0)
                         wait_for = self.interval + t * (max_interval - self.interval)
                     self.stop_event.wait(wait_for)
-                except Exception as exc:
+                except EXPECTED_AUTO_APPROVE_ERRORS as exc:
                     self.update(error=str(exc), last_action="auto approve error")
                     self.emit_event("worker_error", "auto approve error", error=str(exc))
                     self.stop_event.wait(max_interval)

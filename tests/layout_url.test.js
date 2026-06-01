@@ -287,6 +287,10 @@ globalThis.__layoutTestApi = {
   fileQuickOpenItem,
   fileQuickOpenItems,
   fileQuickOpenRootForSearch,
+  fileQuickOpenRootsForSearch,
+  fileQuickOpenScopeLabel,
+  fileExplorerDirectoryIsIndexed,
+  setFileExplorerIndexedDirsForTest(paths) { setFileExplorerIndexedDirs(paths); },
   changesPaneTabHtml,
   changesPanelHtml,
   fileExplorerChangesPanelHtml,
@@ -953,10 +957,13 @@ function makeFileTree(paths) {
 
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-heading-1'));
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-bold'));
-  const anchoredMarkdown = api.markdownTextWithSourceAnchors('# TITLE\n\n```sh\n# code\n```\n## Next');
-  assert.ok(anchoredMarkdown.includes('data-source-line="1"'));
-  assert.ok(anchoredMarkdown.includes('data-source-line="6"'));
-  assert.equal(anchoredMarkdown.includes('data-source-line="3"'), false);
+  const anchoredMarkdown = api.markdownTextWithSourceAnchors('| A | B |\n|---|---|\n| 1 | 2 |\n\n---');
+  assert.equal(anchoredMarkdown.includes('markdown-source-anchor'), false, 'Markdown source is not mutated before marked parses GFM tables and rules');
+  assert.ok(anchoredMarkdown.includes('|---|---|'), 'GFM table delimiter rows stay intact before parsing');
+  assert.ok(anchoredMarkdown.includes('\n---'), 'thematic breaks stay intact before parsing');
+  const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); }'), 'Markdown table headers get a readable preview background');
+  assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }'), 'Markdown thematic breaks render as preview rules');
   assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-comment'));
   assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-variable'));
   assert.ok(api.simpleCodeSyntaxHtml('json', '{"name": "yolomux", "ok": true}').includes('code-attr'));
@@ -1021,7 +1028,7 @@ function makeFileTree(paths) {
   assert.deepStrictEqual(canonical(api.codeMirrorLanguageExtension(brokenLanguageApi, '/home/test/README.md')), [], 'broken Markdown language support falls back to editable plain text');
   assert.deepStrictEqual(canonical(api.codeMirrorMarkdownCodeLanguages(brokenLanguageApi)), [], 'broken fenced-code language descriptions are skipped');
   assert.deepStrictEqual(canonical(api.codeMirrorHighlightExtension({})), [], 'missing highlight support falls back without crashing');
-  assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), true, 'CodeMirror API validation accepts critical editor/search exports');
+  assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), true, 'CodeMirror API validation accepts critical editor/search exports');
   assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}}, EditorView: {theme() {}}}), false, 'CodeMirror API validation rejects partial bundles');
   const parserCrashApi = {
     EditorState: {
@@ -1136,6 +1143,8 @@ function makeFileTree(paths) {
   assert.equal(api.editorViewModeFor(changedPath, changedItem), 'diff', 'opening from Modified files flips the shared editor item to diff mode');
   assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, diff: ''}), false, 'unchanged files are not diffable');
   assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, diff: 'diff --git a/a b/a'}), true, 'changed repo files are diffable');
+  assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a'}), false, 'untracked/all-added files do not auto-open as all-green diffs');
+  assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, diffOriginal: '', diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+one'}), false, 'new-file diffs do not count as normal editable diffs');
   const diffButton = new TestElement('diff-button');
   api.setFileEditorViewMode(changedPath, 'edit', changedItem);
   api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', diffLoaded: true, diff: ''}, changedItem);
@@ -1146,7 +1155,13 @@ function makeFileTree(paths) {
   api.setFileEditorViewMode(changedPath, 'diff', changedItem);
   api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', diffLoading: true}, changedItem);
   assert.equal(diffButton.hidden, false, 'active diff view keeps a loading Diff button while refs load');
-  assert.equal(diffButton.disabled, true, 'loading Diff button is disabled');
+  assert.equal(diffButton.disabled, false, 'active diff view keeps Exit diff clickable while refs load');
+  const codePath = '/repo/app/app.py';
+  const codeItem = api.fileEditorItemFor(codePath);
+  api.setFileEditorViewMode(codePath, 'diff', codeItem);
+  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', diffLoaded: true, diff: ''}, codeItem);
+  assert.equal(diffButton.hidden, false, 'code files stuck in diff still show an Exit diff button');
+  assert.equal(diffButton.disabled, false, 'Exit diff stays clickable even when no code-file diff is available');
 }
 
 {
@@ -1196,6 +1211,21 @@ function makeFileTree(paths) {
   assert.ok(activePreferenceBody.includes('[data-preference-section-toggle]'), 'preference section buttons are preserved through search focusout');
   assert.ok(activePreferenceBody.includes('[data-preferences-reset-all]'), 'global reset button is preserved through search focusout');
   assert.ok(activePreferenceBody.includes('[data-preferences-reset-confirm]'), 'global reset confirmation button is preserved through focusout');
+  assert.ok(source.includes('let sessionFilesRequestId = 0;'), 'Changes modified-file fetches have their own stale-response request id');
+  assert.ok(source.includes('requestId === sessionFilesRequestId'), 'Changes modified-file fetches reject stale responses');
+  assert.ok(source.includes('function activeChangesControl'), 'Changes panel renders can detect active controls');
+  assert.ok(source.includes('!activeChangesControl(panel)'), 'background Changes renders preserve active selects and ref controls');
+  assert.ok(source.includes('function sessionFilesRenderOptions'), 'modified-file fetch rendering distinguishes silent polls from explicit user refreshes');
+  assert.ok(source.includes('const loadingPromise = (async () => {'), 'editor file loading keeps a promise handle for guarded cleanup');
+  assert.ok(source.includes('if (current?.loadingPromise === loadingPromise) delete current.loadingPromise;'), 'editor file loading clears stale loading promises after failure or success');
+  assert.ok(source.includes('let activitySummaryRequestId = 0;'), 'activity summary refreshes carry a stale-response request id');
+  assert.ok(source.includes('if (activitySummaryRefreshing && options.force !== true) return;'), 'activity summary polling skips overlapping non-forced refreshes');
+  assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');
+  assert.ok(source.includes('setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);'), 'notification signatures use the shared bounded-map helper');
+  assert.ok(source.includes('existing?.delay === normalizedDelay'), 'runtime intervals keep their timer phase when refresh delays are unchanged');
+  assert.ok(source.includes('item.fitFinalTimer'), 'terminal fit scheduling debounces resize bursts per terminal');
+  assert.equal(source.includes('esm.sh'), false, 'CodeMirror loading never falls back to a third-party CDN');
+  assert.ok(source.includes('CodeMirror local bundle is unavailable or incomplete'), 'CodeMirror loading reports local bundle failures clearly');
   assert.ok(source.slice(source.indexOf('function focusPreferencesSearch('), source.indexOf('function focusPreferencesSearchSoon(')).includes('panel && panel.isConnected !== false'), 'Preferences focus falls back to the rendered panel when called without a panel');
   const focusedPanelStart = source.indexOf('function setFocusedPanelItem(');
   const focusedPanelEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusedPanelStart);
@@ -1296,6 +1326,10 @@ function makeFileTree(paths) {
   assert.ok(source.includes("renderYoagentPanel({preserveDraft: false, scrollBottom: true})"), 'YO!agent send/clear clears the draft and scrolls chat to the bottom');
   assert.ok(source.includes('draggable="true" data-open-change-file='), 'Modified-files rows are draggable as file payloads');
   assert.ok(source.includes("event.dataTransfer.setData('application/x-yolomux-file'"), 'Modified-files drag carries the same file payload as Finder drag');
+  assert.ok(source.includes("'Allow index'"), 'Finder directory context menu exposes Allow index');
+  assert.ok(source.includes("'Disallow index'"), 'Finder directory context menu exposes Disallow index');
+  assert.ok(source.includes("row.classList.toggle('indexed-directory', indexedDirectory)"), 'Finder row render marks indexed directories');
+  assert.ok(source.includes("'file-icon-dir-indexed'"), 'Finder indexed directories use a distinct icon class');
 }
 
 {
@@ -1311,7 +1345,7 @@ function makeFileTree(paths) {
   assert.ok(source.includes('restoreFileEditorPanelViewState(item, panel)'), 'CodeMirror editor viewport is restored after pane/tab renders');
   assert.ok(source.includes('refreshOpenEditorThemePanels'), 'global/editor theme changes update already-open CodeMirror panels');
   assert.ok(source.includes('function reconfigureCodeMirrorPanelTheme'), 'open CodeMirror panels reconfigure their theme compartment');
-  assert.ok(source.includes('Compartment: state.Compartment'), 'CodeMirror state Compartment is available for in-place theme updates');
+  assert.ok(source.includes('&& api?.Compartment'), 'CodeMirror API validation requires Compartment for in-place theme updates');
   assert.equal(source.includes('scheme: activeEditorScheme().id'), false, 'CodeMirror config signatures do not force panel rebuilds on theme-only changes');
   assert.ok(source.includes('function yoagentChatNetworkError'), 'YO!agent chat distinguishes network failures from normal HTTP errors');
   assert.ok(source.includes('focusInput: true'), 'YO!agent chat refocuses the input after responses and retryable failures');
@@ -1326,6 +1360,12 @@ function makeFileTree(paths) {
   assert.ok(source.includes('openedItem = await openFileInEditor(path, {name: label}, {userInitiated: true});'), 'quick-open waits for file opens and passes user intent');
   assert.ok(source.includes('focusQuickOpenedFile(openedItem);'), 'quick-open focuses the opened file after the async open resolves');
   assert.ok(source.includes('await Promise.resolve(action?.());'), 'command palette selection awaits async run handlers before focus settles');
+  assert.ok(source.includes('function focusCommandPaletteTarget'), 'command palette has one shared post-run focus helper');
+  assert.ok(source.includes('focusCommandPaletteTarget(item);'), 'command palette applies deterministic focus after async tab/session actions');
+  assert.ok(source.includes('targetItem: item,'), 'command palette tab entries carry their layout focus target');
+  assert.ok(source.includes("const defaultLightEditorScheme = 'vscode-light-plus';"), 'light editor defaults to the VS Code Light+ style scheme');
+  assert.ok(source.includes("else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);"), 'plain file opens reset stale diff mode back to edit');
+  assert.ok(source.includes('applyMarkdownSourceLines(container, text);'), 'Markdown preview source anchors are attached after parsing');
 }
 
 {
@@ -1552,6 +1592,7 @@ function makeFileTree(paths) {
   assert.ok(appSource.includes("const editorViewModes = new Set(['edit', 'preview', 'split', 'diff'])"), 'file editor registers diff as a real view mode');
   assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
   assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
+  assert.equal(appSource.includes('allowInlineDiffs: true'), false, 'unified diff uses native deleted chunks so removed lines are not editable doc lines');
   assert.ok(appSource.includes('/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}'), 'editor diff requests carry FROM/TO refs');
   assert.ok(appSource.includes("const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';"), 'diff editor editability follows TO=current after the FROM/TO flip');
   assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent;'), 'diff editor allows edits on the new/current side');
@@ -1702,12 +1743,15 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(255, 225, 77, 0.72)'), 'dark pane splitter is a visible bright-yellow divider at rest');
   assert.ok(preferencesCss.includes('--pane-resizer-hover-bg: rgba(255, 225, 77, 0.96)'), 'dark pane splitter turns brighter on hover/resize');
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(217, 119, 6, 0.78)'), 'light pane splitter uses readable amber at rest');
-  assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 5px'), 'pane splitter hover width is tokenized');
+  assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 4px'), 'pane splitter hover width is tokenized and modest');
   assert.ok(preferencesCss.includes('--pane-tile-radius: 2px'), 'panes use tile-scale rounding instead of card corners');
   assert.ok(/\.layout-column\s*\{[\s\S]*gap:\s*var\(--pane-split-gap\)/.test(preferencesCss), 'pane split layout reads the compact gap token');
   assert.ok(/\.layout-resizer\s*\{[\s\S]*flex:\s*0 0 var\(--pane-resizer-size\)/.test(preferencesCss), 'pane splitters read the compact size token');
   assert.ok(/\.resizer-row::before\s*\{[\s\S]*left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(preferencesCss), 'row splitters draw a tokenized centered visible line');
   assert.ok(/\.resizer-row:hover::before,[\s\S]*var\(--pane-resizer-hover-line-size\)/.test(preferencesCss), 'row splitters widen on hover without increasing the resting seam');
+  assert.ok(/\.layout-resizer:hover::before,[\s\S]*background:\s*transparent/.test(preferencesCss), 'resizer hover does not return to a solid fill');
+  assert.ok(/\.resizer-row:hover::before,[\s\S]*repeating-linear-gradient\(\s*to bottom,[\s\S]*var\(--drop-outline-strong\)/.test(preferencesCss), 'row splitter hover uses a vertical dashed drop-preview line');
+  assert.ok(/\.resizer-column:hover::before,[\s\S]*repeating-linear-gradient\(\s*to right,[\s\S]*var\(--drop-outline-strong\)/.test(preferencesCss), 'column splitter hover uses a horizontal dashed drop-preview line');
   assert.ok(preferencesCss.includes('--pc-control-fg: #1f2937'), 'light mode uses a dark foreground for pane action controls');
   assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: #1f2937'), 'light mode uses dark status text');
   assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
@@ -1791,7 +1835,8 @@ function makeFileTree(paths) {
   assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'dark editor schemes are grouped under Dark');
   assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'light editor schemes are grouped under Light');
   assert.ok(preferencesHtml.indexOf('YOLOmux Dark') < preferencesHtml.indexOf('VS Code Dark+'), 'YOLOmux dark scheme appears first');
-  assert.ok(preferencesHtml.indexOf('YOLOmux Light') < preferencesHtml.indexOf('GitHub Light'), 'YOLOmux light scheme appears first');
+  assert.ok(preferencesHtml.indexOf('VS Code Light+') < preferencesHtml.indexOf('YOLOmux Light'), 'VS Code Light+ is the first light scheme');
+  assert.ok(preferencesHtml.indexOf('YOLOmux Light') < preferencesHtml.indexOf('GitHub Light'), 'YOLOmux light scheme remains ahead of GitHub Light');
   assert.equal(api.globalThemeModeForTest(), 'dark');
   assert.equal(api.globalThemeIsDark(), true, 'global theme defaults dark');
   assert.equal(api.globalThemeLabel(), 'Dark');
@@ -1800,7 +1845,7 @@ function makeFileTree(paths) {
   assert.equal(api.terminalThemeForGlobalTheme('light').background, '#11151d', 'light app theme keeps terminals dark by default');
   api.setTerminalThemeModeForTest('light');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'terminal light theme is explicit opt-in');
-  assert.equal(api.terminalThemeForGlobalTheme('dark').blue, '#064ea5');
+  assert.equal(api.terminalThemeForGlobalTheme('dark').blue, '#0451a5');
   api.setTerminalThemeModeForTest('follow-app');
   assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app maps to the resolved app theme');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#11151d');
@@ -1809,9 +1854,9 @@ function makeFileTree(paths) {
   api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
   assert.ok(api.bodyClassListForTest().contains('theme-light'), 'global light theme marks the body');
   assert.ok(api.bodyClassListForTest().contains('theme-resolved-light'), 'global light theme tracks the resolved mode');
-  assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Light', 'inherited editor theme follows global light');
+  assert.equal(api.activeEditorSchemeForTest().label, 'VS Code Light+', 'inherited editor theme follows global light');
   assert.equal(api.configuredEditorSchemeForMode(true), 'dark');
-  assert.equal(api.configuredEditorSchemeForMode(false), 'yolomux-light');
+  assert.equal(api.configuredEditorSchemeForMode(false), 'vscode-light-plus');
   api.setGlobalThemeModeForTest('dark');
   api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
   assert.equal(api.fileEditorThemeModeForTest(), 'inherit');
@@ -1836,13 +1881,13 @@ function makeFileTree(paths) {
   api.cycleEditorThemeMode();
   assert.equal(api.fileEditorThemeModeForTest(), 'inherit', 'theme toggle clears an explicit editor override back to global inheritance');
   api.cycleEditorThemeMode();
-  assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'theme toggle uses the selected YOLOmux light scheme from inherited dark mode');
+  assert.equal(api.fileEditorThemeModeForTest(), 'vscode-light-plus', 'theme toggle uses the selected VS Code Light+ scheme from inherited dark mode');
   api.setFileEditorThemeMode('light');
-  assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'legacy light storage value maps to YOLOmux Light');
-  assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'YOLOmux Light uses a bright white editor background');
-  assert.equal(api.activeEditorSchemeForTest().previewBg, '#ffffff', 'YOLOmux Light preview background is bright white');
-  assert.equal(api.activeEditorSchemeForTest().syntax.heading, '#0f3d22', 'YOLOmux Light markdown headings stay dark on white');
-  assert.equal(api.activeEditorSchemeForTest().syntax.headingBg, '#ffffff', 'YOLOmux Light heading background stays white');
+  assert.equal(api.fileEditorThemeModeForTest(), 'vscode-light-plus', 'legacy light storage value maps to VS Code Light+');
+  assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'VS Code Light+ uses a bright white editor background');
+  assert.equal(api.activeEditorSchemeForTest().previewBg, '#ffffff', 'VS Code Light+ preview background is bright white');
+  assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#008000', 'VS Code Light+ uses green comments');
+  assert.equal(api.activeEditorSchemeForTest().syntax.control, '#af00db', 'VS Code Light+ uses purple control keywords');
   api.setFileEditorCursorStyleForTest('block');
   api.applyEditorCursorStyle();
   assert.ok(api.bodyClassListForTest().contains('editor-cursor-block'), 'block cursor style marks the body');
@@ -2168,6 +2213,11 @@ function makeFileTree(paths) {
   api.setTranscriptInfoForTest('1', {project: {git: {root: '/repo/workspace'}}, selected_pane: {current_path: '/repo/workspace/src'}});
   api.setFocusedPanelItem('1');
   assert.equal(api.fileQuickOpenRootForSearch(), '/repo/workspace', 'file quick-open searches the workspace root when tmux is inside a repo');
+  api.setFileExplorerIndexedDirsForTest(['/repo/tools', '/repo/tools/src', '/repo/other']);
+  assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools'), true, 'Finder indexed directories are tracked by exact path');
+  assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools/src'), true, 'Finder keeps explicit nested index marks for the tree UI');
+  assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/repo/workspace')), ['/repo/workspace', '/repo/tools', '/repo/other'], 'file quick-open adds indexed Finder directories and compacts nested search roots');
+  assert.equal(api.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 indexed', 'file quick-open placeholder summarizes indexed search scope');
   assert.equal(api.tabMenuItems().some(item => item.type === 'search'), false, 'Tabs menu does not include its own search input');
   api.setTabsMenuSearchTextForTest('xy');
   assert.equal(api.tabSearchScore('1', 'xy') < 0, true, 'tab search uses fuzzy score and rejects non-matches');
@@ -2900,6 +2950,16 @@ function makeFileTree(paths) {
       {split: 'column', pct: 50, children: [{slot: 'slot2'}, {slot: 'slot1'}]},
     ],
   });
+
+  api.setLayoutSlotsForTest(dockedBoundarySlots);
+  api.setLayoutColumnRectsForTest({
+    left: {left: 0, top: 0, right: 240, bottom: 800, width: 240, height: 800},
+    slot1: {left: 240, top: 0, right: 1200, bottom: 800, width: 960, height: 800},
+  });
+  api.showDropPreview({boundary: 'root', zone: 'bottom', targetSlot: 'slot1', previewNode: api.gridForTest(), targetRect: {left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800}});
+  assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-left'), '246px', 'bottom full-span preview starts after the docked Finder');
+  assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-width'), '948px', 'bottom full-span preview spans only the non-Finder content');
+  api.clearDropPreview();
 
   const dockedBoundaryMoveOnlyContent = api.emptyLayoutSlots();
   dockedBoundaryMoveOnlyContent[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);

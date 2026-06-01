@@ -1217,9 +1217,26 @@ function terminalIsVisible(session, container) {
 }
 
 function scheduleFit(session) {
+  const item = terminals.get(session);
+  if (item) {
+    if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
+    if (item.fitTimer) clearTimeout(item.fitTimer);
+    if (item.fitFinalTimer) clearTimeout(item.fitFinalTimer);
+    item.fitFrame = requestAnimationFrame(() => {
+      item.fitFrame = 0;
+      fitTerminal(session);
+    });
+    item.fitTimer = setTimeout(() => {
+      item.fitTimer = 0;
+      fitTerminal(session);
+    }, 80);
+    item.fitFinalTimer = setTimeout(() => {
+      item.fitFinalTimer = 0;
+      fitTerminal(session);
+    }, 250);
+    return;
+  }
   requestAnimationFrame(() => fitTerminal(session));
-  setTimeout(() => fitTerminal(session), 80);
-  setTimeout(() => fitTerminal(session), 250);
 }
 
 function observeTerminalResize(session, container) {
@@ -1552,6 +1569,31 @@ function applyGutterDropPreviewGeometry(node, intent) {
   }
 }
 
+function layoutNodeScreenRect(layoutNode) {
+  const rects = layoutLeafSlots(layoutNode)
+    .map(slot => layoutColumnNode(slot)?.getBoundingClientRect?.())
+    .filter(rect => rect && rect.width > 0 && rect.height > 0);
+  if (!rects.length) return null;
+  const left = Math.min(...rects.map(rect => rect.left));
+  const top = Math.min(...rects.map(rect => rect.top));
+  const right = Math.max(...rects.map(rect => rect.right));
+  const bottom = Math.max(...rects.map(rect => rect.bottom));
+  return {left, top, right, bottom, width: right - left, height: bottom - top};
+}
+
+function applyDockedFileExplorerBoundaryPreviewGeometry(node, intent) {
+  if (intent?.boundary !== 'root' || node !== grid) return;
+  if (intent.zone !== 'top' && intent.zone !== 'bottom') return;
+  const root = layoutSlots?.[layoutTreeKey];
+  const docked = dockedFileExplorerRootSplit(root, layoutSlots);
+  if (!docked) return;
+  const gridRect = grid.getBoundingClientRect();
+  const contentRect = layoutNodeScreenRect(root?.children?.[docked.contentIndex]);
+  if (!gridRect || !contentRect) return;
+  node.style.setProperty('--drop-preview-left', `${Math.round(contentRect.left - gridRect.left + 6)}px`);
+  node.style.setProperty('--drop-preview-width', `${Math.round(Math.max(0, contentRect.width - 12))}px`);
+}
+
 function showDropPreview(intent) {
   clearDropPreview();
   const node = intent?.boundary ? grid : intent?.previewNode;
@@ -1567,6 +1609,7 @@ function showDropPreview(intent) {
         ? 'take over'
         : zone;
   applyGutterDropPreviewGeometry(node, intent);
+  applyDockedFileExplorerBoundaryPreviewGeometry(node, intent);
 }
 
 function dropSessionAtEvent(event) {

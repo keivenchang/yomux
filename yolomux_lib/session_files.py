@@ -225,13 +225,10 @@ def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = 
                 continue
             status = status_text[0]
             if status in {"R", "C"}:
-                old_path = parts[index] if index < len(parts) else ""
                 new_path = parts[index + 1] if index + 1 < len(parts) else ""
                 index += 2
-                if status == "R" and old_path:
-                    statuses[old_path] = "D"
                 if new_path:
-                    statuses[new_path] = "A"
+                    statuses[new_path] = status
                 continue
             rel_path = parts[index] if index < len(parts) else ""
             index += 1
@@ -278,9 +275,10 @@ def git_numstat(repo: Path, base: str | None = None, from_ref: str | None = None
         if parts_head[2]:
             rel_path = parts_head[2]
         else:
-            index += 1
-            rel_path = parts[index] if index < len(parts) else ""
-            index += 1
+            old_path = parts[index] if index < len(parts) else ""
+            new_path = parts[index + 1] if index + 1 < len(parts) else ""
+            index += 2
+            rel_path = new_path or old_path
         if not rel_path:
             continue
         counts[rel_path] = {

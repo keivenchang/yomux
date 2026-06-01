@@ -34,7 +34,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["editor_font_size"] == 28
     assert settings["appearance"]["editor_color_scheme"] == "dark"
     assert settings["appearance"]["editor_dark_color_scheme"] == "dark"
-    assert settings["appearance"]["editor_light_color_scheme"] == "yolomux-light"
+    assert settings["appearance"]["editor_light_color_scheme"] == "vscode-light-plus"
     assert settings["appearance"]["editor_cursor_style"] == "line"
     assert settings["appearance"]["file_explorer_font_size"] == 8
     assert settings["appearance"]["tab_width"] == 120

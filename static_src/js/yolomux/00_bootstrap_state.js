@@ -44,6 +44,7 @@ const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
+const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
@@ -55,7 +56,7 @@ const editorViewModes = new Set(['edit', 'preview', 'split', 'diff']);
 const defaultGlobalTheme = 'dark';
 const defaultTerminalTheme = 'dark';
 const defaultEditorScheme = 'dark';
-const defaultLightEditorScheme = 'yolomux-light';
+const defaultLightEditorScheme = 'vscode-light-plus';
 const editorThemeInheritMode = 'inherit';
 const TERMINAL_THEMES = {
   dark: {
@@ -87,21 +88,21 @@ const TERMINAL_THEMES = {
     cursor: '#0f172a',
     cursorAccent: '#ffffff',
     selectionBackground: '#cfe3ff',
-    black: '#17202c',
-    red: '#b91c1c',
-    green: '#2f7d20',
-    yellow: '#9a6700',
-    blue: '#064ea5',
-    magenta: '#7c3aed',
-    cyan: '#0e7490',
-    white: '#d8dee8',
-    brightBlack: '#5b6573',
-    brightRed: '#dc2626',
-    brightGreen: '#3f8f2d',
-    brightYellow: '#b7791f',
-    brightBlue: '#1d4ed8',
-    brightMagenta: '#9333ea',
-    brightCyan: '#0891b2',
+    black: '#1f2328',
+    red: '#a31515',
+    green: '#008000',
+    yellow: '#795e26',
+    blue: '#0451a5',
+    magenta: '#af00db',
+    cyan: '#267f99',
+    white: '#e5e7eb',
+    brightBlack: '#57606a',
+    brightRed: '#c42b1c',
+    brightGreen: '#16825d',
+    brightYellow: '#9a6700',
+    brightBlue: '#0969da',
+    brightMagenta: '#8250df',
+    brightCyan: '#0e7490',
     brightWhite: '#ffffff',
   },
 };
@@ -164,9 +165,9 @@ const EDITOR_SCHEMES = {
   },
   'vscode-light-plus': {
     id: 'vscode-light-plus', label: 'VS Code Light+', dark: false,
-    bg: '#ffffff', fg: '#000000', cursor: '#000000', selection: '#add6ff', activeLine: '#f0f0f0',
-    gutterBg: '#ffffff', lineNo: '#237893', panel: '#f3f3f3', panel2: '#e9e9e9', line: '#d4d4d4', previewBg: '#fff6df',
-    syntax: {comment: '#008000', keyword: '#0000ff', string: '#a31515', number: '#098658', function: '#795e26', type: '#267f99', variable: '#001080', tag: '#800000', heading: '#800000', link: '#0451a5', inlineCode: '#800000', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#e0b45f', atom: '#0000ff', property: '#001080', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
+    bg: '#ffffff', fg: '#1f1f1f', cursor: '#000000', selection: '#add6ff', activeLine: '#f5f5f5',
+    gutterBg: '#ffffff', lineNo: '#6e7681', panel: '#f3f3f3', panel2: '#e9e9e9', line: '#d4d4d4', previewBg: '#ffffff',
+    syntax: {comment: '#008000', keyword: '#0000ff', control: '#af00db', string: '#a31515', number: '#098658', function: '#795e26', type: '#267f99', variable: '#1f1f1f', tag: '#800000', heading: '#800000', link: '#0451a5', inlineCode: '#800000', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#e0b45f', atom: '#0000ff', property: '#001080', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
     diff: {addFg: '#098658', removeFg: '#a31515'},
   },
   'one-light': {
@@ -212,6 +213,7 @@ const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
 const commandPaletteRecentKeyLimit = 100;
+const notificationLastSentLimit = 512;
 const pendingFileEditorFocus = new Set();
 const fileEditorViewState = new Map();  // layout item -> CodeMirror scroll/selection state
 let activeFile = null;
@@ -264,11 +266,13 @@ let sessionFilesPayloadSignature = '';
 let fileExplorerSessionFilesPayloadSignature = '';
 let sessionFilesLoading = false;
 let fileExplorerSessionFilesLoading = false;
+let sessionFilesRequestId = 0;
 let fileExplorerSessionFilesRequestId = 0;
 let sessionFilesSortMode = 'mtime';
 let sessionFilesSelectedSession = '';
 let fileExplorerTreeShowDates = readStoredFileExplorerTreeShowDates();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
+let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
 let fileExplorerChangesDisplayMode = 'compact';
@@ -638,6 +642,7 @@ let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
+let activitySummaryRequestId = 0;
 let yoagentMessages = [];
 let yoagentBusy = false;
 let yoagentError = '';

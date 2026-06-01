@@ -4,6 +4,8 @@ import json
 import os
 import re
 import shlex
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -13,9 +15,40 @@ from .common import AgentInfo
 from .common import PaneInfo
 from .common import ProcessInfo
 from .common import SessionInfo
+from .common import _CACHE_MISS
 from .common import tail_file_lines
 from .tmux_utils import run_cmd
 from .tmux_utils import tmux
+
+
+TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
+_TRANSCRIPT_LOOKUP_CACHE_LOCK = threading.Lock()
+_TRANSCRIPT_LOOKUP_CACHE: dict[tuple[str, str, str], tuple[float, Path | None]] = {}
+
+
+def transcript_lookup_cache_key(kind: str, root: Path, needle: str) -> tuple[str, str, str]:
+    return kind, str(root.expanduser().resolve(strict=False)), needle
+
+
+def cached_transcript_lookup(kind: str, root: Path, needle: str) -> Path | None | object:
+    key = transcript_lookup_cache_key(kind, root, needle)
+    now = time.monotonic()
+    with _TRANSCRIPT_LOOKUP_CACHE_LOCK:
+        cached = _TRANSCRIPT_LOOKUP_CACHE.get(key)
+        if cached is None:
+            return _CACHE_MISS
+        expires_at, path = cached
+        if expires_at <= now:
+            _TRANSCRIPT_LOOKUP_CACHE.pop(key, None)
+            return _CACHE_MISS
+        return path
+
+
+def set_cached_transcript_lookup(kind: str, root: Path, needle: str, path: Path | None) -> Path | None:
+    key = transcript_lookup_cache_key(kind, root, needle)
+    with _TRANSCRIPT_LOOKUP_CACHE_LOCK:
+        _TRANSCRIPT_LOOKUP_CACHE[key] = (time.monotonic() + TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS, path)
+    return path
 
 
 def list_tmux_panes() -> tuple[list[PaneInfo], str | None]:
@@ -186,9 +219,12 @@ def classify_agent(command: str) -> str | None:
 def find_transcript_by_session_id(base_dir: Path, session_id: str) -> Path | None:
     if not base_dir.exists():
         return None
+    cached = cached_transcript_lookup("claude-session-id", base_dir, session_id)
+    if cached is not _CACHE_MISS:
+        return cached
     for path in base_dir.glob(f"**/{session_id}.jsonl"):
-        return path
-    return None
+        return set_cached_transcript_lookup("claude-session-id", base_dir, session_id, path)
+    return set_cached_transcript_lookup("claude-session-id", base_dir, session_id, None)
 
 
 def read_claude_agent(session: str, pane: PaneInfo, process: ProcessInfo) -> AgentInfo:
@@ -278,12 +314,15 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
     root = root or Path.home() / ".codex" / "sessions"
     if not root.exists():
         return None
-    files = sorted(root.glob("**/rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not cwd:
         return None
+    cached = cached_transcript_lookup("codex-cwd", root, cwd)
+    if cached is not _CACHE_MISS:
+        return cached
+    files = sorted(root.glob("**/rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
     for path in files[:80]:
         if codex_transcript_header_cwd(path) == cwd:
-            return path
+            return set_cached_transcript_lookup("codex-cwd", root, cwd, path)
     needle = json.dumps(cwd)
     for path in files[:80]:
         try:
@@ -291,8 +330,8 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
         except OSError:
             continue
         if needle in tail:
-            return path
-    return None
+            return set_cached_transcript_lookup("codex-cwd", root, cwd, path)
+    return set_cached_transcript_lookup("codex-cwd", root, cwd, None)
 
 
 def path_is_under(path: Path, root: Path) -> bool:

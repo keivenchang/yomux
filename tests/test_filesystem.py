@@ -75,6 +75,60 @@ def test_filesystem_blocks_secret_paths(monkeypatch, tmp_path):
     assert info.value.status == 403
 
 
+def test_filesystem_blocks_symlink_escape_from_allowed_root(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    target = outside / "secret.txt"
+    target.write_text("secret\n", encoding="utf-8")
+    link = allowed / "link.txt"
+    link.symlink_to(target)
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
+
+    with pytest.raises(FilesystemError) as info:
+        filesystem.read_file(str(link))
+
+    assert info.value.status == 403
+
+
+def test_filesystem_blocks_exact_secret_files(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    config_dir = home / ".config" / "yolomux"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(filesystem, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(filesystem, "AUTH_CONFIG_PATH", config_dir / "auth.yaml")
+    monkeypatch.setattr(filesystem, "AUTH_COOKIE_SECRET_PATH", config_dir / "auth-cookie-secret")
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(home))
+    secret_paths = [
+        config_dir / "auth.yaml",
+        config_dir / "auth-cookie-secret",
+        home / ".config" / "gitlab-token",
+        home / ".cache" / "huggingface" / "token",
+        home / ".docker" / "config.json",
+        home / ".ngc" / "config",
+    ]
+    for secret in secret_paths:
+        secret.parent.mkdir(parents=True, exist_ok=True)
+        secret.write_text("secret\n", encoding="utf-8")
+
+    for secret in secret_paths:
+        with pytest.raises(FilesystemError) as info:
+            filesystem.read_file(str(secret))
+        assert info.value.status == 403
+
+
+def test_read_raw_streams_image_with_mime_type(tmp_path):
+    image = tmp_path / "tiny.png"
+    data = b"\x89PNG\r\n\x1a\n"
+    image.write_bytes(data)
+
+    payload, mime = filesystem.read_raw(str(image))
+
+    assert payload == data
+    assert mime == "image/png"
+
+
 def test_delete_path_refuses_configured_root(monkeypatch, tmp_path):
     monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(tmp_path))
     with pytest.raises(FilesystemError) as info:
@@ -107,6 +161,17 @@ def test_list_directory_not_a_dir(tmp_path):
     with pytest.raises(FilesystemError) as info:
         filesystem.list_directory(str(file_path))
     assert info.value.status == 400
+
+
+def test_list_directory_sorts_from_entry_info_not_extra_stats():
+    source = Path("yolomux_lib/filesystem.py").read_text(encoding="utf-8")
+    start = source.index("def list_directory")
+    end = source.index("def _fuzzy_subsequence_match", start)
+    body = source[start:end]
+
+    assert "entries.sort" in body
+    assert "sorted(os.listdir" not in body
+    assert "lambda n" not in body
 
 
 def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp_path):

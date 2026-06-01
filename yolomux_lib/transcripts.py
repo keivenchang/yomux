@@ -11,6 +11,7 @@ from .common import SessionInfo
 from .common import TERMINAL_QUERY_RESPONSE_RE
 from .common import tail_file_lines
 from .common import truncate_text
+from .yolo_rules import hard_floor_decision
 
 
 def strip_terminal_query_responses(data: str) -> str:
@@ -275,7 +276,7 @@ def transcript_tool_approval_record(name: str, tool_input: Any, tool_id: str, ki
             "yes_selected": False,
             "selected_option": 0,
             "action": "option1",
-            "dangerous": command is not None and False,
+            "dangerous": transcript_tool_command_is_dangerous(command),
         }
     if normalized in TRANSCRIPT_FILE_TOOL_NAMES:
         file_path = transcript_tool_file_path(payload, tool_input)
@@ -302,6 +303,11 @@ def transcript_tool_approval_record(name: str, tool_input: Any, tool_id: str, ki
         "action": "option2",
         "dangerous": False,
     }
+
+def transcript_tool_command_is_dangerous(command: str | None) -> bool:
+    if command is None:
+        return False
+    return hard_floor_decision(command) is not None
 
 def transcript_tool_input_mapping(tool_input: Any) -> dict[str, Any]:
     if isinstance(tool_input, dict):

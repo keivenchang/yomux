@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import threading
@@ -12,6 +13,11 @@ from .common import CONTROL_SOCKET_DIR
 
 
 CONTROL_MAX_BYTES = 65536
+LOGGER = logging.getLogger(__name__)
+
+
+class ControlRequestError(Exception):
+    pass
 
 
 def control_socket_path(token: str | None = None, pid: int | None = None) -> Path:
@@ -117,8 +123,11 @@ class YolomuxControlServer:
             return
         try:
             response = self.handler(request)
-        except Exception as exc:
+        except ControlRequestError as exc:
             response = {"ok": False, "error": str(exc)}
+        except Exception:
+            LOGGER.exception("yolomux control handler failed")
+            response = {"ok": False, "error": "internal control handler error"}
         self.write_response(conn, response)
 
     def read_request(self, conn: socket.socket) -> dict[str, Any] | None:

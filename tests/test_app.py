@@ -19,7 +19,8 @@ def no_control_socket(monkeypatch):
 def test_auto_approve_status_refreshes_session_order(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["old"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["new"], None))
-    monkeypatch.setattr(webapp, "auto_approve_session_status", lambda session: {"target": session})
+    monkeypatch.setattr(webapp, "auto_approve_session_status", lambda session, **_kwargs: {"target": session})
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     try:
         payload, status = webapp.auto_approve_status()
     finally:
@@ -28,6 +29,62 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
     assert status == HTTPStatus.OK
     assert payload["session_order"] == ["new"]
     assert payload["sessions"] == {"new": {"target": "new"}}
+
+
+def test_auto_approve_roster_discovers_once_and_skips_pane_capture(monkeypatch):
+    info = SessionInfo(session="6", panes=[], selected_pane=None, agents=[])
+    calls = []
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["5", "6"], None))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: (calls.append(tuple(sessions)) or {"5": info, "6": info}, []))
+    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pane capture should not run for roster")))
+    monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
+    webapp = app_module.TmuxWebtermApp(["5", "6"])
+    try:
+        payload, status = webapp.auto_approve_status()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert calls == [("5", "6")]
+    assert payload["sessions"]["5"]["prompt"]["visible"] is False
+    assert payload["sessions"]["6"]["screen"] == {"key": "idle", "text": ""}
+
+
+def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["6"])
+    signature = {"main": "", "pr": "123", "status": "open", "ci": "pending"}
+    persist_calls = []
+    monkeypatch.setattr(app_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(webapp, "metadata_badge_signatures_for_session", lambda _payload: signature)
+    monkeypatch.setattr(webapp, "persist_metadata_badge_state_locked", lambda: persist_calls.append("persist"))
+    webapp.metadata_badge_signatures = {"6": dict(signature)}
+    webapp.metadata_badge_pulse_until = {"6": {"ci": 99.0}}
+    try:
+        payloads = {"6": {}}
+        webapp.apply_metadata_badge_pulses(payloads)
+    finally:
+        webapp.control_server.stop()
+
+    assert persist_calls == []
+    assert webapp.metadata_badge_pulse_until == {}
+    assert "metadata_badge_pulse_remaining_ms" not in payloads["6"]
+
+
+def test_metadata_badge_signature_change_persists(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["6"])
+    next_signature = {"main": "", "pr": "123", "status": "merged", "ci": "passing"}
+    persist_calls = []
+    monkeypatch.setattr(app_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(webapp, "metadata_badge_signatures_for_session", lambda _payload: next_signature)
+    monkeypatch.setattr(webapp, "persist_metadata_badge_state_locked", lambda: persist_calls.append("persist"))
+    webapp.metadata_badge_signatures = {"6": {"main": "", "pr": "123", "status": "open", "ci": "pending"}}
+    try:
+        webapp.apply_metadata_badge_pulses({"6": {}})
+    finally:
+        webapp.control_server.stop()
+
+    assert persist_calls == ["persist"]
+    assert webapp.metadata_badge_signatures == {"6": next_signature}
 
 
 def test_prompt_and_screen_status_uses_transcript_activity_when_visible_pane_is_idle(monkeypatch, tmp_path):
@@ -357,3 +414,5 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
     assert "--sandbox" in calls[0]
     assert calls[1][:4] == ["codex", "exec", "resume", "--json"]
     assert "codex-session" in calls[1]
+    assert calls[0][calls[0].index("--sandbox") + 1] == "read-only"
+    assert calls[1][calls[1].index("--sandbox") + 1] == "read-only"

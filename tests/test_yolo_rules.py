@@ -30,6 +30,9 @@ def test_command_match_is_argv_aware():
     assert action_for("bash -c 'rm -rf build'", rules) == "block"
     assert action_for('docker exec abc bash -c "rm -rf /workspace"', rules) == "block"
     assert action_for("kubectl exec pod -- rm -rf /workspace", rules) == "block"
+    assert action_for("kubectl exec -it -n test pod -- rm -rf /workspace", rules) == "block"
+    assert action_for("kubectl --namespace test exec pod -- rm -rf /workspace", rules) == "block"
+    assert action_for("kubectl exec --container app pod rm -rf /workspace", rules) == "block"
 
 
 def test_malformed_shell_quote_does_not_abort_rule_evaluation():
@@ -70,6 +73,7 @@ def test_hard_floor_blocks_unrelaxable_cases():
     assert yolo_rules.hard_floor_decision("rm -rf ~/")["action"] == "block"
     assert yolo_rules.hard_floor_decision("rm -rf /home")["action"] == "block"
     assert yolo_rules.hard_floor_decision("rm --recursive --force /usr")["action"] == "block"
+    assert yolo_rules.hard_floor_decision("kubectl exec -it -n test pod -- rm -rf /")["action"] == "block"
     assert yolo_rules.hard_floor_decision("dd if=/dev/zero of=/dev/sda")["action"] == "block"
     assert yolo_rules.hard_floor_decision("mkfs.ext4 /dev/sda1")["action"] == "block"
     assert yolo_rules.hard_floor_decision("echo foo > /dev/sda")["action"] == "block"
@@ -210,6 +214,45 @@ def test_non_bash_prompts_use_rules_and_hard_floor(monkeypatch):
     assert decision["action"] == "block"
     assert decision["rule_name"] == "tool delete text"
     assert yolo_rules.evaluate("rm -rf /", prompt_type="file")["source"] == "hard-floor"
+
+
+def test_dry_run_downgrades_active_rule_actions(monkeypatch):
+    rules = ruleset({
+        "default": "ask",
+        "rules": [
+            {"name": "allow git status", "type": "regex", "match": "^git status", "action": "approve", "risk": "read"},
+        ],
+    })
+    monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
+    monkeypatch.setattr(yolo_rules, "yolo_settings", lambda: {"dry_run": True, "rule_file_path": "/tmp/yolo-rules-test.yaml"})
+
+    decision = yolo_rules.evaluate("git status --short", agent="codex", session="6")
+
+    assert decision["action"] == "ask"
+    assert decision["would_action"] == "approve"
+    assert decision["dry_run"] is True
+    assert decision["agent"] == "codex"
+    assert decision["session"] == "6"
+
+
+def test_dangerously_yolo_bypasses_hard_floor(monkeypatch):
+    rules = ruleset({
+        "default": "approve",
+        "rules": [
+            {"name": "approve all", "type": "regex", "match": ".*", "action": "approve", "risk": "test"},
+        ],
+    })
+    monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
+    monkeypatch.setattr(yolo_rules, "yolo_settings", lambda: {"dry_run": False, "rule_file_path": "/tmp/yolo-rules-test.yaml"})
+
+    normal = yolo_rules.evaluate("rm -rf /", dangerously_yolo=False)
+    bypassed = yolo_rules.evaluate("rm -rf /", dangerously_yolo=True)
+
+    assert normal["action"] == "block"
+    assert normal["source"] == "hard-floor"
+    assert bypassed["action"] == "approve"
+    assert bypassed["rule_name"] == "approve all"
+    assert bypassed["source"] == "test"
 
 
 def test_rule_file_text_validation_reports_yaml_errors():

@@ -1,9 +1,16 @@
 import json
+from pathlib import Path
 
 from yolomux_lib import sessions
 
 
+def clear_transcript_lookup_cache():
+    with sessions._TRANSCRIPT_LOOKUP_CACHE_LOCK:
+        sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
+
+
 def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
+    clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
     transcript = root / "2026" / "05" / "rollout-header.jsonl"
     transcript.parent.mkdir(parents=True)
@@ -16,6 +23,7 @@ def test_find_recent_codex_transcript_matches_session_meta_header(tmp_path):
 
 
 def test_find_recent_codex_transcript_keeps_tail_fallback(tmp_path):
+    clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
     transcript = root / "2026" / "05" / "rollout-tail.jsonl"
     transcript.parent.mkdir(parents=True)
@@ -26,6 +34,7 @@ def test_find_recent_codex_transcript_keeps_tail_fallback(tmp_path):
 
 
 def test_find_recent_codex_transcript_refuses_global_newest_without_cwd(tmp_path):
+    clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
     transcript = root / "2026" / "05" / "rollout-newest.jsonl"
     transcript.parent.mkdir(parents=True)
@@ -36,7 +45,47 @@ def test_find_recent_codex_transcript_refuses_global_newest_without_cwd(tmp_path
     assert sessions.find_recent_codex_transcript("/repo/project", root=root) is None
 
 
+def test_find_recent_codex_transcript_caches_cwd_lookup(tmp_path, monkeypatch):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "codex" / "sessions"
+    transcript = root / "2026" / "05" / "rollout-header.jsonl"
+    transcript.parent.mkdir(parents=True)
+    cwd = "/repo/project"
+    transcript.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": cwd}}), encoding="utf-8")
+    calls = []
+    original_header = sessions.codex_transcript_header_cwd
+    monkeypatch.setattr(sessions, "codex_transcript_header_cwd", lambda path: calls.append(path) or original_header(path))
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) == transcript
+    assert sessions.find_recent_codex_transcript(cwd, root=root) == transcript
+
+    assert calls == [transcript]
+
+
+def test_find_transcript_by_session_id_caches_glob(tmp_path, monkeypatch):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "claude" / "projects"
+    transcript = root / "repo" / "session-123.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+    glob_calls = []
+    original_glob = Path.glob
+
+    def counted_glob(self, pattern):
+        if self == root:
+            glob_calls.append(pattern)
+        return original_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", counted_glob)
+
+    assert sessions.find_transcript_by_session_id(root, "session-123") == transcript
+    assert sessions.find_transcript_by_session_id(root, "session-123") == transcript
+
+    assert glob_calls == ["**/session-123.jsonl"]
+
+
 def test_codex_transcript_from_process_fd_prefers_open_rollout(tmp_path):
+    clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
     transcript = root / "2026" / "05" / "rollout-owned.jsonl"
     transcript.parent.mkdir(parents=True)
@@ -54,6 +103,7 @@ def test_codex_transcript_from_process_fd_prefers_open_rollout(tmp_path):
 
 
 def test_codex_transcript_from_process_fd_accepts_deleted_suffix(tmp_path, monkeypatch):
+    clear_transcript_lookup_cache()
     root = tmp_path / "codex" / "sessions"
     transcript = root / "2026" / "05" / "rollout-owned.jsonl"
     transcript.parent.mkdir(parents=True)

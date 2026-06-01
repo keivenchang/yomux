@@ -139,10 +139,12 @@ def test_git_status_parses_renames_and_tab_paths(tmp_path):
     git(repo, "mv", old_name, new_name)
 
     statuses, error = session_files.git_name_status(repo, "HEAD")
+    counts = session_files.git_numstat(repo, "HEAD")
 
     assert error == ""
-    assert statuses[old_name] == "D"
-    assert statuses[new_name] == "A"
+    assert old_name not in statuses
+    assert statuses[new_name] == "R"
+    assert counts[new_name] == {"added": 0, "removed": 0}
 
 
 def test_git_numstat_parses_paths_with_tabs(tmp_path):

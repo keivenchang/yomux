@@ -96,7 +96,7 @@ def install_state_store(monkeypatch, state):
     monkeypatch.setattr(app_module, "update_yolomux_state", update_state)
 
 
-def test_metadata_badge_pulse_survives_server_restart(monkeypatch):
+def test_metadata_badge_pulse_does_not_persist_across_server_restart(monkeypatch):
     state = {}
     now = [1000.0]
     install_state_store(monkeypatch, state)
@@ -113,13 +113,13 @@ def test_metadata_badge_pulse_survives_server_restart(monkeypatch):
     app.apply_metadata_badge_pulses(changed_payload)
     assert changed_payload["s"]["metadata_badge_pulse_remaining_ms"]["status"] == 20000
     assert state[METADATA_BADGE_SIGNATURES_STATE_KEY]["s"]["status"] == "merged"
-    assert state[METADATA_BADGE_PULSE_UNTIL_STATE_KEY]["s"]["status"] == 1020.0
+    assert state.get(METADATA_BADGE_PULSE_UNTIL_STATE_KEY, {}) == {}
 
     now[0] = 1005.0
     restarted_app = make_metadata_app()
     restarted_payload = session_payload(merged_pr())
     restarted_app.apply_metadata_badge_pulses(restarted_payload)
-    assert restarted_payload["s"]["metadata_badge_pulse_remaining_ms"]["status"] == 15000
+    assert "metadata_badge_pulse_remaining_ms" not in restarted_payload["s"]
 
 
 def test_metadata_badge_pulse_starts_when_restarted_server_detects_change(monkeypatch):
@@ -137,7 +137,7 @@ def test_metadata_badge_pulse_starts_when_restarted_server_detects_change(monkey
     restarted_app.apply_metadata_badge_pulses(changed_payload)
 
     assert changed_payload["s"]["metadata_badge_pulse_remaining_ms"]["status"] == 20000
-    assert state[METADATA_BADGE_PULSE_UNTIL_STATE_KEY]["s"]["status"] == 2120.0
+    assert state.get(METADATA_BADGE_PULSE_UNTIL_STATE_KEY, {}) == {}
 
 
 def test_metadata_badge_pulse_ignores_initial_github_enrichment(monkeypatch):
@@ -214,8 +214,7 @@ def test_metadata_badge_pulse_does_not_rearm_terminal_churn(monkeypatch):
 
     assert merged_payload["s"]["metadata_badge_pulse_remaining_ms"]["status"] == 20000
     assert merged_payload["s"]["metadata_badge_pulse_remaining_ms"]["ci"] == 20000
-    assert state[METADATA_BADGE_PULSE_UNTIL_STATE_KEY]["s"]["status"] == 6020.0
-    assert state[METADATA_BADGE_PULSE_UNTIL_STATE_KEY]["s"]["ci"] == 6020.0
+    assert state.get(METADATA_BADGE_PULSE_UNTIL_STATE_KEY, {}) == {}
 
     now[0] = 6010.0
     churned = merged_pr()
@@ -226,8 +225,7 @@ def test_metadata_badge_pulse_does_not_rearm_terminal_churn(monkeypatch):
 
     assert churned_payload["s"]["metadata_badge_pulse_remaining_ms"]["status"] == 10000
     assert churned_payload["s"]["metadata_badge_pulse_remaining_ms"]["ci"] == 10000
-    assert state[METADATA_BADGE_PULSE_UNTIL_STATE_KEY]["s"]["status"] == 6020.0
-    assert state[METADATA_BADGE_PULSE_UNTIL_STATE_KEY]["s"]["ci"] == 6020.0
+    assert state.get(METADATA_BADGE_PULSE_UNTIL_STATE_KEY, {}) == {}
 
 
 def test_metadata_badge_ci_pulses_only_when_ci_enters_terminal_state(monkeypatch):
@@ -249,4 +247,4 @@ def test_metadata_badge_ci_pulses_only_when_ci_enters_terminal_state(monkeypatch
     app.apply_metadata_badge_pulses(passing_churn_payload)
 
     assert passing_churn_payload["s"]["metadata_badge_pulse_remaining_ms"]["ci"] == 10000
-    assert state[METADATA_BADGE_PULSE_UNTIL_STATE_KEY]["s"]["ci"] == 7020.0
+    assert state.get(METADATA_BADGE_PULSE_UNTIL_STATE_KEY, {}) == {}

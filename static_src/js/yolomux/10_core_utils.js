@@ -139,6 +139,32 @@ function writeStoredFileExplorerTreeSortMode(value) {
   } catch (_) {}
 }
 
+function normalizeStoredFileExplorerIndexedDir(path) {
+  const normalized = normalizeDirectoryPath(expandUserPath(path));
+  return normalized.startsWith('/') ? normalized : '';
+}
+
+function readStoredFileExplorerIndexedDirs() {
+  try {
+    const raw = window.localStorage?.getItem(fileExplorerIndexedDirsStorageKey);
+    const parsed = raw ? JSON.parse(raw) : [];
+    const paths = Array.isArray(parsed) ? parsed : [];
+    return new Set(paths.map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function writeStoredFileExplorerIndexedDirs() {
+  try {
+    const paths = Array.from(fileExplorerIndexedDirs || [])
+      .map(normalizeStoredFileExplorerIndexedDir)
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right));
+    window.localStorage?.setItem(fileExplorerIndexedDirsStorageKey, JSON.stringify(Array.from(new Set(paths))));
+  } catch (_) {}
+}
+
 function nestedSetting(source, path, fallback) {
   let current = source;
   for (const part of String(path || '').split('.')) {

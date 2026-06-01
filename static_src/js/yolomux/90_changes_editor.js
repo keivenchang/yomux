@@ -142,8 +142,8 @@ function setDiffRefs(fromRef, toRef, options = {}) {
     state.diffUnavailable = false;
     state.diffError = '';
   }
-  renderChangesPanels();
-  renderFileExplorerChangesPanels();
+  renderChangesPanels({force: true});
+  renderFileExplorerChangesPanels({force: true});
   fetchSessionFiles({session: sessionFilesTargetSession(), force: true});
   fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   for (const path of openFiles.keys()) renderOpenFilePath(path);
@@ -252,12 +252,25 @@ function setSessionFilesLoadingForDestination(destination, loading) {
   else sessionFilesLoading = loading;
 }
 
+function sessionFilesRenderOptions(options = {}) {
+  return options.force === true || options.silent !== true ? {force: true} : {};
+}
+
+function renderSessionFilesDestination(destination, options = {}) {
+  if (destination === 'finder') renderFileExplorerChangesPanels(options);
+  else renderChangesPanels(options);
+}
+
 async function fetchSessionFiles(options = {}) {
   const destination = options.destination === 'finder' ? 'finder' : 'changes';
   const forceRefresh = options.force === true;
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const requestId = destination === 'finder' ? ++fileExplorerSessionFilesRequestId : 0;
-  const requestIsCurrent = () => destination !== 'finder' || requestId === fileExplorerSessionFilesRequestId;
+  const requestId = destination === 'finder' ? ++fileExplorerSessionFilesRequestId : ++sessionFilesRequestId;
+  const requestIsCurrent = () => (
+    destination === 'finder'
+      ? requestId === fileExplorerSessionFilesRequestId
+      : requestId === sessionFilesRequestId
+  );
   const session = options.session || (destination === 'finder' ? fileExplorerSessionFilesTargetSession() : sessionFilesTargetSession());
   let shouldRender = options.silent !== true;
   if (!session) {
@@ -266,18 +279,14 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, emptyPayload);
     setSessionFilesSignatureForDestination(destination, signature);
-    if (shouldRender) {
-      if (destination === 'finder') renderFileExplorerChangesPanels();
-      else renderChangesPanels();
-    }
+    if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
   if (destination !== 'finder') sessionFilesSelectedSession = session;
   setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = 'loading changed files...';
   if (!options.silent) {
-    if (destination === 'finder') renderFileExplorerChangesPanels();
-    else renderChangesPanels();
+    renderSessionFilesDestination(destination, {force: true});
     renderPaneTabStrips();
   }
   try {
@@ -312,8 +321,7 @@ async function fetchSessionFiles(options = {}) {
   } finally {
     if (requestIsCurrent()) setSessionFilesLoadingForDestination(destination, false);
     if (requestIsCurrent() && shouldRender) {
-      if (destination === 'finder') renderFileExplorerChangesPanels();
-      else renderChangesPanels();
+      renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
       if (destination === 'finder') updateFileTreeGitStatusRows();
       renderPaneTabStrips();
       renderSessionButtons();
@@ -653,12 +661,20 @@ function createChangesPanel() {
   return panel;
 }
 
-function renderChangesPanels() {
+function activeChangesControl(panel) {
+  const active = document.activeElement;
+  if (!active || !panel?.contains(active)) return null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-session-files-display-toggle], [data-uploaded-files-toggle], [data-changes-folder-toggle]') || null;
+}
+
+function renderChangesPanels(options = {}) {
   for (const panel of document.querySelectorAll('.changes-panel')) {
     const body = panel.querySelector('.changes-body');
     const meta = panel.querySelector(`#meta-${cssEscape(changesItemId)}`);
     if (meta) meta.textContent = changesTabDetail();
-    if (body) replaceHtmlPreservingScroll(body, `<div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>${changesPanelHtml()}`);
+    if (body && (options.force === true || !activeChangesControl(panel))) {
+      replaceHtmlPreservingScroll(body, `<div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>${changesPanelHtml()}`);
+    }
     bindChangesPanel(panel);
   }
 }
@@ -700,8 +716,8 @@ function bindChangesPanel(panel) {
     const sortSelect = event.target.closest('[data-session-files-sort]');
     if (sortSelect && panel.contains(sortSelect)) {
       sessionFilesSortMode = sortSelect.value === 'name' ? 'name' : 'mtime';
-      renderChangesPanels();
-      renderFileExplorerChangesPanels();
+      renderChangesPanels({force: true});
+      renderFileExplorerChangesPanels({force: true});
       return;
     }
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -731,8 +747,8 @@ function bindChangesPanel(panel) {
       event.preventDefault();
       uploadedFilesCollapsed = !uploadedFilesCollapsed;
       writeStoredUploadedFilesCollapsed();
-      renderChangesPanels();
-      renderFileExplorerChangesPanels();
+      renderChangesPanels({force: true});
+      renderFileExplorerChangesPanels({force: true});
       return;
     }
     const folderToggle = event.target.closest('[data-changes-folder-toggle]');
@@ -742,15 +758,15 @@ function bindChangesPanel(panel) {
       if (changesFolderCollapsed.has(key)) changesFolderCollapsed.delete(key);
       else changesFolderCollapsed.add(key);
       writeStoredChangesFolderCollapsed();
-      renderChangesPanels();
-      renderFileExplorerChangesPanels();
+      renderChangesPanels({force: true});
+      renderFileExplorerChangesPanels({force: true});
       return;
     }
     const displayToggle = event.target.closest('[data-session-files-display-toggle]');
     if (displayToggle && panel.contains(displayToggle)) {
       event.preventDefault();
       fileExplorerChangesDisplayMode = fileExplorerChangesDisplayMode === 'compact' ? 'detailed' : 'compact';
-      renderFileExplorerChangesPanels();
+      renderFileExplorerChangesPanels({force: true});
       return;
     }
     const refresh = event.target.closest('[data-session-files-refresh]');
@@ -1071,16 +1087,18 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   updateFileExplorerCurrentFileHighlight();
 }
 
-function renderFileExplorerChangesPanel(panel) {
+function renderFileExplorerChangesPanel(panel, options = {}) {
   const changes = panel?.querySelector?.('[data-file-explorer-changes]');
   if (!changes) return;
-  replaceHtmlPreservingScroll(changes, fileExplorerChangesPanelHtml());
+  if (options.force === true || !activeChangesControl(panel)) {
+    replaceHtmlPreservingScroll(changes, fileExplorerChangesPanelHtml());
+  }
   bindChangesPanel(panel);
 }
 
-function renderFileExplorerChangesPanels() {
+function renderFileExplorerChangesPanels(options = {}) {
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
-    renderFileExplorerChangesPanel(panel);
+    renderFileExplorerChangesPanel(panel, options);
   }
 }
 
@@ -1874,7 +1892,6 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           highlightChanges: true,
           gutter: true,
           mergeControls: !readOnlyMode && diffEditsAllowed,
-          allowInlineDiffs: true,
           collapseUnchanged: {margin: 3, minSize: 8},
         }),
         ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path) : codeMirrorReadOnlyExtensions(api, path, panel)),
@@ -2119,7 +2136,7 @@ function renderFileEditorPanel(panel, item) {
 function loadFileEditorState(path, panel, item) {
   const state = openFiles.get(path);
   if (!state || state.loadingPromise) return;
-  state.loadingPromise = (async () => {
+  const loadingPromise = (async () => {
     const ext = fileExtensionOf(basenameOf(path));
     if (IMAGE_EXTENSIONS.has(ext)) {
       const fetched = await fetchFileEntryStatus(path);
@@ -2170,7 +2187,11 @@ function loadFileEditorState(path, panel, item) {
     renderFileEditorPanel(panel, item);
     renderSessionButtons();
     renderPaneTabStrips();
-  })();
+  })().finally(() => {
+    const current = openFiles.get(path);
+    if (current?.loadingPromise === loadingPromise) delete current.loadingPromise;
+  });
+  state.loadingPromise = loadingPromise;
 }
 
 function updateFileEditorPanelChrome(panel, path) {
@@ -2241,14 +2262,41 @@ function setFileEditorPanelStatus(panel, message, level) {
 }
 
 function markdownTextWithSourceAnchors(text) {
-  let inFence = false;
-  return String(text || '').split('\n').map((line, index) => {
-    const fence = /^\s*(```|~~~)/.test(line);
-    const includeAnchor = !inFence && !fence && line.trim();
-    const anchored = includeAnchor ? `${line}<span class="markdown-source-anchor" data-source-line="${index + 1}"></span>` : line;
-    if (fence) inFence = !inFence;
-    return anchored;
-  }).join('\n');
+  return String(text || '');
+}
+
+function applyMarkdownSourceLines(container, source) {
+  const lines = String(source || '').split('\n');
+  let searchFrom = 0;
+  const blocks = Array.from(container.querySelectorAll('h1,h2,h3,h4,h5,h6,p,blockquote,pre,ul,ol,table,hr'));
+  for (const block of blocks) {
+    const text = String(block.textContent || '').trim();
+    let lineIndex = -1;
+    for (let index = searchFrom; index < lines.length; index += 1) {
+      const trimmed = lines[index].trim();
+      if (!trimmed) continue;
+      if (block.tagName === 'HR' && /^-{3,}$/.test(trimmed)) {
+        lineIndex = index;
+        break;
+      }
+      if (block.tagName === 'TABLE' && trimmed.startsWith('|')) {
+        lineIndex = index;
+        break;
+      }
+      if (text && trimmed.includes(text.slice(0, Math.min(text.length, 40)))) {
+        lineIndex = index;
+        break;
+      }
+    }
+    if (lineIndex >= 0) {
+      block.dataset.sourceLine = String(lineIndex + 1);
+      const anchor = document.createElement('span');
+      anchor.className = 'markdown-source-anchor';
+      anchor.dataset.sourceLine = String(lineIndex + 1);
+      block.appendChild(anchor);
+      searchFrom = lineIndex + 1;
+    }
+  }
 }
 
 const MARKDOWN_PREVIEW_BLOCKED_TAGS = new Set([
@@ -2354,6 +2402,7 @@ function renderMarkdownPreviewInto(container, text) {
   }
   const html = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
   container.replaceChildren(sanitizeMarkdownPreviewHtml(html));
+  applyMarkdownSourceLines(container, text);
   if (typeof window.hljs !== 'undefined') {
     container.querySelectorAll('pre code').forEach(block => {
       try { window.hljs.highlightElement(block); } catch (_) {}

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import shutil
 
 import pytest
@@ -8,6 +9,7 @@ pytest.importorskip("selenium")
 webdriver = pytest.importorskip("selenium.webdriver")
 ActionChains = pytest.importorskip("selenium.webdriver.common.action_chains").ActionChains
 Options = pytest.importorskip("selenium.webdriver.chrome.options").Options
+WebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWait
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -432,6 +434,188 @@ def split_seam_fixture_html():
     """
 
 
+def live_runtime_boot_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
+    bootstrap = {
+        "sessions": ["1"],
+        "availableAgents": ["term"],
+        "accessRole": "admin",
+        "homePath": "/home/test",
+        "repoRoot": "/home/test/yolomux.dev",
+        "maxSessionTabs": 9,
+        "serverHostname": "localhost",
+        "version": "test",
+        "versionCommitTime": "test",
+        "settingsPayload": {
+            "settings": {},
+            "defaults": {},
+            "mtime_ns": 0,
+        },
+        "yoloRulesPayload": {
+            "path": "/home/test/.config/yolomux/yolo-rules.yaml",
+            "source": "default",
+            "rules": [],
+            "errors": [],
+        },
+        "codeMirrorAssetUrl": (REPO_ROOT / "static" / "codemirror.js").as_uri(),
+    }
+    stub_script = """
+      window.__bootErrors = [];
+      window.__bootRejections = [];
+      window.__bootFetches = [];
+      window.__bootSockets = [];
+      window.__terminalOpened = 0;
+      window.addEventListener('error', event => window.__bootErrors.push(event.message || String(event.error || event)));
+      window.addEventListener('unhandledrejection', event => window.__bootRejections.push(String(event.reason || event)));
+      window.marked = {parse(text) { return String(text || ''); }};
+      window.hljs = {highlightAuto(text) { return {value: String(text || '')}; }, highlightElement() {}};
+      window.Notification = {permission: 'denied', requestPermission: async () => 'denied'};
+      class FakeTerminal {
+        constructor(options = {}) {
+          this.cols = options.cols || 80;
+          this.rows = options.rows || 24;
+          this.options = options;
+          this.buffer = {active: {length: 0, getLine() { return null; }}};
+        }
+        open(container) {
+          this.element = document.createElement('div');
+          this.element.className = 'xterm';
+          this.element.textContent = 'fake terminal';
+          container.appendChild(this.element);
+          window.__terminalOpened += 1;
+        }
+        resize(cols, rows) { this.cols = cols; this.rows = rows; }
+        refresh() {}
+        write(data) { this.lastWrite = data; }
+        onData(callback) { this._onData = callback; return {dispose() {}}; }
+        onFocus(callback) { this._onFocus = callback; return {dispose() {}}; }
+        onBlur(callback) { this._onBlur = callback; return {dispose() {}}; }
+        focus() { if (this._onFocus) this._onFocus(); }
+        scrollLines() {}
+        registerLinkProvider() { return {dispose() {}}; }
+        attachCustomKeyEventHandler() {}
+        getSelection() { return ''; }
+        clearSelection() {}
+        dispose() { this.disposed = true; }
+      }
+      window.Terminal = FakeTerminal;
+      class FakeWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        static CLOSING = 2;
+        static CLOSED = 3;
+        constructor(url) {
+          this.url = String(url);
+          this.readyState = FakeWebSocket.CONNECTING;
+          this.sent = [];
+          window.__bootSockets.push(this.url);
+          setTimeout(() => {
+            this.readyState = FakeWebSocket.OPEN;
+            if (this.onopen) this.onopen({type: 'open'});
+          }, 0);
+        }
+        send(message) { this.sent.push(String(message)); }
+        close() {
+          this.readyState = FakeWebSocket.CLOSED;
+          if (this.onclose) this.onclose({type: 'close'});
+        }
+      }
+      window.WebSocket = FakeWebSocket;
+      window.EventSource = class {
+        constructor(url) { this.url = String(url); this.listeners = {}; }
+        addEventListener(name, callback) { this.listeners[name] = callback; }
+        close() { this.closed = true; }
+      };
+      function jsonResponse(payload, status = 200) {
+        return Promise.resolve(new Response(JSON.stringify(payload), {
+          status,
+          headers: {'Content-Type': 'application/json'},
+        }));
+      }
+      window.fetch = async (input, options = {}) => {
+        const url = new URL(String(input), 'https://localhost');
+        window.__bootFetches.push({path: url.pathname, method: options.method || 'GET'});
+        if (url.pathname === '/api/notify') return jsonResponse({enabled: false});
+        if (url.pathname === '/api/ensure-session') return jsonResponse({ok: true, created: false});
+        if (url.pathname === '/api/auto-approve') {
+          return jsonResponse({
+            session_order: ['1'],
+            sessions: {'1': {target: '1', enabled: false, last_action: 'off'}},
+            rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
+          });
+        }
+        if (url.pathname === '/api/transcripts') {
+          return jsonResponse({
+            session_order: ['1'],
+            sessions: {
+              '1': {
+                session: '1',
+                selected_pane: {current_path: '/home/test/yolomux.dev'},
+                project: {git: {root: '/home/test/yolomux.dev', branch: 'main'}},
+                agents: [],
+              },
+            },
+          });
+        }
+        if (url.pathname === '/api/activity-summary') return jsonResponse({sessions: {}, global: {lines: []}, session_order: ['1']});
+        if (url.pathname === '/api/session-files') return jsonResponse({session: '1', files: [], repos: [], errors: [], loaded: true});
+        if (url.pathname === '/api/ping') return jsonResponse({ok: true});
+        if (url.pathname === '/api/event') return jsonResponse({ok: true});
+        if (url.pathname === '/api/events') return jsonResponse({events: []});
+        if (url.pathname === '/api/fs/list') return jsonResponse({path: '/home/test', entries: []});
+        return jsonResponse({});
+      };
+    """
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; }}
+          #grid {{ width: 1000px; height: 620px; }}
+          .terminal {{ width: 720px; height: 360px; }}
+        </style>
+      </head>
+      <body>
+        <header class="topbar">
+          <div class="brand-cell"><div class="brand title">YOLOmux</div><span id="httpsWarning" class="transport-warning" hidden></span></div>
+          <div id="sessionButtons" class="app-menu-area" aria-label="Application menus"></div>
+          <div class="actions">
+            <div id="latencyMeter" class="latency-meter"><svg class="latency-graph" viewBox="0 0 44 18"><polyline id="latencyLine" class="latency-line" points=""></polyline></svg><span id="latencyNumber" class="latency-number">-- ms</span></div>
+            <button id="notifyToggle">Notify</button>
+            <button id="refreshMeta">Refresh</button>
+            <button id="logoutButton">Log out</button>
+            <span id="status" class="sub">starting</span>
+          </div>
+        </header>
+        <div id="attentionAlerts" class="attention-alerts" aria-live="polite"></div>
+        <aside id="fileExplorer" class="file-explorer" hidden aria-label="File Explorer">
+          <div class="file-explorer-tree-col">
+            <div class="file-explorer-head">
+              <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle">.*</button>
+              <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle">Root</button>
+              <div id="fileExplorerQuickAccess" class="file-explorer-quick-access"></div>
+              <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/">
+              <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy"></button>
+              <button type="button" id="fileExplorerClose" class="file-explorer-close"></button>
+            </div>
+            <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>
+          </div>
+        </aside>
+        <main id="grid" class="grid"></main>
+        <div id="panelPool" class="panel-pool" aria-hidden="true"></div>
+        <section id="modal" class="modal"><div class="modal-head"><div id="modalTitle">Transcript</div><button id="closeModal">Close</button></div><pre id="modalBody"></pre></section>
+        <script id="yolomux-bootstrap" type="application/json">{json.dumps(bootstrap, separators=(",", ":"))}</script>
+        <script>{stub_script}</script>
+        <script src="{script_uri}"></script>
+      </body>
+    </html>
+    """
+
+
 def load_fixture(browser, tmp_path, width):
     page = tmp_path / f"pane-{width}.html"
     page.write_text(pane_fixture_html(width), encoding="utf-8")
@@ -549,6 +733,50 @@ def load_split_seam_fixture(browser, tmp_path):
     page = tmp_path / "split-seam.html"
     page.write_text(split_seam_fixture_html(), encoding="utf-8")
     browser.get(page.as_uri())
+
+
+def load_live_runtime_boot_fixture(browser, tmp_path):
+    page = tmp_path / "live-runtime-boot.html"
+    page.write_text(live_runtime_boot_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__terminalOpened >= 1 && document.querySelector('#panel-1 .terminal .xterm') !== null"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        return {
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+          fetchPaths: window.__bootFetches.map(item => `${item.method} ${item.path}`),
+          sockets: window.__bootSockets,
+          menuLabels: Array.from(document.querySelectorAll('.app-menu-button')).map(button => button.textContent.trim()),
+          panelCount: document.querySelectorAll('.panel').length,
+          paneTabCount: document.querySelectorAll('.pane-tab').length,
+          panelVisible: document.querySelector('#panel-1')?.isConnected === true,
+          status: document.getElementById('status').textContent,
+          terminalText: document.querySelector('#panel-1 .terminal .xterm')?.textContent || '',
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert "GET /api/notify" in metrics["fetchPaths"]
+    assert "GET /api/auto-approve" in metrics["fetchPaths"]
+    assert "POST /api/ensure-session" in metrics["fetchPaths"]
+    assert "GET /api/transcripts" in metrics["fetchPaths"]
+    assert "GET /api/ping" in metrics["fetchPaths"]
+    assert any("/ws?session=1" in url for url in metrics["sockets"])
+    assert {"File", "View", "tmux", "Tabs", "Help"}.issubset(set(metrics["menuLabels"]))
+    assert metrics["panelCount"] >= 1
+    assert metrics["paneTabCount"] >= 1
+    assert metrics["panelVisible"]
+    assert metrics["terminalText"] == "fake terminal"
 
 
 def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):

@@ -240,9 +240,9 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   const active = editorViewModeFor(path, item) === 'diff';
   const available = openFileDiffAvailable(state);
   const loading = state?.diffLoading === true;
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!available && !(active && loading));
-  button.disabled = loading || !available;
-  const label = loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
+  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!available && !active);
+  button.disabled = !active && (loading || !available);
+  const label = !active && loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
   setFileEditorIcon(button, 'file-editor-icon-diff');
 }
@@ -477,19 +477,24 @@ function runtimeJitteredDelay(baseDelay, randomValue = Math.random()) {
 }
 
 function resetRuntimeInterval(name, callback, delay) {
+  const normalizedDelay = Math.max(1, Math.round(Number(delay) || 1));
   const existing = runtimeIntervals.get(name);
+  if (existing?.delay === normalizedDelay) {
+    existing.callback = callback;
+    return;
+  }
   if (existing) {
     existing.active = false;
     clearTimeout(existing.timer);
   }
-  const state = {active: true, timer: null};
+  const state = {active: true, timer: null, delay: normalizedDelay, callback};
   const scheduleNext = () => {
     if (!state.active) return;
-    state.timer = setTimeout(run, runtimeJitteredDelay(delay));
+    state.timer = setTimeout(run, runtimeJitteredDelay(state.delay));
   };
   const run = () => {
     if (!state.active) return;
-    callback();
+    state.callback();
     scheduleNext();
   };
   scheduleNext();

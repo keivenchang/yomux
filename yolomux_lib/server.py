@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import pty
 import select
@@ -27,6 +28,7 @@ from . import yolo_rules
 from .app import TmuxWebtermApp
 from .common import DEFAULT_COLS
 from .common import DEFAULT_ROWS
+from .common import MAX_EVENT_TAIL_LINES
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_TRANSCRIPT_TAIL_LINES
 from .common import PROJECT_ROOT
@@ -57,6 +59,7 @@ from .websocket import set_pty_size
 
 PTY_DIMENSION_MIN = 1
 PTY_DIMENSION_MAX = 1000
+WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS = 5.0
 
 
 def content_disposition_attachment(raw_path: str) -> str:
@@ -65,12 +68,46 @@ def content_disposition_attachment(raw_path: str) -> str:
     return f'attachment; filename="{safe or "download"}"'
 
 
-def parse_query_int(qs: dict[str, list[str]], name: str, default: int) -> tuple[int | None, str]:
+def parse_query_int(
+    qs: dict[str, list[str]],
+    name: str,
+    default: int,
+    *,
+    min_value: int = 1,
+    max_value: int | None = None,
+) -> tuple[int | None, str]:
     raw = qs.get(name, [str(default)])[0]
     try:
-        return int(raw), ""
+        value = int(raw)
     except (TypeError, ValueError):
         return None, f"{name} must be an integer"
+    if value < min_value:
+        return None, f"{name} must be at least {min_value}"
+    if max_value is not None:
+        value = min(value, max_value)
+    return value, ""
+
+
+def parse_query_float(
+    qs: dict[str, list[str]],
+    name: str,
+    default: float,
+    *,
+    min_value: float = 0.0,
+    max_value: float | None = None,
+) -> tuple[float | None, str]:
+    raw = qs.get(name, [str(default)])[0]
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, f"{name} must be a number"
+    if not math.isfinite(value):
+        return None, f"{name} must be finite"
+    if value < min_value:
+        return None, f"{name} must be at least {min_value:g}"
+    if max_value is not None:
+        value = min(value, max_value)
+    return value, ""
 
 
 def clamp_pty_dimension(value: int) -> int:
@@ -131,7 +168,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/tmux":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
-            lines, error = parse_query_int(qs, "lines", 90)
+            lines, error = parse_query_int(qs, "lines", 90, max_value=MAX_TRANSCRIPT_TAIL_LINES)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -141,7 +178,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/transcript":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
-            lines, error = parse_query_int(qs, "lines", 120)
+            lines, error = parse_query_int(qs, "lines", 120, max_value=MAX_TRANSCRIPT_TAIL_LINES)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -151,7 +188,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/context":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
-            messages, error = parse_query_int(qs, "messages", 40)
+            messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -161,7 +198,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/context-items":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
-            messages, error = parse_query_int(qs, "messages", 40)
+            messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
                 return
@@ -192,10 +229,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/events":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [None])[0]
-            try:
-                limit = int(qs.get("limit", ["100"])[0])
-            except ValueError:
-                limit = 100
+            limit, error = parse_query_int(qs, "limit", 100, max_value=MAX_EVENT_TAIL_LINES)
+            if error:
+                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+                return
             payload, status = self.server.app.events_payload(session, limit)
             self.write_json(payload, status=status)
             return
@@ -203,10 +240,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             session = qs.get("session", [None])[0]
             query = qs.get("q", [""])[0]
-            try:
-                limit = int(qs.get("limit", ["100"])[0])
-            except ValueError:
-                limit = 100
+            limit, error = parse_query_int(qs, "limit", 100, max_value=MAX_EVENT_TAIL_LINES)
+            if error:
+                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+                return
             payload, status = self.server.app.search_payload(query, session, limit)
             self.write_json(payload, status=status)
             return
@@ -219,10 +256,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/session-files":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [None])[0]
-            try:
-                hours = float(qs.get("hours", ["24"])[0])
-            except ValueError:
-                hours = 24.0
+            hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
+            if error:
+                self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+                return
             from_ref = qs.get("from", [None])[0]
             to_ref = qs.get("to", [None])[0]
             payload, status = self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref)
@@ -540,7 +577,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
         body = self.rfile.read(content_length)
         try:
-            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body)
+            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body, max_part_bytes=upload_max_bytes)
         except ValueError as exc:
             return {"session": session, "error": str(exc)}, HTTPStatus.BAD_REQUEST
         return self.server.app.upload_files(session, files)
@@ -570,7 +607,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def stream_context_items(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         session = qs.get("session", [""])[0]
-        messages, error = parse_query_int(qs, "messages", 40)
+        messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
         if error:
             self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -612,10 +649,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def stream_codex_summary(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         session = qs.get("session", [""])[0]
-        try:
-            lookback_seconds = int(qs.get("lookback", [str(SUMMARY_LOOKBACK_SECONDS)])[0])
-        except ValueError:
-            lookback_seconds = SUMMARY_LOOKBACK_SECONDS
+        lookback_seconds, error = parse_query_int(qs, "lookback", SUMMARY_LOOKBACK_SECONDS, max_value=SUMMARY_LOOKBACK_SECONDS * 24)
+        if error:
+            self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
+            return
 
         payload, status = self.server.app.codex_summary_prompt(session, lookback_seconds)
         if status != HTTPStatus.OK:
@@ -935,7 +972,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                             break
                         self.connection.sendall(make_ws_frame(data, opcode=2))
                     if self.connection in readable:
-                        opcode, payload = read_ws_frame(self.rfile)
+                        opcode, payload = self.read_ws_frame_with_timeout()
                         if opcode == 8:
                             connected = False
                             break
@@ -976,7 +1013,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             readable, _, _ = select.select([self.connection], [], [], timeout)
             if self.connection not in readable:
                 break
-            opcode, payload = read_ws_frame(self.rfile)
+            opcode, payload = self.read_ws_frame_with_timeout()
             if opcode == 8:
                 raise ConnectionError("websocket closed")
             if opcode == 9:
@@ -997,6 +1034,16 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             pending_payloads.append(payload)
             break
         return rows, cols, pending_payloads
+
+    def read_ws_frame_with_timeout(self) -> tuple[int, bytes]:
+        previous_timeout = self.connection.gettimeout()
+        self.connection.settimeout(WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS)
+        try:
+            return read_ws_frame(self.rfile)
+        except TimeoutError as exc:
+            raise ConnectionError("websocket frame read timed out") from exc
+        finally:
+            self.connection.settimeout(previous_timeout)
 
     def handle_ws_payload(self, session: str, master_fd: int, resize_fd: int, process: subprocess.Popen[Any], payload: bytes, readonly: bool = False) -> None:
         try:

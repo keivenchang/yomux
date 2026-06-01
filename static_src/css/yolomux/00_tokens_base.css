@@ -73,7 +73,7 @@
   --pane-split-gap: 0px;
   --pane-resizer-size: 2px;
   --pane-resizer-line-size: 1px;
-  --pane-resizer-hover-line-size: 5px;
+  --pane-resizer-hover-line-size: 4px;
   --pane-resizer-bg: rgba(255, 225, 77, 0.72);
   --pane-resizer-hover-bg: rgba(255, 225, 77, 0.96);
   --pane-resizer-shadow: rgba(255, 225, 77, 0.72);

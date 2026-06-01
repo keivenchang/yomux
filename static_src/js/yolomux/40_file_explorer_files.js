@@ -873,11 +873,13 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
   const currentDirectory = activeFinderDirectoryPath();
   const expanded = entry.kind === 'dir' && fileExplorerExpanded.has(fullPath);
+  const indexedDirectory = entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   row.className = `file-tree-row kind-${entry.kind}`;
   row.dataset.path = fullPath;
   row.dataset.kind = entry.kind;
   row.dataset.name = entry.name;
   row.dataset.isRepo = entry.is_repo === true ? 'true' : 'false';
+  row.dataset.indexed = indexedDirectory ? 'true' : 'false';
   row.style.paddingLeft = `${8 + depth * 14}px`;
   row.setAttribute('role', 'treeitem');
   row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
@@ -888,6 +890,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('expanded', expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
+  row.classList.toggle('indexed-directory', indexedDirectory);
   const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : '';
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
@@ -914,7 +917,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   const displayName = fileTreeDisplayParts(fullPath, entry);
   updateFileTreeRowContents(row, icon, displayName.text, {
     gitStatus,
-    iconClass: fileIconClassFor(entry.name, entry.kind),
+    iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
     nameHtml: displayName.html,
     dateText: fileExplorerTreeShowDates ? fileTreeMtimeText(entry) : '',
   });
@@ -1206,6 +1209,54 @@ function compactNestedPaths(paths) {
   return sorted.filter((path, index) => !sorted.some((other, otherIndex) => otherIndex !== index && path.startsWith(`${other}/`)));
 }
 
+function fileExplorerDirectoryIsIndexed(path) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
+}
+
+function setFileExplorerIndexedDirs(paths) {
+  fileExplorerIndexedDirs = new Set((paths || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
+  writeStoredFileExplorerIndexedDirs();
+}
+
+function setFileExplorerDirectoryIndexed(path, indexed) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized) return;
+  if (indexed) fileExplorerIndexedDirs.add(normalized);
+  else fileExplorerIndexedDirs.delete(normalized);
+  writeStoredFileExplorerIndexedDirs();
+  updateFileExplorerIndexedDirectoryRows();
+  if (statusEl) {
+    statusEl.textContent = indexed ? `indexed ${compactHomePath(normalized)}` : `removed index ${compactHomePath(normalized)}`;
+  }
+}
+
+function toggleFileExplorerDirectoryIndexed(path) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized) return;
+  setFileExplorerDirectoryIndexed(normalized, !fileExplorerDirectoryIsIndexed(normalized));
+}
+
+function updateFileExplorerIndexedDirectoryRows() {
+  document.querySelectorAll('.file-tree-row.kind-dir[data-path]').forEach(row => {
+    const indexed = fileExplorerDirectoryIsIndexed(row.dataset.path || '');
+    row.dataset.indexed = indexed ? 'true' : 'false';
+    row.classList.toggle('indexed-directory', indexed);
+    const icon = row.querySelector(':scope > .file-tree-icon');
+    if (icon) {
+      icon.className = ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' ');
+    }
+  });
+}
+
+function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch()) {
+  const candidates = [defaultRoot, ...Array.from(fileExplorerIndexedDirs || [])]
+    .map(normalizeStoredFileExplorerIndexedDir)
+    .filter(Boolean);
+  const unique = Array.from(new Set(candidates));
+  return unique.filter((path, index) => !unique.some((other, otherIndex) => otherIndex !== index && pathIsInsideDirectory(path, other) && path !== other));
+}
+
 async function onFileTreeRowClick(row, fullPath, entry, event) {
   closeFileImagePreview();
   const selectionOnly = updateFileTreeSelectionFromClick(row, fullPath, event);
@@ -1266,6 +1317,7 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(fullPath, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: menuState.openInNewTabDisabled});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
+  appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
   appendContextMenuButton(menu, 'Rename', () => beginFileTreeRename(row, selectedPaths[0], entry), closeFileContextMenu, {disabled: menuState.renameDisabled});
   appendContextMenuButton(menu, multiple ? 'Delete selected' : 'Delete', () => deleteFileTreePath(fullPath, entry, selectedPaths), closeFileContextMenu, {disabled: menuState.deleteDisabled});
   fileContextMenu.open(menu, x, y);
@@ -1277,6 +1329,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
     openInNewTabDisabled: multiple || !entryIsImageFile(entry),
     downloadDisabled: multiple || entry?.kind !== 'file',
+    indexToggleDisabled: multiple || entry?.kind !== 'dir',
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
   };
@@ -2184,7 +2237,10 @@ function refreshOpenFileDiffDecorations(path) {
 }
 
 function openFileDiffAvailable(state) {
-  return Boolean(state?.diffLoaded && (state.diff || state.diffWorkingMissing || state.untracked));
+  if (!state?.diffLoaded) return false;
+  const diff = String(state.diff || '');
+  if (state.untracked || /^---\s+\/dev\/null/m.test(diff) || (!state.diffOriginal && !state.diffWorkingMissing && !diff)) return false;
+  return Boolean(state.diff || state.diffWorkingMissing);
 }
 
 function applyOpenFileDiffPayload(state, payload) {
@@ -2248,6 +2304,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     ownerSession: options.ownerSession || normalizedOpenFileOwnerSession(entry?.session),
   };
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
+  else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
   if (openFiles.has(fullPath)) {
     await showFileEditorPaneForPath(fullPath, openOptions);
     if (options.viewMode) renderOpenFilePath(fullPath);
@@ -2612,13 +2669,10 @@ function codeMirrorLanguageName(path) {
   return language || '';
 }
 
-async function importCodeMirrorModule(path) {
-  return import(`https://esm.sh/${path}`);
-}
-
 function codeMirrorApiIsUsable(api) {
   return Boolean(
     api?.EditorState?.create
+    && api?.Compartment
     && api?.EditorState?.readOnly?.of
     && api?.EditorView?.theme
     && api?.EditorView?.editable?.of
@@ -2652,117 +2706,18 @@ async function loadCodeMirrorApi() {
   if (codeMirrorApiIsUsable(window.YOLOmuxCodeMirror)) return window.YOLOmuxCodeMirror;
   if (!codeMirrorApiPromise) {
     codeMirrorApiPromise = (async () => {
+      let bundleError = null;
       try {
         let bundledApi = await loadCodeMirrorBundleScript();
         if (codeMirrorApiIsUsable(bundledApi)) return bundledApi;
         bundledApi = await loadCodeMirrorBundleScript({force: true});
         if (codeMirrorApiIsUsable(bundledApi)) return bundledApi;
-        console.warn('CodeMirror bundle missing critical exports; falling back to ESM imports');
+        bundleError = new Error('CodeMirror bundle missing critical exports');
       } catch (err) {
-        console.warn(err);
+        bundleError = err;
       }
-      const [
-        cm,
-        state,
-        view,
-        commands,
-        search,
-        merge,
-        language,
-        javascriptMod,
-        pythonMod,
-        rustMod,
-        jsonMod,
-        htmlMod,
-        cssMod,
-        markdownMod,
-        xmlMod,
-        yamlMod,
-        shellMode,
-        tomlMode,
-        lezerHighlight,
-      ] = await Promise.all([
-        importCodeMirrorModule('codemirror@6'),
-        importCodeMirrorModule('@codemirror/state'),
-        importCodeMirrorModule('@codemirror/view'),
-        importCodeMirrorModule('@codemirror/commands'),
-        importCodeMirrorModule('@codemirror/search'),
-        importCodeMirrorModule('@codemirror/merge'),
-        importCodeMirrorModule('@codemirror/language'),
-        importCodeMirrorModule('@codemirror/lang-javascript'),
-        importCodeMirrorModule('@codemirror/lang-python'),
-        importCodeMirrorModule('@codemirror/lang-rust'),
-        importCodeMirrorModule('@codemirror/lang-json'),
-        importCodeMirrorModule('@codemirror/lang-html'),
-        importCodeMirrorModule('@codemirror/lang-css'),
-        importCodeMirrorModule('@codemirror/lang-markdown'),
-        importCodeMirrorModule('@codemirror/lang-xml'),
-        importCodeMirrorModule('@codemirror/lang-yaml'),
-        importCodeMirrorModule('@codemirror/legacy-modes/mode/shell'),
-        importCodeMirrorModule('@codemirror/legacy-modes/mode/toml'),
-        importCodeMirrorModule('@lezer/highlight'),
-      ]);
-      const api = {
-        Compartment: state.Compartment,
-        EditorState: state.EditorState,
-        RangeSetBuilder: state.RangeSetBuilder,
-        EditorView: view.EditorView,
-        Decoration: view.Decoration,
-        ViewPlugin: view.ViewPlugin,
-        keymap: view.keymap,
-        lineNumbers: view.lineNumbers,
-        highlightActiveLine: view.highlightActiveLine,
-        highlightActiveLineGutter: view.highlightActiveLineGutter,
-        drawSelection: view.drawSelection,
-        dropCursor: view.dropCursor,
-        rectangularSelection: view.rectangularSelection,
-        crosshairCursor: view.crosshairCursor,
-        history: commands.history,
-        historyKeymap: commands.historyKeymap,
-        defaultKeymap: commands.defaultKeymap,
-        indentLess: commands.indentLess,
-        indentMore: commands.indentMore,
-        indentWithTab: commands.indentWithTab,
-        toggleComment: commands.toggleComment,
-        foldGutter: language.foldGutter,
-        indentOnInput: language.indentOnInput,
-        bracketMatching: language.bracketMatching,
-        defaultHighlightStyle: language.defaultHighlightStyle,
-        LanguageDescription: language.LanguageDescription,
-        HighlightStyle: language.HighlightStyle,
-        syntaxTree: language.syntaxTree,
-        syntaxHighlighting: language.syntaxHighlighting,
-        StreamLanguage: language.StreamLanguage,
-        search: search.search,
-        openSearchPanel: search.openSearchPanel,
-        closeSearchPanel: search.closeSearchPanel,
-        findNext: search.findNext,
-        findPrevious: search.findPrevious,
-        gotoLine: search.gotoLine,
-        replaceAll: search.replaceAll,
-        replaceNext: search.replaceNext,
-        searchKeymap: search.searchKeymap,
-        highlightSelectionMatches: search.highlightSelectionMatches,
-        MergeView: merge.MergeView,
-        unifiedMergeView: merge.unifiedMergeView,
-        originalDocChangeEffect: merge.originalDocChangeEffect,
-        tags: lezerHighlight.tags,
-        javascript: javascriptMod.javascript,
-        python: pythonMod.python,
-        rust: rustMod.rust,
-        json: jsonMod.json,
-        html: htmlMod.html,
-        css: cssMod.css,
-        markdown: markdownMod.markdown,
-        xml: xmlMod.xml,
-        yaml: yamlMod.yaml,
-        shell: shellMode.shell,
-        toml: tomlMode.toml,
-        basicSetup: cm.basicSetup,
-      };
-      if (!codeMirrorApiIsUsable(api)) throw new Error('CodeMirror API missing critical exports');
-      window.YOLOmuxCodeMirror = api;
-      return api;
+      const suffix = bundleError ? `: ${bundleError}` : '';
+      throw new Error(`CodeMirror local bundle is unavailable or incomplete${suffix}. Check /static/codemirror.js.`);
     })();
   }
   try {
@@ -2852,6 +2807,7 @@ function codeMirrorHighlightExtension(api) {
   if (palette.headingBg) headingStyle.backgroundColor = palette.headingBg;
   return safeCodeMirrorExtension('highlight', () => api.syntaxHighlighting(api.HighlightStyle.define([
     {tag: t.keyword, color: palette.keyword},
+    {tag: tags(t.controlKeyword, t.operatorKeyword), color: palette.control || palette.keyword},
     {tag: tags(t.atom, t.bool, t.null), color: palette.atom},
     {tag: tags(t.string, t.special(t.string), t.regexp), color: palette.string},
     {tag: tags(t.number, t.integer, t.float), color: palette.number},

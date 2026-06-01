@@ -1152,6 +1152,7 @@ function commandPaletteCommandItems() {
     label: itemLabel(item),
     detail: menuTabDetail(item),
     key: `tab:${item}`,
+    targetItem: item,
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
     run: () => selectSession(item),
@@ -1191,6 +1192,16 @@ function fileQuickOpenRootForSearch() {
   if (activeFile) return dirnameOf(activeFile);
   if (fileExplorerRoot) return fileExplorerRoot;
   return repoRoot || homePath || '/';
+}
+
+function fileQuickOpenRootsForSearch(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
+  return fileExplorerIndexedSearchRoots(root);
+}
+
+function fileQuickOpenScopeLabel(root = fileQuickOpenRoot || fileQuickOpenRootForSearch()) {
+  const roots = fileQuickOpenRootsForSearch(root);
+  if (roots.length <= 1) return compactHomePath(roots[0] || root || '/');
+  return `${compactHomePath(roots[0])} + ${roots.length - 1} indexed`;
 }
 
 function fileQuickOpenQueryParts(query = commandPaletteQuery) {
@@ -1301,8 +1312,10 @@ function fileQuickOpenItems() {
   for (const file of fileQuickOpenCandidates) {
     const path = file.path || '';
     if (!path) continue;
+    const indexedRoot = normalizeStoredFileExplorerIndexedDir(file.indexed_root || '');
+    const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
     add(fileQuickOpenItem(path, {
-      group: 'Files',
+      group: indexedRoot && indexedRoot !== baseRoot ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
       sortBonus: file.uploaded === true ? -500 : 0,
@@ -1377,7 +1390,7 @@ function commandPalettePlaceholder() {
   if (commandPaletteMode === 'files' && commandPaletteQuery.trim().startsWith('>')) return 'Run command';
   if (commandPaletteMode === 'files' && commandPaletteQuery.trim().startsWith('@')) return 'Symbol search is not available yet';
   return commandPaletteMode === 'files'
-    ? `Open file in ${compactHomePath(fileQuickOpenRoot || fileQuickOpenRootForSearch())}`
+    ? `Open file in ${fileQuickOpenScopeLabel(fileQuickOpenRoot || fileQuickOpenRootForSearch())}`
     : 'Find tabs, commands, settings';
 }
 
@@ -1504,6 +1517,14 @@ function closeCommandPalette() {
   fileQuickOpenDebounce = null;
 }
 
+function focusCommandPaletteTarget(item) {
+  const target = item?.targetItem;
+  if (!isLayoutItem(target)) return;
+  focusPanel(target, {userInitiated: true});
+  renderPaneTabStrips();
+  requestAnimationFrame(() => focusPanel(target, {userInitiated: true}));
+}
+
 async function invokeCommandPaletteSelection(event = null) {
   const item = commandPaletteItemsCache[commandPaletteIndex];
   if (!item || item.disabled) return;
@@ -1511,6 +1532,7 @@ async function invokeCommandPaletteSelection(event = null) {
   closeCommandPalette();
   const action = appModifier(event) && item.splitRun ? item.splitRun : item.run;
   await Promise.resolve(action?.());
+  focusCommandPaletteTarget(item);
 }
 
 function scheduleFileQuickOpenSearch(options = {}) {
@@ -1530,13 +1552,11 @@ async function refreshFileQuickOpenCandidates(query = '') {
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
-    const response = pathQuery.active
-      ? await apiFetch(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`)
-      : await apiFetch(`/api/fs/search?root=${encodeURIComponent(root)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500`);
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.status);
-    if (requestId !== fileQuickOpenRequestId) return;
     if (pathQuery.active) {
+      const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(pathQuery.directory || '/')}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || response.status);
+      if (requestId !== fileQuickOpenRequestId) return;
       fileQuickOpenRoot = payload.path || pathQuery.directory || root;
       const filter = String(pathQuery.filter || '').toLowerCase();
       fileQuickOpenCandidates = (Array.isArray(payload.entries) ? payload.entries : [])
@@ -1551,8 +1571,32 @@ async function refreshFileQuickOpenCandidates(query = '') {
           mtime: entry.mtime,
         }));
     } else {
-      fileQuickOpenRoot = payload.root || root;
-      fileQuickOpenCandidates = Array.isArray(payload.files) ? payload.files : [];
+      const searchRoots = fileQuickOpenRootsForSearch(root);
+      const results = await Promise.all(searchRoots.map(async searchRoot => {
+        try {
+          const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500`);
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(payload.error || response.status);
+          return {ok: true, root: payload.root || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
+        } catch (error) {
+          return {ok: false, root: searchRoot, error};
+        }
+      }));
+      if (requestId !== fileQuickOpenRequestId) return;
+      const successful = results.filter(result => result.ok);
+      if (!successful.length) {
+        const firstError = results.find(result => result.error)?.error || 'search failed';
+        throw new Error(firstError);
+      }
+      fileQuickOpenRoot = root;
+      const seenPaths = new Set();
+      fileQuickOpenCandidates = successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root})))
+        .filter(file => {
+          const path = file?.path || '';
+          if (!path || seenPaths.has(path)) return false;
+          seenPaths.add(path);
+          return true;
+        });
     }
     fileQuickOpenError = '';
   } catch (error) {
@@ -1825,7 +1869,7 @@ function maybeNotifyState(session, state, options = {}) {
   const key = `${session}:${stateSignature(state)}`;
   const now = Date.now();
   if (attentionAlreadyVisible(session)) {
-    notificationLastSent.set(key, now);
+    setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
     dismissAttentionAlertsForSession(session);
     postEvent(session, 'alert_suppressed_visible', eventMessageForState(session, state), {
       state: state.key,
@@ -1835,7 +1879,7 @@ function maybeNotifyState(session, state, options = {}) {
   }
   const lastSent = notificationLastSent.get(key) || 0;
   if (options.force !== true && now - lastSent < 60_000) return;
-  notificationLastSent.set(key, now);
+  setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);
   const body = `${state.reason} · ${projectDirName(session, transcriptMeta.sessions?.[session])}`;
   showAttentionAlert(session, state);
   postEvent(session, 'alert_shown', eventMessageForState(session, state), {

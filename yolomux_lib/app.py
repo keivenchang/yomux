@@ -378,7 +378,7 @@ class TmuxWebtermApp:
             "--ignore-rules",
         ]
         if resume and session_id:
-            args = ["codex", "exec", "resume", *common, session_id, "-"]
+            args = ["codex", "exec", "resume", *common, "--sandbox", "read-only", "--cd", str(PROJECT_ROOT), session_id, "-"]
         else:
             args = ["codex", "exec", *common, "--sandbox", "read-only", "--cd", str(PROJECT_ROOT), "-"]
         try:
@@ -630,7 +630,7 @@ class TmuxWebtermApp:
             for session, payload in session_payloads.items()
         }
         with self.metadata_badge_lock:
-            state_changed = False
+            signatures_changed = False
             for session, next_signature in list(next_signatures.items()):
                 previous_signature = self.metadata_badge_signatures.get(session)
                 if previous_signature and self.metadata_badge_change_is_cold_cache_degradation(previous_signature, next_signature):
@@ -638,8 +638,6 @@ class TmuxWebtermApp:
 
             for session, badge_times in list(self.metadata_badge_pulse_until.items()):
                 current = {badge: until for badge, until in badge_times.items() if until > now}
-                if current != badge_times:
-                    state_changed = True
                 if current:
                     self.metadata_badge_pulse_until[session] = current
                 else:
@@ -652,11 +650,10 @@ class TmuxWebtermApp:
                 for badge in METADATA_BADGES:
                     if self.metadata_badge_change_should_pulse(previous_signature, next_signature, badge):
                         self.metadata_badge_pulse_until.setdefault(session, {})[badge] = now + self.metadata_badge_pulse_seconds()
-                        state_changed = True
 
             if self.metadata_badge_signatures != next_signatures:
                 self.metadata_badge_signatures = next_signatures
-                state_changed = True
+                signatures_changed = True
 
             for session, payload in session_payloads.items():
                 badge_times = self.metadata_badge_pulse_until.get(session, {})
@@ -668,7 +665,7 @@ class TmuxWebtermApp:
                 if remaining:
                     payload["metadata_badge_pulse_remaining_ms"] = remaining
 
-            if state_changed:
+            if signatures_changed:
                 self.persist_metadata_badge_state_locked()
 
     def load_metadata_badge_state(self) -> None:
@@ -677,15 +674,13 @@ class TmuxWebtermApp:
             self.metadata_badge_signatures = self.sanitized_metadata_badge_signatures(
                 state.get(METADATA_BADGE_SIGNATURES_STATE_KEY)
             )
-            self.metadata_badge_pulse_until = self.sanitized_metadata_badge_pulse_until(
-                state.get(METADATA_BADGE_PULSE_UNTIL_STATE_KEY)
-            )
+            self.metadata_badge_pulse_until = {}
 
     def persist_metadata_badge_state_locked(self) -> None:
         update_yolomux_state(
             {
                 METADATA_BADGE_SIGNATURES_STATE_KEY: self.metadata_badge_signatures,
-                METADATA_BADGE_PULSE_UNTIL_STATE_KEY: self.metadata_badge_pulse_until,
+                METADATA_BADGE_PULSE_UNTIL_STATE_KEY: {},
             }
         )
 
@@ -1326,7 +1321,16 @@ class TmuxWebtermApp:
         self.log_event(session, "yolo_takeover_failed", "YOLO owner kept lock after release request", {"owner": owner or {}, "response": response})
         return False
 
-    def prompt_and_screen_status(self, session: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    def prompt_and_screen_status(
+        self,
+        session: str,
+        discovered_sessions: dict[str, SessionInfo] | None = None,
+        capture_pane: bool = True,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        hidden_prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": ""}
+        if not capture_pane:
+            transcript_state = session_transcript_activity_state((discovered_sessions or {}).get(session))
+            return hidden_prompt, transcript_state if transcript_state.get("key") != "idle" else {"key": "idle", "text": ""}
         try:
             module = auto_approve_tmux
             visible_text = module.tmux_capture_pane(session, visible_only=True)
@@ -1340,7 +1344,9 @@ class TmuxWebtermApp:
                 prompt_state = module.hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
             screen_state = module.agent_screen_state(visible_text)
             if screen_state.get("key") == "idle":
-                infos, _errors = discover_sessions([session])
+                infos = discovered_sessions
+                if infos is None:
+                    infos, _errors = discover_sessions([session])
                 transcript_state = session_transcript_activity_state(infos.get(session))
                 if transcript_state.get("key") != "idle":
                     screen_state = transcript_state
@@ -1350,7 +1356,12 @@ class TmuxWebtermApp:
             screen = {"key": "error", "text": str(exc)}
             return prompt, screen
 
-    def auto_approve_session_status(self, session: str) -> dict[str, Any]:
+    def auto_approve_session_status(
+        self,
+        session: str,
+        discovered_sessions: dict[str, SessionInfo] | None = None,
+        include_live_prompt: bool = True,
+    ) -> dict[str, Any]:
         with self.auto_workers_lock:
             worker = self.auto_workers.get(session)
         if worker:
@@ -1376,7 +1387,7 @@ class TmuxWebtermApp:
                     "last_action": auto_approve_lock_message(owner),
                     "error": auto_approve_lock_message(owner),
                 })
-        prompt, screen = self.prompt_and_screen_status(session)
+        prompt, screen = self.prompt_and_screen_status(session, discovered_sessions=discovered_sessions, capture_pane=include_live_prompt)
         payload["prompt"] = prompt
         payload["screen"] = screen
         return payload
@@ -1396,10 +1407,14 @@ class TmuxWebtermApp:
         if session is not None:
             return self.auto_approve_session_status(session), HTTPStatus.OK
         refresh_errors = self.refresh_sessions()
+        discovered_sessions, discovery_errors = discover_sessions(self.sessions)
         return {
             "session_order": self.sessions,
-            "sessions": {name: self.auto_approve_session_status(name) for name in self.sessions},
-            "errors": refresh_errors,
+            "sessions": {
+                name: self.auto_approve_session_status(name, discovered_sessions=discovered_sessions, include_live_prompt=False)
+                for name in self.sessions
+            },
+            "errors": [*refresh_errors, *discovery_errors],
             "rules": self.yolo_rules_payload(),
         }, HTTPStatus.OK
 

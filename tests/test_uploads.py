@@ -4,6 +4,8 @@ from pathlib import Path
 os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
 
 from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
+from yolomux_lib.common import UPLOAD_MAX_FILES
+from yolomux_lib.uploads import parse_multipart_upload
 from yolomux_lib.uploads import unique_upload_path
 
 
@@ -40,3 +42,55 @@ def test_upload_request_limit_comes_from_live_settings():
 
     assert "self.server.app.upload_max_bytes()" in source
     assert "content_length > UPLOAD_MAX_BYTES" not in source
+    assert "parse_multipart_upload(self.headers.get(\"Content-Type\", \"\"), body, max_part_bytes=upload_max_bytes)" in source
+
+
+def multipart_body(parts, boundary="test-boundary"):
+    chunks = []
+    for headers, content in parts:
+        header_text = "\r\n".join(headers)
+        chunks.append(f"--{boundary}\r\n{header_text}\r\n\r\n".encode("utf-8") + content + b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return f"multipart/form-data; boundary={boundary}", b"".join(chunks)
+
+
+def test_parse_multipart_upload_extracts_files_and_filename_star():
+    content_type, body = multipart_body([
+        (['Content-Disposition: form-data; name="file"; filename="one.txt"'], b"one"),
+        (["Content-Disposition: form-data; name=\"file\"; filename*=utf-8''two%20words.txt"], b"two"),
+    ])
+
+    files = parse_multipart_upload(content_type, body)
+
+    assert [file.filename for file in files] == ["one.txt", "two words.txt"]
+    assert [file.content for file in files] == [b"one", b"two"]
+
+
+def test_parse_multipart_upload_rejects_bad_boundary_and_limits():
+    try:
+        parse_multipart_upload("multipart/form-data", b"")
+    except ValueError as exc:
+        assert "missing multipart boundary" in str(exc)
+    else:
+        raise AssertionError("missing multipart boundary should fail")
+
+    content_type, body = multipart_body([
+        ([f'Content-Disposition: form-data; name="file"; filename="{index}.txt"'], b"x")
+        for index in range(UPLOAD_MAX_FILES + 1)
+    ])
+    try:
+        parse_multipart_upload(content_type, body)
+    except ValueError as exc:
+        assert f"too many files; limit is {UPLOAD_MAX_FILES}" in str(exc)
+    else:
+        raise AssertionError("too many multipart files should fail")
+
+    content_type, body = multipart_body([
+        (['Content-Disposition: form-data; name="file"; filename="large.txt"'], b"too large"),
+    ])
+    try:
+        parse_multipart_upload(content_type, body, max_part_bytes=3)
+    except ValueError as exc:
+        assert "file is too large; limit is 3 bytes" in str(exc)
+    else:
+        raise AssertionError("oversized multipart part should fail")
