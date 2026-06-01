@@ -213,6 +213,21 @@ def test_search_files_non_repo_root_stays_shallow_but_indexes_child_repos(tmp_pa
     assert "project/.git/HEAD" not in paths
 
 
+def test_search_files_recursive_walks_indexed_non_repo_root_but_skips_heavy_dirs(tmp_path):
+    root = tmp_path / "indexed"
+    root.mkdir()
+    (root / "nested" / "deeper").mkdir(parents=True)
+    (root / "nested" / "deeper" / "target_file.py").write_text("print('hit')\n", encoding="utf-8")
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "target_file.js").write_text("skip\n", encoding="utf-8")
+
+    payload = filesystem.search_files(str(root), "target", 20, recursive=True)
+
+    paths = {item["relative_path"] for item in payload["files"]}
+    assert "nested/deeper/target_file.py" in paths
+    assert "node_modules/target_file.js" not in paths
+
+
 def test_search_files_matches_absolute_path_segments(tmp_path):
     project = tmp_path / "home" / "keivenc" / "project"
     project.mkdir(parents=True)

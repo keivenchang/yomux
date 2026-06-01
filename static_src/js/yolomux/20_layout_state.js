@@ -1544,10 +1544,22 @@ function scheduleFileQuickOpenSearch(options = {}) {
   else fileQuickOpenDebounce = setTimeout(run, 160);
 }
 
+function abortFileQuickOpenSearch() {
+  if (fileQuickOpenAbortController) {
+    try { fileQuickOpenAbortController.abort(); } catch (_) {}
+  }
+  fileQuickOpenAbortController = null;
+  fileQuickOpenRequestId += 1;
+  fileQuickOpenLoading = false;
+}
+
 async function refreshFileQuickOpenCandidates(query = '') {
   const root = fileQuickOpenRoot || fileQuickOpenRootForSearch();
   if (!root) return;
+  abortFileQuickOpenSearch();
   const requestId = ++fileQuickOpenRequestId;
+  fileQuickOpenAbortController = typeof AbortController === 'function' ? new AbortController() : null;
+  const fetchOptions = fileQuickOpenAbortController ? {signal: fileQuickOpenAbortController.signal} : {};
   fileQuickOpenLoading = true;
   renderCommandPaletteResults();
   try {
@@ -1574,7 +1586,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
       const searchRoots = fileQuickOpenRootsForSearch(root);
       const results = await Promise.all(searchRoots.map(async searchRoot => {
         try {
-          const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500`);
+          const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
+          const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
+          const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
           const payload = await response.json().catch(() => ({}));
           if (!response.ok) throw new Error(payload.error || response.status);
           return {ok: true, root: payload.root || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
@@ -1601,10 +1615,12 @@ async function refreshFileQuickOpenCandidates(query = '') {
     fileQuickOpenError = '';
   } catch (error) {
     if (requestId !== fileQuickOpenRequestId) return;
+    if (error?.name === 'AbortError') return;
     fileQuickOpenCandidates = [];
     fileQuickOpenError = String(error);
   } finally {
     if (requestId === fileQuickOpenRequestId) {
+      fileQuickOpenAbortController = null;
       fileQuickOpenLoading = false;
       renderCommandPaletteResults();
     }

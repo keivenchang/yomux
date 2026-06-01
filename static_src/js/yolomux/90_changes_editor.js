@@ -1541,12 +1541,13 @@ function codeMirrorDiffLayout(container) {
   return width >= 800 ? 'side' : 'inline';
 }
 
-function codeMirrorReadOnlyExtensions(api, path, panel = null) {
+function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {
+  const wrapEnabled = options.wrap !== false && fileEditorWrapEnabled;
   return [
     api.drawSelection(),
     api.highlightActiveLine(),
     ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-    ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+    ...(wrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
     api.EditorState.readOnly.of(true),
     api.EditorView.editable.of(false),
     codeMirrorLanguageExtension(api, path),
@@ -1596,6 +1597,7 @@ function codeMirrorThemeExtensions(api, path) {
   return [
     codeMirrorHighlightExtension(api),
     codeMirrorHtmlSemanticEmphasisExtension(api, path),
+    codeMirrorMarkdownStrongExtension(api, path),
     codeMirrorThemeExtension(api),
   ];
 }
@@ -1748,10 +1750,48 @@ function diffOverviewChunks(diff, totalLines) {
   }));
 }
 
+function diffOverviewChunksFromDocuments(original, current, totalLines) {
+  const left = String(original || '').split('\n');
+  const right = String(current || '').split('\n');
+  const chunks = [];
+  let currentChunk = null;
+  const pushCurrent = () => {
+    if (currentChunk) chunks.push(currentChunk);
+    currentChunk = null;
+  };
+  const addChunk = (kind, line) => {
+    const start = Math.max(1, Number(line || 1));
+    if (currentChunk && currentChunk.kind === kind && start <= currentChunk.end + 1) {
+      currentChunk.end = Math.max(currentChunk.end, start);
+      return;
+    }
+    pushCurrent();
+    currentChunk = {kind, start, end: start};
+  };
+  const max = Math.max(left.length, right.length);
+  for (let index = 0; index < max; index += 1) {
+    const leftLine = left[index];
+    const rightLine = right[index];
+    if (leftLine === rightLine) {
+      pushCurrent();
+      continue;
+    }
+    if (rightLine !== undefined) addChunk('add', index + 1);
+    if (leftLine !== undefined) addChunk('remove', Math.min(index + 1, totalLines));
+  }
+  pushCurrent();
+  return chunks.map(chunk => ({
+    ...chunk,
+    top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
+    height: Math.max(0.8, ((chunk.end - chunk.start + 1) / Math.max(1, totalLines)) * 100),
+  }));
+}
+
 function updateCodeMirrorDiffOverview(panel, container, state, currentText, original) {
   container?.querySelector?.('.cm-diff-overview')?.remove();
   const totalLines = Math.max(String(currentText || '').split('\n').length, String(original || '').split('\n').length, 1);
-  const chunks = diffOverviewChunks(state?.diff || '', totalLines);
+  const parsedChunks = diffOverviewChunks(state?.diff || '', totalLines);
+  const chunks = parsedChunks.length ? parsedChunks : diffOverviewChunksFromDocuments(original, currentText, totalLines);
   if (!container || !chunks.length) return;
   const overview = document.createElement('div');
   overview.className = 'cm-diff-overview';
@@ -1858,7 +1898,6 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           api.drawSelection(),
           api.highlightActiveLine(),
           ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-          ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
           api.EditorState.readOnly.of(true),
           api.EditorView.editable.of(false),
           codeMirrorLanguageExtension(api, path),
@@ -1869,10 +1908,10 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         doc: currentText,
         extensions: diffEditsAllowed
           ? [
-              ...codeMirrorExtensions(api, panel, path),
+              ...codeMirrorExtensions(api, panel, path, {wrap: false}),
               codeMirrorWorkingUpdateExtension(api, panel, path),
             ]
-          : codeMirrorReadOnlyExtensions(api, path, panel),
+          : codeMirrorReadOnlyExtensions(api, path, panel, {wrap: false}),
       },
       parent: container,
       revertControls: 'a-to-b',
@@ -2476,13 +2515,33 @@ function renderEditorCodePreviewInto(container, path, text) {
   container.replaceChildren(pre);
 }
 
-function renderHtmlPreviewInto(container, text) {
+function htmlPreviewHasDisabledJavaScript(text) {
+  const source = String(text ?? '');
+  return /<script\b/i.test(source) || /\son[a-z]+\s*=/i.test(source);
+}
+
+function renderHtmlPreviewInto(container, path, text) {
+  const children = [];
+  if (htmlPreviewHasDisabledJavaScript(text)) {
+    const notice = document.createElement('div');
+    notice.className = 'file-editor-html-js-notice';
+    const message = document.createElement('span');
+    message.textContent = 'JavaScript is disabled in this sandboxed preview.';
+    const link = document.createElement('a');
+    link.href = `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'Open with JavaScript';
+    notice.append(message, link);
+    children.push(notice);
+  }
   const frame = document.createElement('iframe');
   frame.className = 'file-editor-html-preview';
   frame.setAttribute('sandbox', '');
   frame.setAttribute('title', 'HTML preview');
   frame.srcdoc = String(text ?? '');
-  container.replaceChildren(frame);
+  children.push(frame);
+  container.replaceChildren(...children);
 }
 
 function renderEditorPreviewPane(container, path, text) {
@@ -2493,7 +2552,7 @@ function renderEditorPreviewPane(container, path, text) {
   container.classList.toggle('html-preview-body', isHtmlPath(path));
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
   if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text);
-  else if (isHtmlPath(path)) renderHtmlPreviewInto(container, text);
+  else if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
   else renderEditorCodePreviewInto(container, path, text);
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }

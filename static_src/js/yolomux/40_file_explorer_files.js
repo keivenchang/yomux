@@ -580,6 +580,37 @@ function restoreFileExplorerScrollPositions(positions) {
   });
 }
 
+function markFileExplorerInteraction() {
+  fileExplorerLastInteractionAt = Date.now();
+}
+
+function eventTargetIsFileExplorerSurface(target) {
+  return Boolean(target?.closest?.('#fileExplorer, .panel.file-explorer-panel, .file-explorer-tree-panel'));
+}
+
+function fileExplorerUserIsActive() {
+  if (isFileExplorerItem(focusedPanelItem)) return true;
+  if (Date.now() - fileExplorerLastInteractionAt < fileExplorerRefreshIdleMs) return true;
+  if (fileExplorer?.matches?.(':hover')) return true;
+  return Array.from(document.querySelectorAll('.panel.file-explorer-panel, .file-explorer-tree-panel')).some(node => node.matches?.(':hover'));
+}
+
+function deferFileExplorerRefresh() {
+  if (fileExplorerRefreshDeferred) return;
+  fileExplorerRefreshDeferred = true;
+  setTimeout(() => {
+    fileExplorerRefreshDeferred = false;
+    refreshFileExplorerIfChanged().catch(error => console.warn('deferred file explorer refresh failed', error));
+  }, fileExplorerRefreshIdleMs);
+}
+
+document.addEventListener('pointerdown', event => {
+  if (eventTargetIsFileExplorerSurface(event.target)) markFileExplorerInteraction();
+}, true);
+document.addEventListener('scroll', event => {
+  if (eventTargetIsFileExplorerSurface(event.target)) markFileExplorerInteraction();
+}, true);
+
 function directFileTreeRow(container, fullPath) {
   return Array.from(container?.children || []).find(node => (
     node.classList?.contains('file-tree-row') && node.dataset?.path === fullPath
@@ -891,7 +922,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
-  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : '';
+  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : (indexedDirectory ? 'indexed' : '');
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
     row.classList.toggle(className, className === gitClass);
@@ -1214,16 +1245,36 @@ function fileExplorerDirectoryIsIndexed(path) {
   return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
 }
 
+function fileExplorerIndexedAncestor(path) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized) return '';
+  return Array.from(fileExplorerIndexedDirs || [])
+    .map(normalizeStoredFileExplorerIndexedDir)
+    .filter(candidate => candidate && candidate !== normalized && pathIsInsideDirectory(normalized, candidate))
+    .sort((left, right) => right.length - left.length)[0] || '';
+}
+
 function setFileExplorerIndexedDirs(paths) {
-  fileExplorerIndexedDirs = new Set((paths || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
+  const normalized = (paths || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean);
+  fileExplorerIndexedDirs = new Set(compactNestedPaths(normalized));
   writeStoredFileExplorerIndexedDirs();
 }
 
 function setFileExplorerDirectoryIndexed(path, indexed) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized) return;
-  if (indexed) fileExplorerIndexedDirs.add(normalized);
-  else fileExplorerIndexedDirs.delete(normalized);
+  if (indexed) {
+    const ancestor = fileExplorerIndexedAncestor(normalized);
+    if (ancestor) {
+      if (statusEl) statusEl.textContent = `${compactHomePath(normalized)} is already covered by ${compactHomePath(ancestor)}`;
+      return;
+    }
+    fileExplorerIndexedDirs.add(normalized);
+    fileExplorerIndexedDirs = new Set(compactNestedPaths(Array.from(fileExplorerIndexedDirs)));
+  } else {
+    fileExplorerIndexedDirs.delete(normalized);
+    abortFileQuickOpenSearch();
+  }
   writeStoredFileExplorerIndexedDirs();
   updateFileExplorerIndexedDirectoryRows();
   if (statusEl) {
@@ -1246,15 +1297,25 @@ function updateFileExplorerIndexedDirectoryRows() {
     if (icon) {
       icon.className = ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' ');
     }
+    const status = row.querySelector(':scope > .file-tree-git-status');
+    if (status) {
+      status.textContent = indexed ? 'indexed' : '';
+      status.hidden = !indexed;
+    }
   });
 }
 
 function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch()) {
-  const candidates = [defaultRoot, ...Array.from(fileExplorerIndexedDirs || [])]
+  const defaultPath = normalizeStoredFileExplorerIndexedDir(defaultRoot);
+  const indexedRoots = compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
     .map(normalizeStoredFileExplorerIndexedDir)
-    .filter(Boolean);
-  const unique = Array.from(new Set(candidates));
-  return unique.filter((path, index) => !unique.some((other, otherIndex) => otherIndex !== index && pathIsInsideDirectory(path, other) && path !== other));
+    .filter(Boolean));
+  const defaultCoveredByIndexed = defaultPath && indexedRoots.some(root => root !== defaultPath && pathIsInsideDirectory(defaultPath, root));
+  const roots = defaultPath && !defaultCoveredByIndexed ? [defaultPath] : [];
+  for (const indexedRoot of indexedRoots) {
+    if (!roots.includes(indexedRoot)) roots.push(indexedRoot);
+  }
+  return roots;
 }
 
 async function onFileTreeRowClick(row, fullPath, entry, event) {
@@ -1329,7 +1390,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
     openInNewTabDisabled: multiple || !entryIsImageFile(entry),
     downloadDisabled: multiple || entry?.kind !== 'file',
-    indexToggleDisabled: multiple || entry?.kind !== 'dir',
+    indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
   };
@@ -2540,15 +2601,23 @@ async function refreshFileExplorerIfChanged() {
   const directories = watchedFileExplorerDirectories();
   let changed = false;
   const entriesByDir = new Map();
+  const signaturesByDir = new Map();
   for (const directory of directories) {
     const entries = await fetchDirectory(directory, {recordSignature: false});
     if (!entries) continue;
     const normalizedDirectory = normalizeDirectoryPath(directory);
     entriesByDir.set(normalizedDirectory, entries);
     const signature = directoryEntriesSignature(entries);
+    signaturesByDir.set(normalizedDirectory, signature);
     const previous = fileExplorerDirectorySignatures.get(normalizedDirectory);
-    setLimitedMapEntry(fileExplorerDirectorySignatures, normalizedDirectory, signature, fileExplorerMemoryCacheLimit);
     if (previous !== undefined && previous !== signature) changed = true;
+  }
+  if (changed && fileExplorerUserIsActive()) {
+    deferFileExplorerRefresh();
+    return;
+  }
+  for (const [directory, signature] of signaturesByDir.entries()) {
+    setLimitedMapEntry(fileExplorerDirectorySignatures, directory, signature, fileExplorerMemoryCacheLimit);
   }
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, entriesByDir});
 }
@@ -2977,6 +3046,42 @@ function codeMirrorHtmlSemanticEmphasisExtension(api, path) {
   });
 }
 
+function codeMirrorMarkdownStrongExtension(api, path) {
+  if (codeMirrorLanguageName(path) !== 'markdown' || !api.ViewPlugin || !api.Decoration) return [];
+  const palette = activeEditorScheme().syntax;
+  const strongMark = api.Decoration.mark({
+    attributes: {style: `font-weight:700;color:${palette.strong}`},
+  });
+  const strongPattern = /(\*\*[^*\n](?:.|\n)*?\*\*|__[^_\n](?:.|\n)*?__)/g;
+  return api.ViewPlugin.fromClass(class {
+    constructor(view) {
+      this.decorations = this.build(view);
+    }
+
+    update(update) {
+      if (update.docChanged || update.viewportChanged) this.decorations = this.build(update.view);
+    }
+
+    build(view) {
+      const ranges = [];
+      const visibleRanges = view.visibleRanges?.length ? view.visibleRanges : [{from: 0, to: view.state.doc.length}];
+      for (const visible of visibleRanges) {
+        const text = view.state.doc.sliceString(visible.from, visible.to);
+        strongPattern.lastIndex = 0;
+        let match;
+        while ((match = strongPattern.exec(text))) {
+          const from = visible.from + match.index;
+          const to = from + match[0].length;
+          if (to > from) ranges.push(strongMark.range(from, to));
+        }
+      }
+      return api.Decoration.set(ranges, true);
+    }
+  }, {
+    decorations: plugin => plugin.decorations,
+  });
+}
+
 function parseUnifiedDiffLineClasses(diff) {
   const added = new Set();
   const removed = new Set();
@@ -3185,6 +3290,7 @@ function updateCodeMirrorCursorStatus(panel) {
 
 function codeMirrorExtensions(api, panel, path, options = {}) {
   const save = options.save || (() => saveFileEditor(path, panel));
+  const wrapEnabled = options.wrap !== false && fileEditorWrapEnabled;
   const saveKeymap = api.keymap.of([{
     key: 'Mod-s',
     run() {
@@ -3249,7 +3355,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     findKeymap,
     powerKeymap,
     api.keymap.of([api.indentWithTab, ...api.defaultKeymap, ...api.historyKeymap, ...api.searchKeymap]),
-    ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+    ...(wrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
     codeMirrorLanguageExtension(api, path),

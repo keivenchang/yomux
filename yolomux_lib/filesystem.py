@@ -353,7 +353,7 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
     return visited_dirs, visited_files, truncated
 
 
-def search_files(raw_root: str, query: str = "", limit: int | str | None = 400) -> dict[str, Any]:
+def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
     root = _validated_path(raw_root)
     if not root.exists():
         raise FilesystemError(f"path not found: {root}", status=404)
@@ -366,7 +366,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400) 
     visited_files = 0
     truncated = False
     try:
-        if git_root_for_path(root):
+        if recursive or git_root_for_path(root):
             visited_dirs, visited_files, truncated = _search_full_tree(root, root, tokens, results, max_results)
         else:
             visited_dirs = 1

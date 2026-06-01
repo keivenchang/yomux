@@ -4965,6 +4965,11 @@ body.theme-light .yoagent-line {
   color: #c4f970;
   font-weight: 700;
 }
+.file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
+  color: #d9ff9a;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
 .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
   position: relative;
   color: #c4f970;
@@ -5226,16 +5231,37 @@ body.theme-light .file-tree-children::before {
 }
 .file-editor-html-preview {
   display: block;
+  flex: 1 1 auto;
   width: 100%;
-  min-height: 100%;
+  min-height: 0;
   height: 100%;
   border: 0;
   background: #ffffff;
   color-scheme: light;
 }
 .html-preview-body {
+  display: flex;
+  flex-direction: column;
   padding: 0;
   background: #ffffff;
+}
+.file-editor-html-js-notice {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 5px 9px;
+  color: #17210f;
+  background: #f6e6a8;
+  border-bottom: 1px solid #b7791f;
+  font: 700 var(--ui-font-size-sm)/1.25 var(--ui-font);
+}
+.file-editor-html-js-notice a {
+  color: #064e3b;
+  text-decoration: underline;
+  white-space: nowrap;
 }
 .file-editor-save,
 .file-editor-wrap,

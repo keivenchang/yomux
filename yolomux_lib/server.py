@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import json
 import math
 import os
@@ -289,6 +290,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/fs/raw":
             self.handle_fs_raw(parsed)
             return
+        if parsed.path == "/api/fs/html-preview":
+            self.handle_fs_html_preview(parsed)
+            return
         if parsed.path == "/ws":
             self.websocket(parsed)
             return
@@ -304,7 +308,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         raw_root = qs.get("root", qs.get("path", ["/"]))[0]
         query = qs.get("query", [""])[0]
         limit = qs.get("limit", ["400"])[0]
-        self.write_filesystem_json(raw_root, lambda: filesystem.search_files(raw_root, query, limit))
+        recursive = qs.get("recursive", [""])[0] in {"1", "true", "yes"}
+        self.write_filesystem_json(raw_root, lambda: filesystem.search_files(raw_root, query, limit, recursive=recursive))
 
     def handle_fs_read(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -351,6 +356,35 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+
+    def handle_fs_html_preview(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", [""])[0]
+        if not raw_path.lower().endswith((".html", ".htm")):
+            self.write_json({"error": "path must be an HTML file", "path": raw_path}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            payload = filesystem.read_file(raw_path)
+        except FilesystemError as exc:
+            self.write_json({"error": str(exc), "path": raw_path}, status=HTTPStatus(exc.status))
+            return
+        source = html.escape(str(payload.get("content", "")), quote=True)
+        title = html.escape(Path(raw_path).name or "HTML preview")
+        body = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{title}</title>
+  <style>
+    html, body, iframe {{ width: 100%; height: 100%; margin: 0; border: 0; background: #fff; }}
+    iframe {{ display: block; }}
+  </style>
+</head>
+<body>
+  <iframe title="{title}" sandbox="allow-scripts allow-forms allow-popups" srcdoc="{source}"></iframe>
+</body>
+</html>"""
+        self.write_html(body)
 
     def read_json_body(self, max_length: int) -> dict[str, Any] | None:
         length_text = self.headers.get("Content-Length", "")

@@ -5,8 +5,10 @@ from http import HTTPStatus
 from http.client import HTTPConnection
 from types import SimpleNamespace
 from urllib.parse import urlencode
+from urllib.parse import urlparse
 
 from yolomux_lib import common
+from yolomux_lib.server import Handler
 from yolomux_lib.server import TmuxWebtermHTTPServer
 
 
@@ -152,6 +154,28 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         assert json.loads(body)["error"] == "admin access required"
     finally:
         stop_server(server, thread)
+
+
+def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_path):
+    target = tmp_path / "preview.html"
+    target.write_text("<h1>ok</h1><script>window.answer = 42;</script>\n", encoding="utf-8")
+    written = {}
+    handler = SimpleNamespace(
+        write_html=lambda body, status=HTTPStatus.OK: written.update({"html_status": status, "html": body}),
+        write_json=lambda value, status=HTTPStatus.OK: written.update({"json_status": status, "json": value}),
+    )
+
+    Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(target)})}"))
+
+    assert written["html_status"] == HTTPStatus.OK
+    assert 'sandbox="allow-scripts allow-forms allow-popups"' in written["html"]
+    assert "allow-same-origin" not in written["html"]
+    assert "&lt;script&gt;window.answer = 42;&lt;/script&gt;" in written["html"]
+
+    Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(tmp_path / 'plain.txt')})}"))
+
+    assert written["json_status"] == HTTPStatus.BAD_REQUEST
+    assert written["json"]["error"] == "path must be an HTML file"
 
 
 def test_readonly_identity_cannot_call_mutating_post(monkeypatch, tmp_path):

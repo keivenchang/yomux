@@ -110,9 +110,9 @@ const TERMINAL_THEMES = {
 const EDITOR_SCHEMES = {
   dark: {
     id: 'dark', label: 'YOLOmux Dark', dark: true,
-    bg: '#0f1115', fg: '#ffffff', cursor: '#ffffff', selection: 'rgba(87, 112, 148, 0.46)', activeLine: 'rgba(255, 255, 255, 0.04)',
+    bg: '#0f1115', fg: '#cfd3dc', cursor: '#ffffff', selection: 'rgba(87, 112, 148, 0.46)', activeLine: 'rgba(255, 255, 255, 0.04)',
     gutterBg: '#151922', lineNo: '#9aa5b1', panel: '#151922', panel2: '#1e2430', line: '#303948', previewBg: '#151922',
-    syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ff5c5c', emphasis: '#ffffff', invalid: '#ff6673'},
+    syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ffffff', emphasis: '#ffffff', invalid: '#ff6673'},
     diff: {addFg: '#3fb950', removeFg: '#f85149'},
   },
   'one-dark': {
@@ -213,6 +213,7 @@ const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
+const fileExplorerRefreshIdleMs = 1500;
 const commandPaletteRecentKeyLimit = 100;
 const notificationLastSentLimit = 512;
 const pendingFileEditorFocus = new Set();
@@ -269,6 +270,8 @@ let sessionFilesLoading = false;
 let fileExplorerSessionFilesLoading = false;
 let sessionFilesRequestId = 0;
 let fileExplorerSessionFilesRequestId = 0;
+let fileExplorerLastInteractionAt = 0;
+let fileExplorerRefreshDeferred = false;
 let sessionFilesSortMode = 'mtime';
 let sessionFilesSelectedSession = '';
 let fileExplorerTreeShowDates = readStoredFileExplorerTreeShowDates();
@@ -291,6 +294,7 @@ let fileQuickOpenLoading = false;
 let fileQuickOpenError = '';
 let fileQuickOpenRequestId = 0;
 let fileQuickOpenDebounce = null;
+let fileQuickOpenAbortController = null;
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
 let clientSettingsPayload = bootstrap.settingsPayload || {};
@@ -3201,10 +3205,22 @@ function scheduleFileQuickOpenSearch(options = {}) {
   else fileQuickOpenDebounce = setTimeout(run, 160);
 }
 
+function abortFileQuickOpenSearch() {
+  if (fileQuickOpenAbortController) {
+    try { fileQuickOpenAbortController.abort(); } catch (_) {}
+  }
+  fileQuickOpenAbortController = null;
+  fileQuickOpenRequestId += 1;
+  fileQuickOpenLoading = false;
+}
+
 async function refreshFileQuickOpenCandidates(query = '') {
   const root = fileQuickOpenRoot || fileQuickOpenRootForSearch();
   if (!root) return;
+  abortFileQuickOpenSearch();
   const requestId = ++fileQuickOpenRequestId;
+  fileQuickOpenAbortController = typeof AbortController === 'function' ? new AbortController() : null;
+  const fetchOptions = fileQuickOpenAbortController ? {signal: fileQuickOpenAbortController.signal} : {};
   fileQuickOpenLoading = true;
   renderCommandPaletteResults();
   try {
@@ -3231,7 +3247,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
       const searchRoots = fileQuickOpenRootsForSearch(root);
       const results = await Promise.all(searchRoots.map(async searchRoot => {
         try {
-          const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500`);
+          const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
+          const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
+          const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
           const payload = await response.json().catch(() => ({}));
           if (!response.ok) throw new Error(payload.error || response.status);
           return {ok: true, root: payload.root || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
@@ -3258,10 +3276,12 @@ async function refreshFileQuickOpenCandidates(query = '') {
     fileQuickOpenError = '';
   } catch (error) {
     if (requestId !== fileQuickOpenRequestId) return;
+    if (error?.name === 'AbortError') return;
     fileQuickOpenCandidates = [];
     fileQuickOpenError = String(error);
   } finally {
     if (requestId === fileQuickOpenRequestId) {
+      fileQuickOpenAbortController = null;
       fileQuickOpenLoading = false;
       renderCommandPaletteResults();
     }
@@ -5173,6 +5193,37 @@ function restoreFileExplorerScrollPositions(positions) {
   });
 }
 
+function markFileExplorerInteraction() {
+  fileExplorerLastInteractionAt = Date.now();
+}
+
+function eventTargetIsFileExplorerSurface(target) {
+  return Boolean(target?.closest?.('#fileExplorer, .panel.file-explorer-panel, .file-explorer-tree-panel'));
+}
+
+function fileExplorerUserIsActive() {
+  if (isFileExplorerItem(focusedPanelItem)) return true;
+  if (Date.now() - fileExplorerLastInteractionAt < fileExplorerRefreshIdleMs) return true;
+  if (fileExplorer?.matches?.(':hover')) return true;
+  return Array.from(document.querySelectorAll('.panel.file-explorer-panel, .file-explorer-tree-panel')).some(node => node.matches?.(':hover'));
+}
+
+function deferFileExplorerRefresh() {
+  if (fileExplorerRefreshDeferred) return;
+  fileExplorerRefreshDeferred = true;
+  setTimeout(() => {
+    fileExplorerRefreshDeferred = false;
+    refreshFileExplorerIfChanged().catch(error => console.warn('deferred file explorer refresh failed', error));
+  }, fileExplorerRefreshIdleMs);
+}
+
+document.addEventListener('pointerdown', event => {
+  if (eventTargetIsFileExplorerSurface(event.target)) markFileExplorerInteraction();
+}, true);
+document.addEventListener('scroll', event => {
+  if (eventTargetIsFileExplorerSurface(event.target)) markFileExplorerInteraction();
+}, true);
+
 function directFileTreeRow(container, fullPath) {
   return Array.from(container?.children || []).find(node => (
     node.classList?.contains('file-tree-row') && node.dataset?.path === fullPath
@@ -5484,7 +5535,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
-  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : '';
+  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : (indexedDirectory ? 'indexed' : '');
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
     row.classList.toggle(className, className === gitClass);
@@ -5807,16 +5858,36 @@ function fileExplorerDirectoryIsIndexed(path) {
   return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
 }
 
+function fileExplorerIndexedAncestor(path) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized) return '';
+  return Array.from(fileExplorerIndexedDirs || [])
+    .map(normalizeStoredFileExplorerIndexedDir)
+    .filter(candidate => candidate && candidate !== normalized && pathIsInsideDirectory(normalized, candidate))
+    .sort((left, right) => right.length - left.length)[0] || '';
+}
+
 function setFileExplorerIndexedDirs(paths) {
-  fileExplorerIndexedDirs = new Set((paths || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
+  const normalized = (paths || []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean);
+  fileExplorerIndexedDirs = new Set(compactNestedPaths(normalized));
   writeStoredFileExplorerIndexedDirs();
 }
 
 function setFileExplorerDirectoryIndexed(path, indexed) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized) return;
-  if (indexed) fileExplorerIndexedDirs.add(normalized);
-  else fileExplorerIndexedDirs.delete(normalized);
+  if (indexed) {
+    const ancestor = fileExplorerIndexedAncestor(normalized);
+    if (ancestor) {
+      if (statusEl) statusEl.textContent = `${compactHomePath(normalized)} is already covered by ${compactHomePath(ancestor)}`;
+      return;
+    }
+    fileExplorerIndexedDirs.add(normalized);
+    fileExplorerIndexedDirs = new Set(compactNestedPaths(Array.from(fileExplorerIndexedDirs)));
+  } else {
+    fileExplorerIndexedDirs.delete(normalized);
+    abortFileQuickOpenSearch();
+  }
   writeStoredFileExplorerIndexedDirs();
   updateFileExplorerIndexedDirectoryRows();
   if (statusEl) {
@@ -5839,15 +5910,25 @@ function updateFileExplorerIndexedDirectoryRows() {
     if (icon) {
       icon.className = ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' ');
     }
+    const status = row.querySelector(':scope > .file-tree-git-status');
+    if (status) {
+      status.textContent = indexed ? 'indexed' : '';
+      status.hidden = !indexed;
+    }
   });
 }
 
 function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch()) {
-  const candidates = [defaultRoot, ...Array.from(fileExplorerIndexedDirs || [])]
+  const defaultPath = normalizeStoredFileExplorerIndexedDir(defaultRoot);
+  const indexedRoots = compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
     .map(normalizeStoredFileExplorerIndexedDir)
-    .filter(Boolean);
-  const unique = Array.from(new Set(candidates));
-  return unique.filter((path, index) => !unique.some((other, otherIndex) => otherIndex !== index && pathIsInsideDirectory(path, other) && path !== other));
+    .filter(Boolean));
+  const defaultCoveredByIndexed = defaultPath && indexedRoots.some(root => root !== defaultPath && pathIsInsideDirectory(defaultPath, root));
+  const roots = defaultPath && !defaultCoveredByIndexed ? [defaultPath] : [];
+  for (const indexedRoot of indexedRoots) {
+    if (!roots.includes(indexedRoot)) roots.push(indexedRoot);
+  }
+  return roots;
 }
 
 async function onFileTreeRowClick(row, fullPath, entry, event) {
@@ -5922,7 +6003,7 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
     openInNewTabDisabled: multiple || !entryIsImageFile(entry),
     downloadDisabled: multiple || entry?.kind !== 'file',
-    indexToggleDisabled: multiple || entry?.kind !== 'dir',
+    indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
   };
@@ -7133,15 +7214,23 @@ async function refreshFileExplorerIfChanged() {
   const directories = watchedFileExplorerDirectories();
   let changed = false;
   const entriesByDir = new Map();
+  const signaturesByDir = new Map();
   for (const directory of directories) {
     const entries = await fetchDirectory(directory, {recordSignature: false});
     if (!entries) continue;
     const normalizedDirectory = normalizeDirectoryPath(directory);
     entriesByDir.set(normalizedDirectory, entries);
     const signature = directoryEntriesSignature(entries);
+    signaturesByDir.set(normalizedDirectory, signature);
     const previous = fileExplorerDirectorySignatures.get(normalizedDirectory);
-    setLimitedMapEntry(fileExplorerDirectorySignatures, normalizedDirectory, signature, fileExplorerMemoryCacheLimit);
     if (previous !== undefined && previous !== signature) changed = true;
+  }
+  if (changed && fileExplorerUserIsActive()) {
+    deferFileExplorerRefresh();
+    return;
+  }
+  for (const [directory, signature] of signaturesByDir.entries()) {
+    setLimitedMapEntry(fileExplorerDirectorySignatures, directory, signature, fileExplorerMemoryCacheLimit);
   }
   if (changed) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, entriesByDir});
 }
@@ -7570,6 +7659,42 @@ function codeMirrorHtmlSemanticEmphasisExtension(api, path) {
   });
 }
 
+function codeMirrorMarkdownStrongExtension(api, path) {
+  if (codeMirrorLanguageName(path) !== 'markdown' || !api.ViewPlugin || !api.Decoration) return [];
+  const palette = activeEditorScheme().syntax;
+  const strongMark = api.Decoration.mark({
+    attributes: {style: `font-weight:700;color:${palette.strong}`},
+  });
+  const strongPattern = /(\*\*[^*\n](?:.|\n)*?\*\*|__[^_\n](?:.|\n)*?__)/g;
+  return api.ViewPlugin.fromClass(class {
+    constructor(view) {
+      this.decorations = this.build(view);
+    }
+
+    update(update) {
+      if (update.docChanged || update.viewportChanged) this.decorations = this.build(update.view);
+    }
+
+    build(view) {
+      const ranges = [];
+      const visibleRanges = view.visibleRanges?.length ? view.visibleRanges : [{from: 0, to: view.state.doc.length}];
+      for (const visible of visibleRanges) {
+        const text = view.state.doc.sliceString(visible.from, visible.to);
+        strongPattern.lastIndex = 0;
+        let match;
+        while ((match = strongPattern.exec(text))) {
+          const from = visible.from + match.index;
+          const to = from + match[0].length;
+          if (to > from) ranges.push(strongMark.range(from, to));
+        }
+      }
+      return api.Decoration.set(ranges, true);
+    }
+  }, {
+    decorations: plugin => plugin.decorations,
+  });
+}
+
 function parseUnifiedDiffLineClasses(diff) {
   const added = new Set();
   const removed = new Set();
@@ -7778,6 +7903,7 @@ function updateCodeMirrorCursorStatus(panel) {
 
 function codeMirrorExtensions(api, panel, path, options = {}) {
   const save = options.save || (() => saveFileEditor(path, panel));
+  const wrapEnabled = options.wrap !== false && fileEditorWrapEnabled;
   const saveKeymap = api.keymap.of([{
     key: 'Mod-s',
     run() {
@@ -7842,7 +7968,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     findKeymap,
     powerKeymap,
     api.keymap.of([api.indentWithTab, ...api.defaultKeymap, ...api.historyKeymap, ...api.searchKeymap]),
-    ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+    ...(wrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
     codeMirrorLanguageExtension(api, path),
@@ -14603,12 +14729,13 @@ function codeMirrorDiffLayout(container) {
   return width >= 800 ? 'side' : 'inline';
 }
 
-function codeMirrorReadOnlyExtensions(api, path, panel = null) {
+function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {
+  const wrapEnabled = options.wrap !== false && fileEditorWrapEnabled;
   return [
     api.drawSelection(),
     api.highlightActiveLine(),
     ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-    ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+    ...(wrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
     api.EditorState.readOnly.of(true),
     api.EditorView.editable.of(false),
     codeMirrorLanguageExtension(api, path),
@@ -14658,6 +14785,7 @@ function codeMirrorThemeExtensions(api, path) {
   return [
     codeMirrorHighlightExtension(api),
     codeMirrorHtmlSemanticEmphasisExtension(api, path),
+    codeMirrorMarkdownStrongExtension(api, path),
     codeMirrorThemeExtension(api),
   ];
 }
@@ -14810,10 +14938,48 @@ function diffOverviewChunks(diff, totalLines) {
   }));
 }
 
+function diffOverviewChunksFromDocuments(original, current, totalLines) {
+  const left = String(original || '').split('\n');
+  const right = String(current || '').split('\n');
+  const chunks = [];
+  let currentChunk = null;
+  const pushCurrent = () => {
+    if (currentChunk) chunks.push(currentChunk);
+    currentChunk = null;
+  };
+  const addChunk = (kind, line) => {
+    const start = Math.max(1, Number(line || 1));
+    if (currentChunk && currentChunk.kind === kind && start <= currentChunk.end + 1) {
+      currentChunk.end = Math.max(currentChunk.end, start);
+      return;
+    }
+    pushCurrent();
+    currentChunk = {kind, start, end: start};
+  };
+  const max = Math.max(left.length, right.length);
+  for (let index = 0; index < max; index += 1) {
+    const leftLine = left[index];
+    const rightLine = right[index];
+    if (leftLine === rightLine) {
+      pushCurrent();
+      continue;
+    }
+    if (rightLine !== undefined) addChunk('add', index + 1);
+    if (leftLine !== undefined) addChunk('remove', Math.min(index + 1, totalLines));
+  }
+  pushCurrent();
+  return chunks.map(chunk => ({
+    ...chunk,
+    top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
+    height: Math.max(0.8, ((chunk.end - chunk.start + 1) / Math.max(1, totalLines)) * 100),
+  }));
+}
+
 function updateCodeMirrorDiffOverview(panel, container, state, currentText, original) {
   container?.querySelector?.('.cm-diff-overview')?.remove();
   const totalLines = Math.max(String(currentText || '').split('\n').length, String(original || '').split('\n').length, 1);
-  const chunks = diffOverviewChunks(state?.diff || '', totalLines);
+  const parsedChunks = diffOverviewChunks(state?.diff || '', totalLines);
+  const chunks = parsedChunks.length ? parsedChunks : diffOverviewChunksFromDocuments(original, currentText, totalLines);
   if (!container || !chunks.length) return;
   const overview = document.createElement('div');
   overview.className = 'cm-diff-overview';
@@ -14920,7 +15086,6 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           api.drawSelection(),
           api.highlightActiveLine(),
           ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-          ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
           api.EditorState.readOnly.of(true),
           api.EditorView.editable.of(false),
           codeMirrorLanguageExtension(api, path),
@@ -14931,10 +15096,10 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         doc: currentText,
         extensions: diffEditsAllowed
           ? [
-              ...codeMirrorExtensions(api, panel, path),
+              ...codeMirrorExtensions(api, panel, path, {wrap: false}),
               codeMirrorWorkingUpdateExtension(api, panel, path),
             ]
-          : codeMirrorReadOnlyExtensions(api, path, panel),
+          : codeMirrorReadOnlyExtensions(api, path, panel, {wrap: false}),
       },
       parent: container,
       revertControls: 'a-to-b',
@@ -15538,13 +15703,33 @@ function renderEditorCodePreviewInto(container, path, text) {
   container.replaceChildren(pre);
 }
 
-function renderHtmlPreviewInto(container, text) {
+function htmlPreviewHasDisabledJavaScript(text) {
+  const source = String(text ?? '');
+  return /<script\b/i.test(source) || /\son[a-z]+\s*=/i.test(source);
+}
+
+function renderHtmlPreviewInto(container, path, text) {
+  const children = [];
+  if (htmlPreviewHasDisabledJavaScript(text)) {
+    const notice = document.createElement('div');
+    notice.className = 'file-editor-html-js-notice';
+    const message = document.createElement('span');
+    message.textContent = 'JavaScript is disabled in this sandboxed preview.';
+    const link = document.createElement('a');
+    link.href = `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'Open with JavaScript';
+    notice.append(message, link);
+    children.push(notice);
+  }
   const frame = document.createElement('iframe');
   frame.className = 'file-editor-html-preview';
   frame.setAttribute('sandbox', '');
   frame.setAttribute('title', 'HTML preview');
   frame.srcdoc = String(text ?? '');
-  container.replaceChildren(frame);
+  children.push(frame);
+  container.replaceChildren(...children);
 }
 
 function renderEditorPreviewPane(container, path, text) {
@@ -15555,7 +15740,7 @@ function renderEditorPreviewPane(container, path, text) {
   container.classList.toggle('html-preview-body', isHtmlPath(path));
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
   if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text);
-  else if (isHtmlPath(path)) renderHtmlPreviewInto(container, text);
+  else if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
   else renderEditorCodePreviewInto(container, path, text);
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }

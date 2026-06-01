@@ -109,9 +109,9 @@ const TERMINAL_THEMES = {
 const EDITOR_SCHEMES = {
   dark: {
     id: 'dark', label: 'YOLOmux Dark', dark: true,
-    bg: '#0f1115', fg: '#ffffff', cursor: '#ffffff', selection: 'rgba(87, 112, 148, 0.46)', activeLine: 'rgba(255, 255, 255, 0.04)',
+    bg: '#0f1115', fg: '#cfd3dc', cursor: '#ffffff', selection: 'rgba(87, 112, 148, 0.46)', activeLine: 'rgba(255, 255, 255, 0.04)',
     gutterBg: '#151922', lineNo: '#9aa5b1', panel: '#151922', panel2: '#1e2430', line: '#303948', previewBg: '#151922',
-    syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ff5c5c', emphasis: '#ffffff', invalid: '#ff6673'},
+    syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ffffff', emphasis: '#ffffff', invalid: '#ff6673'},
     diff: {addFg: '#3fb950', removeFg: '#f85149'},
   },
   'one-dark': {
@@ -212,6 +212,7 @@ const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
+const fileExplorerRefreshIdleMs = 1500;
 const commandPaletteRecentKeyLimit = 100;
 const notificationLastSentLimit = 512;
 const pendingFileEditorFocus = new Set();
@@ -268,6 +269,8 @@ let sessionFilesLoading = false;
 let fileExplorerSessionFilesLoading = false;
 let sessionFilesRequestId = 0;
 let fileExplorerSessionFilesRequestId = 0;
+let fileExplorerLastInteractionAt = 0;
+let fileExplorerRefreshDeferred = false;
 let sessionFilesSortMode = 'mtime';
 let sessionFilesSelectedSession = '';
 let fileExplorerTreeShowDates = readStoredFileExplorerTreeShowDates();
@@ -290,6 +293,7 @@ let fileQuickOpenLoading = false;
 let fileQuickOpenError = '';
 let fileQuickOpenRequestId = 0;
 let fileQuickOpenDebounce = null;
+let fileQuickOpenAbortController = null;
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
 let clientSettingsPayload = bootstrap.settingsPayload || {};
