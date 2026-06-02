@@ -129,3 +129,14 @@ def test_save_settings_preserves_concurrent_section_updates(tmp_path):
     assert settings["notifications"]["throttle_seconds"] == 17
     assert not (tmp_path / "settings.yaml.tmp").exists()
     assert list(tmp_path.glob(".settings.yaml.*.tmp")) == []
+
+
+def test_save_settings_reports_coerced_keys(tmp_path):
+    # DOIT.6 #84: a clamped/reverted patch value is reported in payload["coerced"], not changed silently.
+    path = tmp_path / "settings.yaml"
+    save_settings(default_settings(), path)
+    result = save_settings({"appearance": {"ui_font_size": 999}}, path)
+    assert "appearance.ui_font_size" in result["coerced"]
+    assert result["settings"]["appearance"]["ui_font_size"] == 20  # clamped to the max
+    ok = save_settings({"appearance": {"ui_font_size": 14}}, path)
+    assert ok["coerced"] == []
