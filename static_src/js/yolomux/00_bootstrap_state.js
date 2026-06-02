@@ -636,13 +636,13 @@ function applyPlatformControlClass(element, kind) {
 }
 
 function fileExplorerLabel() {
-  return isMacPlatform() ? 'Finder' : 'File Explorer';
+  return isMacPlatform() ? t('finder.label.finder') : t('finder.label.explorer');
 }
 
 function applyFileExplorerStaticLabels() {
   const label = fileExplorerLabel();
   fileExplorer?.setAttribute('aria-label', label);
-  fileExplorerClose?.setAttribute('title', `Close ${label}`);
+  fileExplorerClose?.setAttribute('title', t('finder.close', {name: label}));
   applyPlatformControlClass(fileExplorerClose, 'close');
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));

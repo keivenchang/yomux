@@ -121,8 +121,8 @@ function diffRefControlsHtml(options = {}) {
   const compact = options.compact === true;
   const className = compact ? 'diff-ref-controls compact' : 'diff-ref-controls';
   return `<span class="${className}" data-diff-ref-controls>
-    <label class="diff-ref-control">FROM <select class="diff-ref-select" data-diff-ref-from data-diff-ref-from-select aria-label="Pick an older FROM commit">${diffRefSelectOptionsHtml(diffRefFrom, {compact, suggestions: diffRefFromSuggestions()})}</select></label>
-    <label class="diff-ref-control">TO <select class="diff-ref-select" data-diff-ref-to data-diff-ref-to-select aria-label="Pick a newer TO ref">${diffRefSelectOptionsHtml(diffRefTo, {compact, suggestions: diffRefToSuggestions(diffRefFrom)})}</select></label>
+    <label class="diff-ref-control">${esc(t('diff.ref.from'))} <select class="diff-ref-select" data-diff-ref-from data-diff-ref-from-select aria-label="${esc(t('diff.ref.from.aria'))}">${diffRefSelectOptionsHtml(diffRefFrom, {compact, suggestions: diffRefFromSuggestions()})}</select></label>
+    <label class="diff-ref-control">${esc(t('diff.ref.to'))} <select class="diff-ref-select" data-diff-ref-to data-diff-ref-to-select aria-label="${esc(t('diff.ref.to.aria'))}">${diffRefSelectOptionsHtml(diffRefTo, {compact, suggestions: diffRefToSuggestions(diffRefFrom)})}</select></label>
   </span>`;
 }
 
@@ -419,31 +419,31 @@ function changeFileTotals(files) {
 
 function diffRefDisplayText(ref) {
   const value = cleanDiffRef(ref, '');
-  if (!value || value === 'default') return 'Default base';
-  if (value === 'base') return 'Base';
-  if (value === 'current') return 'Working Tree';
+  if (!value || value === 'default') return t('diff.ref.defaultBase');
+  if (value === 'base') return t('diff.ref.base');
+  if (value === 'current') return t('diff.ref.workingTree');
   return value.length > 12 && /^[0-9a-f]{13,40}$/i.test(value) ? value.slice(0, 9) : value;
 }
 
 function comparisonTitleHtml(payload) {
   const from = diffRefDisplayText(payload?.from_ref || diffRefFrom);
   const to = diffRefDisplayText(payload?.to_ref || diffRefTo);
-  return `Comparing ${esc(from)} with ${esc(to)}`;
+  return t('diff.comparing', {from: esc(from), to: esc(to)});
 }
 
 function changesSummaryHtml(files, session, loading, loaded) {
-  if (loading) return 'loading...';
-  if (!loaded) return 'not loaded';
-  const count = `${files.length} file${files.length === 1 ? '' : 's'} changed`;
+  if (loading) return t('changes.loading');
+  if (!loaded) return t('changes.notLoaded');
+  const count = tPlural('changes.fileCount', files.length);
   const {added, removed} = changeFileTotals(files);
-  const scope = session ? ` in '${sessionLabel(session)}'` : '';
+  const scope = session ? t('changes.inSession', {session: sessionLabel(session)}) : '';
   return `${esc(count)}${esc(scope)} <span class="changes-summary-separator">·</span> <span class="changes-diff-add">+${added}</span> <span class="changes-diff-remove">-${removed}</span>`;
 }
 
 function changesRepoMetaHtml(repoInfo) {
   const pieces = [];
-  if (Number.isFinite(Number(repoInfo?.behind))) pieces.push(`<span>Behind ${Number(repoInfo.behind)} commit${Number(repoInfo.behind) === 1 ? '' : 's'}</span>`);
-  if (Number.isFinite(Number(repoInfo?.ahead))) pieces.push(`<span>Ahead ${Number(repoInfo.ahead)} commit${Number(repoInfo.ahead) === 1 ? '' : 's'}</span>`);
+  if (Number.isFinite(Number(repoInfo?.behind))) pieces.push(`<span>${esc(tPlural('changes.behind', Number(repoInfo.behind)))}</span>`);
+  if (Number.isFinite(Number(repoInfo?.ahead))) pieces.push(`<span>${esc(tPlural('changes.ahead', Number(repoInfo.ahead)))}</span>`);
   return pieces.length ? `<span class="changes-repo-compare-meta">${pieces.join('')}</span>` : '';
 }
 
@@ -590,16 +590,16 @@ function changesPanelHtml() {
   const errorHtml = (sessionFilesPayload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const comparison = changesComparisonHeaderHtml(sessionFilesPayload, files, {loading: sessionFilesLoading});
   const groups = changesRepoGroupsHtml(files, {payload: sessionFilesPayload});
-  const empty = !sessionFilesLoading && loaded && !files.length ? '<div class="changes-empty">No AI-changed files found for this session.</div>' : '';
+  const empty = !sessionFilesLoading && loaded && !files.length ? `<div class="changes-empty">${esc(t('changes.emptyAi'))}</div>` : '';
   return `
     <div class="changes-toolbar">
-      <label class="changes-control">Session <select data-session-files-session>${options}</select></label>
-      <label class="changes-control">Sort <select data-session-files-sort>
-        <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>recent</option>
-        <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>name</option>
+      <label class="changes-control">${esc(t('changes.session'))} <select data-session-files-session>${options}</select></label>
+      <label class="changes-control">${esc(t('changes.sort'))} <select data-session-files-sort>
+        <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>${esc(t('changes.sort.recent'))}</option>
+        <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>${esc(t('changes.sort.name'))}</option>
       </select></label>
       ${diffRefControlsHtml()}
-      <button type="button" class="changes-refresh" data-session-files-refresh>Refresh</button>
+      <button type="button" class="changes-refresh" data-session-files-refresh>${esc(t('changes.refresh'))}</button>
     </div>
     ${comparison}
     ${errorHtml}
@@ -613,13 +613,13 @@ function fileExplorerChangesPanelHtml() {
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
-  const empty = !loading && loaded && !files.length ? '<div class="changes-empty">No modified files for this session.</div>' : '';
+  const empty = !loading && loaded && !files.length ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   return `
     <div class="file-explorer-changes-head">
-      <span class="changes-title">Modified files</span>
+      <span class="changes-title">${esc(t('changes.title'))}</span>
       ${diffRefControlsHtml({compact: true})}
-      <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
-      <button type="button" class="changes-close" data-file-explorer-changes-close title="Hide modified files" aria-label="Hide modified files">×</button>
+      <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
+      <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
     ${changesComparisonHeaderHtml(payload, files, {loading})}
     ${errorHtml}

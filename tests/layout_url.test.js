@@ -4124,6 +4124,40 @@ function makeFileTree(paths) {
 }
 
 {
+  // DOIT.6 #121: the menu bar, Modified-files panel, diff-ref, and comparison localize in a non-English
+  // locale and leak no bare English; source guards confirm the builders route through t().
+  const api = loadYolomux('', ['1']);
+  const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
+  api.i18nSetCatalogForTest('zh-Hant', zhHant);
+  api.setActiveLocaleForTest('zh-Hant');
+  api.setFileExplorerSessionFilesPayloadForTest({
+    session: '1',
+    loaded: true,
+    errors: [],
+    refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
+    repos: [{repo: '/repo/app', count: 1, touched_count: 1, added: 2, removed: 1, behind: 0, ahead: 1}],
+    files: [{session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1}],
+  });
+  const panel = api.fileExplorerChangesPanelHtml();
+  assert.ok(panel.includes(`>${zhHant['changes.title']}</span>`), '#121: the Modified-files title is localized');
+  assert.ok(panel.includes(`>${zhHant['changes.refresh']}</button>`), '#121: the Modified-files Refresh button is localized');
+  assert.ok(panel.includes(`>${zhHant['diff.ref.from']} <select`), '#121: the diff-ref FROM label is localized');
+  assert.ok(panel.includes(`>${zhHant['diff.ref.to']} <select`), '#121: the diff-ref TO label is localized');
+  assert.ok(panel.includes(`aria-label="${zhHant['diff.ref.from.aria']}"`), '#121: the FROM picker aria-label is localized');
+  assert.ok(panel.includes(zhHant['changes.ahead.one'].replace('{count}', '1')), '#121: the Ahead-N-commit meta is localized (tPlural)');
+  // No bare English leaks in the localized Modified-files panel.
+  assert.ok(!/>Modified files<|>Refresh<|>FROM <|>TO <|Ahead 1 commit|Comparing /.test(panel), '#121: no English leaks in the localized Modified-files panel');
+  // Source guards: the menu/changes builders carry no bare English literals (all via t()).
+  const appSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+  for (const literal of ["menuCommand('Open file'", "menuCommand('Preferences'", "menuCommand('Log out'", "menuCommand('Refresh'", "menuSubmenu('Theme'", "menuCommand('Pane details'", "menuCommand('No matching tabs'", "'Kill tmux session", "class=\"changes-title\">Modified files<", '>FROM <select', '`Comparing ${esc(from)} with ${esc(to)}`']) {
+    assert.equal(appSrc.includes(literal), false, `#121: bare English literal removed: ${literal}`);
+  }
+  // The pseudo-locale transforms a representative menu key (the completeness signal).
+  const enXA = JSON.parse(fs.readFileSync('static/locales/en-XA.json', 'utf8'));
+  assert.ok(/[⟦⟧]/.test(enXA['menu.file.openFile']) && !/^Open file$/.test(enXA['menu.file.openFile']), '#121: menu keys are pseudo-localized in en-XA');
+}
+
+{
   // DOIT.6 #7: the default (files-mode) search bar blends matching commands/tabs into the results.
   const api = loadYolomux('', ['1']);
   const prefsLabel = api.itemLabel(api.prefsItemId);
