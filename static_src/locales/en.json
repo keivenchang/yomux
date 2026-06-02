@@ -466,5 +466,19 @@
   "palette.group.settings": "Settings",
   "palette.group.recent": "Recent",
   "palette.group.files": "Files",
-  "common.loading": "loading..."
+  "common.loading": "loading...",
+  "popover.path": "path",
+  "popover.type": "type",
+  "popover.status": "status",
+  "popover.size": "size",
+  "popover.state": "state",
+  "popover.agent": "agent",
+  "popover.branch": "branch",
+  "popover.git": "git",
+  "popover.details": "details",
+  "popover.desc": "desc",
+  "popover.repo": "repo",
+  "popover.kind.image": "image viewer",
+  "popover.kind.text": "file editor",
+  "popover.kind.file": "file"
 }

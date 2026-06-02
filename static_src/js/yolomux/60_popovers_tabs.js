@@ -502,7 +502,7 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
 }
 
 function projectDirName(session, info) {
-  if (!info) return 'loading';
+  if (!info) return t('common.loading');
   const project = info?.project || {};
   const git = project.git;
   const path = git?.root || git?.cwd || info?.selected_pane?.current_path || '';
@@ -531,14 +531,14 @@ function filePopoverHtml(item) {
 }
 
 function filePopoverRows(path, state = {}) {
-  const kind = state.kind === 'image' ? 'image viewer' : state.kind === 'text' ? 'file editor' : state.kind || 'file';
-  const status = state.dirty ? 'modified' : state.loading ? 'loading' : state.error ? String(state.error) : kind;
+  const kind = state.kind === 'image' ? t('popover.kind.image') : state.kind === 'text' ? t('popover.kind.text') : state.kind || t('popover.kind.file');
+  const status = state.dirty ? t('filetab.modified') : state.loading ? t('common.loading') : state.error ? String(state.error) : kind;
   const rows = [
-    popoverRow('path', filePopoverPathHtml(path)),
+    popoverRow(t('popover.path'), filePopoverPathHtml(path)),
   ];
-  if (status && status !== kind) rows.push(popoverPairRow('type', esc(kind), 'status', esc(status)));
-  else rows.push(popoverRow('type', esc(kind)));
-  if (Number.isFinite(state.size)) rows.push(popoverRow('size', formatFileSize(state.size)));
+  if (status && status !== kind) rows.push(popoverPairRow(t('popover.type'), esc(kind), t('popover.status'), esc(status)));
+  else rows.push(popoverRow(t('popover.type'), esc(kind)));
+  if (Number.isFinite(state.size)) rows.push(popoverRow(t('popover.size'), formatFileSize(state.size)));
   return rows;
 }
 
@@ -569,13 +569,13 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const autoText = autoEnabled ? 'YOLO on' : (autoElsewhere ? 'YOLO elsewhere' : '');
   const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || 'not detected');
   const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
-  rows.push(popoverPairRow('state', stateValue, 'agent', agentValue));
+  rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
   const activity = sessionActivitySummary(session);
   if (activity?.local) rows.push(popoverRow(yoagentTabLabel, esc(activity.local)));
-  rows.push(popoverRow('path', displayPath));
-  if (git?.branch) rows.push(popoverRow('branch', `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
+  rows.push(popoverRow(t('popover.path'), displayPath));
+  if (git?.branch) rows.push(popoverRow(t('popover.branch'), `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {
-    rows.push(popoverRow('git', gitStatusText(git)));
+    rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   }
   let linearValue = '';
   let linearDesc = '';
@@ -583,7 +583,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     linearValue = linearInlineHtml(linear);
     linearDesc = linearDescriptionsInlineHtml(linear);
     if (linearValue) rows.push(popoverRow('Linear', linearValue));
-    if (linearDesc) rows.push(popoverRow('details', linearDesc));
+    if (linearDesc) rows.push(popoverRow(t('popover.details'), linearDesc));
   }
   let prDesc = '';
   if (pr?.number) {
@@ -596,11 +596,11 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     prDesc = pullRequestDescriptionInlineHtml(pr);
   }
   if (prDesc) {
-    rows.push(popoverRow('desc', prDesc));
+    rows.push(popoverRow(t('popover.desc'), prDesc));
   }
   const subject = currentBranchSubject(git);
-  if (subject && !pr?.number) rows.push(popoverRow('desc', `<div class="popover-desc">${esc(subject)}</div>`));
-  if (git?.root && git.root !== displayPath) rows.push(popoverRow('repo', git.root));
+  if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
+  if (git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
   if (git?.head) rows.push(popoverRow('HEAD', git.head));
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">

@@ -466,5 +466,19 @@
   "palette.group.settings": "设置",
   "palette.group.recent": "最近",
   "palette.group.files": "文件",
-  "common.loading": "加载中…"
+  "common.loading": "加载中…",
+  "popover.path": "路径",
+  "popover.type": "类型",
+  "popover.status": "状态",
+  "popover.size": "大小",
+  "popover.state": "状态",
+  "popover.agent": "代理",
+  "popover.branch": "分支",
+  "popover.git": "git",
+  "popover.details": "详情",
+  "popover.desc": "描述",
+  "popover.repo": "仓库",
+  "popover.kind.image": "图像查看器",
+  "popover.kind.text": "文件编辑器",
+  "popover.kind.file": "文件"
 }
