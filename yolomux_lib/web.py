@@ -255,6 +255,7 @@ LOGIN_LOCALE_CHOICES: list[tuple[str, str]] = [
     ("es", "Español"),
     ("ja", "日本語"),
     ("de", "Deutsch"),
+    ("fr", "Français"),
 ]
 _LOGIN_LOCALE_VALUES = {value for value, _ in LOGIN_LOCALE_CHOICES}
 

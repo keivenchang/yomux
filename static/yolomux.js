@@ -813,7 +813,7 @@ async function applyLocale(locale) {
 // The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
 // navigator.language to one of these. Add new locales here as their catalogs ship.
 function i18nSupportedLocales() {
-  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'en'];
+  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'en'];
 }
 
 // The language-switcher choices (Preferences picker + topbar switcher). Endonyms stay in their own
@@ -827,6 +827,7 @@ function i18nLocaleChoices() {
     {value: 'es', label: 'Español'},
     {value: 'ja', label: '日本語'},
     {value: 'de', label: 'Deutsch'},
+    {value: 'fr', label: 'Français'},
     {value: 'en-XA', label: t('pref.general.language.pseudo')},
   ];
 }
@@ -13551,6 +13552,7 @@ function preferenceSections() {
         {value: 'es', label: 'Español'},
         {value: 'ja', label: '日本語'},
         {value: 'de', label: 'Deutsch'},
+        {value: 'fr', label: 'Français'},
         {value: 'en-XA', label: t('pref.general.language.pseudo')},
       ], help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
