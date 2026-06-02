@@ -51,7 +51,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["performance"]["pane_state_refresh_ms"] == 1200
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False
-    assert settings["yoagent"]["backend"] == "deterministic"
+    assert settings["yoagent"]["backend"] == "auto"
     assert settings["yoagent"]["invocation"] == "cli"
     assert settings["yoagent"]["system_prompt"] == "Use facts"
     assert settings["yoagent"]["intro"] == "Be terse"
@@ -68,7 +68,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["appearance"]["terminal_theme"] == "follow-app"
     assert payload["settings"]["appearance"]["tab_width"] == 180
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
-    assert payload["settings"]["yoagent"]["backend"] == "deterministic"
+    assert payload["settings"]["yoagent"]["backend"] == "auto"
     assert "normal human status update" in payload["settings"]["yoagent"]["system_prompt"]
     assert "structured status report" in payload["settings"]["yoagent"]["intro"]
     assert "numbered list with ONE item per session" in payload["settings"]["yoagent"]["format"]

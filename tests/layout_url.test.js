@@ -1305,6 +1305,11 @@ function makeFileTree(paths) {
   assert.ok(/disabled: readOnlyMode \|\| !available \|\| loggedOut \|\| capped/.test(source), '#39: a logged-out agent is disabled in the picker');
   assert.ok(/loggedOut[\s\S]*?Run \$\{agentLoginCommand\(agent\)\}/.test(source), '#39: a logged-out agent shows its login command as the menu detail');
   assert.ok(source.includes('if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;'), '#39: the metadata poll refreshes agent login status');
+  // #41: the frontend mirrors the server's auto backend resolution (codex -> claude -> deterministic)
+  // so the chat input enables to match what the backend will run, and defaults to auto.
+  assert.ok(/function yoagentResolvedBackend\(\)[\s\S]*?for \(const agent of \['codex', 'claude'\]\)[\s\S]*?availableAgents\.has\(agent\) && agentLoggedIn\(agent\)/.test(source), '#41: yoagentResolvedBackend prefers codex then claude among logged-in agents');
+  assert.ok(source.includes("initialSetting('yoagent.backend', 'auto')"), '#41: the YO!agent backend default is auto');
+  assert.ok(/function yoagentChatEnabled\(\)[\s\S]*?yoagentResolvedBackend\(\)/.test(source), '#41: chat-enabled tracks the resolved backend');
   assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*boolSetting\('general\.reload_on_update'/.test(source), 'server-version reload is gated on the boot version and the reload_on_update preference');
   assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');
   assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');
@@ -2129,6 +2134,8 @@ function makeFileTree(paths) {
   assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-text input\[type="text"\][\s\S]*?\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-select select\s*\{[\s\S]*?width:\s*100%/.test(preferencesCss), '#38: text/select inputs fill the full width inside wide rows');
   assert.ok(preferencesHtml.includes('No agent'), 'Preferences rename the local YO!agent backend to No agent');
   assert.equal(preferencesHtml.includes('Deterministic'), false, 'Preferences do not expose the internal deterministic backend label');
+  // #41: the YO!agent backend defaults to auto (codex -> claude -> No agent) and the select offers it.
+  assert.ok(/data-setting-path="yoagent\.backend"[\s\S]*?<option value="auto"[^>]*>Auto \(Codex → Claude\)<\/option>/.test(preferencesHtml), '#41: the YO!agent backend select offers the Auto option');
   assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
   assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'dark editor schemes are grouped under Dark');
   assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'light editor schemes are grouped under Light');

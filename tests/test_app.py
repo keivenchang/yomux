@@ -294,6 +294,47 @@ def test_yoagent_cli_fallback_keeps_non_auth_error():
     assert reason == "model overloaded"
 
 
+def test_resolve_yoagent_backend_auto_prefers_codex_then_claude(monkeypatch):
+    # #41: auto resolves to codex first, then claude, then deterministic — only for installed AND
+    # logged-in agents. Explicit choices pass through untouched.
+    def status(claude_in, codex_in):
+        return lambda *a, **k: {
+            "claude": {"installed": True, "logged_in": claude_in},
+            "codex": {"installed": True, "logged_in": codex_in},
+        }
+
+    monkeypatch.setattr(app_module, "agent_auth_status", status(True, True))
+    assert app_module.resolve_yoagent_backend("auto") == "codex"
+    monkeypatch.setattr(app_module, "agent_auth_status", status(True, False))
+    assert app_module.resolve_yoagent_backend("auto") == "claude"
+    monkeypatch.setattr(app_module, "agent_auth_status", status(False, False))
+    assert app_module.resolve_yoagent_backend("auto") == "deterministic"
+    # an installed-but-logged-out codex is skipped in favor of a logged-in claude
+    monkeypatch.setattr(app_module, "agent_auth_status", status(True, False))
+    assert app_module.resolve_yoagent_backend("auto") == "claude"
+    # explicit selections are never auto-resolved
+    monkeypatch.setattr(app_module, "agent_auth_status", status(False, False))
+    assert app_module.resolve_yoagent_backend("claude") == "claude"
+    assert app_module.resolve_yoagent_backend("deterministic") == "deterministic"
+
+
+def test_yoagent_chat_auto_runs_logged_in_agent(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(app_module, "agent_auth_status", lambda *a, **k: {
+        "claude": {"installed": True, "logged_in": False},
+        "codex": {"installed": True, "logged_in": True},
+    })
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "auto", "invocation": "cli"})
+    monkeypatch.setattr(webapp, "run_yoagent_codex_cli", lambda prompt, session_id="", resume=False: ("codex answer", "", "codex-session-1"))
+    try:
+        payload, status = webapp.yoagent_chat({"message": "status?"})
+    finally:
+        webapp.control_server.stop()
+    assert payload["backend"] == "auto"
+    assert payload["backend_used"] == "codex"
+    assert payload["answer"] == "codex answer"
+
+
 def test_yoagent_permission_block_answer_falls_back(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(webapp, "run_yoagent_claude_cli", lambda prompt, session_id="", resume=False: ("I'm blocked — the harness denied access to ~/.claude/projects/**/*.jsonl.", ""))

@@ -13131,6 +13131,7 @@ function yoagentNoticeHtml() {
 
 function yoagentBackendLabel(value) {
   const key = String(value || '').toLowerCase();
+  if (key === 'auto') return 'Auto';
   if (key === 'deterministic') return 'No agent';
   if (key === 'codex') return 'Codex';
   if (key === 'claude') return 'Claude';
@@ -13138,11 +13139,22 @@ function yoagentBackendLabel(value) {
 }
 
 function yoagentBackendKey() {
-  return String(initialSetting('yoagent.backend', 'deterministic') || 'deterministic').trim().toLowerCase();
+  return String(initialSetting('yoagent.backend', 'auto') || 'auto').trim().toLowerCase();
+}
+
+// #41: mirror the server's auto-resolution (codex -> claude -> deterministic) using the cached agent
+// login status, so the chat input enables/disables to match what the backend will actually run.
+function yoagentResolvedBackend() {
+  const key = yoagentBackendKey();
+  if (key !== 'auto') return key;
+  for (const agent of ['codex', 'claude']) {
+    if (availableAgents.has(agent) && agentLoggedIn(agent)) return agent;
+  }
+  return 'deterministic';
 }
 
 function yoagentChatEnabled() {
-  return ['claude', 'codex'].includes(yoagentBackendKey());
+  return ['claude', 'codex'].includes(yoagentResolvedBackend());
 }
 
 function yoagentChatHtml() {
@@ -13371,10 +13383,11 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: 'YO!agent backend', type: 'select', choices: [
+        {value: 'auto', label: 'Auto (Codex → Claude)'},
         {value: 'deterministic', label: 'No agent'},
         {value: 'codex', label: 'Codex'},
         {value: 'claude', label: 'Claude'},
-      ], help: 'Backend used for YO!agent chat. No agent is local and always available.'},
+      ], help: 'Backend used for YO!agent chat. Auto prefers Codex, then Claude (whichever is logged in), else No agent. No agent is local and always available.'},
       {path: 'yoagent.invocation', label: 'YO!agent invocation', type: 'select', choices: [
         {value: 'cli', label: 'CLI'},
         {value: 'api-key', label: 'API key'},

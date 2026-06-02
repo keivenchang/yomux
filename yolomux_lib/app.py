@@ -126,6 +126,20 @@ def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
     return f"{label} is not logged in. Run `{login_command}`; showing the No agent YO!agent summary."
 
 
+def resolve_yoagent_backend(backend: str) -> str:
+    # DOIT.6 #41: the default backend is "auto" — prefer codex, then claude, falling back to the
+    # deterministic ("No agent") summary if neither is installed AND logged in. Explicit choices
+    # (claude / codex / deterministic) pass through unchanged.
+    if backend != "auto":
+        return backend
+    status = agent_auth_status()
+    for agent in ("codex", "claude"):
+        entry = status.get(agent, {})
+        if entry.get("installed") and entry.get("logged_in"):
+            return agent
+    return "deterministic"
+
+
 def codex_event_session_id(event: dict[str, Any]) -> str:
     for key in ("session_id", "sessionId", "thread_id", "threadId", "conversation_id", "conversationId"):
         value = event.get(key)
@@ -286,7 +300,8 @@ class TmuxWebtermApp:
         settings = self.yoagent_settings()
         activity_payload = self.activity_summary_payload()
         context_lines = yoagent_context_lines(activity_payload)
-        backend = str(settings.get("backend") or "deterministic").strip().lower()
+        requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
+        backend = resolve_yoagent_backend(requested_backend)
         invocation = str(settings.get("invocation") or "cli").strip().lower()
         answer = ""
         backend_used = "deterministic"
@@ -302,7 +317,7 @@ class TmuxWebtermApp:
             answer = deterministic_yoagent_reply(question, activity_payload, settings)
         return {
             "answer": answer,
-            "backend": backend,
+            "backend": requested_backend,
             "backend_used": backend_used,
             "fallback": bool(fallback_reason),
             "fallback_reason": fallback_reason,

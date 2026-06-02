@@ -91,7 +91,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "max_bytes": UPLOAD_MAX_BYTES,
     },
     "yoagent": {
-        "backend": "deterministic",
+        "backend": "auto",
         "invocation": "cli",
         "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Help users operate YOLOmux using the supplied concepts and report only from the supplied agent activity context. Write like a normal human status update, not a metadata list. Do not run tools or inspect ~/.claude, ~/.codex, transcript directories, or any filesystem path. Do not say Sup. Do not invent missing facts.",
         "intro": "Summarize the live AI agent activity as a structured status report. Lead with one short sentence of overall state, then give one numbered section per session / topic / PR / ticket, then a closing list of what is open or pending. Name the repos, tickets, PRs, and session ids involved. Use the per-session last-worked timestamps to flag fresh vs stale context.",
@@ -186,7 +186,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("appearance", "editor_cursor_style"): {"line", "block"},
     ("file_explorer", "root_mode"): {"fixed", "sync"},
     ("file_explorer", "image_open_mode"): {"same-tab", "new-tab"},
-    ("yoagent", "backend"): {"deterministic", "claude", "codex"},
+    ("yoagent", "backend"): {"auto", "deterministic", "claude", "codex"},
     ("yoagent", "invocation"): {"cli", "api-key"},
     ("yolo", "prompt_source"): {"pane", "hybrid"},
 }
@@ -241,7 +241,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
     ("uploads", "max_bytes"): "Bytes, 1048576-536870912. Maximum buffered browser upload size. Prefer rsync for large files.",
-    ("yoagent", "backend"): "deterministic | claude | codex. The deterministic internal value is shown as No agent; Claude/Codex use the selected invocation when available.",
+    ("yoagent", "backend"): "auto | deterministic | claude | codex. Default auto prefers codex, then claude (whichever is installed AND logged in), else the No agent summary. The deterministic internal value is shown as No agent; explicit Claude/Codex use the selected invocation when available.",
     ("yoagent", "invocation"): "cli | api-key. CLI runs the local agent binary; api-key is reserved and falls back safely today.",
     ("yoagent", "system_prompt"): "System prompt used when YO!agent calls a model backend.",
     ("yoagent", "intro"): "Instruction prefix added before the activity context.",
