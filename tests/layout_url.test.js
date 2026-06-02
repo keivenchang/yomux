@@ -4050,7 +4050,9 @@ function makeFileTree(paths) {
   assert.equal(api.resolveLocalePref('system'), 'en', 'Phase 1: system falls back to en without a browser locale');
   // The switcher choices: system + en + Traditional-before-Simplified + pseudo, endonym-labeled.
   const choices = api.i18nLocaleChoices();
-  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'es', 'ja', 'en-XA'], 'Phase 1: the locale choices are ordered system/en/Hant/Hans/es/ja/pseudo');
+  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'en-XA'], 'Phase 1/2: the locale choices are ordered system/en/Hant/Hans/es/ja/de/pseudo');
+  assert.equal(choices.find(c => c.value === 'de').label, 'Deutsch', 'Phase 2: German is labeled with its endonym');
+  assert.equal(api.resolveLocalePref('de'), 'de', 'Phase 2: German resolves to itself');
   assert.equal(choices.find(c => c.value === 'es').label, 'Español', 'Phase 1: Spanish is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ja').label, '日本語', 'Phase 1: Japanese is labeled with its endonym');
   assert.equal(api.resolveLocalePref('es'), 'es', 'Phase 1: Spanish resolves to itself');
@@ -4077,6 +4079,10 @@ function makeFileTree(paths) {
   assert.equal(ja['menu.file'], 'ファイル', 'Phase 1: ja translates a representative menu label');
   assert.equal(ja['pref.reset.cancel'], 'キャンセル', 'Phase 1: ja translates the reset cancel button');
   assert.ok(ja['changes.fileCount.other'].includes('{count}'), 'Phase 1: ja preserves count placeholders');
+  const de = JSON.parse(fs.readFileSync('static/locales/de.json', 'utf8'));
+  assert.deepEqual(Object.keys(de).sort(), Object.keys(en).sort(), 'Phase 2: de.json has exactly the same keys as en.json (parity)');
+  assert.equal(de['menu.file'], 'Datei', 'Phase 2: de translates a representative menu label');
+  assert.equal(de['login.signIn'], 'Anmelden', 'Phase 2: de translates the login sign-in label');
 }
 
 {
