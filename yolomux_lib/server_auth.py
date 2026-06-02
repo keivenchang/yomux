@@ -124,7 +124,9 @@ class AuthMixin:
 
     def safe_next_path(self, value: str | None) -> str:
         text = str(value or "/").strip()
-        if not text.startswith("/") or text.startswith("//") or "\r" in text or "\n" in text:
+        # DOIT.6 #76: also reject backslashes — a browser normalizes `/\evil.com` to `//evil.com`, an
+        # external open redirect after login. Protocol-relative `//` and CR/LF are rejected too.
+        if not text.startswith("/") or text.startswith("//") or "\\" in text or "\r" in text or "\n" in text:
             return "/"
         return text
 

@@ -599,6 +599,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             content_length = int(content_length_text)
         except ValueError:
             return {"error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
+        # DOIT.6 #77: reject a non-positive length — `read(-1)` blocks until disconnect and `read(-5)`
+        # raises (-> 500); only the upper bound was checked.
+        if content_length <= 0:
+            return {"error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
         if content_length > 64 * 1024:
             self.close_connection = True
             return {"error": "event is too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
@@ -618,6 +622,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         try:
             content_length = int(content_length_text)
         except ValueError:
+            return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
+        # DOIT.6 #77: reject a non-positive length (read(-1) blocks until disconnect; read(-5) -> 500).
+        if content_length <= 0:
             return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
         upload_max_bytes = self.server.app.upload_max_bytes()
         if content_length > upload_max_bytes:

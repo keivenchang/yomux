@@ -309,3 +309,16 @@ def test_deterministic_yoagent_reply_emits_multi_section_structure():
     assert "**Open / pending:**" in reply
     assert "Recommendation:" in reply
     assert "session 9" in reply.split("**Open / pending:**", 1)[1]
+
+
+def test_changed_file_totals_coerces_numeric_strings_and_ignores_bools():
+    from yolomux_lib.activity_summary import changed_file_totals
+    # DOIT.6 #78: numeric strings count ("5" -> 5); a bool does NOT (added=True must not be +1).
+    payload = {"files": [
+        {"added": "5", "removed": "2"},
+        {"added": 3, "removed": 1},
+        {"added": True, "removed": None},
+        {"added": "x", "removed": "y"},
+    ]}
+    totals = changed_file_totals(payload)
+    assert totals == {"count": 4, "added": 8, "removed": 3}

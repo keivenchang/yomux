@@ -216,10 +216,20 @@ def latest_item_text(items: list[dict[str, str]], role: str) -> str:
     return ""
 
 
+def _coerce_count(value: Any) -> int:
+    # DOIT.6 #78: count numeric strings ("5" -> 5) but never a bool (added=True must NOT count as +1).
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def changed_file_totals(files_payload: dict[str, Any]) -> dict[str, Any]:
     files = [item for item in files_payload.get("files", []) if isinstance(item, dict)] if isinstance(files_payload, dict) else []
-    added = sum(int(item.get("added") or 0) for item in files if isinstance(item.get("added") or 0, int))
-    removed = sum(int(item.get("removed") or 0) for item in files if isinstance(item.get("removed") or 0, int))
+    added = sum(_coerce_count(item.get("added")) for item in files)
+    removed = sum(_coerce_count(item.get("removed")) for item in files)
     return {"count": len(files), "added": added, "removed": removed}
 
 
