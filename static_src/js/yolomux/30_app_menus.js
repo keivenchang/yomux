@@ -156,9 +156,20 @@ function settingsConfigPath() {
   return clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
 }
 
+// Map the global theme mode to the terminal_theme setting value for the lockstep View -> Theme toggle.
+function terminalThemeSettingForGlobalMode(mode) {
+  if (mode === 'system') return 'follow-app';
+  if (mode === 'light') return 'light';
+  return 'dark';
+}
+
 function cycleGlobalThemeSetting() {
   const next = nextGlobalThemeMode();
-  saveSettingsPatch(settingPatch('appearance.theme', next))
+  // DOIT.6: View -> Theme flips the app chrome AND the terminal palette together in one save (the two
+  // Preferences fields stay independently settable; only this menu toggle moves them in lockstep).
+  const patch = settingPatch('appearance.theme', next);
+  patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
+  saveSettingsPatch(patch)
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
@@ -413,7 +424,7 @@ function appMenuTree() {
       label: 'File',
       items: menuGroups(
         [
-          menuCommand(fileExplorerLabel(), () => selectSession(fileExplorerItemId), {
+          menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
             checked: itemInLayout(fileExplorerItemId),
             detail: 'Browse files',
             iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
@@ -561,6 +572,8 @@ function renderSessionButtons(options = {}) {
   sessionButtons.classList.remove('drag-over');
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarSearch());
+  sessionButtons.appendChild(createTopbarActivityStatus());
+  updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
 }
 

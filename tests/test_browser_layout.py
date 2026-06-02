@@ -841,7 +841,8 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
             assert theme_metrics["light"][key] == value
     assert theme_metrics["dark"]["activeTabBg"] == "rgb(134, 214, 0)"
     assert theme_metrics["dark"]["activeTabShadow"] == "none"
-    assert theme_metrics["dark"]["inactiveActiveTabBg"] == "rgb(40, 90, 47)"
+    # DOIT.6 #6: unfocused panes keep a clearly-visible green active tab (brightened from #285a2f).
+    assert theme_metrics["dark"]["inactiveActiveTabBg"] == "rgb(79, 158, 58)"
     assert theme_metrics["dark"]["inactiveActiveTabBg"] != theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["dark"]["inactiveActiveTabShadow"] == "none"
 

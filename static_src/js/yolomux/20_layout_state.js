@@ -905,6 +905,54 @@ function updateDocumentTitle() {
   document.title = count > 0 ? `YOLOmux [${count} running]` : 'YOLOmux [idle]';
 }
 
+// Cross-session "what's going on" rollup for the always-visible top-bar status line: how many tmux
+// agents are running, how many need the user, how many are idle. Reads the same live per-session
+// state the tabs use (stateful, no recompute).
+function globalActivityCounts() {
+  let running = 0;
+  let attention = 0;
+  let total = 0;
+  for (const session of sessions) {
+    if (!isTmuxSession(session)) continue;
+    total += 1;
+    const key = sessionState(session).key;
+    if (['working', 'tests-running', 'yolo-approval'].includes(key)) running += 1;
+    else if (['needs-input', 'needs-approval', 'blocked', 'disconnected'].includes(key)) attention += 1;
+  }
+  return {running, attention, idle: Math.max(0, total - running - attention), total};
+}
+
+function globalActivityStatusLineHtml() {
+  const counts = globalActivityCounts();
+  if (!counts.total) return '';
+  const parts = [];
+  if (counts.running) parts.push(`<span class="topbar-activity-run">${counts.running} running</span>`);
+  if (counts.attention) parts.push(`<span class="topbar-activity-attn">${counts.attention} need you</span>`);
+  parts.push(`<span class="topbar-activity-idle">${counts.idle} idle</span>`);
+  return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
+}
+
+function createTopbarActivityStatus() {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'topbarActivity';
+  button.className = 'topbar-activity';
+  button.title = 'Open the cross-session AI activity summary';
+  button.setAttribute('aria-label', 'AI activity summary across all sessions');
+  button.onclick = () => selectSession(yoagentItemId);
+  return button;
+}
+
+function updateTopbarActivityStatus() {
+  const node = document.getElementById('topbarActivity');
+  if (!node) return;
+  const counts = globalActivityCounts();
+  const html = globalActivityStatusLineHtml();
+  node.innerHTML = html;
+  node.hidden = !html;
+  node.classList.toggle('has-attention', counts.attention > 0);
+}
+
 function yoloRotationDelay(now = Date.now()) {
   const duration = Math.max(0, Number(yoloRotateMs) || 0);
   if (duration <= 0) return '0s';
@@ -939,7 +987,9 @@ function stateBadgeHtml(key, short, title) {
 }
 
 function sessionStateHtml(state) {
-  if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval'].includes(state.key)) return '';
+  // DOIT.6: 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
+  // "PR ready", so the standalone "PR" state pill is redundant on the tab.
+  if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key)) return '';
   return stateBadgeHtml(state.key, state.short, `${state.label}: ${state.reason}`);
 }
 
@@ -1034,7 +1084,9 @@ async function openProjectReadme() {
     statusEl.innerHTML = '<span class="err">README path is unavailable</span>';
     return;
   }
-  await openFileInEditor(path, 'README.md');
+  // DOIT.6: open the README as rendered markdown by default (the user can switch to edit via the
+  // mode control); README.md is markdown so editorPreviewModeAvailable is true.
+  await openFileInEditor(path, 'README.md', {viewMode: 'preview'});
 }
 
 function keyboardShortcutCatalog() {
@@ -1355,7 +1407,15 @@ function fileQuickOpenItems() {
 }
 
 function commandPaletteItems() {
-  return commandPaletteEffectiveMode() === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
+  if (commandPaletteEffectiveMode() !== 'files') return commandPaletteCommandItems();
+  const fileItems = fileQuickOpenItems();
+  // DOIT.6: in files mode, BLEND matching commands/settings/tabs into the results when there is a
+  // plain (non-`>`, non-`@`, non-path) query, so typing a command/setting/tab name surfaces it without
+  // the `>` prefix. The shared score sort interleaves them; `>` stays commands-only, `@` for symbols.
+  const parts = fileQuickOpenQueryParts();
+  if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileItems;
+  if (!commandPaletteSearchQuery()) return fileItems;
+  return [...fileItems, ...commandPaletteCommandItems()];
 }
 
 function commandPaletteMatches(item, query) {

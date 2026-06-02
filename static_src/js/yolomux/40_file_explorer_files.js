@@ -408,15 +408,67 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
   }
 }
 
-async function updateRepoRowHoverTitle(row, path) {
-  if (!row || row.dataset.repoTitleLoaded === 'true') return;
+// Rich git info shown in a styled hover popover for a repo dir (replaces the native title tooltip).
+function repoInfoPopoverHtml(repo) {
+  if (!repo?.root) return '';
+  const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
+  rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(repo.branch || 'detached')}</div>`);
+  if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
+  const stat = [];
+  if (Number(repo.ahead) > 0) stat.push(`${Number(repo.ahead)} ahead`);
+  if (Number(repo.behind) > 0) stat.push(`${Number(repo.behind)} behind`);
+  if (Number.isFinite(Number(repo.dirty_count))) stat.push(`${Number(repo.dirty_count)} dirty`);
+  if (stat.length) rows.push(`<div class="file-tree-repo-popover-stat">${esc(stat.join(' · '))}</div>`);
+  rows.push(`<div class="file-tree-repo-popover-path">${esc(repo.root)}</div>`);
+  return rows.join('');
+}
+
+function fileTreeRepoPopoverNode() {
+  let node = document.getElementById('fileTreeRepoPopover');
+  if (!node) {
+    node = document.createElement('div');
+    node.id = 'fileTreeRepoPopover';
+    node.className = 'file-tree-repo-popover';
+    node.hidden = true;
+    document.body.appendChild(node);
+  }
+  return node;
+}
+
+function showFileTreeRepoPopover(row, repo) {
+  if (!repo?.root) return;
+  const node = fileTreeRepoPopoverNode();
+  node.innerHTML = repoInfoPopoverHtml(repo);
+  node.hidden = false;
+  const rect = row?.getBoundingClientRect?.();
+  if (rect) {
+    node.style.left = `${Math.round(rect.left)}px`;
+    node.style.top = `${Math.round(rect.bottom + 4)}px`;
+  }
+}
+
+function hideFileTreeRepoPopover() {
+  fileTreeRepoPopoverPath = null;
+  const node = document.getElementById('fileTreeRepoPopover');
+  if (node) node.hidden = true;
+}
+
+async function showRepoRowHoverPopover(row, path) {
+  const normalized = normalizeDirectoryPath(path);
+  fileTreeRepoPopoverPath = normalized;
+  // Show immediately from cache (branch/ahead/behind), then lazily fetch full status (incl dirty).
+  showFileTreeRepoPopover(row, fileExplorerRepoInfoCache.get(normalized));
+  const cached = fileExplorerRepoInfoCache.get(normalized);
+  if (cached && Number.isFinite(Number(cached.dirty_count))) return;
+  if (row.dataset.repoTitleLoaded === 'true') return;
   row.dataset.repoTitleLoaded = 'true';
   try {
-    const info = await fetchFilePathInfo(path);
-    if (info.repo) cacheFileExplorerRepoInfo(path, info.repo);
-    const summary = repoInfoSummary(info.repo);
-    if (summary) row.title = `${summary}\n${info.repo.root}`;
-    updateFileTreeGitStatusRows();
+    const info = await fetchFilePathInfo(normalized);
+    if (info.repo) {
+      cacheFileExplorerRepoInfo(normalized, info.repo);
+      updateFileTreeGitStatusRows();
+      if (fileTreeRepoPopoverPath === normalized) showFileTreeRepoPopover(row, info.repo);
+    }
   } catch (_) {}
 }
 
@@ -763,6 +815,22 @@ function fileTreeRepoBranch(path) {
   return repo.branch || 'detached';
 }
 
+// Compact ahead/behind/dirty markers for a repo dir's inline annotation, read from cached repo info.
+function fileTreeRepoSyncMeta(path) {
+  hydrateFileExplorerRepoInfoCache();
+  const normalized = normalizeDirectoryPath(path);
+  const repo = fileExplorerRepoInfoCache.get(normalized);
+  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return [];
+  const parts = [];
+  const ahead = Number(repo.ahead);
+  const behind = Number(repo.behind);
+  const dirty = Number(repo.dirty_count);
+  if (Number.isFinite(ahead) && ahead > 0) parts.push({cls: 'file-tree-repo-ahead', text: `↑${ahead}`});
+  if (Number.isFinite(behind) && behind > 0) parts.push({cls: 'file-tree-repo-behind', text: `↓${behind}`});
+  if (Number.isFinite(dirty) && dirty > 0) parts.push({cls: 'file-tree-repo-dirty', text: `●${dirty}`});
+  return parts;
+}
+
 function fileTreeRepoNumstat(path) {
   const normalized = normalizeDirectoryPath(path);
   const repos = Array.isArray(fileExplorerSessionFilesPayload?.repos) ? fileExplorerSessionFilesPayload.repos : [];
@@ -789,11 +857,16 @@ function fileTreeDisplayParts(path, entry) {
   if (entry.kind === 'dir' && entry.is_repo === true) {
     const branch = fileTreeRepoBranch(path);
     const numstat = fileTreeRepoNumstat(path);
-    const suffix = [branch, numstat].filter(Boolean).join(' ');
+    const sync = fileTreeRepoSyncMeta(path);
+    const textParts = [branch, ...sync.map(part => part.text), numstat].filter(Boolean);
+    const htmlParts = [];
+    if (branch) htmlParts.push(`<span class="file-tree-repo-branch">${esc(branch)}</span>`);
+    for (const part of sync) htmlParts.push(`<span class="${part.cls}">${esc(part.text)}</span>`);
+    if (numstat) htmlParts.push(`<span class="file-tree-repo-delta">${esc(numstat)}</span>`);
     return {
-      text: suffix ? `${entry.name} [${suffix}]` : entry.name,
-      html: suffix
-        ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${branch ? `<span class="file-tree-repo-branch">${esc(branch)}</span>` : ''}${branch && numstat ? ' ' : ''}${numstat ? `<span class="file-tree-repo-delta">${esc(numstat)}</span>` : ''}]</span>`
+      text: textParts.length ? `${entry.name} [${textParts.join(' ')}]` : entry.name,
+      html: htmlParts.length
+        ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${htmlParts.join(' ')}]</span>`
         : esc(entry.name),
     };
   }
@@ -928,10 +1001,13 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
     row.classList.toggle(className, className === gitClass);
   }
   if (entry.kind === 'dir' && entry.is_repo === true) {
-    row.title = row.title || 'Repository';
-    row.onmouseenter = () => updateRepoRowHoverTitle(row, fullPath);
+    // Rich hover popover (no native title — see DOIT.6 dedup of duplicate tab tooltips).
+    row.removeAttribute('title');
+    row.onmouseenter = () => showRepoRowHoverPopover(row, fullPath);
+    row.onmouseleave = () => hideFileTreeRepoPopover();
   } else {
     row.onmouseenter = null;
+    row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
     row.removeAttribute('title');
   }

@@ -654,8 +654,10 @@ body.layout-resizing {
   border-bottom-color: var(--pane-tab-active-bg);
   box-shadow: none;
 }
+/* DOIT.6: every pane keeps its active tab clearly green (no dimming) so you can tell which session
+   each pane shows; the focused pane's extra cue is its brighter lime active tab + the pane ring. */
 .panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active {
-  opacity: 0.86;
+  opacity: 1;
 }
 .pane-tab.active .session-button-name,
 .pane-tab.active .session-button-dir,

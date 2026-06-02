@@ -280,6 +280,8 @@ let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready'
 const fileIndexStatusTimers = new Map();  // normalized indexed root -> poll timer while building
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
+const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
+let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
 let fileExplorerChangesHidden = (() => { try { return localStorage.getItem('yolomux.fileExplorerChangesHidden') === '1'; } catch (_) { return false; } })();
@@ -376,7 +378,7 @@ const layoutBoundaryDropMaxPx = 64;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
-const infoTabLabel = 'Branch Info';
+const infoTabLabel = 'YO!info';
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 const yoagentTabLabel = 'YO!agent';
@@ -2570,6 +2572,54 @@ function updateDocumentTitle() {
   document.title = count > 0 ? `YOLOmux [${count} running]` : 'YOLOmux [idle]';
 }
 
+// Cross-session "what's going on" rollup for the always-visible top-bar status line: how many tmux
+// agents are running, how many need the user, how many are idle. Reads the same live per-session
+// state the tabs use (stateful, no recompute).
+function globalActivityCounts() {
+  let running = 0;
+  let attention = 0;
+  let total = 0;
+  for (const session of sessions) {
+    if (!isTmuxSession(session)) continue;
+    total += 1;
+    const key = sessionState(session).key;
+    if (['working', 'tests-running', 'yolo-approval'].includes(key)) running += 1;
+    else if (['needs-input', 'needs-approval', 'blocked', 'disconnected'].includes(key)) attention += 1;
+  }
+  return {running, attention, idle: Math.max(0, total - running - attention), total};
+}
+
+function globalActivityStatusLineHtml() {
+  const counts = globalActivityCounts();
+  if (!counts.total) return '';
+  const parts = [];
+  if (counts.running) parts.push(`<span class="topbar-activity-run">${counts.running} running</span>`);
+  if (counts.attention) parts.push(`<span class="topbar-activity-attn">${counts.attention} need you</span>`);
+  parts.push(`<span class="topbar-activity-idle">${counts.idle} idle</span>`);
+  return parts.join('<span class="topbar-activity-sep" aria-hidden="true">·</span>');
+}
+
+function createTopbarActivityStatus() {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'topbarActivity';
+  button.className = 'topbar-activity';
+  button.title = 'Open the cross-session AI activity summary';
+  button.setAttribute('aria-label', 'AI activity summary across all sessions');
+  button.onclick = () => selectSession(yoagentItemId);
+  return button;
+}
+
+function updateTopbarActivityStatus() {
+  const node = document.getElementById('topbarActivity');
+  if (!node) return;
+  const counts = globalActivityCounts();
+  const html = globalActivityStatusLineHtml();
+  node.innerHTML = html;
+  node.hidden = !html;
+  node.classList.toggle('has-attention', counts.attention > 0);
+}
+
 function yoloRotationDelay(now = Date.now()) {
   const duration = Math.max(0, Number(yoloRotateMs) || 0);
   if (duration <= 0) return '0s';
@@ -2604,7 +2654,9 @@ function stateBadgeHtml(key, short, title) {
 }
 
 function sessionStateHtml(state) {
-  if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval'].includes(state.key)) return '';
+  // DOIT.6: 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
+  // "PR ready", so the standalone "PR" state pill is redundant on the tab.
+  if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key)) return '';
   return stateBadgeHtml(state.key, state.short, `${state.label}: ${state.reason}`);
 }
 
@@ -2699,7 +2751,9 @@ async function openProjectReadme() {
     statusEl.innerHTML = '<span class="err">README path is unavailable</span>';
     return;
   }
-  await openFileInEditor(path, 'README.md');
+  // DOIT.6: open the README as rendered markdown by default (the user can switch to edit via the
+  // mode control); README.md is markdown so editorPreviewModeAvailable is true.
+  await openFileInEditor(path, 'README.md', {viewMode: 'preview'});
 }
 
 function keyboardShortcutCatalog() {
@@ -3020,7 +3074,15 @@ function fileQuickOpenItems() {
 }
 
 function commandPaletteItems() {
-  return commandPaletteEffectiveMode() === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
+  if (commandPaletteEffectiveMode() !== 'files') return commandPaletteCommandItems();
+  const fileItems = fileQuickOpenItems();
+  // DOIT.6: in files mode, BLEND matching commands/settings/tabs into the results when there is a
+  // plain (non-`>`, non-`@`, non-path) query, so typing a command/setting/tab name surfaces it without
+  // the `>` prefix. The shared score sort interleaves them; `>` stays commands-only, `@` for symbols.
+  const parts = fileQuickOpenQueryParts();
+  if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileItems;
+  if (!commandPaletteSearchQuery()) return fileItems;
+  return [...fileItems, ...commandPaletteCommandItems()];
 }
 
 function commandPaletteMatches(item, query) {
@@ -3868,9 +3930,20 @@ function settingsConfigPath() {
   return clientSettingsPayload.path || clientSettingsPayload.display_path || '~/.config/yolomux/settings.yaml';
 }
 
+// Map the global theme mode to the terminal_theme setting value for the lockstep View -> Theme toggle.
+function terminalThemeSettingForGlobalMode(mode) {
+  if (mode === 'system') return 'follow-app';
+  if (mode === 'light') return 'light';
+  return 'dark';
+}
+
 function cycleGlobalThemeSetting() {
   const next = nextGlobalThemeMode();
-  saveSettingsPatch(settingPatch('appearance.theme', next))
+  // DOIT.6: View -> Theme flips the app chrome AND the terminal palette together in one save (the two
+  // Preferences fields stay independently settable; only this menu toggle moves them in lockstep).
+  const patch = settingPatch('appearance.theme', next);
+  patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
+  saveSettingsPatch(patch)
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
@@ -4125,7 +4198,7 @@ function appMenuTree() {
       label: 'File',
       items: menuGroups(
         [
-          menuCommand(fileExplorerLabel(), () => selectSession(fileExplorerItemId), {
+          menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
             checked: itemInLayout(fileExplorerItemId),
             detail: 'Browse files',
             iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
@@ -4273,6 +4346,8 @@ function renderSessionButtons(options = {}) {
   sessionButtons.classList.remove('drag-over');
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarSearch());
+  sessionButtons.appendChild(createTopbarActivityStatus());
+  updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
 }
 
@@ -5066,15 +5141,67 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
   }
 }
 
-async function updateRepoRowHoverTitle(row, path) {
-  if (!row || row.dataset.repoTitleLoaded === 'true') return;
+// Rich git info shown in a styled hover popover for a repo dir (replaces the native title tooltip).
+function repoInfoPopoverHtml(repo) {
+  if (!repo?.root) return '';
+  const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
+  rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(repo.branch || 'detached')}</div>`);
+  if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
+  const stat = [];
+  if (Number(repo.ahead) > 0) stat.push(`${Number(repo.ahead)} ahead`);
+  if (Number(repo.behind) > 0) stat.push(`${Number(repo.behind)} behind`);
+  if (Number.isFinite(Number(repo.dirty_count))) stat.push(`${Number(repo.dirty_count)} dirty`);
+  if (stat.length) rows.push(`<div class="file-tree-repo-popover-stat">${esc(stat.join(' · '))}</div>`);
+  rows.push(`<div class="file-tree-repo-popover-path">${esc(repo.root)}</div>`);
+  return rows.join('');
+}
+
+function fileTreeRepoPopoverNode() {
+  let node = document.getElementById('fileTreeRepoPopover');
+  if (!node) {
+    node = document.createElement('div');
+    node.id = 'fileTreeRepoPopover';
+    node.className = 'file-tree-repo-popover';
+    node.hidden = true;
+    document.body.appendChild(node);
+  }
+  return node;
+}
+
+function showFileTreeRepoPopover(row, repo) {
+  if (!repo?.root) return;
+  const node = fileTreeRepoPopoverNode();
+  node.innerHTML = repoInfoPopoverHtml(repo);
+  node.hidden = false;
+  const rect = row?.getBoundingClientRect?.();
+  if (rect) {
+    node.style.left = `${Math.round(rect.left)}px`;
+    node.style.top = `${Math.round(rect.bottom + 4)}px`;
+  }
+}
+
+function hideFileTreeRepoPopover() {
+  fileTreeRepoPopoverPath = null;
+  const node = document.getElementById('fileTreeRepoPopover');
+  if (node) node.hidden = true;
+}
+
+async function showRepoRowHoverPopover(row, path) {
+  const normalized = normalizeDirectoryPath(path);
+  fileTreeRepoPopoverPath = normalized;
+  // Show immediately from cache (branch/ahead/behind), then lazily fetch full status (incl dirty).
+  showFileTreeRepoPopover(row, fileExplorerRepoInfoCache.get(normalized));
+  const cached = fileExplorerRepoInfoCache.get(normalized);
+  if (cached && Number.isFinite(Number(cached.dirty_count))) return;
+  if (row.dataset.repoTitleLoaded === 'true') return;
   row.dataset.repoTitleLoaded = 'true';
   try {
-    const info = await fetchFilePathInfo(path);
-    if (info.repo) cacheFileExplorerRepoInfo(path, info.repo);
-    const summary = repoInfoSummary(info.repo);
-    if (summary) row.title = `${summary}\n${info.repo.root}`;
-    updateFileTreeGitStatusRows();
+    const info = await fetchFilePathInfo(normalized);
+    if (info.repo) {
+      cacheFileExplorerRepoInfo(normalized, info.repo);
+      updateFileTreeGitStatusRows();
+      if (fileTreeRepoPopoverPath === normalized) showFileTreeRepoPopover(row, info.repo);
+    }
   } catch (_) {}
 }
 
@@ -5421,6 +5548,22 @@ function fileTreeRepoBranch(path) {
   return repo.branch || 'detached';
 }
 
+// Compact ahead/behind/dirty markers for a repo dir's inline annotation, read from cached repo info.
+function fileTreeRepoSyncMeta(path) {
+  hydrateFileExplorerRepoInfoCache();
+  const normalized = normalizeDirectoryPath(path);
+  const repo = fileExplorerRepoInfoCache.get(normalized);
+  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return [];
+  const parts = [];
+  const ahead = Number(repo.ahead);
+  const behind = Number(repo.behind);
+  const dirty = Number(repo.dirty_count);
+  if (Number.isFinite(ahead) && ahead > 0) parts.push({cls: 'file-tree-repo-ahead', text: `↑${ahead}`});
+  if (Number.isFinite(behind) && behind > 0) parts.push({cls: 'file-tree-repo-behind', text: `↓${behind}`});
+  if (Number.isFinite(dirty) && dirty > 0) parts.push({cls: 'file-tree-repo-dirty', text: `●${dirty}`});
+  return parts;
+}
+
 function fileTreeRepoNumstat(path) {
   const normalized = normalizeDirectoryPath(path);
   const repos = Array.isArray(fileExplorerSessionFilesPayload?.repos) ? fileExplorerSessionFilesPayload.repos : [];
@@ -5447,11 +5590,16 @@ function fileTreeDisplayParts(path, entry) {
   if (entry.kind === 'dir' && entry.is_repo === true) {
     const branch = fileTreeRepoBranch(path);
     const numstat = fileTreeRepoNumstat(path);
-    const suffix = [branch, numstat].filter(Boolean).join(' ');
+    const sync = fileTreeRepoSyncMeta(path);
+    const textParts = [branch, ...sync.map(part => part.text), numstat].filter(Boolean);
+    const htmlParts = [];
+    if (branch) htmlParts.push(`<span class="file-tree-repo-branch">${esc(branch)}</span>`);
+    for (const part of sync) htmlParts.push(`<span class="${part.cls}">${esc(part.text)}</span>`);
+    if (numstat) htmlParts.push(`<span class="file-tree-repo-delta">${esc(numstat)}</span>`);
     return {
-      text: suffix ? `${entry.name} [${suffix}]` : entry.name,
-      html: suffix
-        ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${branch ? `<span class="file-tree-repo-branch">${esc(branch)}</span>` : ''}${branch && numstat ? ' ' : ''}${numstat ? `<span class="file-tree-repo-delta">${esc(numstat)}</span>` : ''}]</span>`
+      text: textParts.length ? `${entry.name} [${textParts.join(' ')}]` : entry.name,
+      html: htmlParts.length
+        ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${htmlParts.join(' ')}]</span>`
         : esc(entry.name),
     };
   }
@@ -5586,10 +5734,13 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
     row.classList.toggle(className, className === gitClass);
   }
   if (entry.kind === 'dir' && entry.is_repo === true) {
-    row.title = row.title || 'Repository';
-    row.onmouseenter = () => updateRepoRowHoverTitle(row, fullPath);
+    // Rich hover popover (no native title — see DOIT.6 dedup of duplicate tab tooltips).
+    row.removeAttribute('title');
+    row.onmouseenter = () => showRepoRowHoverPopover(row, fullPath);
+    row.onmouseleave = () => hideFileTreeRepoPopover();
   } else {
     row.onmouseenter = null;
+    row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
     row.removeAttribute('title');
   }
@@ -8698,9 +8849,10 @@ function applySettingsPayload(payload, options = {}) {
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
   if (previousEditorSchemeId !== activeEditorScheme().id) {
-    for (const [item, panel] of panelNodes.entries()) {
-      if (isFileEditorItem(item)) renderFileEditorPanel(panel, item);
-    }
+    // DOIT.6: re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
+    // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the
+    // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
+    refreshOpenEditorThemePanels();
   }
   if (!options.initial) installRuntimeIntervals();
   return true;
@@ -8810,6 +8962,8 @@ if (fileExplorerHiddenToggle) {
 function updateSessionButtonStates() {
   // Top navigation is menu-based now; per-session state lives in pane tabs
   // and menu rows, which are rebuilt by their normal render paths.
+  // Keep the top-bar cross-session activity line live as states change (poll-driven).
+  updateTopbarActivityStatus();
 }
 
 function bindFilePopoverActions(container) {
@@ -9348,6 +9502,8 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     const prParts = [pullRequestLinkHtml(pr), pullRequestAuthorHtml(pr)].filter(Boolean);
     const checks = pullRequestChecksHtml(pr);
     if (checks) prParts.push(checks);
+    const review = pullRequestReviewInlineHtml(pr);
+    if (review) prParts.push(review);
     rows.push(popoverRow('PR', metaJoin(prParts)));
     prDesc = pullRequestDescriptionInlineHtml(pr);
   }
@@ -9766,6 +9922,41 @@ function appendUniqueItems(target, items) {
   return target;
 }
 
+// Per-pane tab cap (LRU eviction). Records when a tab was last activated so the oldest UNUSED tab
+// can auto-close once a pane grows past appearance.max_tabs_per_pane.
+function recordTabActivation(item) {
+  if (isLayoutItem(item)) tabLastActivatedAt.set(item, Date.now());
+}
+
+function maxTabsPerPane() {
+  const raw = Math.floor(Number(initialSetting('appearance.max_tabs_per_pane', 10)));
+  if (!Number.isFinite(raw)) return 10;
+  return Math.max(2, Math.min(30, raw));
+}
+
+// A tab may be auto-evicted unless it is the one being kept active, the Finder dock, or a
+// dirty/unsaved editor (never silently drop unsaved edits).
+function tabIsEvictableForCap(item, keepItem) {
+  if (item === keepItem || isFileExplorerItem(item)) return false;
+  if (isFileEditorItem(item)) {
+    const state = openFiles.get(fileItemPath(item));
+    if (state && state.dirty) return false;
+  }
+  return true;
+}
+
+// Given a pane's tab list (newest tab already inserted) return the least-recently-used evictable
+// tabs to drop so the pane fits the cap. Keeps keepItem, dirty editors, and the Finder.
+function tabsToEvictForCap(tabs, keepItem) {
+  const cap = maxTabsPerPane();
+  const overflow = tabs.length - cap;
+  if (overflow <= 0) return [];
+  const evictable = tabs.filter(item => tabIsEvictableForCap(item, keepItem));
+  if (!evictable.length) return [];
+  const byLeastRecent = [...evictable].sort((a, b) => (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0));
+  return byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
+}
+
 function paneTabsWithoutFinder(slot, slots = layoutSlots) {
   return paneTabs(slot, slots).filter(item => !isFileExplorerItem(item));
 }
@@ -10014,6 +10205,17 @@ async function placeTmuxSession(session) {
   await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
 }
 
+// DOIT.6: File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
+// Finder panel's close button), otherwise open/focus it. The menu's `checked` state tracks this.
+function toggleFinderPane() {
+  if (itemInLayout(fileExplorerItemId)) {
+    removeSessionFromLayout(fileExplorerItemId);
+    return false;
+  }
+  selectSession(fileExplorerItemId);
+  return true;
+}
+
 async function openFileExplorerPane() {
   const currentSlot = slotForSession(fileExplorerItemId);
   if (currentSlot) {
@@ -10079,8 +10281,17 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   const tabs = next[targetSlot].tabs;
   const index = Math.max(0, Math.min(Number.isFinite(insertIndex) ? insertIndex : 0, tabs.length));
   tabs.splice(index, 0, session);
-  next[targetSlot] = paneStateWithTabs(tabs, session);
-  applyLayoutSlots(next, {focusSession: session, prune: false});
+  recordTabActivation(session);
+  // Enforce the per-pane tab cap: if this pane is now over the limit, auto-close the least-recently
+  // used tabs (keeping the new active tab, the Finder, and any dirty editors).
+  const evicted = tabsToEvictForCap(tabs, session);
+  const keptTabs = evicted.length ? tabs.filter(item => !evicted.includes(item)) : tabs;
+  next[targetSlot] = paneStateWithTabs(keptTabs, session);
+  applyLayoutSlots(next, {
+    focusSession: session,
+    prune: false,
+    message: evicted.length ? `${evicted.map(itemLabel).join(', ')} auto-closed (tab limit ${maxTabsPerPane()})` : '',
+  });
 }
 
 async function dropSessionWithIntent(session, intent, sourceSlot = null) {
@@ -10250,6 +10461,7 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  recordTabActivation(session);
   const previous = activeItemForSide(side);
   if (previous && previous !== session && typeof captureFileEditorPanelViewStateForItem === 'function') {
     captureFileEditorPanelViewStateForItem(previous);
@@ -10471,7 +10683,9 @@ function pullRequestCiIndicatorHtml(session, pr) {
 
 function pullRequestNumberIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
-  return `<span class="ci-indicator tab-symbol pr-number-chip" title="PR #${esc(String(pr.number))}">#${esc(String(pr.number))}</span>`;
+  // No native title — the rich custom session popover already shows PR #, CI, and review state
+  // (DOIT.6: avoid a duplicate browser tooltip alongside the popover).
+  return `<span class="ci-indicator tab-symbol pr-number-chip">#${esc(String(pr.number))}</span>`;
 }
 
 // #38: GitHub reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED) per PR.
@@ -10501,7 +10715,25 @@ function pullRequestApprovalIndicatorHtml(session, pr) {
   const cls = pullRequestApprovalClass(decision);
   if (!cls) return '';
   const label = pullRequestApprovalLabel(decision);
-  return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}" title="${esc(`Review: ${label}`)}">${esc(label)}</span>`;
+  // No native title — the session popover carries the review state (DOIT.6: no duplicate tooltip).
+  return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}">${esc(label)}</span>`;
+}
+
+// DOIT.6: review status + reviewer(s) for the session popover PR row ("Approved by alice" /
+// "Changes requested by bob" / "Review required"). Reuses the meta-pr-status color classes.
+function pullRequestReviewInlineHtml(pr) {
+  const decision = pullRequestReviewDecision(pr);
+  if (!decision) return '';
+  const reviewers = Array.isArray(pr?.review_reviewers) ? pr.review_reviewers : [];
+  const loginsFor = state => reviewers
+    .filter(reviewer => String(reviewer?.state || '').toUpperCase() === state)
+    .map(reviewer => reviewer.login)
+    .filter(Boolean);
+  const by = logins => (logins.length ? ` by ${esc(logins.join(', '))}` : '');
+  if (decision === 'APPROVED') return `<span class="meta-pr-status pr-status-passing">Approved${by(loginsFor('APPROVED'))}</span>`;
+  if (decision === 'CHANGES_REQUESTED') return `<span class="meta-pr-status pr-status-failing">Changes requested${by(loginsFor('CHANGES_REQUESTED'))}</span>`;
+  if (decision === 'REVIEW_REQUIRED') return '<span class="meta-muted">Review required</span>';
+  return '';
 }
 
 function pullRequestLinkHtml(pr) {
@@ -11094,6 +11326,44 @@ function scheduleTerminalReconnect(session, item) {
     item.reconnectTimer = null;
     connectTerminalSocket(session, item);
   }, delay);
+}
+
+// A tmux session that is absent from the live roster has been killed (vs a transient disconnect).
+function sessionConfirmedGone(session, order) {
+  return isTmuxSession(session) && Array.isArray(order) && !order.includes(session);
+}
+
+// Tear down a dead session's UI immediately (terminal, panel, metadata) — mirrors killSession's
+// cleanup without the confirm/POST, for sessions that ended outside this client.
+function pruneDeadSession(session) {
+  const previousActive = activeSessions.slice();
+  stopSessionUi(session);
+  autoApproveStates.delete(session);
+  if (sessions.includes(session)) updateSessionList(sessions.filter(item => item !== session));
+  updateDocumentTitle();
+  renderSessionButtons();
+  renderPanels(previousActive);
+  renderPaneTabStrips();
+  renderAutoApproveButtons();
+  statusEl.innerHTML = `<span class="ok">${esc(sessionLabel(session))} ended</span>`;
+}
+
+// On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
+// prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
+async function confirmSessionGoneOrReconnect(session, item) {
+  if (item.manualClose || terminals.get(session) !== item) return;
+  let order = null;
+  try {
+    const response = await apiFetch('/api/auto-approve');
+    const payload = await response.json();
+    if (Array.isArray(payload.session_order)) order = payload.session_order;
+  } catch (_) {}
+  if (item.manualClose || terminals.get(session) !== item) return;
+  if (sessionConfirmedGone(session, order)) {
+    pruneDeadSession(session);
+    return;
+  }
+  scheduleTerminalReconnect(session, item);
 }
 
 function estimateTerminalSize(container, term = null) {
@@ -12086,8 +12356,11 @@ function clearPaneTabDropPreview(strip) {
 }
 
 function paneTabDropPlacement(strip, event, movingSession) {
-  const tabs = Array.from(strip.querySelectorAll('.pane-tab'))
-    .filter(tab => tab.dataset.paneTab !== movingSession);
+  const allTabs = Array.from(strip.querySelectorAll('.pane-tab'));
+  // The source's position in the FULL strip (before filtering) drives a directional insert threshold
+  // for same-strip reorder; -1 means a cross-pane move (keep the centered threshold).
+  const sourceVisualIndex = movingSession ? allTabs.findIndex(tab => tab.dataset.paneTab === movingSession) : -1;
+  const tabs = allTabs.filter(tab => tab.dataset.paneTab !== movingSession);
   const stripRect = strip.getBoundingClientRect();
   const clampX = value => Math.max(2, Math.min(stripRect.width - 2, value));
   const clampY = (value, height) => Math.max(0, Math.min(Math.max(0, stripRect.height - height), value));
@@ -12106,9 +12379,15 @@ function paneTabDropPlacement(strip, event, movingSession) {
     return !best || distance < best.distance ? {row: item, distance} : best;
   }, null)?.row || rows[0];
   const rowTabs = row.items.slice().sort((left, right) => left.rect.left - right.rect.left);
+  const sameStrip = sourceVisualIndex >= 0;
   for (const item of rowTabs) {
     const rect = item.rect;
-    if (event.clientX < rect.left + rect.width / 2) {
+    // Cross-pane drops insert at the tab center. Same-strip reorder uses the FAR edge relative to the
+    // source (item.index >= sourceVisualIndex means the source sits to its LEFT) so dropping the source
+    // anywhere on a neighbor moves it PAST that neighbor — fixes left->right needing a center overshoot.
+    let threshold = rect.left + rect.width / 2;
+    if (sameStrip) threshold = item.index >= sourceVisualIndex ? rect.left : rect.right;
+    if (event.clientX < threshold) {
       return {
         index: item.index,
         x: clampX(rect.left - stripRect.left),
@@ -12840,7 +13119,7 @@ function preferenceSections() {
       {path: 'general.reload_on_update_auto', label: 'Auto-reload on server update', type: 'boolean', help: 'When the above is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).'},
     ]},
     {title: 'Appearance', items: [
-      {path: 'appearance.theme', label: 'Global app theme', type: 'select', choices: [
+      {path: 'appearance.theme', label: 'Global color theme', type: 'select', choices: [
         {value: 'dark', label: 'Dark'},
         {value: 'light', label: 'Light'},
         {value: 'system', label: 'System'},
@@ -17488,7 +17767,9 @@ function connectTerminalSocket(session, item) {
     clearFocusedTerminal(session);
     updateStatus();
     refreshTrackedSessionChrome(session);
-    scheduleTerminalReconnect(session, item);
+    // Roster-confirm before reconnecting: a killed session is pruned immediately, a transient
+    // disconnect reconnects as before.
+    confirmSessionGoneOrReconnect(session, item);
   };
   socket.onerror = () => {
     updateTypingIndicator(session);

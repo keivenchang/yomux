@@ -68,6 +68,41 @@ function appendUniqueItems(target, items) {
   return target;
 }
 
+// Per-pane tab cap (LRU eviction). Records when a tab was last activated so the oldest UNUSED tab
+// can auto-close once a pane grows past appearance.max_tabs_per_pane.
+function recordTabActivation(item) {
+  if (isLayoutItem(item)) tabLastActivatedAt.set(item, Date.now());
+}
+
+function maxTabsPerPane() {
+  const raw = Math.floor(Number(initialSetting('appearance.max_tabs_per_pane', 10)));
+  if (!Number.isFinite(raw)) return 10;
+  return Math.max(2, Math.min(30, raw));
+}
+
+// A tab may be auto-evicted unless it is the one being kept active, the Finder dock, or a
+// dirty/unsaved editor (never silently drop unsaved edits).
+function tabIsEvictableForCap(item, keepItem) {
+  if (item === keepItem || isFileExplorerItem(item)) return false;
+  if (isFileEditorItem(item)) {
+    const state = openFiles.get(fileItemPath(item));
+    if (state && state.dirty) return false;
+  }
+  return true;
+}
+
+// Given a pane's tab list (newest tab already inserted) return the least-recently-used evictable
+// tabs to drop so the pane fits the cap. Keeps keepItem, dirty editors, and the Finder.
+function tabsToEvictForCap(tabs, keepItem) {
+  const cap = maxTabsPerPane();
+  const overflow = tabs.length - cap;
+  if (overflow <= 0) return [];
+  const evictable = tabs.filter(item => tabIsEvictableForCap(item, keepItem));
+  if (!evictable.length) return [];
+  const byLeastRecent = [...evictable].sort((a, b) => (tabLastActivatedAt.get(a) || 0) - (tabLastActivatedAt.get(b) || 0));
+  return byLeastRecent.slice(0, Math.min(overflow, byLeastRecent.length));
+}
+
 function paneTabsWithoutFinder(slot, slots = layoutSlots) {
   return paneTabs(slot, slots).filter(item => !isFileExplorerItem(item));
 }
@@ -316,6 +351,17 @@ async function placeTmuxSession(session) {
   await moveSessionToSlot(session, targetSlot, null, paneTabs(targetSlot).length);
 }
 
+// DOIT.6: File -> Finder toggles. Hide the Finder when it is already in the layout (same path as the
+// Finder panel's close button), otherwise open/focus it. The menu's `checked` state tracks this.
+function toggleFinderPane() {
+  if (itemInLayout(fileExplorerItemId)) {
+    removeSessionFromLayout(fileExplorerItemId);
+    return false;
+  }
+  selectSession(fileExplorerItemId);
+  return true;
+}
+
 async function openFileExplorerPane() {
   const currentSlot = slotForSession(fileExplorerItemId);
   if (currentSlot) {
@@ -381,8 +427,17 @@ async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertI
   const tabs = next[targetSlot].tabs;
   const index = Math.max(0, Math.min(Number.isFinite(insertIndex) ? insertIndex : 0, tabs.length));
   tabs.splice(index, 0, session);
-  next[targetSlot] = paneStateWithTabs(tabs, session);
-  applyLayoutSlots(next, {focusSession: session, prune: false});
+  recordTabActivation(session);
+  // Enforce the per-pane tab cap: if this pane is now over the limit, auto-close the least-recently
+  // used tabs (keeping the new active tab, the Finder, and any dirty editors).
+  const evicted = tabsToEvictForCap(tabs, session);
+  const keptTabs = evicted.length ? tabs.filter(item => !evicted.includes(item)) : tabs;
+  next[targetSlot] = paneStateWithTabs(keptTabs, session);
+  applyLayoutSlots(next, {
+    focusSession: session,
+    prune: false,
+    message: evicted.length ? `${evicted.map(itemLabel).join(', ')} auto-closed (tab limit ${maxTabsPerPane()})` : '',
+  });
 }
 
 async function dropSessionWithIntent(session, intent, sourceSlot = null) {
@@ -552,6 +607,7 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  recordTabActivation(session);
   const previous = activeItemForSide(side);
   if (previous && previous !== session && typeof captureFileEditorPanelViewStateForItem === 'function') {
     captureFileEditorPanelViewStateForItem(previous);
@@ -773,7 +829,9 @@ function pullRequestCiIndicatorHtml(session, pr) {
 
 function pullRequestNumberIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
-  return `<span class="ci-indicator tab-symbol pr-number-chip" title="PR #${esc(String(pr.number))}">#${esc(String(pr.number))}</span>`;
+  // No native title — the rich custom session popover already shows PR #, CI, and review state
+  // (DOIT.6: avoid a duplicate browser tooltip alongside the popover).
+  return `<span class="ci-indicator tab-symbol pr-number-chip">#${esc(String(pr.number))}</span>`;
 }
 
 // #38: GitHub reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED) per PR.
@@ -803,7 +861,25 @@ function pullRequestApprovalIndicatorHtml(session, pr) {
   const cls = pullRequestApprovalClass(decision);
   if (!cls) return '';
   const label = pullRequestApprovalLabel(decision);
-  return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}" title="${esc(`Review: ${label}`)}">${esc(label)}</span>`;
+  // No native title — the session popover carries the review state (DOIT.6: no duplicate tooltip).
+  return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}">${esc(label)}</span>`;
+}
+
+// DOIT.6: review status + reviewer(s) for the session popover PR row ("Approved by alice" /
+// "Changes requested by bob" / "Review required"). Reuses the meta-pr-status color classes.
+function pullRequestReviewInlineHtml(pr) {
+  const decision = pullRequestReviewDecision(pr);
+  if (!decision) return '';
+  const reviewers = Array.isArray(pr?.review_reviewers) ? pr.review_reviewers : [];
+  const loginsFor = state => reviewers
+    .filter(reviewer => String(reviewer?.state || '').toUpperCase() === state)
+    .map(reviewer => reviewer.login)
+    .filter(Boolean);
+  const by = logins => (logins.length ? ` by ${esc(logins.join(', '))}` : '');
+  if (decision === 'APPROVED') return `<span class="meta-pr-status pr-status-passing">Approved${by(loginsFor('APPROVED'))}</span>`;
+  if (decision === 'CHANGES_REQUESTED') return `<span class="meta-pr-status pr-status-failing">Changes requested${by(loginsFor('CHANGES_REQUESTED'))}</span>`;
+  if (decision === 'REVIEW_REQUIRED') return '<span class="meta-muted">Review required</span>';
+  return '';
 }
 
 function pullRequestLinkHtml(pr) {
@@ -1396,6 +1472,44 @@ function scheduleTerminalReconnect(session, item) {
     item.reconnectTimer = null;
     connectTerminalSocket(session, item);
   }, delay);
+}
+
+// A tmux session that is absent from the live roster has been killed (vs a transient disconnect).
+function sessionConfirmedGone(session, order) {
+  return isTmuxSession(session) && Array.isArray(order) && !order.includes(session);
+}
+
+// Tear down a dead session's UI immediately (terminal, panel, metadata) — mirrors killSession's
+// cleanup without the confirm/POST, for sessions that ended outside this client.
+function pruneDeadSession(session) {
+  const previousActive = activeSessions.slice();
+  stopSessionUi(session);
+  autoApproveStates.delete(session);
+  if (sessions.includes(session)) updateSessionList(sessions.filter(item => item !== session));
+  updateDocumentTitle();
+  renderSessionButtons();
+  renderPanels(previousActive);
+  renderPaneTabStrips();
+  renderAutoApproveButtons();
+  statusEl.innerHTML = `<span class="ok">${esc(sessionLabel(session))} ended</span>`;
+}
+
+// On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
+// prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
+async function confirmSessionGoneOrReconnect(session, item) {
+  if (item.manualClose || terminals.get(session) !== item) return;
+  let order = null;
+  try {
+    const response = await apiFetch('/api/auto-approve');
+    const payload = await response.json();
+    if (Array.isArray(payload.session_order)) order = payload.session_order;
+  } catch (_) {}
+  if (item.manualClose || terminals.get(session) !== item) return;
+  if (sessionConfirmedGone(session, order)) {
+    pruneDeadSession(session);
+    return;
+  }
+  scheduleTerminalReconnect(session, item);
 }
 
 function estimateTerminalSize(container, term = null) {

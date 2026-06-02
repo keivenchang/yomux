@@ -279,6 +279,8 @@ let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready'
 const fileIndexStatusTimers = new Map();  // normalized indexed root -> poll timer while building
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
+const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
+let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
 let fileExplorerChangesHidden = (() => { try { return localStorage.getItem('yolomux.fileExplorerChangesHidden') === '1'; } catch (_) { return false; } })();
@@ -375,7 +377,7 @@ const layoutBoundaryDropMaxPx = 64;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
-const infoTabLabel = 'Branch Info';
+const infoTabLabel = 'YO!info';
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 const yoagentTabLabel = 'YO!agent';

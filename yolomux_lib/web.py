@@ -86,7 +86,16 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
         "yoloRulesPayload": rules_status(),
         "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
     }
-    bootstrap_json = html.escape(json.dumps(bootstrap, separators=(",", ":")), quote=False)
+    # Embed JSON in a <script> tag WITHOUT html.escape: a script element's text content is not
+    # HTML-decoded, so html.escape would leave literal &lt;/&gt;/&amp; inside parsed strings (e.g. the
+    # YO!agent answer-format <topic> placeholders). Escape only the breakout characters as JSON \u
+    # escapes — JSON.parse turns them back into <, >, & and they also prevent a </script> breakout.
+    bootstrap_json = (
+        json.dumps(bootstrap, separators=(",", ":"))
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>

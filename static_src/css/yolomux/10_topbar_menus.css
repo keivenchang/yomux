@@ -223,6 +223,49 @@
     padding: 0 6px;
   }
 }
+/* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
+.topbar-activity {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--compact-control-height);
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted, #8b95a5);
+  font: inherit;
+  font-size: var(--ui-font-size-2xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-activity[hidden] {
+  display: none;
+}
+.topbar-activity:hover {
+  border-color: var(--accent, #6ea8fe);
+  color: var(--text);
+}
+.topbar-activity.has-attention {
+  border-color: var(--brand-green);
+}
+.topbar-activity-run {
+  color: var(--brand-green);
+  font-weight: 600;
+}
+.topbar-activity-attn {
+  color: var(--accent-gold);
+  font-weight: 600;
+}
+.topbar-activity-sep {
+  opacity: 0.5;
+}
+@media (max-width: 1100px) {
+  .topbar-activity-idle {
+    display: none;
+  }
+}
 @media (max-width: 760px) {
   .topbar-search {
     display: none;

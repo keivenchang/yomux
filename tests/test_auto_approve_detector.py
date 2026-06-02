@@ -196,6 +196,49 @@ def test_approval_prompt_ignores_dot_separated_ctrl_hint_cluster():
     assert prompt_detector.approval_prompt_state(visible_text)["visible"] is True
 
 
+def test_approval_prompt_fires_with_ctrl_t_task_list_below_prompt():
+    # Ctrl-T renders the todo overlay BELOW the prompt footer (header + items + "+N pending" + boxed
+    # input). The whole block is chrome under a LIVE prompt; it must not read as "later activity" or
+    # the prompt looks dismissed and auto-approve never fires (image 090).
+    visible_text = claude_bash_prompt_with_footer(
+        " Esc to cancel · Tab to amend · ctrl+e to explain",
+        " ctrl+b to run in background · ctrl+t to hide tasks",
+        " 11 tasks (0 done, 1 in progress, 10 open)",
+        "   First task description that wraps onto",
+        "   a second continuation line",
+        "   Second task",
+        "   +6 pending",
+        " │ > │",
+    )
+
+    assert prompt_detector.approval_prompt_has_later_activity(visible_text) is False
+    assert prompt_detector.detect_prompt(visible_text) == "bash"
+    assert prompt_detector.selected_prompt_option(visible_text) == 1
+    state = prompt_detector.approval_prompt_state(visible_text, visible_text)
+    assert state["visible"] is True
+    assert state["type"] == "bash"
+    assert state["yes_selected"] is True
+    assert state["action"] == "option1"
+
+
+def test_task_list_header_break_does_not_mask_real_dismissal_above_it():
+    # REGRESSION GUARD: genuine agent output (● bullet / ⎿ result) ABOVE a later task list must still
+    # mark the prompt dismissed — the header break only short-circuits chrome between footer and header.
+    visible_text = "\n".join([
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+        "   2. No",
+        " Esc to cancel · Tab to amend · ctrl+e to explain",
+        " ● Ran the command and moved on",
+        "   ⎿  output line",
+        " 3 tasks (1 done, 0 in progress, 2 open)",
+        "   Later task",
+    ])
+
+    assert prompt_detector.approval_prompt_has_later_activity(visible_text) is True
+    assert prompt_detector.approval_prompt_state(visible_text)["visible"] is False
+
+
 def test_claude_no_caret_prompt_defaults_to_yes_when_current():
     visible_text = claude_bash_prompt_with_footer(
         " Esc to cancel · Tab to amend · ctrl+e to explain",

@@ -327,6 +327,52 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   background: #9fd8ff;
   border-color: #c9ebff;
 }
+/* DOIT.6: the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
+   are illegible (worst: pr-review-required = light-gray text + strikethrough on transparent). Light
+   theme uses dark text on light/saturated fills, and a readable (un-faded) review-required chip. */
+body.theme-light .ci-indicator {
+  color: #1c2430;
+  background: #ffffff;
+  border-color: #b9c2d0;
+}
+body.theme-light .ci-indicator.pr-number-chip {
+  color: #ffffff;
+  background: #2b3242;
+  border-color: #2b3242;
+}
+body.theme-light .ci-indicator.pr-status-passing,
+body.theme-light .ci-indicator.pr-review-approved {
+  color: #06340f;
+  background: #6fe08a;
+  border-color: #3fae5e;
+}
+body.theme-light .ci-indicator.pr-status-failing,
+body.theme-light .ci-indicator.pr-review-changes {
+  color: #ffffff;
+  background: #d83048;
+  border-color: #b21f34;
+}
+body.theme-light .ci-indicator.pr-status-pending,
+body.theme-light .ci-indicator.pr-status-draft {
+  color: #3a2c00;
+  background: #ffcf4d;
+  border-color: #d9a400;
+}
+body.theme-light .ci-indicator.pr-status-merged {
+  color: #2b0a45;
+  background: #c79bf5;
+  border-color: #9a5fd0;
+}
+body.theme-light .ci-indicator.pr-review-required {
+  color: #41506a;
+  background: #e7ebf1;
+  border-color: #aab4c4;
+}
+body.theme-light .ci-indicator.branch-indicator {
+  color: #07314f;
+  background: #bfe3ff;
+  border-color: #7fb8e0;
+}
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
   animation: metadata-badge-pulse 1.4s var(--red-reminder-easing) 14;

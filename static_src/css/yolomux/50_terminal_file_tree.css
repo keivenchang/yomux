@@ -1252,6 +1252,52 @@ body.theme-light .yoagent-line {
   color: var(--accent-gold);
   font-weight: 400;
 }
+/* Git-aware Finder: compact ahead/behind/dirty markers in the repo-dir inline annotation. */
+.file-tree-repo-ahead {
+  font-family: var(--mono-font);
+  color: #6fce8a;
+}
+.file-tree-repo-behind {
+  font-family: var(--mono-font);
+  color: #e8b04b;
+}
+.file-tree-repo-dirty {
+  font-family: var(--mono-font);
+  color: var(--accent-gold);
+}
+/* Rich hover popover for a repo dir (replaces the native title tooltip). */
+.file-tree-repo-popover {
+  position: fixed;
+  z-index: 9000;
+  max-width: 360px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel2);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  font-size: var(--ui-font-size-2xs);
+  pointer-events: none;
+}
+.file-tree-repo-popover[hidden] {
+  display: none;
+}
+.file-tree-repo-popover-title {
+  font-weight: 700;
+  color: var(--text);
+}
+.file-tree-repo-popover-branch {
+  font-family: var(--mono-font);
+  color: var(--text);
+}
+.file-tree-repo-popover-stat {
+  color: var(--muted);
+}
+.file-tree-repo-popover-path {
+  margin-top: 3px;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  word-break: break-all;
+}
 .file-tree-icon {
   display: inline-block;
   width: 20px;

@@ -48,6 +48,8 @@ if (fileExplorerHiddenToggle) {
 function updateSessionButtonStates() {
   // Top navigation is menu-based now; per-session state lives in pane tabs
   // and menu rows, which are rebuilt by their normal render paths.
+  // Keep the top-bar cross-session activity line live as states change (poll-driven).
+  updateTopbarActivityStatus();
 }
 
 function bindFilePopoverActions(container) {
@@ -586,6 +588,8 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     const prParts = [pullRequestLinkHtml(pr), pullRequestAuthorHtml(pr)].filter(Boolean);
     const checks = pullRequestChecksHtml(pr);
     if (checks) prParts.push(checks);
+    const review = pullRequestReviewInlineHtml(pr);
+    if (review) prParts.push(review);
     rows.push(popoverRow('PR', metaJoin(prParts)));
     prDesc = pullRequestDescriptionInlineHtml(pr);
   }

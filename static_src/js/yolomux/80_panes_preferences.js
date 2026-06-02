@@ -668,8 +668,11 @@ function clearPaneTabDropPreview(strip) {
 }
 
 function paneTabDropPlacement(strip, event, movingSession) {
-  const tabs = Array.from(strip.querySelectorAll('.pane-tab'))
-    .filter(tab => tab.dataset.paneTab !== movingSession);
+  const allTabs = Array.from(strip.querySelectorAll('.pane-tab'));
+  // The source's position in the FULL strip (before filtering) drives a directional insert threshold
+  // for same-strip reorder; -1 means a cross-pane move (keep the centered threshold).
+  const sourceVisualIndex = movingSession ? allTabs.findIndex(tab => tab.dataset.paneTab === movingSession) : -1;
+  const tabs = allTabs.filter(tab => tab.dataset.paneTab !== movingSession);
   const stripRect = strip.getBoundingClientRect();
   const clampX = value => Math.max(2, Math.min(stripRect.width - 2, value));
   const clampY = (value, height) => Math.max(0, Math.min(Math.max(0, stripRect.height - height), value));
@@ -688,9 +691,15 @@ function paneTabDropPlacement(strip, event, movingSession) {
     return !best || distance < best.distance ? {row: item, distance} : best;
   }, null)?.row || rows[0];
   const rowTabs = row.items.slice().sort((left, right) => left.rect.left - right.rect.left);
+  const sameStrip = sourceVisualIndex >= 0;
   for (const item of rowTabs) {
     const rect = item.rect;
-    if (event.clientX < rect.left + rect.width / 2) {
+    // Cross-pane drops insert at the tab center. Same-strip reorder uses the FAR edge relative to the
+    // source (item.index >= sourceVisualIndex means the source sits to its LEFT) so dropping the source
+    // anywhere on a neighbor moves it PAST that neighbor — fixes left->right needing a center overshoot.
+    let threshold = rect.left + rect.width / 2;
+    if (sameStrip) threshold = item.index >= sourceVisualIndex ? rect.left : rect.right;
+    if (event.clientX < threshold) {
       return {
         index: item.index,
         x: clampX(rect.left - stripRect.left),
@@ -1422,7 +1431,7 @@ function preferenceSections() {
       {path: 'general.reload_on_update_auto', label: 'Auto-reload on server update', type: 'boolean', help: 'When the above is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).'},
     ]},
     {title: 'Appearance', items: [
-      {path: 'appearance.theme', label: 'Global app theme', type: 'select', choices: [
+      {path: 'appearance.theme', label: 'Global color theme', type: 'select', choices: [
         {value: 'dark', label: 'Dark'},
         {value: 'light', label: 'Light'},
         {value: 'system', label: 'System'},

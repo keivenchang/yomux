@@ -95,10 +95,11 @@ def github_graphql(query: str, variables: dict[str, Any]) -> Any:
     )
 
 
-# reviewDecision lives only on the GraphQL pullRequest object, not the REST pulls payload.
+# reviewDecision + the per-reviewer state live only on the GraphQL pullRequest object, not REST.
 _REVIEW_DECISION_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!)"
-    "{repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}"
+    "{repository(owner:$owner,name:$name){pullRequest(number:$number)"
+    "{reviewDecision latestOpinionatedReviews(first:10){nodes{author{login} state}}}}}"
 )
 
 
@@ -106,24 +107,54 @@ def github_pull_request_review_decision_payload(repo: dict[str, str], number: in
     return github_graphql(_REVIEW_DECISION_QUERY, {"owner": repo["owner"], "name": repo["name"], "number": number})
 
 
-def normalize_review_decision(payload: Any) -> str | None:
+def _review_pull_request_node(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     data = payload.get("data")
     repository = data.get("repository") if isinstance(data, dict) else None
     pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
-    decision = pull_request.get("reviewDecision") if isinstance(pull_request, dict) else None
+    return pull_request if isinstance(pull_request, dict) else None
+
+
+def normalize_review_decision(payload: Any) -> str | None:
+    pull_request = _review_pull_request_node(payload)
+    decision = pull_request.get("reviewDecision") if pull_request else None
     return decision if isinstance(decision, str) and decision else None
 
 
-def github_pull_request_review_decision(repo: dict[str, str], number: int, cache: Any) -> str | None:
+def normalize_review_reviewers(payload: Any) -> list[dict[str, str]]:
+    """Per-reviewer {login, state} from latestOpinionatedReviews (APPROVED / CHANGES_REQUESTED / ...)."""
+    pull_request = _review_pull_request_node(payload)
+    reviews = pull_request.get("latestOpinionatedReviews") if pull_request else None
+    nodes = reviews.get("nodes") if isinstance(reviews, dict) else None
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        author = node.get("author") if isinstance(node.get("author"), dict) else {}
+        login = author.get("login") if isinstance(author.get("login"), str) else None
+        state = node.get("state") if isinstance(node.get("state"), str) else None
+        if login and state and login not in seen:
+            seen.add(login)
+            result.append({"login": login, "state": state})
+    return result
+
+
+def github_pull_request_review_info(repo: dict[str, str], number: int, cache: Any) -> dict[str, Any]:
+    """Cached {decision, reviewers} for a PR from a single GraphQL round-trip."""
     key = f"github-review:{repo['owner']}/{repo['name']}:{number}"
     cached = cache.get(key)
     if cached is not _CACHE_MISS:
         return cached
-    value = normalize_review_decision(github_pull_request_review_decision_payload(repo, number))
+    payload = github_pull_request_review_decision_payload(repo, number)
+    value = {"decision": normalize_review_decision(payload), "reviewers": normalize_review_reviewers(payload)}
     cache.set(key, value)
     return value
+
+
+def github_pull_request_review_decision(repo: dict[str, str], number: int, cache: Any) -> str | None:
+    return github_pull_request_review_info(repo, number, cache)["decision"]
 
 
 def github_commit_check_payloads(repo: dict[str, str], head_sha: str) -> tuple[Any, Any]:
@@ -223,6 +254,7 @@ def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str],
         "linear_ids": extract_linear_ids(title, body),
         "checks": github_checks_unknown(),
         "review_decision": None,
+        "review_reviewers": [],
         "source": source,
     }
     result["status_label"] = pull_request_status_label(result)
@@ -238,7 +270,9 @@ def enrich_github_pull_request(value: dict[str, Any], repo: dict[str, str], cach
         value["checks"] = github_commit_checks(repo, head_sha, cache)
     number = value.get("number")
     if isinstance(number, int):
-        value["review_decision"] = github_pull_request_review_decision(repo, number, cache)
+        review = github_pull_request_review_info(repo, number, cache)
+        value["review_decision"] = review["decision"]
+        value["review_reviewers"] = review["reviewers"]
     value["status_label"] = pull_request_status_label(value)
 
 

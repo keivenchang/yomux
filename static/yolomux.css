@@ -44,9 +44,9 @@
   --pane-tab-active-bg: #86d600;
   --pane-tab-active-border: #9be33d;
   --pane-tab-active-accent: #86d600;
-  --pane-tab-unfocused-active-text: #e8f4dc;
-  --pane-tab-unfocused-active-bg: #285a2f;
-  --pane-tab-unfocused-active-border: #78b95d;
+  --pane-tab-unfocused-active-text: #f1f9e8;
+  --pane-tab-unfocused-active-bg: #4f9e3a;
+  --pane-tab-unfocused-active-border: #8fd069;
   --pane-tab-strip-bg: #1f3026;
   --pane-tab-yolo-text: #071000;
   --pane-tab-yolo-bg: #76b900;
@@ -530,6 +530,49 @@ body {
   .topbar-search {
     max-width: none;
     padding: 0 6px;
+  }
+}
+/* Cross-session AI activity status line in the top bar (opens the YO!agent summary). */
+.topbar-activity {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--compact-control-height);
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted, #8b95a5);
+  font: inherit;
+  font-size: var(--ui-font-size-2xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.topbar-activity[hidden] {
+  display: none;
+}
+.topbar-activity:hover {
+  border-color: var(--accent, #6ea8fe);
+  color: var(--text);
+}
+.topbar-activity.has-attention {
+  border-color: var(--brand-green);
+}
+.topbar-activity-run {
+  color: var(--brand-green);
+  font-weight: 600;
+}
+.topbar-activity-attn {
+  color: var(--accent-gold);
+  font-weight: 600;
+}
+.topbar-activity-sep {
+  opacity: 0.5;
+}
+@media (max-width: 1100px) {
+  .topbar-activity-idle {
+    display: none;
   }
 }
 @media (max-width: 760px) {
@@ -1312,6 +1355,52 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   color: #071321;
   background: #9fd8ff;
   border-color: #c9ebff;
+}
+/* DOIT.6: the .ci-indicator chips are tuned for dark mode; on a bright/green tab in light theme they
+   are illegible (worst: pr-review-required = light-gray text + strikethrough on transparent). Light
+   theme uses dark text on light/saturated fills, and a readable (un-faded) review-required chip. */
+body.theme-light .ci-indicator {
+  color: #1c2430;
+  background: #ffffff;
+  border-color: #b9c2d0;
+}
+body.theme-light .ci-indicator.pr-number-chip {
+  color: #ffffff;
+  background: #2b3242;
+  border-color: #2b3242;
+}
+body.theme-light .ci-indicator.pr-status-passing,
+body.theme-light .ci-indicator.pr-review-approved {
+  color: #06340f;
+  background: #6fe08a;
+  border-color: #3fae5e;
+}
+body.theme-light .ci-indicator.pr-status-failing,
+body.theme-light .ci-indicator.pr-review-changes {
+  color: #ffffff;
+  background: #d83048;
+  border-color: #b21f34;
+}
+body.theme-light .ci-indicator.pr-status-pending,
+body.theme-light .ci-indicator.pr-status-draft {
+  color: #3a2c00;
+  background: #ffcf4d;
+  border-color: #d9a400;
+}
+body.theme-light .ci-indicator.pr-status-merged {
+  color: #2b0a45;
+  background: #c79bf5;
+  border-color: #9a5fd0;
+}
+body.theme-light .ci-indicator.pr-review-required {
+  color: #41506a;
+  background: #e7ebf1;
+  border-color: #aab4c4;
+}
+body.theme-light .ci-indicator.branch-indicator {
+  color: #07314f;
+  background: #bfe3ff;
+  border-color: #7fb8e0;
 }
 .ci-indicator.metadata-pulse:not(.pr-status-failing) {
   transform-origin: center;
@@ -3312,8 +3401,10 @@ body.layout-resizing {
   border-bottom-color: var(--pane-tab-active-bg);
   box-shadow: none;
 }
+/* DOIT.6: every pane keeps its active tab clearly green (no dimming) so you can tell which session
+   each pane shows; the focused pane's extra cue is its brighter lime active tab + the pane ring. */
 .panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active {
-  opacity: 0.86;
+  opacity: 1;
 }
 .pane-tab.active .session-button-name,
 .pane-tab.active .session-button-dir,
@@ -5080,6 +5171,52 @@ body.theme-light .yoagent-line {
   font-family: var(--mono-font);
   color: var(--accent-gold);
   font-weight: 400;
+}
+/* Git-aware Finder: compact ahead/behind/dirty markers in the repo-dir inline annotation. */
+.file-tree-repo-ahead {
+  font-family: var(--mono-font);
+  color: #6fce8a;
+}
+.file-tree-repo-behind {
+  font-family: var(--mono-font);
+  color: #e8b04b;
+}
+.file-tree-repo-dirty {
+  font-family: var(--mono-font);
+  color: var(--accent-gold);
+}
+/* Rich hover popover for a repo dir (replaces the native title tooltip). */
+.file-tree-repo-popover {
+  position: fixed;
+  z-index: 9000;
+  max-width: 360px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel2);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  font-size: var(--ui-font-size-2xs);
+  pointer-events: none;
+}
+.file-tree-repo-popover[hidden] {
+  display: none;
+}
+.file-tree-repo-popover-title {
+  font-weight: 700;
+  color: var(--text);
+}
+.file-tree-repo-popover-branch {
+  font-family: var(--mono-font);
+  color: var(--text);
+}
+.file-tree-repo-popover-stat {
+  color: var(--muted);
+}
+.file-tree-repo-popover-path {
+  margin-top: 3px;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  word-break: break-all;
 }
 .file-tree-icon {
   display: inline-block;

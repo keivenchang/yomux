@@ -1,3 +1,6 @@
+import json
+import re
+
 from yolomux_lib import common
 from yolomux_lib import web
 
@@ -135,6 +138,23 @@ def test_setup_auth_page_recommends_https(monkeypatch):
     assert "--self-signed" in setup_html
     assert "--host 0.0.0.0" not in setup_html
     assert setup_html.index("Highly recommend that you restart with HTTPS") < setup_html.index("Edit <code>")
+
+
+def test_bootstrap_json_escapes_breakout_chars_without_html_entities():
+    page = web.html_page([])
+    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    assert match, "bootstrap script tag is present"
+    raw = match.group(1)
+    # The YO!agent answer-format default contains <topic>; it must NOT be HTML-entity-escaped (that
+    # would leave literal &lt;topic&gt; after JSON.parse) and must NOT contain a raw </script> breakout.
+    assert "&lt;topic&gt;" not in raw
+    assert "\\u003ctopic\\u003e" in raw
+    assert "</script>" not in raw
+    # The breakout chars round-trip back to literal <, >, & through JSON.parse (json.loads here).
+    parsed = json.loads(raw)
+    fmt = parsed["settingsPayload"]["settings"]["yoagent"]["format"]
+    assert "<topic>" in fmt
+    assert "&lt;" not in fmt
 
 
 def test_main_page_has_logout_button():

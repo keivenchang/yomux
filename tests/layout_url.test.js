@@ -391,6 +391,8 @@ globalThis.__layoutTestApi = {
   globalShortcutTargetAllowsAppAction,
   commandPaletteItemScore,
   commandPaletteCommandItems,
+  commandPaletteItems,
+  setCommandPaletteStateForTest(mode, query) { commandPaletteMode = mode; commandPaletteQuery = query || ''; },
   commandPaletteMatches,
   openFileQuickOpen,
   testElementForId(id) { return document.getElementById(id); },
@@ -450,6 +452,15 @@ globalThis.__layoutTestApi = {
   terminalThemeModeForTest() { return terminalThemeMode; },
   setTerminalThemeModeForTest(value) { terminalThemeMode = normalizeTerminalThemeMode(value); },
   expandPaneFromLayout,
+  terminalThemeSettingForGlobalMode,
+  sessionConfirmedGone,
+  globalActivityCounts,
+  globalActivityStatusLineHtml,
+  setAutoApproveStateForTest(session, state) { autoApproveStates.set(session, state); },
+  maxTabsPerPane,
+  tabsToEvictForCap,
+  recordTabActivation,
+  setTabLastActivatedForTest(item, ts) { tabLastActivatedAt.set(item, ts); },
   infoBranchRows,
   fileContextMenuState,
   fileEditorItemFor,
@@ -463,6 +474,9 @@ globalThis.__layoutTestApi = {
   pullRequestStatusLabel,
   pullRequestApprovalIndicatorHtml,
   pullRequestCompactBadgesHtml,
+  pullRequestNumberIndicatorHtml,
+  pullRequestReviewInlineHtml,
+  sessionStateHtml,
   openFileStatus,
   setOpenFileOwner,
   renderTransportWarning,
@@ -476,6 +490,9 @@ globalThis.__layoutTestApi = {
   setFileExplorerRepoInfoForTest(path, repo) {
     fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), repo);
   },
+  repoInfoPopoverHtml,
+  fileTreeRepoSyncMeta,
+  fileTreeDisplayParts,
   setUploadedFilesCollapsedForTest(value) { uploadedFilesCollapsed = Boolean(value); },
   setChangesFolderCollapsedForTest(keys) { changesFolderCollapsed = new Set((keys || []).map(String)); },
   rawFileUrl,
@@ -1343,6 +1360,122 @@ function makeFileTree(paths) {
 }
 
 {
+  // GLOBAL activity status line: cross-session running / need-you / idle rollup in the top bar.
+  const api = loadYolomux('', ['1', '2', '3', '4']);
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  api.setAutoApproveStateForTest('1', {screen: {key: 'working'}});
+  api.setAutoApproveStateForTest('2', {screen: {key: 'needs-input'}});
+  // '3' and '4' fall through to idle.
+  const counts = api.globalActivityCounts();
+  assert.equal(counts.running, 1, 'one working session counts as running');
+  assert.equal(counts.attention, 1, 'one needs-input session counts as needing the user');
+  assert.equal(counts.idle, 2, 'the remaining sessions are idle');
+  assert.equal(counts.total, 4, 'all tmux sessions are counted');
+  const html = api.globalActivityStatusLineHtml();
+  assert.ok(/1 running/.test(html) && /topbar-activity-run/.test(html), 'status line shows running count');
+  assert.ok(/1 need you/.test(html) && /topbar-activity-attn/.test(html), 'status line flags sessions needing the user');
+  assert.ok(/2 idle/.test(html), 'status line shows the idle count');
+  assert.ok(/\.topbar-activity\s*\{/.test(css), 'the top-bar activity line is styled');
+  assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
+}
+
+{
+  // Event-driven session-kill: a terminal WS close roster-confirms gone vs transient disconnect.
+  const api = loadYolomux('', ['1', '2', '3']);
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.equal(api.sessionConfirmedGone('2', ['1', '3']), true, 'a tmux session absent from the roster is confirmed gone');
+  assert.equal(api.sessionConfirmedGone('2', ['1', '2', '3']), false, 'a session still in the roster is a transient disconnect, not gone');
+  assert.equal(api.sessionConfirmedGone('2', null), false, 'a failed/empty roster fetch never declares a session gone (reconnect instead)');
+  assert.equal(api.sessionConfirmedGone(api.fileEditorItemFor('/x/y.txt'), []), false, 'non-tmux items are never roster-pruned');
+  assert.ok(source.includes('confirmSessionGoneOrReconnect(session, item);'), 'terminal WS close roster-confirms before reconnecting');
+  assert.ok(/sessionConfirmedGone\(session, order\)\)\s*\{\s*pruneDeadSession\(session\);/.test(source), 'a confirmed-gone session is pruned immediately');
+  assert.ok(/scheduleTerminalReconnect\(session, item\);\s*\}\s*$/m.test(source) || source.includes('scheduleTerminalReconnect(session, item);'), 'a transient disconnect still reconnects');
+}
+
+{
+  // Git-aware Finder: repo-dir inline annotation (branch + ahead/behind/dirty) + hover popover.
+  const api = loadYolomux('', ['1']);
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  api.setFileExplorerRepoInfoForTest('/repo/app', {root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3});
+  const sync = api.fileTreeRepoSyncMeta('/repo/app').map(part => part.text);
+  assert.deepStrictEqual([...sync], ['↑2', '↓1', '●3'], 'repo sync meta shows ahead/behind/dirty markers');
+  const parts = api.fileTreeDisplayParts('/repo/app', {kind: 'dir', is_repo: true, name: 'app'});
+  assert.ok(parts.html.includes('file-tree-repo-branch') && parts.html.includes('feature/x'), 'repo dir annotation shows the branch');
+  assert.ok(parts.html.includes('file-tree-repo-ahead') && parts.html.includes('↑2'), 'repo dir annotation shows ahead count inline');
+  assert.ok(parts.html.includes('file-tree-repo-dirty') && parts.html.includes('●3'), 'repo dir annotation shows dirty count inline');
+  // Rich hover popover (replaces the native title tooltip) carries branch / upstream / stat / path.
+  const pop = api.repoInfoPopoverHtml({root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3});
+  assert.ok(pop.includes('feature/x') && pop.includes('2 ahead') && pop.includes('1 behind') && pop.includes('3 dirty'), 'repo popover shows branch + ahead/behind/dirty');
+  assert.ok(pop.includes('/repo/app'), 'repo popover shows the repo root path');
+  assert.equal(api.repoInfoPopoverHtml({}), '', 'no popover html without a repo root');
+  assert.ok(/\.file-tree-repo-popover\s*\{[^}]*position:\s*fixed/.test(css), 'the repo hover popover is a styled floating element');
+  assert.ok(/\.file-tree-repo-ahead/.test(css) && /\.file-tree-repo-dirty/.test(css), 'inline ahead/dirty markers are styled');
+}
+
+{
+  // Max tabs per pane + LRU eviction (Preference).
+  const api = loadYolomux('', ['1', '2', '3', '4', '5']);
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
+  assert.equal(api.maxTabsPerPane(), 3, 'tab cap reads appearance.max_tabs_per_pane');
+  api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 999}});
+  assert.equal(api.maxTabsPerPane(), 30, 'tab cap is clamped to 30');
+  api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 1}});
+  assert.equal(api.maxTabsPerPane(), 2, 'tab cap is clamped to a minimum of 2');
+  api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
+  // Five tmux tabs, '5' is the active/newest; evict the 2 least-recently-used others.
+  const tabs = ['1', '2', '3', '4', '5'];
+  api.setTabLastActivatedForTest('1', 10);
+  api.setTabLastActivatedForTest('2', 50);
+  api.setTabLastActivatedForTest('3', 20);
+  api.setTabLastActivatedForTest('4', 90);
+  api.setTabLastActivatedForTest('5', 100);
+  assert.deepStrictEqual([...api.tabsToEvictForCap(tabs, '5')], ['1', '3'], 'LRU eviction drops the two oldest non-active tabs');
+  assert.deepStrictEqual([...api.tabsToEvictForCap(['1', '2'], '2')], [], 'no eviction when the pane is within the cap');
+  // A dirty editor tab is never evicted; the next LRU tab goes instead.
+  const editorItem = api.fileEditorItemFor('/x/draft.txt');
+  api.setOpenFileStateForTest('/x/draft.txt', {kind: 'text', dirty: true, content: 'x', original: ''});
+  api.setTabLastActivatedForTest(editorItem, 1);  // oldest, but dirty -> protected
+  const withDirty = ['1', '2', editorItem, '5'];
+  api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 2}});
+  const evicted = api.tabsToEvictForCap(withDirty, '5');
+  assert.ok(!evicted.includes(editorItem), 'a dirty/unsaved editor tab is never auto-closed');
+  assert.ok(evicted.includes('1'), 'the oldest non-dirty tab is evicted instead of the dirty editor');
+  assert.ok(source.includes('const evicted = tabsToEvictForCap(tabs, session);'), 'moveSessionToSlot enforces the tab cap when a tab joins a pane');
+}
+
+{
+  // DOIT.6 #4: the session popover shows review status AND who reviewed.
+  const api = loadYolomux('', ['5']);
+  const approved = api.pullRequestReviewInlineHtml({number: 12, review_decision: 'APPROVED', review_reviewers: [{login: 'alice', state: 'APPROVED'}]});
+  assert.ok(/Approved by alice/.test(approved) && /pr-status-passing/.test(approved), 'popover shows "Approved by <login>"');
+  const changes = api.pullRequestReviewInlineHtml({number: 12, review_decision: 'CHANGES_REQUESTED', review_reviewers: [{login: 'bob', state: 'CHANGES_REQUESTED'}]});
+  assert.ok(/Changes requested by bob/.test(changes) && /pr-status-failing/.test(changes), 'popover shows "Changes requested by <login>"');
+  const required = api.pullRequestReviewInlineHtml({number: 12, review_decision: 'REVIEW_REQUIRED', review_reviewers: []});
+  assert.ok(/Review required/.test(required), 'popover shows "Review required" when unreviewed');
+  assert.equal(api.pullRequestReviewInlineHtml({number: 12}), '', 'no review part without a decision');
+  // Approved with no reviewer login still renders the status without a dangling "by".
+  const approvedNoWho = api.pullRequestReviewInlineHtml({number: 12, review_decision: 'APPROVED', review_reviewers: []});
+  assert.ok(/Approved</.test(approvedNoWho) && !/ by /.test(approvedNoWho), 'approved with no reviewer omits the "by" clause');
+}
+
+{
+  // DOIT.6 #1/#2/#3: tab badge legibility (light), drop the redundant PR pill, no duplicate tooltip.
+  const api = loadYolomux('', ['5']);
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  // #1: light-theme overrides exist for the badge chips, incl. a readable (non-transparent) review-required.
+  assert.ok(/body\.theme-light \.ci-indicator\.pr-review-required\s*\{[^}]*background:\s*#e7ebf1/.test(css), '#6: review-required chip is legible (light fill) in light theme');
+  assert.ok(/body\.theme-light \.ci-indicator\.pr-number-chip/.test(css) && /body\.theme-light \.ci-indicator\.pr-review-approved/.test(css), '#6: light-theme overrides cover number + review chips');
+  // #2: the ready-review "PR" state pill is dropped (PR chips convey it now); other states still render.
+  assert.equal(api.sessionStateHtml({key: 'ready-review', short: 'PR', label: 'Ready for review', reason: 'checks pass'}), '', '#7: the redundant ready-review PR pill is suppressed');
+  assert.ok(api.sessionStateHtml({key: 'needs-input', short: '?', label: 'Needs input', reason: 'waiting'}).includes('session-state-needs-input'), '#7: actionable states still render a badge');
+  // #3: tab badge chips carry no native title (the custom popover is the single source).
+  assert.ok(!api.pullRequestNumberIndicatorHtml('5', {number: 123}).includes('title='), '#8: the PR number chip has no native title tooltip');
+  assert.ok(!api.pullRequestApprovalIndicatorHtml('5', {number: 123, state: 'open', review_decision: 'APPROVED'}).includes('title='), '#8: the approval chip has no native title tooltip');
+  assert.ok(!api.pullRequestCompactBadgesHtml('5', {number: 123, state: 'open', review_decision: 'APPROVED'}).includes('title='), '#8: the compact PR badge row has no native title tooltips');
+}
+
+{
   // #38: tab APPROVAL badge driven by GitHub reviewDecision.
   const api = loadYolomux('', ['5']);
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -1849,7 +1982,7 @@ function makeFileTree(paths) {
   assert.ok(changedFilesSource.includes("numberSetting('appearance.tab_width', 180)"), 'runtime settings fallback keeps the 180px tab width default');
   assert.ok(/body\.theme-dark\s*\{[\s\S]*--pane-tab-strip-bg:\s*#1f3026/.test(preferencesCss), 'dark theme uses a greenish dark pane tab-strip background');
   assert.ok(/body\.theme-light\s*\{[\s\S]*--pane-tab-strip-bg:\s*#cfd4dd/.test(preferencesCss), 'light theme uses a bright pane tab-strip background');
-  assert.ok(preferencesCss.includes('--pane-tab-unfocused-active-bg: #285a2f'), 'unfocused active tabs use dark green, not gray');
+  assert.ok(preferencesCss.includes('--pane-tab-unfocused-active-bg: #4f9e3a'), 'unfocused active tabs use a clearly-visible green, not gray (DOIT.6 #6: undimmed per-pane highlight)');
   assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
   assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 2px'), 'active pane ring uses a thin shared width token');
   assert.ok(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'focused panes keep the same bright tab-strip background');
@@ -2183,12 +2316,12 @@ function makeFileTree(paths) {
   assert.equal(fileMenuLabels.includes('Rename session'), false);
   assert.equal(fileMenuLabels.includes('Kill session'), false);
   assert.equal(fileMenuLabels.includes('Resume session'), false);
-  assert.ok(fileMenuLabels.includes('Branch Info'));
+  assert.ok(fileMenuLabels.includes('YO!info'));
   assert.ok(fileMenuLabels.includes('YO!agent'));
   assert.ok(fileMenuLabels.includes('Preferences'));
   assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
   assert.deepStrictEqual(canonical(fileMenu.items.slice(-3).map(item => item.type === 'separator' ? '---' : item.label)), ['Preferences', '---', 'Log out']);
-  for (const label of [api.fileExplorerLabel(), 'Branch Info', 'YO!agent', 'Open file', 'Preferences', 'Log out']) {
+  for (const label of [api.fileExplorerLabel(), 'YO!info', 'YO!agent', 'Open file', 'Preferences', 'Log out']) {
     const item = fileMenu.items.find(candidate => candidate.label === label);
     assert.ok(item?.iconHtml, `File menu ${label} uses the shared icon row`);
     assert.equal(item.className || '', '', `File menu ${label} does not use the raised tab-row scaffold`);
@@ -2405,7 +2538,7 @@ function makeFileTree(paths) {
   const controlsHtml = api.panelControlsHtml('1');
   assert.equal(controlsHtml.includes('data-panel-tab-overflow'), false);
   assert.equal((controlsHtml.match(/pane-actions-dots/g) || []).length, 1, 'pane header has one merged ellipsis menu');
-  assert.ok(controlsHtml.includes('title="Branch Info" aria-label="Branch Info"'));
+  assert.ok(controlsHtml.includes('title="YO!info" aria-label="YO!info"'));
   assert.ok(api.tmuxPaneTabHtml('1', null, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'test'}).includes('tab-symbol'));
   assert.equal(api.tmuxSessionNameError('good_name-1.2'), '');
   assert.equal(api.tmuxSessionNameError('dynamo 2'), '');
@@ -3644,6 +3777,70 @@ function makeFileTree(paths) {
   multiLineStrip.rect = {left: 100, right: 406, top: 0, bottom: 58, width: 306, height: 58};
   assert.deepStrictEqual(canonical(api.paneTabDropPlacement(multiLineStrip, {clientX: 110, clientY: 38}, '9')), {index: 2, x: 2, y: 30, height: 27});
   assert.deepStrictEqual(canonical(api.paneTabDropPlacement(multiLineStrip, {clientX: 225, clientY: 38}, '9')), {index: 3, x: 103, y: 30, height: 27});
+}
+
+{
+  // DOIT.6 #7: the default (files-mode) search bar blends matching commands/tabs into the results.
+  const api = loadYolomux('', ['1']);
+  const prefsLabel = api.itemLabel(api.prefsItemId);
+  api.setFileQuickOpenCandidatesForTest('/repo/app', [
+    {name: 'notes.py', path: '/repo/app/notes.py', relative_path: 'notes.py'},
+  ]);
+  api.setCommandPaletteStateForTest('files', prefsLabel);
+  assert.ok(api.commandPaletteItems().some(item => item.group === 'Tabs' && item.label === prefsLabel), '#7: a command/tab matching a plain files-mode query is blended in (no > needed)');
+  // `>` stays commands-only — no file candidates blended.
+  api.setCommandPaletteStateForTest('files', `>${prefsLabel}`);
+  assert.ok(!api.commandPaletteItems().some(item => item.path === '/repo/app/notes.py'), '#7: the > prefix stays commands-only');
+  // An empty files-mode query must NOT dump the whole command corpus.
+  api.setCommandPaletteStateForTest('files', '');
+  assert.ok(!api.commandPaletteItems().some(item => item.group === 'Tabs'), '#7: empty files-mode query shows files only (no command dump)');
+  // `@` stays reserved for symbols (no command blend).
+  api.setCommandPaletteStateForTest('files', '@thing');
+  assert.ok(!api.commandPaletteItems().some(item => item.group === 'Tabs'), '#7: @ stays reserved for symbols');
+}
+
+{
+  // DOIT.6 #8-#13: renames, toggles, theme propagation, README preview.
+  const api = loadYolomux('', ['1']);
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  // #8: Branch Info -> YO!info (single constant drives tab/menu/palette).
+  assert.ok(source.includes("const infoTabLabel = 'YO!info'"), '#8: the info tab is renamed YO!info');
+  // #9: File -> Finder toggles via toggleFinderPane (hide when in layout, else open).
+  assert.ok(source.includes('menuCommand(fileExplorerLabel(), () => toggleFinderPane()'), '#9: File -> Finder uses the toggle');
+  assert.ok(/function toggleFinderPane\(\)\s*\{[^}]*itemInLayout\(fileExplorerItemId\)[^}]*removeSessionFromLayout\(fileExplorerItemId\)/.test(source), '#9: toggle hides the Finder when it is already in the layout');
+  // #11: View -> Theme writes terminal_theme alongside appearance.theme, mapped.
+  assert.equal(api.terminalThemeSettingForGlobalMode('system'), 'follow-app', '#11: system maps to follow-app');
+  assert.equal(api.terminalThemeSettingForGlobalMode('dark'), 'dark', '#11: dark maps to dark');
+  assert.equal(api.terminalThemeSettingForGlobalMode('light'), 'light', '#11: light maps to light');
+  assert.ok(source.includes('patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next)'), '#11: the View theme toggle moves the terminal palette in lockstep');
+  // #10: a global-theme change re-themes live editors via the compartment swap.
+  assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme change re-themes open editors');
+  // #12: Preferences field renamed.
+  assert.ok(source.includes("label: 'Global color theme'"), '#12: the Preferences field reads "Global color theme"');
+  assert.equal(source.includes("label: 'Global app theme'"), false, '#12: no stale "Global app theme" label remains');
+  // #13: Help -> README opens rendered markdown preview.
+  assert.ok(source.includes("openFileInEditor(path, 'README.md', {viewMode: 'preview'})"), '#13: README opens in preview mode');
+}
+
+{
+  // DOIT.6 #6: every pane keeps its active tab clearly green (no dimming); focused pane = brighter
+  // lime + ring. Source-guards on the shared tokens + the un-dimmed unfocused-active rule.
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/--pane-tab-unfocused-active-bg:\s*#4f9e3a/.test(css), '#11: unfocused panes show a clearly-visible green active tab');
+  assert.ok(/\.panel:not\(\.active-pane\):not\(\.file-explorer-panel\):not\(\.changes-panel\) \.pane-tab\.active\s*\{\s*opacity:\s*1/.test(css), '#11: unfocused active tabs are no longer dimmed');
+  assert.ok(/--pane-tab-active-bg:\s*#86d600/.test(css), '#11: the focused pane keeps the brighter lime active tab as its extra cue');
+}
+
+{
+  // DOIT.6 #5: same-strip drag-reorder works in BOTH directions. Dropping a tab anywhere onto a
+  // neighbor moves it past that neighbor (no center-overshoot required for the left->right case).
+  const api = loadYolomux('', ['6']);
+  const strip = tabStrip([tabElement('6', 100, 100), tabElement('P', 203, 100)]);
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 230, clientY: 8}, '6').index, 1, 'left tab dropped onto its right neighbor reorders RIGHT');
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 180, clientY: 8}, 'P').index, 0, 'right tab dropped onto its left neighbor reorders LEFT');
+  // Cross-pane drops keep the centered insert threshold (unchanged behavior).
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 230, clientY: 8}, '9').index, 1, 'cross-pane drop keeps the centered threshold');
 }
 
 {

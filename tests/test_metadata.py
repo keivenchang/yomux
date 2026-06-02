@@ -89,7 +89,10 @@ def test_github_pr_fetch_path_uses_cache_and_enriches_checks(monkeypatch):
 
     def fake_review_payload(_repo, number):
         review_calls.append(number)
-        return {"data": {"repository": {"pullRequest": {"reviewDecision": "APPROVED"}}}}
+        return {"data": {"repository": {"pullRequest": {
+            "reviewDecision": "APPROVED",
+            "latestOpinionatedReviews": {"nodes": [{"author": {"login": "alice"}, "state": "APPROVED"}]},
+        }}}}
 
     monkeypatch.setattr(github_client, "github_pull_request_payload", fake_pr_payload)
     monkeypatch.setattr(github_client, "github_commit_check_payloads", fake_checks)
@@ -106,9 +109,10 @@ def test_github_pr_fetch_path_uses_cache_and_enriches_checks(monkeypatch):
     assert first["checks"]["state"] == "passing"
     assert first["status_label"] == "open · CI passing"
     assert first["review_decision"] == "APPROVED"
+    assert first["review_reviewers"] == [{"login": "alice", "state": "APPROVED"}]
     assert payload_calls == [42]
     assert check_calls == ["abc123"]
-    # reviewDecision is fetched once then served from cache (no second GraphQL round-trip).
+    # reviewDecision + reviewers are fetched once then served from cache (no second GraphQL round-trip).
     assert review_calls == [42]
 
 

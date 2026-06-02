@@ -370,6 +370,10 @@ _BOX_DRAWING_ONLY_LINE_RE = re.compile(r"^[\s│┃╭╮╰╯┌┐└┘├�
 _BOXED_EMPTY_INPUT_LINE_RE = re.compile(r"^\s*[│┃]\s*[❯›>]?\s*[█▉▊▋▌▍▎▏_ ]*[│┃]\s*$")
 _EFFORT_STATUS_LINE_RE = re.compile(r"^\s*(?:[^\w\s]\s*)?\S+\s+/effort\b", re.IGNORECASE)
 _WORK_QUEUE_HINT_RE = re.compile(r"(?:↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)", re.IGNORECASE)
+# Header of the Ctrl-T todo overlay, e.g. "11 tasks (0 done, 1 in progress, 10 open)" — also matches
+# singular "1 task (...)". The whole overlay is a bounded block: everything below this header is
+# persistent chrome rendered under a LIVE prompt, not newer agent output.
+_TASK_LIST_HEADER_RE = re.compile(r"^\d+\s+tasks?\s+\(")
 _WORK_QUEUE_ROW_RE = re.compile(
     r"^\s*[○●◦]\s+\S.*(?:\b\d+(?:\.\d+)?\s*s\b|↑/↓\s+to\s+select|enter\s+to\s+view|↑\s+to\s+manage)",
     re.IGNORECASE,
@@ -408,6 +412,10 @@ def visible_agent_working(visible_text: str) -> bool:
 def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool:
     for line in lines[working_index + 1:]:
         stripped = line.strip()
+        # Same bounded-overlay rule as approval_prompt_has_later_activity: a Ctrl-T task list below a
+        # working row is chrome, not a later prompt. break so real output above the header still counts.
+        if _TASK_LIST_HEADER_RE.match(stripped):
+            break
         if not stripped or _is_separator_or_footer(line) or _is_prompt_trailing_ui_line(line):
             continue
         if re.match(r"^[❯›>]\s+\S", stripped):
@@ -476,6 +484,11 @@ def approval_prompt_has_later_activity(visible_text: str) -> bool:
     start = footer_index + 1 if footer_index >= 0 else selected_index + 1
     for line in lines[start:]:
         stripped = line.strip()
+        # The Ctrl-T task overlay is a bounded block under a LIVE prompt: once its header appears,
+        # the rest of the pane is overlay chrome, not newer output. break (not return False) so any
+        # genuine output ABOVE the header is still evaluated below and still flags a dismissed prompt.
+        if _TASK_LIST_HEADER_RE.match(stripped):
+            break
         if (
             _is_separator_or_footer(line)
             or _CHOICE_LINE_RE.search(line)
@@ -539,9 +552,16 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
         return True
     if re.match(r"^(?:gpt|claude|opus|sonnet)[A-Za-z0-9_.-]*\s+.+\s·\s", stripped, re.IGNORECASE):
         return True
-    if re.match(r"^\d+\s+tasks\s+\(", stripped):
+    if _TASK_LIST_HEADER_RE.match(stripped):
+        return True
+    if re.match(r"^\+\d+\s+(?:pending|more)\b", stripped, re.IGNORECASE):
         return True
     if re.match(r"^\d+%\s+context\s+(?:used|left|remaining)\b", stripped, re.IGNORECASE):
+        return True
+    # Ctrl-T task/todo list rows shown below an approval prompt (pending ☐, done ☑/☒/◼, active ◐),
+    # optionally led by a tree/box connector. Defense-in-depth for a partial overlay (header scrolled
+    # off): these are prompt-trailing UI, not new activity. The header break above is the durable fix.
+    if re.match(r"^[│├└╰⎿]?\s*[☐☑☒▢▣◻◼◐◓]\s+\S", stripped):
         return True
     if stripped.startswith(("◼", "◻", "☑", "☒")):
         return True

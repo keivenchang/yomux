@@ -1027,7 +1027,9 @@ function connectTerminalSocket(session, item) {
     clearFocusedTerminal(session);
     updateStatus();
     refreshTrackedSessionChrome(session);
-    scheduleTerminalReconnect(session, item);
+    // Roster-confirm before reconnecting: a killed session is pruned immediately, a transient
+    // disconnect reconnects as before.
+    confirmSessionGoneOrReconnect(session, item);
   };
   socket.onerror = () => {
     updateTypingIndicator(session);

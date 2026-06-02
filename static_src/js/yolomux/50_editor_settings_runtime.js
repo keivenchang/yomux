@@ -452,9 +452,10 @@ function applySettingsPayload(payload, options = {}) {
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
   if (previousEditorSchemeId !== activeEditorScheme().id) {
-    for (const [item, panel] of panelNodes.entries()) {
-      if (isFileEditorItem(item)) renderFileEditorPanel(panel, item);
-    }
+    // DOIT.6: re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
+    // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the
+    // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
+    refreshOpenEditorThemePanels();
   }
   if (!options.initial) installRuntimeIntervals();
   return true;
