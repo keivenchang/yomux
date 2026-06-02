@@ -1875,7 +1875,9 @@ function showToast(title, lines, options = {}) {
     if (!first) break;
     removeAttentionAlert(Number(first.dataset.alertId || 0));
   }
-  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), toastDurationMs));
+  // DOIT.6 #85: remove the toast when its countdown bar finishes — honor options.countdownMs (the
+  // reconnect toast animates over that, not the fixed toastDurationMs) so the bar and removal align.
+  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), options.countdownMs || toastDurationMs));
   return node;
 }
 

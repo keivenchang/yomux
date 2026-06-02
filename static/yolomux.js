@@ -3682,7 +3682,9 @@ function showToast(title, lines, options = {}) {
     if (!first) break;
     removeAttentionAlert(Number(first.dataset.alertId || 0));
   }
-  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), toastDurationMs));
+  // DOIT.6 #85: remove the toast when its countdown bar finishes — honor options.countdownMs (the
+  // reconnect toast animates over that, not the fixed toastDurationMs) so the bar and removal align.
+  attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), options.countdownMs || toastDurationMs));
   return node;
 }
 
@@ -5382,8 +5384,12 @@ function showFileTreeRepoPopover(row, repo) {
   node.hidden = false;
   const rect = row?.getBoundingClientRect?.();
   if (rect) {
-    node.style.left = `${Math.round(rect.left)}px`;
-    node.style.top = `${Math.round(rect.bottom + 4)}px`;
+    // DOIT.6 #87: clamp to the viewport so the popover stays fully on-screen near the right/bottom edge
+    // (it was placed at the row's left/bottom with no clamp and overflowed off-screen).
+    const popRect = node.getBoundingClientRect?.();
+    const pos = clampToViewport(Math.floor(rect.left), Math.ceil(rect.bottom + 4), Math.ceil(popRect?.width || 0), Math.ceil(popRect?.height || 0));
+    node.style.left = `${Math.round(pos.left)}px`;
+    node.style.top = `${Math.round(pos.top)}px`;
   }
 }
 
@@ -6904,7 +6910,9 @@ function fileEntryChanged(state, entry) {
   const stateMtime = Number(state.mtime || 0);
   const entryMtime = fileEntryMtime(entry);
   if (stateMtime !== entryMtime) return true;
-  if (state.size == null || entry.size == null) return false;
+  // DOIT.6 #88: equal mtimes but an UNKNOWN size on either side — do NOT assert "unchanged" (an
+  // equal-mtime content change with no size would be missed); treat it as changed so the caller re-stats.
+  if (state.size == null || entry.size == null) return true;
   return Number(state.size) !== Number(entry.size);
 }
 
@@ -11588,18 +11596,27 @@ function pruneDeadSession(session) {
 // prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
 async function confirmSessionGoneOrReconnect(session, item) {
   if (item.manualClose || terminals.get(session) !== item) return;
-  let order = null;
+  // DOIT.6 #86: one in-flight confirmation per terminal. A flapping WS could otherwise run several
+  // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
+  // (distorting the backoff).
+  if (item.confirmingGone) return;
+  item.confirmingGone = true;
   try {
-    const response = await apiFetch('/api/auto-approve');
-    const payload = await response.json();
-    if (Array.isArray(payload.session_order)) order = payload.session_order;
-  } catch (_) {}
-  if (item.manualClose || terminals.get(session) !== item) return;
-  if (sessionConfirmedGone(session, order)) {
-    pruneDeadSession(session);
-    return;
+    let order = null;
+    try {
+      const response = await apiFetch('/api/auto-approve');
+      const payload = await response.json();
+      if (Array.isArray(payload.session_order)) order = payload.session_order;
+    } catch (_) {}
+    if (item.manualClose || terminals.get(session) !== item) return;
+    if (sessionConfirmedGone(session, order)) {
+      pruneDeadSession(session);
+      return;
+    }
+    scheduleTerminalReconnect(session, item);
+  } finally {
+    item.confirmingGone = false;
   }
-  scheduleTerminalReconnect(session, item);
 }
 
 function estimateTerminalSize(container, term = null) {

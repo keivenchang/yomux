@@ -442,8 +442,12 @@ function showFileTreeRepoPopover(row, repo) {
   node.hidden = false;
   const rect = row?.getBoundingClientRect?.();
   if (rect) {
-    node.style.left = `${Math.round(rect.left)}px`;
-    node.style.top = `${Math.round(rect.bottom + 4)}px`;
+    // DOIT.6 #87: clamp to the viewport so the popover stays fully on-screen near the right/bottom edge
+    // (it was placed at the row's left/bottom with no clamp and overflowed off-screen).
+    const popRect = node.getBoundingClientRect?.();
+    const pos = clampToViewport(Math.floor(rect.left), Math.ceil(rect.bottom + 4), Math.ceil(popRect?.width || 0), Math.ceil(popRect?.height || 0));
+    node.style.left = `${Math.round(pos.left)}px`;
+    node.style.top = `${Math.round(pos.top)}px`;
   }
 }
 
@@ -1964,7 +1968,9 @@ function fileEntryChanged(state, entry) {
   const stateMtime = Number(state.mtime || 0);
   const entryMtime = fileEntryMtime(entry);
   if (stateMtime !== entryMtime) return true;
-  if (state.size == null || entry.size == null) return false;
+  // DOIT.6 #88: equal mtimes but an UNKNOWN size on either side — do NOT assert "unchanged" (an
+  // equal-mtime content change with no size would be missed); treat it as changed so the caller re-stats.
+  if (state.size == null || entry.size == null) return true;
   return Number(state.size) !== Number(entry.size);
 }
 

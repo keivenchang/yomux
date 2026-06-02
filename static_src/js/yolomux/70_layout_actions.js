@@ -1501,18 +1501,27 @@ function pruneDeadSession(session) {
 // prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
 async function confirmSessionGoneOrReconnect(session, item) {
   if (item.manualClose || terminals.get(session) !== item) return;
-  let order = null;
+  // DOIT.6 #86: one in-flight confirmation per terminal. A flapping WS could otherwise run several
+  // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
+  // (distorting the backoff).
+  if (item.confirmingGone) return;
+  item.confirmingGone = true;
   try {
-    const response = await apiFetch('/api/auto-approve');
-    const payload = await response.json();
-    if (Array.isArray(payload.session_order)) order = payload.session_order;
-  } catch (_) {}
-  if (item.manualClose || terminals.get(session) !== item) return;
-  if (sessionConfirmedGone(session, order)) {
-    pruneDeadSession(session);
-    return;
+    let order = null;
+    try {
+      const response = await apiFetch('/api/auto-approve');
+      const payload = await response.json();
+      if (Array.isArray(payload.session_order)) order = payload.session_order;
+    } catch (_) {}
+    if (item.manualClose || terminals.get(session) !== item) return;
+    if (sessionConfirmedGone(session, order)) {
+      pruneDeadSession(session);
+      return;
+    }
+    scheduleTerminalReconnect(session, item);
+  } finally {
+    item.confirmingGone = false;
   }
-  scheduleTerminalReconnect(session, item);
 }
 
 function estimateTerminalSize(container, term = null) {

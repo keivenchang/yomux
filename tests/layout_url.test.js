@@ -1325,6 +1325,12 @@ function makeFileTree(paths) {
   assert.ok(/maybeAdoptYoagentDeepLink[\s\S]*?infoPanelSubTab = 'yoagent'/.test(source), '#40: a yoagent deep-link pre-selects the YO!agent sub-tab');
   // DOIT.8 Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
   assert.ok(source.includes("esc(t('brand.marker'))"), 'the YO marker glyph renders via t(brand.marker)');
+  // #85/#86/#87/#88: toast removal honors countdownMs; reconnect confirmation is single-in-flight; the
+  // repo popover is viewport-clamped; an equal-mtime unknown-size entry is treated as changed (re-stat).
+  assert.ok(/removeAttentionAlert\(id\), options\.countdownMs \|\| toastDurationMs/.test(source), '#85: toast removal uses options.countdownMs');
+  assert.ok(/function confirmSessionGoneOrReconnect[\s\S]*?if \(item\.confirmingGone\) return;[\s\S]*?item\.confirmingGone = true/.test(source), '#86: reconnect confirmation has an in-flight guard');
+  assert.ok(/function showFileTreeRepoPopover[\s\S]*?clampToViewport\(/.test(source), '#87: the repo popover is clamped to the viewport');
+  assert.ok(/function fileEntryChanged[\s\S]*?state\.size == null \|\| entry\.size == null\) return true/.test(source), '#88: unknown-size equal-mtime entries are treated as changed');
   // #73: the item-keyed editor maps are cleaned up on close + migrated on rename (no unbounded growth),
   // and the per-pane LRU timestamp survives a session rename.
   assert.ok(/function removeFilePanelOwner[\s\S]*?fileEditorViewState\.delete\(item\)[\s\S]*?tabLastActivatedAt\.delete\(item\)/.test(source), '#73: editor view-state + LRU timestamp are dropped on tab close');
