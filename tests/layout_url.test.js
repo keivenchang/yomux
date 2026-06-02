@@ -3981,6 +3981,33 @@ function makeFileTree(paths) {
 }
 
 {
+  // DOIT.8 "then Chinese": zh-Hant + zh-Hans catalogs localize the WHOLE Preferences panel, and the
+  // language select offers both endonym-labeled (Traditional before Simplified).
+  const api = loadYolomux('', ['1']);
+  // The select offers the two Chinese options in their own script, Traditional listed before Simplified.
+  const selectHtml = api.preferencesPanelHtmlForTest('language');
+  assert.ok(selectHtml.includes('<option value="zh-Hant"'), 'language select offers Traditional Chinese');
+  assert.ok(selectHtml.includes('<option value="zh-Hans"'), 'language select offers Simplified Chinese');
+  assert.ok(selectHtml.includes('>繁體中文</option>') && selectHtml.includes('>简体中文</option>'), 'Chinese options use endonym labels');
+  assert.ok(selectHtml.indexOf('value="zh-Hant"') < selectHtml.indexOf('value="zh-Hans"'), 'Traditional Chinese is listed before Simplified');
+  for (const locale of ['zh-Hant', 'zh-Hans']) {
+    const catalog = JSON.parse(fs.readFileSync(`static/locales/${locale}.json`, 'utf8'));
+    // Same key set as English (the build enforces this; assert it here too).
+    assert.deepStrictEqual(new Set(Object.keys(catalog)), new Set(Object.keys(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')))), `${locale} has the same keys as en`);
+    api.i18nSetCatalogForTest(locale, catalog);
+    api.setActiveLocaleForTest(locale);
+    const zhHtml = api.preferencesPanelHtmlForTest('');
+    assert.ok(zhHtml.includes(catalog['pref.appearance.theme.label']), `${locale} renders the localized global-theme label`);
+    assert.ok(zhHtml.includes(catalog['pref.section.yoagent']), `${locale} renders the localized YO!agent section title`);
+    // Brand glyph: YO!agent localizes to 優agent / 优agent (no plain "YO!agent" section title leak).
+    assert.ok(catalog['pref.section.yoagent'].includes(locale === 'zh-Hant' ? '優agent' : '优agent'), `${locale} applies the YO!agent brand glyph`);
+    for (const englishLeak of ['Global color theme', 'Upload size cap', 'Terminal scrollback']) {
+      assert.equal(zhHtml.includes(englishLeak), false, `${locale}: no plain-English "${englishLeak}" leaks`);
+    }
+  }
+}
+
+{
   // DOIT.6 #7: the default (files-mode) search bar blends matching commands/tabs into the results.
   const api = loadYolomux('', ['1']);
   const prefsLabel = api.itemLabel(api.prefsItemId);

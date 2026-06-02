@@ -152,7 +152,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "default_layout"): {"single", "grid", "wall"},
     # i18n (DOIT.8 Phase 0): only locales that ship a catalog are accepted; "system" matches the
     # browser/OS. Phase 1 will widen this as real locale catalogs are added.
-    ("general", "language"): {"system", "en", "en-XA"},
+    ("general", "language"): {"system", "en", "zh-Hant", "zh-Hans", "en-XA"},
     ("appearance", "theme"): {"system", "dark", "light"},
     ("appearance", "terminal_theme"): {"dark", "light", "follow-app"},
     ("appearance", "editor_color_scheme"): {
@@ -194,7 +194,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
 SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
     ("general", "default_layout"): "single | grid | wall. Reserved default for new visits.",
-    ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, en-XA pseudo). More locales arrive in later i18n phases.",
+    ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hant, zh-Hans, en-XA pseudo). More locales arrive in later i18n phases.",
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
     ("general", "reload_on_update"): "true/false. Default false. When true, an open client shows a 'New version available' banner once the server ships a newer YOLOMUX_VERSION.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).",
