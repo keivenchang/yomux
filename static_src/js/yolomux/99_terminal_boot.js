@@ -1293,8 +1293,8 @@ function startSummaryStream(session) {
   const node = document.getElementById(`summary-${session}`);
   if (!node) return;
   if (readOnlyMode) {
-    node.textContent = 'AI Transcript requires admin access.';
-    statusEl.innerHTML = '<span class="err">readonly access cannot run AI Transcript</span>';
+    node.textContent = t('transcript.adminRequired');
+    statusEl.innerHTML = `<span class="err">${esc(t('transcript.adminStatus'))}</span>`;
     return;
   }
   // Accumulate the raw streamed text and render it through the markdown pipeline
@@ -1778,7 +1778,7 @@ async function showContext(session) {
   const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
   title.textContent = `${sessionLabel(session)} transcript tail`;
-  body.textContent = 'loading...';
+  body.textContent = t('common.loading');
   modal.classList.add('open');
   const response = await apiFetch(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
   const payload = await response.json();

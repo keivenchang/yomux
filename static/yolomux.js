@@ -2600,7 +2600,10 @@ const stateDefs = {
 };
 
 function stateDef(key) {
-  return stateDefs[key] || stateDefs.idle;
+  // #121: resolve the human label through t() on each access so a runtime language switch
+  // re-localizes it (stateDefs is frozen at load). The terse `short` badge codes stay as-is.
+  const resolvedKey = stateDefs[key] ? key : 'idle';
+  return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`)};
 }
 
 function terminalDisconnected(session) {
@@ -2611,7 +2614,7 @@ function terminalDisconnected(session) {
 }
 
 function sessionState(session, info = transcriptMeta.sessions?.[session]) {
-  if (!isTmuxSession(session)) return {key: 'idle', ...stateDefs.idle, reason: 'not a tmux session'};
+  if (!isTmuxSession(session)) return {key: 'idle', ...stateDef('idle'), reason: t('state.notTmux')};
   const auto = autoApproveStates.get(session) || {};
   const autoEnabled = autoApproveEnabledForSession(auto);
   const approvalPrompt = auto.prompt || {};
@@ -3011,7 +3014,7 @@ function flattenMenuCommands(items, prefix = []) {
       result.push(...flattenMenuCommands(item.items, [...prefix, item.label]));
     } else if (item.type === 'command' && item.action && !item.disabled) {
       result.push({
-        group: 'Menu',
+        group: t('palette.group.menu'),
         label: [...prefix, item.label].join(' / '),
         detail: item.detail || '',
         key: `menu:${[...prefix, item.label].join('/')}`,
@@ -3037,7 +3040,7 @@ function commandPaletteKeybinding(label, detail = '') {
 
 function commandPaletteCommandItems() {
   const tabItems = commandPaletteAllTabItems().map(item => ({
-    group: 'Tabs',
+    group: t('palette.group.tabs'),
     label: itemLabel(item),
     detail: menuTabDetail(item),
     key: `tab:${item}`,
@@ -3051,7 +3054,7 @@ function commandPaletteCommandItems() {
     .flatMap(menu => flattenMenuCommands(menu.items, [menu.label]))
     .filter(item => !(item.targetItem && isVirtualItem(item.targetItem) && tabItemIds.has(item.targetItem)));
   const settingItems = preferenceSections().flatMap(section => section.items.map(item => ({
-    group: 'Settings',
+    group: t('palette.group.settings'),
     label: `${section.title} / ${item.label}`,
     detail: item.help || item.path,
     key: `setting:${item.path}`,
@@ -3183,7 +3186,7 @@ function fileQuickOpenItem(path, options = {}) {
 
 function recentFileQuickOpenItems() {
   return Array.from(openFiles.keys()).reverse().map((path, index) => fileQuickOpenItem(path, {
-    group: 'Recent',
+    group: t('palette.group.recent'),
     sortBonus: 120 - index,
   }));
 }
@@ -3212,8 +3215,8 @@ function fileQuickOpenItems() {
   }
   if (fileQuickOpenError) {
     items.push({
-      group: 'Files',
-      label: 'Search failed',
+      group: t('palette.group.files'),
+      label: t('search.failed'),
       detail: fileQuickOpenError,
       searchFields: ['search failed', fileQuickOpenError],
       disabled: true,
@@ -3222,8 +3225,8 @@ function fileQuickOpenItems() {
   }
   if (fileQuickOpenLoading) {
     items.push({
-      group: 'Files',
-      label: 'Searching...',
+      group: t('palette.group.files'),
+      label: t('search.searching'),
       detail: compactHomePath(fileQuickOpenRoot),
       searchFields: ['searching'],
       disabled: true,
@@ -7084,7 +7087,7 @@ function openFileStatus(state) {
   if (state.externalMissing) return {message: 'deleted on disk; unsaved edits kept', level: 'warn'};
   if (state.externalError) return {message: `refresh failed; file state unknown: ${state.externalError}`, level: 'warn'};
   if (state.externalChanged) return {message: state.dirty ? 'changed on disk; unsaved edits kept' : 'changed on disk; reload available', level: 'warn'};
-  if (state.dirty) return {message: 'modified', level: ''};
+  if (state.dirty) return {message: t('filetab.modified'), level: ''};
   if (state.kind === 'text') return {message: `${state.original.length} chars`, level: ''};
   return {message: '', level: ''};
 }
@@ -7260,7 +7263,7 @@ function bindFileConflictCompareScroll(root) {
 function showFileEditorDecisionDialog(options = {}) {
   const actions = Array.isArray(options.actions) && options.actions.length
     ? options.actions
-    : [{id: 'cancel', label: 'Cancel'}];
+    : [{id: 'cancel', label: t('dialog.cancel')}];
   return new Promise(resolve => {
     const backdrop = document.createElement('div');
     backdrop.className = `file-editor-dialog-backdrop ${options.className || ''}`.trim();
@@ -7271,8 +7274,8 @@ function showFileEditorDecisionDialog(options = {}) {
       ? `<div class="file-editor-dialog-body custom">${options.bodyHtml}</div>`
       : `<div class="file-editor-dialog-body">${esc(options.message || '')}</div>`;
     backdrop.innerHTML = `
-      <section class="file-editor-dialog" role="dialog" aria-modal="true" aria-label="${esc(options.title || 'File editor choice')}">
-        <div class="file-editor-dialog-title">${esc(options.title || 'File editor choice')}</div>
+      <section class="file-editor-dialog" role="dialog" aria-modal="true" aria-label="${esc(options.title || t('dialog.defaultTitle'))}">
+        <div class="file-editor-dialog-title">${esc(options.title || t('dialog.defaultTitle'))}</div>
         ${body}
         <div class="file-editor-dialog-actions">${actionButtons}</div>
       </section>`;
@@ -7308,14 +7311,14 @@ async function showFileConflictCompareDialog(path, panel = null) {
   const state = openFiles.get(path);
   const loaded = await openFileStateFromDisk(path);
   const diskState = loaded.state;
-  const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? '(missing on disk)' : String(diskState?.error || 'unable to load disk version');
+  const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? t('dialog.missingOnDisk') : String(diskState?.error || t('dialog.unableLoadDisk'));
   const action = await showFileEditorDecisionDialog({
-    title: `Compare ${basenameOf(path)}`,
+    title: t('dialog.compareTitle', {name: basenameOf(path)}),
     bodyHtml: fileConflictCompareHtml(state?.content || '', diskText),
     actions: [
-      {id: 'overwrite', label: 'Overwrite disk', variant: 'danger'},
-      {id: 'reload', label: 'Keep disk version'},
-      {id: 'cancel', label: 'Cancel'},
+      {id: 'overwrite', label: t('dialog.overwriteDisk'), variant: 'danger'},
+      {id: 'reload', label: t('dialog.keepDisk')},
+      {id: 'cancel', label: t('dialog.cancel')},
     ],
     className: 'file-editor-compare-dialog',
     onMount: bindFileConflictCompareScroll,
@@ -7338,13 +7341,13 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
     }
     const detail = options.message ? `\n\n${options.message}` : '';
     const action = await showFileEditorDecisionDialog({
-      title: `File changed on disk`,
-      message: `${basenameOf(path)} changed outside YOLOmux. Choose what should happen to your unsaved edits.${detail}`,
+      title: t('dialog.conflictTitle'),
+      message: `${t('dialog.conflictMessage', {name: basenameOf(path)})}${detail}`,
       actions: [
-        {id: 'overwrite', label: 'Overwrite disk', variant: 'danger'},
-        {id: 'reload', label: 'Keep disk version'},
-        {id: 'compare', label: 'Compare'},
-        {id: 'cancel', label: 'Cancel'},
+        {id: 'overwrite', label: t('dialog.overwriteDisk'), variant: 'danger'},
+        {id: 'reload', label: t('dialog.keepDisk')},
+        {id: 'compare', label: t('dialog.compare')},
+        {id: 'cancel', label: t('dialog.cancel')},
       ],
       className: 'file-editor-conflict-dialog',
     });
@@ -7362,11 +7365,11 @@ async function promptExternalChangeBeforeEditing(path, panel = null) {
   if (!state?.externalChanged || state.externalChangeEditPrompted) return false;
   state.externalChangeEditPrompted = true;
   const action = await showFileEditorDecisionDialog({
-    title: 'Content changed on disk',
-    message: `${basenameOf(path)} changed outside YOLOmux. Reload the disk version or keep editing this stale buffer?`,
+    title: t('dialog.externalTitle'),
+    message: t('dialog.externalMessage', {name: basenameOf(path)}),
     actions: [
-      {id: 'reload', label: 'Reload'},
-      {id: 'dismiss', label: 'Keep editing'},
+      {id: 'reload', label: t('dialog.reload')},
+      {id: 'dismiss', label: t('dialog.keepEditing')},
     ],
     className: 'file-editor-external-change-dialog',
   });
@@ -7374,7 +7377,7 @@ async function promptExternalChangeBeforeEditing(path, panel = null) {
     await reloadOpenFileFromDisk(path, {force: true});
     return true;
   }
-  setFileEditorPanelStatus(panel, 'changed on disk; saving will ask what to keep', 'warn');
+  setFileEditorPanelStatus(panel, t('dialog.staleStatus'), 'warn');
   renderOpenFilePath(path);
   return false;
 }
@@ -7391,12 +7394,12 @@ async function confirmDirtyFileClose(path, panel = null) {
     // the user can retry, discard, or cancel.
   }
   const action = await showFileEditorDecisionDialog({
-    title: `Close ${basenameOf(path)}?`,
-    message: fileEditorAutosaveEnabled ? 'Auto-save on close failed. This editor has unsaved changes.' : 'This editor has unsaved changes.',
+    title: t('dialog.closeTitle', {name: basenameOf(path)}),
+    message: fileEditorAutosaveEnabled ? t('dialog.autosaveFailed') : t('dialog.unsavedChanges'),
     actions: [
-      {id: 'save', label: 'Save'},
-      {id: 'discard', label: 'Discard', variant: 'danger'},
-      {id: 'cancel', label: 'Cancel'},
+      {id: 'save', label: t('dialog.save')},
+      {id: 'discard', label: t('dialog.discard'), variant: 'danger'},
+      {id: 'cancel', label: t('dialog.cancel')},
     ],
     className: 'file-editor-close-dialog',
   });
@@ -12552,11 +12555,11 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
   const state = openFiles.get(path) || {};
   const owners = openFileOwnerSessionsForPath(path);
-  const ownerTitle = owners.length > 1 ? `multiple owning sessions: ${owners.join(', ')}` : owners[0] ? `owning session: ${owners[0]}` : '';
-  const ownerText = owners.length > 1 ? 'multi' : owners[0] || '';
+  const ownerTitle = owners.length > 1 ? t('filetab.ownersMulti', {sessions: owners.join(', ')}) : owners[0] ? t('filetab.owner', {session: owners[0]}) : '';
+  const ownerText = owners.length > 1 ? t('filetab.multi') : owners[0] || '';
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
-  const dirty = state.dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
-  const missing = openFileIsMissing(path) ? '<span class="file-tab-missing-badge" title="missing on disk" aria-label="missing on disk">missing</span>' : '';
+  const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('filetab.modified'))}" aria-label="${esc(t('filetab.modified'))}"></span>` : '';
+  const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
   const kind = isFilePreviewItem(item) ? `<span class="file-tab-kind" title="${esc(t('tab.previewOnly'))}">${esc(t('tab.preview'))}</span>` : '';
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}${kind}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
 }
@@ -14977,16 +14980,16 @@ function showUploadRsyncRecommendation(options = {}) {
   const command = uploadRsyncExampleCommand();
   const action = document.createElement('button');
   action.type = 'button';
-  action.textContent = 'Copy rsync example';
+  action.textContent = t('pref.advisory.copyRsync');
   action.addEventListener('click', event => {
     event.stopPropagation();
     copyTextToClipboard(command)
-      .then(() => { statusEl.textContent = 'copied rsync example'; })
-      .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+      .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
+      .catch(error => { statusEl.innerHTML = `<span class="err">${esc(t('upload.copyFailed', {error}))}</span>`; });
   });
-  const sizeText = options.sizeBytes ? `Selected upload size is ${formatFileSize(options.sizeBytes)}.` : '';
-  return showToast('Use rsync for large files', [
-    `${sizeText} Browser uploads are buffered in memory; current cap is ${formatFileSize(uploadMaxBytes)}.`,
+  const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
+  return showToast(t('upload.toastTitle'), [
+    t('upload.toastBody', {sizeText, cap: formatFileSize(uploadMaxBytes)}),
     command,
   ], {
     container: displayToastContainer(options.session || prefsItemId),
@@ -15504,7 +15507,7 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
     imagePane.dataset.imagePath = path;
     imagePane.dataset.imageVersion = version;
     imagePane.appendChild(img);
-    status('loading...', '');
+    status(t('common.loading'), '');
   }
   applyFileEditorImageMode(imagePane, img, path, {preserveScroll: sameImage});
 }
@@ -16177,7 +16180,7 @@ function renderFileEditorPanel(panel, item) {
     panel.classList.remove('syntax-highlighted');
     destroyCodeMirrorPanel(panel);
     hideFileEditorContent(rawPane, previewPane, imagePane, codeMirrorPane);
-    setFileEditorPanelStatus(panel, 'loading...', '');
+    setFileEditorPanelStatus(panel, t('common.loading'), '');
     loadFileEditorState(path, panel, item);
     return;
   }
@@ -16657,7 +16660,7 @@ function renderHtmlPreviewInto(container, path, text) {
     const notice = document.createElement('div');
     notice.className = 'file-editor-html-js-notice';
     const message = document.createElement('span');
-    message.textContent = 'JavaScript is disabled in this sandboxed preview.';
+    message.textContent = t('preview.jsDisabled');
     const link = document.createElement('a');
     link.href = htmlPreviewUrl(path);
     link.target = '_blank';
@@ -16667,7 +16670,7 @@ function renderHtmlPreviewInto(container, path, text) {
       event.preventDefault();
       openHtmlPreviewWithAuth(path);
     });
-    link.textContent = 'Open with JavaScript';
+    link.textContent = t('preview.openWithJs');
     notice.append(message, link);
     children.push(notice);
   }
@@ -18420,8 +18423,8 @@ function startSummaryStream(session) {
   const node = document.getElementById(`summary-${session}`);
   if (!node) return;
   if (readOnlyMode) {
-    node.textContent = 'AI Transcript requires admin access.';
-    statusEl.innerHTML = '<span class="err">readonly access cannot run AI Transcript</span>';
+    node.textContent = t('transcript.adminRequired');
+    statusEl.innerHTML = `<span class="err">${esc(t('transcript.adminStatus'))}</span>`;
     return;
   }
   // Accumulate the raw streamed text and render it through the markdown pipeline
@@ -18905,7 +18908,7 @@ async function showContext(session) {
   const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
   title.textContent = `${sessionLabel(session)} transcript tail`;
-  body.textContent = 'loading...';
+  body.textContent = t('common.loading');
   modal.classList.add('open');
   const response = await apiFetch(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
   const payload = await response.json();

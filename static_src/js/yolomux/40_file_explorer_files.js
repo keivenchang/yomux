@@ -2135,7 +2135,7 @@ function openFileStatus(state) {
   if (state.externalMissing) return {message: 'deleted on disk; unsaved edits kept', level: 'warn'};
   if (state.externalError) return {message: `refresh failed; file state unknown: ${state.externalError}`, level: 'warn'};
   if (state.externalChanged) return {message: state.dirty ? 'changed on disk; unsaved edits kept' : 'changed on disk; reload available', level: 'warn'};
-  if (state.dirty) return {message: 'modified', level: ''};
+  if (state.dirty) return {message: t('filetab.modified'), level: ''};
   if (state.kind === 'text') return {message: `${state.original.length} chars`, level: ''};
   return {message: '', level: ''};
 }
@@ -2311,7 +2311,7 @@ function bindFileConflictCompareScroll(root) {
 function showFileEditorDecisionDialog(options = {}) {
   const actions = Array.isArray(options.actions) && options.actions.length
     ? options.actions
-    : [{id: 'cancel', label: 'Cancel'}];
+    : [{id: 'cancel', label: t('dialog.cancel')}];
   return new Promise(resolve => {
     const backdrop = document.createElement('div');
     backdrop.className = `file-editor-dialog-backdrop ${options.className || ''}`.trim();
@@ -2322,8 +2322,8 @@ function showFileEditorDecisionDialog(options = {}) {
       ? `<div class="file-editor-dialog-body custom">${options.bodyHtml}</div>`
       : `<div class="file-editor-dialog-body">${esc(options.message || '')}</div>`;
     backdrop.innerHTML = `
-      <section class="file-editor-dialog" role="dialog" aria-modal="true" aria-label="${esc(options.title || 'File editor choice')}">
-        <div class="file-editor-dialog-title">${esc(options.title || 'File editor choice')}</div>
+      <section class="file-editor-dialog" role="dialog" aria-modal="true" aria-label="${esc(options.title || t('dialog.defaultTitle'))}">
+        <div class="file-editor-dialog-title">${esc(options.title || t('dialog.defaultTitle'))}</div>
         ${body}
         <div class="file-editor-dialog-actions">${actionButtons}</div>
       </section>`;
@@ -2359,14 +2359,14 @@ async function showFileConflictCompareDialog(path, panel = null) {
   const state = openFiles.get(path);
   const loaded = await openFileStateFromDisk(path);
   const diskState = loaded.state;
-  const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? '(missing on disk)' : String(diskState?.error || 'unable to load disk version');
+  const diskText = diskState?.kind === 'text' ? diskState.content : loaded.missing ? t('dialog.missingOnDisk') : String(diskState?.error || t('dialog.unableLoadDisk'));
   const action = await showFileEditorDecisionDialog({
-    title: `Compare ${basenameOf(path)}`,
+    title: t('dialog.compareTitle', {name: basenameOf(path)}),
     bodyHtml: fileConflictCompareHtml(state?.content || '', diskText),
     actions: [
-      {id: 'overwrite', label: 'Overwrite disk', variant: 'danger'},
-      {id: 'reload', label: 'Keep disk version'},
-      {id: 'cancel', label: 'Cancel'},
+      {id: 'overwrite', label: t('dialog.overwriteDisk'), variant: 'danger'},
+      {id: 'reload', label: t('dialog.keepDisk')},
+      {id: 'cancel', label: t('dialog.cancel')},
     ],
     className: 'file-editor-compare-dialog',
     onMount: bindFileConflictCompareScroll,
@@ -2389,13 +2389,13 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
     }
     const detail = options.message ? `\n\n${options.message}` : '';
     const action = await showFileEditorDecisionDialog({
-      title: `File changed on disk`,
-      message: `${basenameOf(path)} changed outside YOLOmux. Choose what should happen to your unsaved edits.${detail}`,
+      title: t('dialog.conflictTitle'),
+      message: `${t('dialog.conflictMessage', {name: basenameOf(path)})}${detail}`,
       actions: [
-        {id: 'overwrite', label: 'Overwrite disk', variant: 'danger'},
-        {id: 'reload', label: 'Keep disk version'},
-        {id: 'compare', label: 'Compare'},
-        {id: 'cancel', label: 'Cancel'},
+        {id: 'overwrite', label: t('dialog.overwriteDisk'), variant: 'danger'},
+        {id: 'reload', label: t('dialog.keepDisk')},
+        {id: 'compare', label: t('dialog.compare')},
+        {id: 'cancel', label: t('dialog.cancel')},
       ],
       className: 'file-editor-conflict-dialog',
     });
@@ -2413,11 +2413,11 @@ async function promptExternalChangeBeforeEditing(path, panel = null) {
   if (!state?.externalChanged || state.externalChangeEditPrompted) return false;
   state.externalChangeEditPrompted = true;
   const action = await showFileEditorDecisionDialog({
-    title: 'Content changed on disk',
-    message: `${basenameOf(path)} changed outside YOLOmux. Reload the disk version or keep editing this stale buffer?`,
+    title: t('dialog.externalTitle'),
+    message: t('dialog.externalMessage', {name: basenameOf(path)}),
     actions: [
-      {id: 'reload', label: 'Reload'},
-      {id: 'dismiss', label: 'Keep editing'},
+      {id: 'reload', label: t('dialog.reload')},
+      {id: 'dismiss', label: t('dialog.keepEditing')},
     ],
     className: 'file-editor-external-change-dialog',
   });
@@ -2425,7 +2425,7 @@ async function promptExternalChangeBeforeEditing(path, panel = null) {
     await reloadOpenFileFromDisk(path, {force: true});
     return true;
   }
-  setFileEditorPanelStatus(panel, 'changed on disk; saving will ask what to keep', 'warn');
+  setFileEditorPanelStatus(panel, t('dialog.staleStatus'), 'warn');
   renderOpenFilePath(path);
   return false;
 }
@@ -2442,12 +2442,12 @@ async function confirmDirtyFileClose(path, panel = null) {
     // the user can retry, discard, or cancel.
   }
   const action = await showFileEditorDecisionDialog({
-    title: `Close ${basenameOf(path)}?`,
-    message: fileEditorAutosaveEnabled ? 'Auto-save on close failed. This editor has unsaved changes.' : 'This editor has unsaved changes.',
+    title: t('dialog.closeTitle', {name: basenameOf(path)}),
+    message: fileEditorAutosaveEnabled ? t('dialog.autosaveFailed') : t('dialog.unsavedChanges'),
     actions: [
-      {id: 'save', label: 'Save'},
-      {id: 'discard', label: 'Discard', variant: 'danger'},
-      {id: 'cancel', label: 'Cancel'},
+      {id: 'save', label: t('dialog.save')},
+      {id: 'discard', label: t('dialog.discard'), variant: 'danger'},
+      {id: 'cancel', label: t('dialog.cancel')},
     ],
     className: 'file-editor-close-dialog',
   });

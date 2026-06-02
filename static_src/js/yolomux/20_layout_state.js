@@ -789,7 +789,10 @@ const stateDefs = {
 };
 
 function stateDef(key) {
-  return stateDefs[key] || stateDefs.idle;
+  // #121: resolve the human label through t() on each access so a runtime language switch
+  // re-localizes it (stateDefs is frozen at load). The terse `short` badge codes stay as-is.
+  const resolvedKey = stateDefs[key] ? key : 'idle';
+  return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`)};
 }
 
 function terminalDisconnected(session) {
@@ -800,7 +803,7 @@ function terminalDisconnected(session) {
 }
 
 function sessionState(session, info = transcriptMeta.sessions?.[session]) {
-  if (!isTmuxSession(session)) return {key: 'idle', ...stateDefs.idle, reason: 'not a tmux session'};
+  if (!isTmuxSession(session)) return {key: 'idle', ...stateDef('idle'), reason: t('state.notTmux')};
   const auto = autoApproveStates.get(session) || {};
   const autoEnabled = autoApproveEnabledForSession(auto);
   const approvalPrompt = auto.prompt || {};
@@ -1200,7 +1203,7 @@ function flattenMenuCommands(items, prefix = []) {
       result.push(...flattenMenuCommands(item.items, [...prefix, item.label]));
     } else if (item.type === 'command' && item.action && !item.disabled) {
       result.push({
-        group: 'Menu',
+        group: t('palette.group.menu'),
         label: [...prefix, item.label].join(' / '),
         detail: item.detail || '',
         key: `menu:${[...prefix, item.label].join('/')}`,
@@ -1226,7 +1229,7 @@ function commandPaletteKeybinding(label, detail = '') {
 
 function commandPaletteCommandItems() {
   const tabItems = commandPaletteAllTabItems().map(item => ({
-    group: 'Tabs',
+    group: t('palette.group.tabs'),
     label: itemLabel(item),
     detail: menuTabDetail(item),
     key: `tab:${item}`,
@@ -1240,7 +1243,7 @@ function commandPaletteCommandItems() {
     .flatMap(menu => flattenMenuCommands(menu.items, [menu.label]))
     .filter(item => !(item.targetItem && isVirtualItem(item.targetItem) && tabItemIds.has(item.targetItem)));
   const settingItems = preferenceSections().flatMap(section => section.items.map(item => ({
-    group: 'Settings',
+    group: t('palette.group.settings'),
     label: `${section.title} / ${item.label}`,
     detail: item.help || item.path,
     key: `setting:${item.path}`,
@@ -1372,7 +1375,7 @@ function fileQuickOpenItem(path, options = {}) {
 
 function recentFileQuickOpenItems() {
   return Array.from(openFiles.keys()).reverse().map((path, index) => fileQuickOpenItem(path, {
-    group: 'Recent',
+    group: t('palette.group.recent'),
     sortBonus: 120 - index,
   }));
 }
@@ -1401,8 +1404,8 @@ function fileQuickOpenItems() {
   }
   if (fileQuickOpenError) {
     items.push({
-      group: 'Files',
-      label: 'Search failed',
+      group: t('palette.group.files'),
+      label: t('search.failed'),
       detail: fileQuickOpenError,
       searchFields: ['search failed', fileQuickOpenError],
       disabled: true,
@@ -1411,8 +1414,8 @@ function fileQuickOpenItems() {
   }
   if (fileQuickOpenLoading) {
     items.push({
-      group: 'Files',
-      label: 'Searching...',
+      group: t('palette.group.files'),
+      label: t('search.searching'),
       detail: compactHomePath(fileQuickOpenRoot),
       searchFields: ['searching'],
       disabled: true,

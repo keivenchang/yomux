@@ -908,16 +908,16 @@ function showUploadRsyncRecommendation(options = {}) {
   const command = uploadRsyncExampleCommand();
   const action = document.createElement('button');
   action.type = 'button';
-  action.textContent = 'Copy rsync example';
+  action.textContent = t('pref.advisory.copyRsync');
   action.addEventListener('click', event => {
     event.stopPropagation();
     copyTextToClipboard(command)
-      .then(() => { statusEl.textContent = 'copied rsync example'; })
-      .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+      .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
+      .catch(error => { statusEl.innerHTML = `<span class="err">${esc(t('upload.copyFailed', {error}))}</span>`; });
   });
-  const sizeText = options.sizeBytes ? `Selected upload size is ${formatFileSize(options.sizeBytes)}.` : '';
-  return showToast('Use rsync for large files', [
-    `${sizeText} Browser uploads are buffered in memory; current cap is ${formatFileSize(uploadMaxBytes)}.`,
+  const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
+  return showToast(t('upload.toastTitle'), [
+    t('upload.toastBody', {sizeText, cap: formatFileSize(uploadMaxBytes)}),
     command,
   ], {
     container: displayToastContainer(options.session || prefsItemId),
@@ -1435,7 +1435,7 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
     imagePane.dataset.imagePath = path;
     imagePane.dataset.imageVersion = version;
     imagePane.appendChild(img);
-    status('loading...', '');
+    status(t('common.loading'), '');
   }
   applyFileEditorImageMode(imagePane, img, path, {preserveScroll: sameImage});
 }
@@ -2108,7 +2108,7 @@ function renderFileEditorPanel(panel, item) {
     panel.classList.remove('syntax-highlighted');
     destroyCodeMirrorPanel(panel);
     hideFileEditorContent(rawPane, previewPane, imagePane, codeMirrorPane);
-    setFileEditorPanelStatus(panel, 'loading...', '');
+    setFileEditorPanelStatus(panel, t('common.loading'), '');
     loadFileEditorState(path, panel, item);
     return;
   }
@@ -2588,7 +2588,7 @@ function renderHtmlPreviewInto(container, path, text) {
     const notice = document.createElement('div');
     notice.className = 'file-editor-html-js-notice';
     const message = document.createElement('span');
-    message.textContent = 'JavaScript is disabled in this sandboxed preview.';
+    message.textContent = t('preview.jsDisabled');
     const link = document.createElement('a');
     link.href = htmlPreviewUrl(path);
     link.target = '_blank';
@@ -2598,7 +2598,7 @@ function renderHtmlPreviewInto(container, path, text) {
       event.preventDefault();
       openHtmlPreviewWithAuth(path);
     });
-    link.textContent = 'Open with JavaScript';
+    link.textContent = t('preview.openWithJs');
     notice.append(message, link);
     children.push(notice);
   }
