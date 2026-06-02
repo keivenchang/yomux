@@ -1298,6 +1298,13 @@ function makeFileTree(paths) {
   assert.equal(source.includes('esm.sh'), false, 'CodeMirror loading never falls back to a third-party CDN');
   assert.ok(source.includes('CodeMirror local bundle is unavailable or incomplete'), 'CodeMirror loading reports local bundle failures clearly');
   assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMeta.server_version)'), 'the metadata poll checks the live server version');
+  // #39: the new-session picker greys an installed-but-logged-out agent and names its login command;
+  // the metadata poll refreshes agentAuth so it re-enables after the user logs in.
+  assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.logged_in === true/.test(source), '#39: agentLoggedIn reads the per-agent logged_in flag');
+  assert.ok(source.includes('const loggedOut = available && !agentLoggedIn(agent);'), '#39: the new-session picker computes a logged-out state per agent');
+  assert.ok(/disabled: readOnlyMode \|\| !available \|\| loggedOut \|\| capped/.test(source), '#39: a logged-out agent is disabled in the picker');
+  assert.ok(/loggedOut[\s\S]*?Run \$\{agentLoginCommand\(agent\)\}/.test(source), '#39: a logged-out agent shows its login command as the menu detail');
+  assert.ok(source.includes('if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;'), '#39: the metadata poll refreshes agent login status');
   assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*boolSetting\('general\.reload_on_update'/.test(source), 'server-version reload is gated on the boot version and the reload_on_update preference');
   assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');
   assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');

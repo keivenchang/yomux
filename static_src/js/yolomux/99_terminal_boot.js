@@ -1417,6 +1417,8 @@ async function refreshTranscripts() {
     const response = await apiFetch('/api/transcripts');
     transcriptMeta = await response.json();
     maybeHandleServerVersionChange(transcriptMeta.server_version);
+    // #39: keep agent login status fresh so the new-session picker re-enables an agent after login.
+    if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
     updateMetadataBadgePulses(transcriptMeta);
     const previousActive = activeSessions.slice();
     const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);

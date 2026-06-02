@@ -81,6 +81,8 @@ from .tmux_utils import tmux_session_target
 from .uploads import sanitize_upload_filename
 from .uploads import unique_upload_path
 from .workdir import agent_command
+from .workdir import AGENT_LOGIN_COMMANDS
+from .workdir import agent_auth_status
 from .workdir import available_agent_commands
 from .workdir import resolved_upload_dir
 from .workdir import session_workdir
@@ -119,7 +121,8 @@ def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
     if not yoagent_cli_auth_failure(text):
         return text
     label = "Claude CLI" if backend == "claude" else "Codex CLI" if backend == "codex" else f"{backend} CLI"
-    login_command = "claude login" if backend == "claude" else "codex login" if backend == "codex" else f"{backend} login"
+    # Use the canonical login command (DOIT.6 #39 verified `claude auth login`, not `claude login`).
+    login_command = AGENT_LOGIN_COMMANDS.get(backend, f"{backend} login")
     return f"{label} is not logged in. Run `{login_command}`; showing the No agent YO!agent summary."
 
 
@@ -619,6 +622,9 @@ class TmuxWebtermApp:
             "server_version": YOLOMUX_VERSION,
             "session_order": self.sessions,
             "sessions": session_payloads,
+            # DOIT.6 #39: refresh agent login status on the metadata poll (cached server-side) so the
+            # new-session picker re-enables an agent within the cache TTL after the user logs in.
+            "agentAuth": agent_auth_status(),
             "errors": [*refresh_errors, *errors],
         }
         self.apply_metadata_badge_pulses(session_payloads)

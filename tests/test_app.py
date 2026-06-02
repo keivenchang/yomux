@@ -286,7 +286,7 @@ def test_yoagent_cli_auth_failure_is_actionable(monkeypatch):
     assert payload["backend_used"] == "deterministic"
     assert payload["fallback"] is True
     assert "Claude CLI is not logged in" in payload["fallback_reason"]
-    assert "claude login" in payload["fallback_reason"]
+    assert "claude auth login" in payload["fallback_reason"]
 
 
 def test_yoagent_cli_fallback_keeps_non_auth_error():

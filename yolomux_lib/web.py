@@ -14,6 +14,8 @@ from .common import login_username
 from .common import xterm_asset_path
 from .common import yolomux_commit_time_pt
 from .settings import settings_payload
+from .workdir import AGENT_LOGIN_COMMANDS
+from .workdir import agent_auth_status
 from .workdir import available_agent_commands
 from .yolo_rules import rules_status
 
@@ -91,6 +93,9 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
     bootstrap = {
         "sessions": sessions,
         "availableAgents": available_agent_commands(),
+        # DOIT.6 #39: per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
+        # agent in the new-session picker (cached server-side; not probed per request).
+        "agentAuth": agent_auth_status(),
         "accessRole": access_role,
         "homePath": str(Path.home()),
         "repoRoot": str(Path(__file__).resolve().parents[1]),
@@ -184,10 +189,30 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
     """
 
 
+def agent_login_notice_html(css_class: str = "login-warning") -> str:
+    # DOIT.6 #39: if an installed agent (claude/codex) is not logged in, tell the user the exact login
+    # command on the login + auth-setup screens. If NEITHER installed agent is logged in, lead with a
+    # stronger "Please login to Claude or Codex". Returns '' when every installed agent is logged in
+    # (or none are installed — a terminal-only host needs no agent login).
+    status = agent_auth_status()
+    installed = [agent for agent in ("claude", "codex") if status.get(agent, {}).get("installed")]
+    logged_out = [agent for agent in installed if not status[agent]["logged_in"]]
+    if not installed or not logged_out:
+        return ""
+    commands = " ".join(f"<code>{html.escape(AGENT_LOGIN_COMMANDS[agent])}</code>" for agent in logged_out)
+    if not any(status[agent]["logged_in"] for agent in installed):
+        names = " or ".join(agent.capitalize() for agent in logged_out)
+        lead = f"Please login to {html.escape(names)}"
+    else:
+        lead = f"Please login ({html.escape(', '.join(logged_out))})"
+    return f'<div class="{html.escape(css_class)}">{lead} — run {commands}</div>'
+
+
 def login_html(next_path: str = "/", error: str = "", secure: bool = True) -> str:
     safe_next = html.escape(next_path if next_path.startswith("/") else "/", quote=True)
     error_html = f'<div class="login-error" role="alert">{html.escape(error)}</div>' if error else ""
     security_html = "" if secure else '<div class="login-warning">No HTTPS. Highly recommend that you restart with <code>python3 yolomux.py --port 9998 --self-signed</code>.</div>'
+    agent_notice_html = agent_login_notice_html()
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -203,6 +228,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True) -> st
     <div class="login-brand">{brand_html("brand-title login-brand-title", "div")}</div>
     <h1>Sign in</h1>
     {security_html}
+    {agent_notice_html}
     {error_html}
     <form method="post" action="/login" class="login-form">
       <input type="hidden" name="next" value="{safe_next}">
@@ -244,6 +270,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True) -> st
 def setup_auth_html() -> str:
     auth_path = html.escape(AUTH_CONFIG_DISPLAY_PATH)
     login = html.escape(login_username())
+    agent_notice_html = agent_login_notice_html("setup-login-notice")
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -265,6 +292,7 @@ def setup_auth_html() -> str:
   - username: "guest"
     password: "guest"
     role: "readonly"</pre>
+  {agent_notice_html}
   <p id="setupStatus" class="setup-status">Waiting for auth.yaml changes<span class="setup-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></p>
 </main>
 <script src="{static_asset_url("setup-auth.js")}"></script>

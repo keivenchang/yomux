@@ -140,6 +140,54 @@ def test_setup_auth_page_recommends_https(monkeypatch):
     assert setup_html.index("Highly recommend that you restart with HTTPS") < setup_html.index("Edit <code>")
 
 
+def test_login_and_setup_screens_show_please_login_for_logged_out_agent(monkeypatch):
+    # #39: codex installed but not logged in -> both screens name the exact login command.
+    monkeypatch.setattr(web, "login_username", lambda: "keivenc")
+    monkeypatch.setattr(web, "agent_auth_status", lambda *a, **k: {
+        "claude": {"installed": True, "logged_in": True},
+        "codex": {"installed": True, "logged_in": False},
+    })
+    login = web.login_html()
+    setup = web.setup_auth_html()
+    assert "Please login (codex)" in login
+    assert "codex login" in login
+    assert "setup-login-notice" in setup
+    assert "codex login" in setup
+
+
+def test_login_screen_strong_message_when_no_agent_logged_in(monkeypatch):
+    monkeypatch.setattr(web, "agent_auth_status", lambda *a, **k: {
+        "claude": {"installed": True, "logged_in": False},
+        "codex": {"installed": True, "logged_in": False},
+    })
+    login = web.login_html()
+    assert "Please login to Claude or Codex" in login
+    assert "claude auth login" in login
+    assert "codex login" in login
+
+
+def test_login_screen_has_no_notice_when_agents_logged_in(monkeypatch):
+    # All installed agents logged in (codex not installed) -> no login nag.
+    monkeypatch.setattr(web, "login_username", lambda: "keivenc")
+    monkeypatch.setattr(web, "agent_auth_status", lambda *a, **k: {
+        "claude": {"installed": True, "logged_in": True},
+        "codex": {"installed": False, "logged_in": False},
+    })
+    assert "Please login" not in web.login_html()
+    assert "setup-login-notice" not in web.setup_auth_html()
+
+
+def test_main_page_bootstrap_includes_agent_auth(monkeypatch):
+    monkeypatch.setattr(web, "agent_auth_status", lambda *a, **k: {
+        "claude": {"installed": True, "logged_in": True},
+        "codex": {"installed": True, "logged_in": False},
+    })
+    page = web.html_page([])
+    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    parsed = json.loads(match.group(1))
+    assert parsed["agentAuth"]["codex"] == {"installed": True, "logged_in": False}
+
+
 def test_bootstrap_locale_resolves_language_and_serves_locale_catalogs():
     # bootstrap_locale: an explicit locale passes through; "system"/unknown falls back to en.
     assert web.bootstrap_locale({"settings": {"general": {"language": "en-XA"}}}) == "en-XA"

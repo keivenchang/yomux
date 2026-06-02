@@ -71,6 +71,20 @@ pre {
   border-color: #6e2d36;
   background: #1b1014;
 }
+/* DOIT.6 #39: "Please login (claude/codex)" notice when an installed agent CLI is not logged in. */
+.setup-login-notice {
+  margin: 12px 0;
+  padding: 9px 11px;
+  color: #2a1e00;
+  background: #ffe7a3;
+  border: 1px solid #c8941e;
+  border-radius: 6px;
+}
+.setup-login-notice code {
+  color: #2a1e00;
+  background: #fff3cf;
+  border-color: #c8941e;
+}
 .setup-dots {
   display: inline-flex;
   width: 1.2em;

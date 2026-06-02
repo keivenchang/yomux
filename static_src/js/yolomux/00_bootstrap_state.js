@@ -1,6 +1,18 @@
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
 let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
+// DOIT.6 #39: per-agent {installed, logged_in} login status (probed + cached server-side). Used to
+// grey an installed-but-logged-out agent in the new-session picker. Refreshed by metadata polls.
+let agentAuth = bootstrap.agentAuth || {};
+const agentLoginCommands = {claude: 'claude auth login', codex: 'codex login'};
+function agentLoggedIn(agent) {
+  const entry = agentAuth[agent];
+  // Unknown (term, or no status yet) counts as logged-in so we never block a usable agent.
+  return !entry || !entry.installed || entry.logged_in === true;
+}
+function agentLoginCommand(agent) {
+  return agentLoginCommands[agent] || '';
+}
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
 const homePath = bootstrap.homePath;

@@ -2,6 +2,18 @@
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
 let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
+// DOIT.6 #39: per-agent {installed, logged_in} login status (probed + cached server-side). Used to
+// grey an installed-but-logged-out agent in the new-session picker. Refreshed by metadata polls.
+let agentAuth = bootstrap.agentAuth || {};
+const agentLoginCommands = {claude: 'claude auth login', codex: 'codex login'};
+function agentLoggedIn(agent) {
+  const entry = agentAuth[agent];
+  // Unknown (term, or no status yet) counts as logged-in so we never block a usable agent.
+  return !entry || !entry.installed || entry.logged_in === true;
+}
+function agentLoginCommand(agent) {
+  return agentLoginCommands[agent] || '';
+}
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
 const homePath = bootstrap.homePath;
@@ -4225,12 +4237,19 @@ function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
     const capped = visibleSessions.length >= maxSessionTabs;
+    // #39: an installed agent that is not logged in is greyed with its login command, instead of
+    // silently starting a session that the CLI will reject for auth.
+    const loggedOut = available && !agentLoggedIn(agent);
     return menuCommand(`+ ${agentName(agent)}`, () => createNextSession(agent), {
       iconHtml: agentIcon(agent),
-      disabled: readOnlyMode || !available || capped,
+      disabled: readOnlyMode || !available || loggedOut || capped,
       detail: readOnlyMode
         ? 'Admin only'
-        : (!available ? `${agentName(agent)} unavailable` : (capped ? 'Limit reached' : '')),
+        : (!available
+          ? `${agentName(agent)} unavailable`
+          : (loggedOut
+            ? `Run ${agentLoginCommand(agent)}`
+            : (capped ? 'Limit reached' : ''))),
     });
   });
 }
@@ -18327,6 +18346,8 @@ async function refreshTranscripts() {
     const response = await apiFetch('/api/transcripts');
     transcriptMeta = await response.json();
     maybeHandleServerVersionChange(transcriptMeta.server_version);
+    // #39: keep agent login status fresh so the new-session picker re-enables an agent after login.
+    if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
     updateMetadataBadgePulses(transcriptMeta);
     const previousActive = activeSessions.slice();
     const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);

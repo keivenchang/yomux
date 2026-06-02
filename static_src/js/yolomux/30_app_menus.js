@@ -336,12 +336,19 @@ function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
     const capped = visibleSessions.length >= maxSessionTabs;
+    // #39: an installed agent that is not logged in is greyed with its login command, instead of
+    // silently starting a session that the CLI will reject for auth.
+    const loggedOut = available && !agentLoggedIn(agent);
     return menuCommand(`+ ${agentName(agent)}`, () => createNextSession(agent), {
       iconHtml: agentIcon(agent),
-      disabled: readOnlyMode || !available || capped,
+      disabled: readOnlyMode || !available || loggedOut || capped,
       detail: readOnlyMode
         ? 'Admin only'
-        : (!available ? `${agentName(agent)} unavailable` : (capped ? 'Limit reached' : '')),
+        : (!available
+          ? `${agentName(agent)} unavailable`
+          : (loggedOut
+            ? `Run ${agentLoginCommand(agent)}`
+            : (capped ? 'Limit reached' : ''))),
     });
   });
 }
