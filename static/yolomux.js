@@ -690,6 +690,10 @@ let dragSourceSlot = null;
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
 let pendingPreferencesRender = false;
+// DOIT.6 #114: renderPanels() pools every panel and clears the grid (grid.innerHTML='').
+// If it fires mid-drag (e.g. a metadata poll), it detaches the dragged node and the native
+// HTML5 drag aborts. renderPanels defers to this flag while dragging; endSessionDrag flushes it.
+let pendingPanelsRender = false;
 let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
@@ -7378,11 +7382,14 @@ async function confirmDirtyFileClose(path, panel = null) {
   syncOpenFileContentFromPanels(path, panel);
   if (!state.dirty) return true;
   if (fileEditorAutosaveEnabled) {
-    return saveFileEditor(path, panel, {autosave: true, closing: true});
+    if (await saveFileEditor(path, panel, {autosave: true, closing: true})) return true;
+    // DOIT.6 #81: autosave-on-close failed (transient error / on-disk conflict). Don't silently abort
+    // the close with only a status line — fall through to the explicit save/discard/cancel dialog so
+    // the user can retry, discard, or cancel.
   }
   const action = await showFileEditorDecisionDialog({
     title: `Close ${basenameOf(path)}?`,
-    message: 'This editor has unsaved changes.',
+    message: fileEditorAutosaveEnabled ? 'Auto-save on close failed. This editor has unsaved changes.' : 'This editor has unsaved changes.',
     actions: [
       {id: 'save', label: 'Save'},
       {id: 'discard', label: 'Discard', variant: 'danger'},
@@ -10092,6 +10099,8 @@ function endSessionDrag(event) {
   // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
+  // DOIT.6 #114: flush the full panel re-render deferred during the drag (dragSession is null now).
+  if (pendingPanelsRender) { pendingPanelsRender = false; renderPanels(); }
 }
 function layoutWithoutItemFromSlots(item, slots = layoutSlots, options = {}) {
   const next = emptyLayoutSlots();
@@ -11942,6 +11951,11 @@ function handleDropDragLeave(event) {
   clearDropPreview();
 }
 function renderPanels(previousActive = [], options = {}) {
+  // DOIT.6 #114: a full panel re-render pools every panel and clears the grid, which detaches
+  // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
+  // ends; endSessionDrag flushes pendingPanelsRender. Drops still render because endSessionDrag
+  // clears dragSession before flushing.
+  if (dragSession != null) { pendingPanelsRender = true; return; }
   movePanelsToPool();
   const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
   grid.className = `grid ${activePaneCount === 1 ? 'full' : ''} ${activePaneCount === 0 ? 'empty' : ''}`.trim();

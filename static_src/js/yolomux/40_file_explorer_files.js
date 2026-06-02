@@ -2436,11 +2436,14 @@ async function confirmDirtyFileClose(path, panel = null) {
   syncOpenFileContentFromPanels(path, panel);
   if (!state.dirty) return true;
   if (fileEditorAutosaveEnabled) {
-    return saveFileEditor(path, panel, {autosave: true, closing: true});
+    if (await saveFileEditor(path, panel, {autosave: true, closing: true})) return true;
+    // DOIT.6 #81: autosave-on-close failed (transient error / on-disk conflict). Don't silently abort
+    // the close with only a status line — fall through to the explicit save/discard/cancel dialog so
+    // the user can retry, discard, or cancel.
   }
   const action = await showFileEditorDecisionDialog({
     title: `Close ${basenameOf(path)}?`,
-    message: 'This editor has unsaved changes.',
+    message: fileEditorAutosaveEnabled ? 'Auto-save on close failed. This editor has unsaved changes.' : 'This editor has unsaved changes.',
     actions: [
       {id: 'save', label: 'Save'},
       {id: 'discard', label: 'Discard', variant: 'danger'},

@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 function renderPanels(previousActive = [], options = {}) {
+  // DOIT.6 #114: a full panel re-render pools every panel and clears the grid, which detaches
+  // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
+  // ends; endSessionDrag flushes pendingPanelsRender. Drops still render because endSessionDrag
+  // clears dragSession before flushing.
+  if (dragSession != null) { pendingPanelsRender = true; return; }
   movePanelsToPool();
   const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
   grid.className = `grid ${activePaneCount === 1 ? 'full' : ''} ${activePaneCount === 0 ? 'empty' : ''}`.trim();

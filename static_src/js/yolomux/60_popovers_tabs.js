@@ -930,4 +930,6 @@ function endSessionDrag(event) {
   // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
+  // DOIT.6 #114: flush the full panel re-render deferred during the drag (dragSession is null now).
+  if (pendingPanelsRender) { pendingPanelsRender = false; renderPanels(); }
 }

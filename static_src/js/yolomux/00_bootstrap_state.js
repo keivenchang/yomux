@@ -689,6 +689,10 @@ let dragSourceSlot = null;
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
 let pendingPreferencesRender = false;
+// DOIT.6 #114: renderPanels() pools every panel and clears the grid (grid.innerHTML='').
+// If it fires mid-drag (e.g. a metadata poll), it detaches the dragged node and the native
+// HTML5 drag aborts. renderPanels defers to this flag while dragging; endSessionDrag flushes it.
+let pendingPanelsRender = false;
 let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};

@@ -510,6 +510,9 @@ globalThis.__layoutTestApi = {
   renderPaneTabStrips,
   setDragSessionForTest(session) { dragSession = session; },
   pendingTabStripRenderForTest() { return pendingTabStripRender; },
+  renderPanels,
+  pendingPanelsRenderForTest() { return pendingPanelsRender; },
+  setPendingPanelsRenderForTest(value) { pendingPanelsRender = Boolean(value); },
   focusFreshPreferencesSearchSoon,
   markPreferencesInteracted,
   preferencesSearchFreshForTest() { return preferencesSearchFresh; },
@@ -1325,6 +1328,9 @@ function makeFileTree(paths) {
   assert.ok(/maybeAdoptYoagentDeepLink[\s\S]*?infoPanelSubTab = 'yoagent'/.test(source), '#40: a yoagent deep-link pre-selects the YO!agent sub-tab');
   // DOIT.8 Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
   assert.ok(source.includes("esc(t('brand.marker'))"), 'the YO marker glyph renders via t(brand.marker)');
+  // #81: a failed autosave-on-close falls through to the explicit save/discard/cancel dialog instead of
+  // silently aborting the close.
+  assert.ok(/if \(await saveFileEditor\(path, panel, \{autosave: true, closing: true\}\)\) return true;[\s\S]*?showFileEditorDecisionDialog/.test(source), '#81: autosave-on-close failure falls back to the close dialog');
   // #85/#86/#87/#88: toast removal honors countdownMs; reconnect confirmation is single-in-flight; the
   // repo popover is viewport-clamped; an equal-mtime unknown-size entry is treated as changed (re-stat).
   assert.ok(/removeAttentionAlert\(id\), options\.countdownMs \|\| toastDurationMs/.test(source), '#85: toast removal uses options.countdownMs');
@@ -4136,6 +4142,12 @@ function makeFileTree(paths) {
   api.renderPaneTabStrips();
   assert.equal(api.pendingTabStripRenderForTest(), true, '#30: tab-strip re-render is DEFERRED during a drag (node not replaced)');
   assert.equal(api.focusPreferencesSearch(), false, '#30: search focus is suppressed during a drag');
+  // DOIT.6 #114: a full renderPanels() pools every panel + clears the grid, which detaches the
+  // dragged node and aborts the native drag. It must defer to pendingPanelsRender mid-drag, NOT
+  // touch the grid. (If the guard were missing this call would throw on the absent grid element.)
+  api.setPendingPanelsRenderForTest(false);
+  api.renderPanels();
+  assert.equal(api.pendingPanelsRenderForTest(), true, '#114: full panel re-render is DEFERRED during a drag (grid not wiped)');
   api.setDragSessionForTest(null);
   const strip3 = tabStrip([tabElement('A', 100, 100), tabElement('B', 203, 100), tabElement('C', 306, 100)]);
   assert.equal(api.paneTabDropPlacement(strip3, {clientX: 330, clientY: 8}, 'A').index, 2, '#30: 3-tab L->R drop on the far tab lands after it');
@@ -4147,6 +4159,10 @@ function makeFileTree(paths) {
   assert.ok(dragSrc.includes('item.term.options.minimumContrastRatio = minContrast'), '#32: live terminals re-apply minimumContrastRatio');
   assert.ok(/item\.container\.style\.background = theme\.background/.test(dragSrc), '#32: all terminal containers share one theme background');
   assert.ok(/body\.theme-light \.topbar-search\s*\{[^}]*background/.test(dragCss), '#33: the topbar search blends in light mode (no dark pill)');
+  // DOIT.6 #114: the dragSession guard MUST precede movePanelsToPool()/grid.innerHTML in renderPanels,
+  // and endSessionDrag MUST flush the deferred render after clearing dragSession.
+  assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,400}?if \(dragSession != null\) \{ pendingPanelsRender = true; return; \}[\s\S]{0,40}movePanelsToPool\(\)/.test(dragSrc), '#114: renderPanels defers (sets pendingPanelsRender) before pooling panels / clearing the grid');
+  assert.ok(/dragSession = null;[\s\S]*?if \(pendingPanelsRender\) \{ pendingPanelsRender = false; renderPanels\(\); \}/.test(dragSrc), '#114: endSessionDrag flushes the deferred panel re-render after clearing dragSession');
 }
 
 {

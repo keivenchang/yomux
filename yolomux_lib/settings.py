@@ -289,7 +289,9 @@ def coerce_string_list(value: Any, default: list[str]) -> list[str]:
     return result
 
 
-def sanitize_settings(raw: Any) -> dict[str, Any]:
+def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, Any]:
+    # DOIT.6 #84: pass a `coerced` list to collect "<section>.<key>" for every PRESENT incoming value
+    # that had to be clamped/reverted, so the API can report it instead of silently changing the value.
     defaults = default_settings()
     source = raw if isinstance(raw, dict) else {}
     sanitized = default_settings()
@@ -298,6 +300,7 @@ def sanitize_settings(raw: Any) -> dict[str, Any]:
         if not isinstance(incoming, dict):
             incoming = {}
         for key, default in values.items():
+            present = key in incoming
             value = incoming.get(key, default)
             if isinstance(default, bool):
                 sanitized[section][key] = coerce_bool(value, default)
@@ -314,20 +317,22 @@ def sanitize_settings(raw: Any) -> dict[str, Any]:
                 sanitized[section][key] = value if isinstance(value, str) and value in SETTING_CHOICES[(section, key)] else default
             elif isinstance(default, str):
                 sanitized[section][key] = value if isinstance(value, str) and value.strip() else default
+            if coerced is not None and present and sanitized[section][key] != value:
+                coerced.append(f"{section}.{key}")
     return sanitized
 
 
-def merge_settings(base: dict[str, Any], patch: Any) -> dict[str, Any]:
+def merge_settings(base: dict[str, Any], patch: Any, coerced: list[str] | None = None) -> dict[str, Any]:
     merged = copy.deepcopy(base)
     if not isinstance(patch, dict):
-        return sanitize_settings(merged)
+        return sanitize_settings(merged, coerced)
     for section, values in patch.items():
         if section not in merged or not isinstance(values, dict):
             continue
         for key, value in values.items():
             if key in merged[section]:
                 merged[section][key] = value
-    return sanitize_settings(merged)
+    return sanitize_settings(merged, coerced)
 
 
 def settings_template(settings: dict[str, Any]) -> str:
@@ -438,6 +443,11 @@ def settings_payload(path: Path = SETTINGS_PATH) -> dict[str, Any]:
 def save_settings(patch: Any, path: Path = SETTINGS_PATH) -> dict[str, Any]:
     with locked_settings_file(path):
         current, _ = _read_settings_file_unlocked(path)
-        next_settings = merge_settings(current, patch)
+        coerced: list[str] = []
+        next_settings = merge_settings(current, patch, coerced)
         _write_settings_file_unlocked(next_settings, path)
-        return _settings_payload_unlocked(path)
+        payload = _settings_payload_unlocked(path)
+        # DOIT.6 #84: report which patched keys were clamped/reverted so the API/UI can surface it
+        # instead of silently changing the value (e.g. ui_font_size:999 -> 20).
+        payload["coerced"] = coerced
+        return payload
