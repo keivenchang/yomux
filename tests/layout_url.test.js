@@ -454,6 +454,7 @@ globalThis.__layoutTestApi = {
   globalThemeIsDark,
   nextGlobalThemeMode,
   terminalThemeForGlobalTheme,
+  terminalMinimumContrastRatio,
   globalThemeModeForTest() { return globalThemeMode; },
   setGlobalThemeModeForTest(value) { globalThemeMode = normalizeGlobalThemeMode(value); },
   terminalThemeModeForTest() { return terminalThemeMode; },
@@ -506,6 +507,9 @@ globalThis.__layoutTestApi = {
   rawFileDownloadUrl,
   markOpenFileDiffUnavailable,
   focusPreferencesSearch,
+  renderPaneTabStrips,
+  setDragSessionForTest(session) { dragSession = session; },
+  pendingTabStripRenderForTest() { return pendingTabStripRender; },
   focusFreshPreferencesSearchSoon,
   markPreferencesInteracted,
   preferencesSearchFreshForTest() { return preferencesSearchFresh; },
@@ -1994,6 +1998,7 @@ function makeFileTree(paths) {
   assert.ok(/body\.theme-light \.meta a/.test(preferencesCss), '#28: light theme adds a contrast override for detail-row links');
   assert.ok(/body\.theme-light \.pane-tab:hover/.test(preferencesCss), '#28: light theme fixes the near-white pane-tab hover border');
   assert.ok(/body\.theme-light \.tabs \.pane-actions:hover/.test(preferencesCss), '#28: light theme fixes the white tab-overflow hover glyph');
+  assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-active-bg:\s*#4f9e3a/.test(preferencesCss), '#31: the active pane tab has a light-mode green so a theme switch repaints it');
   assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('session-button-dir pane-tab-info-label'), '#27: the YO!info tab label uses the themed .session-button-dir color treatment');
   assert.ok(preferencesCss.includes('--pane-tab-active-bg: #86d600'), 'focused active pane tab uses a brighter brand green fill');
   assert.ok(preferencesCss.includes('--pane-tab-active-accent: #86d600'), 'focused active pane tab accent token is the same green, not yellow/lime');
@@ -2122,6 +2127,11 @@ function makeFileTree(paths) {
   api.setTerminalThemeModeForTest('light');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'terminal light theme is explicit opt-in');
   assert.equal(api.terminalThemeForGlobalTheme('dark').blue, '#0451a5');
+  // DOIT.6 #32: a white terminal auto-darkens faint 24-bit agent text via minimumContrastRatio.
+  assert.equal(api.terminalMinimumContrastRatio('dark'), 4.5, '#32: light terminal raises the minimum contrast ratio');
+  api.setTerminalThemeModeForTest('dark');
+  assert.equal(api.terminalMinimumContrastRatio('dark'), 1, '#32: dark terminal does not adjust contrast (agents assume dark)');
+  api.setTerminalThemeModeForTest('light');
   api.setTerminalThemeModeForTest('follow-app');
   assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app maps to the resolved app theme');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#11151d');
@@ -3933,6 +3943,27 @@ function makeFileTree(paths) {
   assert.ok(/--pane-tab-unfocused-active-bg:\s*#4f9e3a/.test(css), '#11: unfocused panes show a clearly-visible green active tab');
   assert.ok(/\.panel:not\(\.active-pane\):not\(\.file-explorer-panel\):not\(\.changes-panel\) \.pane-tab\.active\s*\{\s*opacity:\s*1/.test(css), '#11: unfocused active tabs are no longer dimmed');
   assert.ok(/--pane-tab-active-bg:\s*#86d600/.test(css), '#11: the focused pane keeps the brighter lime active tab as its extra cue');
+}
+
+{
+  // DOIT.6 #30: re-renders + search-focus are deferred/suppressed mid-drag so the dragged DOM node
+  // is not replaced (which aborts the native HTML5 drag); + 3-tab placement in a consistent index space.
+  const api = loadYolomux('', ['1', '2', '3']);
+  api.setDragSessionForTest('2');
+  api.renderPaneTabStrips();
+  assert.equal(api.pendingTabStripRenderForTest(), true, '#30: tab-strip re-render is DEFERRED during a drag (node not replaced)');
+  assert.equal(api.focusPreferencesSearch(), false, '#30: search focus is suppressed during a drag');
+  api.setDragSessionForTest(null);
+  const strip3 = tabStrip([tabElement('A', 100, 100), tabElement('B', 203, 100), tabElement('C', 306, 100)]);
+  assert.equal(api.paneTabDropPlacement(strip3, {clientX: 330, clientY: 8}, 'A').index, 2, '#30: 3-tab L->R drop on the far tab lands after it');
+  assert.equal(api.paneTabDropPlacement(strip3, {clientX: 120, clientY: 8}, 'C').index, 0, '#30: 3-tab R->L drop on the first tab lands before it');
+  // DOIT.6 #32/#33 source guards.
+  const dragSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+  const dragCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(dragSrc.includes('minimumContrastRatio: terminalMinimumContrastRatio()'), '#32: terminal creation sets minimumContrastRatio');
+  assert.ok(dragSrc.includes('item.term.options.minimumContrastRatio = minContrast'), '#32: live terminals re-apply minimumContrastRatio');
+  assert.ok(/item\.container\.style\.background = theme\.background/.test(dragSrc), '#32: all terminal containers share one theme background');
+  assert.ok(/body\.theme-light \.topbar-search\s*\{[^}]*background/.test(dragCss), '#33: the topbar search blends in light mode (no dark pill)');
 }
 
 {

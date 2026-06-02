@@ -683,6 +683,10 @@ let focusedPanelItem = null;
 let lastFocusedTmuxSession = null;
 let dragSession = null;
 let dragSourceSlot = null;
+// While a tab drag is in flight, tab/preferences re-renders are deferred so they don't replace the
+// dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
+let pendingTabStripRender = false;
+let pendingPreferencesRender = false;
 let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};

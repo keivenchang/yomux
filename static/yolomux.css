@@ -230,6 +230,15 @@ body.theme-dark {
 body.theme-light {
   color-scheme: light;
   --pane-tab-strip-bg: #cfd4dd;
+  /* DOIT.6 #31: active-tab greens tuned for the light surface so a theme switch visibly repaints the
+     active pane tab (the dark-mode neon lime looked "stuck" with no light override). */
+  --pane-tab-active-bg: #4f9e3a;
+  --pane-tab-active-text: #ffffff;
+  --pane-tab-active-border: #3f8f2d;
+  --pane-tab-active-accent: #4f9e3a;
+  --pane-tab-unfocused-active-bg: #d2ecc2;
+  --pane-tab-unfocused-active-text: #16320c;
+  --pane-tab-unfocused-active-border: #7bbf5a;
   --pane-tab-panel-head-text: #1f2937;
   --pane-tab-panel-detail-bg: #dce8d2;
   --pane-detail-bg: #e7edf5;
@@ -500,6 +509,11 @@ body {
 }
 .topbar-search:hover {
   border-color: var(--accent, #6ea8fe);
+}
+/* DOIT.6 #33: --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
+   In light mode blend it into the topbar as a subtle bordered box (keep the border + muted text). */
+body.theme-light .topbar-search {
+  background: rgba(15, 23, 42, 0.05);
 }
 .topbar-search-icon {
   flex: 0 0 auto;

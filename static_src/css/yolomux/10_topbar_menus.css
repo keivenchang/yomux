@@ -193,6 +193,11 @@
 .topbar-search:hover {
   border-color: var(--accent, #6ea8fe);
 }
+/* DOIT.6 #33: --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
+   In light mode blend it into the topbar as a subtle bordered box (keep the border + muted text). */
+body.theme-light .topbar-search {
+  background: rgba(15, 23, 42, 0.05);
+}
 .topbar-search-icon {
   flex: 0 0 auto;
 }

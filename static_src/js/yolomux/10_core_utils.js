@@ -265,6 +265,13 @@ function terminalThemeForGlobalTheme(mode = globalThemeMode) {
   return {...theme};
 }
 
+// DOIT.6 #32: on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
+// terminal that render faint on white. xterm's minimumContrastRatio auto-darkens ANY text color
+// (including app 24-bit colors) against the bg. Dark terminals keep 1 (no adjustment).
+function terminalMinimumContrastRatio(mode = globalThemeMode) {
+  return resolvedTerminalThemeMode(terminalThemeMode, mode) === 'light' ? 4.5 : 1;
+}
+
 function normalizeEditorThemeMode(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (['inherit', 'system', 'global', 'auto', ''].includes(normalized)) return editorThemeInheritMode;

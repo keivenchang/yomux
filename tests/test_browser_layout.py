@@ -840,10 +840,18 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     )
     assert theme_metrics["dark"]["panelHeadBg"] == "rgb(31, 48, 38)"
     assert theme_metrics["light"]["panelHeadBg"] == "rgb(207, 212, 221)"
+    # DOIT.6 #31: the active-tab greens are tuned PER THEME so a theme switch visibly repaints the
+    # active pane tab; every other surface stays token-equal across themes (only panelHeadBg differed).
+    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor"}
     for key, value in theme_metrics["dark"].items():
-        if key != "panelHeadBg":
+        if key not in theme_specific:
             assert theme_metrics["light"][key] == value
     assert theme_metrics["dark"]["activeTabBg"] == "rgb(134, 214, 0)"
+    assert theme_metrics["light"]["activeTabBg"] == "rgb(79, 158, 58)"
+    assert theme_metrics["light"]["activeTabBg"] != theme_metrics["dark"]["activeTabBg"]
+    assert theme_metrics["light"]["inactiveActiveTabBg"] != theme_metrics["dark"]["inactiveActiveTabBg"]
+    # Active-tab text stays legible against its (theme-specific) green in light mode.
+    assert theme_metrics["light"]["activeTabColor"] != theme_metrics["light"]["activeTabBg"]
     assert theme_metrics["dark"]["activeTabShadow"] == "none"
     # DOIT.6 #6: unfocused panes keep a clearly-visible green active tab (brightened from #285a2f).
     assert theme_metrics["dark"]["inactiveActiveTabBg"] == "rgb(79, 158, 58)"

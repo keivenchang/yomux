@@ -283,6 +283,9 @@ function renderEmptyPane(slot) {
 }
 
 function renderPaneTabStrips() {
+  // DOIT.6 #30: do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
+  // aborts the native drag. Defer to the endSessionDrag flush.
+  if (dragSession != null) { pendingTabStripRender = true; return; }
   for (const side of layoutSlotKeys()) {
     const session = activeItemForSide(side);
     if (!session) continue;
@@ -1843,6 +1846,9 @@ function markPreferencesInteracted() {
 }
 
 function focusPreferencesSearch(panel = null) {
+  // DOIT.6 #30: never steal focus into the search box while a tab is being dragged — focus() during a
+  // drag (and the re-render it triggers) aborts the native drag.
+  if (dragSession != null) return false;
   const root = panel && panel.isConnected !== false
     ? panel
     : (Array.from(document.querySelectorAll('.preferences-panel')).find(candidate => candidate.offsetParent !== null) || document.querySelector('.preferences-panel'));
@@ -1867,6 +1873,9 @@ function focusFreshPreferencesSearchSoon(panel = null) {
 }
 
 function renderPreferencesPanels(options = {}) {
+  // DOIT.6 #30: defer Preferences re-render while a tab drag is in flight (a rebuild + the auto-focus
+  // steal the drag and abort it — the worst case the user hit with Preferences active).
+  if (dragSession != null) { pendingPreferencesRender = true; return; }
   for (const panel of document.querySelectorAll('.preferences-panel')) {
     const body = panel.querySelector('.preferences-body');
     const meta = panel.querySelector(`#meta-${cssEscape(prefsItemId)}`);

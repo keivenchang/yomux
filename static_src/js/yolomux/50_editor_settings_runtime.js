@@ -370,11 +370,18 @@ function installGlobalThemeMediaListener() {
 }
 
 function applyTerminalRuntimeSettings(options = {}) {
+  // DOIT.6 #32: one theme source for every terminal AND its container, so all panes share the same
+  // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
+  // faint 24-bit agent output stays legible on white.
+  const theme = terminalThemeForGlobalTheme();
+  const minContrast = terminalMinimumContrastRatio();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term) continue;
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
-    item.term.options.theme = terminalThemeForGlobalTheme();
+    item.term.options.theme = theme;
+    item.term.options.minimumContrastRatio = minContrast;
+    if (item.container?.style) item.container.style.background = theme.background;
     if (options.fit !== false) scheduleFit(session);
   }
 }

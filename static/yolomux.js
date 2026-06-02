@@ -684,6 +684,10 @@ let focusedPanelItem = null;
 let lastFocusedTmuxSession = null;
 let dragSession = null;
 let dragSourceSlot = null;
+// While a tab drag is in flight, tab/preferences re-renders are deferred so they don't replace the
+// dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
+let pendingTabStripRender = false;
+let pendingPreferencesRender = false;
 let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
@@ -1070,6 +1074,13 @@ function resolvedTerminalThemeMode(mode = terminalThemeMode, appMode = globalThe
 function terminalThemeForGlobalTheme(mode = globalThemeMode) {
   const theme = TERMINAL_THEMES[resolvedTerminalThemeMode(terminalThemeMode, mode)] || TERMINAL_THEMES.dark;
   return {...theme};
+}
+
+// DOIT.6 #32: on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
+// terminal that render faint on white. xterm's minimumContrastRatio auto-darkens ANY text color
+// (including app 24-bit colors) against the bg. Dark terminals keep 1 (no adjustment).
+function terminalMinimumContrastRatio(mode = globalThemeMode) {
+  return resolvedTerminalThemeMode(terminalThemeMode, mode) === 'light' ? 4.5 : 1;
 }
 
 function normalizeEditorThemeMode(value) {
@@ -8889,11 +8900,18 @@ function installGlobalThemeMediaListener() {
 }
 
 function applyTerminalRuntimeSettings(options = {}) {
+  // DOIT.6 #32: one theme source for every terminal AND its container, so all panes share the same
+  // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
+  // faint 24-bit agent output stays legible on white.
+  const theme = terminalThemeForGlobalTheme();
+  const minContrast = terminalMinimumContrastRatio();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term) continue;
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
-    item.term.options.theme = terminalThemeForGlobalTheme();
+    item.term.options.theme = theme;
+    item.term.options.minimumContrastRatio = minContrast;
+    if (item.container?.style) item.container.style.background = theme.background;
     if (options.fit !== false) scheduleFit(session);
   }
 }
@@ -9977,6 +9995,9 @@ function endSessionDrag(event) {
   stopCustomDragPreview();
   sessionButtons.classList.remove('drag-over');
   clearDropPreview();
+  // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
+  if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
+  if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
 }
 function layoutWithoutItemFromSlots(item, slots = layoutSlots, options = {}) {
   const next = emptyLayoutSlots();
@@ -12097,6 +12118,9 @@ function renderEmptyPane(slot) {
 }
 
 function renderPaneTabStrips() {
+  // DOIT.6 #30: do not rebuild tab DOM while a tab is being dragged — replacing the dragged node
+  // aborts the native drag. Defer to the endSessionDrag flush.
+  if (dragSession != null) { pendingTabStripRender = true; return; }
   for (const side of layoutSlotKeys()) {
     const session = activeItemForSide(side);
     if (!session) continue;
@@ -13657,6 +13681,9 @@ function markPreferencesInteracted() {
 }
 
 function focusPreferencesSearch(panel = null) {
+  // DOIT.6 #30: never steal focus into the search box while a tab is being dragged — focus() during a
+  // drag (and the re-render it triggers) aborts the native drag.
+  if (dragSession != null) return false;
   const root = panel && panel.isConnected !== false
     ? panel
     : (Array.from(document.querySelectorAll('.preferences-panel')).find(candidate => candidate.offsetParent !== null) || document.querySelector('.preferences-panel'));
@@ -13681,6 +13708,9 @@ function focusFreshPreferencesSearchSoon(panel = null) {
 }
 
 function renderPreferencesPanels(options = {}) {
+  // DOIT.6 #30: defer Preferences re-render while a tab drag is in flight (a rebuild + the auto-focus
+  // steal the drag and abort it — the worst case the user hit with Preferences active).
+  if (dragSession != null) { pendingPreferencesRender = true; return; }
   for (const panel of document.querySelectorAll('.preferences-panel')) {
     const body = panel.querySelector('.preferences-body');
     const meta = panel.querySelector(`#meta-${cssEscape(prefsItemId)}`);
@@ -17957,9 +17987,12 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
-    theme: terminalThemeForGlobalTheme()
+    theme: terminalThemeForGlobalTheme(),
+    minimumContrastRatio: terminalMinimumContrastRatio(),
   });
   term.open(container);
+  // DOIT.6 #32: match the container bg to the terminal theme so every pane shares one white.
+  if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
   installTerminalLinkProvider(term);
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term);

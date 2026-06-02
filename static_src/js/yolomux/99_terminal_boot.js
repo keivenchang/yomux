@@ -1083,9 +1083,12 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
-    theme: terminalThemeForGlobalTheme()
+    theme: terminalThemeForGlobalTheme(),
+    minimumContrastRatio: terminalMinimumContrastRatio(),
   });
   term.open(container);
+  // DOIT.6 #32: match the container bg to the terminal theme so every pane shares one white.
+  if (container?.style) container.style.background = terminalThemeForGlobalTheme().background;
   installTerminalLinkProvider(term);
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term);
