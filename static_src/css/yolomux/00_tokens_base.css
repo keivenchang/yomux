@@ -13,10 +13,10 @@
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
   --accent-gold: #f5c542;
-  --drop-outline: var(--accent-gold);
+  --drop-outline: #ffffff;
   --drop-outline-text: #2b2100;
   --drop-outline-bg: rgba(245, 197, 66, 0.18);
-  --drop-outline-strong: rgba(245, 197, 66, 0.98);
+  --drop-outline-strong: rgba(255, 255, 255, 0.95);
   --drop-outline-shadow: rgba(245, 197, 66, 0.82);
   --drop-outline-surface: rgba(17, 23, 34, 0.84);
   --auto-text: #071000;

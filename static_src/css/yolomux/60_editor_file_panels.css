@@ -768,24 +768,6 @@ body.theme-light .file-explorer-changes-head {
   padding: 0 6px;
   font-size: var(--ui-font-size-2xs);
 }
-.file-explorer-changes-panel .changes-display-toggle {
-  height: 20px;
-  width: 20px;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--ui-font-size-sm);
-  line-height: 1;
-  cursor: pointer;
-}
-.file-explorer-changes-panel .changes-display-toggle:hover,
-.file-explorer-changes-panel .changes-display-toggle:focus-visible {
-  color: var(--brand-green);
-  border-color: var(--brand-green);
-  background: rgba(118, 185, 0, 0.10);
-}
 .file-explorer-changes-panel .changes-summary {
   justify-self: end;
   min-width: 0;
@@ -796,11 +778,11 @@ body.theme-light .file-explorer-changes-head {
 }
 @container (max-width: 520px) {
   .file-explorer-changes-head {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
-      "title density refresh"
-      "refs refs refs"
-      "summary summary summary";
+      "title refresh"
+      "refs refs"
+      "summary summary";
     gap: 4px;
   }
   .file-explorer-changes-head .changes-title {
@@ -822,9 +804,6 @@ body.theme-light .file-explorer-changes-head {
   .file-explorer-changes-head .diff-ref-select {
     width: 100%;
     min-width: 0;
-  }
-  .file-explorer-changes-head .changes-display-toggle {
-    grid-area: density;
   }
   .file-explorer-changes-head .changes-refresh {
     grid-area: refresh;

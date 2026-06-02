@@ -1238,6 +1238,9 @@ body.theme-light .yoagent-line {
 }
 .file-tree-repo-meta {
   color: var(--muted);
+  font-size: var(--ui-font-size-2xs);
+  line-height: 1.1;
+  letter-spacing: -0.2px;
 }
 .file-tree-repo-branch {
   font-family: var(--mono-font);

@@ -14,10 +14,10 @@
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
   --accent-gold: #f5c542;
-  --drop-outline: var(--accent-gold);
+  --drop-outline: #ffffff;
   --drop-outline-text: #2b2100;
   --drop-outline-bg: rgba(245, 197, 66, 0.18);
-  --drop-outline-strong: rgba(245, 197, 66, 0.98);
+  --drop-outline-strong: rgba(255, 255, 255, 0.95);
   --drop-outline-shadow: rgba(245, 197, 66, 0.82);
   --drop-outline-surface: rgba(17, 23, 34, 0.84);
   --auto-text: #071000;
@@ -5045,6 +5045,9 @@ body.theme-light .yoagent-line {
 }
 .file-tree-repo-meta {
   color: var(--muted);
+  font-size: var(--ui-font-size-2xs);
+  line-height: 1.1;
+  letter-spacing: -0.2px;
 }
 .file-tree-repo-branch {
   font-family: var(--mono-font);
@@ -6119,24 +6122,6 @@ body.theme-light .file-explorer-changes-head {
   padding: 0 6px;
   font-size: var(--ui-font-size-2xs);
 }
-.file-explorer-changes-panel .changes-display-toggle {
-  height: 20px;
-  width: 20px;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--ui-font-size-sm);
-  line-height: 1;
-  cursor: pointer;
-}
-.file-explorer-changes-panel .changes-display-toggle:hover,
-.file-explorer-changes-panel .changes-display-toggle:focus-visible {
-  color: var(--brand-green);
-  border-color: var(--brand-green);
-  background: rgba(118, 185, 0, 0.10);
-}
 .file-explorer-changes-panel .changes-summary {
   justify-self: end;
   min-width: 0;
@@ -6147,11 +6132,11 @@ body.theme-light .file-explorer-changes-head {
 }
 @container (max-width: 520px) {
   .file-explorer-changes-head {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
-      "title density refresh"
-      "refs refs refs"
-      "summary summary summary";
+      "title refresh"
+      "refs refs"
+      "summary summary";
     gap: 4px;
   }
   .file-explorer-changes-head .changes-title {
@@ -6173,9 +6158,6 @@ body.theme-light .file-explorer-changes-head {
   .file-explorer-changes-head .diff-ref-select {
     width: 100%;
     min-width: 0;
-  }
-  .file-explorer-changes-head .changes-display-toggle {
-    grid-area: density;
   }
   .file-explorer-changes-head .changes-refresh {
     grid-area: refresh;

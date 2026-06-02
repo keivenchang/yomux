@@ -282,7 +282,6 @@ const fileIndexStatusTimers = new Map();  // normalized indexed root -> poll tim
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
-let fileExplorerChangesDisplayMode = 'compact';
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
 let commandPaletteMode = 'command';
@@ -13977,19 +13976,15 @@ function fileExplorerChangesPanelHtml() {
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? '<div class="changes-empty">No modified files for this session.</div>' : '';
-  const compact = fileExplorerChangesDisplayMode === 'compact';
-  const densityTitle = compact ? 'Show detailed modified-files list' : 'Show compact modified-files list';
-  const densityIcon = compact ? '▤' : '☷';
   return `
     <div class="file-explorer-changes-head">
       <span class="changes-title">Modified files</span>
       ${diffRefControlsHtml({compact: true})}
-      <button type="button" class="changes-display-toggle${compact ? ' compact' : ' detailed'}" data-session-files-display-toggle title="${esc(densityTitle)}" aria-label="${esc(densityTitle)}" aria-pressed="${compact ? 'true' : 'false'}">${esc(densityIcon)}</button>
       <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
     </div>
     ${changesComparisonHeaderHtml(payload, files, {loading})}
     ${errorHtml}
-    ${empty || changesRepoGroupsHtml(files, {compact, payload})}`;
+    ${empty || changesRepoGroupsHtml(files, {compact: true, payload})}`;
 }
 
 function createChangesPanel() {
@@ -14023,7 +14018,7 @@ function createChangesPanel() {
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-session-files-display-toggle], [data-uploaded-files-toggle], [data-changes-folder-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-uploaded-files-toggle], [data-changes-folder-toggle]') || null;
 }
 
 function renderChangesPanels(options = {}) {
@@ -14118,13 +14113,6 @@ function bindChangesPanel(panel) {
       else changesFolderCollapsed.add(key);
       writeStoredChangesFolderCollapsed();
       renderChangesPanels({force: true});
-      renderFileExplorerChangesPanels({force: true});
-      return;
-    }
-    const displayToggle = event.target.closest('[data-session-files-display-toggle]');
-    if (displayToggle && panel.contains(displayToggle)) {
-      event.preventDefault();
-      fileExplorerChangesDisplayMode = fileExplorerChangesDisplayMode === 'compact' ? 'detailed' : 'compact';
       renderFileExplorerChangesPanels({force: true});
       return;
     }
