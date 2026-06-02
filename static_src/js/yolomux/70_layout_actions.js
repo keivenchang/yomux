@@ -1141,13 +1141,13 @@ function showSessionRenameDialog(session) {
   overlay.className = 'session-rename-backdrop';
   overlay.setAttribute('role', 'presentation');
   overlay.innerHTML = `
-    <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="Rename tmux session">
-      <div class="session-rename-title">Rename ${esc(sessionLabel(session))} ${esc(session)}</div>
-      <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="New session name" autocomplete="off">
+    <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('rename.aria'))}">
+      <div class="session-rename-title">${esc(t('rename.title', {name: `${sessionLabel(session)} ${session}`}))}</div>
+      <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="${esc(t('rename.inputAria'))}" autocomplete="off">
       <div class="session-rename-error" hidden></div>
       <div class="session-rename-actions">
-        <button type="button" class="session-rename-cancel">Cancel</button>
-        <button type="submit" class="session-rename-submit">Rename</button>
+        <button type="button" class="session-rename-cancel">${esc(t('rename.cancel'))}</button>
+        <button type="submit" class="session-rename-submit">${esc(t('rename.submit'))}</button>
       </div>
     </form>`;
   const form = overlay.querySelector('form');

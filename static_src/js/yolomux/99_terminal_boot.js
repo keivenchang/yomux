@@ -27,8 +27,8 @@ function paneFrameControlsHtml(session, options = {}) {
   const includeExpand = options.expand !== false;
   if (includeActions) {
     controls.push(disabled
-      ? `<button class="tab pane-actions" ${disabledAttrs('Actions')}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
-      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="session actions" aria-label="Session actions"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
+      ? `<button class="tab pane-actions" ${disabledAttrs(t('pane.actions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
+      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('pane.actions'))}" aria-label="${esc(t('pane.actions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
   }
   if (includeDetails) {
     controls.push(disabled
@@ -37,17 +37,17 @@ function paneFrameControlsHtml(session, options = {}) {
   }
   if (includeMinimize) {
     controls.push(disabled
-      ? `<button class="tab pane-minimize ${platformWindowControlClass('minimize')}" ${disabledAttrs('Minimize pane')}></button>`
-      : `<button type="button" class="tab pane-minimize ${platformWindowControlClass('minimize')}" data-pane-minimize="${esc(session)}" title="minimize pane" aria-label="Minimize pane"></button>`);
+      ? `<button class="tab pane-minimize ${platformWindowControlClass('minimize')}" ${disabledAttrs(t('pane.minimize'))}></button>`
+      : `<button type="button" class="tab pane-minimize ${platformWindowControlClass('minimize')}" data-pane-minimize="${esc(session)}" title="${esc(t('pane.minimize'))}" aria-label="${esc(t('pane.minimize'))}"></button>`);
   }
   if (includeExpand) {
-    const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="expand pane" aria-label="Expand pane"`;
+    const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="${esc(t('pane.expand'))}" aria-label="${esc(t('pane.expand'))}"`;
     controls.push(disabled
-      ? `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${disabledAttrs('Expand pane')}></button>`
+      ? `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${disabledAttrs(t('pane.expand'))}></button>`
       : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`);
   }
   if (options.close) {
-    const closeLabel = options.closeLabel || 'Close pane tab';
+    const closeLabel = options.closeLabel || t('pane.closeTab');
     const closeTitle = options.closeTitle || closeLabel;
     const closeClass = options.closeClass ? ` ${options.closeClass}` : '';
     const closeData = `data-pane-close="${esc(session)}"`;

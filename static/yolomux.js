@@ -2918,31 +2918,31 @@ async function openProjectReadme() {
 
 function keyboardShortcutCatalog() {
   return [
-    {section: 'App', items: [
-      {label: 'Command palette', keys: appShortcutText('P', {shift: true})},
-      {label: 'File quick-open', keys: appShortcutText('P')},
-      {label: `Toggle ${fileExplorerLabel()}`, keys: appShortcutText('B')},
-      {label: 'Open Preferences', keys: appShortcutText(',')},
-      {label: 'Keyboard shortcuts', keys: '?'},
+    {section: t('shortcuts.section.app'), items: [
+      {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
+      {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
+      {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
+      {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
+      {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
     ]},
-    {section: 'Editor', items: [
-      {label: 'Save active editor', keys: appShortcutText('S')},
-      {label: 'Find', keys: appShortcutText('F')},
-      {label: 'Replace', keys: appShortcutText('H')},
-      {label: 'Go to line', keys: appShortcutText('G')},
-      {label: 'Toggle line comment', keys: appShortcutText('/')},
-      {label: 'Indent / outdent', keys: 'Tab / Shift+Tab'},
-      {label: 'Undo / redo', keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
+    {section: t('shortcuts.section.editor'), items: [
+      {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},
+      {label: t('shortcuts.find'), keys: appShortcutText('F')},
+      {label: t('shortcuts.replace'), keys: appShortcutText('H')},
+      {label: t('shortcuts.goToLine'), keys: appShortcutText('G')},
+      {label: t('shortcuts.toggleComment'), keys: appShortcutText('/')},
+      {label: t('shortcuts.indentOutdent'), keys: 'Tab / Shift+Tab'},
+      {label: t('shortcuts.undoRedo'), keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
     ]},
-    {section: 'Diff', items: [
-      {label: 'Undo accept/reject chunk', keys: appShortcutText('Z')},
-      {label: 'Redo accept/reject chunk', keys: appShortcutText('Z', {shift: true})},
+    {section: t('shortcuts.section.diff'), items: [
+      {label: t('shortcuts.undoChunk'), keys: appShortcutText('Z')},
+      {label: t('shortcuts.redoChunk'), keys: appShortcutText('Z', {shift: true})},
     ]},
-    {section: 'Tabs / Panes', items: [
-      {label: 'Close active editor/viewer tab', keys: `${appShortcutText('W')} · ${appShortcutText('Backspace')} outside text`},
-      {label: 'Move or split tab', keys: 'Drag a tab'},
-      {label: 'Session actions', keys: 'Right-click a tmux tab'},
-      {label: 'Close menu or dialog', keys: 'Esc'},
+    {section: t('shortcuts.section.tabsPanes'), items: [
+      {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: appShortcutText('Backspace')})},
+      {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
+      {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
+      {label: t('shortcuts.closeMenu'), keys: 'Esc'},
     ]},
   ];
 }
@@ -2967,10 +2967,10 @@ function ensureKeyboardShortcutsOverlay() {
   node.className = 'keyboard-shortcuts-overlay';
   node.hidden = true;
   node.innerHTML = `
-    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('shortcuts.title'))}">
       <div class="keyboard-shortcuts-head">
-        <h2>Keyboard shortcuts</h2>
-        <button type="button" class="keyboard-shortcuts-close" aria-label="Close keyboard shortcuts">×</button>
+        <h2>${esc(t('shortcuts.title'))}</h2>
+        <button type="button" class="keyboard-shortcuts-close" aria-label="${esc(t('shortcuts.close'))}">×</button>
       </div>
       <div class="keyboard-shortcuts-body"></div>
     </div>`;
@@ -3307,8 +3307,8 @@ function ensureCommandPalette() {
   node.className = 'command-palette';
   node.hidden = true;
   node.innerHTML = `
-    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="Command palette">
-      <input type="search" class="command-palette-input" placeholder="Find tabs, commands, settings" aria-label="Find tabs, commands, settings">
+    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('palette.aria'))}">
+      <input type="search" class="command-palette-input" placeholder="${esc(t('palette.placeholder'))}" aria-label="${esc(t('palette.placeholder'))}">
       <div class="command-palette-results" role="listbox"></div>
     </div>`;
   node.addEventListener('mousedown', event => {
@@ -11248,13 +11248,13 @@ function showSessionRenameDialog(session) {
   overlay.className = 'session-rename-backdrop';
   overlay.setAttribute('role', 'presentation');
   overlay.innerHTML = `
-    <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="Rename tmux session">
-      <div class="session-rename-title">Rename ${esc(sessionLabel(session))} ${esc(session)}</div>
-      <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="New session name" autocomplete="off">
+    <form class="session-rename-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('rename.aria'))}">
+      <div class="session-rename-title">${esc(t('rename.title', {name: `${sessionLabel(session)} ${session}`}))}</div>
+      <input class="session-rename-input" name="sessionName" value="${esc(session)}" aria-label="${esc(t('rename.inputAria'))}" autocomplete="off">
       <div class="session-rename-error" hidden></div>
       <div class="session-rename-actions">
-        <button type="button" class="session-rename-cancel">Cancel</button>
-        <button type="submit" class="session-rename-submit">Rename</button>
+        <button type="button" class="session-rename-cancel">${esc(t('rename.cancel'))}</button>
+        <button type="submit" class="session-rename-submit">${esc(t('rename.submit'))}</button>
       </div>
     </form>`;
   const form = overlay.querySelector('form');
@@ -17154,8 +17154,8 @@ function paneFrameControlsHtml(session, options = {}) {
   const includeExpand = options.expand !== false;
   if (includeActions) {
     controls.push(disabled
-      ? `<button class="tab pane-actions" ${disabledAttrs('Actions')}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
-      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="session actions" aria-label="Session actions"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
+      ? `<button class="tab pane-actions" ${disabledAttrs(t('pane.actions'))}><span class="pane-actions-dots" aria-hidden="true">...</span></button>`
+      : `<button type="button" class="tab pane-actions" data-pane-actions="${esc(session)}" title="${esc(t('pane.actions'))}" aria-label="${esc(t('pane.actions'))}"><span class="pane-actions-dots" aria-hidden="true">...</span></button>`);
   }
   if (includeDetails) {
     controls.push(disabled
@@ -17164,17 +17164,17 @@ function paneFrameControlsHtml(session, options = {}) {
   }
   if (includeMinimize) {
     controls.push(disabled
-      ? `<button class="tab pane-minimize ${platformWindowControlClass('minimize')}" ${disabledAttrs('Minimize pane')}></button>`
-      : `<button type="button" class="tab pane-minimize ${platformWindowControlClass('minimize')}" data-pane-minimize="${esc(session)}" title="minimize pane" aria-label="Minimize pane"></button>`);
+      ? `<button class="tab pane-minimize ${platformWindowControlClass('minimize')}" ${disabledAttrs(t('pane.minimize'))}></button>`
+      : `<button type="button" class="tab pane-minimize ${platformWindowControlClass('minimize')}" data-pane-minimize="${esc(session)}" title="${esc(t('pane.minimize'))}" aria-label="${esc(t('pane.minimize'))}"></button>`);
   }
   if (includeExpand) {
-    const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="expand pane" aria-label="Expand pane"`;
+    const expandAttrs = `${canPaneExpand(session) ? '' : ' hidden'} type="button" data-pane-expand="${esc(session)}" title="${esc(t('pane.expand'))}" aria-label="${esc(t('pane.expand'))}"`;
     controls.push(disabled
-      ? `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${disabledAttrs('Expand pane')}></button>`
+      ? `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${disabledAttrs(t('pane.expand'))}></button>`
       : `<button class="tab pane-expand ${platformWindowControlClass('zoom')}" ${expandAttrs}></button>`);
   }
   if (options.close) {
-    const closeLabel = options.closeLabel || 'Close pane tab';
+    const closeLabel = options.closeLabel || t('pane.closeTab');
     const closeTitle = options.closeTitle || closeLabel;
     const closeClass = options.closeClass ? ` ${options.closeClass}` : '';
     const closeData = `data-pane-close="${esc(session)}"`;

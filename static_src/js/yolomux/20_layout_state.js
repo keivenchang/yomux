@@ -1107,31 +1107,31 @@ async function openProjectReadme() {
 
 function keyboardShortcutCatalog() {
   return [
-    {section: 'App', items: [
-      {label: 'Command palette', keys: appShortcutText('P', {shift: true})},
-      {label: 'File quick-open', keys: appShortcutText('P')},
-      {label: `Toggle ${fileExplorerLabel()}`, keys: appShortcutText('B')},
-      {label: 'Open Preferences', keys: appShortcutText(',')},
-      {label: 'Keyboard shortcuts', keys: '?'},
+    {section: t('shortcuts.section.app'), items: [
+      {label: t('shortcuts.commandPalette'), keys: appShortcutText('P', {shift: true})},
+      {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
+      {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
+      {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
+      {label: t('shortcuts.keyboardShortcuts'), keys: '?'},
     ]},
-    {section: 'Editor', items: [
-      {label: 'Save active editor', keys: appShortcutText('S')},
-      {label: 'Find', keys: appShortcutText('F')},
-      {label: 'Replace', keys: appShortcutText('H')},
-      {label: 'Go to line', keys: appShortcutText('G')},
-      {label: 'Toggle line comment', keys: appShortcutText('/')},
-      {label: 'Indent / outdent', keys: 'Tab / Shift+Tab'},
-      {label: 'Undo / redo', keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
+    {section: t('shortcuts.section.editor'), items: [
+      {label: t('shortcuts.saveEditor'), keys: appShortcutText('S')},
+      {label: t('shortcuts.find'), keys: appShortcutText('F')},
+      {label: t('shortcuts.replace'), keys: appShortcutText('H')},
+      {label: t('shortcuts.goToLine'), keys: appShortcutText('G')},
+      {label: t('shortcuts.toggleComment'), keys: appShortcutText('/')},
+      {label: t('shortcuts.indentOutdent'), keys: 'Tab / Shift+Tab'},
+      {label: t('shortcuts.undoRedo'), keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
     ]},
-    {section: 'Diff', items: [
-      {label: 'Undo accept/reject chunk', keys: appShortcutText('Z')},
-      {label: 'Redo accept/reject chunk', keys: appShortcutText('Z', {shift: true})},
+    {section: t('shortcuts.section.diff'), items: [
+      {label: t('shortcuts.undoChunk'), keys: appShortcutText('Z')},
+      {label: t('shortcuts.redoChunk'), keys: appShortcutText('Z', {shift: true})},
     ]},
-    {section: 'Tabs / Panes', items: [
-      {label: 'Close active editor/viewer tab', keys: `${appShortcutText('W')} · ${appShortcutText('Backspace')} outside text`},
-      {label: 'Move or split tab', keys: 'Drag a tab'},
-      {label: 'Session actions', keys: 'Right-click a tmux tab'},
-      {label: 'Close menu or dialog', keys: 'Esc'},
+    {section: t('shortcuts.section.tabsPanes'), items: [
+      {label: t('shortcuts.closeTab'), keys: t('shortcuts.keys.closeTab', {w: appShortcutText('W'), bs: appShortcutText('Backspace')})},
+      {label: t('shortcuts.moveTab'), keys: t('shortcuts.keys.dragTab')},
+      {label: t('shortcuts.sessionActions'), keys: t('shortcuts.keys.rightClick')},
+      {label: t('shortcuts.closeMenu'), keys: 'Esc'},
     ]},
   ];
 }
@@ -1156,10 +1156,10 @@ function ensureKeyboardShortcutsOverlay() {
   node.className = 'keyboard-shortcuts-overlay';
   node.hidden = true;
   node.innerHTML = `
-    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+    <div class="keyboard-shortcuts-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('shortcuts.title'))}">
       <div class="keyboard-shortcuts-head">
-        <h2>Keyboard shortcuts</h2>
-        <button type="button" class="keyboard-shortcuts-close" aria-label="Close keyboard shortcuts">×</button>
+        <h2>${esc(t('shortcuts.title'))}</h2>
+        <button type="button" class="keyboard-shortcuts-close" aria-label="${esc(t('shortcuts.close'))}">×</button>
       </div>
       <div class="keyboard-shortcuts-body"></div>
     </div>`;
@@ -1496,8 +1496,8 @@ function ensureCommandPalette() {
   node.className = 'command-palette';
   node.hidden = true;
   node.innerHTML = `
-    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="Command palette">
-      <input type="search" class="command-palette-input" placeholder="Find tabs, commands, settings" aria-label="Find tabs, commands, settings">
+    <div class="command-palette-dialog" role="dialog" aria-modal="true" aria-label="${esc(t('palette.aria'))}">
+      <input type="search" class="command-palette-input" placeholder="${esc(t('palette.placeholder'))}" aria-label="${esc(t('palette.placeholder'))}">
       <div class="command-palette-results" role="listbox"></div>
     </div>`;
   node.addEventListener('mousedown', event => {
