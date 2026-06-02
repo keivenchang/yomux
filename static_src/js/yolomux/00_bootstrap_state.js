@@ -693,6 +693,9 @@ let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
 let transparentDragImage = null;
+// #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
+// mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
+let dragTabRectCache = null;
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();

@@ -679,13 +679,41 @@ function clearPaneTabDropPreview(strip) {
   strip.style.removeProperty('--tab-drop-height');
 }
 
+// #47: reset the per-drag tab-rect cache (called at drag start/end). See dragMeasureStrip.
+function resetDragTabRectCache() {
+  dragTabRectCache = null;
+}
+
+// During a live drag the tabs do not move (renders are deferred, #30), so measure each strip's rect +
+// its tab rects ONCE and reuse them for every dragover instead of forcing sync layout on every move.
+// Outside a drag (e.g. unit tests calling paneTabDropPlacement directly), measure fresh each time.
+function dragMeasureStrip(strip) {
+  if (dragSession != null) {
+    if (!dragTabRectCache || dragTabRectCache.strip !== strip) {
+      dragTabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
+    }
+    return dragTabRectCache;
+  }
+  return {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
+}
+
+function dragMeasureTab(cache, tab) {
+  let rect = cache.rects.get(tab);
+  if (!rect) {
+    rect = tab.getBoundingClientRect();
+    cache.rects.set(tab, rect);
+  }
+  return rect;
+}
+
 function paneTabDropPlacement(strip, event, movingSession) {
   const allTabs = Array.from(strip.querySelectorAll('.pane-tab'));
   // The source's position in the FULL strip (before filtering) drives a directional insert threshold
   // for same-strip reorder; -1 means a cross-pane move (keep the centered threshold).
   const sourceVisualIndex = movingSession ? allTabs.findIndex(tab => tab.dataset.paneTab === movingSession) : -1;
   const tabs = allTabs.filter(tab => tab.dataset.paneTab !== movingSession);
-  const stripRect = strip.getBoundingClientRect();
+  const measure = dragMeasureStrip(strip);
+  const stripRect = measure.stripRect;
   const clampX = value => Math.max(2, Math.min(stripRect.width - 2, value));
   const clampY = (value, height) => Math.max(0, Math.min(Math.max(0, stripRect.height - height), value));
   const defaultHeight = Math.min(32, Math.max(24, stripRect.height || 27));
@@ -697,7 +725,7 @@ function paneTabDropPlacement(strip, event, movingSession) {
       height: defaultHeight,
     };
   }
-  const rows = paneTabRows(tabs);
+  const rows = paneTabRows(tabs, tab => dragMeasureTab(measure, tab));
   const row = rows.reduce((best, item) => {
     const distance = Math.abs(event.clientY - item.centerY);
     return !best || distance < best.distance ? {row: item, distance} : best;
@@ -729,10 +757,10 @@ function paneTabDropPlacement(strip, event, movingSession) {
   };
 }
 
-function paneTabRows(tabs) {
+function paneTabRows(tabs, rectFor = tab => tab.getBoundingClientRect()) {
   const rows = [];
   tabs.forEach((tab, index) => {
-    const rect = tab.getBoundingClientRect();
+    const rect = rectFor(tab);
     const centerY = rect.top + rect.height / 2;
     const row = rows.find(item => Math.abs(centerY - item.centerY) <= Math.max(4, item.height / 2));
     const target = row || {items: [], top: rect.top, bottom: rect.bottom, centerY, height: rect.height};

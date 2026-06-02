@@ -694,6 +694,9 @@ let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
 let transparentDragImage = null;
+// #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
+// mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
+let dragTabRectCache = null;
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
@@ -9988,31 +9991,8 @@ function stopCustomDragPreview() {
   closeFileImagePreview();
 }
 
-function startCustomDragPreview(event) {
-  const source = event.currentTarget;
-  if (!source || !source.cloneNode) return;
-  stopCustomDragPreview();
-  const rect = source.getBoundingClientRect();
-  const clone = source.cloneNode(true);
-  clone.classList?.remove('popover-open', 'dragging');
-  clone.classList?.add('drag-image');
-  clone.querySelectorAll?.('.session-popover').forEach(node => node.remove());
-  clone.style.position = 'fixed';
-  clone.style.width = `${Math.max(1, Math.round(rect.width || 1))}px`;
-  clone.style.height = `${Math.max(1, Math.round(rect.height || 1))}px`;
-  clone.style.opacity = '0.50';
-  clone.style.pointerEvents = 'none';
-  clone.style.zIndex = '99999';
-  document.body.appendChild(clone);
-  customDragPreview = clone;
-  const offsetX = Math.max(0, Math.min(rect.width || 0, event.clientX - rect.left)) || Math.max(1, (rect.width || 1) / 2);
-  const offsetY = Math.max(0, Math.min(rect.height || 0, event.clientY - rect.top)) || Math.max(1, (rect.height || 1) / 2);
-  customDragPreviewOffset = {x: offsetX, y: offsetY};
-  moveCustomDragPreview(event);
-  bindCustomDragPreviewListeners();
-  event.dataTransfer?.setDragImage?.(transparentNativeDragImage(), 0, 0);
-}
-
+// #47: tab drags use the native drag image (see startSessionDrag) — the clone-follow tab preview is
+// gone. The custom-preview machinery below is retained only for the rich FILE drag preview.
 function startFileDragPreview(event, paths, entry) {
   stopCustomDragPreview();
   const normalizedPaths = Array.from(new Set((paths || []).filter(Boolean)));
@@ -10060,12 +10040,23 @@ function startSessionDrag(event, session, sourceSlot = null) {
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-session', payload);
   event.dataTransfer.setData('text/plain', session);
-  startCustomDragPreview(event);
+  // #47: use the NATIVE drag image — a one-time compositor snapshot of the tab itself — instead of the
+  // JS clone-follow preview. That removes the per-move reposition, the two document capture listeners,
+  // and the animated heavyweight clone that caused the "won't budge" first drag and the per-move jank.
+  const source = event.currentTarget;
+  const rect = source?.getBoundingClientRect?.();
+  if (rect && event.dataTransfer?.setDragImage) {
+    const offsetX = Math.max(0, Math.min(rect.width || 0, (event.clientX || 0) - rect.left));
+    const offsetY = Math.max(0, Math.min(rect.height || 0, (event.clientY || 0) - rect.top));
+    event.dataTransfer.setDragImage(source, offsetX, offsetY);
+  }
+  resetDragTabRectCache();
 }
 
 function endSessionDrag(event) {
   dragSession = null;
   dragSourceSlot = null;
+  resetDragTabRectCache();
   stopCustomDragPreview();
   sessionButtons.classList.remove('drag-over');
   clearDropPreview();
@@ -12588,13 +12579,41 @@ function clearPaneTabDropPreview(strip) {
   strip.style.removeProperty('--tab-drop-height');
 }
 
+// #47: reset the per-drag tab-rect cache (called at drag start/end). See dragMeasureStrip.
+function resetDragTabRectCache() {
+  dragTabRectCache = null;
+}
+
+// During a live drag the tabs do not move (renders are deferred, #30), so measure each strip's rect +
+// its tab rects ONCE and reuse them for every dragover instead of forcing sync layout on every move.
+// Outside a drag (e.g. unit tests calling paneTabDropPlacement directly), measure fresh each time.
+function dragMeasureStrip(strip) {
+  if (dragSession != null) {
+    if (!dragTabRectCache || dragTabRectCache.strip !== strip) {
+      dragTabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
+    }
+    return dragTabRectCache;
+  }
+  return {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
+}
+
+function dragMeasureTab(cache, tab) {
+  let rect = cache.rects.get(tab);
+  if (!rect) {
+    rect = tab.getBoundingClientRect();
+    cache.rects.set(tab, rect);
+  }
+  return rect;
+}
+
 function paneTabDropPlacement(strip, event, movingSession) {
   const allTabs = Array.from(strip.querySelectorAll('.pane-tab'));
   // The source's position in the FULL strip (before filtering) drives a directional insert threshold
   // for same-strip reorder; -1 means a cross-pane move (keep the centered threshold).
   const sourceVisualIndex = movingSession ? allTabs.findIndex(tab => tab.dataset.paneTab === movingSession) : -1;
   const tabs = allTabs.filter(tab => tab.dataset.paneTab !== movingSession);
-  const stripRect = strip.getBoundingClientRect();
+  const measure = dragMeasureStrip(strip);
+  const stripRect = measure.stripRect;
   const clampX = value => Math.max(2, Math.min(stripRect.width - 2, value));
   const clampY = (value, height) => Math.max(0, Math.min(Math.max(0, stripRect.height - height), value));
   const defaultHeight = Math.min(32, Math.max(24, stripRect.height || 27));
@@ -12606,7 +12625,7 @@ function paneTabDropPlacement(strip, event, movingSession) {
       height: defaultHeight,
     };
   }
-  const rows = paneTabRows(tabs);
+  const rows = paneTabRows(tabs, tab => dragMeasureTab(measure, tab));
   const row = rows.reduce((best, item) => {
     const distance = Math.abs(event.clientY - item.centerY);
     return !best || distance < best.distance ? {row: item, distance} : best;
@@ -12638,10 +12657,10 @@ function paneTabDropPlacement(strip, event, movingSession) {
   };
 }
 
-function paneTabRows(tabs) {
+function paneTabRows(tabs, rectFor = tab => tab.getBoundingClientRect()) {
   const rows = [];
   tabs.forEach((tab, index) => {
-    const rect = tab.getBoundingClientRect();
+    const rect = rectFor(tab);
     const centerY = rect.top + rect.height / 2;
     const row = rows.find(item => Math.abs(centerY - item.centerY) <= Math.max(4, item.height / 2));
     const target = row || {items: [], top: rect.top, bottom: rect.bottom, centerY, height: rect.height};

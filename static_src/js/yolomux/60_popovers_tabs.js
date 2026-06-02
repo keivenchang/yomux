@@ -858,31 +858,8 @@ function stopCustomDragPreview() {
   closeFileImagePreview();
 }
 
-function startCustomDragPreview(event) {
-  const source = event.currentTarget;
-  if (!source || !source.cloneNode) return;
-  stopCustomDragPreview();
-  const rect = source.getBoundingClientRect();
-  const clone = source.cloneNode(true);
-  clone.classList?.remove('popover-open', 'dragging');
-  clone.classList?.add('drag-image');
-  clone.querySelectorAll?.('.session-popover').forEach(node => node.remove());
-  clone.style.position = 'fixed';
-  clone.style.width = `${Math.max(1, Math.round(rect.width || 1))}px`;
-  clone.style.height = `${Math.max(1, Math.round(rect.height || 1))}px`;
-  clone.style.opacity = '0.50';
-  clone.style.pointerEvents = 'none';
-  clone.style.zIndex = '99999';
-  document.body.appendChild(clone);
-  customDragPreview = clone;
-  const offsetX = Math.max(0, Math.min(rect.width || 0, event.clientX - rect.left)) || Math.max(1, (rect.width || 1) / 2);
-  const offsetY = Math.max(0, Math.min(rect.height || 0, event.clientY - rect.top)) || Math.max(1, (rect.height || 1) / 2);
-  customDragPreviewOffset = {x: offsetX, y: offsetY};
-  moveCustomDragPreview(event);
-  bindCustomDragPreviewListeners();
-  event.dataTransfer?.setDragImage?.(transparentNativeDragImage(), 0, 0);
-}
-
+// #47: tab drags use the native drag image (see startSessionDrag) — the clone-follow tab preview is
+// gone. The custom-preview machinery below is retained only for the rich FILE drag preview.
 function startFileDragPreview(event, paths, entry) {
   stopCustomDragPreview();
   const normalizedPaths = Array.from(new Set((paths || []).filter(Boolean)));
@@ -930,12 +907,23 @@ function startSessionDrag(event, session, sourceSlot = null) {
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('application/x-yolomux-session', payload);
   event.dataTransfer.setData('text/plain', session);
-  startCustomDragPreview(event);
+  // #47: use the NATIVE drag image — a one-time compositor snapshot of the tab itself — instead of the
+  // JS clone-follow preview. That removes the per-move reposition, the two document capture listeners,
+  // and the animated heavyweight clone that caused the "won't budge" first drag and the per-move jank.
+  const source = event.currentTarget;
+  const rect = source?.getBoundingClientRect?.();
+  if (rect && event.dataTransfer?.setDragImage) {
+    const offsetX = Math.max(0, Math.min(rect.width || 0, (event.clientX || 0) - rect.left));
+    const offsetY = Math.max(0, Math.min(rect.height || 0, (event.clientY || 0) - rect.top));
+    event.dataTransfer.setDragImage(source, offsetX, offsetY);
+  }
+  resetDragTabRectCache();
 }
 
 function endSessionDrag(event) {
   dragSession = null;
   dragSourceSlot = null;
+  resetDragTabRectCache();
   stopCustomDragPreview();
   sessionButtons.classList.remove('drag-over');
   clearDropPreview();

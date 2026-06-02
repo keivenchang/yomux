@@ -1338,6 +1338,12 @@ function makeFileTree(paths) {
   assert.ok(/if \(path === 'general\.language'\) applyLocale\(resolveLocalePref\(value\)\)/.test(source), '#50: the language select switches locale optimistically, not on the poll');
   // #52: the wordmark YO/LO glyphs localize client-side (優樂 / 优乐) via t(brand.wordmark.*).
   assert.ok(/function renderBrandWordmark\(\)[\s\S]*?t\('brand\.wordmark\.yo'\)[\s\S]*?t\('brand\.wordmark\.lo'\)/.test(source), '#52: renderBrandWordmark localizes the YO/LO wordmark glyphs');
+  // #47: tab drags use the native drag image (no JS clone-follow), and the drop-placement path reuses
+  // cached tab rects during a drag instead of forcing sync layout (getBoundingClientRect) per move.
+  assert.ok(/function startSessionDrag[\s\S]*?setDragImage\(source/.test(source), '#47: tab drags install the native drag image (the tab itself)');
+  assert.equal(source.includes('function startCustomDragPreview'), false, '#47: the tab clone-follow preview is removed');
+  assert.ok(/function paneTabDropPlacement[\s\S]*?dragMeasureStrip\(strip\)/.test(source), '#47: drop placement measures the strip via the per-drag cache');
+  assert.ok(/function dragMeasureStrip\([\s\S]*?dragSession != null[\s\S]*?dragTabRectCache/.test(source), '#47: the rect cache is only active during a live drag');
   assert.ok(source.includes('id="summary-${session}" class="summary-preview markdown-body"'), 'the AI Transcript panel is a markdown-body container, not a raw <pre>');
   assert.ok(source.includes("AI Transcript for session '"), 'the AI Transcript panel head names the session');
   assert.ok(/function startSummaryStream[\s\S]*renderMarkdownPreviewInto\(node, raw\)/.test(source), 'the AI Transcript stream renders accumulated text through the markdown pipeline');
@@ -4284,16 +4290,13 @@ function makeFileTree(paths) {
   assert.equal(event.dataTransfer.effectAllowed, 'move');
   assert.equal(event.dataTransfer['application/x-yolomux-session'], JSON.stringify({session: '4', sourceSlot: 'left'}));
   assert.equal(event.dataTransfer['text/plain'], '4');
-  assert.ok(event.dataTransfer.dragImage, 'transparent native drag image is installed');
-  assert.equal(event.dataTransfer.dragImage.node.className, 'transparent-drag-image');
-  assert.equal(event.dataTransfer.dragImage.x, 0);
-  assert.equal(event.dataTransfer.dragImage.y, 0);
-  const preview = api.customDragPreviewForTest();
-  assert.ok(preview, 'custom drag preview is installed');
-  assert.equal(preview.style.opacity, '0.50');
-  assert.ok(preview.classList.contains('drag-image'));
-  assert.equal(preview.style.left, '100px');
-  assert.equal(preview.style.top, '20px');
+  // #47: tab drags use the NATIVE drag image — a one-time snapshot of the tab itself, positioned under
+  // the grab point — with NO transparent image, NO JS clone-follow preview, and NO document listeners.
+  assert.ok(event.dataTransfer.dragImage, 'native drag image is installed');
+  assert.equal(event.dataTransfer.dragImage.node, source, '#47: the drag image is the tab itself (compositor snapshot)');
+  assert.equal(event.dataTransfer.dragImage.x, 25, '#47: drag-image grab offset X follows the pointer');
+  assert.equal(event.dataTransfer.dragImage.y, 11, '#47: drag-image grab offset Y follows the pointer');
+  assert.equal(api.customDragPreviewForTest(), null, '#47: tab drags install no JS clone-follow preview');
 }
 
 {
