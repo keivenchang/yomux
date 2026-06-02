@@ -283,6 +283,7 @@ globalThis.__layoutTestApi = {
   t,
   tPlural,
   yoagentInlineMarkdown,
+  yoagentTightMarkdown,
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
@@ -1643,7 +1644,7 @@ function makeFileTree(paths) {
   // #45: assistant replies are structured Markdown — flag the body and render it through marked.js.
   assert.ok(source.includes('function renderYoagentMessageMarkdown'), '#45: YO!agent assistant replies render their multi-section Markdown body');
   assert.ok(/\.yoagent-message\.assistant \.yoagent-message-body\[data-yoagent-markdown\]/.test(source), '#45: the markdown render pass targets flagged assistant message bodies');
-  assert.ok(/renderMarkdownPreviewInto\(body, body\.textContent/.test(source), '#45: assistant message Markdown is rendered from the escaped-text fallback');
+  assert.ok(/renderMarkdownPreviewInto\(body, yoagentTightMarkdown\(body\.textContent/.test(source), '#45/#129: assistant message Markdown is rendered (tightened) from the escaped-text fallback');
   assert.ok(source.includes("roleClass === 'assistant' ? 'yoagent-message-body markdown-body'"), '#45: assistant message bodies get the markdown-body class for formatting');
   // #42: editor controls (# / wrap / find / FROM-TO / diff / theme / save) move OFF the tab strip
   // onto a dedicated toolbar info line below the tabs; the tab strip keeps only tabs + frame controls.
@@ -3983,6 +3984,17 @@ function makeFileTree(paths) {
   assert.ok(source.includes('yoagent-session-summary-body markdown-body" data-yoagent-summary-markdown'), '#29: the summary body is flagged for markdown rendering');
   assert.ok(/\.yoagent-session-summary-body\[data-yoagent-summary-markdown\]/.test(source), '#29: renderYoagentMessageMarkdown renders the summary card body');
   assert.ok(/renderMarkdownPreviewInto\(body, yoagentInlineMarkdown\(/.test(source), '#29: summary markdown is heading-downgraded before rendering');
+  // DOIT.6 #129: the yoagent markdown normalizer tightens loose lists / collapses blank-line runs.
+  assert.equal(api.yoagentTightMarkdown('- a\n\n- b\n\n- c'), '- a\n- b\n- c', '#129: blank lines between adjacent list items are stripped (tight list)');
+  assert.equal(api.yoagentTightMarkdown('1. a\n\n2. b'), '1. a\n2. b', '#129: ordered-list item gaps are stripped too');
+  assert.equal(api.yoagentTightMarkdown('lead\n\n\n\nmore'), 'lead\n\nmore', '#129: runs of 2+ blank lines collapse to one');
+  assert.equal(api.yoagentTightMarkdown('- a\n\nparagraph'), '- a\n\nparagraph', '#129: a blank line before a NON-list paragraph is preserved');
+  // The chat assistant path also runs the tightener (not just the summary path).
+  assert.ok(/renderMarkdownPreviewInto\(body, yoagentTightMarkdown\(/.test(source), '#129: the chat assistant body is tightened before rendering');
+  // yoagentInlineMarkdown folds in the tightening (heading downgrade + tight lists).
+  assert.equal(api.yoagentInlineMarkdown('## H\n\n- a\n\n- b'), '**H**\n\n- a\n- b', '#129: inline-markdown downgrades headings AND tightens the list');
+  // DOIT.6 #128: a <p> inside an <li> carries no margin so loose lists render tight.
+  assert.ok(/\.markdown-body li > p\s*\{[^}]*margin:\s*0/.test(fs.readFileSync('static/yolomux.css', 'utf8')), '#128: .markdown-body li > p has zero margin');
 }
 
 {

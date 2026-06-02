@@ -6129,6 +6129,9 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 }
 .markdown-body ul, .markdown-body ol { margin: 4px 0 6px 22px; }
 .markdown-body li { margin: 2px 0; }
+/* DOIT.6 #128: a <p> directly inside an <li> (loose lists) carries no vertical margin, so a loose
+   list renders as tightly as a tight one. Safe for the file-editor preview too. */
+.markdown-body li > p { margin: 0; }
 .markdown-body blockquote { border-left: 3px solid var(--line); margin: 6px 0; padding: 3px 8px; color: var(--muted); }
 .markdown-body table { border-collapse: collapse; margin: 8px 0; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }

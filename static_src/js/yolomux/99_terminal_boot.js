@@ -244,8 +244,19 @@ function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content'
 // Downgrade block-level headings (#/##/### …) to inline bold so an embedded agent heading renders as
 // emphasis inside a compact card instead of a giant h1/h2 that balloons its height. Inline emphasis,
 // code, lists, and links are left intact for marked.js to render.
+// DOIT.6 #129: the LLM backends emit "loose" markdown (blank lines between list items, double blank
+// lines between sections) which marked.js renders with big gaps. Tighten ONLY the yoagent inputs
+// (not the shared file-editor preview): collapse 2+ blank lines to one, and drop blank lines between
+// adjacent list items so a loose list renders as tightly as a tight one.
+function yoagentTightMarkdown(text) {
+  return String(text || '')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^([ \t]*(?:[-*+]|\d+\.)[ \t].*)\n(?:[ \t]*\n)+(?=[ \t]*(?:[-*+]|\d+\.)[ \t])/gm, '$1\n');
+}
+
 function yoagentInlineMarkdown(text) {
-  return String(text || '').replace(/^[ \t]*#{1,6}[ \t]+(.*?)[ \t]*#*$/gm, (match, title) => (title ? `**${title}**` : ''));
+  const downgraded = String(text || '').replace(/^[ \t]*#{1,6}[ \t]+(.*?)[ \t]*#*$/gm, (match, title) => (title ? `**${title}**` : ''));
+  return yoagentTightMarkdown(downgraded);
 }
 
 function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
@@ -253,7 +264,7 @@ function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-co
   // titles, code, lists, and links display formatted. Without marked.js the escaped-text fallback stays.
   if (!node || typeof window.marked === 'undefined') return;
   (node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || []).forEach(body => {
-    renderMarkdownPreviewInto(body, body.textContent || '');
+    renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
     body.removeAttribute('data-yoagent-markdown');
   });
   // Per-session summary bodies embed the agent's own transcript markdown (## headings etc.): downgrade
