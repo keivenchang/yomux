@@ -3945,6 +3945,22 @@ function makeFileTree(paths) {
   assert.ok(html.includes(enXA['pref.general.auto_focus.label']), 'pseudo-locale General field label renders');
   assert.ok(html.includes(enXA['pref.general.language.help']), 'pseudo-locale field help renders');
   assert.equal(html.includes('Auto-focus active pane'), false, 'no plain-English General field label leaks under the pseudo-locale');
+  // DOIT.8 Phase 0 (extraction complete): every preference section's fields are i18n-keyed, so the
+  // pseudo-locale accents them and NO plain-English label/help from any section leaks through.
+  for (const key of [
+    'pref.appearance.theme.label', 'pref.appearance.terminal_theme.help',
+    'pref.performance.metadata_refresh_ms.label', 'pref.notifications.throttle_seconds.label',
+    'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',
+    'pref.yoagent.backend.label', 'pref.yolo.dry_run.label',
+  ]) {
+    assert.ok(html.includes(enXA[key]), `pseudo-locale renders ${key}`);
+  }
+  for (const englishLeak of [
+    'Global color theme', 'Metadata refresh interval', 'Notification throttle',
+    'Terminal scrollback', 'Upload size cap', 'YO!agent backend', 'Dry run',
+  ]) {
+    assert.equal(html.includes(englishLeak), false, `no plain-English "${englishLeak}" leaks under the pseudo-locale`);
+  }
 }
 
 {
@@ -3984,9 +4000,11 @@ function makeFileTree(paths) {
   assert.ok(source.includes('patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next)'), '#11: the View theme toggle moves the terminal palette in lockstep');
   // #10: a global-theme change re-themes live editors via the compartment swap.
   assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme change re-themes open editors');
-  // #12: Preferences field renamed.
-  assert.ok(source.includes("label: 'Global color theme'"), '#12: the Preferences field reads "Global color theme"');
-  assert.equal(source.includes("label: 'Global app theme'"), false, '#12: no stale "Global app theme" label remains');
+  // #12: Preferences field renamed. (DOIT.8 Phase 0: the label is now i18n-keyed; en.json holds the text.)
+  assert.ok(source.includes("label: t('pref.appearance.theme.label')"), '#12: the global theme field is i18n-keyed');
+  const enThemeCatalog = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
+  assert.equal(enThemeCatalog['pref.appearance.theme.label'], 'Global color theme', '#12: the Preferences field reads "Global color theme"');
+  assert.equal(enThemeCatalog['pref.appearance.theme.label'] === 'Global app theme', false, '#12: no stale "Global app theme" label remains');
   // #13: Help -> README opens rendered markdown preview.
   assert.ok(source.includes("openFileInEditor(path, 'README.md', {viewMode: 'preview'})"), '#13: README opens in preview mode');
 }
