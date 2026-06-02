@@ -638,8 +638,14 @@ class TmuxWebtermApp:
             worker = self.auto_workers.get(session)
             if worker is None:
                 return {"ok": True, "session": session, "enabled": False, "message": "YOLO was not enabled here"}
-            worker.stop()
+            # DOIT.6 #70: confirm the worker thread actually exited (and released its flock) BEFORE
+            # reporting released — otherwise the requester could re-acquire while this worker is still
+            # alive and about to fire one more keystroke (two workers on one session).
+            released = worker.stop()
             self.auto_workers.pop(session, None)
+        if not released:
+            self.log_event(session, "yolo_release_timeout", "YOLO worker did not stop in time", {"requester": requester})
+            return {"ok": False, "session": session, "error": "YOLO worker did not stop in time"}
         self.log_event(session, "yolo_released", "YOLO released for another server", {"requester": requester})
         return {"ok": True, "session": session, "enabled": False}
 
@@ -1316,18 +1322,27 @@ class TmuxWebtermApp:
             return worker, worker.status()
         locked_owner = owner
         if takeover and self.request_auto_approve_release(session, owner):
-            worker = AutoApproveWorker(
-                session,
-                interval=self.auto_approve_interval_seconds(),
-                event_callback=self.log_auto_event,
-                owner_extra=self.control_server.owner_payload(),
-                dangerously_yolo=self.dangerously_yolo,
-                prompt_source=self.auto_approve_prompt_source(),
-            )
-            started, owner = worker.start()
-            if started:
-                self.log_event(session, "yolo_takeover", "YOLO moved from another server", {"owner": locked_owner or {}})
-                return worker, worker.status()
+            # #69: re-acquire with the SINGLE atomic non-blocking flock (worker.start), retried briefly to
+            # absorb any lag between the owner's ok and its flock release. Each attempt is atomic, so a
+            # third instance grabbing the lock in the gap simply fails the acquire (reported locked) —
+            # never a double-owner.
+            deadline = time.monotonic() + 2.0
+            while True:
+                worker = AutoApproveWorker(
+                    session,
+                    interval=self.auto_approve_interval_seconds(),
+                    event_callback=self.log_auto_event,
+                    owner_extra=self.control_server.owner_payload(),
+                    dangerously_yolo=self.dangerously_yolo,
+                    prompt_source=self.auto_approve_prompt_source(),
+                )
+                started, owner = worker.start()
+                if started:
+                    self.log_event(session, "yolo_takeover", "YOLO moved from another server", {"owner": locked_owner or {}})
+                    return worker, worker.status()
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
         payload = worker.status()
         payload.update({
             "enabled": False,
@@ -1354,13 +1369,11 @@ class TmuxWebtermApp:
         if response.get("ok") is not True:
             self.log_event(session, "yolo_takeover_failed", "YOLO owner did not release", {"owner": owner or {}, "response": response})
             return False
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            if auto_approve_lock_owner(session) is None:
-                return True
-            time.sleep(0.05)
-        self.log_event(session, "yolo_takeover_failed", "YOLO owner kept lock after release request", {"owner": owner or {}, "response": response})
-        return False
+        # DOIT.6 #69: the owner stopped its worker and released the flock before replying ok (it joins the
+        # thread first, #70). Do NOT probe-and-poll the lock to "infer" we may take it — that LOCK_EX
+        # probe momentarily acquires the lock and races a third instance. Trust the owner's ok; the
+        # caller re-acquires with a single atomic non-blocking flock, which is the only safe arbiter.
+        return True
 
     def prompt_and_screen_status(
         self,

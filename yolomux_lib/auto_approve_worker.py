@@ -22,6 +22,11 @@ from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import truncate_text
 
+# DOIT.6 #70: stop() joins for at least this long so an in-flight capture + keystroke walk (~0.6s) and
+# the post-approval / max-interval sleep (interruptible via stop_event, but the send is not) can finish
+# and the thread can release its flock before a takeover re-acquires.
+AUTO_APPROVE_STOP_JOIN_SECONDS = 5.0
+
 
 LOGGER = logging.getLogger(__name__)
 EXPECTED_AUTO_APPROVE_ERRORS = (OSError, subprocess.SubprocessError, TimeoutError, json.JSONDecodeError)
@@ -164,9 +169,14 @@ class AutoApproveWorker:
         self.thread.start()
         return True, None
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
+        # DOIT.6 #70: join long enough for the thread to finish any in-flight capture/send (the relative
+        # keystroke walk alone is ~0.6s) and exit + release its flock. A 1.0s join could return while the
+        # thread is still alive and about to fire ONE more keystroke after a takeover (two workers, one
+        # session). Returns True only when the thread has actually exited.
         self.stop_event.set()
-        self.thread.join(timeout=1.0)
+        self.thread.join(timeout=AUTO_APPROVE_STOP_JOIN_SECONDS)
+        return not self.thread.is_alive()
 
     def alive(self) -> bool:
         return self.thread.is_alive() and not self.stop_event.is_set()
@@ -286,13 +296,30 @@ class AutoApproveWorker:
         return False
 
     def send_action(self, module: Any, action: str | None, selected_option: int = 1) -> bool:
-        if selected_option > 0 and hasattr(module, "tmux_capture_pane") and hasattr(module, "selected_prompt_option"):
-            visible_text = module.tmux_capture_pane(self.target, visible_only=True)
-            current_option = module.selected_prompt_option(visible_text or "")
+        option = 2 if action == "option2" else 1
+        can_verify = hasattr(module, "tmux_capture_pane") and hasattr(module, "selected_prompt_option")
+        # Pre-walk: don't even start the walk if the highlight already moved off the expected option.
+        if selected_option > 0 and can_verify:
+            current_option = module.selected_prompt_option(module.tmux_capture_pane(self.target, visible_only=True) or "")
             if current_option > 0 and current_option != selected_option:
                 self.update(last_action=f"approval option moved from {selected_option} to {current_option}; waiting for next capture")
                 return False
-        option = 2 if action == "option2" else 1
+        # DOIT.6 #66: walk the highlight to the target, then RE-VERIFY it landed there before pressing
+        # Enter — the menu can redraw/move during the ~0.6s relative walk, so confirm the FINAL state
+        # instead of confirming blind (which could pick the wrong option, even "No"). Abort+retry if it
+        # is not on the target (or the highlight is unreadable).
+        if can_verify and hasattr(module, "tmux_move_to_option") and hasattr(module, "tmux_send_enter"):
+            if self.stop_event.is_set():
+                return False
+            module.tmux_move_to_option(self.target, option, selected_option)
+            confirmed = module.selected_prompt_option(module.tmux_capture_pane(self.target, visible_only=True) or "")
+            if confirmed != option:
+                self.update(last_action=f"approval highlight is {confirmed or 'none'}, expected {option} after move; not confirming")
+                return False
+            if self.stop_event.is_set():
+                return False
+            module.tmux_send_enter(self.target)
+            return True
         if hasattr(module, "tmux_send_option"):
             module.tmux_send_option(self.target, option, selected_option)
             return True

@@ -66,6 +66,48 @@ class MovingOptionModule(DummyProcessModule):
         return 2
 
 
+class StableWalkModule(DummyProcessModule):
+    # DOIT.6 #66: highlight stays on the target through the walk; records the walk + Enter.
+    def __init__(self, prompt_state: dict[str, Any]):
+        super().__init__(prompt_state)
+        self.moved: list[Any] = []
+
+    def selected_prompt_option(self, _visible_text: str) -> int:
+        return 1
+
+    def tmux_move_to_option(self, target: str, option: int, selected_option: int | None = None) -> None:
+        self.moved.append((target, option, selected_option))
+
+
+class PostWalkMoveModule(StableWalkModule):
+    # Highlight is correct at the pre-walk check (1) but moves to 2 AFTER the walk (a redraw).
+    def __init__(self, prompt_state: dict[str, Any]):
+        super().__init__(prompt_state)
+        self._calls = 0
+
+    def selected_prompt_option(self, _visible_text: str) -> int:
+        self._calls += 1
+        return 1 if self._calls == 1 else 2
+
+
+def test_send_action_confirms_after_reverifying_the_walked_highlight():
+    # DOIT.6 #66: walk to the target, re-verify it landed there, THEN press Enter.
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    module = StableWalkModule({"type": "bash", "selected_option": 1})
+    assert worker.send_action(module, "option1", selected_option=1) is True
+    assert module.moved == [("6", 1, 1)]
+    assert ("enter", "6") in module.sent
+
+
+def test_send_action_aborts_when_highlight_moves_during_the_walk():
+    # DOIT.6 #66: if the highlight moved during the ~0.6s walk, do NOT press Enter (could confirm "No").
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)
+    module = PostWalkMoveModule({"type": "bash", "selected_option": 1})
+    assert worker.send_action(module, "option1", selected_option=1) is False
+    assert module.moved == [("6", 1, 1)]
+    assert ("enter", "6") not in module.sent
+
+
 def approving_decision(*_args: Any, **_kwargs: Any) -> dict[str, str]:
     return {
         "action": "approve",

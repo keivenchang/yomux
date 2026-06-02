@@ -112,7 +112,9 @@ def tmux_send_enter(target: str) -> None:
     tmux_run("send-keys", "-t", tmux_exact_target(target), "Enter", check=False)
 
 
-def tmux_send_option(target: str, option: int, selected_option: int | None = None) -> None:
+def tmux_move_to_option(target: str, option: int, selected_option: int | None = None) -> None:
+    # DOIT.6 #66: walk the highlight to `option` WITHOUT pressing Enter, so the caller can re-verify the
+    # highlight actually landed on the target before confirming (the menu can redraw/move during a walk).
     exact_target = tmux_exact_target(target)
     selected = selected_option if selected_option and selected_option > 0 else 1
     delta = option - selected
@@ -120,7 +122,11 @@ def tmux_send_option(target: str, option: int, selected_option: int | None = Non
     for _ in range(min(abs(delta), 6)):
         tmux_run("send-keys", "-t", exact_target, key, check=False)
         time.sleep(0.1)
-    tmux_send_enter(exact_target)
+
+
+def tmux_send_option(target: str, option: int, selected_option: int | None = None) -> None:
+    tmux_move_to_option(target, option, selected_option)
+    tmux_send_enter(tmux_exact_target(target))
 
 
 def tmux_send_option1(target: str, selected_option: int | None = None) -> None:

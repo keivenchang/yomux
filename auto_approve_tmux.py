@@ -71,6 +71,8 @@ from yolomux_lib.tmux_utils import tmux_capture_pane
 from yolomux_lib.tmux_utils import tmux_exact_target_from_sessions
 from yolomux_lib.tmux_utils import tmux_has_session
 from yolomux_lib.tmux_utils import tmux_list_sessions
+from yolomux_lib.tmux_utils import tmux_move_to_option
+from yolomux_lib.tmux_utils import tmux_send_enter
 from yolomux_lib.tmux_utils import tmux_send_option
 from yolomux_lib.tmux_utils import tmux_session_names
 from yolomux_lib.transcripts import transcript_pending_approval
