@@ -12020,7 +12020,7 @@ function renderLayoutNode(node, path) {
   handle.tabIndex = 0;
   handle.dataset.splitPath = path;
   handle.setAttribute('aria-orientation', node.split === 'column' ? 'horizontal' : 'vertical');
-  handle.setAttribute('aria-label', 'Resize panes');
+  handle.setAttribute('aria-label', t('pane.resize'));
   section.append(first, handle, second);
   applySplitPercentToSection(section, node.pct);
   bindLayoutResizer(handle, section, path);
@@ -12234,7 +12234,7 @@ function renderEmptyPane(slot) {
   const panel = document.createElement('article');
   panel.className = 'panel empty-pane-panel';
   panel.dataset.slot = slot;
-  panel.setAttribute('aria-label', 'Empty pane');
+  panel.setAttribute('aria-label', t('pane.empty'));
   panel.appendChild(document.createElement('div'));
   panel.children[0].className = 'empty-pane-fill';
   return panel;
@@ -12539,13 +12539,13 @@ function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
 }
 
 function preferencesPaneTabHtml(item = prefsItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">Preferences</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.preferences'))}</span></span>`;
 }
 
 function changesPaneTabHtml(item = changesItemId, options = {}) {
   const count = sessionFilesPayload.files?.length || 0;
   const badge = count ? `<span class="session-state-badge changes-count-badge">${count}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">Changes</span>${badge}</span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.changes'))}</span>${badge}</span>`;
 }
 
 function fileEditorPaneTabHtml(item, options = {}) {
@@ -12557,7 +12557,7 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
   const dirty = state.dirty ? '<span class="file-tab-dirty" title="modified" aria-label="modified"></span>' : '';
   const missing = openFileIsMissing(path) ? '<span class="file-tab-missing-badge" title="missing on disk" aria-label="missing on disk">missing</span>' : '';
-  const kind = isFilePreviewItem(item) ? '<span class="file-tab-kind" title="preview only">Preview</span>' : '';
+  const kind = isFilePreviewItem(item) ? `<span class="file-tab-kind" title="${esc(t('tab.previewOnly'))}">${esc(t('tab.preview'))}</span>` : '';
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}${kind}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
 }
 
@@ -13089,7 +13089,7 @@ function createInfoPanel() {
       <div class="panel-detail-row">
         <div class="panel-copy">
           <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel)}</span></div>
-          <div id="meta-${infoItemId}" class="meta">Repo metadata, PRs, CI, and the AI activity summary</div>
+          <div id="meta-${infoItemId}" class="meta">${esc(t('info.subtitle'))}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
@@ -13102,14 +13102,14 @@ function createInfoPanel() {
         <div class="info-subview" data-info-subview="info">
           <div class="transcript-head info-head">
             <span>${esc(infoTabLabel)}</span>
-            <button type="button" class="info-refresh" data-info-refresh title="Refresh repo metadata">Refresh repo metadata</button>
+            <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
           </div>
           <div id="info-content" class="info-list"></div>
         </div>
         <div class="info-subview yoagent-subview" data-info-subview="yoagent">
           <div class="transcript-head info-head">
             <span>${esc(yoagentTabLabel)}</span>
-            <button type="button" class="info-refresh" data-yoagent-refresh title="Refresh AI activity summary">Refresh summary</button>
+            <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
           </div>
           <div id="yoagent-content" class="info-list yoagent-list"></div>
         </div>
@@ -13210,13 +13210,13 @@ function activitySummaryLinesHtml(lines, options = {}) {
 
 function relativeActivityGeneratedText(payload = activitySummaryPayload) {
   const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
-  if (!Number.isFinite(ts) || ts <= 0) return {text: 'not loaded', title: ''};
+  if (!Number.isFinite(ts) || ts <= 0) return {text: t('yoagent.notLoaded'), title: ''};
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
   const text = seconds < 60
-    ? 'last updated just now'
+    ? t('yoagent.updated.justNow')
     : seconds < 3600
-      ? `last updated ${Math.round(seconds / 60)} min ago`
-      : `last updated ${Math.round(seconds / 3600)} hr ago`;
+      ? t('yoagent.updated.minAgo', {n: Math.round(seconds / 60)})
+      : t('yoagent.updated.hrAgo', {n: Math.round(seconds / 3600)});
   let title = payload?.generated_at || '';
   try {
     title = new Intl.DateTimeFormat(undefined, {
@@ -13235,14 +13235,14 @@ function globalActivitySummaryHtml() {
   const headline = summary.headline || lines[0] || '';
   const detailLines = lines.filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)));
   const generated = relativeActivityGeneratedText();
-  const refreshBar = activitySummaryRefreshing ? '<div class="yoagent-refresh-progress" aria-label="Refreshing summary"></div>' : '';
-  return `<section class="yoagent-global" aria-label="${esc(yoagentTabLabel)} AI activity summary">
+  const refreshBar = activitySummaryRefreshing ? `<div class="yoagent-refresh-progress" aria-label="${esc(t('yoagent.refreshing'))}"></div>` : '';
+  return `<section class="yoagent-global" aria-label="${esc(t('yoagent.globalAria', {name: yoagentTabLabel}))}">
     <div class="yoagent-global-head">
       <span>${esc(yoagentTabLabel)}</span>
       <span class="yoagent-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
     </div>
     ${refreshBar}
-    ${headline ? `<div class="yoagent-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: 'No AI agent activity detected yet.'})}
+    ${headline ? `<div class="yoagent-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: t('yoagent.emptyGlobal')})}
     ${activitySummaryLinesHtml(detailLines)}
   </section>`;
 }
@@ -13255,11 +13255,11 @@ function yoagentSessionSummariesHtml() {
       const summary = sessions?.[session];
       if (!summary?.local) return '';
       const status = summary.active ? 'active' : 'idle';
-      const files = summary.files?.count ? `${summary.files.count} files (+${summary.files.added || 0}/-${summary.files.removed || 0})` : 'no files yet';
+      const files = summary.files?.count ? t('yoagent.files', {count: summary.files.count, added: summary.files.added || 0, removed: summary.files.removed || 0}) : t('yoagent.noFiles');
       return `<article class="yoagent-session-summary ${esc(status)}">
         <div class="yoagent-session-summary-head">
-          <span>session ${esc(session)}</span>
-          <span>${esc(summary.agent_label || summary.agent || 'agent')}</span>
+          <span>${esc(t('yoagent.sessionLabel', {session}))}</span>
+          <span>${esc(summary.agent_label || summary.agent || t('yoagent.agentFallback'))}</span>
           <span>${esc(files)}</span>
         </div>
         <div class="yoagent-session-summary-body markdown-body" data-yoagent-summary-markdown>${esc(summary.local)}</div>
@@ -13267,8 +13267,8 @@ function yoagentSessionSummariesHtml() {
     })
     .filter(Boolean)
     .join('');
-  return `<section class="yoagent-session-summaries" aria-label="Per-session AI activity summaries">
-    ${rows || '<div class="yoagent-empty">No per-session AI activity detected yet.</div>'}
+  return `<section class="yoagent-session-summaries" aria-label="${esc(t('yoagent.perSessionAria'))}">
+    ${rows || `<div class="yoagent-empty">${esc(t('yoagent.emptyPerSession'))}</div>`}
   </section>`;
 }
 
@@ -13276,12 +13276,12 @@ function yoagentChatMessagesHtml() {
   const messages = Array.isArray(yoagentMessages) ? yoagentMessages : [];
   if (!messages.length) {
     if (!yoagentChatEnabled()) {
-      return '<div class="yoagent-chat-empty">Set a Claude or Codex backend in Preferences to chat.</div>';
+      return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatDisabled'))}</div>`;
     }
-    return '<div class="yoagent-chat-empty">Ask YO!agent what the running AI agents are doing.</div>';
+    return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatEmpty', {name: yoagentTabLabel}))}</div>`;
   }
   return messages.map(message => {
-    const role = message.role === 'user' ? 'You' : yoagentTabLabel;
+    const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel;
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
     // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
     // renderYoagentMessageMarkdown() can render it. The escaped text stays as the no-marked fallback.
@@ -13302,11 +13302,11 @@ function yoagentNoticeHtml() {
 
 function yoagentBackendLabel(value) {
   const key = String(value || '').toLowerCase();
-  if (key === 'auto') return 'Auto';
-  if (key === 'deterministic') return 'No agent';
+  if (key === 'auto') return t('yoagent.backend.auto');
+  if (key === 'deterministic') return t('yoagent.backend.none');
   if (key === 'codex') return 'Codex';
   if (key === 'claude') return 'Claude';
-  return value || 'No agent';
+  return value || t('yoagent.backend.none');
 }
 
 function yoagentBackendKey() {
@@ -13330,13 +13330,13 @@ function yoagentChatEnabled() {
 
 function yoagentChatHtml() {
   const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
-  const placeholder = readOnlyMode ? 'YO!agent chat requires admin access' : 'Ask about agents, repos, files, CI, blockers...';
+  const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel}) : t('yoagent.chatPlaceholder');
   const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || yoagentBusy || yoagentError);
   const busy = yoagentBusy
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span>thinking...</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span>${esc(t('yoagent.thinking'))}</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
-    ? '<button type="button" class="yoagent-chat-retry" data-yoagent-retry>Retry</button>'
+    ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
     : '';
   const error = yoagentError ? `<div class="yoagent-chat-error"><span>${esc(yoagentError)}</span>${retry}</div>` : '';
   const clearDisabled = yoagentBusy || (!yoagentMessages.length && !yoagentNotice && !yoagentError) ? ' disabled' : '';
@@ -13344,12 +13344,12 @@ function yoagentChatHtml() {
     ? `<form class="yoagent-chat-form" data-yoagent-chat-form>
       <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
       <div class="yoagent-chat-actions">
-        <button type="submit" class="yoagent-chat-send"${disabled}>Ask</button>
-        <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>Clear conversation</button>
+        <button type="submit" class="yoagent-chat-send"${disabled}>${esc(t('yoagent.ask'))}</button>
+        <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('yoagent.clear'))}</button>
       </div>
     </form>`
     : '';
-  return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="YO!agent chat">
+  return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel}))}">
     <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
     ${form}
   </section>`;
@@ -13362,9 +13362,9 @@ function yoagentChatNetworkError(error) {
 
 function yoagentChatErrorMessage(error) {
   if (yoagentChatNetworkError(error)) {
-    return "Couldn't reach the YOLOmux server. Your question is still in the box; retry after the server is back.";
+    return t('yoagent.networkError');
   }
-  return `chat failed: ${error?.message || error}`;
+  return t('yoagent.chatFailed', {error: error?.message || error});
 }
 
 async function clearYoagentConversation() {
@@ -13376,9 +13376,9 @@ async function clearYoagentConversation() {
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
     await apiFetch('/api/yoagent/reset', {method: 'POST'});
-    statusEl.textContent = 'cleared YO!agent conversation';
+    statusEl.textContent = t('yoagent.statusCleared');
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">clear YO!agent failed: ${esc(error)}</span>`;
+    statusEl.innerHTML = `<span class="err">${esc(t('yoagent.statusClearFailed', {error}))}</span>`;
   }
 }
 
@@ -13403,8 +13403,8 @@ async function sendYoagentChatMessage(rawText) {
     if (payload.fallback && payload.fallback_reason) {
       yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
     }
-    yoagentMessages.push({role: 'assistant', content: payload.answer || 'No answer.'});
-    statusEl.textContent = `YO!agent answered with ${yoagentBackendLabel(payload.backend_used || payload.backend)}`;
+    yoagentMessages.push({role: 'assistant', content: payload.answer || t('yoagent.noAnswer')});
+    statusEl.textContent = t('yoagent.statusAnswered', {backend: yoagentBackendLabel(payload.backend_used || payload.backend)});
   } catch (error) {
     if (yoagentChatNetworkError(error)) yoagentDraft = text;
     yoagentError = yoagentChatErrorMessage(error);
@@ -13603,10 +13603,10 @@ function preferencesPathRowsHtml() {
   const rulesDetail = yoloRulesPayload.source ? ` · ${yoloRuleStatusDetail()}` : '';
   return `
     <div class="preferences-path-row">
-      <span class="preferences-path-label">settings</span><span class="preferences-path-value">${esc(settingsPath)}</span>${pathCopyButtonHtml(settingsPath, {className: 'preferences-path-copy', title: 'Copy settings path'})}
+      <span class="preferences-path-label">${esc(t('pref.path.settings'))}</span><span class="preferences-path-value">${esc(settingsPath)}</span>${pathCopyButtonHtml(settingsPath, {className: 'preferences-path-copy', title: t('pref.path.copySettings')})}
     </div>
     <div class="preferences-path-row">
-      <span class="preferences-path-label">YOLO rules</span><span class="preferences-path-value">${esc(rulesPath)}${esc(rulesDetail)}</span>${pathCopyButtonHtml(rulesPath, {className: 'preferences-path-copy', title: 'Copy YOLO rules path'})}
+      <span class="preferences-path-label">${esc(t('pref.path.rules'))}</span><span class="preferences-path-value">${esc(rulesPath)}${esc(rulesDetail)}</span>${pathCopyButtonHtml(rulesPath, {className: 'preferences-path-copy', title: t('pref.path.copyRules')})}
     </div>`;
 }
 
@@ -13778,7 +13778,7 @@ function preferenceControlHtml(item, query = '') {
   }
   const resetDisabled = readOnlyMode || JSON.stringify(value) === JSON.stringify(defaultValue) ? ' disabled' : '';
   const extraControl = item.action === 'open-yolo-rule'
-    ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${readOnlyMode ? ' disabled' : ''}>Open</button>`
+    ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${readOnlyMode ? ' disabled' : ''}>${esc(t('pref.openAction'))}</button>`
     : '';
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
@@ -13797,9 +13797,9 @@ function preferenceAdvisoryHtml(item, value) {
   if (item.path !== 'uploads.max_bytes' || Number(value) <= uploadRsyncRecommendationBytes) return '';
   const command = uploadRsyncExampleCommand();
   return `<div class="preferences-setting-advisory">
-    <span>Large browser uploads are buffered in memory. Prefer rsync for files above ${esc(formatFileSize(uploadRsyncRecommendationBytes))}.</span>
+    <span>${esc(t('pref.advisory.upload', {size: formatFileSize(uploadRsyncRecommendationBytes)}))}</span>
     <code>${esc(command)}</code>
-    <button type="button" class="preferences-inline-action" data-copy-text="${esc(command)}">Copy rsync example</button>
+    <button type="button" class="preferences-inline-action" data-copy-text="${esc(command)}">${esc(t('pref.advisory.copyRsync'))}</button>
   </div>`;
 }
 
@@ -13829,7 +13829,7 @@ function preferencesPanelHtml() {
           <div class="preferences-settings"${collapsed ? ' hidden' : ''}>${rows}</div>
         </section>`;
     }).join('');
-  const readonly = readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : '';
+  const readonly = readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : '';
   const resetDisabled = readOnlyMode ? ' disabled' : '';
   const resetTitle = preferencesResetConfirmVisible ? t('pref.reset.confirmTitle') : t('pref.reset.title');
   const resetWarning = preferencesResetConfirmVisible
@@ -13850,7 +13850,7 @@ function preferencesPanelHtml() {
     </div>`;
   return `
     <div class="preferences-search-row">
-      <input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="Search settings" aria-label="Search settings">
+      <input type="search" class="preferences-search" data-preferences-search value="${esc(preferencesSearchText)}" placeholder="${esc(t('pref.searchPlaceholder'))}" aria-label="${esc(t('pref.searchPlaceholder'))}">
       <button type="button" class="preferences-search-button" data-preferences-search-action>YOsearch</button>
     </div>
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
@@ -13866,12 +13866,12 @@ function createPreferencesPanel() {
   panel.id = `panel-${prefsItemId}`;
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(prefsItemId, 'Preferences')}
+        ${virtualPanelControlsHtml(prefsItemId, t('tab.preferences'))}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
-          <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">Preferences</span></div>
+          <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.preferences'))}</span></div>
           <div id="meta-${prefsItemId}" class="meta">${esc(preferenceStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
