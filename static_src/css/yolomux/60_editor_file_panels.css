@@ -885,10 +885,10 @@ body.theme-light .file-explorer-changes-head {
   background: rgba(118, 185, 0, 0.88);
 }
 .cm-yolomux-diff-add {
-  background: color-mix(in srgb, var(--code-diff-add) 58%, transparent);
+  background: color-mix(in srgb, var(--code-diff-add) 74%, transparent);
 }
 .cm-yolomux-diff-remove {
-  background: color-mix(in srgb, var(--code-diff-remove) 60%, transparent);
+  background: color-mix(in srgb, var(--code-diff-remove) 76%, transparent);
 }
 .file-editor-diff-codemirror .cm-mergeView {
   height: 100%;
@@ -898,10 +898,10 @@ body.theme-light .file-explorer-changes-head {
 }
 .file-editor-diff-codemirror {
   position: relative;
-  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 58%, transparent);
-  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 60%, transparent);
-  --diff-add-text-bg: color-mix(in srgb, var(--code-diff-add) 70%, transparent);
-  --diff-remove-text-bg: color-mix(in srgb, var(--code-diff-remove) 72%, transparent);
+  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 74%, transparent);
+  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 76%, transparent);
+  --diff-add-text-bg: color-mix(in srgb, var(--code-diff-add) 88%, transparent);
+  --diff-remove-text-bg: color-mix(in srgb, var(--code-diff-remove) 90%, transparent);
 }
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;

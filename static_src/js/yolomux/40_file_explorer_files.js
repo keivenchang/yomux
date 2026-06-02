@@ -2440,28 +2440,35 @@ function markOpenFileDiffUnavailable(state, error) {
 async function refreshOpenFileDiff(path, options = {}) {
   const state = openFiles.get(path);
   if (!state || state.kind !== 'text') return false;
-  if (state.diffLoading) return false;
+  // Dedup concurrent triggers (renderFileEditorPanel + ensureCodeMirrorDiffPanel both ask): a second
+  // caller awaits the SAME in-flight load instead of returning early, so the diff panel never renders
+  // a MergeView against an un-loaded (empty) original (which showed an untracked file all-green).
+  if (state.diffLoading && state._diffLoadingPromise) return state._diffLoadingPromise;
   state.diffLoading = true;
-  try {
-    const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}`);
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.status);
-    applyOpenFileDiffPayload(state, payload);
-    refreshOpenFileDiffDecorations(path);
-    for (const panel of fileEditorPanelsForPath(path)) {
-      updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panel.dataset.layoutItem || '');
-      if (editorViewModeFor(path, panel.dataset.layoutItem || '') === 'diff') renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+  state._diffLoadingPromise = (async () => {
+    try {
+      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || response.status);
+      applyOpenFileDiffPayload(state, payload);
+      refreshOpenFileDiffDecorations(path);
+      for (const panel of fileEditorPanelsForPath(path)) {
+        updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panel.dataset.layoutItem || '');
+        if (editorViewModeFor(path, panel.dataset.layoutItem || '') === 'diff') renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+      }
+      return true;
+    } catch (error) {
+      markOpenFileDiffUnavailable(state, error);
+      if (!options.silent) {
+        for (const panel of fileEditorPanelsForPath(path)) setFileEditorPanelStatus(panel, `diff unavailable: ${String(error)}`, 'warn');
+      }
+      return false;
+    } finally {
+      state.diffLoading = false;
+      state._diffLoadingPromise = null;
     }
-    return true;
-  } catch (error) {
-    markOpenFileDiffUnavailable(state, error);
-    if (!options.silent) {
-      for (const panel of fileEditorPanelsForPath(path)) setFileEditorPanelStatus(panel, `diff unavailable: ${String(error)}`, 'warn');
-    }
-    return false;
-  } finally {
-    state.diffLoading = false;
-  }
+  })();
+  return state._diffLoadingPromise;
 }
 
 async function openFileInEditor(fullPath, entryOrName, options = {}) {

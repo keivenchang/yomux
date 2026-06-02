@@ -764,6 +764,17 @@ async function openDraggedFilesInEditor(payload, options = {}) {
         targetZone: options.targetZone || 'middle',
         targetIndex: options.targetIndex == null ? null : Number(options.targetIndex) + index,
       });
+      // Unify with double-click: a dragged CHANGED (tracked, has-diff) file opens in the SAME diff
+      // view (ensureCodeMirrorDiffPanel) as openChangedFileInDiff, not a plain edit-mode editor.
+      // Unchanged/untracked files have no diff available and stay in edit.
+      await refreshOpenFileDiff(path, {silent: true});
+      const draggedState = openFiles.get(path);
+      if (draggedState && openFileDiffAvailable(draggedState)) {
+        setFileEditorViewMode(path, 'diff', fileEditorItemFor(path));
+        for (const draggedPanel of fileEditorPanelsForPath(path)) {
+          renderFileEditorPanel(draggedPanel, draggedPanel.dataset.layoutItem || fileEditorItemFor(path));
+        }
+      }
       opened += 1;
     } catch (error) {
       showFileOpenError(path, error);

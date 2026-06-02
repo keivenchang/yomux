@@ -7097,28 +7097,35 @@ function markOpenFileDiffUnavailable(state, error) {
 async function refreshOpenFileDiff(path, options = {}) {
   const state = openFiles.get(path);
   if (!state || state.kind !== 'text') return false;
-  if (state.diffLoading) return false;
+  // Dedup concurrent triggers (renderFileEditorPanel + ensureCodeMirrorDiffPanel both ask): a second
+  // caller awaits the SAME in-flight load instead of returning early, so the diff panel never renders
+  // a MergeView against an un-loaded (empty) original (which showed an untracked file all-green).
+  if (state.diffLoading && state._diffLoadingPromise) return state._diffLoadingPromise;
   state.diffLoading = true;
-  try {
-    const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}`);
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.status);
-    applyOpenFileDiffPayload(state, payload);
-    refreshOpenFileDiffDecorations(path);
-    for (const panel of fileEditorPanelsForPath(path)) {
-      updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panel.dataset.layoutItem || '');
-      if (editorViewModeFor(path, panel.dataset.layoutItem || '') === 'diff') renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+  state._diffLoadingPromise = (async () => {
+    try {
+      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || response.status);
+      applyOpenFileDiffPayload(state, payload);
+      refreshOpenFileDiffDecorations(path);
+      for (const panel of fileEditorPanelsForPath(path)) {
+        updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panel.dataset.layoutItem || '');
+        if (editorViewModeFor(path, panel.dataset.layoutItem || '') === 'diff') renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+      }
+      return true;
+    } catch (error) {
+      markOpenFileDiffUnavailable(state, error);
+      if (!options.silent) {
+        for (const panel of fileEditorPanelsForPath(path)) setFileEditorPanelStatus(panel, `diff unavailable: ${String(error)}`, 'warn');
+      }
+      return false;
+    } finally {
+      state.diffLoading = false;
+      state._diffLoadingPromise = null;
     }
-    return true;
-  } catch (error) {
-    markOpenFileDiffUnavailable(state, error);
-    if (!options.silent) {
-      for (const panel of fileEditorPanelsForPath(path)) setFileEditorPanelStatus(panel, `diff unavailable: ${String(error)}`, 'warn');
-    }
-    return false;
-  } finally {
-    state.diffLoading = false;
-  }
+  })();
+  return state._diffLoadingPromise;
 }
 
 async function openFileInEditor(fullPath, entryOrName, options = {}) {
@@ -9518,6 +9525,17 @@ async function openDraggedFilesInEditor(payload, options = {}) {
         targetZone: options.targetZone || 'middle',
         targetIndex: options.targetIndex == null ? null : Number(options.targetIndex) + index,
       });
+      // Unify with double-click: a dragged CHANGED (tracked, has-diff) file opens in the SAME diff
+      // view (ensureCodeMirrorDiffPanel) as openChangedFileInDiff, not a plain edit-mode editor.
+      // Unchanged/untracked files have no diff available and stay in edit.
+      await refreshOpenFileDiff(path, {silent: true});
+      const draggedState = openFiles.get(path);
+      if (draggedState && openFileDiffAvailable(draggedState)) {
+        setFileEditorViewMode(path, 'diff', fileEditorItemFor(path));
+        for (const draggedPanel of fileEditorPanelsForPath(path)) {
+          renderFileEditorPanel(draggedPanel, draggedPanel.dataset.layoutItem || fileEditorItemFor(path));
+        }
+      }
       opened += 1;
     } catch (error) {
       showFileOpenError(path, error);
@@ -15202,9 +15220,12 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmGeneration = generation;
   container.hidden = false;
   container.classList.add('file-editor-diff-codemirror');
-  if (!state.diffLoaded && !state.diffLoading && !state.diffUnavailable) await refreshOpenFileDiff(path, {silent: true});
+  // Always await the diff load (the dedup'd in-flight promise) before rendering, so we never build a
+  // MergeView against an un-loaded/empty original — an untracked/all-added file then resolves to
+  // diffUnavailable and falls back to the plain editor below instead of flashing all-green.
+  if (!state.diffLoaded && !state.diffUnavailable) await refreshOpenFileDiff(path, {silent: true});
   if (panel._cmGeneration !== generation) return null;
-  if (!openFileDiffAvailable(state) && !state.diffLoading) {
+  if (!openFileDiffAvailable(state)) {
     setFileEditorPanelStatus(panel, state.diffError ? `diff unavailable: ${state.diffError}` : 'No diff for this file', 'warn');
     return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
   }
@@ -17578,6 +17599,10 @@ async function loadAutoStatuses() {
     }
   }
   updateDocumentTitle();
+  // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
+  // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
+  // updated the title but never re-synced the markers).
+  renderAutoApproveButtons();
 }
 
 function autoApproveOwnerLabel(payload) {

@@ -1274,6 +1274,8 @@ function makeFileTree(paths) {
   assert.ok(source.includes("=== 'building' ? 'indexing…' : 'indexed'"), '#31: the indexed badge shows "indexing…" while building, then a steady "indexed"');
   assert.ok(/payload && payload\.ready \? 'ready' : 'building'/.test(source), '#31: a ready index (incl. during a background TTL rebuild that keeps ready=true) stays "indexed", not "indexing"');
   assert.ok(/fileExplorerIndexStatus\.set\(normalized, 'building'\);\s*refreshFileIndexStatus\(normalized\)/.test(source), '#30: indexing a directory eagerly warms its backend index (no cold first-query live walk)');
+  const loadAutoStatusesFn = source.slice(source.indexOf('async function loadAutoStatuses'), source.indexOf('async function loadAutoStatuses') + 1700);
+  assert.ok(loadAutoStatusesFn.includes('updateDocumentTitle();') && loadAutoStatusesFn.includes('renderAutoApproveButtons();'), '#46: the auto-status poll re-syncs the YO markers (renderAutoApproveButtons) alongside the tab title, so a done pane stops spinning on the same poll');
   assert.ok(source.includes("{path: 'file_explorer.indexed_dirs'"), '#32: Preferences exposes an editable indexed-directories list');
   assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*setFileExplorerDirectoryIndexed\(dir, true\)[\s\S]*setFileExplorerDirectoryIndexed\(dir, false\)/.test(source), '#32: editing the indexed-dirs setting adds/removes indexed dirs (bi-directional sync)');
   assert.ok(source.includes('/api/fs/unindex?root='), '#32: removing an indexed dir wires to the backend unindex');
@@ -1664,6 +1666,10 @@ function makeFileTree(paths) {
   assert.equal(diffLayoutFn.includes("'side'"), false, '#33: the wide-pane side-by-side layout (which numbered deleted rows) is no longer selected, so deleted rows are unnumbered widgets at every width');
   assert.equal(api.codeMirrorDiffLayout({getBoundingClientRect: () => ({width: 2000})}), 'inline', '#33: even a very wide pane uses the unified (inline) diff, so deleted rows are never numbered');
   assert.equal(api.codeMirrorDiffLayout({getBoundingClientRect: () => ({width: 300})}), 'inline', '#33: a narrow pane also uses the unified diff');
+  assert.ok(/if \(state\.diffLoading && state\._diffLoadingPromise\) return state\._diffLoadingPromise/.test(appSource), '#43: concurrent diff loads are deduped (callers await one in-flight load), so the panel never renders against an un-loaded original');
+  assert.ok(/if \(!state\.diffLoaded && !state\.diffUnavailable\) await refreshOpenFileDiff/.test(appSource), '#43: the diff panel awaits the load before rendering, so an untracked/all-added file resolves to diffUnavailable and falls back to the plain editor instead of flashing all-green');
+  assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+x'}), false, '#43: an untracked/all-added file reports no diff, so it never enters diff view');
+  assert.ok(/function openDraggedFilesInEditor[\s\S]*await refreshOpenFileDiff\(path[\s\S]*openFileDiffAvailable\(draggedState\)[\s\S]*setFileEditorViewMode\(path, 'diff'/.test(appSource), '#39: a dragged CHANGED file opens in the same unified diff view as double-click (routes through the shared refreshOpenFileDiff/diff path)');
   assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');
   assert.ok(/switchFileExplorerChangesSession\(item\)/.test(appSource), 'tmux focus switches the Finder modified-files session immediately');
   assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'tmux focus forces a fresh Finder modified-files fetch even if an older request is in flight');
@@ -1838,10 +1844,10 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('--code-diff-remove: #f85149'), 'dark diff remove base is vivid red');
   assert.equal(preferencesCss.includes('--code-diff-add: #98c379'), false, 'muted one-dark diff green must not return as the YOLOmux dark default');
   assert.equal(preferencesCss.includes('--code-diff-remove: #e06c75'), false, 'muted one-dark diff red must not return as the YOLOmux dark default');
-  assert.ok(preferencesCss.includes('var(--code-diff-remove) 60%'), 'dark diff removed-line color is prominent');
-  assert.ok(preferencesCss.includes('var(--code-diff-add) 58%'), 'dark diff added-line color is prominent');
-  assert.ok(preferencesCss.includes('var(--code-diff-remove) 72%'), 'dark diff removed-token color is stronger than the line tint');
-  assert.ok(preferencesCss.includes('var(--code-diff-add) 70%'), 'dark diff added-token color is stronger than the line tint');
+  assert.ok(preferencesCss.includes('var(--code-diff-remove) 76%'), '#39: dark diff removed-line fill is high-contrast');
+  assert.ok(preferencesCss.includes('var(--code-diff-add) 74%'), '#39: dark diff added-line fill is high-contrast');
+  assert.ok(preferencesCss.includes('var(--code-diff-remove) 90%'), '#39: dark diff removed-token fill is stronger than the line tint');
+  assert.ok(preferencesCss.includes('var(--code-diff-add) 88%'), '#39: dark diff added-token fill is stronger than the line tint');
   assert.ok(preferencesCss.includes('.file-editor-icon-side-split'), 'cross-pane side preview has a distinct icon');
   assert.ok(preferencesCss.includes('.panel.preview-linked:not(.active-pane)'), 'paired side-preview pane gets a thinner linked ring');
   assert.ok(/\.yoagent-global\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent global summary fits narrow panes');
@@ -1855,10 +1861,10 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('.file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons'), 'diff merge controls are positioned in the chunk margin');
   assert.ok(preferencesCss.includes('inset-inline-end: 8px !important'), 'diff merge controls sit on the right edge');
   assert.ok(preferencesCss.includes('.cm-diff-overview-tick'), 'diff overview ruler ticks are styled');
-  assert.ok(/--diff-add-line-bg:\s*color-mix\(in srgb, var\(--code-diff-add\) 58%/.test(preferencesCss), 'diff added lines use stronger green fill');
+  assert.ok(/--diff-add-line-bg:\s*color-mix\(in srgb, var\(--code-diff-add\) 74%/.test(preferencesCss), '#39: diff added lines use a high-contrast green fill');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#e6ffec/.test(preferencesCss), 'light diff added lines use GitHub-soft green');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#ffebe9/.test(preferencesCss), 'light diff removed lines use GitHub-soft red');
-  assert.ok(/--diff-remove-line-bg:\s*color-mix\(in srgb, var\(--code-diff-remove\) 60%/.test(preferencesCss), 'diff removed lines use stronger red fill');
+  assert.ok(/--diff-remove-line-bg:\s*color-mix\(in srgb, var\(--code-diff-remove\) 76%/.test(preferencesCss), '#39: diff removed lines use a high-contrast red fill');
   assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(preferencesCss), false, 'deleted rows carry no number via unified-merge read-only widgets, not a transparent-text gutter hack');
   assert.ok(preferencesCss.includes('clip-path: inset(0 -100vw)'), 'diff line backgrounds extend to the full editor width');
   assert.ok(preferencesCss.includes('.file-editor-diff-codemirror .cm-insertedLine .cm-insertedText'), 'whole-line inserted rows suppress ragged token overlays');

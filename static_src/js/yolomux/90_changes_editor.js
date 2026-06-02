@@ -1840,9 +1840,12 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmGeneration = generation;
   container.hidden = false;
   container.classList.add('file-editor-diff-codemirror');
-  if (!state.diffLoaded && !state.diffLoading && !state.diffUnavailable) await refreshOpenFileDiff(path, {silent: true});
+  // Always await the diff load (the dedup'd in-flight promise) before rendering, so we never build a
+  // MergeView against an un-loaded/empty original — an untracked/all-added file then resolves to
+  // diffUnavailable and falls back to the plain editor below instead of flashing all-green.
+  if (!state.diffLoaded && !state.diffUnavailable) await refreshOpenFileDiff(path, {silent: true});
   if (panel._cmGeneration !== generation) return null;
-  if (!openFileDiffAvailable(state) && !state.diffLoading) {
+  if (!openFileDiffAvailable(state)) {
     setFileEditorPanelStatus(panel, state.diffError ? `diff unavailable: ${state.diffError}` : 'No diff for this file', 'warn');
     return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
   }

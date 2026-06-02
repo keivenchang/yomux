@@ -1207,6 +1207,10 @@ async function loadAutoStatuses() {
     }
   }
   updateDocumentTitle();
+  // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
+  // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
+  // updated the title but never re-synced the markers).
+  renderAutoApproveButtons();
 }
 
 function autoApproveOwnerLabel(payload) {
