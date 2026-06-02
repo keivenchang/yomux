@@ -43,6 +43,18 @@ def test_read_ws_frame_reports_closed_stream():
         raise AssertionError("expected ConnectionError")
 
 
+def test_read_ws_frame_rejects_oversized_declared_length():
+    # DOIT.6 #65: a 127-marker frame declaring a huge length is rejected BEFORE buffering it, so a
+    # hostile/buggy client cannot OOM the shared process. Header only — no payload bytes are read.
+    header = struct.pack("!BBQ", 0x82, 0x7F, websocket.MAX_WS_FRAME_BYTES + 1)
+    try:
+        websocket.read_ws_frame(io.BytesIO(header))
+    except ConnectionError as exc:
+        assert "too large" in str(exc)
+    else:
+        raise AssertionError("expected ConnectionError for an oversized frame")
+
+
 def test_set_pty_size_clamps_dimensions(monkeypatch):
     calls = []
     monkeypatch.setattr(websocket.fcntl, "ioctl", lambda fd, request, payload: calls.append((fd, request, payload)))

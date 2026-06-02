@@ -17,6 +17,10 @@ from .common import LINEAR_ID_RE
 from .common import _CACHE_MISS
 from .common import truncate_text
 
+# DOIT.6 #71: a failed/empty GitHub fetch (None) is cached only this long, so a transient error retries
+# within seconds instead of pinning "none/unknown" for the full positive metadata TTL.
+NEGATIVE_METADATA_TTL_SECONDS = 30
+
 
 def http_json(
     url: str,
@@ -178,7 +182,10 @@ def cached_metadata(
     if not allow_network:
         return None
     value = load()
-    cache.set(key, value)
+    # DOIT.6 #71: cache a None result (a transient 403/429/5xx/timeout, or genuinely no PR) only BRIEFLY
+    # so a transient failure retries within seconds instead of reading "none/unknown" for the full
+    # positive TTL. Real values keep the full TTL.
+    cache.set(key, value, ttl=NEGATIVE_METADATA_TTL_SECONDS if value is None else None)
     return value
 
 

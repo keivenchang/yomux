@@ -2,6 +2,7 @@ from yolomux_lib import github_client
 from yolomux_lib import linear_client
 from yolomux_lib import metadata
 from yolomux_lib.common import _CACHE_MISS
+from yolomux_lib.common import tail_file_lines
 from yolomux_lib.metadata import MetadataCache
 from yolomux_lib.metadata import extract_linear_ids
 from yolomux_lib.metadata import github_checks_unknown
@@ -190,3 +191,25 @@ def test_review_decision_is_cached(monkeypatch):
     assert github_client.github_pull_request_review_decision(REPO, 7, cache) == "REVIEW_REQUIRED"
     assert github_client.github_pull_request_review_decision(REPO, 7, cache) == "REVIEW_REQUIRED"
     assert calls == [7]
+
+
+def test_cached_metadata_gives_failures_a_short_negative_ttl():
+    # DOIT.6 #71: a None result (transient 403/429/5xx/timeout, or genuinely no PR) is cached only
+    # briefly so it retries soon, while a real value keeps the full positive TTL.
+    cache = MetadataCache(ttl_seconds=300)
+    github_client.cached_metadata(cache, "real", True, lambda: {"x": 1})
+    github_client.cached_metadata(cache, "none", True, lambda: None)
+    real_expiry = cache.values["real"][0]
+    none_expiry = cache.values["none"][0]
+    assert cache.values["none"][1] is None
+    assert real_expiry - none_expiry > 60
+
+
+def test_tail_file_lines_reads_a_bounded_window_from_eof(tmp_path):
+    # DOIT.6 #72: return the last N lines without scanning the whole file.
+    big = tmp_path / "transcript.jsonl"
+    big.write_text("".join(f"row-{i}\n" for i in range(5000)))
+    assert tail_file_lines(big, 3).splitlines() == ["row-4997", "row-4998", "row-4999"]
+    small = tmp_path / "small.txt"
+    small.write_text("a\nb\n")
+    assert tail_file_lines(small, 10) == "a\nb\n"

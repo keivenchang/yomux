@@ -5,6 +5,10 @@ import struct
 import termios
 from typing import Any
 
+# DOIT.6 #65: hard ceiling on an inbound WebSocket frame's declared length. Browser terminal input is
+# tiny; this only bounds a hostile/buggy client so it cannot OOM the shared process.
+MAX_WS_FRAME_BYTES = 16 * 1024 * 1024
+
 
 def set_pty_size(fd: int, rows: int, cols: int) -> None:
     rows = max(2, min(rows, 300))
@@ -33,6 +37,9 @@ def read_ws_frame(stream: Any) -> tuple[int, bytes]:
         length = struct.unpack("!H", read_exact(stream, 2))[0]
     elif length == 127:
         length = struct.unpack("!Q", read_exact(stream, 8))[0]
+    # #65: reject an oversized declared length BEFORE buffering it (memory-exhaustion DoS guard).
+    if length > MAX_WS_FRAME_BYTES:
+        raise ConnectionError(f"websocket frame too large: {length} > {MAX_WS_FRAME_BYTES}")
     mask = read_exact(stream, 4) if masked else b""
     payload = read_exact(stream, length) if length else b""
     if masked:

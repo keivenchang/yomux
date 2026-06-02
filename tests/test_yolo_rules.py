@@ -115,8 +115,11 @@ def test_schema_validation_reports_errors():
         raise AssertionError("invalid regex should fail validation")
 
 
-def test_builtin_default_reproduces_current_block_and_allow_sets():
+def test_builtin_default_reproduces_current_block_and_allow_sets(monkeypatch):
     rules = yolo_rules.validate_rules(yolo_rules.default_rule_data("approve"), source="built-in")
+    # DOIT.6 #68: is_dangerous now reads the ACTIVE cached ruleset; pin it to the built-in default here
+    # so this test still validates the built-in block/allow classification deterministically.
+    monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
     dangerous_cmds = [
         "rm -rf /tmp/foo",
         "rm file.txt",
@@ -242,6 +245,23 @@ def test_dry_run_downgrades_active_rule_actions(monkeypatch):
     assert decision["dry_run"] is True
     assert decision["agent"] == "codex"
     assert decision["session"] == "6"
+
+
+def test_is_dangerous_uses_active_ruleset_and_flags_non_approve(monkeypatch):
+    # DOIT.6 #68: the UI danger badge reflects the USER's active ruleset (what the worker acts on) and
+    # treats ANY non-approve outcome (block / decline / ask) as dangerous — only a clean approve is safe.
+    rules = ruleset({
+        "default": "ask",
+        "rules": [
+            {"name": "ok ls", "type": "command", "match": ["ls"], "action": "approve", "risk": "test"},
+            {"name": "decline curl", "type": "command", "match": ["curl"], "action": "decline", "risk": "net"},
+        ],
+    })
+    monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
+    assert auto_approve_tmux.is_dangerous("ls -la") is False        # approve -> safe
+    assert auto_approve_tmux.is_dangerous("curl http://example") is True   # decline -> dangerous
+    assert auto_approve_tmux.is_dangerous("make build") is True     # default ask -> dangerous
+    assert auto_approve_tmux.is_dangerous("rm -rf /") is True       # hard floor -> dangerous
 
 
 def test_dangerously_yolo_keeps_the_hard_floor(monkeypatch):

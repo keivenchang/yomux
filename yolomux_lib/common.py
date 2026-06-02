@@ -33,7 +33,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.1.67"
+YOLOMUX_VERSION = "0.1.68"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -299,11 +299,23 @@ def split_csv(values: list[str]) -> list[str]:
 
 
 def tail_file_lines(path: Path, lines: int) -> str:
-    keep = collections.deque(maxlen=max(1, lines))
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            keep.append(line)
-    return "".join(keep)
+    # DOIT.6 #72: read a bounded window backward from EOF instead of scanning the whole file front-to-
+    # back. Transcripts are multi-hundred-MB JSONL and this is called on every metadata poll, /api/context,
+    # /api/transcripts, and the summary — a full re-scan each time was the hot path.
+    want = min(max(1, lines), MAX_TRANSCRIPT_TAIL_LINES)
+    chunk = 65536
+    max_bytes = want * chunk  # generous per-line ceiling; never walk the entire huge file
+    data = b""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        pos = handle.tell()
+        while pos > 0 and data.count(b"\n") <= want and len(data) < max_bytes:
+            step = min(chunk, pos)
+            pos -= step
+            handle.seek(pos)
+            data = handle.read(step) + data
+    text = data.decode("utf-8", errors="replace")
+    return "".join(text.splitlines(keepends=True)[-want:])
 
 def parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}

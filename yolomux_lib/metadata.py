@@ -257,9 +257,11 @@ class MetadataCache:
                 return _CACHE_MISS
             return value
 
-    def set(self, key: str, value: Any) -> None:
+    def set(self, key: str, value: Any, ttl: float | None = None) -> None:
+        # DOIT.6 #71: allow a per-entry TTL so a failed/empty fetch can be cached briefly (retry soon)
+        # instead of for the full positive TTL.
         with self.lock:
-            self.values[key] = (time.time() + self.ttl_seconds, value)
+            self.values[key] = (time.time() + (self.ttl_seconds if ttl is None else ttl), value)
 
 def session_project_metadata(info: SessionInfo, cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
     git_data = session_git_inventory(info)

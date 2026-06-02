@@ -12,7 +12,13 @@ from . import yolo_rules
 
 
 def is_dangerous(cmd_line: str) -> bool:
-    """Return True when the shared YOLO rule engine identifies a dangerous command."""
+    """Return True when the shared YOLO rule engine would not auto-approve this command.
+
+    DOIT.6 #68: evaluate the USER's active ruleset (the same one the worker acts on), not the built-in
+    default, so the UI danger badge matches the real auto-approve decision. Any non-approve outcome
+    (block / decline / ask / unknown) is "dangerous" for badge purposes — only a clean approve is safe.
+    The catastrophic hard floor still flags regardless of the ruleset.
+    """
     cmd_line = cmd_line.strip()
     if not cmd_line:
         return False
@@ -20,8 +26,11 @@ def is_dangerous(cmd_line: str) -> bool:
     if yolo_rules.hard_floor_decision(cmd_line):
         return True
 
-    ruleset = yolo_rules.validate_rules(yolo_rules.default_rule_data("approve"), source="built-in")
-    return yolo_rules.evaluate_ruleset(cmd_line, ruleset)["action"] == "block"
+    ruleset, error = yolo_rules.cached_rules()
+    if error or ruleset is None:
+        # Fall back to the built-in default ruleset when the user's file is missing/broken.
+        ruleset = yolo_rules.validate_rules(yolo_rules.default_rule_data("approve"), source="built-in")
+    return yolo_rules.evaluate_ruleset(cmd_line, ruleset)["action"] != "approve"
 
 
 # ---------------------------------------------------------------------------
@@ -266,23 +275,20 @@ def _approval_prompt_defaults_to_yes(pane_text: str) -> bool:
 
 
 def yes_is_selected(pane_text: str) -> bool:
-    """Check that the first option is currently highlighted.
+    """Check that the first option is currently highlighted by an ACTUAL selector glyph (❯/›/>).
 
-    Works for both Claude (❯) and Codex (›) selectors, and for both Yes/No
-    permission prompts and AskUserQuestion-style prompts with arbitrary
-    first-option text.
+    DOIT.6 #67: do NOT authorize from a positional "option 1 is Yes before No" guess — on a redraw
+    frame with nothing highlighted that wrongly reports the first option as selected, which can confirm
+    the wrong option. A send requires a visible selector glyph.
     """
-    if _YES_SELECTOR_RE.search(pane_text):
-        return True
-    return _approval_prompt_defaults_to_yes(pane_text) and not approval_prompt_has_later_activity(pane_text)
+    return bool(_YES_SELECTOR_RE.search(pane_text))
 
 
 def selected_prompt_option(pane_text: str) -> int:
+    # #67: only a visible selector glyph counts as a selection — no positional default-to-yes.
     matches = list(_SELECTED_CHOICE_NUMBER_RE.finditer(pane_text))
     if matches:
         return int(matches[-1].group(1))
-    if _approval_prompt_defaults_to_yes(pane_text) and not approval_prompt_has_later_activity(pane_text):
-        return 1
     return 0
 
 

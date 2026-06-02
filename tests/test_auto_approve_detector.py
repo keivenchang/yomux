@@ -265,16 +265,17 @@ def test_task_list_header_break_does_not_mask_real_dismissal_above_it():
     assert prompt_detector.approval_prompt_state(visible_text)["visible"] is False
 
 
-def test_claude_no_caret_prompt_defaults_to_yes_when_current():
+def test_claude_no_caret_prompt_is_not_treated_as_selected():
+    # DOIT.6 #67: a prompt with NO selector glyph (nothing highlighted — e.g. a redraw frame) must NOT
+    # be auto-confirmed from a positional "option 1 is Yes" guess. A send requires a visible ❯/›/box.
     visible_text = claude_bash_prompt_with_footer(
         " Esc to cancel · Tab to amend · ctrl+e to explain",
     ).replace(" ❯ 1. Yes", "   1. Yes")
 
     assert prompt_detector.approval_prompt_has_later_activity(visible_text) is False
-    assert prompt_detector.yes_is_selected(visible_text) is True
-    state = prompt_detector.approval_prompt_state(visible_text)
-    assert state["visible"] is True
-    assert state["yes_selected"] is True
+    assert prompt_detector.yes_is_selected(visible_text) is False
+    assert prompt_detector.selected_prompt_option(visible_text) == 0
+    assert prompt_detector.approval_prompt_state(visible_text)["yes_selected"] is False
 
 
 def test_claude_no_caret_prompt_does_not_default_when_stale():
