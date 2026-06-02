@@ -1306,7 +1306,8 @@ function makeFileTree(paths) {
   assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.logged_in === true/.test(source), '#39: agentLoggedIn reads the per-agent logged_in flag');
   assert.ok(source.includes('const loggedOut = available && !agentLoggedIn(agent);'), '#39: the new-session picker computes a logged-out state per agent');
   assert.ok(/disabled: readOnlyMode \|\| !available \|\| loggedOut \|\| capped/.test(source), '#39: a logged-out agent is disabled in the picker');
-  assert.ok(/loggedOut[\s\S]*?Run \$\{agentLoginCommand\(agent\)\}/.test(source), '#39: a logged-out agent shows its login command as the menu detail');
+  assert.ok(/loggedOut[\s\S]*?t\('menu\.tmux\.runLogin', \{command: agentLoginCommand\(agent\)\}\)/.test(source), '#39: a logged-out agent shows its login command as the menu detail (via t())');
+  assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['menu.tmux.runLogin'], 'Run {command}', '#39/#121: the login-command detail renders "Run <command>" in English');
   assert.ok(source.includes('if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;'), '#39: the metadata poll refreshes agent login status');
   // #41: the frontend mirrors the server's auto backend resolution (codex -> claude -> deterministic)
   // so the chat input enables to match what the backend will run, and defaults to auto.

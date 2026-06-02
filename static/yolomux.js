@@ -4033,7 +4033,7 @@ function menuTabCommand(item, options = {}) {
   const slot = slotForSession(item);
   const visible = itemIsActivePaneTab(item);
   const active = item === currentActiveMenuItem();
-  const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? 'Minimized: in a pane, not shown' : 'Inactive: not in a pane'));
+  const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? t('menu.tabs.minimizedDetail') : t('menu.tabs.inactiveDetail')));
   return menuCommand(itemLabel(item), () => {
     if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item);
     return selectSession(item);
@@ -4053,11 +4053,13 @@ function tmuxSessionActionCommands(session, options = {}) {
   const autoHere = hasSession ? autoApproveEnabledHere(autoPayload) : false;
   const includeYolo = options.includeYolo !== false;
   const includeKill = options.includeKill !== false;
-  const readonlyDetail = 'Admin only';
-  const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
-  const visibleDetail = readOnlyMode ? readonlyDetail : (hasSession ? '' : 'No tmux tab focused');
-  const yoloLabel = `${autoHere ? 'Disable' : 'Enable'} YOLO for Tmux Session${hasSession ? ` '${session}'` : ''}`;
-  const renameLabel = hasSession ? `Rename tmux session '${session}'` : 'Rename tmux session';
+  const readonlyDetail = t('menu.common.adminOnly');
+  const focusDetail = hasSession ? menuTabDetail(session) : t('menu.tmux.focusSessionFirst');
+  const visibleDetail = readOnlyMode ? readonlyDetail : (hasSession ? '' : t('menu.tmux.noTabFocused'));
+  const yoloLabel = hasSession
+    ? t(autoHere ? 'menu.tmux.yolo.disableFor' : 'menu.tmux.yolo.enableFor', {session})
+    : t(autoHere ? 'menu.tmux.yolo.disable' : 'menu.tmux.yolo.enable');
+  const renameLabel = hasSession ? t('menu.tmux.rename.for', {session}) : t('menu.tmux.rename');
   const renameAction = options.renameAction || (() => renameTmuxSession(session));
   const commands = [];
   if (includeYolo) commands.push(menuCommand(yoloLabel, async () => {
@@ -4070,7 +4072,7 @@ function tmuxSessionActionCommands(session, options = {}) {
       disabled: readOnlyMode || !hasSession,
       detail: visibleDetail,
       iconHtml: hasSession ? yoloMarkerHtml(session, autoHere, {enabledOnly: false, yoloWorking: sessionYoloIsWorking(session)}) : '',
-      ariaLabel: [yoloLabel, hasSession ? focusDetail : 'Focus a tmux session first'].filter(Boolean).join(' - '),
+      ariaLabel: [yoloLabel, hasSession ? focusDetail : t('menu.tmux.focusSessionFirst')].filter(Boolean).join(' - '),
     }));
   commands.push(
     menuCommand(renameLabel, renameAction, {
@@ -4085,10 +4087,10 @@ function tmuxSessionActionCommands(session, options = {}) {
 
 function tmuxSessionKillCommand(session) {
   const hasSession = isTmuxSession(session);
-  const readonlyDetail = 'Admin only';
-  const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
-  const visibleDetail = readOnlyMode ? readonlyDetail : (hasSession ? '' : 'No tmux tab focused');
-  const label = hasSession ? `Kill tmux session '${session}'` : 'Kill tmux session';
+  const readonlyDetail = t('menu.common.adminOnly');
+  const focusDetail = hasSession ? menuTabDetail(session) : t('menu.tmux.focusSessionFirst');
+  const visibleDetail = readOnlyMode ? readonlyDetail : (hasSession ? '' : t('menu.tmux.noTabFocused'));
+  const label = hasSession ? t('menu.tmux.kill.for', {session}) : t('menu.tmux.kill');
   return menuCommand(label, () => killTmuxSession(session), {
     disabled: readOnlyMode || !hasSession,
     detail: visibleDetail,
@@ -4147,11 +4149,11 @@ function cycleGlobalThemeSetting() {
 function yoloRuleStatusDetail() {
   const source = yoloRulesPayload.source || 'unknown';
   const count = Number(yoloRulesPayload.rule_count || 0);
-  const countText = `${count} rule${count === 1 ? '' : 's'}`;
-  const dryRun = yoloRulesPayload.dry_run ? ', dry run' : '';
+  const countText = tPlural('menu.yolo.ruleCount', count);
+  const dryRun = yoloRulesPayload.dry_run ? t('menu.yolo.dryRunSuffix') : '';
   return yoloRulesPayload.error
-    ? `error: ${yoloRulesPayload.error}`
-    : `${source}, ${countText}${dryRun}`;
+    ? t('menu.yolo.errorDetail', {error: yoloRulesPayload.error})
+    : t('menu.yolo.statusDetail', {source, rules: countText, dryRun});
 }
 
 async function openYoloRuleFile() {
@@ -4166,7 +4168,7 @@ async function openYoloRuleFile() {
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
-    statusEl.textContent = 'opened YOLO rule file';
+    statusEl.textContent = t('status.openedYoloRule');
   } catch (error) {
     statusEl.innerHTML = `<span class="err">open YOLO rule file failed: ${esc(error)}</span>`;
   }
@@ -4205,11 +4207,11 @@ async function refreshYoloRulesStatus(options = {}) {
 
 function tmuxYoloMenuItems() {
   return [
-    menuCommand('Open rule file', openYoloRuleFile, {
+    menuCommand(t('menu.yolo.openRuleFile'), openYoloRuleFile, {
       disabled: readOnlyMode,
       detail: compactHomePath(yoloRulePath()),
     }),
-    menuCommand('Reload rules', reloadYoloRules, {
+    menuCommand(t('menu.yolo.reloadRules'), reloadYoloRules, {
       detail: yoloRuleStatusDetail(),
     }),
   ];
@@ -4220,7 +4222,7 @@ function tmuxCurrentYoloCommand(session) {
   const payload = hasSession ? autoApproveStates.get(session) : null;
   const enabled = hasSession ? autoApproveEnabledHere(payload) : false;
   const elsewhere = hasSession ? autoApproveEnabledElsewhere(payload) : false;
-  const label = hasSession ? `YO ${enabled ? 'on' : elsewhere ? 'elsewhere' : 'off'}` : 'YO';
+  const label = hasSession ? t(enabled ? 'menu.tmux.yo.on' : elsewhere ? 'menu.tmux.yo.elsewhere' : 'menu.tmux.yo.off') : t('menu.tmux.yo.none');
   return menuCommand(label, async () => {
     if (!hasSession) return;
     await toggleAutoApprove(session);
@@ -4228,22 +4230,22 @@ function tmuxCurrentYoloCommand(session) {
     renderPaneTabStrips();
   }, {
     disabled: readOnlyMode || !hasSession,
-    detail: hasSession ? `Tmux Session '${session}'` : 'Focus a tmux tab first',
+    detail: hasSession ? t('menu.tmux.sessionLabel', {session}) : t('menu.tmux.focusTabFirst'),
     iconHtml: hasSession ? yoloMarkerHtml(session, enabled, {enabledOnly: false, yoloWorking: sessionYoloIsWorking(session)}) : '',
     keepOpen: true,
-    ariaLabel: hasSession ? `${enabled ? 'Disable' : 'Enable'} YOLO for Tmux Session '${session}'` : 'Focus a tmux tab first',
+    ariaLabel: hasSession ? t(enabled ? 'menu.tmux.yolo.disableFor' : 'menu.tmux.yolo.enableFor', {session}) : t('menu.tmux.focusTabFirst'),
   });
 }
 
 function tmuxSessionViewCommands(session) {
   const hasSession = isTmuxSession(session);
   const active = hasSession && activeSessions.includes(session);
-  const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
-  const disabledDetail = hasSession ? 'Open the tab in a pane first' : 'No tmux tab focused';
+  const focusDetail = hasSession ? menuTabDetail(session) : t('menu.tmux.focusSessionFirst');
+  const disabledDetail = hasSession ? t('menu.tmux.openInPaneFirst') : t('menu.tmux.noTabFocused');
   const viewLabel = sessionLabel(session);
-  const transcriptName = `Transcript for session '${viewLabel}'`;
-  const summaryName = `AI Transcript for session '${viewLabel}'`;
-  const eventLogName = `Event log for session '${viewLabel}'`;
+  const transcriptName = t('menu.tmux.transcript', {session: viewLabel});
+  const summaryName = t('menu.tmux.aiTranscript', {session: viewLabel});
+  const eventLogName = t('menu.tmux.eventLog', {session: viewLabel});
   return [
     menuCommand(transcriptName, () => {
       if (active) activateTab(session, 'transcript');
@@ -4257,7 +4259,7 @@ function tmuxSessionViewCommands(session) {
       if (active) activateTab(session, 'summary');
     }, {
       disabled: readOnlyMode || !active,
-      detail: readOnlyMode ? 'Admin only' : (active ? '' : disabledDetail),
+      detail: readOnlyMode ? t('menu.common.adminOnly') : (active ? '' : disabledDetail),
       checked: active && panelActiveTabName(session) === 'summary',
       ariaLabel: [summaryName, focusDetail].filter(Boolean).join(' - '),
     }),
@@ -4269,14 +4271,14 @@ function tmuxSessionViewCommands(session) {
       checked: active && panelActiveTabName(session) === 'events',
       ariaLabel: [eventLogName, focusDetail].filter(Boolean).join(' - '),
     }),
-    menuCommand('Pane details', () => {
+    menuCommand(t('menu.tmux.paneDetails'), () => {
       if (!active) return;
       const panel = document.getElementById(`panel-${session}`);
       if (panel) setPanelDetailsCollapsed(panel, !panel.classList.contains('details-collapsed'));
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
-      ariaLabel: ['Pane details', focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: [t('menu.tmux.paneDetails'), focusDetail].filter(Boolean).join(' - '),
     }),
   ];
 }
@@ -4288,16 +4290,16 @@ function newTmuxSessionItems() {
     // #39: an installed agent that is not logged in is greyed with its login command, instead of
     // silently starting a session that the CLI will reject for auth.
     const loggedOut = available && !agentLoggedIn(agent);
-    return menuCommand(`+ ${agentName(agent)}`, () => createNextSession(agent), {
+    return menuCommand(t('menu.tmux.newSession', {name: agentName(agent)}), () => createNextSession(agent), {
       iconHtml: agentIcon(agent),
       disabled: readOnlyMode || !available || loggedOut || capped,
       detail: readOnlyMode
-        ? 'Admin only'
+        ? t('menu.common.adminOnly')
         : (!available
-          ? `${agentName(agent)} unavailable`
+          ? t('menu.tmux.agentUnavailable', {name: agentName(agent)})
           : (loggedOut
-            ? `Run ${agentLoginCommand(agent)}`
-            : (capped ? 'Limit reached' : ''))),
+            ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
+            : (capped ? t('menu.tmux.limitReached') : ''))),
     });
   });
 }
@@ -4350,7 +4352,7 @@ function filterTabItemsForSearch(items, query = tabsMenuSearchText) {
 function backgroundTabMenuItems() {
   return tabCommandsForItems(filterTabItemsForSearch(backgroundTabItems()), {
     checked: false,
-    detail: 'Minimized',
+    detail: t('menu.tabs.minimized'),
     openAsPane: true,
     toggleYolo: true,
   });
@@ -4359,7 +4361,7 @@ function backgroundTabMenuItems() {
 function inactiveTabMenuItems() {
   return tabCommandsForItems(filterTabItemsForSearch(inactiveTabItems()), {
     checked: false,
-    detail: 'Not in a pane',
+    detail: t('menu.tabs.notInPane'),
     openAsPane: true,
     toggleYolo: true,
   });
@@ -4373,7 +4375,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
     backgroundTabMenuItems(),
     inactiveTabMenuItems()
   );
-  const resultItems = groupedItems.length ? groupedItems : [menuCommand('No matching tabs', null, {disabled: true})];
+  const resultItems = groupedItems.length ? groupedItems : [menuCommand(t('menu.tabs.noMatch'), null, {disabled: true})];
   return resultItems;
 }
 
@@ -4398,22 +4400,22 @@ function appMenuTree() {
         [
           menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
             checked: itemInLayout(fileExplorerItemId),
-            detail: 'Browse files',
+            detail: t('menu.file.browseFiles'),
             iconHtml: tabTypeIconHtml(fileExplorerItemId, {menu: true}),
             targetItem: fileExplorerItemId,
           }),
-          fileMenuVirtualCommand(infoItemId, 'Open branch, PR, CI, and repo metadata'),
+          fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
           // #40: YO!agent is now a sub-tab of the merged YO!info pane — this entry opens that pane on it.
           menuCommand(yoagentTabLabel, () => openInfoSubTab('yoagent'), {
             checked: itemInLayout(infoItemId) && infoPanelSubTab === 'yoagent',
-            detail: 'Open the AI agent activity summary',
+            detail: t('menu.file.yoagent.detail'),
             iconHtml: appMenuUiIcon('yoagent'),
           }),
-          menuCommand('Open file', openFileQuickOpen, {
+          menuCommand(t('menu.file.openFile'), openFileQuickOpen, {
             detail: appShortcutText('P'),
             iconHtml: appMenuUiIcon('document'),
           }),
-          menuCommand('Preferences', () => selectSession(prefsItemId), {
+          menuCommand(t('menu.file.preferences'), () => selectSession(prefsItemId), {
             checked: itemInLayout(prefsItemId),
             detail: compactHomePath(settingsConfigPath()),
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),
@@ -4421,8 +4423,8 @@ function appMenuTree() {
           }),
         ],
         [
-          menuCommand('Log out', logOut, {
-            detail: 'End this browser session',
+          menuCommand(t('menu.file.logout'), logOut, {
+            detail: t('menu.file.logout.detail'),
             iconHtml: appMenuUiIcon('logout'),
           }),
         ]
@@ -4432,30 +4434,30 @@ function appMenuTree() {
       id: 'view',
       label: t('menu.view'),
       items: [
-        menuCommand(tabMetaVisible ? 'Hide tab metadata' : 'Show tab metadata', toggleTabMetadata, {
+        menuCommand(tabMetaVisible ? t('menu.view.tabMeta.hide') : t('menu.view.tabMeta.show'), toggleTabMetadata, {
           checked: tabMetaVisible,
-          detail: 'Branch, state, PR, cwd',
+          detail: t('menu.view.tabMeta.detail'),
           iconHtml: appMenuUiIcon('tab-meta', tabMetaVisible),
         }),
-        menuCommand('Alert', toggleNotifications, {
+        menuCommand(t('menu.view.alert'), toggleNotifications, {
           checked: notificationsEnabled,
           disabled: readOnlyMode,
-          detail: readOnlyMode ? 'Requires admin access' : '',
+          detail: readOnlyMode ? t('menu.view.alert.adminDetail') : '',
           iconHtml: appMenuUiIcon('notify', notificationsEnabled),
         }),
-        menuCommand('Refresh', refreshAll, {
+        menuCommand(t('menu.view.refresh'), refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
         }),
-        menuSubmenu('Theme', [
-          menuCommand('System', () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', detail: `Match the OS theme (${resolvedGlobalThemeMode()})`}),
-          menuCommand('Dark', () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
-          menuCommand('Light', () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
+        menuSubmenu(t('menu.view.theme'), [
+          menuCommand(t('menu.view.theme.system'), () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', detail: t('menu.view.theme.system.detail', {mode: t('menu.view.theme.' + resolvedGlobalThemeMode())})}),
+          menuCommand(t('menu.view.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
+          menuCommand(t('menu.view.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
         ]),
-        menuSubmenu('Layout', [
-          menuCommand('Single pane', setLayoutToSinglePane, {detail: 'Consolidate visible non-Finder tabs'}),
-          menuCommand('Split', setLayoutToSplitPanes, {detail: 'Split visible non-Finder tabs left/right'}),
-          menuCommand('Grid', null, {disabled: true, detail: 'Drag panes for now'}),
-          menuCommand('Wall', null, {disabled: true}),
+        menuSubmenu(t('menu.view.layout'), [
+          menuCommand(t('menu.view.layout.single'), setLayoutToSinglePane, {detail: t('menu.view.layout.single.detail', {name: fileExplorerLabel()})}),
+          menuCommand(t('menu.view.layout.split'), setLayoutToSplitPanes, {detail: t('menu.view.layout.split.detail', {name: fileExplorerLabel()})}),
+          menuCommand(t('menu.view.layout.grid'), null, {disabled: true, detail: t('menu.view.layout.grid.detail')}),
+          menuCommand(t('menu.view.layout.wall'), null, {disabled: true}),
         ]),
       ],
     },
@@ -4468,13 +4470,13 @@ function appMenuTree() {
         tmuxSessionViewCommands(activeTmux),
         [
           ...tmuxSessionActionCommands(activeTmux, {includeYolo: false}),
-          menuCommand('Resume session', null, {
+          menuCommand(t('menu.tmux.resume'), null, {
             disabled: true,
-            detail: 'Coming soon',
+            detail: t('menu.common.comingSoon'),
           }),
         ],
         [
-          menuSubmenu('YOLO', tmuxYoloMenuItems()),
+          menuSubmenu(t('menu.tmux.yoloSubmenu'), tmuxYoloMenuItems()),
         ]
       ),
     },
@@ -4482,27 +4484,27 @@ function appMenuTree() {
       id: 'tabs',
       label: t('menu.tabs'),
       badgeText: yoloCount ? String(yoloCount) : '',
-      badgeTitle: yoloCount ? `${yoloCount} tmux session${yoloCount === 1 ? '' : 's'} with YOLO enabled` : '',
+      badgeTitle: yoloCount ? tPlural('menu.tabs.yoloBadge', yoloCount) : '',
       items: tabMenuItems(openItems),
     },
     {
       id: 'help',
       label: t('menu.help'),
       items: menuGroups(
-        [menuCommand('Command palette', openCommandPalette, {
+        [menuCommand(t('menu.help.commandPalette'), openCommandPalette, {
           detail: appShortcutText('P', {shift: true}),
         })],
         [
           menuCommand(`YOLOmux ${bootstrap.version || ''}`.trim(), null, {
             disabled: true,
-            detail: bootstrap.versionCommitTime ? `Last commit: ${bootstrap.versionCommitTime}` : '',
+            detail: bootstrap.versionCommitTime ? t('menu.help.lastCommit', {time: bootstrap.versionCommitTime}) : '',
           }),
-          menuCommand('Keyboard shortcuts', openKeyboardShortcutsOverlay, {
+          menuCommand(t('menu.help.shortcuts'), openKeyboardShortcutsOverlay, {
             detail: '?',
           }),
-          menuCommand('Open README', openProjectReadme, {
+          menuCommand(t('menu.help.openReadme'), openProjectReadme, {
             disabled: !projectReadmePath(),
-            detail: 'Local README',
+            detail: t('menu.help.localReadme'),
           }),
         ]
       ),
@@ -4567,7 +4569,7 @@ function renderBrandWordmark() {
 function createAppMenuBar() {
   const bar = document.createElement('nav');
   bar.className = 'app-menu-bar';
-  bar.setAttribute('aria-label', 'Application menu');
+  bar.setAttribute('aria-label', t('menu.bar.aria'));
   bar.setAttribute('role', 'menubar');
   for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
   return bar;
@@ -4578,19 +4580,20 @@ function createAppMenuBar() {
 // commands) — it reuses openFileQuickOpen, it does not fork the palette logic.
 function createTopbarSearch() {
   const isMac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || '');
+  const mod = isMac ? 'Cmd' : 'Ctrl';
   const button = document.createElement('button');
   button.type = 'button';
   button.id = 'topbarSearch';
   button.className = 'topbar-search';
-  button.setAttribute('aria-label', 'Search files, tabs, settings, and commands');
-  button.title = `Search files, tabs, and settings (${isMac ? 'Cmd' : 'Ctrl'}-P) — type > for commands (${isMac ? 'Cmd' : 'Ctrl'}-Shift-P)`;
+  button.setAttribute('aria-label', t('topbar.search.aria'));
+  button.title = t('topbar.search.title', {mod});
   const icon = document.createElement('span');
   icon.className = 'topbar-search-icon';
   icon.setAttribute('aria-hidden', 'true');
   icon.textContent = '⌕';
   const label = document.createElement('span');
   label.className = 'topbar-search-label';
-  label.textContent = 'Search files, commands…';
+  label.textContent = t('topbar.search.label');
   const hint = document.createElement('kbd');
   hint.className = 'topbar-search-hint';
   hint.textContent = isMac ? '⌘P' : 'Ctrl+P';
@@ -4769,7 +4772,7 @@ function createAppMenuCommand(item, options = {}) {
       const autoTarget = event.target.closest('[data-auto-session]');
       if (autoTarget && button.contains(autoTarget)) {
         if (readOnlyMode) {
-          statusEl.textContent = 'YOLO changes require admin access';
+          statusEl.textContent = t('status.yoloAdminRequired');
           return;
         }
         toggleAutoApprove(autoTarget.dataset.autoSession).then(() => {
