@@ -644,7 +644,10 @@ def evaluate(cmd: str, prompt_type: str = "bash", agent: str = "", session: str 
     settings = yolo_settings()
     path = active_rule_path()
     dry_run = settings["dry_run"]
-    floor = None if dangerously_yolo else hard_floor_decision(cmd)
+    # DOIT.6 #62: a FLOOR is a floor. The catastrophic block list (rm root, mkfs, dd to a block device,
+    # fork bomb, block-device redirect) ALWAYS applies — even under --dangerously-yolo, which only opts
+    # out of the soft ruleset / ask-default, never out of the hard floor.
+    floor = hard_floor_decision(cmd)
     if floor:
         decision = {**floor, "source": "hard-floor", "path": str(path)}
     else:

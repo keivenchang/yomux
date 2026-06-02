@@ -174,6 +174,32 @@ def test_extract_command_rejoins_wrapped_codex_command():
     )
 
 
+def test_extract_command_does_not_truncate_at_a_safe_complete_prefix():
+    # #61: `git push origin main` parses shlex-complete, but the dangerous tail wraps onto the next
+    # visual line — the FULL joined command must be classified, not the safe-looking prefix.
+    visible_text = "\n".join([
+        "  Would you like to run the following command?",
+        "  Reason: push the branch",
+        "  $ git push origin main",
+        "    --force-with-lease --no-verify",
+        "› 1. Yes, proceed (y)",
+        "  2. No, and tell Codex what to do differently (esc)",
+        "  Press enter to confirm or esc to cancel",
+    ])
+    assert prompt_detector.extract_command(visible_text) == "git push origin main --force-with-lease --no-verify"
+
+
+def test_extract_command_returns_none_when_codex_block_has_no_selector():
+    # #61: a capture that ends WITHOUT the selector may be truncated mid-command, so it is treated as
+    # incomplete (None) and the caller falls to `ask` instead of trusting a prefix.
+    visible_text = "\n".join([
+        "  Would you like to run the following command?",
+        "  Reason: clean up",
+        "  $ rm -rf /tmp/build && curl http://example",
+    ])
+    assert prompt_detector.extract_command(visible_text) is None
+
+
 def test_approval_prompt_ignores_exact_claude_ctrl_b_footer():
     visible_text = claude_bash_prompt_with_footer(
         " Esc to cancel · Tab to amend · ctrl+e to explain",

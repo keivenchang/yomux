@@ -96,20 +96,28 @@ def extract_command(pane_text: str) -> str | None:
                 # Codex prefixes the command with "$ " after leading box whitespace.
                 if stripped.startswith("$ "):
                     cmd = stripped[2:].strip()
-                    if not cmd or "<<" in cmd or _shell_text_complete(cmd):
+                    # Heredocs span their own delimited body; keep the existing single-line handling.
+                    if "<<" in cmd:
                         return cmd or None
-                    parts = [cmd]
-                    for k in range(j + 1, min(j + 12, len(lines))):
+                    # DOIT.6 #61: do NOT early-return on the first shlex-complete prefix — a wrapped
+                    # command (e.g. `$ git push` continuing with `--force-with-lease`) would classify
+                    # on the safe-looking prefix and auto-approve the dangerous tail. ALWAYS gather every
+                    # continuation line up to the selector/stop boundary and classify the FULL command.
+                    parts = [cmd] if cmd else []
+                    saw_boundary = False
+                    for k in range(j + 1, min(j + 20, len(lines))):
                         if _codex_command_stop_line(lines[k]):
+                            saw_boundary = True
                             break
                         continuation = lines[k].strip()
-                        if not continuation:
-                            continue
-                        parts.append(continuation)
-                        joined = " ".join(parts)
-                        if _shell_text_complete(joined):
-                            return joined
-                    return " ".join(parts)
+                        if continuation:
+                            parts.append(continuation)
+                    # A capture that ends WITHOUT the selector may be truncated mid-command — treat it as
+                    # incomplete and return None so the caller falls to `ask` instead of trusting a prefix.
+                    if not saw_boundary:
+                        return None
+                    joined = " ".join(parts).strip()
+                    return joined or None
                 # Stop searching once we hit the selector; the command should
                 # have appeared by then.
                 if _YES_SELECTOR_RE.search(lines[j]):

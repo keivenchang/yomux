@@ -90,6 +90,15 @@ def test_hard_floor_blocks_unrelaxable_cases():
     assert yolo_rules.hard_floor_decision("mkfs.ext4 /dev/sda1")["action"] == "block"
 
 
+def test_dangerously_yolo_still_hits_the_hard_floor():
+    # DOIT.6 #62: --dangerously-yolo opts out of the soft ruleset / ask-default, NOT the catastrophic
+    # floor — rm -rf /, mkfs, dd to a block device, and fork bombs are blocked even under the flag.
+    for cmd in ["rm -rf /", "mkfs.ext4 /dev/sda1", "dd if=/dev/zero of=/dev/sda", ":(){ :|:& };:"]:
+        decision = yolo_rules.evaluate(cmd, "bash", dangerously_yolo=True)
+        assert decision["action"] == "block", cmd
+        assert decision["source"] == "hard-floor", cmd
+
+
 def test_schema_validation_reports_errors():
     bad = {
         "default": "approve",
@@ -235,7 +244,10 @@ def test_dry_run_downgrades_active_rule_actions(monkeypatch):
     assert decision["session"] == "6"
 
 
-def test_dangerously_yolo_bypasses_hard_floor(monkeypatch):
+def test_dangerously_yolo_keeps_the_hard_floor(monkeypatch):
+    # DOIT.6 #62: --dangerously-yolo only opts out of the soft ruleset / ask-default — the catastrophic
+    # hard floor ALWAYS applies. rm -rf / is blocked under the flag; a non-catastrophic command the
+    # ruleset approves is still approved (so the flag's broad relaxation is preserved).
     rules = ruleset({
         "default": "approve",
         "rules": [
@@ -245,14 +257,15 @@ def test_dangerously_yolo_bypasses_hard_floor(monkeypatch):
     monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
     monkeypatch.setattr(yolo_rules, "yolo_settings", lambda: {"dry_run": False, "rule_file_path": "/tmp/yolo-rules-test.yaml"})
 
-    normal = yolo_rules.evaluate("rm -rf /", dangerously_yolo=False)
-    bypassed = yolo_rules.evaluate("rm -rf /", dangerously_yolo=True)
+    for flag in (False, True):
+        catastrophic = yolo_rules.evaluate("rm -rf /", dangerously_yolo=flag)
+        assert catastrophic["action"] == "block", flag
+        assert catastrophic["source"] == "hard-floor", flag
 
-    assert normal["action"] == "block"
-    assert normal["source"] == "hard-floor"
-    assert bypassed["action"] == "approve"
-    assert bypassed["rule_name"] == "approve all"
-    assert bypassed["source"] == "test"
+    safe = yolo_rules.evaluate("ls -la", dangerously_yolo=True)
+    assert safe["action"] == "approve"
+    assert safe["rule_name"] == "approve all"
+    assert safe["source"] == "test"
 
 
 def test_rule_file_text_validation_reports_yaml_errors():
