@@ -13779,7 +13779,7 @@ function preferenceControlHtml(item, query = '') {
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
   const advisory = preferenceAdvisoryHtml(item, value);
   const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
-  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span>${advisory}</div>`;
+  return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>${esc(t('pref.reset.row'))}</button></span>${advisory}</div>`;
 }
 
 function uploadRsyncExampleCommand() {
@@ -13826,17 +13826,17 @@ function preferencesPanelHtml() {
     }).join('');
   const readonly = readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : '';
   const resetDisabled = readOnlyMode ? ' disabled' : '';
-  const resetTitle = preferencesResetConfirmVisible ? 'Confirm GLOBAL reset' : 'GLOBAL reset';
+  const resetTitle = preferencesResetConfirmVisible ? t('pref.reset.confirmTitle') : t('pref.reset.title');
   const resetWarning = preferencesResetConfirmVisible
-    ? 'This is destructive for preferences: every setting will be reset to the built-in defaults.'
-    : 'Warning: resets every Preferences value to the built-in defaults, including YOLO, appearance, editor, Finder/File Explorer, notification, and performance settings.';
+    ? t('pref.reset.confirmWarning')
+    : t('pref.reset.warning', {name: fileExplorerLabel()});
   const resetAction = preferencesResetConfirmVisible ? `
       <div class="preferences-reset-confirm">
-        <button type="button" class="preferences-reset-continue" data-preferences-reset-confirm${resetDisabled}>Continue reset</button>
-        <button type="button" class="preferences-reset-cancel" data-preferences-reset-cancel>Cancel</button>
-      </div>` : `<button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>Reset all defaults</button>`;
+        <button type="button" class="preferences-reset-continue" data-preferences-reset-confirm${resetDisabled}>${esc(t('pref.reset.continue'))}</button>
+        <button type="button" class="preferences-reset-cancel" data-preferences-reset-cancel>${esc(t('pref.reset.cancel'))}</button>
+      </div>` : `<button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>${esc(t('pref.reset.all'))}</button>`;
   const resetBlock = preferencesAllDefault() && !preferencesResetConfirmVisible ? '' : `
-    <div class="preferences-global-reset${preferencesResetConfirmVisible ? ' confirming' : ''}" role="group" aria-label="GLOBAL reset warning">
+    <div class="preferences-global-reset${preferencesResetConfirmVisible ? ' confirming' : ''}" role="group" aria-label="${esc(t('pref.reset.aria'))}">
       <div>
         <div class="preferences-global-reset-title">${resetTitle}</div>
         <div class="preferences-global-reset-warning">${resetWarning}</div>

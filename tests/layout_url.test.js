@@ -4101,6 +4101,28 @@ function makeFileTree(paths) {
 }
 
 {
+  // DOIT.6 #115: the Preferences GLOBAL-reset UI (title, warning, both buttons, per-row Reset) is localized.
+  const api = loadYolomux('', ['1']);
+  const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
+  api.i18nSetCatalogForTest('zh-Hant', zhHant);
+  api.setActiveLocaleForTest('zh-Hant');
+  // A non-default value makes the GLOBAL-reset block render (it is hidden when everything is default).
+  api.setClientSettingsPatchForTest({appearance: {ui_font_size: 19}});
+  const html = api.preferencesPanelHtmlForTest('');
+  assert.ok(html.includes(zhHant['pref.reset.title']), '#115: the GLOBAL-reset title is localized');
+  assert.ok(html.includes(zhHant['pref.reset.all']), '#115: the "Reset all defaults" button is localized');
+  assert.ok(html.includes(`aria-label="${zhHant['pref.reset.aria']}"`), '#115: the reset group aria-label is localized');
+  assert.ok(html.includes(`>${zhHant['pref.reset.row']}</button>`), '#115: the per-row Reset button is localized');
+  // No bare English reset literals leak through.
+  assert.ok(!/>GLOBAL reset<|>Reset all defaults<|>Continue reset</.test(html), '#115: no English reset literals leak in a non-English locale');
+  // Source guard: every reset literal routes through t('pref.reset.*').
+  const src = fs.readFileSync('static/yolomux.js', 'utf8');
+  for (const key of ['title', 'confirmTitle', 'warning', 'confirmWarning', 'continue', 'cancel', 'all', 'row', 'aria']) {
+    assert.ok(src.includes(`t('pref.reset.${key}'`), `#115: reset UI uses t('pref.reset.${key}')`);
+  }
+}
+
+{
   // DOIT.6 #7: the default (files-mode) search bar blends matching commands/tabs into the results.
   const api = loadYolomux('', ['1']);
   const prefsLabel = api.itemLabel(api.prefsItemId);

@@ -143,5 +143,14 @@
   "pref.yoagent.intro.label": "优agent 引言",
   "pref.yoagent.intro.help": "加在活动上下文前的指示前缀。",
   "pref.yoagent.format.label": "优agent 回答格式",
-  "pref.yoagent.format.help": "加在用户问题前的输出格式指示。"
+  "pref.yoagent.format.help": "加在用户问题前的输出格式指示。",
+  "pref.reset.row": "重置",
+  "pref.reset.title": "全局重置",
+  "pref.reset.confirmTitle": "确认全局重置",
+  "pref.reset.warning": "警告：会将每一个偏好设置值重置为内置默认值，包括 YOLO、外观、编辑器、{name}、通知与性能设置。",
+  "pref.reset.confirmWarning": "此操作会破坏偏好设置：所有设置都会重置为内置默认值。",
+  "pref.reset.continue": "继续重置",
+  "pref.reset.cancel": "取消",
+  "pref.reset.all": "重置所有默认值",
+  "pref.reset.aria": "全局重置警告"
 }
