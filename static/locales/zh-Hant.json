@@ -1,5 +1,7 @@
 {
   "brand.marker": "優",
+  "brand.wordmark.lo": "樂",
+  "brand.wordmark.yo": "優",
   "pref.appearance.editor_cursor_style.block": "方塊",
   "pref.appearance.editor_cursor_style.help": "CodeMirror 編輯器的游標形狀。兩種樣式都使用使用中的編輯器游標顏色。",
   "pref.appearance.editor_cursor_style.label": "編輯器游標樣式",
@@ -61,7 +63,7 @@
   "pref.general.default_sessions.help": "優先開啟的 tmux 工作階段，每行一個工作階段名稱。",
   "pref.general.default_sessions.label": "預設工作階段",
   "pref.general.language.help": "優樂mux 介面使用的語言。「系統」會比對你的瀏覽器；en-XA 是用於找出未在地化文字的偽語言環境。",
-  "pref.general.language.label": "介面語言",
+  "pref.general.language.label": "語言",
   "pref.general.language.pseudo": "偽語言 (en-XA)",
   "pref.general.language.system": "系統",
   "pref.general.reload_on_update.help": "當伺服器推出較新版本時，在這個開啟的用戶端顯示「有新版本可用 — 重新載入」橫幅。預設關閉。",

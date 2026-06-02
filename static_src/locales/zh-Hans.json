@@ -1,5 +1,7 @@
 {
   "brand.marker": "优",
+  "brand.wordmark.yo": "优",
+  "brand.wordmark.lo": "乐",
   "pref.section.general": "常规",
   "pref.section.appearance": "外观",
   "pref.section.yolo": "YOLO",
@@ -12,7 +14,7 @@
   "pref.general.auto_focus.help": "在切换标签页、调整布局和悬停手势后，聚焦窗格并启用悬停打开菜单。默认关闭。",
   "pref.general.default_layout.label": "默认布局",
   "pref.general.default_layout.help": "新浏览器访问时首选的初始窗格布局。",
-  "pref.general.language.label": "界面语言",
+  "pref.general.language.label": "语言",
   "pref.general.language.system": "系统",
   "pref.general.language.pseudo": "伪语言 (en-XA)",
   "pref.general.language.help": "优乐mux 界面使用的语言。“系统”会匹配你的浏览器；en-XA 是用于发现未本地化文本的伪语言环境。",

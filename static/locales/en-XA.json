@@ -1,5 +1,7 @@
 {
   "brand.marker": "⟦ÝÓ·⟧",
+  "brand.wordmark.lo": "⟦ŁÓ·⟧",
+  "brand.wordmark.yo": "⟦ÝÓ·⟧",
   "pref.appearance.editor_cursor_style.block": "⟦Ɓłóçķ··⟧",
   "pref.appearance.editor_cursor_style.help": "⟦Çářéť šĥáƥé ƒóř ÇóđéⱮířřóř éđíťóřš. Ɓóťĥ šťýłéš úšé ťĥé áçťíṽé éđíťóř çúřšóř çółóř.·································⟧",
   "pref.appearance.editor_cursor_style.label": "⟦Éđíťóř çúřšóř šťýłé········⟧",
@@ -61,7 +63,7 @@
   "pref.general.default_sessions.help": "⟦Ƥřéƒéřřéđ ťɱúẋ šéššíóñš ťó óƥéñ ƒířšť, óñé šéššíóñ ñáɱé ƥéř łíñé.··························⟧",
   "pref.general.default_sessions.label": "⟦Đéƒáúłť šéššíóñš······⟧",
   "pref.general.language.help": "⟦Łáñǧúáǧé ƒóř ťĥé ÝÓŁÓɱúẋ ÚÍ. Šýšťéɱ ɱáťçĥéš ýóúř ƀřóŵšéř; éñ-ẊÁ íš á ƥšéúđó-łóçáłé ƒóř šƥóťťíñǧ úñłóçáłížéđ ťéẋť.·············································⟧",
-  "pref.general.language.label": "⟦ÚÍ łáñǧúáǧé····⟧",
+  "pref.general.language.label": "⟦Łáñǧúáǧé···⟧",
   "pref.general.language.pseudo": "⟦Ƥšéúđó (éñ-ẊÁ)······⟧",
   "pref.general.language.system": "⟦Šýšťéɱ··⟧",
   "pref.general.reload_on_update.help": "⟦Ŵĥéñ ťĥé šéřṽéř šĥíƥš á ñéŵéř ṽéřšíóñ, šĥóŵ á \"Ñéŵ ṽéřšíóñ áṽáíłáƀłé — Řéłóáđ\" ƀáññéř íñ ťĥíš óƥéñ çłíéñť. Óƒƒ ƀý đéƒáúłť.·················································⟧",

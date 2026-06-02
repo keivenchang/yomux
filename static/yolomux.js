@@ -806,10 +806,15 @@ function resolveLocalePref(pref) {
 }
 
 function rerenderForLocale() {
-  // Re-render the surfaces that contain localized text. Guarded so this is safe at any load order.
-  if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels();
-  if (typeof renderSessionButtons === 'function') renderSessionButtons();
+  // DOIT.6 #50: force-re-render EVERY localized surface so a language switch repaints the open UI on
+  // the same interaction. Guarded so this is safe at any load order. Preferences must be forced past
+  // the active-control guard (the language <select> is the active control when the switch fires).
+  if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels({force: true});
+  if (typeof renderSessionButtons === 'function') renderSessionButtons();  // rebuilds the app menu bar
   if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+  if (typeof renderInfoPanel === 'function') renderInfoPanel();
+  if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true});
+  if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
 }
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
@@ -4533,6 +4538,14 @@ function renderSessionButtons(options = {}) {
   sessionButtons.appendChild(createTopbarActivityStatus());
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
+}
+
+// #52: the wordmark is server-rendered (YO/LO/m/u/x); localize the YO/LO glyphs client-side so a
+// Chinese locale shows 優樂mux / 优乐mux (優/优 boxed-green, 樂/乐 green) and updates on a language switch
+// without a reload. The m/u/x colorful spans and the version are untouched.
+function renderBrandWordmark() {
+  for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.wordmark.yo');
+  for (const lo of document.querySelectorAll('.brand-title .brand-lo')) lo.textContent = t('brand.wordmark.lo');
 }
 
 function createAppMenuBar() {
@@ -13369,8 +13382,7 @@ function editorSchemePreferenceChoices(options = {}) {
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
-      {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
-      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'select', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
+      // #51: Language is the FIRST General preference.
       {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: [
         // Endonym labels (each language in its own script); Traditional Chinese before Simplified.
         {value: 'system', label: t('pref.general.language.system')},
@@ -13379,6 +13391,8 @@ function preferenceSections() {
         {value: 'zh-Hans', label: '简体中文'},
         {value: 'en-XA', label: t('pref.general.language.pseudo')},
       ], help: t('pref.general.language.help')},
+      {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
+      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'select', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
       {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
@@ -14899,6 +14913,9 @@ function savePreferenceControl(control) {
   }
   const previousValue = preferenceValue(path);
   const value = valueFromPreferenceControl(control);
+  // #50: switch the UI language OPTIMISTICALLY on the select change — don't wait for the settings-poll
+  // round-trip (same lesson as the theme toggle). applyLocale is async + re-renders every surface.
+  if (path === 'general.language') applyLocale(resolveLocalePref(value));
   saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })

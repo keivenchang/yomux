@@ -1,5 +1,7 @@
 {
   "brand.marker": "YO",
+  "brand.wordmark.yo": "YO",
+  "brand.wordmark.lo": "LO",
   "pref.section.general": "General",
   "pref.section.appearance": "Appearance",
   "pref.section.yolo": "YOLO",
@@ -12,7 +14,7 @@
   "pref.general.auto_focus.help": "Focus panes and enable hover-open menus after tab switches, layout moves, and hover gestures. Off by default.",
   "pref.general.default_layout.label": "Default layout",
   "pref.general.default_layout.help": "Preferred starting pane layout for new browser visits.",
-  "pref.general.language.label": "UI language",
+  "pref.general.language.label": "Language",
   "pref.general.language.system": "System",
   "pref.general.language.pseudo": "Pseudo (en-XA)",
   "pref.general.language.help": "Language for the YOLOmux UI. System matches your browser; en-XA is a pseudo-locale for spotting unlocalized text.",

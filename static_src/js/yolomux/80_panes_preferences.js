@@ -1481,8 +1481,7 @@ function editorSchemePreferenceChoices(options = {}) {
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
-      {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
-      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'select', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
+      // #51: Language is the FIRST General preference.
       {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: [
         // Endonym labels (each language in its own script); Traditional Chinese before Simplified.
         {value: 'system', label: t('pref.general.language.system')},
@@ -1491,6 +1490,8 @@ function preferenceSections() {
         {value: 'zh-Hans', label: '简体中文'},
         {value: 'en-XA', label: t('pref.general.language.pseudo')},
       ], help: t('pref.general.language.help')},
+      {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
+      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'select', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
       {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},

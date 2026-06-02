@@ -4461,11 +4461,20 @@ body.theme-light .panel.typing-ready-pane {
 .info-subview .info-list {
   flex: 1;
 }
+/* #48: the merged info panel has FOUR rows — window-tab strip, detail row, the YO!info|YO!agent sub-tab
+   toggle, then the body. `.panel` only declares three tracks, so give the info panel its own template so
+   the sub-tab row gets a real track (and stays visible when the detail header is collapsed away). */
+.info-panel {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+.info-panel.details-collapsed {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
 /* The segmented sub-tab toggle that switches between YO!info and YO!agent (its own row under the tabs). */
 .info-subtabs {
   display: flex;
   gap: 0;
-  padding: 6px 10px 0;
+  padding: 6px 10px 4px;
   background: #11151d;
 }
 .info-subtab {

@@ -931,6 +931,9 @@ function savePreferenceControl(control) {
   }
   const previousValue = preferenceValue(path);
   const value = valueFromPreferenceControl(control);
+  // #50: switch the UI language OPTIMISTICALLY on the select change — don't wait for the settings-poll
+  // round-trip (same lesson as the theme toggle). applyLocale is async + re-renders every surface.
+  if (path === 'general.language') applyLocale(resolveLocalePref(value));
   saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })

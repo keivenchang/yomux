@@ -607,6 +607,14 @@ function renderSessionButtons(options = {}) {
   scheduleTopbarMetricsUpdate();
 }
 
+// #52: the wordmark is server-rendered (YO/LO/m/u/x); localize the YO/LO glyphs client-side so a
+// Chinese locale shows 優樂mux / 优乐mux (優/优 boxed-green, 樂/乐 green) and updates on a language switch
+// without a reload. The m/u/x colorful spans and the version are untouched.
+function renderBrandWordmark() {
+  for (const yo of document.querySelectorAll('.brand-title .brand-yolo')) yo.textContent = t('brand.wordmark.yo');
+  for (const lo of document.querySelectorAll('.brand-title .brand-lo')) lo.textContent = t('brand.wordmark.lo');
+}
+
 function createAppMenuBar() {
   const bar = document.createElement('nav');
   bar.className = 'app-menu-bar';

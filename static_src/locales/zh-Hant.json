@@ -1,5 +1,7 @@
 {
   "brand.marker": "優",
+  "brand.wordmark.yo": "優",
+  "brand.wordmark.lo": "樂",
   "pref.section.general": "一般",
   "pref.section.appearance": "外觀",
   "pref.section.yolo": "YOLO",
@@ -12,7 +14,7 @@
   "pref.general.auto_focus.help": "在切換分頁、調整版面與滑鼠停留手勢後，聚焦窗格並啟用滑鼠停留開啟選單。預設關閉。",
   "pref.general.default_layout.label": "預設版面",
   "pref.general.default_layout.help": "新瀏覽器造訪時偏好的起始窗格版面。",
-  "pref.general.language.label": "介面語言",
+  "pref.general.language.label": "語言",
   "pref.general.language.system": "系統",
   "pref.general.language.pseudo": "偽語言 (en-XA)",
   "pref.general.language.help": "優樂mux 介面使用的語言。「系統」會比對你的瀏覽器；en-XA 是用於找出未在地化文字的偽語言環境。",

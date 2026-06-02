@@ -84,8 +84,13 @@ function resolveLocalePref(pref) {
 }
 
 function rerenderForLocale() {
-  // Re-render the surfaces that contain localized text. Guarded so this is safe at any load order.
-  if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels();
-  if (typeof renderSessionButtons === 'function') renderSessionButtons();
+  // DOIT.6 #50: force-re-render EVERY localized surface so a language switch repaints the open UI on
+  // the same interaction. Guarded so this is safe at any load order. Preferences must be forced past
+  // the active-control guard (the language <select> is the active control when the switch fires).
+  if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels({force: true});
+  if (typeof renderSessionButtons === 'function') renderSessionButtons();  // rebuilds the app menu bar
   if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+  if (typeof renderInfoPanel === 'function') renderInfoPanel();
+  if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true});
+  if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
 }

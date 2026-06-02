@@ -1329,6 +1329,15 @@ function makeFileTree(paths) {
   assert.ok(/\.info-subview\s*\{[\s\S]*?display:\s*none/.test(mergedInfoCss), '#40: inactive sub-views are hidden');
   assert.ok(/\.info-subview\.active\s*\{[\s\S]*?display:\s*flex/.test(mergedInfoCss), '#40: the active sub-view is shown');
   assert.ok(/\.info-subtab\.active\s*\{/.test(mergedInfoCss), '#40: the active sub-tab button is styled');
+  // #48: the merged info panel gets its own 4-row grid so the YO!info|YO!agent sub-tab row is always
+  // visible (a real track), including when the detail header is collapsed.
+  assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the info panel reserves a row for the sub-tab toggle');
+  assert.ok(/\.info-panel\.details-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the sub-tab row survives a collapsed detail header');
+  // #50: a language switch force-re-renders every localized surface and fires applyLocale optimistically.
+  assert.ok(/function rerenderForLocale\(\)[\s\S]*?renderPreferencesPanels\(\{force: true\}\)[\s\S]*?renderBrandWordmark\(\)/.test(source), '#50: rerenderForLocale force-re-renders Preferences + the wordmark');
+  assert.ok(/if \(path === 'general\.language'\) applyLocale\(resolveLocalePref\(value\)\)/.test(source), '#50: the language select switches locale optimistically, not on the poll');
+  // #52: the wordmark YO/LO glyphs localize client-side (優樂 / 优乐) via t(brand.wordmark.*).
+  assert.ok(/function renderBrandWordmark\(\)[\s\S]*?t\('brand\.wordmark\.yo'\)[\s\S]*?t\('brand\.wordmark\.lo'\)/.test(source), '#52: renderBrandWordmark localizes the YO/LO wordmark glyphs');
   assert.ok(source.includes('id="summary-${session}" class="summary-preview markdown-body"'), 'the AI Transcript panel is a markdown-body container, not a raw <pre>');
   assert.ok(source.includes("AI Transcript for session '"), 'the AI Transcript panel head names the session');
   assert.ok(/function startSummaryStream[\s\S]*renderMarkdownPreviewInto\(node, raw\)/.test(source), 'the AI Transcript stream renders accumulated text through the markdown pipeline');
@@ -4005,10 +4014,24 @@ function makeFileTree(paths) {
     assert.ok(catalog['pref.section.yoagent'].includes(locale === 'zh-Hant' ? '優agent' : '优agent'), `${locale} applies the YO!agent brand glyph`);
     // The YO marker glyph localizes to 優 / 优 (the catalog value the marker renders via t('brand.marker')).
     assert.equal(catalog['brand.marker'], locale === 'zh-Hant' ? '優' : '优', `${locale} marker glyph`);
+    // #52: the wordmark glyphs localize to 優樂 / 优乐.
+    assert.equal(catalog['brand.wordmark.yo'], locale === 'zh-Hant' ? '優' : '优', `${locale} wordmark YO glyph`);
+    assert.equal(catalog['brand.wordmark.lo'], locale === 'zh-Hant' ? '樂' : '乐', `${locale} wordmark LO glyph`);
     for (const englishLeak of ['Global color theme', 'Upload size cap', 'Terminal scrollback']) {
       assert.equal(zhHtml.includes(englishLeak), false, `${locale}: no plain-English "${englishLeak}" leaks`);
     }
   }
+}
+
+{
+  // DOIT.6 #51: "Language" is the FIRST General preference and its label is "Language" (not "UI language").
+  const api = loadYolomux('', ['1']);
+  const enCatalog = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
+  assert.equal(enCatalog['pref.general.language.label'], 'Language', '#51: the language label reads "Language"');
+  api.setActiveLocaleForTest('en');
+  const generalHtml = api.preferencesPanelHtmlForTest('');
+  assert.ok(generalHtml.includes('data-setting-path="general.language"'), '#51: the language field is present');
+  assert.ok(generalHtml.indexOf('data-setting-path="general.language"') < generalHtml.indexOf('data-setting-path="general.auto_focus"'), '#51: the language field is the first General row (before auto-focus)');
 }
 
 {
