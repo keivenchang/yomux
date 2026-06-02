@@ -158,6 +158,9 @@ def pc_controls_fixture_html():
         </div>
         <span id="working-yolo" class="session-yolo-marker active working">YO</span>
         <span id="idle-yolo" class="session-yolo-marker active">YO</span>
+        <button type="button" class="pane-tab active" id="info-tab">
+          <span class="pane-tab-core"><span class="session-button-dir pane-tab-info-label">YO!info</span></span>
+        </button>
         <button type="button" class="pane-tab active">
           <span class="pane-tab-core"><span class="session-button-name">1</span></span>
           <span id="tab-minimize" class="pane-tab-close pc-window-control pc-minimize"></span>
@@ -1013,6 +1016,8 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
           actionsBg: actionsStyle.backgroundColor,
           closeColor: closeStyle.color,
           closeBg: closeStyle.backgroundColor,
+          infoLabelColor: getComputedStyle(document.querySelector('#info-tab .pane-tab-info-label')).color,
+          infoTabBg: getComputedStyle(document.getElementById('info-tab')).backgroundColor,
         };
         """
     )
@@ -1020,6 +1025,9 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert light_control["actionsColor"] != light_control["actionsBg"]
     assert light_control["closeColor"] == "rgb(31, 41, 55)"
     assert light_control["closeColor"] != light_control["closeBg"]
+    # DOIT.6 #27: the YO!info tab label is legible in light mode (color contrasts with the tab bg,
+    # not white-on-white) now that it uses the themed .session-button-dir treatment.
+    assert light_control["infoLabelColor"] != light_control["infoTabBg"]
     z_indexes = browser.execute_script(
         """
         return {

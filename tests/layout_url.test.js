@@ -282,6 +282,7 @@ globalThis.__layoutTestApi = {
   appShortcutText,
   t,
   tPlural,
+  yoagentInlineMarkdown,
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
@@ -1986,7 +1987,14 @@ function makeFileTree(paths) {
   assert.ok(/\.file-explorer-changes-panel \.changes-comparison-head\s*\{[^}]*flex-wrap: nowrap/.test(preferencesCss), '#44(d): the Finder comparison header is compacted to one tight line (header chrome takes less height)');
   assert.ok(/\.grid\.drop-preview::before/.test(preferencesCss), 'root layout drops have a full-layout preview overlay');
   assert.ok(/\.grid\.drop-preview-gutter::before\s*\{[\s\S]*--drop-preview-left/.test(preferencesCss), 'split-bar drops use explicit full-span preview geometry');
-  assert.equal(/body\.theme-light\s+[^{]*(?:\.pane-tab|\.tabs|\.active-pane|\.panel-head)/.test(preferencesCss), false, 'global light theme does not restyle pane tab strips or active pane rings');
+  // Light theme drives the BASE pane-tab/ring styling via tokens, not rule overrides; but DOIT.6 #28
+  // adds targeted hover/link contrast overrides (expected), so guard only the base tab + ring.
+  assert.equal(/body\.theme-light\s+\.pane-tab\s*\{/.test(preferencesCss), false, 'light theme does not restyle the base pane tab (tokens drive it)');
+  assert.equal(/body\.theme-light\s+\.panel\.active-pane\s*\{/.test(preferencesCss), false, 'light theme does not restyle the active-pane ring directly');
+  assert.ok(/body\.theme-light \.meta a/.test(preferencesCss), '#28: light theme adds a contrast override for detail-row links');
+  assert.ok(/body\.theme-light \.pane-tab:hover/.test(preferencesCss), '#28: light theme fixes the near-white pane-tab hover border');
+  assert.ok(/body\.theme-light \.tabs \.pane-actions:hover/.test(preferencesCss), '#28: light theme fixes the white tab-overflow hover glyph');
+  assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('session-button-dir pane-tab-info-label'), '#27: the YO!info tab label uses the themed .session-button-dir color treatment');
   assert.ok(preferencesCss.includes('--pane-tab-active-bg: #86d600'), 'focused active pane tab uses a brighter brand green fill');
   assert.ok(preferencesCss.includes('--pane-tab-active-accent: #86d600'), 'focused active pane tab accent token is the same green, not yellow/lime');
   assert.equal(preferencesCss.includes('box-shadow: inset 0 2px 0 var(--pane-tab-active-accent)'), false, 'focused active pane tabs do not paint a contrasting top line');
@@ -3827,6 +3835,19 @@ function makeFileTree(paths) {
     {path: '/y/a.md', realpath: '/y/a.md'},
   ]).map(file => file.path);
   assert.deepStrictEqual([...unknown], ['/x/a.md', '/y/a.md'], '#25: unknown-size same-name files are not collapsed');
+}
+
+{
+  // DOIT.6 #29: per-session summary renders markdown; block headings downgrade to inline bold.
+  const api = loadYolomux('', ['1']);
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.equal(api.yoagentInlineMarkdown('## Ant-brain session summary\nbody'), '**Ant-brain session summary**\nbody', '#29: ## headings become inline bold (no big h2)');
+  assert.equal(api.yoagentInlineMarkdown('### Goal ###\n- a'), '**Goal**\n- a', '#29: closed ATX headings downgrade and keep list markers');
+  assert.equal(api.yoagentInlineMarkdown('**Goal:** ship it `now`'), '**Goal:** ship it `now`', '#29: inline emphasis/code is left intact');
+  // The summary body is flagged for the markdown pass (like chat) and that pass handles it.
+  assert.ok(source.includes('yoagent-session-summary-body markdown-body" data-yoagent-summary-markdown'), '#29: the summary body is flagged for markdown rendering');
+  assert.ok(/\.yoagent-session-summary-body\[data-yoagent-summary-markdown\]/.test(source), '#29: renderYoagentMessageMarkdown renders the summary card body');
+  assert.ok(/renderMarkdownPreviewInto\(body, yoagentInlineMarkdown\(/.test(source), '#29: summary markdown is heading-downgraded before rendering');
 }
 
 {

@@ -561,7 +561,9 @@ function positionPaneTabPopover(tab) {
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
+  // DOIT.6: use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
+  // active/inactive colors; the old .pane-tab-info-label set no color and went white-on-white in light.
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
@@ -1230,7 +1232,7 @@ function yoagentSessionSummariesHtml() {
           <span>${esc(summary.agent_label || summary.agent || 'agent')}</span>
           <span>${esc(files)}</span>
         </div>
-        <div class="yoagent-session-summary-body">${esc(summary.local)}</div>
+        <div class="yoagent-session-summary-body markdown-body" data-yoagent-summary-markdown>${esc(summary.local)}</div>
       </article>`;
     })
     .filter(Boolean)

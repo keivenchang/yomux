@@ -1168,6 +1168,26 @@ body.theme-light .panel-detail-close:focus-visible {
   color: #0f172a;
   background: rgba(15, 23, 42, 0.08);
 }
+/* DOIT.6 #28: light-mode contrast fixes for genuine light-text-on-neutral / near-white-affordance
+   cases (links on the light detail row, the near-white tab-hover border, white hover-glyph text on
+   the light control hover bg). Saturated-chip light text (red/dark-blue badges) is left as-is. */
+body.theme-light .meta a,
+body.theme-light .summary-context a {
+  color: #1d4ed8;
+}
+body.theme-light .meta a:hover,
+body.theme-light .summary-context a:hover {
+  color: #1e3a8a;
+}
+body.theme-light .pane-tab:hover {
+  border-color: rgba(15, 23, 42, 0.5);
+}
+body.theme-light .tabs .pane-actions:hover,
+body.theme-light .tabs .pane-actions:focus-visible,
+body.theme-light .tabs .panel-tab-overflow:hover,
+body.theme-light .tabs .panel-tab-overflow:focus-visible {
+  color: #0f172a;
+}
 body.theme-light .panel.typing-ready-pane {
   border-color: #9aa6b6;
 }

@@ -12375,7 +12375,9 @@ function positionPaneTabPopover(tab) {
 }
 
 function paneInfoTabHtml(item = infoItemId, options = {}) {
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
+  // DOIT.6: use .session-button-dir (like the Finder/Prefs tabs) so the label gets the themed
+  // active/inactive colors; the old .pane-tab-info-label set no color and went white-on-white in light.
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir pane-tab-info-label">${esc(itemLabel(item))}</span></span>`;
 }
 
 function fileExplorerPaneTabHtml(item = fileExplorerItemId, options = {}) {
@@ -13044,7 +13046,7 @@ function yoagentSessionSummariesHtml() {
           <span>${esc(summary.agent_label || summary.agent || 'agent')}</span>
           <span>${esc(files)}</span>
         </div>
-        <div class="yoagent-session-summary-body">${esc(summary.local)}</div>
+        <div class="yoagent-session-summary-body markdown-body" data-yoagent-summary-markdown>${esc(summary.local)}</div>
       </article>`;
     })
     .filter(Boolean)
@@ -17105,6 +17107,7 @@ function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-co
   if (!globalRegion || !sessionsRegion) return false;
   globalRegion.outerHTML = globalActivitySummaryHtml();
   sessionsRegion.outerHTML = yoagentSessionSummariesHtml();
+  renderYoagentMessageMarkdown(node);
   return true;
 }
 
@@ -17112,14 +17115,26 @@ function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content'
   return Boolean(yoagentBusy && node?.querySelector?.('.yoagent-chat-status'));
 }
 
+// Downgrade block-level headings (#/##/### …) to inline bold so an embedded agent heading renders as
+// emphasis inside a compact card instead of a giant h1/h2 that balloons its height. Inline emphasis,
+// code, lists, and links are left intact for marked.js to render.
+function yoagentInlineMarkdown(text) {
+  return String(text || '').replace(/^[ \t]*#{1,6}[ \t]+(.*?)[ \t]*#*$/gm, (match, title) => (title ? `**${title}**` : ''));
+}
+
 function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
-  // Render each assistant reply body through the Markdown pipeline so bold section titles, numbered
-  // items, and sub-bullets display formatted. Without marked.js the escaped-text fallback stays.
+  // Render assistant chat replies AND per-session summary cards through the Markdown pipeline so bold
+  // titles, code, lists, and links display formatted. Without marked.js the escaped-text fallback stays.
   if (!node || typeof window.marked === 'undefined') return;
-  const bodies = node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || [];
-  bodies.forEach(body => {
+  (node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || []).forEach(body => {
     renderMarkdownPreviewInto(body, body.textContent || '');
     body.removeAttribute('data-yoagent-markdown');
+  });
+  // Per-session summary bodies embed the agent's own transcript markdown (## headings etc.): downgrade
+  // headings to inline bold so a long heading does not blow up the card.
+  (node.querySelectorAll?.('.yoagent-session-summary-body[data-yoagent-summary-markdown]') || []).forEach(body => {
+    renderMarkdownPreviewInto(body, yoagentInlineMarkdown(body.textContent || ''));
+    body.removeAttribute('data-yoagent-summary-markdown');
   });
 }
 
