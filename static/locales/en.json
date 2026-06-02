@@ -108,6 +108,7 @@
   "finder.toolbar.syncLabel": "Sync",
   "info.refreshRepo": "Refresh repo metadata",
   "info.subtitle": "Repo metadata, PRs, CI, and the AI activity summary",
+  "language.switcher": "Language",
   "menu.bar.aria": "Application menu",
   "menu.common.adminOnly": "Admin only",
   "menu.common.comingSoon": "Coming soon",

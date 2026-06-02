@@ -285,6 +285,8 @@ globalThis.__layoutTestApi = {
   yoagentInlineMarkdown,
   yoagentTightMarkdown,
   joinAndNormalize,
+  resolveLocalePref,
+  i18nLocaleChoices,
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
@@ -4036,6 +4038,29 @@ function makeFileTree(paths) {
   const themeCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.theme-card-system \.theme-card-pane\s*\{[^}]*linear-gradient/.test(themeCss), '#123: the System card uses a diagonal light/dark split');
   assert.ok(/\.theme-card\.selected \.theme-card-preview\s*\{[^}]*var\(--brand-green\)/.test(themeCss), '#123: the selected card is ringed with the accent');
+}
+
+{
+  // DOIT.8 Phase 1: the topbar language switcher + system-locale resolution.
+  const api = loadYolomux('', ['1']);
+  // Explicit prefs resolve to themselves; 'system' (no navigator.language in the harness) falls back to en.
+  assert.equal(api.resolveLocalePref('zh-Hant'), 'zh-Hant', 'Phase 1: an explicit locale pref resolves to itself');
+  assert.equal(api.resolveLocalePref('zh-Hans'), 'zh-Hans', 'Phase 1: Simplified Chinese resolves to itself');
+  assert.equal(api.resolveLocalePref('en'), 'en', 'Phase 1: English resolves to itself');
+  assert.equal(api.resolveLocalePref('system'), 'en', 'Phase 1: system falls back to en without a browser locale');
+  // The switcher choices: system + en + Traditional-before-Simplified + pseudo, endonym-labeled.
+  const choices = api.i18nLocaleChoices();
+  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'en-XA'], 'Phase 1: the locale choices are ordered system/en/Hant/Hans/pseudo');
+  assert.equal(choices.find(c => c.value === 'zh-Hant').label, '繁體中文', 'Phase 1: Traditional Chinese is labeled with its endonym');
+  assert.equal(choices.find(c => c.value === 'zh-Hans').label, '简体中文', 'Phase 1: Simplified Chinese is labeled with its endonym');
+  const src = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\)/.test(src), 'Phase 1: the topbar renders the language switcher');
+  assert.ok(/function createTopbarLanguageSwitcher[\s\S]*?applyLocale\(resolveLocalePref\(value\)\)[\s\S]*?saveSettingsPatch\(settingPatch\('general\.language', value\)\)/.test(src), 'Phase 1: the switcher applies the locale optimistically AND saves general.language (same setting as Preferences)');
+  // The zh fallback mapping (zh-TW/HK/Hant -> Hant, other zh -> Hans).
+  assert.ok(/nav\.startsWith\('zh'\)\) return \/hant\|/.test(src), 'Phase 1: system maps Chinese browser locales to Hant/Hans');
+  assert.ok(/\.topbar-language\s*\{/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'Phase 1: the language switcher has topbar styling');
+  // boot() resolves the raw general.language pref (so a system pref localizes client-side).
+  assert.ok(/await applyLocale\(resolveLocalePref\(initialSetting\('general\.language', 'system'\)\)\)/.test(src), 'Phase 1: boot resolves the raw language pref (system -> navigator)');
 }
 
 {

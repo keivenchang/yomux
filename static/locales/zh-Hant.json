@@ -108,6 +108,7 @@
   "finder.toolbar.syncLabel": "同步",
   "info.refreshRepo": "重新整理儲存庫中繼資料",
   "info.subtitle": "儲存庫中繼資料、PR、CI 與 AI 活動摘要",
+  "language.switcher": "語言",
   "menu.bar.aria": "應用程式選單",
   "menu.common.adminOnly": "僅限管理員",
   "menu.common.comingSoon": "即將推出",

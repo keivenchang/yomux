@@ -468,6 +468,7 @@
   "palette.group.recent": "Recent",
   "palette.group.files": "Files",
   "common.loading": "loading...",
+  "language.switcher": "Language",
   "popover.path": "path",
   "popover.type": "type",
   "popover.status": "status",

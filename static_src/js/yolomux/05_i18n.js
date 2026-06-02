@@ -81,13 +81,37 @@ async function applyLocale(locale) {
   rerenderForLocale();
 }
 
+// The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
+// navigator.language to one of these. Add new locales here as their catalogs ship.
+function i18nSupportedLocales() {
+  return ['zh-Hant', 'zh-Hans', 'en'];
+}
+
+// The language-switcher choices (Preferences picker + topbar switcher). Endonyms stay in their own
+// script (never translated); 'system'/pseudo are localized. Traditional Chinese before Simplified.
+function i18nLocaleChoices() {
+  return [
+    {value: 'system', label: t('pref.general.language.system')},
+    {value: 'en', label: 'English'},
+    {value: 'zh-Hant', label: '繁體中文'},
+    {value: 'zh-Hans', label: '简体中文'},
+    {value: 'en-XA', label: t('pref.general.language.pseudo')},
+  ];
+}
+
 // Resolve a `general.language` pref to a concrete locale. "system" matches navigator.language against
-// the locales that ship a catalog (Phase 0: only `en`), so it falls back to en.
+// the locales that ship a catalog: zh-TW/HK/MO/Hant -> zh-Hant, other zh-* -> zh-Hans, else by language
+// prefix, falling back to en.
 function resolveLocalePref(pref) {
   const value = String(pref || 'system');
   if (value !== 'system') return value;
   const nav = (typeof navigator === 'object' && navigator && navigator.language) ? String(navigator.language).toLowerCase() : 'en';
-  return nav.startsWith('en') ? 'en' : 'en';
+  if (nav.startsWith('zh')) return /hant|\b(tw|hk|mo)\b|-tw|-hk|-mo/.test(nav) ? 'zh-Hant' : 'zh-Hans';
+  for (const loc of i18nSupportedLocales()) {
+    const base = loc.toLowerCase().split('-')[0];
+    if (nav === loc.toLowerCase() || nav === base || nav.startsWith(base + '-')) return loc;
+  }
+  return 'en';
 }
 
 function rerenderForLocale() {

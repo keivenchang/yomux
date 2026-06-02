@@ -108,6 +108,7 @@
   "finder.toolbar.syncLabel": "同步",
   "info.refreshRepo": "刷新仓库元数据",
   "info.subtitle": "仓库元数据、PR、CI 与 AI 活动摘要",
+  "language.switcher": "语言",
   "menu.bar.aria": "应用程序菜单",
   "menu.common.adminOnly": "仅限管理员",
   "menu.common.comingSoon": "即将推出",

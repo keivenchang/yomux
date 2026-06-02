@@ -810,13 +810,37 @@ async function applyLocale(locale) {
   rerenderForLocale();
 }
 
+// The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
+// navigator.language to one of these. Add new locales here as their catalogs ship.
+function i18nSupportedLocales() {
+  return ['zh-Hant', 'zh-Hans', 'en'];
+}
+
+// The language-switcher choices (Preferences picker + topbar switcher). Endonyms stay in their own
+// script (never translated); 'system'/pseudo are localized. Traditional Chinese before Simplified.
+function i18nLocaleChoices() {
+  return [
+    {value: 'system', label: t('pref.general.language.system')},
+    {value: 'en', label: 'English'},
+    {value: 'zh-Hant', label: '繁體中文'},
+    {value: 'zh-Hans', label: '简体中文'},
+    {value: 'en-XA', label: t('pref.general.language.pseudo')},
+  ];
+}
+
 // Resolve a `general.language` pref to a concrete locale. "system" matches navigator.language against
-// the locales that ship a catalog (Phase 0: only `en`), so it falls back to en.
+// the locales that ship a catalog: zh-TW/HK/MO/Hant -> zh-Hant, other zh-* -> zh-Hans, else by language
+// prefix, falling back to en.
 function resolveLocalePref(pref) {
   const value = String(pref || 'system');
   if (value !== 'system') return value;
   const nav = (typeof navigator === 'object' && navigator && navigator.language) ? String(navigator.language).toLowerCase() : 'en';
-  return nav.startsWith('en') ? 'en' : 'en';
+  if (nav.startsWith('zh')) return /hant|\b(tw|hk|mo)\b|-tw|-hk|-mo/.test(nav) ? 'zh-Hant' : 'zh-Hans';
+  for (const loc of i18nSupportedLocales()) {
+    const base = loc.toLowerCase().split('-')[0];
+    if (nav === loc.toLowerCase() || nav === base || nav.startsWith(base + '-')) return loc;
+  }
+  return 'en';
 }
 
 function rerenderForLocale() {
@@ -4557,6 +4581,7 @@ function renderSessionButtons(options = {}) {
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarSearch());
   sessionButtons.appendChild(createTopbarActivityStatus());
+  sessionButtons.appendChild(createTopbarLanguageSwitcher());
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
 }
@@ -4603,6 +4628,32 @@ function createTopbarSearch() {
   button.append(icon, label, hint);
   button.addEventListener('click', () => openFileQuickOpen());
   return button;
+}
+
+// DOIT.8 Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
+// setting as the Preferences picker and applies the locale optimistically (no settings-poll round-trip).
+// 'system' resolves against navigator.language; the <select> shows the raw pref so 'system' reads as Auto.
+function createTopbarLanguageSwitcher() {
+  const pref = String(initialSetting('general.language', 'system'));
+  const select = document.createElement('select');
+  select.className = 'topbar-language';
+  select.setAttribute('aria-label', t('language.switcher'));
+  select.title = t('language.switcher');
+  for (const choice of i18nLocaleChoices()) {
+    const option = document.createElement('option');
+    option.value = choice.value;
+    option.textContent = choice.label;
+    if (choice.value === pref) option.selected = true;
+    select.appendChild(option);
+  }
+  select.addEventListener('change', () => {
+    const value = select.value;
+    applyLocale(resolveLocalePref(value));
+    if (readOnlyMode) return;
+    saveSettingsPatch(settingPatch('general.language', value))
+      .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+  });
+  return select;
 }
 
 function appMenuAnchorInlineSize(popover) {
@@ -18971,8 +19022,9 @@ async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   // i18n (DOIT.8): AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
-  // menu bar renders synchronously at boot, before any later re-render could fix it).
-  await applyLocale(i18nActiveLocaleId());
+  // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
+  // resolved client-side against navigator.language (the server can't see the browser locale).
+  await applyLocale(resolveLocalePref(initialSetting('general.language', 'system')));
   installGlobalThemeMediaListener();
   applyFileExplorerStaticLabels();
   renderTransportWarning();

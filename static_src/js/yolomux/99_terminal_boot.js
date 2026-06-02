@@ -1764,8 +1764,9 @@ async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   // i18n (DOIT.8): AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
   // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
-  // menu bar renders synchronously at boot, before any later re-render could fix it).
-  await applyLocale(i18nActiveLocaleId());
+  // menu bar renders synchronously at boot, before any later re-render could fix it). A 'system' pref is
+  // resolved client-side against navigator.language (the server can't see the browser locale).
+  await applyLocale(resolveLocalePref(initialSetting('general.language', 'system')));
   installGlobalThemeMediaListener();
   applyFileExplorerStaticLabels();
   renderTransportWarning();

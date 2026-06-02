@@ -468,6 +468,7 @@
   "palette.group.recent": "最近",
   "palette.group.files": "文件",
   "common.loading": "加载中…",
+  "language.switcher": "语言",
   "popover.path": "路径",
   "popover.type": "类型",
   "popover.status": "状态",

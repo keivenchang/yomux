@@ -605,6 +605,7 @@ function renderSessionButtons(options = {}) {
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarSearch());
   sessionButtons.appendChild(createTopbarActivityStatus());
+  sessionButtons.appendChild(createTopbarLanguageSwitcher());
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
 }
@@ -651,6 +652,32 @@ function createTopbarSearch() {
   button.append(icon, label, hint);
   button.addEventListener('click', () => openFileQuickOpen());
   return button;
+}
+
+// DOIT.8 Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
+// setting as the Preferences picker and applies the locale optimistically (no settings-poll round-trip).
+// 'system' resolves against navigator.language; the <select> shows the raw pref so 'system' reads as Auto.
+function createTopbarLanguageSwitcher() {
+  const pref = String(initialSetting('general.language', 'system'));
+  const select = document.createElement('select');
+  select.className = 'topbar-language';
+  select.setAttribute('aria-label', t('language.switcher'));
+  select.title = t('language.switcher');
+  for (const choice of i18nLocaleChoices()) {
+    const option = document.createElement('option');
+    option.value = choice.value;
+    option.textContent = choice.label;
+    if (choice.value === pref) option.selected = true;
+    select.appendChild(option);
+  }
+  select.addEventListener('change', () => {
+    const value = select.value;
+    applyLocale(resolveLocalePref(value));
+    if (readOnlyMode) return;
+    saveSettingsPatch(settingPatch('general.language', value))
+      .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+  });
+  return select;
 }
 
 function appMenuAnchorInlineSize(popover) {
