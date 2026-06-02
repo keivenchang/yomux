@@ -575,7 +575,7 @@ function changesRepoGroupsHtml(files, options = {}) {
   const uploadedRows = uploadedFilesCollapsed ? '' : uploaded.map(item => changeFileRowHtml(item, options)).join('');
   const uploadedHtml = `<section class="changes-repo-group changes-uploaded-group${uploadedFilesCollapsed ? ' collapsed' : ''}">
       <button type="button" class="changes-repo-head changes-uploaded-toggle" data-uploaded-files-toggle aria-expanded="${uploadedFilesCollapsed ? 'false' : 'true'}">
-        <span><span class="changes-uploaded-caret">${uploadedFilesCollapsed ? '▸' : '▾'}</span> Uploaded files (${uploaded.length})</span><span>${uploadedFilesCollapsed ? 'collapsed' : uploaded.length}</span>
+        <span><span class="changes-uploaded-caret">${uploadedFilesCollapsed ? '▸' : '▾'}</span> ${esc(t('changes.uploaded', {count: uploaded.length}))}</span><span>${uploadedFilesCollapsed ? esc(t('changes.collapsed')) : uploaded.length}</span>
       </button>
       ${uploadedFilesCollapsed ? '' : `<div class="changes-file-list">${uploadedRows}</div>`}
     </section>`;
@@ -647,14 +647,14 @@ function createChangesPanel() {
   panel.innerHTML = `
       <div class="panel-head changes-panel-head">
         ${virtualPanelControlsHtml(changesItemId, 'Changes')}
-        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
           <div id="panel-tab-${changesItemId}" class="panel-session-label"><span class="session-button-dir">Changes</span></div>
           <div id="meta-${changesItemId}" class="meta">${esc(changesTabDetail())}</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(changesItemId)}" title="hide details" aria-label="hide details"></button>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(changesItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div class="changes-body panel-overlay-root">
         <div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>
@@ -989,26 +989,26 @@ function createFileExplorerPanel() {
   const label = fileExplorerLabel();
   panel.innerHTML = `
       <div class="panel-head file-explorer-head">
-        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
         <div class="file-explorer-toolbar">
-          <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="Show hidden files (dotfiles)" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-          <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="Root mode: fixed" aria-pressed="false">Root</button>
-          <div class="file-explorer-quick-access-panel" aria-label="Quick paths"></div>
-          <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="New file" aria-label="New file">+</button>
-          <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="New folder" aria-label="New folder">▣</button>
-          <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="Refresh" aria-label="Refresh">↻</button>
-          <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
-          <button type="button" class="file-explorer-header-action file-explorer-date-toggle" data-file-explorer-tree-dates title="Show modified dates" aria-pressed="${fileExplorerTreeShowDates ? 'true' : 'false'}">date</button>
-          <button type="button" class="file-explorer-header-action file-explorer-changes-toggle" data-file-explorer-changes-toggle title="${fileExplorerChangesHidden ? 'Show modified files' : 'Hide modified files'}" aria-pressed="${fileExplorerChangesHidden ? 'false' : 'true'}">Δ</button>
-          <select class="file-explorer-sort-select" data-file-explorer-tree-sort title="Sort tree" aria-label="Sort tree">
-            <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>A-Z</option>
-            <option value="za"${fileExplorerTreeSortMode === 'za' ? ' selected' : ''}>Z-A</option>
-            <option value="newest"${fileExplorerTreeSortMode === 'newest' ? ' selected' : ''}>new</option>
-            <option value="oldest"${fileExplorerTreeSortMode === 'oldest' ? ' selected' : ''}>old</option>
+          <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
+          <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="${esc(t('finder.rootMode.fixed'))}" aria-pressed="false">${esc(t('finder.toolbar.rootLabel'))}</button>
+          <div class="file-explorer-quick-access-panel" aria-label="${esc(t('finder.toolbar.quickPaths'))}"></div>
+          <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
+          <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}">▣</button>
+          <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="${esc(t('finder.toolbar.refresh'))}" aria-label="${esc(t('finder.toolbar.refresh'))}">↻</button>
+          <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
+          <button type="button" class="file-explorer-header-action file-explorer-date-toggle" data-file-explorer-tree-dates title="${esc(t('finder.toolbar.dates'))}" aria-pressed="${fileExplorerTreeShowDates ? 'true' : 'false'}">${esc(t('finder.toolbar.datesLabel'))}</button>
+          <button type="button" class="file-explorer-header-action file-explorer-changes-toggle" data-file-explorer-changes-toggle title="${esc(fileExplorerChangesHidden ? t('changes.show') : t('changes.hide'))}" aria-pressed="${fileExplorerChangesHidden ? 'false' : 'true'}">Δ</button>
+          <select class="file-explorer-sort-select" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
+            <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
+            <option value="za"${fileExplorerTreeSortMode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
+            <option value="newest"${fileExplorerTreeSortMode === 'newest' ? ' selected' : ''}>${esc(t('finder.sort.newest'))}</option>
+            <option value="oldest"${fileExplorerTreeSortMode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
           </select>
-          <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(label)} root path">
+          <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
           <span class="file-explorer-repo-summary" hidden></span>
-          <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="Copy current path" aria-label="Copy current path"></button>
+          <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="${esc(t('finder.toolbar.copyPath'))}" aria-label="${esc(t('finder.toolbar.copyPath'))}"></button>
           ${paneFrameControlsGroupHtml(fileExplorerItemId, {
             groupClass: 'file-explorer-frame-controls',
             actions: false,
@@ -1016,15 +1016,15 @@ function createFileExplorerPanel() {
             expand: false,
             close: true,
             closeClass: 'file-explorer-panel-close',
-            closeTitle: `Hide ${label} from layout`,
-            closeLabel: `Hide ${label} from layout`,
+            closeTitle: t('finder.hideFromLayout', {name: label}),
+            closeLabel: t('finder.hideFromLayout', {name: label}),
           })}
         </div>
       </div>
       <div class="file-explorer-pane panel-overlay-root">
         <div id="panel-toasts-${fileExplorerItemId}" class="panel-toast-stack"></div>
         <div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
-        <div class="file-explorer-changes-resizer" data-file-explorer-changes-resizer title="Drag to resize modified files"></div>
+        <div class="file-explorer-changes-resizer" data-file-explorer-changes-resizer title="${esc(t('finder.toolbar.resize'))}"></div>
         <div class="file-explorer-changes-panel" data-file-explorer-changes></div>
       </div>`;
   bindPanelShell(panel, fileExplorerItemId);
@@ -1203,30 +1203,30 @@ function createFileEditorPanel(item) {
             expand: true,
             close: true,
             closeClass: 'file-editor-panel-close',
-            closeTitle: 'Close pane',
-            closeLabel: 'Close pane',
+            closeTitle: t('editor.closePane'),
+            closeLabel: t('editor.closePane'),
           })}
         </div>
-        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
-      <div class="file-editor-toolbar" role="toolbar" aria-label="Editor controls" hidden>
-        <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="Editor mode" hidden>
-          <button type="button" data-editor-mode="edit" title="Edit" aria-label="Edit"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
-          <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
-          <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
-          <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
+      <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
+        <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="${esc(t('editor.mode.aria'))}" hidden>
+          <button type="button" data-editor-mode="edit" title="${esc(t('editor.mode.edit'))}" aria-label="${esc(t('editor.mode.edit'))}"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
+          <button type="button" data-editor-mode="preview" title="${esc(t('editor.mode.preview'))}" aria-label="${esc(t('editor.mode.preview'))}"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
+          <button type="button" data-editor-mode="split" title="${esc(t('editor.mode.split'))}" aria-label="${esc(t('editor.mode.split'))}"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
+          <button type="button" class="file-editor-cross-split-panel" title="${esc(t('editor.sidePreview'))}" aria-label="${esc(t('editor.sidePreview'))}" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
         </div>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
-        <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
-        <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-find-panel" title="${esc(`Find in file (${appShortcutText('F')})`)}" aria-label="Find in file" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-diff-panel" title="Diff" aria-label="Diff" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
+        <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
         <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
-        <button type="button" class="file-editor-theme-panel" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
+        <button type="button" class="file-editor-theme-panel" title="${esc(t('editor.theme'))}" aria-label="${esc(t('editor.theme'))}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-reload-panel" title="${esc(t('editor.reloadFromDisk'))}" hidden>${esc(t('editor.reload'))}</button>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
-        <button type="button" class="file-editor-save-panel" title="Save" aria-label="Save file" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-save-panel" title="${esc(t('editor.save'))}" aria-label="${esc(t('editor.saveFile'))}" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
       </div>
       <div class="file-editor-panel-body panel-overlay-root">
         <div id="panel-toasts-${item}" class="panel-toast-stack"></div>

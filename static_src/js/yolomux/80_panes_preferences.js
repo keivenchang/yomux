@@ -929,7 +929,9 @@ function setPanelDetailsCollapsed(panel, collapsed) {
   const button = panel.querySelector('[data-detail-toggle]');
   if (button) {
     button.classList.toggle('active', !collapsed);
-    button.title = collapsed ? 'show details' : 'hide details';
+    const detailsLabel = collapsed ? t('pane.details.show') : t('pane.details.hide');
+    button.title = detailsLabel;
+    button.setAttribute('aria-label', detailsLabel);
     button.setAttribute('aria-pressed', collapsed ? 'false' : 'true');
   }
 }
@@ -1129,14 +1131,14 @@ function createInfoPanel() {
   panel.innerHTML = `
       <div class="panel-head">
         ${virtualPanelControlsHtml(infoItemId, infoTabLabel)}
-        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
           <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel)}</span></div>
           <div id="meta-${infoItemId}" class="meta">Repo metadata, PRs, CI, and the AI activity summary</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="hide details" aria-label="hide details"></button>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel)} / ${esc(yoagentTabLabel)}">
         <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel)}</span></button>
@@ -1912,14 +1914,14 @@ function createPreferencesPanel() {
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
         ${virtualPanelControlsHtml(prefsItemId, 'Preferences')}
-        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
           <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">Preferences</span></div>
           <div id="meta-${prefsItemId}" class="meta">${esc(preferenceStatusText())}</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="hide details" aria-label="hide details"></button>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div class="preferences-body panel-overlay-root">
         <div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>

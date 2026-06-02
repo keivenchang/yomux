@@ -123,15 +123,15 @@ function createPanel(session) {
   panel.innerHTML = `
       <div class="panel-head">
         ${panelControlsHtml(session)}
-        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+        <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-popover-zone">
           <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMeta.sessions?.[session]))}</div>
-          <div id="meta-${session}" class="meta">finding branch...</div>
+          <div id="meta-${session}" class="meta">${esc(t('pane.findingBranch'))}</div>
           ${sessionPopoverHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session), autoApproveStates.get(session)?.enabled === true, sessionState(session, transcriptMeta.sessions?.[session]))}
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="hide details" aria-label="hide details"></button>
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(session)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div id="terminal-pane-${session}" class="tab-pane active panel-overlay-root">
         <div id="term-${session}" class="terminal"></div>

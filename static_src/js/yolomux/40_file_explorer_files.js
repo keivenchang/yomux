@@ -239,8 +239,8 @@ function fileExplorerRootModeButtons() {
 
 function renderFileExplorerRootModeControls() {
   const sync = fileExplorerRootMode === 'sync';
-  const label = sync ? 'Sync' : 'Root';
-  const title = sync ? 'Root mode: sync to focused tmux session' : 'Root mode: fixed';
+  const label = sync ? t('finder.toolbar.syncLabel') : t('finder.toolbar.rootLabel');
+  const title = sync ? t('finder.rootMode.sync') : t('finder.rootMode.fixed');
   for (const button of fileExplorerRootModeButtons()) {
     button.textContent = label;
     syncPressedButton(button, sync, {labelOn: title, labelOff: title});
