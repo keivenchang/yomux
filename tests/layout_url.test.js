@@ -2425,6 +2425,12 @@ function makeFileTree(paths) {
   const menus = api.appMenuTree();
   assert.equal(menus.map(menu => menu.label).join(','), 'File,View,tmux,Tabs,Help');
   assert.equal(menus.some(menu => menu.id === 'yolo'), false);
+  // DOIT.8: File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
+  const zhHantMenu = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
+  api.i18nSetCatalogForTest('zh-Hant', zhHantMenu);
+  api.setActiveLocaleForTest('zh-Hant');
+  assert.equal(api.appMenuTree().map(menu => menu.label).join(','), '檔案,檢視,tmux,分頁,說明', 'menu bar localizes (tmux unchanged)');
+  api.setActiveLocaleForTest('en');
   assert.equal(menus.some(menu => menu.id === 'settings'), false);
   const fileMenu = menus.find(menu => menu.id === 'file');
   const fileMenuLabels = fileMenu.items.map(item => item.label).filter(Boolean);

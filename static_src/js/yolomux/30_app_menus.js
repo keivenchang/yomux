@@ -444,7 +444,7 @@ function appMenuTree() {
   return [
     {
       id: 'file',
-      label: 'File',
+      label: t('menu.file'),
       items: menuGroups(
         [
           menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
@@ -481,7 +481,7 @@ function appMenuTree() {
     },
     {
       id: 'view',
-      label: 'View',
+      label: t('menu.view'),
       items: [
         menuCommand(tabMetaVisible ? 'Hide tab metadata' : 'Show tab metadata', toggleTabMetadata, {
           checked: tabMetaVisible,
@@ -531,14 +531,14 @@ function appMenuTree() {
     },
     {
       id: 'tabs',
-      label: 'Tabs',
+      label: t('menu.tabs'),
       badgeText: yoloCount ? String(yoloCount) : '',
       badgeTitle: yoloCount ? `${yoloCount} tmux session${yoloCount === 1 ? '' : 's'} with YOLO enabled` : '',
       items: tabMenuItems(openItems),
     },
     {
       id: 'help',
-      label: 'Help',
+      label: t('menu.help'),
       items: menuGroups(
         [menuCommand('Command palette', openCommandPalette, {
           detail: appShortcutText('P', {shift: true}),

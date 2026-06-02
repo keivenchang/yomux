@@ -6,6 +6,13 @@
 let i18nActiveLocale = (typeof bootstrap === 'object' && bootstrap && bootstrap.locale) ? String(bootstrap.locale) : 'en';
 const i18nFallbackLocale = 'en';
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
+// DOIT.8: seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
+// SYNCHRONOUSLY on the very first render — the menu bar/tabs/wordmark paint at boot before any fetch.
+if (typeof bootstrap === 'object' && bootstrap && bootstrap.strings && typeof bootstrap.strings === 'object') {
+  for (const [loc, catalog] of Object.entries(bootstrap.strings)) {
+    if (catalog && typeof catalog === 'object') i18nCatalogs.set(loc, catalog);
+  }
+}
 
 function i18nCatalogValue(locale, key) {
   const catalog = i18nCatalogs.get(locale);

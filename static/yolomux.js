@@ -731,6 +731,13 @@ let fileExplorerSyncGeneration = 0;
 let i18nActiveLocale = (typeof bootstrap === 'object' && bootstrap && bootstrap.locale) ? String(bootstrap.locale) : 'en';
 const i18nFallbackLocale = 'en';
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
+// DOIT.8: seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
+// SYNCHRONOUSLY on the very first render — the menu bar/tabs/wordmark paint at boot before any fetch.
+if (typeof bootstrap === 'object' && bootstrap && bootstrap.strings && typeof bootstrap.strings === 'object') {
+  for (const [loc, catalog] of Object.entries(bootstrap.strings)) {
+    if (catalog && typeof catalog === 'object') i18nCatalogs.set(loc, catalog);
+  }
+}
 
 function i18nCatalogValue(locale, key) {
   const catalog = i18nCatalogs.get(locale);
@@ -4380,7 +4387,7 @@ function appMenuTree() {
   return [
     {
       id: 'file',
-      label: 'File',
+      label: t('menu.file'),
       items: menuGroups(
         [
           menuCommand(fileExplorerLabel(), () => toggleFinderPane(), {
@@ -4417,7 +4424,7 @@ function appMenuTree() {
     },
     {
       id: 'view',
-      label: 'View',
+      label: t('menu.view'),
       items: [
         menuCommand(tabMetaVisible ? 'Hide tab metadata' : 'Show tab metadata', toggleTabMetadata, {
           checked: tabMetaVisible,
@@ -4467,14 +4474,14 @@ function appMenuTree() {
     },
     {
       id: 'tabs',
-      label: 'Tabs',
+      label: t('menu.tabs'),
       badgeText: yoloCount ? String(yoloCount) : '',
       badgeTitle: yoloCount ? `${yoloCount} tmux session${yoloCount === 1 ? '' : 's'} with YOLO enabled` : '',
       items: tabMenuItems(openItems),
     },
     {
       id: 'help',
-      label: 'Help',
+      label: t('menu.help'),
       items: menuGroups(
         [menuCommand('Command palette', openCommandPalette, {
           detail: appShortcutText('P', {shift: true}),
@@ -18815,8 +18822,10 @@ function refreshAll() {
 
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
-  // i18n (DOIT.8): load the active locale catalog (all-static-fetch) and re-render once it arrives.
-  applyLocale(i18nActiveLocaleId());
+  // i18n (DOIT.8): AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
+  // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
+  // menu bar renders synchronously at boot, before any later re-render could fix it).
+  await applyLocale(i18nActiveLocaleId());
   installGlobalThemeMediaListener();
   applyFileExplorerStaticLabels();
   renderTransportWarning();

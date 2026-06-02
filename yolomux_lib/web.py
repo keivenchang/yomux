@@ -60,6 +60,25 @@ def bootstrap_locale(settings_data: dict) -> str:
     return language if isinstance(language, str) and language and language != "system" else "en"
 
 
+def bootstrap_locale_catalogs(locale: str) -> dict:
+    """Inline the active locale's catalog (+ the en fallback) so t() resolves on the first render.
+
+    DOIT.8: boot-time surfaces (menu bar, tabs, wordmark) render synchronously before a client-side
+    fetch could complete, so the active + fallback catalogs are embedded in the bootstrap. Other locales
+    are still fetched from /static/locales on a language switch.
+    """
+    catalogs: dict = {}
+    for code in dict.fromkeys(["en", str(locale or "en")]):
+        path = STATIC_DIR / "locales" / f"{code}.json"
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            data = {}
+        if isinstance(data, dict):
+            catalogs[code] = data
+    return catalogs
+
+
 def static_asset_version(asset: str) -> int:
     path = static_asset_path(asset)
     if path is None:
@@ -104,10 +123,12 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
         "version": YOLOMUX_VERSION,
         "versionCommitTime": yolomux_commit_time_pt(),
         "settingsPayload": settings_data,
-        # i18n (DOIT.8 Phase 0): resolved active locale for first paint. "system" can't be resolved
-        # server-side (no navigator here), so it falls back to "en"; the client may refine via
-        # navigator.language. The catalog itself is fetched client-side (/static/locales) — not inlined.
+        # i18n (DOIT.8): resolved active locale for first paint ("system" -> en server-side; the client
+        # may refine via navigator.language). The active locale's catalog (+ the en fallback) is INLINED
+        # so t() resolves SYNCHRONOUSLY on the first render — the menu bar, tabs, and wordmark paint at
+        # boot before any fetch could complete. Other locales are still fetched on a language switch.
         "locale": bootstrap_locale(settings_data),
+        "strings": bootstrap_locale_catalogs(bootstrap_locale(settings_data)),
         "yoloRulesPayload": rules_status(),
         "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
     }

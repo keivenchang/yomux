@@ -463,6 +463,10 @@ def live_runtime_boot_fixture_html():
             "errors": [],
         },
         "codeMirrorAssetUrl": (REPO_ROOT / "static" / "codemirror.js").as_uri(),
+        # DOIT.8: the real page inlines the active locale catalog so t() resolves on the first render
+        # (the menu bar paints at boot). Mirror that here so the live-boot menu shows real labels.
+        "locale": "en",
+        "strings": {"en": json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text())},
     }
     stub_script = """
       window.__bootErrors = [];

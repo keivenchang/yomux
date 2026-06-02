@@ -1751,8 +1751,10 @@ function refreshAll() {
 
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
-  // i18n (DOIT.8): load the active locale catalog (all-static-fetch) and re-render once it arrives.
-  applyLocale(i18nActiveLocaleId());
+  // i18n (DOIT.8): AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
+  // tabs, and the wordmark paint in the right language from the start — no flash of raw t() keys (the
+  // menu bar renders synchronously at boot, before any later re-render could fix it).
+  await applyLocale(i18nActiveLocaleId());
   installGlobalThemeMediaListener();
   applyFileExplorerStaticLabels();
   renderTransportWarning();
