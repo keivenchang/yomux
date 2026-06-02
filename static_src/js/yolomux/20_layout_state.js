@@ -1059,7 +1059,7 @@ async function toggleNotifications() {
     sendTestNotification();
     notifyCurrentAttentionStates();
   } else {
-    statusEl.innerHTML = '<span class="ok">Notify off</span>';
+    statusEl.innerHTML = `<span class="ok">${esc(t('status.notifyOff'))}</span>`;
   }
 }
 

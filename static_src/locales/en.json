@@ -395,5 +395,22 @@
   "yoagent.statusCleared": "cleared YO!agent conversation",
   "yoagent.statusClearFailed": "clear YO!agent failed: {error}",
   "yoagent.noAnswer": "No answer.",
-  "yoagent.statusAnswered": "YO!agent answered with {backend}"
+  "yoagent.statusAnswered": "YO!agent answered with {backend}",
+  "tab.transcript": "Transcript",
+  "pane.findingTranscript": "finding transcript...",
+  "branch.all": "All branches",
+  "branch.none": "none found in this checkout",
+  "branch.current": "current",
+  "branch.more": "+ {count} more",
+  "update.available": "New YOLOmux version available",
+  "update.reload": "Reload",
+  "meta.refresh": "Refresh",
+  "meta.refreshAria": "Refresh session state",
+  "conflict.unsaved": "Unsaved editor",
+  "conflict.onDisk": "On disk",
+  "status.notifyOff": "Notify off",
+  "pr.approved": "Approved",
+  "pr.changesRequested": "Changes requested",
+  "pr.reviewRequired": "Review required",
+  "pr.by": " by {logins}"
 }

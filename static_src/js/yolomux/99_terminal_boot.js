@@ -141,9 +141,9 @@ function createPanel(session) {
       </div>
       <div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
-          <div class="transcript-head">Transcript</div>
-          <div id="transcript-path-${session}" class="transcript-path-row">finding transcript...</div>
-          <div id="transcript-${session}" class="transcript-preview">finding transcript...</div>
+          <div class="transcript-head">${esc(t('tab.transcript'))}</div>
+          <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
+          <div id="transcript-${session}" class="transcript-preview">${esc(t('pane.findingTranscript'))}</div>
         </div>
       </div>
       <div id="summary-pane-${session}" class="tab-pane">
@@ -1382,11 +1382,11 @@ function showServerUpdateBanner(version) {
   banner.dataset.version = version;
   const msg = document.createElement('span');
   msg.className = 'server-update-banner-msg';
-  msg.textContent = 'New YOLOmux version available';
+  msg.textContent = t('update.available');
   const reload = document.createElement('button');
   reload.type = 'button';
   reload.className = 'server-update-banner-reload';
-  reload.textContent = 'Reload';
+  reload.textContent = t('update.reload');
   reload.addEventListener('click', () => location.reload());
   const dismiss = document.createElement('button');
   dismiss.type = 'button';
@@ -1822,8 +1822,8 @@ function toggleFileExplorerShortcut() {
 }
 
 if (refreshMeta) {
-  refreshMeta.textContent = 'Refresh';
-  refreshMeta.setAttribute('aria-label', 'Refresh session state');
+  refreshMeta.textContent = t('meta.refresh');
+  refreshMeta.setAttribute('aria-label', t('meta.refreshAria'));
   refreshMetaButtonTitle();
   refreshMeta.onclick = refreshAll;
 }

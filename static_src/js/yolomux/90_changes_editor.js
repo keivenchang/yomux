@@ -651,7 +651,7 @@ function createChangesPanel() {
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
-          <div id="panel-tab-${changesItemId}" class="panel-session-label"><span class="session-button-dir">Changes</span></div>
+          <div id="panel-tab-${changesItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.changes'))}</span></div>
           <div id="meta-${changesItemId}" class="meta">${esc(changesTabDetail())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(changesItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>

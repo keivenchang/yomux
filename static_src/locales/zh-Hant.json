@@ -395,5 +395,22 @@
   "yoagent.statusCleared": "已清除 YO!agent 對話",
   "yoagent.statusClearFailed": "清除 YO!agent 失敗：{error}",
   "yoagent.noAnswer": "沒有回答。",
-  "yoagent.statusAnswered": "YO!agent 以 {backend} 回答"
+  "yoagent.statusAnswered": "YO!agent 以 {backend} 回答",
+  "tab.transcript": "逐字稿",
+  "pane.findingTranscript": "尋找逐字稿中…",
+  "branch.all": "所有分支",
+  "branch.none": "此檢出中找不到分支",
+  "branch.current": "目前",
+  "branch.more": "+ 還有 {count} 個",
+  "update.available": "有新的 YOLOmux 版本",
+  "update.reload": "重新載入",
+  "meta.refresh": "重新整理",
+  "meta.refreshAria": "重新整理工作階段狀態",
+  "conflict.unsaved": "未儲存的編輯器",
+  "conflict.onDisk": "磁碟上的版本",
+  "status.notifyOff": "通知已關閉",
+  "pr.approved": "已核准",
+  "pr.changesRequested": "要求變更",
+  "pr.reviewRequired": "需要審查",
+  "pr.by": " 由 {logins}"
 }

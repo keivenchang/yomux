@@ -2281,11 +2281,11 @@ function fileConflictCompareHtml(editorText, diskText) {
   return `
     <div class="file-editor-conflict-compare">
       <section>
-        <h4>Unsaved editor</h4>
+        <h4>${esc(t('conflict.unsaved'))}</h4>
         <pre data-file-compare-scroll>${editorHtml}</pre>
       </section>
       <section>
-        <h4>On disk</h4>
+        <h4>${esc(t('conflict.onDisk'))}</h4>
         <pre data-file-compare-scroll>${diskHtml}</pre>
       </section>
     </div>`;

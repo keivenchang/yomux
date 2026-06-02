@@ -2870,7 +2870,7 @@ async function toggleNotifications() {
     sendTestNotification();
     notifyCurrentAttentionStates();
   } else {
-    statusEl.innerHTML = '<span class="ok">Notify off</span>';
+    statusEl.innerHTML = `<span class="ok">${esc(t('status.notifyOff'))}</span>`;
   }
 }
 
@@ -7230,11 +7230,11 @@ function fileConflictCompareHtml(editorText, diskText) {
   return `
     <div class="file-editor-conflict-compare">
       <section>
-        <h4>Unsaved editor</h4>
+        <h4>${esc(t('conflict.unsaved'))}</h4>
         <pre data-file-compare-scroll>${editorHtml}</pre>
       </section>
       <section>
-        <h4>On disk</h4>
+        <h4>${esc(t('conflict.onDisk'))}</h4>
         <pre data-file-compare-scroll>${diskHtml}</pre>
       </section>
     </div>`;
@@ -9874,7 +9874,7 @@ function otherBranchesHtml(git) {
   const inventory = git?.other_branches || {};
   const branches = inventory.branches || [];
   if (!branches.length) {
-    return `<div class="branch-list"><div class="branch-list-title">All branches</div><div class="meta-muted">none found in this checkout</div></div>`;
+    return `<div class="branch-list"><div class="branch-list-title">${esc(t('branch.all'))}</div><div class="meta-muted">${esc(t('branch.none'))}</div></div>`;
   }
   const items = branches.map(branch => {
     const branchLink = branchLinkHtml(git, branch.name);
@@ -9882,15 +9882,15 @@ function otherBranchesHtml(git) {
     const linearLinks = (branch.linear_ids || []).map(linearIssueLinkHtml).filter(Boolean).join(' ');
     const meta = [prLink, linearLinks, esc(branch.updated || '')].filter(Boolean).join(' ');
     return `<div class="branch-item">
-      <div class="branch-name">${branch.current ? '<span class="info-branch-current">current</span> ' : ''}${branchLink}</div>
+      <div class="branch-name">${branch.current ? `<span class="info-branch-current">${esc(t('branch.current'))}</span> ` : ''}${branchLink}</div>
       <div class="branch-meta">${meta}</div>
       <div class="branch-subject">${esc(shortText(branch.subject || '', 240))}</div>
     </div>`;
   }).join('');
   const hidden = Number(inventory.hidden_count || 0) > 0
-    ? `<div class="meta-muted">+ ${inventory.hidden_count} more</div>`
+    ? `<div class="meta-muted">${esc(t('branch.more', {count: inventory.hidden_count}))}</div>`
     : '';
-  return `<div class="branch-list"><div class="branch-list-title">All branches</div>${items}${hidden}</div>`;
+  return `<div class="branch-list"><div class="branch-list-title">${esc(t('branch.all'))}</div>${items}${hidden}</div>`;
 }
 
 function dragPayload(event) {
@@ -10982,10 +10982,10 @@ function pullRequestReviewInlineHtml(pr) {
     .filter(reviewer => String(reviewer?.state || '').toUpperCase() === state)
     .map(reviewer => reviewer.login)
     .filter(Boolean);
-  const by = logins => (logins.length ? ` by ${esc(logins.join(', '))}` : '');
-  if (decision === 'APPROVED') return `<span class="meta-pr-status pr-status-passing">Approved${by(loginsFor('APPROVED'))}</span>`;
-  if (decision === 'CHANGES_REQUESTED') return `<span class="meta-pr-status pr-status-failing">Changes requested${by(loginsFor('CHANGES_REQUESTED'))}</span>`;
-  if (decision === 'REVIEW_REQUIRED') return '<span class="meta-muted">Review required</span>';
+  const by = logins => (logins.length ? t('pr.by', {logins: esc(logins.join(', '))}) : '');
+  if (decision === 'APPROVED') return `<span class="meta-pr-status pr-status-passing">${esc(t('pr.approved'))}${by(loginsFor('APPROVED'))}</span>`;
+  if (decision === 'CHANGES_REQUESTED') return `<span class="meta-pr-status pr-status-failing">${esc(t('pr.changesRequested'))}${by(loginsFor('CHANGES_REQUESTED'))}</span>`;
+  if (decision === 'REVIEW_REQUIRED') return `<span class="meta-muted">${esc(t('pr.reviewRequired'))}</span>`;
   return '';
 }
 
@@ -14720,7 +14720,7 @@ function createChangesPanel() {
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
-          <div id="panel-tab-${changesItemId}" class="panel-session-label"><span class="session-button-dir">Changes</span></div>
+          <div id="panel-tab-${changesItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.changes'))}</span></div>
           <div id="meta-${changesItemId}" class="meta">${esc(changesTabDetail())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(changesItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
@@ -17268,9 +17268,9 @@ function createPanel(session) {
       </div>
       <div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
-          <div class="transcript-head">Transcript</div>
-          <div id="transcript-path-${session}" class="transcript-path-row">finding transcript...</div>
-          <div id="transcript-${session}" class="transcript-preview">finding transcript...</div>
+          <div class="transcript-head">${esc(t('tab.transcript'))}</div>
+          <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
+          <div id="transcript-${session}" class="transcript-preview">${esc(t('pane.findingTranscript'))}</div>
         </div>
       </div>
       <div id="summary-pane-${session}" class="tab-pane">
@@ -18509,11 +18509,11 @@ function showServerUpdateBanner(version) {
   banner.dataset.version = version;
   const msg = document.createElement('span');
   msg.className = 'server-update-banner-msg';
-  msg.textContent = 'New YOLOmux version available';
+  msg.textContent = t('update.available');
   const reload = document.createElement('button');
   reload.type = 'button';
   reload.className = 'server-update-banner-reload';
-  reload.textContent = 'Reload';
+  reload.textContent = t('update.reload');
   reload.addEventListener('click', () => location.reload());
   const dismiss = document.createElement('button');
   dismiss.type = 'button';
@@ -18949,8 +18949,8 @@ function toggleFileExplorerShortcut() {
 }
 
 if (refreshMeta) {
-  refreshMeta.textContent = 'Refresh';
-  refreshMeta.setAttribute('aria-label', 'Refresh session state');
+  refreshMeta.textContent = t('meta.refresh');
+  refreshMeta.setAttribute('aria-label', t('meta.refreshAria'));
   refreshMetaButtonTitle();
   refreshMeta.onclick = refreshAll;
 }

@@ -875,10 +875,10 @@ function pullRequestReviewInlineHtml(pr) {
     .filter(reviewer => String(reviewer?.state || '').toUpperCase() === state)
     .map(reviewer => reviewer.login)
     .filter(Boolean);
-  const by = logins => (logins.length ? ` by ${esc(logins.join(', '))}` : '');
-  if (decision === 'APPROVED') return `<span class="meta-pr-status pr-status-passing">Approved${by(loginsFor('APPROVED'))}</span>`;
-  if (decision === 'CHANGES_REQUESTED') return `<span class="meta-pr-status pr-status-failing">Changes requested${by(loginsFor('CHANGES_REQUESTED'))}</span>`;
-  if (decision === 'REVIEW_REQUIRED') return '<span class="meta-muted">Review required</span>';
+  const by = logins => (logins.length ? t('pr.by', {logins: esc(logins.join(', '))}) : '');
+  if (decision === 'APPROVED') return `<span class="meta-pr-status pr-status-passing">${esc(t('pr.approved'))}${by(loginsFor('APPROVED'))}</span>`;
+  if (decision === 'CHANGES_REQUESTED') return `<span class="meta-pr-status pr-status-failing">${esc(t('pr.changesRequested'))}${by(loginsFor('CHANGES_REQUESTED'))}</span>`;
+  if (decision === 'REVIEW_REQUIRED') return `<span class="meta-muted">${esc(t('pr.reviewRequired'))}</span>`;
   return '';
 }
 

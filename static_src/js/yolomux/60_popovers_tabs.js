@@ -702,7 +702,7 @@ function otherBranchesHtml(git) {
   const inventory = git?.other_branches || {};
   const branches = inventory.branches || [];
   if (!branches.length) {
-    return `<div class="branch-list"><div class="branch-list-title">All branches</div><div class="meta-muted">none found in this checkout</div></div>`;
+    return `<div class="branch-list"><div class="branch-list-title">${esc(t('branch.all'))}</div><div class="meta-muted">${esc(t('branch.none'))}</div></div>`;
   }
   const items = branches.map(branch => {
     const branchLink = branchLinkHtml(git, branch.name);
@@ -710,15 +710,15 @@ function otherBranchesHtml(git) {
     const linearLinks = (branch.linear_ids || []).map(linearIssueLinkHtml).filter(Boolean).join(' ');
     const meta = [prLink, linearLinks, esc(branch.updated || '')].filter(Boolean).join(' ');
     return `<div class="branch-item">
-      <div class="branch-name">${branch.current ? '<span class="info-branch-current">current</span> ' : ''}${branchLink}</div>
+      <div class="branch-name">${branch.current ? `<span class="info-branch-current">${esc(t('branch.current'))}</span> ` : ''}${branchLink}</div>
       <div class="branch-meta">${meta}</div>
       <div class="branch-subject">${esc(shortText(branch.subject || '', 240))}</div>
     </div>`;
   }).join('');
   const hidden = Number(inventory.hidden_count || 0) > 0
-    ? `<div class="meta-muted">+ ${inventory.hidden_count} more</div>`
+    ? `<div class="meta-muted">${esc(t('branch.more', {count: inventory.hidden_count}))}</div>`
     : '';
-  return `<div class="branch-list"><div class="branch-list-title">All branches</div>${items}${hidden}</div>`;
+  return `<div class="branch-list"><div class="branch-list-title">${esc(t('branch.all'))}</div>${items}${hidden}</div>`;
 }
 
 function dragPayload(event) {
