@@ -971,6 +971,12 @@ body.theme-light .keyboard-shortcut-row kbd {
   grid-column: 1 / -1;
   min-height: min(34vh, 15lh);
 }
+/* #38: long-value text/select fields (e.g. the upload filename template, the YOLO rule path) render
+   as full-width --wide rows so the whole value is visible instead of clipping at the 24ch cap. */
+.preferences-setting-row--wide .preferences-setting-control.setting-type-text input[type="text"],
+.preferences-setting-row--wide .preferences-setting-control.setting-type-select select {
+  width: 100%;
+}
 .preferences-setting-row--wide .preferences-reset {
   justify-self: end;
 }

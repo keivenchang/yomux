@@ -406,7 +406,9 @@ function defaultBranchHeadPullRequest(info) {
     description,
     url: existing.url || githubPullRequestUrlFromGit(git, number),
     checks: existing.checks || {state: 'unknown'},
-    status_label: '',
+    // A (#NNNN) in the default branch's HEAD merge commit means that PR is, by definition, merged
+    // (it is in main's history) — so label it MERGED even though we only inferred it from the subject.
+    status_label: existing.status_label || 'merged',
     source_only: true,
   };
 }

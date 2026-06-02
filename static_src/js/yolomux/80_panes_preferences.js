@@ -1468,7 +1468,7 @@ function preferenceSections() {
       {path: 'appearance.metadata_badge_pulse_seconds', label: 'Badge pulse duration', type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: 'When branch, PR, status, or CI metadata changes, badges like PR and CI flash for this many seconds.'},
     ]},
     {title: t('pref.section.yolo'), items: [
-      {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text', action: 'open-yolo-rule', help: 'YAML file with ordered first-match YOLO rules.'},
+      {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text', action: 'open-yolo-rule', wide: true, help: 'YAML file with ordered first-match YOLO rules.'},
       {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean', help: 'Log matched rules and actions without pressing an approval key.'},
       {path: 'yolo.prompt_source', label: 'Approval prompt source', type: 'select', choices: [
         {value: 'hybrid', label: 'Pane + transcript'},
@@ -1510,7 +1510,7 @@ function preferenceSections() {
       {path: 'file_explorer.new_entry_highlight_ms', label: 'New file highlight duration', type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: 'How long newly detected files or directories stay colored in Finder/File Explorer.'},
     ]},
     {title: t('pref.section.uploads'), items: [
-      {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
+      {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', wide: true, help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
       {path: 'uploads.max_bytes', label: 'Upload size cap', type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: 'Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.'},
     ]},
     {title: t('pref.section.yoagent'), items: [
@@ -1738,7 +1738,7 @@ function preferenceControlHtml(item, query = '') {
   const suffix = item.suffix ? `<span class="preferences-setting-suffix">${esc(item.suffix)}</span>` : '';
   const help = item.help ? `<span class="preferences-setting-help">${esc(item.help)}</span>` : '';
   const advisory = preferenceAdvisoryHtml(item, value);
-  const rowClass = item.type === 'textarea' ? ' preferences-setting-row--wide' : '';
+  const rowClass = item.type === 'textarea' || item.wide ? ' preferences-setting-row--wide' : '';
   return `<div class="preferences-setting-row${rowClass}"><label class="preferences-setting-label" for="${esc(controlId)}">${esc(item.label)}${help}</label><span class="preferences-setting-control setting-type-${esc(item.type)}">${control}${suffix}${extraControl}<button type="button" class="preferences-reset" data-setting-reset="${esc(item.path)}"${resetDisabled}>Reset</button></span>${advisory}</div>`;
 }
 

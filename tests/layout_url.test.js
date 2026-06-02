@@ -2115,6 +2115,11 @@ function makeFileTree(paths) {
   assert.ok(/data-setting-path="file_explorer\.quick_access_paths"[\s\S]*data-setting-type="list"[\s\S]*rows="3"/.test(preferencesHtml), 'list settings keep compact textarea rows');
   assert.ok(/\.preferences-setting-row--wide\s*\{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(preferencesCss), 'wide preference rows stack to one column');
   assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control textarea\s*\{[\s\S]*grid-column:\s*1 \/ -1[\s\S]*min-height:\s*min\(34vh, 15lh\)/.test(preferencesCss), 'wide textarea controls span the row and stay tall');
+  // #38: long-value text fields (upload filename template, YOLO rule path) render as full-width --wide
+  // rows so the whole value shows instead of clipping at the old 24ch cap.
+  assert.ok(/preferences-setting-row preferences-setting-row--wide"><label class="preferences-setting-label" for="preference-uploads-filename_template"/.test(preferencesHtml), '#38: the upload filename template is a full-width row so its long value is not clipped');
+  assert.ok(/preferences-setting-row preferences-setting-row--wide"><label class="preferences-setting-label" for="preference-yolo-rule_file_path"/.test(preferencesHtml), '#38: the YOLO rule file path is a full-width row so the long path is not clipped');
+  assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-text input\[type="text"\][\s\S]*?\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-select select\s*\{[\s\S]*?width:\s*100%/.test(preferencesCss), '#38: text/select inputs fill the full width inside wide rows');
   assert.ok(preferencesHtml.includes('No agent'), 'Preferences rename the local YO!agent backend to No agent');
   assert.equal(preferencesHtml.includes('Deterministic'), false, 'Preferences do not expose the internal deterministic backend label');
   assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
@@ -3563,8 +3568,14 @@ function makeFileTree(paths) {
   assert.ok(html.includes('>4<'), 'tab includes session number');
   assert.ok(html.includes('>MAIN<'), 'tab marks default branch');
   assertNoStandalonePrBadge(html, 'open PR tab');
+  // #42: a source-inferred PR with no explicit status_label still reports no status (we don't trust a
+  // raw merged flag on an inferred PR)...
   assert.equal(api.pullRequestStatusLabel({number: 9961, source_only: true, merged: true}), '');
-  assert.equal(html.includes('MERGED'), false, 'main fallback does not show merged status');
+  // ...but an explicit status_label is honored even when source_only, so the default-branch head merge
+  // commit (which is, by definition, merged) reports MERGED.
+  assert.equal(api.pullRequestStatusLabel({number: 9961, source_only: true, status_label: 'merged'}), 'merged');
+  assert.ok(html.includes('MERGED'), '#42: a default-branch HEAD merge commit (#9961) shows MERGED on the tab');
+  assert.ok(html.includes('pr-status-merged'), '#42: the inferred merged PR uses the merged status color');
   assert.equal(html.includes('(#9961)'), false, 'tab title strips duplicated PR suffix');
 
   const blockedHtml = api.tmuxPaneTabHtml('4', info, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'blocked command'}, false);

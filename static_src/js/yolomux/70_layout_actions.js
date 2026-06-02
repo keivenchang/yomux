@@ -770,8 +770,8 @@ function linkHtml(url, label, title = '', className = '') {
 
 function pullRequestStatusLabel(pr) {
   if (!pr) return '';
-  if (pr.source_only) return '';
   if (pr.status_label) return pr.status_label;
+  if (pr.source_only) return '';
   if (pr.draft) return 'draft';
   if (pr.merged || pr.merged_at) return 'merged';
   return pr.state || '';
