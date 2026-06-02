@@ -461,6 +461,8 @@ globalThis.__layoutTestApi = {
   keyboardShortcutsHtml,
   openFileEditorItems,
   pullRequestStatusLabel,
+  pullRequestApprovalIndicatorHtml,
+  pullRequestCompactBadgesHtml,
   openFileStatus,
   setOpenFileOwner,
   renderTransportWarning,
@@ -1341,6 +1343,26 @@ function makeFileTree(paths) {
 }
 
 {
+  // #38: tab APPROVAL badge driven by GitHub reviewDecision.
+  const api = loadYolomux('', ['5']);
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  const approved = api.pullRequestApprovalIndicatorHtml('5', {number: 12345, state: 'open', review_decision: 'APPROVED'});
+  assert.ok(/pr-review-approved/.test(approved) && />Approved</.test(approved), '#38: approved PR shows a green Approved badge');
+  const changes = api.pullRequestApprovalIndicatorHtml('5', {number: 12345, state: 'open', review_decision: 'CHANGES_REQUESTED'});
+  assert.ok(/pr-review-changes/.test(changes) && />Changes</.test(changes), '#38: changes-requested PR shows a red Changes badge');
+  const required = api.pullRequestApprovalIndicatorHtml('5', {number: 12345, state: 'open', review_decision: 'REVIEW_REQUIRED'});
+  assert.ok(/pr-review-required/.test(required) && />Review</.test(required), '#38: review-required PR shows the neutral/crossed-out badge');
+  // No badge without a PR, without a decision, or once merged.
+  assert.equal(api.pullRequestApprovalIndicatorHtml('5', {number: 12345, state: 'open'}), '', '#38: no review badge when reviewDecision is absent');
+  assert.equal(api.pullRequestApprovalIndicatorHtml('5', null), '', '#38: no review badge without a PR');
+  assert.equal(api.pullRequestApprovalIndicatorHtml('5', {number: 12345, merged: true, review_decision: 'APPROVED'}), '', '#38: no review badge once the PR is merged');
+  // The compact badge row carries the approval badge alongside #/CI.
+  assert.ok(/pr-review-approved/.test(api.pullRequestCompactBadgesHtml('5', {number: 12345, state: 'open', review_decision: 'APPROVED'})), '#38: the compact PR badge row includes the approval badge');
+  assert.ok(/\.ci-indicator\.pr-review-approved/.test(css), '#38: approval badge has an approved (green) color class');
+  assert.ok(/\.ci-indicator\.pr-review-required[\s\S]*?line-through/.test(css), '#38: the review-required badge is crossed out');
+}
+
+{
   const api = loadYolomux('', ['1']);
   const strip = new TestElement('strip');
   const tab = new TestElement('tab');
@@ -1404,6 +1426,22 @@ function makeFileTree(paths) {
   assert.ok(source.includes('focusInput: true'), 'YO!agent chat refocuses the input after responses and retryable failures');
   assert.ok(source.includes('function refreshYoagentSummaryRegions'), 'YO!agent metadata refresh can update summaries without rebuilding the chat input');
   assert.ok(source.includes('summaryOnly: true'), 'YO!agent metadata refresh requests summary-only panel updates');
+  // #45: assistant replies are structured Markdown — flag the body and render it through marked.js.
+  assert.ok(source.includes('function renderYoagentMessageMarkdown'), '#45: YO!agent assistant replies render their multi-section Markdown body');
+  assert.ok(/\.yoagent-message\.assistant \.yoagent-message-body\[data-yoagent-markdown\]/.test(source), '#45: the markdown render pass targets flagged assistant message bodies');
+  assert.ok(/renderMarkdownPreviewInto\(body, body\.textContent/.test(source), '#45: assistant message Markdown is rendered from the escaped-text fallback');
+  assert.ok(source.includes("roleClass === 'assistant' ? 'yoagent-message-body markdown-body'"), '#45: assistant message bodies get the markdown-body class for formatting');
+  // #42: editor controls (# / wrap / find / FROM-TO / diff / theme / save) move OFF the tab strip
+  // onto a dedicated toolbar info line below the tabs; the tab strip keeps only tabs + frame controls.
+  const editorToolbarIdx = source.indexOf('class="file-editor-toolbar" role="toolbar"');
+  const editorFrameActionsIdx = source.indexOf('file-editor-frame-actions');
+  const editorTabsIdx = source.indexOf('<div class="pane-tabs"', editorFrameActionsIdx);
+  const editorGutterIdx = source.indexOf('<button type="button" class="file-editor-gutter-panel"');
+  assert.ok(editorToolbarIdx > -1, '#42: editor controls render on a dedicated .file-editor-toolbar info line');
+  assert.ok(editorGutterIdx > editorToolbarIdx, '#42: the # / line-numbers control lives in the toolbar row, not the tab strip');
+  assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorTabsIdx)), '#42: the editor tab strip is uncluttered — only tabs + frame controls remain');
+  assert.ok(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(css), '#42: the editor panel grid reserves a row for the toolbar between tabs and body');
+  assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');
   assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
   assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
   assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
@@ -1609,6 +1647,7 @@ function makeFileTree(paths) {
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-to-select'), 'Finder compact modified-files header exposes the TO picker');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), false, '#41: the modified-files density toggle is removed');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row compact'), '#41: the Finder modified-files panel is always compact');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('data-file-explorer-changes-close'), '#44: the Modified-files header has a close (X) button to hide the section');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
@@ -1797,6 +1836,9 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('--file-explorer-changes-min-block-size: 96px'), 'modified-files resizer shares a stable min-size token');
   assert.ok(preferencesCss.includes('--drop-outline: #ffffff'), '#40: dark-mode drag preview/outline is white (light mode stays blue, asserted below)');
   assert.ok(/\.file-tree-repo-meta\s*\{[^}]*font-size: var\(--ui-font-size-2xs\)/.test(preferencesCss), '#37: the Finder repo/branch label is condensed to a smaller font so more files fit');
+  assert.ok(preferencesCss.includes('--file-explorer-changes-size: 40%'), '#44: the Modified-files section defaults to 40% (2/5) of the Finder height');
+  assert.ok(/body\.file-explorer-changes-hidden \.file-explorer-changes-panel/.test(preferencesCss), '#44: hiding the Modified-files section collapses both the panel and its resizer');
+  assert.ok(/\.file-explorer-changes-panel \.changes-comparison-head\s*\{[^}]*flex-wrap: nowrap/.test(preferencesCss), '#44(d): the Finder comparison header is compacted to one tight line (header chrome takes less height)');
   assert.ok(/\.grid\.drop-preview::before/.test(preferencesCss), 'root layout drops have a full-layout preview overlay');
   assert.ok(/\.grid\.drop-preview-gutter::before\s*\{[\s\S]*--drop-preview-left/.test(preferencesCss), 'split-bar drops use explicit full-span preview geometry');
   assert.equal(/body\.theme-light\s+[^{]*(?:\.pane-tab|\.tabs|\.active-pane|\.panel-head)/.test(preferencesCss), false, 'global light theme does not restyle pane tab strips or active pane rings');

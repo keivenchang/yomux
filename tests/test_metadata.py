@@ -85,8 +85,15 @@ def test_github_pr_fetch_path_uses_cache_and_enriches_checks(monkeypatch):
             {"state": "success", "statuses": []},
         )
 
+    review_calls = []
+
+    def fake_review_payload(_repo, number):
+        review_calls.append(number)
+        return {"data": {"repository": {"pullRequest": {"reviewDecision": "APPROVED"}}}}
+
     monkeypatch.setattr(github_client, "github_pull_request_payload", fake_pr_payload)
     monkeypatch.setattr(github_client, "github_commit_check_payloads", fake_checks)
+    monkeypatch.setattr(github_client, "github_pull_request_review_decision_payload", fake_review_payload)
     cache = MetadataCache()
 
     first = github_client.github_pull_request_by_number(REPO, 42, cache, allow_network=True)
@@ -98,8 +105,11 @@ def test_github_pr_fetch_path_uses_cache_and_enriches_checks(monkeypatch):
     assert first["linear_ids"] == ["OPS-123"]
     assert first["checks"]["state"] == "passing"
     assert first["status_label"] == "open · CI passing"
+    assert first["review_decision"] == "APPROVED"
     assert payload_calls == [42]
     assert check_calls == ["abc123"]
+    # reviewDecision is fetched once then served from cache (no second GraphQL round-trip).
+    assert review_calls == [42]
 
 
 def test_linear_issue_metadata_uses_api_and_cache(monkeypatch):
@@ -144,3 +154,35 @@ def test_linear_issue_metadata_falls_back_without_network():
     assert issue["identifier"] == "OPS-123"
     assert issue["source"] == "local-id"
     assert issue["url"].endswith("/OPS-123")
+
+
+def test_normalize_review_decision_reads_graphql_shape_and_ignores_garbage():
+    assert github_client.normalize_review_decision(
+        {"data": {"repository": {"pullRequest": {"reviewDecision": "CHANGES_REQUESTED"}}}}
+    ) == "CHANGES_REQUESTED"
+    # A null reviewDecision (no reviews required) and malformed payloads yield no badge.
+    assert github_client.normalize_review_decision(
+        {"data": {"repository": {"pullRequest": {"reviewDecision": None}}}}
+    ) is None
+    assert github_client.normalize_review_decision({"data": {"repository": None}}) is None
+    assert github_client.normalize_review_decision(None) is None
+
+
+def test_github_graphql_requires_token(monkeypatch):
+    monkeypatch.setattr(github_client, "github_token", lambda: None)
+    # Without a token GraphQL is skipped entirely (no network attempt), returning None.
+    assert github_client.github_graphql("query{}", {}) is None
+
+
+def test_review_decision_is_cached(monkeypatch):
+    calls = []
+
+    def fake_payload(_repo, number):
+        calls.append(number)
+        return {"data": {"repository": {"pullRequest": {"reviewDecision": "REVIEW_REQUIRED"}}}}
+
+    monkeypatch.setattr(github_client, "github_pull_request_review_decision_payload", fake_payload)
+    cache = MetadataCache()
+    assert github_client.github_pull_request_review_decision(REPO, 7, cache) == "REVIEW_REQUIRED"
+    assert github_client.github_pull_request_review_decision(REPO, 7, cache) == "REVIEW_REQUIRED"
+    assert calls == [7]

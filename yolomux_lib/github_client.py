@@ -76,6 +76,56 @@ def github_pull_requests_by_branch_payload(repo: dict[str, str], branch: str) ->
     return github_api_get(path)
 
 
+def github_graphql(query: str, variables: dict[str, Any]) -> Any:
+    """POST a GraphQL query. Returns None without a token (GraphQL always requires auth)."""
+    token = github_token()
+    if not token:
+        return None
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "YOLOmux",
+        "Content-Type": "application/json",
+        "Authorization": f"token {token}",
+    }
+    return http_json(
+        f"{GITHUB_API_ROOT}/graphql",
+        headers=headers,
+        timeout=HTTP_METADATA_TIMEOUT_SECONDS,
+        payload={"query": query, "variables": variables},
+    )
+
+
+# reviewDecision lives only on the GraphQL pullRequest object, not the REST pulls payload.
+_REVIEW_DECISION_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!)"
+    "{repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}"
+)
+
+
+def github_pull_request_review_decision_payload(repo: dict[str, str], number: int) -> Any:
+    return github_graphql(_REVIEW_DECISION_QUERY, {"owner": repo["owner"], "name": repo["name"], "number": number})
+
+
+def normalize_review_decision(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    repository = data.get("repository") if isinstance(data, dict) else None
+    pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+    decision = pull_request.get("reviewDecision") if isinstance(pull_request, dict) else None
+    return decision if isinstance(decision, str) and decision else None
+
+
+def github_pull_request_review_decision(repo: dict[str, str], number: int, cache: Any) -> str | None:
+    key = f"github-review:{repo['owner']}/{repo['name']}:{number}"
+    cached = cache.get(key)
+    if cached is not _CACHE_MISS:
+        return cached
+    value = normalize_review_decision(github_pull_request_review_decision_payload(repo, number))
+    cache.set(key, value)
+    return value
+
+
 def github_commit_check_payloads(repo: dict[str, str], head_sha: str) -> tuple[Any, Any]:
     owner = quote(repo["owner"])
     name = quote(repo["name"])
@@ -172,6 +222,7 @@ def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str],
         "description": compact_description(body),
         "linear_ids": extract_linear_ids(title, body),
         "checks": github_checks_unknown(),
+        "review_decision": None,
         "source": source,
     }
     result["status_label"] = pull_request_status_label(result)
@@ -185,6 +236,9 @@ def enrich_github_pull_request(value: dict[str, Any], repo: dict[str, str], cach
     head_sha = value.get("head_sha")
     if isinstance(head_sha, str) and head_sha:
         value["checks"] = github_commit_checks(repo, head_sha, cache)
+    number = value.get("number")
+    if isinstance(number, int):
+        value["review_decision"] = github_pull_request_review_decision(repo, number, cache)
     value["status_label"] = pull_request_status_label(value)
 
 

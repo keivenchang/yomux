@@ -240,6 +240,17 @@ function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content'
   return Boolean(yoagentBusy && node?.querySelector?.('.yoagent-chat-status'));
 }
 
+function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
+  // Render each assistant reply body through the Markdown pipeline so bold section titles, numbered
+  // items, and sub-bullets display formatted. Without marked.js the escaped-text fallback stays.
+  if (!node || typeof window.marked === 'undefined') return;
+  const bodies = node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || [];
+  bodies.forEach(body => {
+    renderMarkdownPreviewInto(body, body.textContent || '');
+    body.removeAttribute('data-yoagent-markdown');
+  });
+}
+
 function renderYoagentPanel(options = {}) {
   const node = document.getElementById('yoagent-content');
   if (!node) return;
@@ -254,6 +265,7 @@ function renderYoagentPanel(options = {}) {
   }
   if (options.summaryOnly && refreshYoagentSummaryRegions(node)) return;
   node.innerHTML = `${globalActivitySummaryHtml()}${yoagentSessionSummariesHtml()}${yoagentChatHtml()}`;
+  renderYoagentMessageMarkdown(node);
   if (options.scrollBottom !== false) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));
     setTimeout(() => scrollYoagentChatToBottom(node), 0);

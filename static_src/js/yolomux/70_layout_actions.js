@@ -776,6 +776,36 @@ function pullRequestNumberIndicatorHtml(session, pr) {
   return `<span class="ci-indicator tab-symbol pr-number-chip" title="PR #${esc(String(pr.number))}">#${esc(String(pr.number))}</span>`;
 }
 
+// #38: GitHub reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED) per PR.
+function pullRequestReviewDecision(pr) {
+  return String(pr?.review_decision || '').toUpperCase();
+}
+
+function pullRequestApprovalClass(decision) {
+  if (decision === 'APPROVED') return 'pr-review-approved';
+  if (decision === 'CHANGES_REQUESTED') return 'pr-review-changes';
+  if (decision === 'REVIEW_REQUIRED') return 'pr-review-required';
+  return '';
+}
+
+function pullRequestApprovalLabel(decision) {
+  if (decision === 'APPROVED') return 'Approved';
+  if (decision === 'CHANGES_REQUESTED') return 'Changes';
+  if (decision === 'REVIEW_REQUIRED') return 'Review';
+  return '';
+}
+
+function pullRequestApprovalIndicatorHtml(session, pr) {
+  if (!pr?.number) return '';
+  // No review badge once the PR is merged/closed (review state no longer actionable).
+  if (['merged', 'closed'].includes(pullRequestStatusLabel(pr).toLowerCase())) return '';
+  const decision = pullRequestReviewDecision(pr);
+  const cls = pullRequestApprovalClass(decision);
+  if (!cls) return '';
+  const label = pullRequestApprovalLabel(decision);
+  return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}" title="${esc(`Review: ${label}`)}">${esc(label)}</span>`;
+}
+
 function pullRequestLinkHtml(pr) {
   return linkHtml(pr.url, pullRequestLinkLabel(pr), pr.title || pr.description || '', pullRequestStatusClass(pr));
 }

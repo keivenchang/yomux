@@ -1286,6 +1286,28 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   background: #c084fc;
   border-color: #e9d5ff;
 }
+/* #38: PR reviewDecision badge — green Approved, red Changes, crossed-out neutral Review. */
+.ci-indicator.pr-review-chip {
+  padding: 0 5px;
+  font-weight: 700;
+}
+.ci-indicator.pr-review-approved {
+  color: #051408;
+  background: #52d273;
+  border-color: #8ff2a7;
+}
+.ci-indicator.pr-review-changes {
+  color: #fff3f4;
+  background: #c61f38;
+  border-color: #ff7a86;
+}
+.ci-indicator.pr-review-required {
+  color: #c4ccd6;
+  background: transparent;
+  border-color: var(--line);
+  text-decoration: line-through;
+  opacity: 0.85;
+}
 .ci-indicator.branch-indicator {
   color: #071321;
   background: #9fd8ff;
@@ -6011,9 +6033,15 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   overflow: hidden;
   background: var(--panel);
   min-height: 0;
-  --file-explorer-changes-size: 34%;
+  --file-explorer-changes-size: 40%;
   --file-explorer-changes-min-block-size: 96px;
   --file-explorer-changes-resizer-size: 6px;
+}
+/* Hidden Modified-files section: the close X / Finder toggle collapse both the panel and its resizer,
+   so the file tree takes the full Finder height. */
+body.file-explorer-changes-hidden .file-explorer-changes-panel,
+body.file-explorer-changes-hidden .file-explorer-changes-resizer {
+  display: none;
 }
 body.resizing-file-explorer-changes {
   cursor: row-resize;
@@ -6117,6 +6145,40 @@ body.theme-light .file-explorer-changes-head {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* #44(d): compact the Modified-files header chrome so the section spends its height on files. The
+   comparison box collapses to one tight, borderless line and the close X is a small square. */
+.file-explorer-changes-panel .changes-comparison-head {
+  flex-wrap: nowrap;
+  gap: 4px 8px;
+  margin-bottom: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: var(--ui-font-size-xs);
+}
+.file-explorer-changes-panel .changes-comparison-title {
+  font-weight: 600;
+}
+.file-explorer-changes-panel .changes-comparison-summary {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.file-explorer-changes-head .changes-close {
+  height: 20px;
+  width: 20px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-font-size-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+.file-explorer-changes-head .changes-close:hover,
+.file-explorer-changes-head .changes-close:focus-visible {
+  color: var(--brand-green);
+  border-color: var(--brand-green);
+}
 .file-explorer-changes-panel .changes-refresh {
   height: 20px;
   padding: 0 6px;
@@ -6132,15 +6194,17 @@ body.theme-light .file-explorer-changes-head {
 }
 @container (max-width: 520px) {
   .file-explorer-changes-head {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     grid-template-areas:
-      "title refresh"
-      "refs refs"
-      "summary summary";
+      "title refresh close"
+      "refs refs refs";
     gap: 4px;
   }
   .file-explorer-changes-head .changes-title {
     grid-area: title;
+  }
+  .file-explorer-changes-head .changes-close {
+    grid-area: close;
   }
   .file-explorer-changes-head .diff-ref-controls {
     grid-area: refs;
@@ -6383,7 +6447,8 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  /* #42: head (tabs) / editor-toolbar row / body. The toolbar row is auto and collapses when hidden. */
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 .panel.file-editor-panel .file-editor-panel-head {
   display: block;
@@ -6431,6 +6496,34 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
 }
 .file-editor-panel-actions .pane-frame-controls {
   margin-left: 0;
+}
+/* #42: the frame controls (zoom / minimize / close) sit plainly in the tab strip — drop the
+   bordered control pill that used to wrap the moved editor controls. */
+.file-editor-panel-actions.file-editor-frame-actions {
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+/* #42: editor controls (# / wrap / find / FROM-TO / diff / theme / save) render on a dedicated
+   info line BELOW the tab strip instead of cramming the tabs. */
+.file-editor-toolbar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 2px;
+  min-height: 26px;
+  padding: 2px 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel2) 70%, var(--bg) 30%);
+}
+.file-editor-toolbar::-webkit-scrollbar {
+  display: none;
+}
+.file-editor-toolbar[hidden] {
+  display: none;
 }
 .file-editor-diff-ref-panel {
   display: inline-flex;

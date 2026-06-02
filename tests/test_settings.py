@@ -70,9 +70,9 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "deterministic"
     assert "normal human status update" in payload["settings"]["yoagent"]["system_prompt"]
-    assert "most recent work" in payload["settings"]["yoagent"]["intro"]
-    assert "Your most recent work is about" in payload["settings"]["yoagent"]["format"]
-    assert "You have not touched" in payload["settings"]["yoagent"]["format"]
+    assert "structured status report" in payload["settings"]["yoagent"]["intro"]
+    assert "numbered list with ONE item per session" in payload["settings"]["yoagent"]["format"]
+    assert "Open / pending:" in payload["settings"]["yoagent"]["format"]
     assert path.exists()
     assert "YOLOmux user preferences" in path.read_text()
 

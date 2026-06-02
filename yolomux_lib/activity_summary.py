@@ -507,6 +507,7 @@ def build_session_activity_summary(info: SessionInfo, project: dict[str, Any], f
         "repos": repos,
         "goal": goal,
         "work": truncate_text(work, 220) if work else "",
+        "pr_number": pr.get("number") if isinstance(pr, dict) else None,
         "ci": ci,
         "status_text": status,
         "files": files,
@@ -684,6 +685,45 @@ def deterministic_yoagent_help_reply(question: str) -> str:
     return ""
 
 
+def yoagent_topic_title(summary: dict[str, Any]) -> str:
+    topic = truncate_text(str(summary.get("work") or summary.get("goal") or summary.get("ci") or "ongoing work"), 90)
+    suffix_parts: list[str] = []
+    repos = summary.get("repos") or []
+    if repos:
+        suffix_parts.append(repo_label(str(repos[0])))
+    pr_number = summary.get("pr_number")
+    if pr_number:
+        suffix_parts.append(f"PR #{pr_number}")
+    suffix = f" — {' · '.join(part for part in suffix_parts if part)}" if any(suffix_parts) else ""
+    return f"{topic}{suffix}"
+
+
+def yoagent_session_section(index: int, summary: dict[str, Any]) -> list[str]:
+    """One numbered Markdown section for a session: a bold title line + indented sub-bullets."""
+    session = summary.get("session")
+    lines = [f"**{index}. {yoagent_topic_title(summary)} (session {session})**"]
+    agent = str(summary.get("agent_label") or agent_label(str(summary.get("agent") or "")))
+    state = str(summary.get("activity_label") or ("active" if summary.get("active") else "idle"))
+    last = str(summary.get("last_activity_text") or "").strip()
+    state_line = f"- {agent} is {state}"
+    if last:
+        state_line += f"; last worked {last}"
+    lines.append(state_line)
+    files = summary.get("files") or {}
+    if int(files.get("count") or 0):
+        lines.append(f"- {files_sentence(files)}")
+    goal = str(summary.get("goal") or "").strip()
+    if goal and goal != str(summary.get("work") or ""):
+        lines.append(f"- goal: {truncate_text(goal, 160)}")
+    ci = str(summary.get("ci") or "").strip()
+    if ci:
+        lines.append(f"- CI: {ci}")
+    status = str(summary.get("status_text") or "").strip()
+    if status and status != ci:
+        lines.append(f"- status: {truncate_text(status, 160)}")
+    return lines
+
+
 def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any], settings: dict[str, Any] | None = None) -> str:
     help_reply = deterministic_yoagent_help_reply(question)
     if help_reply:
@@ -692,22 +732,34 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
     sessions = activity_payload.get("sessions") if isinstance(activity_payload, dict) else {}
     headline = str(global_summary.get("headline") or "No AI agent activity is available yet.") if isinstance(global_summary, dict) else "No AI agent activity is available yet."
     question_text = str(question or "").lower()
-    selected_sessions: list[dict[str, Any]] = []
+    all_summaries: list[dict[str, Any]] = []
     if isinstance(sessions, dict):
-        for session, summary in sessions.items():
+        for key, summary in sessions.items():
             if not isinstance(summary, dict):
                 continue
-            if session and session in question_text:
-                selected_sessions.append(summary)
-    sentences = [headline]
-    if isinstance(global_summary, dict):
-        for line in global_summary.get("lines") or []:
-            text = str(line or "").strip()
-            if text and text != headline:
-                sentences.append(text)
-    for summary in selected_sessions:
-        local = str(summary.get("local") or "").strip()
-        if local:
-            sentences.append(f"Details: {local}")
+            # Real payloads carry "session"; fall back to the dict key so the section title is labeled.
+            all_summaries.append(summary if summary.get("session") else {**summary, "session": key})
+    # If the question names specific sessions, focus on those; otherwise report every session.
+    selected = [summary for summary in all_summaries if summary.get("session") and str(summary.get("session")) in question_text]
+    chosen = selected or all_summaries
+    # Active sessions first, then freshest by last-activity timestamp, so the report leads with live work.
+    chosen = sorted(chosen, key=lambda summary: (0 if summary.get("active") else 1, -summary_last_activity_ts(summary)))
     prefix = "No AI backend is answering; showing the activity summary. Set or log in a Claude/Codex backend in Preferences to chat."
-    return " ".join([prefix, *sentences])
+    out = [prefix, "", headline]
+    if not chosen:
+        return "\n".join(out).strip()
+    out.append("")
+    for index, summary in enumerate(chosen, start=1):
+        out.extend(yoagent_session_section(index, summary))
+        out.append("")
+    pending: list[str] = []
+    recommendation = global_recommendation_sentence(all_summaries)
+    if recommendation:
+        pending.append(f"- {recommendation}")
+    stale = stale_work_sentence(all_summaries)
+    if stale:
+        pending.append(f"- {stale}")
+    if pending:
+        out.append("**Open / pending:**")
+        out.extend(pending)
+    return "\n".join(out).strip()

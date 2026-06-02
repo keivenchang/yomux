@@ -343,7 +343,8 @@ function pullRequestCompactBadgesHtml(session, pr) {
   const numberHtml = pullRequestNumberIndicatorHtml(session, pr);
   const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
   const ciHtml = pullRequestCiIndicatorHtml(session, pr);
-  return [numberHtml, statusHtml, ciHtml].filter(Boolean).join('');
+  const reviewHtml = pullRequestApprovalIndicatorHtml(session, pr);
+  return [numberHtml, statusHtml, ciHtml, reviewHtml].filter(Boolean).join('');
 }
 
 function applySessionStateClasses(node, state) {

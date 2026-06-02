@@ -1242,9 +1242,13 @@ function yoagentChatMessagesHtml() {
   return messages.map(message => {
     const role = message.role === 'user' ? 'You' : yoagentTabLabel;
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
+    // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
+    // renderYoagentMessageMarkdown() can render it. The escaped text stays as the no-marked fallback.
+    const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
+    const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
     return `<div class="yoagent-message ${roleClass}">
       <div class="yoagent-message-role">${esc(role)}</div>
-      <div class="yoagent-message-body">${esc(message.content || '')}</div>
+      <div class="${bodyClass}"${markdownAttr}>${esc(message.content || '')}</div>
     </div>`;
   }).join('');
 }

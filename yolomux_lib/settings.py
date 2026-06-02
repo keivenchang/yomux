@@ -92,8 +92,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "backend": "deterministic",
         "invocation": "cli",
         "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Help users operate YOLOmux using the supplied concepts and report only from the supplied agent activity context. Write like a normal human status update, not a metadata list. Do not run tools or inspect ~/.claude, ~/.codex, transcript directories, or any filesystem path. Do not say Sup. Do not invent missing facts.",
-        "intro": "Start with the user's most recent work, then say what is currently being changed and why. Use per-session last-worked timestamps to call out fresh and stale context. Give a concrete recommendation for what to work on next, plus one short tip for using AI agents more efficiently when useful.",
-        "format": "Prefer one short paragraph in this shape: Your most recent work is about <topic>, and you are currently making changes to <files or repos> in order to <goal>. Other work includes <other topics>. Session <id> was last worked <age> ago; session <id> is stale at <age>. You have not touched <area> for quite some time. Recommendation: <next best action>. Efficiency tip: <how to use the AI sessions better>. Omit any clause the context does not support. Put changed-file totals and active/idle agent count after the work summary. Avoid repeating repo, task, or session names.",
+        "intro": "Summarize the live AI agent activity as a structured status report. Lead with one short sentence of overall state, then give one numbered section per session / topic / PR / ticket, then a closing list of what is open or pending. Name the repos, tickets, PRs, and session ids involved. Use the per-session last-worked timestamps to flag fresh vs stale context.",
+        "format": "Reply in Markdown in this shape: an optional one-line lead, then a numbered list with ONE item per session / topic / PR / ticket. Each item starts with a BOLD title line — `**N. <topic> — <repo> · PR #NNNN**` (or `**N. <topic> — Linear <ID>: <title>**`) — followed by indented sub-bullets of what was done or verified (agent + state, changed-file totals like +A/-R, CI status, last-worked age). End with a `**Open / pending:**` section listing the next best actions and any stale sessions. DO name the repos, tickets, PRs, and session ids. Omit any sub-bullet the context does not support, and keep each bullet to one short line.",
     },
     "yolo": {
         "rule_file_path": "~/.config/yolomux/yolo-rules.yaml",
@@ -324,7 +324,9 @@ def merge_settings(base: dict[str, Any], patch: Any) -> dict[str, Any]:
 
 def settings_template(settings: dict[str, Any]) -> str:
     def encode_yaml_value(value: Any) -> str:
-        lines = [line for line in yaml.safe_dump(value, default_flow_style=True).splitlines() if line.strip() != "..."]
+        # width=4096 keeps long scalars (e.g. the yoagent prompt) on one line so rejoining the
+        # dumped lines with a space cannot corrupt folded text; allow_unicode keeps em-dashes literal.
+        lines = [line for line in yaml.safe_dump(value, default_flow_style=True, width=4096, allow_unicode=True).splitlines() if line.strip() != "..."]
         return " ".join(line.strip() for line in lines).strip() or "''"
 
     lines = [

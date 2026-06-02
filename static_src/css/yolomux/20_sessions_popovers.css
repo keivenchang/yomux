@@ -300,6 +300,28 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   background: #c084fc;
   border-color: #e9d5ff;
 }
+/* #38: PR reviewDecision badge — green Approved, red Changes, crossed-out neutral Review. */
+.ci-indicator.pr-review-chip {
+  padding: 0 5px;
+  font-weight: 700;
+}
+.ci-indicator.pr-review-approved {
+  color: #051408;
+  background: #52d273;
+  border-color: #8ff2a7;
+}
+.ci-indicator.pr-review-changes {
+  color: #fff3f4;
+  background: #c61f38;
+  border-color: #ff7a86;
+}
+.ci-indicator.pr-review-required {
+  color: #c4ccd6;
+  background: transparent;
+  border-color: var(--line);
+  text-decoration: line-through;
+  opacity: 0.85;
+}
 .ci-indicator.branch-indicator {
   color: #071321;
   background: #9fd8ff;

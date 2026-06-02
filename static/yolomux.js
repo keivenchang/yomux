@@ -282,6 +282,7 @@ const fileIndexStatusTimers = new Map();  // normalized indexed root -> poll tim
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
+let fileExplorerChangesHidden = (() => { try { return localStorage.getItem('yolomux.fileExplorerChangesHidden') === '1'; } catch (_) { return false; } })();
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
 let commandPaletteMode = 'command';
@@ -9104,7 +9105,8 @@ function pullRequestCompactBadgesHtml(session, pr) {
   const numberHtml = pullRequestNumberIndicatorHtml(session, pr);
   const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
   const ciHtml = pullRequestCiIndicatorHtml(session, pr);
-  return [numberHtml, statusHtml, ciHtml].filter(Boolean).join('');
+  const reviewHtml = pullRequestApprovalIndicatorHtml(session, pr);
+  return [numberHtml, statusHtml, ciHtml, reviewHtml].filter(Boolean).join('');
 }
 
 function applySessionStateClasses(node, state) {
@@ -10470,6 +10472,36 @@ function pullRequestCiIndicatorHtml(session, pr) {
 function pullRequestNumberIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   return `<span class="ci-indicator tab-symbol pr-number-chip" title="PR #${esc(String(pr.number))}">#${esc(String(pr.number))}</span>`;
+}
+
+// #38: GitHub reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED) per PR.
+function pullRequestReviewDecision(pr) {
+  return String(pr?.review_decision || '').toUpperCase();
+}
+
+function pullRequestApprovalClass(decision) {
+  if (decision === 'APPROVED') return 'pr-review-approved';
+  if (decision === 'CHANGES_REQUESTED') return 'pr-review-changes';
+  if (decision === 'REVIEW_REQUIRED') return 'pr-review-required';
+  return '';
+}
+
+function pullRequestApprovalLabel(decision) {
+  if (decision === 'APPROVED') return 'Approved';
+  if (decision === 'CHANGES_REQUESTED') return 'Changes';
+  if (decision === 'REVIEW_REQUIRED') return 'Review';
+  return '';
+}
+
+function pullRequestApprovalIndicatorHtml(session, pr) {
+  if (!pr?.number) return '';
+  // No review badge once the PR is merged/closed (review state no longer actionable).
+  if (['merged', 'closed'].includes(pullRequestStatusLabel(pr).toLowerCase())) return '';
+  const decision = pullRequestReviewDecision(pr);
+  const cls = pullRequestApprovalClass(decision);
+  if (!cls) return '';
+  const label = pullRequestApprovalLabel(decision);
+  return `<span class="${metadataBadgeClasses(session, 'review', `ci-indicator tab-symbol pr-review-chip ${cls}`)}" title="${esc(`Review: ${label}`)}">${esc(label)}</span>`;
 }
 
 function pullRequestLinkHtml(pr) {
@@ -12628,9 +12660,13 @@ function yoagentChatMessagesHtml() {
   return messages.map(message => {
     const role = message.role === 'user' ? 'You' : yoagentTabLabel;
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
+    // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
+    // renderYoagentMessageMarkdown() can render it. The escaped text stays as the no-marked fallback.
+    const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
+    const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
     return `<div class="yoagent-message ${roleClass}">
       <div class="yoagent-message-role">${esc(role)}</div>
-      <div class="yoagent-message-body">${esc(message.content || '')}</div>
+      <div class="${bodyClass}"${markdownAttr}>${esc(message.content || '')}</div>
     </div>`;
   }).join('');
 }
@@ -13999,10 +14035,25 @@ function fileExplorerChangesPanelHtml() {
       <span class="changes-title">Modified files</span>
       ${diffRefControlsHtml({compact: true})}
       <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
+      <button type="button" class="changes-close" data-file-explorer-changes-close title="Hide modified files" aria-label="Hide modified files">×</button>
     </div>
     ${changesComparisonHeaderHtml(payload, files, {loading})}
     ${errorHtml}
     ${empty || changesRepoGroupsHtml(files, {compact: true, payload})}`;
+}
+
+function applyFileExplorerChangesHidden() {
+  document.body.classList.toggle('file-explorer-changes-hidden', fileExplorerChangesHidden);
+  document.querySelectorAll('[data-file-explorer-changes-toggle]').forEach(btn => {
+    btn.setAttribute('aria-pressed', fileExplorerChangesHidden ? 'false' : 'true');
+    btn.title = fileExplorerChangesHidden ? 'Show modified files' : 'Hide modified files';
+  });
+}
+
+function setFileExplorerChangesHidden(hidden) {
+  fileExplorerChangesHidden = Boolean(hidden);
+  try { localStorage.setItem('yolomux.fileExplorerChangesHidden', fileExplorerChangesHidden ? '1' : '0'); } catch (_) {}
+  applyFileExplorerChangesHidden();
 }
 
 function createChangesPanel() {
@@ -14354,6 +14405,7 @@ function createFileExplorerPanel() {
           <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="Refresh" aria-label="Refresh">↻</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
           <button type="button" class="file-explorer-header-action file-explorer-date-toggle" data-file-explorer-tree-dates title="Show modified dates" aria-pressed="${fileExplorerTreeShowDates ? 'true' : 'false'}">date</button>
+          <button type="button" class="file-explorer-header-action file-explorer-changes-toggle" data-file-explorer-changes-toggle title="${fileExplorerChangesHidden ? 'Show modified files' : 'Hide modified files'}" aria-pressed="${fileExplorerChangesHidden ? 'false' : 'true'}">Δ</button>
           <select class="file-explorer-sort-select" data-file-explorer-tree-sort title="Sort tree" aria-label="Sort tree">
             <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>A-Z</option>
             <option value="za"${fileExplorerTreeSortMode === 'za' ? ' selected' : ''}>Z-A</option>
@@ -14413,6 +14465,20 @@ function createFileExplorerPanel() {
   bindFileExplorerPathInput(panel.querySelector('.file-explorer-path-inline'));
   bindFileExplorerHeaderActions(panel);
   bindFileExplorerChangesResizer(panel);
+  // #44: the panel-head toggle (Δ) and the Modified-files header X show/hide the section. Delegated on
+  // the panel so it survives changes-panel re-renders; persisted so the choice sticks across reloads.
+  panel.addEventListener('click', event => {
+    if (event.target.closest?.('[data-file-explorer-changes-toggle]')) {
+      event.preventDefault();
+      event.stopPropagation();
+      setFileExplorerChangesHidden(!fileExplorerChangesHidden);
+    } else if (event.target.closest?.('[data-file-explorer-changes-close]')) {
+      event.preventDefault();
+      event.stopPropagation();
+      setFileExplorerChangesHidden(true);
+    }
+  });
+  applyFileExplorerChangesHidden();
   renderFileExplorerRootModeControls();
   if (closeBtn) {
     closeBtn.addEventListener('pointerdown', event => event.stopPropagation());
@@ -14535,25 +14601,7 @@ function createFileEditorPanel(item) {
   panel.dataset.layoutItem = item;
   panel.innerHTML = `
       <div class="panel-head file-editor-panel-head">
-        <div class="file-editor-panel-actions">
-          <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="Editor mode" hidden>
-            <button type="button" data-editor-mode="edit" title="Edit" aria-label="Edit"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
-            <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
-            <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
-            <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
-          </div>
-          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
-          <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
-          <button type="button" class="file-editor-find-panel" title="${esc(`Find in file (${appShortcutText('F')})`)}" aria-label="Find in file" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
-          <button type="button" class="file-editor-diff-panel" title="Diff" aria-label="Diff" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
-          <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
-          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-theme-panel" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
-          <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
-          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-save-panel" title="Save" aria-label="Save file" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
-          <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="save" aria-hidden="true" hidden></span>
+        <div class="file-editor-panel-actions file-editor-frame-actions">
           ${paneFrameControlsGroupHtml(item, {
             groupClass: 'file-editor-frame-controls',
             actions: false,
@@ -14566,6 +14614,25 @@ function createFileEditorPanel(item) {
           })}
         </div>
         <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
+      </div>
+      <div class="file-editor-toolbar" role="toolbar" aria-label="Editor controls" hidden>
+        <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="Editor mode" hidden>
+          <button type="button" data-editor-mode="edit" title="Edit" aria-label="Edit"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
+          <button type="button" data-editor-mode="preview" title="Preview" aria-label="Preview"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
+          <button type="button" data-editor-mode="split" title="Split view" aria-label="Split view"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
+          <button type="button" class="file-editor-cross-split-panel" title="Open side preview" aria-label="Open side preview" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
+        </div>
+        <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
+        <button type="button" class="file-editor-gutter-panel" title="Toggle line numbers" aria-label="Toggle line numbers" hidden>#</button>
+        <button type="button" class="file-editor-wrap-panel" title="Toggle word wrap" aria-label="Toggle word wrap" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-find-panel" title="${esc(`Find in file (${appShortcutText('F')})`)}" aria-label="Find in file" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-diff-panel" title="Diff" aria-label="Diff" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
+        <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
+        <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
+        <button type="button" class="file-editor-theme-panel" title="Editor theme" aria-label="Editor theme"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-reload-panel" title="Reload from disk" hidden>Reload</button>
+        <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
+        <button type="button" class="file-editor-save-panel" title="Save" aria-label="Save file" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
       </div>
       <div class="file-editor-panel-body panel-overlay-root">
         <div id="panel-toasts-${item}" class="panel-toast-stack"></div>
@@ -15648,11 +15715,13 @@ function updateFileEditorToolbarSeparators(panel) {
   const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel')
     || fileEditorToolbarControlVisible(panel, '.file-editor-reload-panel');
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
-  const frame = true;
-  setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || theme || save || frame));
-  setFileEditorToolbarSeparator(panel, 'tools', tools && (theme || save || frame));
-  setFileEditorToolbarSeparator(panel, 'theme', theme && (save || frame));
-  setFileEditorToolbarSeparator(panel, 'save', save && frame);
+  // #42: the editor controls now live on their own toolbar row below the tab strip (no frame
+  // controls sit beside them), so separators only sit between adjacent visible control groups.
+  setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || theme || save));
+  setFileEditorToolbarSeparator(panel, 'tools', tools && (theme || save));
+  setFileEditorToolbarSeparator(panel, 'theme', theme && save);
+  const toolbar = panel?.querySelector?.('.file-editor-toolbar');
+  if (toolbar) toolbar.hidden = !(mode || tools || theme || save);
 }
 
 function setFileEditorPanelStatus(panel, message, level) {
@@ -16632,6 +16701,17 @@ function yoagentBusyUiIsMounted(node = document.getElementById('yoagent-content'
   return Boolean(yoagentBusy && node?.querySelector?.('.yoagent-chat-status'));
 }
 
+function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
+  // Render each assistant reply body through the Markdown pipeline so bold section titles, numbered
+  // items, and sub-bullets display formatted. Without marked.js the escaped-text fallback stays.
+  if (!node || typeof window.marked === 'undefined') return;
+  const bodies = node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || [];
+  bodies.forEach(body => {
+    renderMarkdownPreviewInto(body, body.textContent || '');
+    body.removeAttribute('data-yoagent-markdown');
+  });
+}
+
 function renderYoagentPanel(options = {}) {
   const node = document.getElementById('yoagent-content');
   if (!node) return;
@@ -16646,6 +16726,7 @@ function renderYoagentPanel(options = {}) {
   }
   if (options.summaryOnly && refreshYoagentSummaryRegions(node)) return;
   node.innerHTML = `${globalActivitySummaryHtml()}${yoagentSessionSummariesHtml()}${yoagentChatHtml()}`;
+  renderYoagentMessageMarkdown(node);
   if (options.scrollBottom !== false) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));
     setTimeout(() => scrollYoagentChatToBottom(node), 0);

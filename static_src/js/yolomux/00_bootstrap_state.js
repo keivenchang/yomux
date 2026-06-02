@@ -281,6 +281,7 @@ const fileIndexStatusTimers = new Map();  // normalized indexed root -> poll tim
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
+let fileExplorerChangesHidden = (() => { try { return localStorage.getItem('yolomux.fileExplorerChangesHidden') === '1'; } catch (_) { return false; } })();
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
 let commandPaletteMode = 'command';

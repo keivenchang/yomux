@@ -229,8 +229,12 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert "No AI backend is answering" in reply
     assert "Set or log in a Claude/Codex backend" in reply
     assert "Your most recent work is about editor fixes" in reply
+    # New multi-section shape: a bold numbered section per session + an Open / pending tail.
+    assert "**1. editor fixes" in reply
+    assert "(session 5)**" in reply
+    assert "- Codex gpt-5.5 is active" in reply
+    assert "**Open / pending:**" in reply
     assert "Recommendation" in reply
-    assert "Codex session 5 is active" in reply
     assert "Be terse" not in reply
 
 
@@ -256,3 +260,52 @@ def test_yoagent_help_primer_and_deterministic_help_answers():
     fallback_reply = deterministic_yoagent_reply("date?", {"global": {"headline": "No recent work."}}, {})
     assert fallback_reply.startswith("No AI backend is answering")
     assert "No recent work." in fallback_reply
+
+
+def test_deterministic_yoagent_reply_emits_multi_section_structure():
+    now = time.time()
+    activity = {
+        "global": {"headline": "Two AI agents are working across yolomux and dynamo.", "lines": []},
+        "sessions": {
+            "5": {
+                "session": "5",
+                "agent": "codex",
+                "agent_label": "Codex gpt-5.5",
+                "active": True,
+                "repos": ["/repo/yolomux"],
+                "files": {"count": 3, "added": 12, "removed": 4},
+                "work": "tab approval badge",
+                "pr_number": 12345,
+                "ci": "CI passing",
+                "status_text": "PR #12345",
+                "last_activity_text": "2 minutes ago",
+                "last_activity_ts": now - 120,
+            },
+            "9": {
+                "session": "9",
+                "agent": "claude",
+                "agent_label": "Claude opus",
+                "active": False,
+                "repos": ["/repo/dynamo"],
+                "files": {"count": 0, "added": 0, "removed": 0},
+                "work": "stale refactor",
+                "status_text": "waiting for more activity",
+                "last_activity_text": "8 days ago",
+                "last_activity_ts": now - 8 * 24 * 3600,
+            },
+        },
+        "errors": [],
+    }
+    reply = deterministic_yoagent_reply("what is happening?", activity, {})
+    # Numbered, bold, one section per session, active first.
+    assert "**1. tab approval badge — yolomux · PR #12345 (session 5)**" in reply
+    assert "**2. stale refactor — dynamo (session 9)**" in reply
+    assert reply.index("(session 5)") < reply.index("(session 9)")
+    # Sub-bullets carry agent/state, file totals, CI.
+    assert "- Codex gpt-5.5 is active; last worked 2 minutes ago" in reply
+    assert "- 3 files changed (+12/-4)" in reply
+    assert "- CI: CI passing" in reply
+    # Closing Open / pending section with a recommendation and the stale session.
+    assert "**Open / pending:**" in reply
+    assert "Recommendation:" in reply
+    assert "session 9" in reply.split("**Open / pending:**", 1)[1]
