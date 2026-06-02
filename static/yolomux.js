@@ -13503,10 +13503,10 @@ function preferenceSections() {
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
     ]},
     {title: t('pref.section.appearance'), items: [
-      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'select', choices: [
+      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'theme-cards', choices: [
+        {value: 'system', label: t('pref.appearance.theme.system')},
         {value: 'dark', label: t('pref.appearance.theme.dark')},
         {value: 'light', label: t('pref.appearance.theme.light')},
-        {value: 'system', label: t('pref.appearance.theme.system')},
       ], help: t('pref.appearance.theme.help')},
       {path: 'appearance.terminal_theme', label: t('pref.appearance.terminal_theme.label'), type: 'select', choices: [
         {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
@@ -13786,6 +13786,21 @@ function preferenceControlHtml(item, query = '') {
     control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
   } else if (item.type === 'select') {
     control = `<select ${baseAttrs}>${preferenceSelectOptionsHtml(item, value)}</select>`;
+  } else if (item.type === 'theme-cards') {
+    // DOIT.6 #123: macOS-style theme picker — clickable cards, each a mini YOLOmux-window preview drawn
+    // from the theme's OWN palette (titlebar + traffic-light dots + a pane + the green accent). The
+    // active card is ringed; clicking saves appearance.theme via the discrete settings patch.
+    const cards = (item.choices || []).map(choice => {
+      const selected = String(value) === String(choice.value);
+      return `<button type="button" class="theme-card${selected ? ' selected' : ''} theme-card-${esc(choice.value)}" role="radio" aria-checked="${selected ? 'true' : 'false'}" data-theme-card="${esc(choice.value)}" aria-label="${esc(choice.label)}"${readOnlyMode ? ' disabled' : ''}>
+        <span class="theme-card-preview" aria-hidden="true">
+          <span class="theme-card-titlebar"><span class="theme-card-dot r"></span><span class="theme-card-dot y"></span><span class="theme-card-dot g"></span></span>
+          <span class="theme-card-window"><span class="theme-card-pane"></span><span class="theme-card-accent"></span></span>
+        </span>
+        <span class="theme-card-caption">${esc(choice.label)}</span>
+      </button>`;
+    }).join('');
+    control = `<div class="theme-cards" role="radiogroup" data-setting-path="${esc(item.path)}" aria-label="${esc(item.label)}">${cards}</div>`;
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
     control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
@@ -14006,6 +14021,16 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true, focusSearch: true});
+      return;
+    }
+    // DOIT.6 #123: a theme-preview card saves appearance.theme (same discrete patch as the old select).
+    const themeCard = event.target.closest('[data-theme-card]');
+    if (themeCard && panel.contains(themeCard) && !themeCard.disabled) {
+      event.preventDefault();
+      markPreferencesInteracted();
+      saveSettingsPatch(settingPatch('appearance.theme', themeCard.dataset.themeCard))
+        .then(() => { statusEl.textContent = 'saved appearance.theme'; renderPreferencesPanels(); })
+        .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
       return;
     }
     const resetAll = event.target.closest('[data-preferences-reset-all]');

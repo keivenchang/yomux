@@ -4019,6 +4019,26 @@ function makeFileTree(paths) {
 }
 
 {
+  // DOIT.6 #123: the Global color theme field renders macOS-style preview cards; the active is ringed.
+  const api = loadYolomux('', ['1']);
+  api.setActiveLocaleForTest('en');
+  api.setClientSettingsPatchForTest({appearance: {theme: 'light'}});
+  const html = api.preferencesPanelHtmlForTest('');
+  for (const v of ['system', 'dark', 'light']) {
+    assert.ok(html.includes(`data-theme-card="${v}"`), `#123: a ${v} theme card renders`);
+  }
+  assert.ok(/class="theme-cards" role="radiogroup"/.test(html), '#123: the cards render as a radiogroup');
+  assert.ok(html.includes('theme-card selected theme-card-light'), '#123: the active theme (light) card is selected/ringed');
+  assert.equal((html.match(/class="theme-card selected/g) || []).length, 1, '#123: exactly one card is selected');
+  assert.equal(/<select[^>]*data-setting-path="appearance\.theme"/.test(html), false, '#123: the theme field is cards, not a <select>');
+  const themeSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/saveSettingsPatch\(settingPatch\('appearance\.theme', themeCard\.dataset\.themeCard\)\)/.test(themeSrc), '#123: clicking a card saves appearance.theme via the discrete patch');
+  const themeCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.theme-card-system \.theme-card-pane\s*\{[^}]*linear-gradient/.test(themeCss), '#123: the System card uses a diagonal light/dark split');
+  assert.ok(/\.theme-card\.selected \.theme-card-preview\s*\{[^}]*var\(--brand-green\)/.test(themeCss), '#123: the selected card is ringed with the accent');
+}
+
+{
   // DOIT.8 Phase 0: i18n runtime — t()/tPlural() fallback + interpolation, active-over-en, pseudo.
   const api = loadYolomux('', ['1']);
   api.i18nSetCatalogForTest('en', {greet: 'Hi {name}', plain: 'Plain'});
