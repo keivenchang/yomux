@@ -213,3 +213,19 @@ def test_tail_file_lines_reads_a_bounded_window_from_eof(tmp_path):
     small = tmp_path / "small.txt"
     small.write_text("a\nb\n")
     assert tail_file_lines(small, 10) == "a\nb\n"
+
+
+def test_metadata_cache_is_bounded_and_sweeps_expired_on_write():
+    # DOIT.6 #83: the cache stays bounded (cap + sweep expired) so dead branch/sha keys don't leak for
+    # the process lifetime.
+    cache = MetadataCache(ttl_seconds=300)
+    for i in range(MetadataCache.MAX_ENTRIES + 1):
+        cache.set(f"expired{i}", i, ttl=0)  # immediately expired
+    cache.set("fresh", 1)
+    assert len(cache.values) <= MetadataCache.MAX_ENTRIES
+    assert "fresh" in cache.values
+    # a large burst of live entries is also capped.
+    cache2 = MetadataCache(ttl_seconds=300)
+    for i in range(MetadataCache.MAX_ENTRIES + 100):
+        cache2.set(f"k{i}", i)
+    assert len(cache2.values) <= MetadataCache.MAX_ENTRIES

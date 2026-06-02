@@ -200,6 +200,34 @@ def test_extract_command_returns_none_when_codex_block_has_no_selector():
     assert prompt_detector.extract_command(visible_text) is None
 
 
+def test_extract_command_anchors_to_bash_call_arg_not_prose():
+    # DOIT.6 #79: anchor to the ● Bash(...) arg — never fold the description prose into the command.
+    visible_text = "\n".join([
+        "● Bash(git status --short)",
+        "  Show the working tree status so we can decide what to commit next and keep the repo tidy",
+        " Permission rule Bash requires confirmation for this command.",
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+        "   2. No",
+    ])
+    assert prompt_detector.extract_command(visible_text) == "git status --short"
+
+
+def test_extract_command_does_not_fold_long_description_prose():
+    # DOIT.6 #79: a long description line (no shell metacharacters) is NOT folded into the command.
+    visible_text = "\n".join([
+        "Bash command",
+        "",
+        "   rm -rf /tmp/build",
+        "   This removes the build directory and triggers a clean rebuild from scratch every time now",
+        "",
+        " Permission rule Bash requires confirmation for this command.",
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+    ])
+    assert prompt_detector.extract_command(visible_text) == "rm -rf /tmp/build"
+
+
 def test_approval_prompt_ignores_exact_claude_ctrl_b_footer():
     visible_text = claude_bash_prompt_with_footer(
         " Esc to cancel · Tab to amend · ctrl+e to explain",

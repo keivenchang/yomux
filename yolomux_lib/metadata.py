@@ -241,6 +241,11 @@ def parse_github_remote(remote_url: str) -> dict[str, str] | None:
     }
 
 class MetadataCache:
+    # DOIT.6 #83: bound the cache so dead branch/sha keys (e.g. github-checks:<old_sha> after a push)
+    # don't live for the whole process lifetime. Expired entries are swept on write, and a hard cap
+    # evicts the soonest-to-expire keys.
+    MAX_ENTRIES = 1024
+
     def __init__(self, ttl_seconds: int = METADATA_CACHE_TTL_SECONDS):
         self.ttl_seconds = ttl_seconds
         self.lock = threading.Lock()
@@ -261,7 +266,17 @@ class MetadataCache:
         # DOIT.6 #71: allow a per-entry TTL so a failed/empty fetch can be cached briefly (retry soon)
         # instead of for the full positive TTL.
         with self.lock:
-            self.values[key] = (time.time() + (self.ttl_seconds if ttl is None else ttl), value)
+            now = time.time()
+            self.values[key] = (now + (self.ttl_seconds if ttl is None else ttl), value)
+            # DOIT.6 #83: sweep expired entries on write, then evict the soonest-to-expire keys if still
+            # over the cap, so the cache stays bounded and dead keys don't leak.
+            if len(self.values) > self.MAX_ENTRIES:
+                for dead in [k for k, (expires_at, _) in self.values.items() if expires_at <= now]:
+                    self.values.pop(dead, None)
+                if len(self.values) > self.MAX_ENTRIES:
+                    overflow = len(self.values) - self.MAX_ENTRIES
+                    for stale in sorted(self.values, key=lambda k: self.values[k][0])[:overflow]:
+                        self.values.pop(stale, None)
 
 def session_project_metadata(info: SessionInfo, cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
     git_data = session_git_inventory(info)

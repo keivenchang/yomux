@@ -52,6 +52,9 @@ _SKIP_LINE = re.compile(
 
 # Lines that look like commands (contain special shell chars, flags, or are long).
 _CMD_CHARS = re.compile(r"[/|&;$=(>`~]|--|\s-[a-zA-Z]")
+# DOIT.6 #79: the canonical Claude bullet `● Bash(<cmd>)` / `• Bash(<cmd>)` — the parenthesized arg is
+# the exact command, so anchoring to it avoids folding the adjacent description prose.
+_BASH_CALL_RE = re.compile(r"[●•]\s*Bash\((.+)\)\s*$")
 
 
 def _shell_text_complete(cmd_line: str) -> bool:
@@ -144,6 +147,14 @@ def extract_command(pane_text: str) -> str | None:
     if trigger_idx is None:
         return None
 
+    # DOIT.6 #79: anchor to the canonical `● Bash(<cmd>)` arg when present — that is the exact command,
+    # so we never fold the adjacent description prose into the text handed to is_dangerous.
+    for i in range(trigger_idx - 1, max(-1, trigger_idx - 40), -1):
+        bash_call = _BASH_CALL_RE.search(lines[i])
+        if bash_call:
+            cmd = bash_call.group(1).strip()
+            return cmd or None
+
     top_idx = 0
     found_content = False
     for i in range(trigger_idx - 1, -1, -1):
@@ -171,7 +182,11 @@ def extract_command(pane_text: str) -> str | None:
             continue
         if _SKIP_LINE.match(stripped):
             continue
-        if _CMD_CHARS.search(stripped) or len(stripped) > 60:
+        # #79: only fold genuinely command-ish lines. Dropped the `len > 60` fallback — it pulled long
+        # DESCRIPTION prose into the "command" and skewed the danger verdict; a long command almost
+        # always carries a shell metacharacter (caught by _CMD_CHARS), and the ● Bash(...) anchor above
+        # already handles the canonical form.
+        if _CMD_CHARS.search(stripped):
             cmd_parts.append(stripped)
 
     if not cmd_parts:
