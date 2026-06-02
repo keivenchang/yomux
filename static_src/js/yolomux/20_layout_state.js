@@ -480,8 +480,24 @@ function readableParamComponentDecode(value) {
   }
 }
 
+// DOIT.6 #40: a bookmarked ?…=yoagent / __yoagent__ (or legacy __yosup__) URL opens the merged pane on
+// the YO!agent sub-tab. The aliases resolve to __info__ during normalization (losing the yoagent intent),
+// so detect them in the raw params here and pre-select the sub-tab before the layout is built.
+function maybeAdoptYoagentDeepLink(params) {
+  const raw = [params.get('tabs') || '', params.get('sessions') || '', params.get('active') || ''].join(',');
+  const referencesYoagent = raw
+    .split(/[,:|]/)
+    .map(value => value.trim())
+    .some(value => tabTypeForParam(value)?.key === 'info' && value !== 'info' && value !== infoItemId);
+  if (referencesYoagent) {
+    infoPanelSubTab = 'yoagent';
+    writeStoredInfoSubTab('yoagent');
+  }
+}
+
 function initialLayoutSlots() {
   const params = new URLSearchParams(location.search);
+  maybeAdoptYoagentDeepLink(params);
   const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '');
   if (layoutFromUrl) return layoutFromUrl;
   const raw = params.get('sessions') || params.get('active') || '';
@@ -615,7 +631,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -665,7 +681,7 @@ function openFileEditorItems() {
 }
 
 function computeLayoutItems() {
-  return [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {
@@ -939,7 +955,7 @@ function createTopbarActivityStatus() {
   button.className = 'topbar-activity';
   button.title = 'Open the cross-session AI activity summary';
   button.setAttribute('aria-label', 'AI activity summary across all sessions');
-  button.onclick = () => selectSession(yoagentItemId);
+  button.onclick = () => openInfoSubTab('yoagent');
   return button;
 }
 

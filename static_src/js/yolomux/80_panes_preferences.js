@@ -1077,10 +1077,15 @@ function installPanelInactiveOverlays(panel, session) {
   }
 }
 
+// DOIT.6 #40: ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
+// summary), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
+// own containers (#info-content / #yoagent-content) and the active one is shown via CSS; the chosen
+// sub-tab is remembered across reloads (infoPanelSubTab).
 function createInfoPanel() {
   const panel = document.createElement('article');
   panel.className = 'panel info-panel';
   panel.id = `panel-${infoItemId}`;
+  panel.dataset.infoSubtab = infoPanelSubTab;
   panel.innerHTML = `
       <div class="panel-head">
         ${virtualPanelControlsHtml(infoItemId, infoTabLabel)}
@@ -1089,56 +1094,47 @@ function createInfoPanel() {
       <div class="panel-detail-row">
         <div class="panel-copy">
           <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel)}</span></div>
-          <div id="meta-${infoItemId}" class="meta">Branches, PRs, CI, and repo metadata sorted by recent activity</div>
+          <div id="meta-${infoItemId}" class="meta">Repo metadata, PRs, CI, and the AI activity summary</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="hide details" aria-label="hide details"></button>
       </div>
+      <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel)} / ${esc(yoagentTabLabel)}">
+        <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel)}</span></button>
+        <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel)}</span></button>
+      </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
-        <div class="transcript-head info-head">
-          <span>${esc(infoTabLabel)}</span>
-          <button type="button" class="info-refresh" data-info-refresh title="Refresh repo metadata">Refresh repo metadata</button>
+        <div class="info-subview" data-info-subview="info">
+          <div class="transcript-head info-head">
+            <span>${esc(infoTabLabel)}</span>
+            <button type="button" class="info-refresh" data-info-refresh title="Refresh repo metadata">Refresh repo metadata</button>
+          </div>
+          <div id="info-content" class="info-list"></div>
         </div>
-        <div id="info-content" class="info-list"></div>
+        <div class="info-subview yoagent-subview" data-info-subview="yoagent">
+          <div class="transcript-head info-head">
+            <span>${esc(yoagentTabLabel)}</span>
+            <button type="button" class="info-refresh" data-yoagent-refresh title="Refresh AI activity summary">Refresh summary</button>
+          </div>
+          <div id="yoagent-content" class="info-list yoagent-list"></div>
+        </div>
       </div>`;
   bindPanelShell(panel, infoItemId);
   panel.querySelector('[data-info-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
     refreshTranscripts();
   });
-  renderInfoPanel();
-  return panel;
-}
-
-function createYoagentPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel yoagent-panel';
-  panel.id = `panel-${yoagentItemId}`;
-  panel.innerHTML = `
-      <div class="panel-head">
-        ${virtualPanelControlsHtml(yoagentItemId, yoagentTabLabel)}
-        <div class="pane-tabs" role="tablist" aria-label="Tabs"></div>
-      </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
-          <div id="panel-tab-${yoagentItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yoagentTabLabel)}</span></div>
-          <div id="meta-${yoagentItemId}" class="meta">Activity roll-up of active AI agents and changed files</div>
-        </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(yoagentItemId)}" title="hide details" aria-label="hide details"></button>
-      </div>
-      <div class="info-pane panel-overlay-root">
-        <div id="panel-toasts-${yoagentItemId}" class="panel-toast-stack"></div>
-        <div class="transcript-head info-head">
-          <span>${esc(yoagentTabLabel)}</span>
-          <button type="button" class="info-refresh" data-yoagent-refresh title="Refresh AI activity summary">Refresh summary</button>
-        </div>
-        <div id="yoagent-content" class="info-list yoagent-list"></div>
-      </div>`;
-  bindPanelShell(panel, yoagentItemId);
   panel.querySelector('[data-yoagent-refresh]')?.addEventListener('click', event => {
     event.preventDefault();
     refreshActivitySummary({force: true});
   });
+  panel.querySelectorAll('[data-info-subtab]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      setInfoSubTab(button.dataset.infoSubtab, {focusChat: button.dataset.infoSubtab === 'yoagent'});
+    });
+  });
+  // YO!agent chat interactions (submit / clear / retry / draft) — preserved from the old yoagent panel.
   panel.addEventListener('submit', event => {
     const form = event.target.closest('[data-yoagent-chat-form]');
     if (!form || !panel.contains(form)) return;
@@ -1167,8 +1163,44 @@ function createYoagentPanel() {
     const input = event.target.closest('[data-yoagent-chat-input]');
     if (input && panel.contains(input)) yoagentDraft = input.value || '';
   });
+  applyInfoSubTab(panel);
+  renderInfoPanel();
   renderYoagentPanel();
   return panel;
+}
+
+// Reflect the active sub-tab onto the merged panel (button highlight + which sub-view is visible).
+function applyInfoSubTab(panel = document.getElementById(`panel-${infoItemId}`)) {
+  if (!panel) return;
+  panel.dataset.infoSubtab = infoPanelSubTab;
+  panel.querySelectorAll('[data-info-subtab]').forEach(button => {
+    const active = button.dataset.infoSubtab === infoPanelSubTab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  panel.querySelectorAll('[data-info-subview]').forEach(view => {
+    view.classList.toggle('active', view.dataset.infoSubview === infoPanelSubTab);
+  });
+}
+
+function setInfoSubTab(tab, options = {}) {
+  const next = normalizedInfoSubTab(tab);
+  if (next !== infoPanelSubTab) {
+    infoPanelSubTab = next;
+    writeStoredInfoSubTab(next);
+  }
+  applyInfoSubTab();
+  if (next === 'yoagent') renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
+}
+
+// Open the merged YO!info pane on a given sub-tab — used by the File menu, command palette, the topbar
+// activity button, and the boot deep-link for legacy ?…=yoagent / __yoagent__ references.
+async function openInfoSubTab(tab) {
+  infoPanelSubTab = normalizedInfoSubTab(tab);
+  writeStoredInfoSubTab(infoPanelSubTab);
+  await selectSession(infoItemId);
+  applyInfoSubTab();
+  if (infoPanelSubTab === 'yoagent') renderYoagentPanel({preserveDraft: true, focusInput: true});
 }
 
 function sessionActivitySummary(session) {

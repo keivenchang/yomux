@@ -38,6 +38,27 @@ function writeStoredTabMetaVisible(value) {
   }
 }
 
+// DOIT.6 #40: persist the merged YO!info pane's active sub-tab ('info' | 'yoagent'), default 'info'.
+function normalizedInfoSubTab(value) {
+  return value === 'yoagent' ? 'yoagent' : 'info';
+}
+
+function readStoredInfoSubTab() {
+  try {
+    return normalizedInfoSubTab(window.localStorage?.getItem(infoSubTabStorageKey));
+  } catch (_) {
+    return 'info';
+  }
+}
+
+function writeStoredInfoSubTab(value) {
+  try {
+    window.localStorage?.setItem(infoSubTabStorageKey, normalizedInfoSubTab(value));
+  } catch (_) {
+    // Sub-tab selection still works for the current page when storage is blocked.
+  }
+}
+
 function readStoredEditorWrap() {
   try {
     return window.localStorage?.getItem(fileEditorWrapStorageKey) === '1';

@@ -1313,6 +1313,20 @@ function makeFileTree(paths) {
   assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*boolSetting\('general\.reload_on_update'/.test(source), 'server-version reload is gated on the boot version and the reload_on_update preference');
   assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');
   assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');
+  // #40: YO!info and YO!agent are merged into ONE panel with a segmented sub-tab toggle; both sub-views
+  // (the metadata table + the AI chat/summary) live in the single info panel and the active one is shown.
+  assert.ok(/function createInfoPanel\(\)[\s\S]*?class="info-subtabs"[\s\S]*?data-info-subtab="info"[\s\S]*?data-info-subtab="yoagent"/.test(source), '#40: the merged info panel renders a YO!info/YO!agent sub-tab toggle');
+  assert.ok(/function createInfoPanel\(\)[\s\S]*?data-info-subview="info"[\s\S]*?id="info-content"[\s\S]*?data-info-subview="yoagent"[\s\S]*?id="yoagent-content"/.test(source), '#40: the merged info panel hosts both the metadata and the YO!agent sub-views');
+  assert.ok(/function createInfoPanel\(\)[\s\S]*?renderInfoPanel\(\);\s*renderYoagentPanel\(\);/.test(source), '#40: the merged panel renders both sub-views on creation');
+  assert.equal(source.includes('function createYoagentPanel('), false, '#40: the standalone YO!agent panel builder is gone');
+  assert.ok(source.includes('function setInfoSubTab(') && source.includes('function applyInfoSubTab(') && source.includes('async function openInfoSubTab('), '#40: sub-tab switch + open helpers exist');
+  assert.ok(/function setInfoSubTab[\s\S]*?writeStoredInfoSubTab\(next\)/.test(source), '#40: switching the sub-tab persists it (remembered across reloads)');
+  assert.ok(/function openInfoSubTab[\s\S]*?selectSession\(infoItemId\)/.test(source), '#40: opening YO!agent activates the merged info pane');
+  assert.ok(/maybeAdoptYoagentDeepLink[\s\S]*?infoPanelSubTab = 'yoagent'/.test(source), '#40: a yoagent deep-link pre-selects the YO!agent sub-tab');
+  const mergedInfoCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.info-subview\s*\{[\s\S]*?display:\s*none/.test(mergedInfoCss), '#40: inactive sub-views are hidden');
+  assert.ok(/\.info-subview\.active\s*\{[\s\S]*?display:\s*flex/.test(mergedInfoCss), '#40: the active sub-view is shown');
+  assert.ok(/\.info-subtab\.active\s*\{/.test(mergedInfoCss), '#40: the active sub-tab button is styled');
   assert.ok(source.includes('id="summary-${session}" class="summary-preview markdown-body"'), 'the AI Transcript panel is a markdown-body container, not a raw <pre>');
   assert.ok(source.includes("AI Transcript for session '"), 'the AI Transcript panel head names the session');
   assert.ok(/function startSummaryStream[\s\S]*renderMarkdownPreviewInto\(node, raw\)/.test(source), 'the AI Transcript stream renders accumulated text through the markdown pipeline');
@@ -1708,10 +1722,14 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux('', ['1', '2']);
-  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,yoagent,files,preferences,changes,image-viewer,file-editor,file-preview');
-  assert.equal(api.resolveLayoutItem('yosup'), api.yoagentItemId, 'legacy yosup URL param resolves to YO!agent');
-  assert.equal(api.resolveLayoutItem('__yosup__'), api.yoagentItemId, 'legacy yosup item id resolves to YO!agent');
-  assert.equal(api.itemParam(api.yoagentItemId), 'yoagent', 'new YO!agent URLs use the new param');
+  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,changes,image-viewer,file-editor,file-preview');
+  // #40: YO!info and YO!agent are merged into the single info item; the legacy yoagent/yosup aliases
+  // resolve to it so saved layouts and bookmarked ?…=yoagent URLs open the merged pane.
+  assert.equal(api.resolveLayoutItem('yoagent'), api.infoItemId, 'yoagent alias resolves to the merged YO!info item');
+  assert.equal(api.resolveLayoutItem('yosup'), api.infoItemId, 'legacy yosup URL param resolves to the merged item');
+  assert.equal(api.resolveLayoutItem('__yosup__'), api.infoItemId, 'legacy yosup item id resolves to the merged item');
+  assert.equal(api.resolveLayoutItem('__yoagent__'), api.infoItemId, 'legacy yoagent item id resolves to the merged item');
+  assert.equal(api.itemParam(api.infoItemId), 'info', 'the merged pane uses the info param');
   assert.equal(api.tabTypeForItem('__files__').key, 'files');
   assert.equal(api.tabTypeForItem('__changes__').key, 'changes');
   assert.equal(api.tabTypeForItem('image:/home/test/screen.png').key, 'image-viewer');
@@ -1880,7 +1898,8 @@ function makeFileTree(paths) {
   assert.ok(api.menuTabCommand('__files__').html.includes('app-menu-ui-icon-finder'));
   assert.ok(api.menuTabCommand('__prefs__').html.includes('app-menu-ui-icon-gear'));
   assert.ok(api.menuTabCommand('__info__').html.includes('app-menu-ui-icon-branch-info'));
-  assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-yoagent'));
+  // #40: a legacy __yoagent__ reference resolves to the merged YO!info item (so it shows the info icon).
+  assert.ok(api.menuTabCommand('__yoagent__').html.includes('app-menu-ui-icon-branch-info'));
   assert.ok(api.menuTabCommand('__changes__').html.includes('app-menu-ui-icon-changes'));
   assert.ok(api.menuTabCommand('file:/home/test/README.md').html.includes('app-menu-ui-icon-document'));
   assert.equal(api.platformWindowControlClass('minimize'), 'pc-window-control pc-minimize');
@@ -2508,11 +2527,17 @@ function makeFileTree(paths) {
       api.commandPaletteItemScore({group: 'Tabs', label: '1', detail: 'y o agent buried in details', searchFields: ['1', 'y o agent buried in details']}, 'yoagent'),
     'command palette ranks YO!agent first for punctuation-insensitive prefix queries'
   );
-  const paletteVirtualLabels = api.commandPaletteCommandItems().filter(item => [api.infoItemId, api.yoagentItemId, api.fileExplorerItemId, api.prefsItemId, api.changesItemId].map(api.itemLabel).includes(item.label));
-  const expectedVirtualLabels = [api.infoItemId, api.yoagentItemId, api.fileExplorerItemId, api.prefsItemId, api.changesItemId].map(api.itemLabel);
+  // #40: YO!info, Finder, Preferences, Changes are the standalone virtual tabs; YO!agent is now a
+  // sub-tab of the merged YO!info pane, so it is NOT a Tabs entry.
+  const paletteItems = api.commandPaletteCommandItems();
+  const expectedVirtualLabels = [api.infoItemId, api.fileExplorerItemId, api.prefsItemId, api.changesItemId].map(api.itemLabel);
+  const paletteVirtualLabels = paletteItems.filter(item => item.group === 'Tabs' && expectedVirtualLabels.includes(item.label));
   assert.equal(paletteVirtualLabels.length, expectedVirtualLabels.length, 'command palette lists each virtual tab once');
   assert.equal(expectedVirtualLabels.every(label => paletteVirtualLabels.some(item => item.label === label)), true, 'command palette includes all virtual tabs');
   assert.equal(paletteVirtualLabels.every(item => item.group === 'Tabs'), true, 'virtual tab palette entries come from the Tabs group, not duplicate menu commands');
+  // YO!agent survives as a File-menu command that opens the merged pane on its sub-tab.
+  assert.ok(paletteItems.some(item => item.group === 'Menu' && /YO!agent$/.test(item.label)), 'command palette offers a YO!agent command (opens the merged pane on its sub-tab)');
+  assert.equal(paletteItems.some(item => item.group === 'Tabs' && item.label === 'YO!agent'), false, 'YO!agent is not a standalone palette tab anymore');
   api.setFileQuickOpenCandidatesForTest('/repo/app', [
     {name: 'helloXandYyy.py', path: '/repo/app/src/helloXandYyy.py', relative_path: 'src/helloXandYyy.py'},
   ]);
@@ -3219,7 +3244,7 @@ function makeFileTree(paths) {
   });
 
   api.setLayoutSlotsForTest(fullSpanSlots);
-  api.splitSessionAtGutter('__yoagent__', '', 'right');
+  api.splitSessionAtGutter('__changes__', '', 'right');
   const gutterSplit = api.serialize(api.currentSlots());
   assert.equal(gutterSplit.tree.split, 'row');
   assert.deepStrictEqual(canonical(gutterSplit.tree.children[0]), {
@@ -3235,7 +3260,7 @@ function makeFileTree(paths) {
       {split: 'column', pct: 50, children: [{slot: 'slot3'}, {slot: 'slot4'}]},
     ],
   });
-  assert.deepStrictEqual(canonical(gutterSplit.panes.slot5), {tabs: ['__yoagent__'], active: '__yoagent__'});
+  assert.deepStrictEqual(canonical(gutterSplit.panes.slot5), {tabs: ['__changes__'], active: '__changes__'});
 
   const dockedBoundarySlots = api.emptyLayoutSlots();
   dockedBoundarySlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
@@ -3264,7 +3289,7 @@ function makeFileTree(paths) {
   dockedBoundaryTopSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
   dockedBoundaryTopSlots.slot1 = api.paneStateWithTabs(['1'], '1');
   api.setLayoutSlotsForTest(dockedBoundaryTopSlots);
-  api.splitSessionAtLayoutBoundary('__yoagent__', 'top');
+  api.splitSessionAtLayoutBoundary('__changes__', 'top');
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).tree), {
     split: 'row',
     pct: 22,
@@ -3320,7 +3345,7 @@ function makeFileTree(paths) {
   resizer.classList.add('layout-resizer');
   resizer.dataset.splitPath = '';
   resizer.rect = {left: 598, top: 0, right: 602, bottom: 800, width: 4, height: 800};
-  const gutterEvent = dragEvent(601, '__yoagent__');
+  const gutterEvent = dragEvent(601, '__changes__');
   gutterEvent.target = resizer;
   gutterEvent.clientY = 400;
   const gutterIntent = api.dropIntentForEvent(gutterEvent, {allowBoundary: true});
@@ -3478,7 +3503,7 @@ function makeFileTree(paths) {
   assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
   assert.equal(api.itemIsBackgroundPaneTab('1'), false);
   assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__files__', '__prefs__', '__changes__', '3']);
+  assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__files__', '__prefs__', '__changes__', '3']);
 }
 
 {

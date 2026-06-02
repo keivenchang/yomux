@@ -336,6 +336,9 @@ const pasteCounters = new Map();
 const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
+// DOIT.6 #40: YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
+// sub-tab is remembered across reloads.
+const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
 let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
 let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15000);
@@ -393,6 +396,8 @@ const infoTabLabel = 'YO!info';
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
 const yoagentTabLabel = 'YO!agent';
+// DOIT.6 #40: the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
+let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
 const changesItemId = '__changes__';
@@ -405,38 +410,23 @@ function filePreviewItemFor(path) { return filePreviewItemPrefix + path; }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
 const TAB_TYPES = [
   {
+    // DOIT.6 #40: YO!info and YO!agent are ONE item now — the panel hosts both via an in-pane sub-tab
+    // toggle. The legacy yoagent/yosup aliases resolve here so saved layouts and bookmarked
+    // ?…=yoagent URLs open the merged pane (the boot deep-link scan pre-selects the YO!agent sub-tab).
     key: 'info',
     id: infoItemId,
-    aliases: ['info', infoItemId],
-    match: item => item === infoItemId,
+    aliases: ['info', infoItemId, 'yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
+    match: item => item === infoItemId || item === yoagentItemId || item === legacyYosupItemId,
     label: () => infoTabLabel,
     shortLabel: () => 'Term',
     terminalTitle: () => `unavailable for ${infoTabLabel}`,
     sortRank: 0,
     param: () => 'info',
-    detail: () => 'Repo metadata, branches, PRs, and CI',
+    detail: () => 'Repo metadata, PRs, CI, and the AI activity summary',
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     className: () => 'info',
     icon: 'branch-info',
-    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
-    prunePriority: () => 0,
-  },
-  {
-    key: 'yoagent',
-    id: yoagentItemId,
-    aliases: ['yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
-    match: item => item === yoagentItemId || item === legacyYosupItemId,
-    label: () => yoagentTabLabel,
-    shortLabel: () => 'YO',
-    terminalTitle: () => `unavailable for ${yoagentTabLabel}`,
-    sortRank: 0.25,
-    param: () => 'yoagent',
-    detail: () => 'Casual AI activity summary',
-    rowHtml: (item, options) => paneInfoTabHtml(item, options),
-    createPanel: () => createYoagentPanel(),
-    className: () => 'info yoagent-item',
-    icon: 'yoagent',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
     prunePriority: () => 0,
   },
@@ -657,7 +647,7 @@ function applyFileExplorerStaticLabels() {
 }
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 let visibleSessions = sessions.slice(0, maxSessionTabs);
-let layoutItems = [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
+let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};

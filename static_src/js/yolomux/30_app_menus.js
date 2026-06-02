@@ -454,7 +454,12 @@ function appMenuTree() {
             targetItem: fileExplorerItemId,
           }),
           fileMenuVirtualCommand(infoItemId, 'Open branch, PR, CI, and repo metadata'),
-          fileMenuVirtualCommand(yoagentItemId, 'Open the AI agent activity summary'),
+          // #40: YO!agent is now a sub-tab of the merged YO!info pane — this entry opens that pane on it.
+          menuCommand(yoagentTabLabel, () => openInfoSubTab('yoagent'), {
+            checked: itemInLayout(infoItemId) && infoPanelSubTab === 'yoagent',
+            detail: 'Open the AI agent activity summary',
+            iconHtml: appMenuUiIcon('yoagent'),
+          }),
           menuCommand('Open file', openFileQuickOpen, {
             detail: appShortcutText('P'),
             iconHtml: appMenuUiIcon('document'),

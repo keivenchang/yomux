@@ -477,11 +477,61 @@
   color: var(--muted);
 }
 .info-pane {
+  position: relative;
   height: 100%;
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   background: #11151d;
+}
+/* DOIT.6 #40: the merged YO!info / YO!agent sub-views share the pane; only the active one is shown,
+   and it fills the available height (head row + scrolling list). */
+.info-subview {
+  display: none;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+.info-subview.active {
+  display: flex;
+}
+.info-subview .info-head {
+  flex: 0 0 auto;
+}
+.info-subview .info-list {
+  flex: 1;
+}
+/* The segmented sub-tab toggle that switches between YO!info and YO!agent (its own row under the tabs). */
+.info-subtabs {
+  display: flex;
+  gap: 0;
+  padding: 6px 10px 0;
+  background: #11151d;
+}
+.info-subtab {
+  flex: 0 0 auto;
+  padding: 4px 14px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+.info-subtab:first-child {
+  border-radius: 6px 0 0 6px;
+}
+.info-subtab:last-child {
+  border-radius: 0 6px 6px 0;
+  border-left: 0;
+}
+.info-subtab.active {
+  color: #f4fff0;
+  background: var(--brand-green);
+  border-color: var(--brand-green);
+}
+.info-subtab:not(.active):hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
 }
 .info-list {
   min-height: 0;
