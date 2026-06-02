@@ -1523,6 +1523,8 @@ function preferenceSections() {
         {value: 'en', label: 'English'},
         {value: 'zh-Hant', label: '繁體中文'},
         {value: 'zh-Hans', label: '简体中文'},
+        {value: 'es', label: 'Español'},
+        {value: 'ja', label: '日本語'},
         {value: 'en-XA', label: t('pref.general.language.pseudo')},
       ], help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},

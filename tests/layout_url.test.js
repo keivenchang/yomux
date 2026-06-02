@@ -4050,7 +4050,11 @@ function makeFileTree(paths) {
   assert.equal(api.resolveLocalePref('system'), 'en', 'Phase 1: system falls back to en without a browser locale');
   // The switcher choices: system + en + Traditional-before-Simplified + pseudo, endonym-labeled.
   const choices = api.i18nLocaleChoices();
-  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'en-XA'], 'Phase 1: the locale choices are ordered system/en/Hant/Hans/pseudo');
+  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'es', 'ja', 'en-XA'], 'Phase 1: the locale choices are ordered system/en/Hant/Hans/es/ja/pseudo');
+  assert.equal(choices.find(c => c.value === 'es').label, 'Español', 'Phase 1: Spanish is labeled with its endonym');
+  assert.equal(choices.find(c => c.value === 'ja').label, '日本語', 'Phase 1: Japanese is labeled with its endonym');
+  assert.equal(api.resolveLocalePref('es'), 'es', 'Phase 1: Spanish resolves to itself');
+  assert.equal(api.resolveLocalePref('ja'), 'ja', 'Phase 1: Japanese resolves to itself');
   assert.equal(choices.find(c => c.value === 'zh-Hant').label, '繁體中文', 'Phase 1: Traditional Chinese is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'zh-Hans').label, '简体中文', 'Phase 1: Simplified Chinese is labeled with its endonym');
   const src = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -4061,6 +4065,18 @@ function makeFileTree(paths) {
   assert.ok(/\.topbar-language\s*\{/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'Phase 1: the language switcher has topbar styling');
   // boot() resolves the raw general.language pref (so a system pref localizes client-side).
   assert.ok(/await applyLocale\(resolveLocalePref\(initialSetting\('general\.language', 'system'\)\)\)/.test(src), 'Phase 1: boot resolves the raw language pref (system -> navigator)');
+  // The Spanish locale ships with full key-parity and real (non-English) translations.
+  const en = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
+  const es = JSON.parse(fs.readFileSync('static/locales/es.json', 'utf8'));
+  assert.deepEqual(Object.keys(es).sort(), Object.keys(en).sort(), 'Phase 1: es.json has exactly the same keys as en.json (parity)');
+  assert.equal(es['menu.file'], 'Archivo', 'Phase 1: es translates a representative menu label');
+  assert.equal(es['pref.reset.cancel'], 'Cancelar', 'Phase 1: es translates the reset cancel button');
+  assert.ok(es['pref.appearance.file_explorer_font_size.label'].includes('{name}'), 'Phase 1: es preserves interpolation placeholders');
+  const ja = JSON.parse(fs.readFileSync('static/locales/ja.json', 'utf8'));
+  assert.deepEqual(Object.keys(ja).sort(), Object.keys(en).sort(), 'Phase 1: ja.json has exactly the same keys as en.json (parity)');
+  assert.equal(ja['menu.file'], 'ファイル', 'Phase 1: ja translates a representative menu label');
+  assert.equal(ja['pref.reset.cancel'], 'キャンセル', 'Phase 1: ja translates the reset cancel button');
+  assert.ok(ja['changes.fileCount.other'].includes('{count}'), 'Phase 1: ja preserves count placeholders');
 }
 
 {
