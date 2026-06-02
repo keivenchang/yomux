@@ -155,10 +155,17 @@ def test_login_locale_picker_writes_general_language():
     assert 'name="locale"' in page
     assert "繁體中文" in page and "简体中文" in page  # endonym-labeled, Traditional before Simplified
     assert page.index("繁體中文") < page.index("简体中文")
+    # The login chrome localizes to the saved locale (server-side, pre-auth).
+    assert "Sign in" in login_html(current_locale="en")
+    assert "登入" in login_html(current_locale="zh-Hant")  # Sign in (Traditional)
+    assert "Iniciar sesión" in login_html(current_locale="es")
+    assert "ログイン" in login_html(current_locale="ja")
     try:
         save_login_locale("zh-Hant")
         assert current_language_pref() == "zh-Hant"
-        assert ' value="zh-Hant" selected>' in login_html(current_locale=current_language_pref())
+        page = login_html(current_locale=current_language_pref())
+        assert ' value="zh-Hant" selected>' in page
+        assert "使用者名稱" in page and "密碼" in page  # Username / Password localized
         save_login_locale("bogus-locale")  # invalid -> ignored, no change
         assert current_language_pref() == "zh-Hant"
     finally:

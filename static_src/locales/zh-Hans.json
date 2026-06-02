@@ -482,5 +482,14 @@
   "popover.repo": "仓库",
   "popover.kind.image": "图像查看器",
   "popover.kind.text": "文件编辑器",
-  "popover.kind.file": "文件"
+  "popover.kind.file": "文件",
+  "login.signIn": "登录",
+  "login.username": "用户名",
+  "login.password": "密码",
+  "login.show": "显示",
+  "login.hide": "隐藏",
+  "login.showPassword": "显示密码",
+  "login.hidePassword": "隐藏密码",
+  "login.language": "语言",
+  "login.error.invalid": "用户名或密码无效。"
 }

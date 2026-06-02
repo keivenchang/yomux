@@ -482,5 +482,14 @@
   "popover.repo": "repo",
   "popover.kind.image": "image viewer",
   "popover.kind.text": "file editor",
-  "popover.kind.file": "file"
+  "popover.kind.file": "file",
+  "login.signIn": "Sign in",
+  "login.username": "Username",
+  "login.password": "Password",
+  "login.show": "Show",
+  "login.hide": "Hide",
+  "login.showPassword": "Show password",
+  "login.hidePassword": "Hide password",
+  "login.language": "Language",
+  "login.error.invalid": "Invalid username or password."
 }

@@ -24,6 +24,7 @@ from .common import current_auth_users
 from .web import current_language_pref
 from .web import login_html
 from .web import save_login_locale
+from .web import server_string
 from .web import setup_auth_html
 
 
@@ -230,8 +231,14 @@ class AuthMixin:
         identity = auth_identity_for_credentials(username, password)
         if identity is None:
             self.close_after_unread_body()
+            locale = current_language_pref()
             self.write_html(
-                login_html(next_path=next_path, error="Invalid username or password.", secure=self.request_is_https()),
+                login_html(
+                    next_path=next_path,
+                    error=server_string(locale, "login.error.invalid"),
+                    secure=self.request_is_https(),
+                    current_locale=locale,
+                ),
                 status=HTTPStatus.UNAUTHORIZED,
             )
             return

@@ -482,5 +482,14 @@
   "popover.repo": "リポジトリ",
   "popover.kind.image": "画像ビューアー",
   "popover.kind.text": "ファイルエディター",
-  "popover.kind.file": "ファイル"
+  "popover.kind.file": "ファイル",
+  "login.signIn": "ログイン",
+  "login.username": "ユーザー名",
+  "login.password": "パスワード",
+  "login.show": "表示",
+  "login.hide": "非表示",
+  "login.showPassword": "パスワードを表示",
+  "login.hidePassword": "パスワードを非表示",
+  "login.language": "言語",
+  "login.error.invalid": "ユーザー名またはパスワードが無効です。"
 }

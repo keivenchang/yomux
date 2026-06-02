@@ -80,6 +80,19 @@ def bootstrap_locale_catalogs(locale: str) -> dict:
     return catalogs
 
 
+def server_string(locale: str, key: str, **params: str) -> str:
+    """Resolve a catalog key SERVER-SIDE (active locale -> en fallback -> key) for the pre-auth shell.
+
+    The login/setup screens are rendered server-side (not by the localized JS), so they look up strings
+    directly from the same /static/locales catalogs the client uses, keyed by the saved general.language.
+    """
+    catalogs = bootstrap_locale_catalogs(locale)
+    value = catalogs.get(str(locale or ""), {}).get(key) or catalogs.get("en", {}).get(key) or key
+    for name, replacement in params.items():
+        value = value.replace("{" + name + "}", str(replacement))
+    return value
+
+
 def static_asset_version(asset: str) -> int:
     path = static_asset_path(asset)
     if path is None:
@@ -256,10 +269,11 @@ def login_locale_field_html(current: str = "system") -> str:
         f'<option value="{html.escape(value, quote=True)}"{" selected" if value == current else ""}>{html.escape(label)}</option>'
         for value, label in LOGIN_LOCALE_CHOICES
     )
+    language_label = html.escape(server_string(current, "login.language"))
     return (
         '<label class="login-locale">'
-        "<span>Language</span>"
-        f'<select name="locale" aria-label="Language">{options}</select>'
+        f"<span>{language_label}</span>"
+        f'<select name="locale" aria-label="{language_label}">{options}</select>'
         "</label>"
     )
 
@@ -273,9 +287,22 @@ def save_login_locale(value: str) -> None:
 
 def login_html(next_path: str = "/", error: str = "", secure: bool = True, current_locale: str = "system") -> str:
     safe_next = html.escape(next_path if next_path.startswith("/") else "/", quote=True)
+    # DOIT.8 Phase 1: localize the pre-auth login chrome via the SAVED locale (the JS i18n runtime is not
+    # loaded here). The HTTPS warning + agent-login notice carry shell commands, so they stay English.
+    sign_in = html.escape(server_string(current_locale, "login.signIn"))
+    username_label = html.escape(server_string(current_locale, "login.username"))
+    password_label = html.escape(server_string(current_locale, "login.password"))
+    show_label = server_string(current_locale, "login.show")
+    show_aria = server_string(current_locale, "login.showPassword")
     error_html = f'<div class="login-error" role="alert">{html.escape(error)}</div>' if error else ""
     security_html = "" if secure else '<div class="login-warning">No HTTPS. Highly recommend that you restart with <code>python3 yolomux.py --port 9998 --self-signed</code>.</div>'
     agent_notice_html = agent_login_notice_html()
+    toggle_labels = json.dumps({
+        "show": show_label,
+        "hide": server_string(current_locale, "login.hide"),
+        "showAria": show_aria,
+        "hideAria": server_string(current_locale, "login.hidePassword"),
+    })
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -289,38 +316,39 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 <main class="login-shell">
   <section class="login-panel">
     <div class="login-brand">{brand_html("brand-title login-brand-title", "div")}</div>
-    <h1>Sign in</h1>
+    <h1>{sign_in}</h1>
     {security_html}
     {agent_notice_html}
     {error_html}
     <form method="post" action="/login" class="login-form">
       <input type="hidden" name="next" value="{safe_next}">
       <label>
-        <span>Username</span>
+        <span>{username_label}</span>
         <input name="username" autocomplete="username" autofocus required>
       </label>
       <label>
-        <span>Password</span>
+        <span>{password_label}</span>
         <span class="password-field">
           <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
-          <button id="togglePassword" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false">Show</button>
+          <button id="togglePassword" class="password-toggle" type="button" aria-label="{html.escape(show_aria, quote=True)}" aria-pressed="false">{html.escape(show_label)}</button>
         </span>
       </label>
       {login_locale_field_html(current_locale)}
-      <button type="submit">Sign in</button>
+      <button type="submit">{sign_in}</button>
     </form>
   </section>
 </main>
 <script>
 (() => {{
+  const labels = {toggle_labels};
   const password = document.getElementById('loginPassword');
   const toggle = document.getElementById('togglePassword');
   if (!password || !toggle) return;
   toggle.addEventListener('click', () => {{
     const show = password.type === 'password';
     password.type = show ? 'text' : 'password';
-    toggle.textContent = show ? 'Hide' : 'Show';
-    toggle.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    toggle.textContent = show ? labels.hide : labels.show;
+    toggle.setAttribute('aria-label', show ? labels.hideAria : labels.showAria);
     toggle.setAttribute('aria-pressed', show ? 'true' : 'false');
     password.focus();
   }});
