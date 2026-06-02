@@ -389,13 +389,25 @@ _FOOTER_LINE_RE = re.compile(
 )
 _FOOTER_HINT_SEPARATOR_RE = re.compile(r"\s*(?:[·•]|\.(?=\s))\s*")
 _FOOTER_HINT_PART_RE = re.compile(
+    # DOIT.6 #43: also cover Claude's AskUserQuestion footer parts — the arrow cluster "↑/↓ to navigate"
+    # (and ←/→), and a bare single-letter key like "n to add notes".
     r"^(?:"
     r"\? for shortcuts"
-    r"|(?:esc|escape|enter|return|tab|shift\+tab|ctrl\+[a-z0-9]|cmd\+[a-z0-9]|alt\+[a-z0-9]|option\+[a-z0-9]|↑|↓|←|→)\s+to\s+.+"
+    r"|(?:esc|escape|enter|return|tab|shift\+tab|ctrl\+[a-z0-9]|cmd\+[a-z0-9]|alt\+[a-z0-9]|option\+[a-z0-9]|↑/↓|←/→|↑|↓|←|→|[a-z])\s+to\s+.+"
     r")$",
     re.IGNORECASE,
 )
 _QUESTION_RE = re.compile(r"(?:^|\b)(?:Q\d+\s*/\s*\d+\s*:\s*)?.+\?\s*$")
+# DOIT.6 #43: Claude Code's AskUserQuestion footer. Its distinctive combo ("Enter to select" plus a
+# navigate / add-notes / switch-questions hint) identifies the multi-option ask UI, whose selected
+# option is box-highlighted (no ❯ glyph) and which puts a preview / "Notes:" / "Chat about this" block
+# between the options and the footer.
+_ASK_QUESTION_FOOTER_RE = re.compile(
+    r"enter\s+to\s+select", re.IGNORECASE
+)
+_ASK_QUESTION_HINT_RE = re.compile(
+    r"to\s+navigate|add\s+notes|switch\s+questions", re.IGNORECASE
+)
 
 
 def _is_working_line(line: str) -> bool:
@@ -581,6 +593,36 @@ def _clip_prompt_lines(lines: list[str], max_lines: int = 12, max_chars: int = 1
     return text
 
 
+def _is_ask_user_question_footer(line: str) -> bool:
+    return bool(_ASK_QUESTION_FOOTER_RE.search(line) and _ASK_QUESTION_HINT_RE.search(line))
+
+
+def ask_user_question_prompt_text(visible_text: str) -> str:
+    """Return the question text when the visible pane shows Claude Code's AskUserQuestion UI.
+
+    DOIT.6 #43: that UI is NOT a yes/no permission prompt (``detect_prompt`` returns None) and its
+    selected option is box-highlighted (no ``❯``), so the generic choice detector misses it. Recognize
+    it by its footer ("Enter to select" + a navigate / add-notes / switch-questions hint) below ≥2
+    numbered options and a ``?``-question line — even with a preview box / "Notes:" / "Chat about this"
+    block sitting between the options and the footer.
+    """
+    lines = visible_text.splitlines()[-80:]
+    footer_indices = [i for i, line in enumerate(lines) if _is_ask_user_question_footer(line)]
+    if not footer_indices:
+        return ""
+    head = lines[: footer_indices[-1]]
+    option_indices = [i for i, line in enumerate(head) if _CHOICE_LINE_RE.search(line)]
+    if len(option_indices) < 2:
+        return ""
+    for line in reversed(head[: option_indices[0]]):
+        cleaned = _clean_prompt_block_line(line)
+        if not cleaned:
+            continue
+        if _QUESTION_RE.match(cleaned):
+            return cleaned
+    return ""
+
+
 def visible_choice_prompt_text(visible_text: str) -> str:
     """Return the current user-question prompt from the visible pane only.
 
@@ -593,6 +635,11 @@ def visible_choice_prompt_text(visible_text: str) -> str:
         return ""
     if re.search(r"accept edits on\s*\(", visible_text, re.IGNORECASE):
         return ""
+
+    # DOIT.6 #43: the box-highlighted AskUserQuestion multi-option UI is a question, not a yes/no prompt.
+    ask_question = ask_user_question_prompt_text(visible_text)
+    if ask_question:
+        return ask_question
 
     lines = visible_text.splitlines()[-80:]
     selected_indices = [i for i, line in enumerate(lines) if _SELECTED_CHOICE_LINE_RE.search(line)]

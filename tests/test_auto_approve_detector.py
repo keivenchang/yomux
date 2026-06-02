@@ -574,6 +574,36 @@ def test_visible_choice_prompt_text_detects_current_user_question():
     assert prompt_detector.agent_screen_state(visible_text)["key"] == "needs-input"
 
 
+def test_ask_user_question_ui_is_needs_input_not_auto_approved():
+    # DOIT.6 #43: Claude Code's AskUserQuestion multi-option UI (image 20260602-014). The selected option
+    # is box-highlighted (no ❯), and a preview box / "Notes:" / "Chat about this" sit between the options
+    # and the footer. It must be flagged needs-input, but is NOT a yes/no permission prompt.
+    visible_text = "\n".join([
+        "How should the YO!info | YO!agent sub-tab toggle look inside the merged panel?",
+        "  1. Segmented control under pane tabs",
+        "  2. Pills in the content header",
+        "┌──────────────────────────────┐",
+        "│ Preview: segmented control…   │",
+        "└──────────────────────────────┘",
+        "Notes: press n to add notes",
+        "Chat about this",
+        "Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel",
+    ])
+
+    assert prompt_detector.detect_prompt(visible_text) is None, "AskUserQuestion is not a yes/no permission prompt"
+    state = prompt_detector.agent_screen_state(visible_text)
+    assert state["key"] == "needs-input"
+    assert state["text"] == "How should the YO!info | YO!agent sub-tab toggle look inside the merged panel?"
+
+
+def test_ask_user_question_footer_parts_are_recognized():
+    # The AskUserQuestion footer hints ("↑/↓ to navigate", "n to add notes", "Tab to switch questions")
+    # count as a footer line so the block is bounded correctly.
+    footer = "Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel"
+    assert prompt_detector._is_footer_hint_line(footer)
+    assert prompt_detector._is_ask_user_question_footer(footer)
+
+
 def test_target_resolution_self_test_cases_live_in_pytest():
     sessions = ["project1", "project2", "project3", "misc"]
 
