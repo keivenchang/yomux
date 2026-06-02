@@ -8210,8 +8210,12 @@ function codeMirrorMarkdownStrongExtension(api, path) {
 }
 
 function parseUnifiedDiffLineClasses(diff) {
+  // DOIT.6 #49: map the unified hunk to CURRENT-document line numbers. A deleted (`-`) line occupies NO
+  // current-doc line, so it must NOT advance the new-file counter and must NOT paint a present line red.
+  // Only added/changed lines get a green line background; a deletion is recorded as a between-line
+  // marker on the present line that now sits where the removed content was (rendered as a top tick).
   const added = new Set();
-  const removed = new Set();
+  const deletionMarkers = new Set();
   let newLine = 0;
   for (const line of String(diff || '').split('\n')) {
     const hunk = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
@@ -8224,18 +8228,22 @@ function parseUnifiedDiffLineClasses(diff) {
       added.add(newLine);
       newLine += 1;
     } else if (line.startsWith('-')) {
-      removed.add(Math.max(1, newLine));
+      // The deletion sits BETWEEN newLine-1 and newLine; mark the present line below it (never red-fill
+      // it) so the user sees where content was removed. Do not advance the new-file counter.
+      deletionMarkers.add(Math.max(1, newLine));
     } else {
       newLine += 1;
     }
   }
-  return {added, removed};
+  return {added, deletionMarkers};
 }
 
 function codeMirrorDiffLineExtension(api, path) {
   if (!api.ViewPlugin || !api.Decoration) return [];
   const addLine = api.Decoration.line({class: 'cm-yolomux-diff-add'});
-  const removeLine = api.Decoration.line({class: 'cm-yolomux-diff-remove'});
+  // #49: a deletion marker is a top-edge tick on the present line below the removed content — NOT a red
+  // background on a present line (a deleted line does not exist in the current document).
+  const deletionMarker = api.Decoration.line({class: 'cm-yolomux-diff-deletion'});
   return api.ViewPlugin.fromClass(class {
     constructor(view) {
       this.decorations = this.build(view);
@@ -8251,8 +8259,8 @@ function codeMirrorDiffLineExtension(api, path) {
       for (const lineNumber of diff.added || []) {
         if (lineNumber <= view.state.doc.lines) ranges.push(addLine.range(view.state.doc.line(lineNumber).from));
       }
-      for (const lineNumber of diff.removed || []) {
-        if (lineNumber <= view.state.doc.lines) ranges.push(removeLine.range(view.state.doc.line(lineNumber).from));
+      for (const lineNumber of diff.deletionMarkers || []) {
+        if (lineNumber <= view.state.doc.lines) ranges.push(deletionMarker.range(view.state.doc.line(lineNumber).from));
       }
       return api.Decoration.set(ranges, true);
     }

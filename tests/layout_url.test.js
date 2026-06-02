@@ -1873,7 +1873,16 @@ function makeFileTree(paths) {
 +extra
 `);
   assert.deepStrictEqual(Array.from(diffLines.added), [2, 3]);
-  assert.deepStrictEqual(Array.from(diffLines.removed), [2]);
+  // #49: deletions are between-line markers on the present line below them, never a full red line fill.
+  assert.deepStrictEqual(Array.from(diffLines.deletionMarkers), [2]);
+  assert.equal(diffLines.removed, undefined, '#49: there is no full-line red-fill set for deletions');
+  // A pure deletion (no adjacent add) must NOT paint the following present line green/red — only a tick.
+  const pureDel = api.parseUnifiedDiffLineClasses('@@ -1,3 +1,2 @@\n keep1\n-gone\n keep2\n');
+  assert.deepStrictEqual(Array.from(pureDel.added), [], '#49: a pure deletion adds no green lines');
+  assert.deepStrictEqual(Array.from(pureDel.deletionMarkers), [2], '#49: a pure deletion marks the present line below it (not a red fill)');
+  const diffDecoCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.cm-yolomux-diff-deletion\s*\{[\s\S]*?box-shadow:\s*inset 0 2px 0/.test(diffDecoCss), '#49: the deletion marker is a top tick, not a line background');
+  assert.equal(diffDecoCss.includes('.cm-yolomux-diff-remove'), false, '#49: the full-line red-fill decoration class is removed');
   const filesTab = api.fileExplorerPaneTabHtml();
   assert.equal(api.fileExplorerLabel(), 'File Explorer');
   assert.ok(filesTab.includes('File Explorer'));

@@ -6541,8 +6541,10 @@ body.theme-light .file-explorer-changes-head {
 .cm-yolomux-diff-add {
   background: color-mix(in srgb, var(--code-diff-add) 74%, transparent);
 }
-.cm-yolomux-diff-remove {
-  background: color-mix(in srgb, var(--code-diff-remove) 76%, transparent);
+/* #49: a deletion is a between-line tick on the present line below it — a top border, NOT a red
+   background on present content (a deleted line has no current-document line to fill). */
+.cm-yolomux-diff-deletion {
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--code-diff-remove) 88%, transparent);
 }
 .file-editor-diff-codemirror .cm-mergeView {
   height: 100%;
