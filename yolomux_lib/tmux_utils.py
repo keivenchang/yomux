@@ -80,8 +80,28 @@ def tmux_exact_target_from_sessions(target: str, sessions: list[str]) -> str:
     return target
 
 
+# DOIT.6 #80: tmux_exact_target ran `tmux list-sessions` on EVERY capture, so the inline N×2-3 captures
+# in prompt_and_screen_status each paid a list-sessions subprocess (a +3s hang point if tmux wedged).
+# Cache the session-name resolution for a short window so a poll's captures reuse one resolution.
+_SESSION_NAMES_CACHE: dict[str, object] = {"at": 0.0, "names": []}
+_SESSION_NAMES_TTL = 1.0
+
+
+def cached_session_names() -> list[str]:
+    now = time.monotonic()
+    if now - float(_SESSION_NAMES_CACHE["at"]) < _SESSION_NAMES_TTL:
+        return list(_SESSION_NAMES_CACHE["names"])  # type: ignore[arg-type]
+    names = tmux_session_names()
+    _SESSION_NAMES_CACHE["at"] = now
+    _SESSION_NAMES_CACHE["names"] = names
+    return names
+
+
 def tmux_exact_target(target: str) -> str:
-    return tmux_exact_target_from_sessions(target, tmux_session_names())
+    # Skip the list-sessions resolution entirely for unambiguous targets (pane ids / already-qualified).
+    if not target or target.startswith("%") or ":" in target:
+        return target
+    return tmux_exact_target_from_sessions(target, cached_session_names())
 
 
 def unique_session_names(values: list[str] | tuple[str, ...]) -> list[str]:
@@ -96,13 +116,17 @@ def unique_session_names(values: list[str] | tuple[str, ...]) -> list[str]:
     return sorted(result, key=session_sort_key)
 
 
-def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False) -> str | None:
-    """Capture a tmux pane, using visible_only=True for prompt presence checks."""
+def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False, timeout: float = 3.0) -> str | None:
+    """Capture a tmux pane, using visible_only=True for prompt presence checks.
+
+    DOIT.6 #80: an explicit short timeout so a wedged tmux fails the capture fast instead of blocking the
+    request thread (the synchronous /api/auto-approve path runs several captures inline).
+    """
     exact_target = tmux_exact_target(target)
     if visible_only:
-        result = tmux_run("capture-pane", "-t", exact_target, "-p", check=False)
+        result = tmux_run("capture-pane", "-t", exact_target, "-p", check=False, timeout=timeout)
     else:
-        result = tmux_run("capture-pane", "-t", exact_target, "-p", "-S", f"-{lines}", check=False)
+        result = tmux_run("capture-pane", "-t", exact_target, "-p", "-S", f"-{lines}", check=False, timeout=timeout)
     if result.returncode != 0:
         return None
     return result.stdout
