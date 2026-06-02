@@ -1088,6 +1088,9 @@ function replaceSessionMetadata(oldSession, newSession) {
     uploadResultsBySession,
     uploadCleanupTimers,
     pasteCounters,
+    // DOIT.6 #73: carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
+    // eviction ordering glitches (it reads as never-activated).
+    tabLastActivatedAt,
   ]) {
     rekeyMap(map, oldSession, newSession);
   }

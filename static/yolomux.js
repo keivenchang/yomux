@@ -6925,6 +6925,10 @@ function removeFilePanelOwner(path, item) {
   else if (isFilePreviewItem(item)) filePreviewTabPaths.delete(path);
   else fileEditorTabPaths.delete(path);
   fileEditorViewMode.delete(item);
+  // DOIT.6 #73: also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
+  // so these item-keyed maps don't grow unbounded as editor tabs open and close.
+  fileEditorViewState.delete(item);
+  tabLastActivatedAt.delete(item);
   if (!openFilePathHasOwner(path)) openFileOwnerSessions.delete(path);
 }
 
@@ -8586,6 +8590,16 @@ function renameOpenFilePath(oldPath, newPath) {
     if (fileEditorViewMode.has(oldKey)) {
       fileEditorViewMode.set(newKey, fileEditorViewMode.get(oldKey));
       fileEditorViewMode.delete(oldKey);
+    }
+    // DOIT.6 #73: migrate the item-keyed scroll/selection state and the LRU timestamp on rename too,
+    // so they don't leak under the old item id (and the LRU ordering survives the rename).
+    if (fileEditorViewState.has(oldKey)) {
+      fileEditorViewState.set(newKey, fileEditorViewState.get(oldKey));
+      fileEditorViewState.delete(oldKey);
+    }
+    if (tabLastActivatedAt.has(oldKey)) {
+      tabLastActivatedAt.set(newKey, tabLastActivatedAt.get(oldKey));
+      tabLastActivatedAt.delete(oldKey);
     }
   }
   if (fileEditorViewMode.has(oldPath)) {
@@ -11161,6 +11175,9 @@ function replaceSessionMetadata(oldSession, newSession) {
     uploadResultsBySession,
     uploadCleanupTimers,
     pasteCounters,
+    // DOIT.6 #73: carry the per-pane LRU timestamp across a session rename too, or the renamed tab's
+    // eviction ordering glitches (it reads as never-activated).
+    tabLastActivatedAt,
   ]) {
     rekeyMap(map, oldSession, newSession);
   }
