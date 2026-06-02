@@ -1733,6 +1733,8 @@ function refreshAll() {
 
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
+  // i18n (DOIT.8): load the active locale catalog (all-static-fetch) and re-render once it arrives.
+  applyLocale(i18nActiveLocaleId());
   installGlobalThemeMediaListener();
   applyFileExplorerStaticLabels();
   renderTransportWarning();

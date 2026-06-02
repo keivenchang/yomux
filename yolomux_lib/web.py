@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from pathlib import Path
 
 from .common import AUTH_CONFIG_DISPLAY_PATH
@@ -30,17 +31,31 @@ STATIC_CONTENT_TYPES = {
 }
 
 
+# i18n locale catalogs are served from /static/locales/<locale>.json (all-static-fetch). The strict
+# pattern (no "/" or ".." in the locale) prevents path traversal.
+_LOCALE_ASSET_RE = re.compile(r"^locales/[A-Za-z0-9_-]+\.json$")
+
+
 def static_content_type(asset: str) -> str | None:
+    if _LOCALE_ASSET_RE.match(asset):
+        return "application/json; charset=utf-8"
     return STATIC_CONTENT_TYPES.get(asset)
 
 
 def static_asset_path(asset: str) -> Path | None:
     if asset in {"xterm.css", "xterm.js"}:
         return xterm_asset_path(asset)
-    if asset not in STATIC_CONTENT_TYPES:
-        return None
-    path = STATIC_DIR / asset
-    return path if path.is_file() else None
+    if asset in STATIC_CONTENT_TYPES or _LOCALE_ASSET_RE.match(asset):
+        path = STATIC_DIR / asset
+        return path if path.is_file() else None
+    return None
+
+
+def bootstrap_locale(settings_data: dict) -> str:
+    """Resolve the active UI locale for first paint. 'system' (or unknown) falls back to 'en'."""
+    settings = settings_data.get("settings", {}) if isinstance(settings_data, dict) else {}
+    language = (settings.get("general") or {}).get("language", "system")
+    return language if isinstance(language, str) and language and language != "system" else "en"
 
 
 def static_asset_version(asset: str) -> int:
@@ -72,6 +87,7 @@ def brand_html(class_name: str = "brand-title", tag: str = "span") -> str:
 
 
 def html_page(sessions: list[str], access_role: str = "admin") -> str:
+    settings_data = settings_payload()
     bootstrap = {
         "sessions": sessions,
         "availableAgents": available_agent_commands(),
@@ -82,7 +98,11 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
         "serverHostname": SERVER_HOSTNAME,
         "version": YOLOMUX_VERSION,
         "versionCommitTime": yolomux_commit_time_pt(),
-        "settingsPayload": settings_payload(),
+        "settingsPayload": settings_data,
+        # i18n (DOIT.8 Phase 0): resolved active locale for first paint. "system" can't be resolved
+        # server-side (no navigator here), so it falls back to "en"; the client may refine via
+        # navigator.language. The catalog itself is fetched client-side (/static/locales) — not inlined.
+        "locale": bootstrap_locale(settings_data),
         "yoloRulesPayload": rules_status(),
         "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
     }

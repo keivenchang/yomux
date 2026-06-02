@@ -74,6 +74,15 @@ async function applyLocale(locale) {
   rerenderForLocale();
 }
 
+// Resolve a `general.language` pref to a concrete locale. "system" matches navigator.language against
+// the locales that ship a catalog (Phase 0: only `en`), so it falls back to en.
+function resolveLocalePref(pref) {
+  const value = String(pref || 'system');
+  if (value !== 'system') return value;
+  const nav = (typeof navigator === 'object' && navigator && navigator.language) ? String(navigator.language).toLowerCase() : 'en';
+  return nav.startsWith('en') ? 'en' : 'en';
+}
+
 function rerenderForLocale() {
   // Re-render the surfaces that contain localized text. Guarded so this is safe at any load order.
   if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels();

@@ -140,6 +140,25 @@ def test_setup_auth_page_recommends_https(monkeypatch):
     assert setup_html.index("Highly recommend that you restart with HTTPS") < setup_html.index("Edit <code>")
 
 
+def test_bootstrap_locale_resolves_language_and_serves_locale_catalogs():
+    # bootstrap_locale: an explicit locale passes through; "system"/unknown falls back to en.
+    assert web.bootstrap_locale({"settings": {"general": {"language": "en-XA"}}}) == "en-XA"
+    assert web.bootstrap_locale({"settings": {"general": {"language": "system"}}}) == "en"
+    assert web.bootstrap_locale({}) == "en"
+    # /static/locales/<locale>.json is a served JSON asset; path traversal is rejected.
+    assert web.static_content_type("locales/en.json") == "application/json; charset=utf-8"
+    assert web.static_content_type("locales/en-XA.json") == "application/json; charset=utf-8"
+    assert web.static_content_type("locales/../settings.yaml") is None
+    assert web.static_content_type("locales/sub/dir.json") is None
+
+
+def test_main_page_bootstrap_includes_resolved_locale():
+    page = web.html_page([])
+    match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+    parsed = json.loads(match.group(1))
+    assert parsed["locale"] in {"en", "en-XA"}
+
+
 def test_bootstrap_json_escapes_breakout_chars_without_html_entities():
     page = web.html_page([])
     match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)

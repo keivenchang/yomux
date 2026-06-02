@@ -397,6 +397,7 @@ function applySettingsPayload(payload, options = {}) {
   if (!payload?.settings) return false;
   const nextMtime = Number(payload.mtime_ns || 0);
   if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
+  const previousLocale = i18nActiveLocaleId();
   clientSettingsPayload = payload;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
@@ -457,6 +458,9 @@ function applySettingsPayload(payload, options = {}) {
     // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
     refreshOpenEditorThemePanels();
   }
+  // i18n (DOIT.8): when general.language changes, load the new catalog and re-render localized surfaces.
+  const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));
+  if (nextLocale !== previousLocale) applyLocale(nextLocale);
   if (!options.initial) installRuntimeIntervals();
   return true;
 }

@@ -280,6 +280,11 @@ globalThis.__layoutTestApi = {
   appModifier,
   appMenuTree,
   appShortcutText,
+  t,
+  tPlural,
+  i18nActiveLocaleId,
+  i18nSetCatalogForTest,
+  setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
   createAppMenuCommand,
   backgroundTabItems,
   canPaneExpand,
@@ -696,7 +701,13 @@ globalThis.__layoutTestApi = {
     return document.documentElement.style;
   },
 };`, context);
-  return context.__layoutTestApi;
+  const api = context.__layoutTestApi;
+  // Mirror production boot: preload the en catalog so t() resolves to English in tests (fetch is
+  // disabled here, so the live applyLocale() never runs).
+  try {
+    api.i18nSetCatalogForTest('en', JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')));
+  } catch (_) {}
+  return api;
 }
 
 function tabElement(session, left, width, top = 0) {
@@ -3816,6 +3827,38 @@ function makeFileTree(paths) {
     {path: '/y/a.md', realpath: '/y/a.md'},
   ]).map(file => file.path);
   assert.deepStrictEqual([...unknown], ['/x/a.md', '/y/a.md'], '#25: unknown-size same-name files are not collapsed');
+}
+
+{
+  // DOIT.8 Phase 0: i18n runtime — t()/tPlural() fallback + interpolation, active-over-en, pseudo.
+  const api = loadYolomux('', ['1']);
+  api.i18nSetCatalogForTest('en', {greet: 'Hi {name}', plain: 'Plain'});
+  api.setActiveLocaleForTest('en');
+  assert.equal(api.t('greet', {name: 'Al'}), 'Hi Al', 't() interpolates {params}');
+  assert.equal(api.t('plain'), 'Plain', 't() returns the catalog value');
+  assert.equal(api.t('missing.key'), 'missing.key', 't() falls back to the key when absent (never blank)');
+  api.i18nSetCatalogForTest('en', {'files.one': '{count} file', 'files.other': '{count} files'});
+  assert.equal(api.tPlural('files', 1), '1 file', 'tPlural picks the one category');
+  assert.equal(api.tPlural('files', 3), '3 files', 'tPlural picks the other category');
+  api.i18nSetCatalogForTest('en', {x: 'English'});
+  api.i18nSetCatalogForTest('zz', {x: 'Zzz'});
+  api.setActiveLocaleForTest('zz');
+  assert.equal(api.t('x'), 'Zzz', 'active locale wins over the en fallback');
+  assert.equal(api.t('y'), 'y', 'missing-in-active falls through en to the key');
+}
+
+{
+  // DOIT.8 Phase 0: the Preferences General section + section titles render through t(); under the
+  // en-XA pseudo-locale every extracted label is accented/padded, with no plain-English leakage.
+  const api = loadYolomux('', ['1']);
+  const enXA = JSON.parse(fs.readFileSync('static/locales/en-XA.json', 'utf8'));
+  api.i18nSetCatalogForTest('en-XA', enXA);
+  api.setActiveLocaleForTest('en-XA');
+  const html = api.preferencesPanelHtmlForTest('');
+  assert.ok(html.includes(enXA['pref.section.general']), 'pseudo-locale section title renders');
+  assert.ok(html.includes(enXA['pref.general.auto_focus.label']), 'pseudo-locale General field label renders');
+  assert.ok(html.includes(enXA['pref.general.language.help']), 'pseudo-locale field help renders');
+  assert.equal(html.includes('Auto-focus active pane'), false, 'no plain-English General field label leaks under the pseudo-locale');
 }
 
 {

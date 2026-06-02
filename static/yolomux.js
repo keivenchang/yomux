@@ -790,6 +790,15 @@ async function applyLocale(locale) {
   rerenderForLocale();
 }
 
+// Resolve a `general.language` pref to a concrete locale. "system" matches navigator.language against
+// the locales that ship a catalog (Phase 0: only `en`), so it falls back to en.
+function resolveLocalePref(pref) {
+  const value = String(pref || 'system');
+  if (value !== 'system') return value;
+  const nav = (typeof navigator === 'object' && navigator && navigator.language) ? String(navigator.language).toLowerCase() : 'en';
+  return nav.startsWith('en') ? 'en' : 'en';
+}
+
 function rerenderForLocale() {
   // Re-render the surfaces that contain localized text. Guarded so this is safe at any load order.
   if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels();
@@ -8907,6 +8916,7 @@ function applySettingsPayload(payload, options = {}) {
   if (!payload?.settings) return false;
   const nextMtime = Number(payload.mtime_ns || 0);
   if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
+  const previousLocale = i18nActiveLocaleId();
   clientSettingsPayload = payload;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
@@ -8967,6 +8977,9 @@ function applySettingsPayload(payload, options = {}) {
     // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
     refreshOpenEditorThemePanels();
   }
+  // i18n (DOIT.8): when general.language changes, load the new catalog and re-render localized surfaces.
+  const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));
+  if (nextLocale !== previousLocale) applyLocale(nextLocale);
   if (!options.initial) installRuntimeIntervals();
   return true;
 }
@@ -13224,14 +13237,19 @@ function editorSchemePreferenceChoices(options = {}) {
 
 function preferenceSections() {
   return [
-    {title: 'General', items: [
-      {path: 'general.auto_focus', label: 'Auto-focus active pane', type: 'boolean', help: 'Focus panes and enable hover-open menus after tab switches, layout moves, and hover gestures. Off by default.'},
-      {path: 'general.default_layout', label: 'Default layout', type: 'select', choices: ['single', 'grid', 'wall'], help: 'Preferred starting pane layout for new browser visits.'},
-      {path: 'general.default_sessions', label: 'Default sessions', type: 'list', help: 'Preferred tmux sessions to open first, one session name per line.'},
-      {path: 'general.reload_on_update', label: 'Notify on server update', type: 'boolean', help: 'When the server ships a newer version, show a "New version available — Reload" banner in this open client. Off by default.'},
-      {path: 'general.reload_on_update_auto', label: 'Auto-reload on server update', type: 'boolean', help: 'When the above is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).'},
+    {title: t('pref.section.general'), items: [
+      {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
+      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'select', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
+      {path: 'general.language', label: t('pref.general.language.label'), type: 'select', choices: [
+        {value: 'system', label: t('pref.general.language.system')},
+        {value: 'en', label: 'English'},
+        {value: 'en-XA', label: t('pref.general.language.pseudo')},
+      ], help: t('pref.general.language.help')},
+      {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
+      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
+      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
     ]},
-    {title: 'Appearance', items: [
+    {title: t('pref.section.appearance'), items: [
       {path: 'appearance.theme', label: 'Global color theme', type: 'select', choices: [
         {value: 'dark', label: 'Dark'},
         {value: 'light', label: 'Light'},
@@ -13258,7 +13276,7 @@ function preferenceSections() {
       {path: 'appearance.yolo_rotate_ms', label: 'Active YO rotation period', type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: 'How often the active YO indicator completes a rotation. Set 0 to disable.'},
       {path: 'appearance.metadata_badge_pulse_seconds', label: 'Badge pulse duration', type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: 'When branch, PR, status, or CI metadata changes, badges like PR and CI flash for this many seconds.'},
     ]},
-    {title: 'YOLO', items: [
+    {title: t('pref.section.yolo'), items: [
       {path: 'yolo.rule_file_path', label: 'Rule file', type: 'text', action: 'open-yolo-rule', help: 'YAML file with ordered first-match YOLO rules.'},
       {path: 'yolo.dry_run', label: 'Dry run', type: 'boolean', help: 'Log matched rules and actions without pressing an approval key.'},
       {path: 'yolo.prompt_source', label: 'Approval prompt source', type: 'select', choices: [
@@ -13266,7 +13284,7 @@ function preferenceSections() {
         {value: 'pane', label: 'Pane only'},
       ], help: 'Hybrid keeps the visible pane as the trigger and uses recent transcript JSONL only to recover prompt type or command context.'},
     ]},
-    {title: 'Performance', items: [
+    {title: t('pref.section.performance'), items: [
       {path: 'performance.metadata_refresh_ms', label: 'Metadata refresh interval', type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: 'How often YOLOmux refreshes branch, PR, cwd, and process metadata. Client-side jitter avoids synchronized polling.'},
       {path: 'performance.pane_state_refresh_ms', label: 'Pane state refresh interval', type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: 'How often YOLOmux refreshes YOLO status, prompt state, and tmux session roster. Client-side jitter avoids synchronized polling.'},
       {path: 'performance.latency_refresh_ms', label: 'Latency refresh interval', type: 'number', min: 1000, max: 30000, step: 100, suffix: 'ms', help: 'How often the browser pings the server and updates the latency display. Client-side jitter avoids synchronized polling.'},
@@ -13279,12 +13297,12 @@ function preferenceSections() {
       {path: 'performance.remote_resize_delay_ms', label: 'Remote resize debounce', type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: 'Delay before sending a settled browser resize to tmux.'},
       {path: 'performance.auto_approve_interval_seconds', label: 'YOLO worker poll interval', type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: 'How often newly enabled YOLO workers inspect visible tmux prompts.'},
     ]},
-    {title: 'Notifications', items: [
+    {title: t('pref.section.notifications'), items: [
       {path: 'notifications.toast_duration_ms', label: 'Notification popup duration', type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: 'How long in-page notification popups stay visible before auto-closing.'},
       {path: 'notifications.throttle_seconds', label: 'Notification throttle', type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: 'Minimum time before repeating the same notification.'},
       {path: 'notifications.notify_transitions', label: 'Notify transitions', type: 'list', help: 'Session state transitions that may trigger notifications, one transition key per line.'},
     ]},
-    {title: 'Terminal / Editor', items: [
+    {title: t('pref.section.terminal_editor'), items: [
       {path: 'terminal_editor.scrollback', label: 'Terminal scrollback', type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: 'Number of terminal lines kept in browser memory.'},
       {path: 'terminal_editor.word_wrap', label: 'Default editor word wrap', type: 'boolean', help: 'Initial word-wrap state for newly opened editor tabs.'},
       {path: 'terminal_editor.line_numbers', label: 'Default editor line numbers', type: 'boolean', help: 'Initial line-number gutter state for newly opened editor tabs.'},
@@ -13300,11 +13318,11 @@ function preferenceSections() {
       {path: 'file_explorer.refresh_ms', label: `${fileExplorerLabel()} refresh interval`, type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: 'How often YOLOmux checks changed Finder/File Explorer directories and open files. Client-side jitter avoids synchronized polling.'},
       {path: 'file_explorer.new_entry_highlight_ms', label: 'New file highlight duration', type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: 'How long newly detected files or directories stay colored in Finder/File Explorer.'},
     ]},
-    {title: 'Uploads', items: [
+    {title: t('pref.section.uploads'), items: [
       {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
       {path: 'uploads.max_bytes', label: 'Upload size cap', type: 'number', min: 1048576, max: 536870912, step: 1048576, suffix: 'bytes', help: 'Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.'},
     ]},
-    {title: 'YO!agent', items: [
+    {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: 'YO!agent backend', type: 'select', choices: [
         {value: 'deterministic', label: 'No agent'},
         {value: 'codex', label: 'Codex'},
@@ -18587,6 +18605,8 @@ function refreshAll() {
 
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
+  // i18n (DOIT.8): load the active locale catalog (all-static-fetch) and re-render once it arrives.
+  applyLocale(i18nActiveLocaleId());
   installGlobalThemeMediaListener();
   applyFileExplorerStaticLabels();
   renderTransportWarning();
