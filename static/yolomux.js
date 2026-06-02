@@ -9447,7 +9447,7 @@ function yoloMarkerHtml(session, auto, options = {}) {
   const title = options.toggle && readOnlyMode
     ? `YOLO ${stateText} for ${sessionLabel(session)}; readonly access`
     : (options.toggle ? `YOLO ${stateText} for ${sessionLabel(session)}` : `YOLO ${stateText}`);
-  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">YO</span>`;
+  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
@@ -13233,7 +13233,7 @@ function yoagentChatHtml() {
   const placeholder = readOnlyMode ? 'YO!agent chat requires admin access' : 'Ask about agents, repos, files, CI, blockers...';
   const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || yoagentBusy || yoagentError);
   const busy = yoagentBusy
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">YO</span><span>thinking...</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span>thinking...</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
     ? '<button type="button" class="yoagent-chat-retry" data-yoagent-retry>Retry</button>'
@@ -18296,7 +18296,7 @@ function renderAutoApproveButton(session, payload) {
       button.style.removeProperty('--yolo-rotate-delay');
     }
     button.closest('.pane-tab')?.classList.remove('is-working');
-    button.textContent = 'YO';
+    button.textContent = t('brand.marker');
     const action = payload?.last_action ? `; ${payload.last_action}` : '';
     button.title = enabled
       ? `YOLO on for ${sessionLabel(session)}${action}${readOnlyMode ? '; readonly access' : ''}`

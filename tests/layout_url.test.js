@@ -1323,6 +1323,8 @@ function makeFileTree(paths) {
   assert.ok(/function setInfoSubTab[\s\S]*?writeStoredInfoSubTab\(next\)/.test(source), '#40: switching the sub-tab persists it (remembered across reloads)');
   assert.ok(/function openInfoSubTab[\s\S]*?selectSession\(infoItemId\)/.test(source), '#40: opening YO!agent activates the merged info pane');
   assert.ok(/maybeAdoptYoagentDeepLink[\s\S]*?infoPanelSubTab = 'yoagent'/.test(source), '#40: a yoagent deep-link pre-selects the YO!agent sub-tab');
+  // DOIT.8 Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
+  assert.ok(source.includes("esc(t('brand.marker'))"), 'the YO marker glyph renders via t(brand.marker)');
   const mergedInfoCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.info-subview\s*\{[\s\S]*?display:\s*none/.test(mergedInfoCss), '#40: inactive sub-views are hidden');
   assert.ok(/\.info-subview\.active\s*\{[\s\S]*?display:\s*flex/.test(mergedInfoCss), '#40: the active sub-view is shown');
@@ -4001,6 +4003,8 @@ function makeFileTree(paths) {
     assert.ok(zhHtml.includes(catalog['pref.section.yoagent']), `${locale} renders the localized YO!agent section title`);
     // Brand glyph: YO!agent localizes to 優agent / 优agent (no plain "YO!agent" section title leak).
     assert.ok(catalog['pref.section.yoagent'].includes(locale === 'zh-Hant' ? '優agent' : '优agent'), `${locale} applies the YO!agent brand glyph`);
+    // The YO marker glyph localizes to 優 / 优 (the catalog value the marker renders via t('brand.marker')).
+    assert.equal(catalog['brand.marker'], locale === 'zh-Hant' ? '優' : '优', `${locale} marker glyph`);
     for (const englishLeak of ['Global color theme', 'Upload size cap', 'Terminal scrollback']) {
       assert.equal(zhHtml.includes(englishLeak), false, `${locale}: no plain-English "${englishLeak}" leaks`);
     }

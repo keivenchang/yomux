@@ -1,4 +1,5 @@
 {
+  "brand.marker": "YO",
   "pref.appearance.editor_cursor_style.block": "Block",
   "pref.appearance.editor_cursor_style.help": "Caret shape for CodeMirror editors. Both styles use the active editor cursor color.",
   "pref.appearance.editor_cursor_style.label": "Editor cursor style",

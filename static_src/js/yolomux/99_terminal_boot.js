@@ -1276,7 +1276,7 @@ function renderAutoApproveButton(session, payload) {
       button.style.removeProperty('--yolo-rotate-delay');
     }
     button.closest('.pane-tab')?.classList.remove('is-working');
-    button.textContent = 'YO';
+    button.textContent = t('brand.marker');
     const action = payload?.last_action ? `; ${payload.last_action}` : '';
     button.title = enabled
       ? `YOLO on for ${sessionLabel(session)}${action}${readOnlyMode ? '; readonly access' : ''}`

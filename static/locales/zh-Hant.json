@@ -1,4 +1,5 @@
 {
+  "brand.marker": "優",
   "pref.appearance.editor_cursor_style.block": "方塊",
   "pref.appearance.editor_cursor_style.help": "CodeMirror 編輯器的游標形狀。兩種樣式都使用使用中的編輯器游標顏色。",
   "pref.appearance.editor_cursor_style.label": "編輯器游標樣式",

@@ -1,4 +1,5 @@
 {
+  "brand.marker": "优",
   "pref.appearance.editor_cursor_style.block": "方块",
   "pref.appearance.editor_cursor_style.help": "CodeMirror 编辑器的光标形状。两种样式都使用活动编辑器光标颜色。",
   "pref.appearance.editor_cursor_style.label": "编辑器光标样式",

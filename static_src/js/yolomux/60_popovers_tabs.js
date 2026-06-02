@@ -338,7 +338,7 @@ function yoloMarkerHtml(session, auto, options = {}) {
   const title = options.toggle && readOnlyMode
     ? `YOLO ${stateText} for ${sessionLabel(session)}; readonly access`
     : (options.toggle ? `YOLO ${stateText} for ${sessionLabel(session)}` : `YOLO ${stateText}`);
-  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">YO</span>`;
+  return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
