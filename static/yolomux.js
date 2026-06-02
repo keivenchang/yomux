@@ -13295,7 +13295,8 @@ async function sendYoagentChatMessage(rawText) {
     const response = await apiFetch('/api/yoagent/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, history: yoagentMessages.slice(-10)}),
+      // DOIT.8 Phase 1: pass the active UI locale so the LLM backend replies in that language.
+      body: JSON.stringify({message: text, history: yoagentMessages.slice(-10), locale: i18nActiveLocaleId()}),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);

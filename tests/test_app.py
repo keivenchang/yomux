@@ -318,6 +318,38 @@ def test_resolve_yoagent_backend_auto_prefers_codex_then_claude(monkeypatch):
     assert app_module.resolve_yoagent_backend("deterministic") == "deterministic"
 
 
+def test_yoagent_language_directive_only_for_non_english_locales():
+    # DOIT.8 Phase 1: a non-English UI locale asks the LLM to answer in that language.
+    assert app_module.yoagent_language_directive("zh-Hant") == "\n\nRespond in Traditional Chinese."
+    assert app_module.yoagent_language_directive("zh-Hans") == "\n\nRespond in Simplified Chinese."
+    assert app_module.yoagent_language_directive("es") == "\n\nRespond in Spanish."
+    assert app_module.yoagent_language_directive("en") == ""
+    assert app_module.yoagent_language_directive("en-XA") == ""
+    assert app_module.yoagent_language_directive("system") == ""
+    assert app_module.yoagent_language_directive("") == ""
+
+
+def test_yoagent_chat_appends_language_directive_to_the_llm_prompt(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(app_module, "agent_auth_status", lambda *a, **k: {
+        "claude": {"installed": True, "logged_in": False},
+        "codex": {"installed": True, "logged_in": True},
+    })
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "auto", "invocation": "cli"})
+    captured = {}
+
+    def fake_codex(prompt, session_id="", resume=False):
+        captured["prompt"] = prompt
+        return ("respuesta", "", "s1")
+    monkeypatch.setattr(webapp, "run_yoagent_codex_cli", fake_codex)
+    try:
+        payload, status = webapp.yoagent_chat({"message": "estado?", "locale": "zh-Hant"})
+    finally:
+        webapp.control_server.stop()
+    assert status == HTTPStatus.OK
+    assert "Respond in Traditional Chinese." in captured["prompt"]
+
+
 def test_yoagent_chat_auto_runs_logged_in_agent(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(app_module, "agent_auth_status", lambda *a, **k: {

@@ -126,6 +126,21 @@ def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
     return f"{label} is not logged in. Run `{login_command}`; showing the No agent YO!agent summary."
 
 
+# DOIT.8 Phase 1: when the UI is in a non-English locale, ask the LLM backend to answer in that
+# language. The directive itself is English (models follow it reliably) and names the target language.
+_YOAGENT_LANGUAGE_NAMES = {
+    "zh-Hant": "Traditional Chinese",
+    "zh-Hans": "Simplified Chinese",
+    "es": "Spanish",
+    "ja": "Japanese",
+}
+
+
+def yoagent_language_directive(locale: str) -> str:
+    name = _YOAGENT_LANGUAGE_NAMES.get(str(locale or "").strip())
+    return f"\n\nRespond in {name}." if name else ""
+
+
 def resolve_yoagent_backend(backend: str) -> str:
     # DOIT.6 #41: the default backend is "auto" — prefer codex, then claude, falling back to the
     # deterministic ("No agent") summary if neither is installed AND logged in. Explicit choices
@@ -298,6 +313,7 @@ class TmuxWebtermApp:
                 if content:
                     history.append({"role": role, "content": content})
         settings = self.yoagent_settings()
+        locale = str(payload.get("locale") or "en").strip()
         activity_payload = self.activity_summary_payload()
         context_lines = yoagent_context_lines(activity_payload)
         requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
@@ -308,7 +324,7 @@ class TmuxWebtermApp:
         fallback_reason = ""
         cli_status: dict[str, Any] = {}
         if backend in {"codex", "claude"} and invocation == "cli":
-            answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(backend, question, activity_payload, settings, history)
+            answer, fallback_reason, cli_status = self.run_yoagent_cli_backend(backend, question, activity_payload, settings, history, locale)
             if answer:
                 backend_used = backend
         elif backend in {"codex", "claude"} and invocation != "cli":
@@ -334,6 +350,7 @@ class TmuxWebtermApp:
         activity_payload: dict[str, Any],
         settings: dict[str, Any],
         history: list[dict[str, str]],
+        locale: str = "en",
     ) -> tuple[str, str, dict[str, Any]]:
         if backend not in {"codex", "claude"}:
             return "", f"unknown backend: {backend}", {}
@@ -350,6 +367,7 @@ class TmuxWebtermApp:
             seed = not session_id
             next_session_id = session_id or (str(uuid.uuid4()) if backend == "claude" else "")
             prompt = build_yoagent_chat_prompt(question, activity_payload, settings, history) if seed else build_yoagent_resume_prompt(question, activity_payload, settings, context_changed)
+            prompt += yoagent_language_directive(locale)
 
         started = time.monotonic()
         if backend == "codex":
