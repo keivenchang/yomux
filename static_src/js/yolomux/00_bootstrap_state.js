@@ -54,9 +54,9 @@ const diffRefFromStorageKey = 'yolomux.diffRefFrom';
 const diffRefToStorageKey = 'yolomux.diffRefTo';
 const editorViewModes = new Set(['edit', 'preview', 'split', 'diff']);
 const defaultGlobalTheme = 'dark';
-const defaultTerminalTheme = 'dark';
+const defaultTerminalTheme = 'follow-app';
 const defaultEditorScheme = 'dark';
-const defaultLightEditorScheme = 'vscode-light-plus';
+const defaultLightEditorScheme = 'yolomux-light';
 const editorThemeInheritMode = 'inherit';
 const TERMINAL_THEMES = {
   dark: {

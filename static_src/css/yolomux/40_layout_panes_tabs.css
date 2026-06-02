@@ -1163,6 +1163,14 @@ body.theme-light .panel-detail-row {
   color: var(--text);
   background: #eef3f9;
 }
+/* DOIT.6 #35: the detail-row header LABEL (.session-button-name, e.g. "YO!info") is the one header
+   element NOT covered by the active-pane color rule (which lists .meta*/.session-button-dir/detail),
+   so in light mode force it dark on the light row. (meta/dir/detail already resolve dark via the
+   --pane-tab-panel-head-text light override.) */
+body.theme-light .panel-detail-row .session-button-name,
+body.theme-light .panel.active-pane .panel-detail-row .session-button-name {
+  color: var(--text);
+}
 body.theme-light .panel-detail-close:hover,
 body.theme-light .panel-detail-close:focus-visible {
   color: #0f172a;

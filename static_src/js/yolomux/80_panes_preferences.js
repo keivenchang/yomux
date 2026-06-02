@@ -1449,8 +1449,8 @@ function preferenceSections() {
       {path: 'appearance.terminal_theme', label: 'Terminal color theme', type: 'select', choices: [
         {value: 'dark', label: 'Dark'},
         {value: 'light', label: 'Light'},
-        {value: 'follow-app', label: 'Follow app'},
-      ], help: 'xterm.js color palette. Dark is the default because Claude, Codex, vim, and other full-screen terminal apps usually assume a dark terminal.'},
+        {value: 'follow-app', label: 'Follow global app theme'},
+      ], help: 'xterm.js color palette. Defaults to following the global app theme; a light terminal raises the minimum contrast ratio so dark-tuned agent output stays legible.'},
       {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: 'Font size for menus, tabs, and compact UI text. Values outside the range are clamped.'},
       {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by xterm.js panes. Values outside the range are clamped.'},
       {path: 'appearance.editor_font_size', label: 'Editor font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by editor text, code highlighting, and rendered previews.'},
@@ -1511,7 +1511,7 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.uploads'), items: [
       {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
-      {path: 'uploads.max_bytes', label: 'Upload size cap', type: 'number', min: 1048576, max: 536870912, step: 1048576, suffix: 'bytes', help: 'Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.'},
+      {path: 'uploads.max_bytes', label: 'Upload size cap', type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: 'Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.'},
     ]},
     {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: 'YO!agent backend', type: 'select', choices: [
@@ -1720,7 +1720,7 @@ function preferenceControlHtml(item, query = '') {
   if (item.type === 'boolean') {
     control = `<input type="checkbox" ${baseAttrs}${value ? ' checked' : ''}>`;
   } else if (item.type === 'number') {
-    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
+    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
   } else if (item.type === 'select') {
     control = `<select ${baseAttrs}>${preferenceSelectOptionsHtml(item, value)}</select>`;
   } else if (item.type === 'list') {

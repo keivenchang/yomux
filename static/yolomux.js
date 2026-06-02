@@ -55,9 +55,9 @@ const diffRefFromStorageKey = 'yolomux.diffRefFrom';
 const diffRefToStorageKey = 'yolomux.diffRefTo';
 const editorViewModes = new Set(['edit', 'preview', 'split', 'diff']);
 const defaultGlobalTheme = 'dark';
-const defaultTerminalTheme = 'dark';
+const defaultTerminalTheme = 'follow-app';
 const defaultEditorScheme = 'dark';
-const defaultLightEditorScheme = 'vscode-light-plus';
+const defaultLightEditorScheme = 'yolomux-light';
 const editorThemeInheritMode = 'inherit';
 const TERMINAL_THEMES = {
   dark: {
@@ -13284,8 +13284,8 @@ function preferenceSections() {
       {path: 'appearance.terminal_theme', label: 'Terminal color theme', type: 'select', choices: [
         {value: 'dark', label: 'Dark'},
         {value: 'light', label: 'Light'},
-        {value: 'follow-app', label: 'Follow app'},
-      ], help: 'xterm.js color palette. Dark is the default because Claude, Codex, vim, and other full-screen terminal apps usually assume a dark terminal.'},
+        {value: 'follow-app', label: 'Follow global app theme'},
+      ], help: 'xterm.js color palette. Defaults to following the global app theme; a light terminal raises the minimum contrast ratio so dark-tuned agent output stays legible.'},
       {path: 'appearance.ui_font_size', label: 'UI font size', type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: 'Font size for menus, tabs, and compact UI text. Values outside the range are clamped.'},
       {path: 'appearance.terminal_font_size', label: 'Terminal font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by xterm.js panes. Values outside the range are clamped.'},
       {path: 'appearance.editor_font_size', label: 'Editor font size', type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: 'Font size used by editor text, code highlighting, and rendered previews.'},
@@ -13346,7 +13346,7 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.uploads'), items: [
       {path: 'uploads.filename_template', label: 'Upload filename template', type: 'text', help: 'Template for pasted and dropped filenames. Use {date:%Y%m%d}, {seq:03d}, {name}, and {ext}.'},
-      {path: 'uploads.max_bytes', label: 'Upload size cap', type: 'number', min: 1048576, max: 536870912, step: 1048576, suffix: 'bytes', help: 'Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.'},
+      {path: 'uploads.max_bytes', label: 'Upload size cap', type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: 'Maximum buffered browser upload size. For large files, rsync is faster and avoids buffering the whole upload in memory.'},
     ]},
     {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: 'YO!agent backend', type: 'select', choices: [
@@ -13555,7 +13555,7 @@ function preferenceControlHtml(item, query = '') {
   if (item.type === 'boolean') {
     control = `<input type="checkbox" ${baseAttrs}${value ? ' checked' : ''}>`;
   } else if (item.type === 'number') {
-    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
+    control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
   } else if (item.type === 'select') {
     control = `<select ${baseAttrs}>${preferenceSelectOptionsHtml(item, value)}</select>`;
   } else if (item.type === 'list') {
@@ -14681,7 +14681,10 @@ function preferenceFocusTargetIsInteractive(target) {
 }
 
 function clampPreferenceNumber(item, value) {
-  const fallback = Number(preferenceDefault(item.path));
+  // item.scale lets a field display a human unit (e.g. MB) while storing raw (bytes); min/max are in
+  // display units, so the stored default is divided by scale to compare in the same space.
+  const scale = Number(item.scale) || 1;
+  const fallback = Number(preferenceDefault(item.path)) / scale;
   const parsed = Number(value);
   let number = Number.isFinite(parsed) ? parsed : fallback;
   if (Number.isFinite(Number(item.min))) number = Math.max(Number(item.min), number);
@@ -14728,7 +14731,8 @@ function valueFromPreferenceControl(control) {
     const clamped = clampPreferenceNumber(item, control.value);
     control.value = clamped;
     validatePreferenceNumberControl(control);
-    return Number(clamped);
+    const scale = Number(item.scale) || 1;
+    return Number(clamped) * scale;
   }
   if (type === 'list') return String(control.value || '').split('\n').map(line => line.trim()).filter(Boolean);
   return control.value;

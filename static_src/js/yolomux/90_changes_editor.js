@@ -822,7 +822,10 @@ function preferenceFocusTargetIsInteractive(target) {
 }
 
 function clampPreferenceNumber(item, value) {
-  const fallback = Number(preferenceDefault(item.path));
+  // item.scale lets a field display a human unit (e.g. MB) while storing raw (bytes); min/max are in
+  // display units, so the stored default is divided by scale to compare in the same space.
+  const scale = Number(item.scale) || 1;
+  const fallback = Number(preferenceDefault(item.path)) / scale;
   const parsed = Number(value);
   let number = Number.isFinite(parsed) ? parsed : fallback;
   if (Number.isFinite(Number(item.min))) number = Math.max(Number(item.min), number);
@@ -869,7 +872,8 @@ function valueFromPreferenceControl(control) {
     const clamped = clampPreferenceNumber(item, control.value);
     control.value = clamped;
     validatePreferenceNumberControl(control);
-    return Number(clamped);
+    const scale = Number(item.scale) || 1;
+    return Number(clamped) * scale;
   }
   if (type === 'list') return String(control.value || '').split('\n').map(line => line.trim()).filter(Boolean);
   return control.value;

@@ -1604,7 +1604,7 @@ function makeFileTree(paths) {
   assert.ok(source.includes('function focusCommandPaletteTarget'), 'command palette has one shared post-run focus helper');
   assert.ok(source.includes('focusCommandPaletteTarget(item);'), 'command palette applies deterministic focus after async tab/session actions');
   assert.ok(source.includes('targetItem: item,'), 'command palette tab entries carry their layout focus target');
-  assert.ok(source.includes("const defaultLightEditorScheme = 'vscode-light-plus';"), 'light editor defaults to the VS Code Light+ style scheme');
+  assert.ok(source.includes("const defaultLightEditorScheme = 'yolomux-light';"), 'light editor defaults to the brand YOLOmux Light scheme (green headings, matching dark)');
   assert.ok(source.includes("else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);"), 'plain file opens reset stale diff mode back to edit');
   assert.ok(source.includes('applyMarkdownSourceLines(container, text);'), 'Markdown preview source anchors are attached after parsing');
 }
@@ -1999,6 +1999,7 @@ function makeFileTree(paths) {
   assert.ok(/body\.theme-light \.pane-tab:hover/.test(preferencesCss), '#28: light theme fixes the near-white pane-tab hover border');
   assert.ok(/body\.theme-light \.tabs \.pane-actions:hover/.test(preferencesCss), '#28: light theme fixes the white tab-overflow hover glyph');
   assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-active-bg:\s*#4f9e3a/.test(preferencesCss), '#31: the active pane tab has a light-mode green so a theme switch repaints it');
+  assert.ok(/body\.theme-light \.panel\.active-pane \.panel-detail-row \.session-button-name/.test(preferencesCss), '#35: the active-pane detail-row header label is forced dark in light mode (was light-on-light)');
   assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('session-button-dir pane-tab-info-label'), '#27: the YO!info tab label uses the themed .session-button-dir color treatment');
   assert.ok(preferencesCss.includes('--pane-tab-active-bg: #86d600'), 'focused active pane tab uses a brighter brand green fill');
   assert.ok(preferencesCss.includes('--pane-tab-active-accent: #86d600'), 'focused active pane tab accent token is the same green, not yellow/lime');
@@ -2091,6 +2092,10 @@ function makeFileTree(paths) {
   const largeUploadPreferencesHtml = api.preferencesPanelHtmlForTest('upload', []);
   assert.ok(largeUploadPreferencesHtml.includes('preferences-setting-advisory'), 'large upload cap shows an rsync recommendation');
   assert.ok(largeUploadPreferencesHtml.includes('rsync -avz'), 'large upload recommendation includes a copyable rsync command');
+  assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?value="64"/.test(largeUploadPreferencesHtml), 'upload size cap displays in MB (64), not raw bytes');
+  assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?max="512"/.test(largeUploadPreferencesHtml), 'upload size cap min/max are expressed in MB');
+  assert.ok(/data-setting-path="uploads\.max_bytes"[\s\S]*?preferences-setting-suffix">MB</.test(largeUploadPreferencesHtml), 'upload size cap labels its unit as MB');
+  assert.equal(/data-setting-path="uploads\.max_bytes"[\s\S]*?preferences-setting-suffix">bytes</.test(largeUploadPreferencesHtml), false, 'upload size cap no longer shows a raw bytes suffix');
   assert.ok(preferencesHtml.includes('Auto-focus active pane'), 'auto-focus setting names the whole active pane/view');
   assert.ok(preferencesHtml.includes('enable hover-open menus'), 'auto-focus help covers menu hover behavior');
   assert.ok(preferencesHtml.includes('Off by default'), 'auto-focus help explains the default');
@@ -2122,8 +2127,8 @@ function makeFileTree(paths) {
   assert.equal(api.globalThemeIsDark(), true, 'global theme defaults dark');
   assert.equal(api.globalThemeLabel(), 'Dark');
   assert.equal(api.nextGlobalThemeMode(), 'light');
-  assert.equal(api.terminalThemeModeForTest(), 'dark', 'terminal theme defaults dark');
-  assert.equal(api.terminalThemeForGlobalTheme('light').background, '#11151d', 'light app theme keeps terminals dark by default');
+  assert.equal(api.terminalThemeModeForTest(), 'follow-app', 'terminal theme defaults to follow-app (matches the global app theme)');
+  assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app default gives a light terminal in light app mode');
   api.setTerminalThemeModeForTest('light');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'terminal light theme is explicit opt-in');
   assert.equal(api.terminalThemeForGlobalTheme('dark').blue, '#0451a5');
@@ -2140,9 +2145,9 @@ function makeFileTree(paths) {
   api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
   assert.ok(api.bodyClassListForTest().contains('theme-light'), 'global light theme marks the body');
   assert.ok(api.bodyClassListForTest().contains('theme-resolved-light'), 'global light theme tracks the resolved mode');
-  assert.equal(api.activeEditorSchemeForTest().label, 'VS Code Light+', 'inherited editor theme follows global light');
+  assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Light', 'inherited editor theme follows global light (brand YOLOmux Light default)');
   assert.equal(api.configuredEditorSchemeForMode(true), 'dark');
-  assert.equal(api.configuredEditorSchemeForMode(false), 'vscode-light-plus');
+  assert.equal(api.configuredEditorSchemeForMode(false), 'yolomux-light');
   api.setGlobalThemeModeForTest('dark');
   api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
   assert.equal(api.fileEditorThemeModeForTest(), 'inherit');
@@ -2167,13 +2172,13 @@ function makeFileTree(paths) {
   api.cycleEditorThemeMode();
   assert.equal(api.fileEditorThemeModeForTest(), 'inherit', 'theme toggle clears an explicit editor override back to global inheritance');
   api.cycleEditorThemeMode();
-  assert.equal(api.fileEditorThemeModeForTest(), 'vscode-light-plus', 'theme toggle uses the selected VS Code Light+ scheme from inherited dark mode');
+  assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'theme toggle uses the default YOLOmux Light scheme from inherited dark mode (DOIT.6 #34)');
   api.setFileEditorThemeMode('light');
-  assert.equal(api.fileEditorThemeModeForTest(), 'vscode-light-plus', 'legacy light storage value maps to VS Code Light+');
-  assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'VS Code Light+ uses a bright white editor background');
-  assert.equal(api.activeEditorSchemeForTest().previewBg, '#ffffff', 'VS Code Light+ preview background is bright white');
-  assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#008000', 'VS Code Light+ uses green comments');
-  assert.equal(api.activeEditorSchemeForTest().syntax.control, '#af00db', 'VS Code Light+ uses purple control keywords');
+  assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'legacy light storage value maps to the YOLOmux Light default');
+  assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'YOLOmux Light uses a bright white editor background');
+  assert.equal(api.activeEditorSchemeForTest().previewBg, '#ffffff', 'YOLOmux Light preview background is bright white');
+  assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#64748b', 'YOLOmux Light uses muted-gray comments');
+  assert.equal(api.activeEditorSchemeForTest().syntax.heading, '#0f3d22', '#34: YOLOmux Light markdown headings are dark green (matching dark mode), not maroon');
   api.setFileEditorCursorStyleForTest('block');
   api.applyEditorCursorStyle();
   assert.ok(api.bodyClassListForTest().contains('editor-cursor-block'), 'block cursor style marks the body');

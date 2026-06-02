@@ -28,13 +28,13 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     )
 
     assert settings["appearance"]["theme"] == "dark"
-    assert settings["appearance"]["terminal_theme"] == "dark"
+    assert settings["appearance"]["terminal_theme"] == "follow-app"
     assert settings["appearance"]["ui_font_size"] == 8
     assert settings["appearance"]["terminal_font_size"] == 28
     assert settings["appearance"]["editor_font_size"] == 28
     assert settings["appearance"]["editor_color_scheme"] == "dark"
     assert settings["appearance"]["editor_dark_color_scheme"] == "dark"
-    assert settings["appearance"]["editor_light_color_scheme"] == "vscode-light-plus"
+    assert settings["appearance"]["editor_light_color_scheme"] == "yolomux-light"
     assert settings["appearance"]["editor_cursor_style"] == "line"
     assert settings["appearance"]["file_explorer_font_size"] == 8
     assert settings["appearance"]["tab_width"] == 120
@@ -65,7 +65,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
 
     assert payload["settings"] == default_settings()
     assert payload["settings"]["general"]["auto_focus"] is False
-    assert payload["settings"]["appearance"]["terminal_theme"] == "dark"
+    assert payload["settings"]["appearance"]["terminal_theme"] == "follow-app"
     assert payload["settings"]["appearance"]["tab_width"] == 180
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "deterministic"
