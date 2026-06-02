@@ -892,7 +892,17 @@ function autoApproveScreenIsWorking(payload) {
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  return autoApproveEnabledHere(payload) && autoApproveScreenIsWorking(payload);
+  // Spin the YO ball whenever the agent is working, regardless of auto-approve state.
+  return autoApproveScreenIsWorking(payload);
+}
+
+function runningAgentCount() {
+  return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session))).length;
+}
+
+function updateDocumentTitle() {
+  const count = runningAgentCount();
+  document.title = count > 0 ? `YOLOmux [${count} running]` : 'YOLOmux [idle]';
 }
 
 function yoloRotationDelay(now = Date.now()) {
@@ -1796,7 +1806,7 @@ function showAttentionAlert(session, state) {
     `YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}`,
     state.reason,
     {
-      container: displayToastContainer(session),
+      container: attentionAlerts,
       onClick: () => selectSession(session),
     },
   );

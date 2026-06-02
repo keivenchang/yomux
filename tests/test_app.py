@@ -31,12 +31,23 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
     assert payload["sessions"] == {"new": {"target": "new"}}
 
 
-def test_auto_approve_roster_discovers_once_and_skips_pane_capture(monkeypatch):
+def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
+    # #28: the roster's working/idle signal comes from the LIVE pane (a cheap visible-only capture),
+    # not transcript recency, while still discovering once and skipping the expensive prompt fan-out.
     info = SessionInfo(session="6", panes=[], selected_pane=None, agents=[])
-    calls = []
+    discover_calls = []
+    capture_calls = []
+    pane_text = {"5": "working pane", "6": "idle pane"}
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["5", "6"], None))
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: (calls.append(tuple(sessions)) or {"5": info, "6": info}, []))
-    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("pane capture should not run for roster")))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: (discover_calls.append(tuple(sessions)) or {"5": info, "6": info}, []))
+
+    def fake_capture(session, *_args, **kwargs):
+        capture_calls.append((session, kwargs.get("visible_only")))
+        return pane_text.get(session, "")
+
+    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", fake_capture)
+    monkeypatch.setattr(app_module.auto_approve_tmux, "agent_screen_state", lambda text: {"key": "working" if text == "working pane" else "idle", "text": ""})
+    monkeypatch.setattr(app_module.auto_approve_tmux, "hybrid_approval_prompt_state", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("roster must not run the prompt-detection fan-out")))
     monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
     webapp = app_module.TmuxWebtermApp(["5", "6"])
     try:
@@ -45,9 +56,25 @@ def test_auto_approve_roster_discovers_once_and_skips_pane_capture(monkeypatch):
         webapp.control_server.stop()
 
     assert status == HTTPStatus.OK
-    assert calls == [("5", "6")]
-    assert payload["sessions"]["5"]["prompt"]["visible"] is False
-    assert payload["sessions"]["6"]["screen"] == {"key": "idle", "text": ""}
+    assert discover_calls == [("5", "6")]  # discovered once for the whole roster, not per session
+    assert {session for session, _visible in capture_calls} == {"5", "6"}
+    assert all(visible_only is True for _session, visible_only in capture_calls)  # cheap visible-only capture only
+    assert payload["sessions"]["5"]["screen"]["key"] == "working"  # live working pane spins
+    assert payload["sessions"]["6"]["screen"]["key"] == "idle"  # finished agent idle at prompt stops spinning
+    assert payload["sessions"]["5"]["prompt"]["visible"] is False  # no live prompt fan-out in the roster
+
+
+def test_transcripts_payload_exposes_server_version(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda: [])
+    monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
+    try:
+        payload = webapp.transcripts_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["server_version"] == app_module.YOLOMUX_VERSION
 
 
 def test_metadata_badge_pulse_expiry_does_not_persist(monkeypatch):

@@ -1414,6 +1414,8 @@ function preferenceSections() {
       {path: 'general.auto_focus', label: 'Auto-focus active pane', type: 'boolean', help: 'Focus panes and enable hover-open menus after tab switches, layout moves, and hover gestures. Off by default.'},
       {path: 'general.default_layout', label: 'Default layout', type: 'select', choices: ['single', 'grid', 'wall'], help: 'Preferred starting pane layout for new browser visits.'},
       {path: 'general.default_sessions', label: 'Default sessions', type: 'list', help: 'Preferred tmux sessions to open first, one session name per line.'},
+      {path: 'general.reload_on_update', label: 'Notify on server update', type: 'boolean', help: 'When the server ships a newer version, show a "New version available — Reload" banner in this open client. Off by default.'},
+      {path: 'general.reload_on_update_auto', label: 'Auto-reload on server update', type: 'boolean', help: 'When the above is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).'},
     ]},
     {title: 'Appearance', items: [
       {path: 'appearance.theme', label: 'Global app theme', type: 'select', choices: [

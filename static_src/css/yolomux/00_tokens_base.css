@@ -69,11 +69,11 @@
   --pane-tab-zoom-hover-bg: #52d273;
   --pane-tab-zoom-hover-border: #9befad;
   --pane-tab-badge-gold: #f5c542;
-  --pane-tile-radius: 2px;
+  --pane-tile-radius: 0;
   --pane-split-gap: 0px;
-  --pane-resizer-size: 2px;
+  --pane-resizer-size: 1px;
   --pane-resizer-line-size: 1px;
-  --pane-resizer-hover-line-size: 4px;
+  --pane-resizer-hover-line-size: 1.5px;
   --pane-resizer-bg: rgba(255, 225, 77, 0.72);
   --pane-resizer-hover-bg: rgba(255, 225, 77, 0.96);
   --pane-resizer-shadow: rgba(255, 225, 77, 0.72);
@@ -221,6 +221,7 @@
   --red-reminder-easing: ease-in-out;
   --yolo-reminder-duration: 2.8s;
   --yolo-rotation-duration: 20s;
+  --yolo-working-duration: 1.2s;
 }
 body.theme-dark {
   color-scheme: dark;

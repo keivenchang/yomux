@@ -1045,7 +1045,6 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-changedLineGutter {
   background: #dafbe1;
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
-  color: #82071e;
   background: #ffebe9;
 }
 /* File editor panels are layout siblings of terminals and Files. */

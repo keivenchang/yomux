@@ -644,6 +644,7 @@ let layoutItems = [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, .
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
+let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
 let activitySummaryRequestId = 0;

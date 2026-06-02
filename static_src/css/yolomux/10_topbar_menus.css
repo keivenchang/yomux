@@ -172,6 +172,62 @@
   min-height: var(--compact-control-height);
   overflow: visible;
 }
+.topbar-search {
+  margin: 0 auto;
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 320px;
+  height: var(--compact-control-height);
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--input-bg, #11151c);
+  color: var(--muted, #8b95a5);
+  cursor: text;
+  font: inherit;
+  overflow: hidden;
+}
+.topbar-search:hover {
+  border-color: var(--accent, #6ea8fe);
+}
+.topbar-search-icon {
+  flex: 0 0 auto;
+}
+.topbar-search-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.topbar-search-hint {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: var(--ui-font-size-3xs, 10px);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 4px;
+  color: var(--muted, #8b95a5);
+  background: transparent;
+}
+@media (max-width: 1100px) {
+  .topbar-search-label,
+  .topbar-search-hint {
+    display: none;
+  }
+  .topbar-search {
+    max-width: none;
+    padding: 0 6px;
+  }
+}
+@media (max-width: 760px) {
+  .topbar-search {
+    display: none;
+  }
+}
 .app-menu-area.drag-over {
   outline: 1px dashed var(--drop-outline);
   outline-offset: 2px;

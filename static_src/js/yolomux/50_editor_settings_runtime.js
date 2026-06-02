@@ -240,8 +240,12 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   const active = editorViewModeFor(path, item) === 'diff';
   const available = openFileDiffAvailable(state);
   const loading = state?.diffLoading === true;
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!available && !active);
-  button.disabled = !active && (loading || !available);
+  // Keep the diff toggle on ANY text file (not just md/html) so .py/.js/.rs can switch edit<->diff.
+  // The diff loads lazily on click (refreshOpenFileDiff); only hide the button once a load has
+  // confirmed there is nothing to diff (diffLoaded && !available), and never while in diff mode.
+  const confirmedNoDiff = state?.diffLoaded === true && !available;
+  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (confirmedNoDiff && !active);
+  button.disabled = !active && loading;
   const label = !active && loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
   setFileEditorIcon(button, 'file-editor-icon-diff');

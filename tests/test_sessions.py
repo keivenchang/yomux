@@ -62,6 +62,26 @@ def test_find_recent_codex_transcript_caches_cwd_lookup(tmp_path, monkeypatch):
     assert calls == [transcript]
 
 
+def test_find_recent_codex_transcript_orders_by_name_without_stat_storm(tmp_path, monkeypatch):
+    clear_transcript_lookup_cache()
+    root = tmp_path / "codex" / "sessions"
+    day = root / "2026" / "06" / "01"
+    day.mkdir(parents=True)
+    cwd = "/repo/project"
+    older = day / "rollout-2026-06-01T08-00-00-aaaa.jsonl"
+    newer = day / "rollout-2026-06-01T10-00-00-bbbb.jsonl"
+    for path in (older, newer):
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": cwd}}), encoding="utf-8")
+
+    stat_calls: list[Path] = []
+    original_stat = Path.stat
+    monkeypatch.setattr(Path, "stat", lambda self, *args, **kwargs: (stat_calls.append(self) or original_stat(self, *args, **kwargs)))
+
+    # Newest-by-name wins, and ordering issues no per-rollout-file stat() (no syscall storm).
+    assert sessions.find_recent_codex_transcript(cwd, root=root) == newer
+    assert [path for path in stat_calls if path.name.startswith("rollout-")] == []
+
+
 def test_find_transcript_by_session_id_caches_glob(tmp_path, monkeypatch):
     clear_transcript_lookup_cache()
     root = tmp_path / "claude" / "projects"

@@ -327,11 +327,11 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (auto) classes.push('active');
   else if (locked) classes.push('locked');
   else classes.push('inactive');
-  if (auto && options.yoloWorking) classes.push('working');
+  if (options.yoloWorking) classes.push('working');
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
-  const rotationStyle = auto && options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
+  const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
   const stateText = auto ? 'on here' : (locked ? 'on elsewhere' : 'off');
   const title = options.toggle && readOnlyMode
     ? `YOLO ${stateText} for ${sessionLabel(session)}; readonly access`
@@ -340,9 +340,10 @@ function yoloMarkerHtml(session, auto, options = {}) {
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
+  const numberHtml = pullRequestNumberIndicatorHtml(session, pr);
   const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
   const ciHtml = pullRequestCiIndicatorHtml(session, pr);
-  return [statusHtml, ciHtml].filter(Boolean).join('');
+  return [numberHtml, statusHtml, ciHtml].filter(Boolean).join('');
 }
 
 function applySessionStateClasses(node, state) {

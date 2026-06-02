@@ -29,6 +29,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "auto_focus": False,
         "default_layout": "single",
         "default_sessions": [],
+        "reload_on_update": False,
+        "reload_on_update_auto": False,
     },
     "appearance": {
         "theme": "dark",
@@ -186,6 +188,8 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
     ("general", "default_layout"): "single | grid | wall. Reserved default for new visits.",
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
+    ("general", "reload_on_update"): "true/false. Default false. When true, an open client shows a 'New version available' banner once the server ships a newer YOLOMUX_VERSION.",
+    ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).",
     ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and editor defaults.",
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Default dark because full-screen terminal apps usually assume a dark terminal.",
     ("appearance", "ui_font_size"): "Pixels, 8-20. Drives tab and compact UI text.",

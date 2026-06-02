@@ -225,7 +225,20 @@
   background: #3a3524;
   border-color: #f0b85d;
 }
-.session-yolo-marker.active.working {
+/* Working spin: fast and driven by the agent's working state alone (not auto-approve),
+   so any working session's YO ball spins visibly. Its own duration, not the slow ambient. */
+.session-yolo-marker.working {
+  transform-origin: center;
+  animation-name: yolo-marker-rotate !important;
+  animation-duration: var(--yolo-working-duration, 1.2s) !important;
+  animation-delay: var(--yolo-rotate-delay, 0s) !important;
+  animation-timing-function: linear !important;
+  animation-iteration-count: infinite !important;
+}
+/* Ambient rotation for an auto-on, idle marker (the "Active YO rotation period" setting);
+   stays slow. renderAutoApproveButton toggles .inactive/.locked/.working live (not .active),
+   so key off those rather than .active. yolo_rotate_ms = 0 -> 0s duration disables it. */
+.session-yolo-marker:not(.inactive):not(.locked):not(.working) {
   transform-origin: center;
   animation-name: yolo-marker-rotate !important;
   animation-duration: var(--yolo-rotation-duration, 20s) !important;
@@ -258,6 +271,12 @@
 }
 body.tab-meta-hidden .pane-tab .tab-symbol {
   display: none;
+}
+.ci-indicator.pr-number-chip {
+  color: #e9edf3;
+  background: #000;
+  border-color: #000;
+  padding: 0 4px;
 }
 .ci-indicator.pr-status-failing {
   color: #fff3f4;

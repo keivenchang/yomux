@@ -771,6 +771,11 @@ function pullRequestCiIndicatorHtml(session, pr) {
   return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestCiStatusClass(pr)}`)}">CI</span>`;
 }
 
+function pullRequestNumberIndicatorHtml(session, pr) {
+  if (!pr?.number) return '';
+  return `<span class="ci-indicator tab-symbol pr-number-chip" title="PR #${esc(String(pr.number))}">#${esc(String(pr.number))}</span>`;
+}
+
 function pullRequestLinkHtml(pr) {
   return linkHtml(pr.url, pullRequestLinkLabel(pr), pr.title || pr.description || '', pullRequestStatusClass(pr));
 }
@@ -1133,6 +1138,7 @@ async function killTmuxSession(session) {
     stopSessionUi(session);
     const sessionsChanged = updateSessionList(payload.sessions || []);
     autoApproveStates.delete(session);
+    updateDocumentTitle();
     renderSessionButtons();
     renderPanels(previousActive);
     if (sessionsChanged) renderPaneTabStrips();

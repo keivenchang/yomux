@@ -40,6 +40,7 @@ from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import SUMMARY_MAX_PROMPT_CHARS
 from .common import SUMMARY_CODEX_EFFORT
+from .common import YOLOMUX_VERSION
 from .common import SUMMARY_CODEX_MODEL
 from .common import SUMMARY_CODEX_SERVICE_TIER
 from .common import UPLOAD_MAX_FILES
@@ -615,6 +616,7 @@ class TmuxWebtermApp:
         }
         payload = {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "server_version": YOLOMUX_VERSION,
             "session_order": self.sessions,
             "sessions": session_payloads,
             "errors": [*refresh_errors, *errors],
@@ -1329,8 +1331,19 @@ class TmuxWebtermApp:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         hidden_prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": ""}
         if not capture_pane:
-            transcript_state = session_transcript_activity_state((discovered_sessions or {}).get(session))
-            return hidden_prompt, transcript_state if transcript_state.get("key") != "idle" else {"key": "idle", "text": ""}
+            # Roster path: derive working/idle from the LIVE pane via a cheap visible-only capture
+            # (no expensive prompt-detection or bash double-capture fan-out), NOT transcript recency —
+            # a finished agent idle at the prompt must report idle, and a working pane must report
+            # working, matching prompt_detector.visible_agent_working. discover_sessions still runs
+            # once for the whole roster (we do not re-discover per session).
+            module = auto_approve_tmux
+            try:
+                visible_text = module.tmux_capture_pane(session, visible_only=True)
+            except (OSError, subprocess.SubprocessError):
+                visible_text = None
+            if visible_text is None:
+                return hidden_prompt, {"key": "idle", "text": ""}
+            return hidden_prompt, dict(module.agent_screen_state(visible_text))
         try:
             module = auto_approve_tmux
             visible_text = module.tmux_capture_pane(session, visible_only=True)

@@ -587,7 +587,6 @@ function changesPanelHtml() {
   const files = sessionFilesPayload.files || [];
   const loaded = sessionFilesPayload.loaded === true;
   const options = sessions.map(session => `<option value="${esc(session)}"${session === target ? ' selected' : ''}>${esc(sessionLabel(session))} ${esc(session)}</option>`).join('');
-  const summary = changesSummaryHtml(files, target, sessionFilesLoading, loaded);
   const errorHtml = (sessionFilesPayload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const comparison = changesComparisonHeaderHtml(sessionFilesPayload, files, {loading: sessionFilesLoading});
   const groups = changesRepoGroupsHtml(files, {payload: sessionFilesPayload});
@@ -601,7 +600,6 @@ function changesPanelHtml() {
       </select></label>
       ${diffRefControlsHtml()}
       <button type="button" class="changes-refresh" data-session-files-refresh>Refresh</button>
-      <span class="changes-summary">${summary}</span>
     </div>
     ${comparison}
     ${errorHtml}
@@ -614,7 +612,6 @@ function fileExplorerChangesPanelHtml() {
   const files = payload.files || [];
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
-  const summary = changesSummaryHtml(files, session, loading, loaded);
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? '<div class="changes-empty">No modified files for this session.</div>' : '';
   const compact = fileExplorerChangesDisplayMode === 'compact';
@@ -626,7 +623,6 @@ function fileExplorerChangesPanelHtml() {
       ${diffRefControlsHtml({compact: true})}
       <button type="button" class="changes-display-toggle${compact ? ' compact' : ' detailed'}" data-session-files-display-toggle title="${esc(densityTitle)}" aria-label="${esc(densityTitle)}" aria-pressed="${compact ? 'true' : 'false'}">${esc(densityIcon)}</button>
       <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
-      <span class="changes-summary">${summary}</span>
     </div>
     ${changesComparisonHeaderHtml(payload, files, {loading})}
     ${errorHtml}
@@ -1490,6 +1486,9 @@ function restoreFileEditorPanelViewState(item, panel) {
 function destroyCodeMirrorPanel(panel) {
   panel?._cmResizeObserver?.disconnect?.();
   if (panel) panel._cmResizeObserver = null;
+  // Clear the diff scrollbar overview so its red/green ticks don't linger after switching to
+  // edit/normal mode (only the diff build re-adds it via updateCodeMirrorDiffOverview).
+  panel?.querySelector?.('.cm-diff-overview')?.remove();
   if (panel?._cmMergeView) {
     panel._cmMergeView.destroy();
     panel._cmMergeView = null;
@@ -1703,46 +1702,34 @@ function reconfigureCodeMirrorPanelTheme(panel) {
   return true;
 }
 
-function diffOverviewChunks(diff, totalLines) {
+function diffOverviewCollector() {
   const chunks = [];
-  let oldLine = 0;
-  let newLine = 0;
   let current = null;
   const pushCurrent = () => {
     if (current) chunks.push(current);
     current = null;
   };
-  const addChunk = (kind, line) => {
-    const start = Math.max(1, Number(line || 1));
-    if (current && current.kind === kind && start <= current.end + 1) {
-      current.end = Math.max(current.end, start);
-      return;
-    }
-    pushCurrent();
-    current = {kind, start, end: start};
+  return {
+    add(kind, line) {
+      const start = Math.max(1, Number(line || 1));
+      if (current && current.kind === kind && start <= current.end + 1) {
+        current.end = Math.max(current.end, start);
+        return;
+      }
+      pushCurrent();
+      current = {kind, start, end: start};
+    },
+    flush() {
+      pushCurrent();
+    },
+    finish() {
+      pushCurrent();
+      return chunks;
+    },
   };
-  for (const line of String(diff || '').split('\n')) {
-    const hunk = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
-    if (hunk) {
-      pushCurrent();
-      oldLine = Math.max(1, Number(hunk[1]) || 1);
-      newLine = Math.max(1, Number(hunk[2]) || 1);
-      continue;
-    }
-    if (!newLine || line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+')) {
-      addChunk('add', newLine);
-      newLine += 1;
-    } else if (line.startsWith('-')) {
-      addChunk('remove', newLine || oldLine);
-      oldLine += 1;
-    } else {
-      pushCurrent();
-      oldLine += 1;
-      newLine += 1;
-    }
-  }
-  pushCurrent();
+}
+
+function diffOverviewChunkPercentages(chunks, totalLines) {
   return chunks.map(chunk => ({
     ...chunk,
     top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
@@ -1750,41 +1737,50 @@ function diffOverviewChunks(diff, totalLines) {
   }));
 }
 
+function diffOverviewChunks(diff, totalLines) {
+  const collector = diffOverviewCollector();
+  let oldLine = 0;
+  let newLine = 0;
+  for (const line of String(diff || '').split('\n')) {
+    const hunk = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
+    if (hunk) {
+      collector.flush();
+      oldLine = Math.max(1, Number(hunk[1]) || 1);
+      newLine = Math.max(1, Number(hunk[2]) || 1);
+      continue;
+    }
+    if (!newLine || line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) {
+      collector.add('add', newLine);
+      newLine += 1;
+    } else if (line.startsWith('-')) {
+      collector.add('remove', newLine || oldLine);
+      oldLine += 1;
+    } else {
+      collector.flush();
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  return diffOverviewChunkPercentages(collector.finish(), totalLines);
+}
+
 function diffOverviewChunksFromDocuments(original, current, totalLines) {
   const left = String(original || '').split('\n');
   const right = String(current || '').split('\n');
-  const chunks = [];
-  let currentChunk = null;
-  const pushCurrent = () => {
-    if (currentChunk) chunks.push(currentChunk);
-    currentChunk = null;
-  };
-  const addChunk = (kind, line) => {
-    const start = Math.max(1, Number(line || 1));
-    if (currentChunk && currentChunk.kind === kind && start <= currentChunk.end + 1) {
-      currentChunk.end = Math.max(currentChunk.end, start);
-      return;
-    }
-    pushCurrent();
-    currentChunk = {kind, start, end: start};
-  };
+  const collector = diffOverviewCollector();
   const max = Math.max(left.length, right.length);
   for (let index = 0; index < max; index += 1) {
     const leftLine = left[index];
     const rightLine = right[index];
     if (leftLine === rightLine) {
-      pushCurrent();
+      collector.flush();
       continue;
     }
-    if (rightLine !== undefined) addChunk('add', index + 1);
-    if (leftLine !== undefined) addChunk('remove', Math.min(index + 1, totalLines));
+    if (rightLine !== undefined) collector.add('add', index + 1);
+    if (leftLine !== undefined) collector.add('remove', Math.min(index + 1, totalLines));
   }
-  pushCurrent();
-  return chunks.map(chunk => ({
-    ...chunk,
-    top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
-    height: Math.max(0.8, ((chunk.end - chunk.start + 1) / Math.max(1, totalLines)) * 100),
-  }));
+  return diffOverviewChunkPercentages(collector.finish(), totalLines);
 }
 
 function updateCodeMirrorDiffOverview(panel, container, state, currentText, original) {
@@ -1851,7 +1847,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmGeneration = generation;
   container.hidden = false;
   container.classList.add('file-editor-diff-codemirror');
-  if (!state.diffLoaded && !state.diffLoading) await refreshOpenFileDiff(path, {silent: true});
+  if (!state.diffLoaded && !state.diffLoading && !state.diffUnavailable) await refreshOpenFileDiff(path, {silent: true});
   if (panel._cmGeneration !== generation) return null;
   if (!openFileDiffAvailable(state) && !state.diffLoading) {
     setFileEditorPanelStatus(panel, state.diffError ? `diff unavailable: ${state.diffError}` : 'No diff for this file', 'warn');
@@ -2520,6 +2516,30 @@ function htmlPreviewHasDisabledJavaScript(text) {
   return /<script\b/i.test(source) || /\son[a-z]+\s*=/i.test(source);
 }
 
+function htmlPreviewUrl(path) {
+  return `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+}
+
+async function openHtmlPreviewWithAuth(path) {
+  const previewWindow = window.open('about:blank', '_blank');
+  if (previewWindow) previewWindow.opener = null;
+  try {
+    const response = await apiFetch(htmlPreviewUrl(path));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const source = await response.text();
+    const blobUrl = URL.createObjectURL(new Blob([source], {type: 'text/html'}));
+    if (previewWindow) {
+      previewWindow.location.href = blobUrl;
+    } else {
+      window.open(blobUrl, '_blank', 'noopener,noreferrer');
+    }
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+  } catch (error) {
+    if (previewWindow) previewWindow.close();
+    statusEl.innerHTML = `<span class="err">HTML preview failed: ${esc(error)}</span>`;
+  }
+}
+
 function renderHtmlPreviewInto(container, path, text) {
   const children = [];
   if (htmlPreviewHasDisabledJavaScript(text)) {
@@ -2528,9 +2548,14 @@ function renderHtmlPreviewInto(container, path, text) {
     const message = document.createElement('span');
     message.textContent = 'JavaScript is disabled in this sandboxed preview.';
     const link = document.createElement('a');
-    link.href = `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+    link.href = htmlPreviewUrl(path);
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
+    link.dataset.htmlPreviewAuth = '1';
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      openHtmlPreviewWithAuth(path);
+    });
     link.textContent = 'Open with JavaScript';
     notice.append(message, link);
     children.push(notice);

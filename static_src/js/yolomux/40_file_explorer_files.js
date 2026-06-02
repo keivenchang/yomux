@@ -1245,12 +1245,17 @@ function fileExplorerDirectoryIsIndexed(path) {
   return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
 }
 
+function fileExplorerIndexedRootList() {
+  return compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
+    .map(normalizeStoredFileExplorerIndexedDir)
+    .filter(Boolean));
+}
+
 function fileExplorerIndexedAncestor(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized) return '';
-  return Array.from(fileExplorerIndexedDirs || [])
-    .map(normalizeStoredFileExplorerIndexedDir)
-    .filter(candidate => candidate && candidate !== normalized && pathIsInsideDirectory(normalized, candidate))
+  return fileExplorerIndexedRootList()
+    .filter(candidate => candidate !== normalized && pathIsInsideDirectory(normalized, candidate))
     .sort((left, right) => right.length - left.length)[0] || '';
 }
 
@@ -1307,9 +1312,7 @@ function updateFileExplorerIndexedDirectoryRows() {
 
 function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch()) {
   const defaultPath = normalizeStoredFileExplorerIndexedDir(defaultRoot);
-  const indexedRoots = compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
-    .map(normalizeStoredFileExplorerIndexedDir)
-    .filter(Boolean));
+  const indexedRoots = fileExplorerIndexedRootList();
   const defaultCoveredByIndexed = defaultPath && indexedRoots.some(root => root !== defaultPath && pathIsInsideDirectory(defaultPath, root));
   const roots = defaultPath && !defaultCoveredByIndexed ? [defaultPath] : [];
   for (const indexedRoot of indexedRoots) {
@@ -2322,6 +2325,16 @@ function applyOpenFileDiffPayload(state, payload) {
   state.diffError = '';
 }
 
+function markOpenFileDiffUnavailable(state, error) {
+  state.diff = '';
+  state.diffLineClasses = parseUnifiedDiffLineClasses('');
+  state.diffOriginal = '';
+  state.diffWorking = '';
+  state.diffLoaded = true;
+  state.diffUnavailable = true;
+  state.diffError = String(error || 'diff unavailable');
+}
+
 async function refreshOpenFileDiff(path, options = {}) {
   const state = openFiles.get(path);
   if (!state || state.kind !== 'text') return false;
@@ -2339,8 +2352,7 @@ async function refreshOpenFileDiff(path, options = {}) {
     }
     return true;
   } catch (error) {
-    state.diffError = String(error);
-    state.diffUnavailable = true;
+    markOpenFileDiffUnavailable(state, error);
     if (!options.silent) {
       for (const panel of fileEditorPanelsForPath(path)) setFileEditorPanelStatus(panel, `diff unavailable: ${String(error)}`, 'warn');
     }

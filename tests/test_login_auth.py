@@ -178,6 +178,26 @@ def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_p
     assert written["json"]["error"] == "path must be an HTML file"
 
 
+def test_html_preview_route_accepts_logged_in_cookie(monkeypatch, tmp_path):
+    target = tmp_path / "preview.html"
+    target.write_text("<h1>ok</h1><script>window.answer = 42;</script>\n", encoding="utf-8")
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        cookie = _login_and_extract_auth_cookie(port)
+        status, _headers, body = request(
+            port,
+            "GET",
+            f"/api/fs/html-preview?{urlencode({'path': str(target)})}",
+            headers={"Cookie": cookie},
+        )
+        assert status == HTTPStatus.OK
+        assert b'sandbox="allow-scripts allow-forms allow-popups"' in body
+        assert b"authentication required" not in body
+    finally:
+        stop_server(server, thread)
+
+
 def test_readonly_identity_cannot_call_mutating_post(monkeypatch, tmp_path):
     server, thread = start_server(monkeypatch, tmp_path)
     port = server.server_address[1]

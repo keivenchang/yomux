@@ -264,30 +264,34 @@ function tmuxSessionViewCommands(session) {
   const active = hasSession && activeSessions.includes(session);
   const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
   const disabledDetail = hasSession ? 'Open the tab in a pane first' : 'No tmux tab focused';
+  const viewLabel = sessionLabel(session);
+  const transcriptName = `Transcript for session '${viewLabel}'`;
+  const summaryName = `AI Transcript for session '${viewLabel}'`;
+  const eventLogName = `Event log for session '${viewLabel}'`;
   return [
-    menuCommand('Transcript', () => {
+    menuCommand(transcriptName, () => {
       if (active) activateTab(session, 'transcript');
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
       checked: active && panelActiveTabName(session) === 'transcript',
-      ariaLabel: ['Transcript', focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: [transcriptName, focusDetail].filter(Boolean).join(' - '),
     }),
-    menuCommand('AI summary', () => {
+    menuCommand(summaryName, () => {
       if (active) activateTab(session, 'summary');
     }, {
       disabled: readOnlyMode || !active,
       detail: readOnlyMode ? 'Admin only' : (active ? '' : disabledDetail),
       checked: active && panelActiveTabName(session) === 'summary',
-      ariaLabel: ['AI summary', focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: [summaryName, focusDetail].filter(Boolean).join(' - '),
     }),
-    menuCommand('Event log', () => {
+    menuCommand(eventLogName, () => {
       if (active) activateTab(session, 'events');
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
       checked: active && panelActiveTabName(session) === 'events',
-      ariaLabel: ['Event log', focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: [eventLogName, focusDetail].filter(Boolean).join(' - '),
     }),
     menuCommand('Pane details', () => {
       if (!active) return;
@@ -556,6 +560,7 @@ function renderSessionButtons(options = {}) {
   };
   sessionButtons.classList.remove('drag-over');
   sessionButtons.appendChild(createAppMenuBar());
+  sessionButtons.appendChild(createTopbarSearch());
   scheduleTopbarMetricsUpdate();
 }
 
@@ -566,6 +571,32 @@ function createAppMenuBar() {
   bar.setAttribute('role', 'menubar');
   for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
   return bar;
+}
+
+// Universal search affordance in the topbar's empty middle gap: a launcher that
+// opens the existing unified palette (files/tabs/settings by default, `>` for
+// commands) — it reuses openFileQuickOpen, it does not fork the palette logic.
+function createTopbarSearch() {
+  const isMac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || '');
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'topbarSearch';
+  button.className = 'topbar-search';
+  button.setAttribute('aria-label', 'Search files, tabs, settings, and commands');
+  button.title = `Search files, tabs, and settings (${isMac ? 'Cmd' : 'Ctrl'}-P) — type > for commands (${isMac ? 'Cmd' : 'Ctrl'}-Shift-P)`;
+  const icon = document.createElement('span');
+  icon.className = 'topbar-search-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = '⌕';
+  const label = document.createElement('span');
+  label.className = 'topbar-search-label';
+  label.textContent = 'Search files, commands…';
+  const hint = document.createElement('kbd');
+  hint.className = 'topbar-search-hint';
+  hint.textContent = isMac ? '⌘P' : 'Ctrl+P';
+  button.append(icon, label, hint);
+  button.addEventListener('click', () => openFileQuickOpen());
+  return button;
 }
 
 function appMenuAnchorInlineSize(popover) {

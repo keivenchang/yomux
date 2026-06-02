@@ -203,6 +203,17 @@ class TestElement {
   setAttribute(name, value) { this.attributes[name] = String(value); }
 }
 
+function assertNoStandalonePrBadge(html, label) {
+  assert.equal(html.includes('>PR<'), false, `${label} avoids redundant PR text`);
+  assert.equal(/class="[^"]*pr-indicator[^"]*"[^>]*>PR</.test(html), false, `${label} never renders a standalone PR text pill`);
+  assert.equal(html.includes('pr-indicator'), false, `${label} suppresses the separate PR number badge`);
+}
+
+function assertSingleCiBadge(html, label) {
+  assert.ok(html.includes('>CI</span>'), `${label} renders a CI badge`);
+  assert.equal((html.match(/>CI<\/span>/g) || []).length, 1, `${label} renders exactly one CI badge`);
+}
+
 function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin') {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const bootStart = source.indexOf("if (refreshMeta) {");
@@ -463,6 +474,7 @@ globalThis.__layoutTestApi = {
   setChangesFolderCollapsedForTest(keys) { changesFolderCollapsed = new Set((keys || []).map(String)); },
   rawFileUrl,
   rawFileDownloadUrl,
+  markOpenFileDiffUnavailable,
   focusPreferencesSearch,
   focusFreshPreferencesSearchSoon,
   markPreferencesInteracted,
@@ -596,6 +608,9 @@ globalThis.__layoutTestApi = {
   setSessionFilesSortModeForTest(mode) {
     sessionFilesSortMode = mode;
   },
+  runningAgentCount,
+  updateDocumentTitle,
+  documentTitleForTest() { return document.title; },
   serialize(slots) {
     return {
       tree: slots[layoutTreeKey],
@@ -1126,6 +1141,8 @@ function makeFileTree(paths) {
   assert.equal(htmlPreview.children.length, 2);
   assert.equal(htmlPreview.children[0].className, 'file-editor-html-js-notice');
   assert.equal(htmlPreview.children[0].children[1].href, '/api/fs/html-preview?path=%2Fhome%2Ftest%2Findex.html');
+  assert.equal(htmlPreview.children[0].children[1].dataset.htmlPreviewAuth, '1');
+  assert.equal((htmlPreview.children[0].children[1].listeners.get('click') || []).length, 1);
   assert.equal(htmlPreview.children[1].className, 'file-editor-html-preview');
   assert.equal(htmlPreview.children[1].attributes.sandbox, '', 'HTML preview iframe is sandboxed with scripts disabled');
   assert.ok(htmlPreview.children[1].srcdoc.includes('<h1>Hello</h1>'), 'HTML preview renders markup through srcdoc');
@@ -1147,6 +1164,12 @@ function makeFileTree(paths) {
   assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, diff: 'diff --git a/a b/a'}), true, 'changed repo files are diffable');
   assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a'}), false, 'untracked/all-added files do not auto-open as all-green diffs');
   assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, diffOriginal: '', diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+one'}), false, 'new-file diffs do not count as normal editable diffs');
+  const unavailableDiffState = {kind: 'text', diffLoaded: false, diffLoading: true, diff: 'stale'};
+  api.markOpenFileDiffUnavailable(unavailableDiffState, 'not tracked');
+  assert.equal(unavailableDiffState.diffLoaded, true, 'diff-unavailable is a completed attempt');
+  assert.equal(unavailableDiffState.diffUnavailable, true);
+  assert.equal(unavailableDiffState.diff, '');
+  assert.equal(api.openFileDiffAvailable(unavailableDiffState), false);
   const diffButton = new TestElement('diff-button');
   api.setFileEditorViewMode(changedPath, 'edit', changedItem);
   api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', diffLoaded: true, diff: ''}, changedItem);
@@ -1164,6 +1187,12 @@ function makeFileTree(paths) {
   api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', diffLoaded: true, diff: ''}, codeItem);
   assert.equal(diffButton.hidden, false, 'code files stuck in diff still show an Exit diff button');
   assert.equal(diffButton.disabled, false, 'Exit diff stays clickable even when no code-file diff is available');
+  // #25: a .py (non-md/html) in NORMAL mode with no diff loaded yet still offers a clickable Diff
+  // toggle, which lazily loads the diff on click (it only hides once a load confirms there is none).
+  api.setFileEditorViewMode(codePath, 'edit', codeItem);
+  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text'}, codeItem);
+  assert.equal(diffButton.hidden, false, '#25: a code file with no diff loaded yet still offers a Diff toggle');
+  assert.equal(diffButton.disabled, false, '#25: the Diff toggle is clickable so it can lazily load the diff');
 }
 
 {
@@ -1228,6 +1257,15 @@ function makeFileTree(paths) {
   assert.ok(source.includes('item.fitFinalTimer'), 'terminal fit scheduling debounces resize bursts per terminal');
   assert.equal(source.includes('esm.sh'), false, 'CodeMirror loading never falls back to a third-party CDN');
   assert.ok(source.includes('CodeMirror local bundle is unavailable or incomplete'), 'CodeMirror loading reports local bundle failures clearly');
+  assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMeta.server_version)'), 'the metadata poll checks the live server version');
+  assert.ok(/maybeHandleServerVersionChange[\s\S]*serverVersion === bootstrap\.version[\s\S]*boolSetting\('general\.reload_on_update'/.test(source), 'server-version reload is gated on the boot version and the reload_on_update preference');
+  assert.ok(/maybeHandleServerVersionChange[\s\S]*boolSetting\('general\.reload_on_update_auto'[\s\S]*reloadIsSafe\(\)/.test(source), 'auto-reload only fires when enabled and reloadIsSafe()');
+  assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');
+  assert.ok(source.includes('id="summary-${session}" class="summary-preview markdown-body"'), 'the AI Transcript panel is a markdown-body container, not a raw <pre>');
+  assert.ok(source.includes("AI Transcript for session '"), 'the AI Transcript panel head names the session');
+  assert.ok(/function startSummaryStream[\s\S]*renderMarkdownPreviewInto\(node, raw\)/.test(source), 'the AI Transcript stream renders accumulated text through the markdown pipeline');
+  assert.ok(/function createTopbarSearch[\s\S]*openFileQuickOpen\(\)/.test(source), 'the topbar universal search opens the unified quick-open/command palette (no forked logic)');
+  assert.ok(/renderSessionButtons[\s\S]*appendChild\(createTopbarSearch\(\)\)/.test(source), 'the topbar search is mounted in the menubar middle area');
   assert.ok(source.slice(source.indexOf('function focusPreferencesSearch('), source.indexOf('function focusPreferencesSearchSoon(')).includes('panel && panel.isConnected !== false'), 'Preferences focus falls back to the rendered panel when called without a panel');
   const focusedPanelStart = source.indexOf('function setFocusedPanelItem(');
   const focusedPanelEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusedPanelStart);
@@ -1482,6 +1520,9 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('/repo/app'));
   assert.ok(changesHtml.includes('2 files changed in &#39;1&#39;'), 'Changes pane summary names the session explicitly');
   assert.ok(changesHtml.includes('changes-comparison-title">Comparing HEAD with Working Tree'), 'Changes pane shows the comparison header');
+  assert.equal((changesHtml.match(/files changed in &#39;1&#39;/g) || []).length, 1, '#24: the file-count/+/- summary appears exactly once (in the comparison card), not duplicated in the toolbar');
+  assert.equal(changesHtml.includes('class="changes-summary"'), false, '#24: the standalone toolbar summary duplicate is removed');
+  assert.ok(changesHtml.includes('class="changes-comparison-summary"'), '#24: the summary lives in the comparison card');
   assert.ok(changesHtml.includes('Behind 0 commits'), 'Changes pane shows behind count');
   assert.ok(changesHtml.includes('Ahead 2 commits'), 'Changes pane shows ahead count');
   assert.ok(changesHtml.includes('changes-tree-folder-name">src/'), 'Changes pane groups nested paths under folders');
@@ -1595,9 +1636,18 @@ function makeFileTree(paths) {
   assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
   assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
   assert.equal(appSource.includes('allowInlineDiffs: true'), false, 'unified diff uses native deleted chunks so removed lines are not editable doc lines');
+  // #17: deleted rows carry NO line number and stay read-only — done structurally, not via a CSS
+  // transparent-text hack. The unified diff edits the MODIFIED document and overlays the original
+  // through unifiedMergeView, so deleted lines are merge-decoration widgets (read-only, unnumbered),
+  // never real numbered document lines. (No real CodeMirror in this Node harness, so this guards the
+  // construction that produces the rendered behaviour, which was verified visually.)
+  assert.ok(/api\.EditorState\.create\(\{\s*doc: currentText,\s*extensions: \[\s*api\.unifiedMergeView\(\{\s*original,/.test(appSource), 'unified diff edits the modified document and overlays the original via unifiedMergeView, so deleted rows are unnumbered read-only widgets');
+  const diffGutterCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(diffGutterCss), false, '#17: deleted-line numbers are suppressed natively by unifiedMergeView, not by a transparent-text gutter hack');
   assert.ok(appSource.includes('/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}'), 'editor diff requests carry FROM/TO refs');
   assert.ok(appSource.includes("const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';"), 'diff editor editability follows TO=current after the FROM/TO flip');
   assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent;'), 'diff editor allows edits on the new/current side');
+  assert.ok(/function destroyCodeMirrorPanel[\s\S]*\.cm-diff-overview'\)\?\.remove\(\)/.test(appSource), '#26: tearing down the CodeMirror panel removes the diff scrollbar overview so its red/green ticks do not linger in edit/normal mode');
   assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');
   assert.ok(/switchFileExplorerChangesSession\(item\)/.test(appSource), 'tmux focus switches the Finder modified-files session immediately');
   assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'tmux focus forces a fresh Finder modified-files fetch even if an older request is in flight');
@@ -1741,19 +1791,20 @@ function makeFileTree(paths) {
   assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
   assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder or Changes panes');
   assert.ok(preferencesCss.includes('--pane-split-gap: 0px'), 'pane split layout collapses gap through a shared token');
-  assert.ok(preferencesCss.includes('--pane-resizer-size: 2px'), 'pane splitter size is tokenized and compact');
+  assert.ok(preferencesCss.includes('--pane-resizer-size: 1px'), 'pane splitter reserves only the 1px separator line');
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(255, 225, 77, 0.72)'), 'dark pane splitter is a visible bright-yellow divider at rest');
   assert.ok(preferencesCss.includes('--pane-resizer-hover-bg: rgba(255, 225, 77, 0.96)'), 'dark pane splitter turns brighter on hover/resize');
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(217, 119, 6, 0.78)'), 'light pane splitter uses readable amber at rest');
-  assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 4px'), 'pane splitter hover width is tokenized and modest');
-  assert.ok(preferencesCss.includes('--pane-tile-radius: 2px'), 'panes use tile-scale rounding instead of card corners');
+  assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 1.5px'), 'pane splitter hover thickens only modestly (1.5px) over the 1px resting line');
+  assert.ok(preferencesCss.includes('--pane-tile-radius: 0'), 'adjacent panes meet flush with square corners (no rounded-corner seam wedges)');
+  assert.ok(/\.topbar-search\s*\{[^}]*margin:\s*0 auto/.test(preferencesCss), '#29: topbar universal search is centered (auto margins both sides) between the menubar and the right-side actions, not right-aligned');
   assert.ok(/\.layout-column\s*\{[\s\S]*gap:\s*var\(--pane-split-gap\)/.test(preferencesCss), 'pane split layout reads the compact gap token');
   assert.ok(/\.layout-resizer\s*\{[\s\S]*flex:\s*0 0 var\(--pane-resizer-size\)/.test(preferencesCss), 'pane splitters read the compact size token');
   assert.ok(/\.resizer-row::before\s*\{[\s\S]*left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(preferencesCss), 'row splitters draw a tokenized centered visible line');
   assert.ok(/\.resizer-row:hover::before,[\s\S]*var\(--pane-resizer-hover-line-size\)/.test(preferencesCss), 'row splitters widen on hover without increasing the resting seam');
   assert.ok(/\.layout-resizer:hover::before,[\s\S]*background:\s*transparent/.test(preferencesCss), 'resizer hover does not return to a solid fill');
-  assert.ok(/\.resizer-row:hover::before,[\s\S]*repeating-linear-gradient\(\s*to bottom,[\s\S]*var\(--drop-outline-strong\)/.test(preferencesCss), 'row splitter hover uses a vertical dashed drop-preview line');
-  assert.ok(/\.resizer-column:hover::before,[\s\S]*repeating-linear-gradient\(\s*to right,[\s\S]*var\(--drop-outline-strong\)/.test(preferencesCss), 'column splitter hover uses a horizontal dashed drop-preview line');
+  assert.ok(/\.resizer-row:hover::before,[^{]*\{[^}]*background: var\(--pane-resizer-hover-bg\)/.test(preferencesCss), '#27: row splitter hover is a solid straight yellow bar (no dashed gradient)');
+  assert.ok(/\.resizer-column:hover::before,[^{]*\{[^}]*background: var\(--pane-resizer-hover-bg\)/.test(preferencesCss), '#27: column splitter hover is a solid straight yellow bar (no dashed gradient)');
   assert.ok(preferencesCss.includes('--pc-control-fg: #1f2937'), 'light mode uses a dark foreground for pane action controls');
   assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: #1f2937'), 'light mode uses dark status text');
   assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
@@ -1787,6 +1838,7 @@ function makeFileTree(paths) {
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#e6ffec/.test(preferencesCss), 'light diff added lines use GitHub-soft green');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#ffebe9/.test(preferencesCss), 'light diff removed lines use GitHub-soft red');
   assert.ok(/--diff-remove-line-bg:\s*color-mix\(in srgb, var\(--code-diff-remove\) 60%/.test(preferencesCss), 'diff removed lines use stronger red fill');
+  assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(preferencesCss), false, 'deleted rows carry no number via unified-merge read-only widgets, not a transparent-text gutter hack');
   assert.ok(preferencesCss.includes('clip-path: inset(0 -100vw)'), 'diff line backgrounds extend to the full editor width');
   assert.ok(preferencesCss.includes('.file-editor-diff-codemirror .cm-insertedLine .cm-insertedText'), 'whole-line inserted rows suppress ragged token overlays');
   assert.ok(preferencesCss.includes('.file-tree-row.repo-non-main'), 'Finder repo rows have non-main branch styling');
@@ -2080,9 +2132,9 @@ function makeFileTree(paths) {
   assert.ok(tmuxMenuLabels.includes('+ Claude'));
   assert.ok(tmuxMenuLabels.includes('+ Codex'));
   assert.ok(tmuxMenu.items.find(item => item.label === '+ Codex')?.detail !== 'Create tmux session');
-  assert.ok(tmuxMenuLabels.includes('Transcript'));
-  assert.ok(tmuxMenuLabels.includes('AI summary'));
-  assert.ok(tmuxMenuLabels.includes('Event log'));
+  assert.ok(tmuxMenuLabels.includes("Transcript for session '1'"));
+  assert.ok(tmuxMenuLabels.includes("AI Transcript for session '1'"));
+  assert.ok(tmuxMenuLabels.includes("Event log for session '1'"));
   assert.ok(tmuxMenuLabels.includes('Pane details'));
   assert.ok(tmuxMenuLabels.includes("Rename tmux session '1'"));
   assert.ok(tmuxMenuLabels.includes("Kill tmux session '1'"));
@@ -2253,12 +2305,12 @@ function makeFileTree(paths) {
   const bodyChildCount = api.bodyChildren().length;
   api.showSessionContextMenu('1', 10, 10);
   const contextMenu = api.bodyChildren()[bodyChildCount];
-  assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", 'Transcript', 'AI summary', 'Event log', "Kill tmux session '1'"]);
+  assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "AI Transcript for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
   assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
   const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
   assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');
   const sessionViews = api.tmuxSessionViewCommands('1');
-  assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ['Transcript', 'AI summary', 'Event log', 'Pane details']);
+  assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "AI Transcript for session '1'", "Event log for session '1'", 'Pane details']);
   assert.equal(api.fileIconFor('screenshot.png'), '🖼');
   assert.equal(api.fileIconFor('run.sh'), '🐚');
   assert.equal(api.fileIconFor('main.rs'), '🧩');
@@ -3214,6 +3266,35 @@ function makeFileTree(paths) {
 }
 
 {
+  loadYolomux();
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const start = source.indexOf('function showAttentionAlert(');
+  const end = source.indexOf('function dismissAttentionAlertsForSession(', start);
+  assert.ok(start > 0 && end > start, 'could not locate showAttentionAlert body');
+  const body = source.slice(start, end);
+  assert.ok(body.includes('container: attentionAlerts'), 'attention notifications use the global fixed stack');
+  assert.equal(body.includes('displayToastContainer(session)'), false, 'attention notifications do not use pane-local toast stacks');
+  const attentionCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.attention-alerts\s*\{[\s\S]*top:\s*12px[\s\S]*right:\s*12px[\s\S]*left:\s*auto/.test(attentionCss), 'global attention stack is fixed to the top-right corner');
+}
+
+{
+  const api = loadYolomux();
+  api.updateDocumentTitle();
+  assert.equal(api.documentTitleForTest(), 'YOLOmux [idle]');
+  api.setAutoApproveStateForTest('1', {screen: {key: 'working'}});
+  api.setAutoApproveStateForTest('2', {screen: {key: 'working'}});
+  api.setAutoApproveStateForTest('3', {screen: {key: 'idle'}});
+  api.updateDocumentTitle();
+  assert.equal(api.runningAgentCount(), 2);
+  assert.equal(api.documentTitleForTest(), 'YOLOmux [2 running]');
+  api.setAutoApproveStateForTest('1', {screen: {key: 'idle'}});
+  api.setAutoApproveStateForTest('2', {screen: {key: 'idle'}});
+  api.updateDocumentTitle();
+  assert.equal(api.documentTitleForTest(), 'YOLOmux [idle]');
+}
+
+{
   const api = loadYolomux();
   const info = {
     project: {
@@ -3227,13 +3308,13 @@ function makeFileTree(paths) {
   };
   const html = api.tmuxPaneTabHtml('4', info, null, true);
   const tabBadgeSource = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.equal(tabBadgeSource.includes('function pullRequestNumberIndicatorHtml'), false, 'tab PR number badge helper is removed');
+  assert.ok(tabBadgeSource.includes('function pullRequestNumberIndicatorHtml'), 'tab renders the PR number chip helper');
+  assert.ok(/<span class="ci-indicator tab-symbol pr-number-chip"[^>]*>#9961<\/span>/.test(html), 'open PR tab renders the #number as a black chip');
   assert.ok(html.includes('>YO<'), 'tab includes YO marker');
   assert.equal(/session-yolo-marker[^"]*tab-symbol/.test(html), false, 'YO marker stays visible when metadata badges are hidden');
   assert.ok(html.includes('>4<'), 'tab includes session number');
   assert.ok(html.includes('>MAIN<'), 'tab marks default branch');
-  assert.equal(html.includes('pr-indicator'), false, 'open PR tabs do not show a separate PR number badge');
-  assert.equal(html.includes('>#9961<'), false, 'open PR tabs do not render PR number as a standalone badge');
+  assertNoStandalonePrBadge(html, 'open PR tab');
   assert.equal(api.pullRequestStatusLabel({number: 9961, source_only: true, merged: true}), '');
   assert.equal(html.includes('MERGED'), false, 'main fallback does not show merged status');
   assert.equal(html.includes('(#9961)'), false, 'tab title strips duplicated PR suffix');
@@ -3247,6 +3328,13 @@ function makeFileTree(paths) {
   api.setAutoApproveStateForTest('4', {enabled: true, screen: {key: 'working'}});
   const workingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
   assert.ok(/session-yolo-marker[^"]*active[^"]*working/.test(workingHtml), 'visible screen working pulses active YO marker');
+
+  api.setAutoApproveStateForTest('4', {enabled: false, screen: {key: 'working'}});
+  const autoOffWorkingHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
+  assert.ok(/session-yolo-marker[^"]*\bworking\b/.test(autoOffWorkingHtml), 'a working agent spins its YO ball even when auto-approve is off');
+  assert.equal(/session-yolo-marker[^"]*\bactive\b/.test(autoOffWorkingHtml), false, 'an auto-off working marker is not rendered as active');
+  const yoloMarkerCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.session-yolo-marker\.working\s*\{[^}]*--yolo-working-duration/.test(yoloMarkerCss), 'working YO spin uses its own fast duration, separate from the slow ambient rotation');
 
   api.setAutoApproveStateForTest('4', {enabled: false, enabled_elsewhere: true, locked: true, lock_owner: {pid: 1234}, screen: {key: 'working'}});
   const externalHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
@@ -3269,57 +3357,24 @@ function makeFileTree(paths) {
   const mergedPulseHtml = api.tmuxPaneTabHtml('8', mergedInfo, {key: 'idle'}, true);
   assert.ok(mergedPulseHtml.includes('pr-status-merged metadata-pulse'), 'MERGED badge pulses after status change');
 
-  const ciInfo = {
-    project: {
-      git: {branch: 'feature'},
-      pull_request: {number: 13, status_label: 'CI failing', checks: {state: 'failure'}},
-    },
-  };
-  api.applyServerMetadataPulsesForTest('9', {ci: 20000});
-  const ciPulseHtml = api.tmuxPaneTabHtml('9', ciInfo, {key: 'idle'}, true);
-  assert.ok(ciPulseHtml.includes('pr-status-failing metadata-pulse'), 'CI badge is marked after CI change');
-  assert.equal(ciPulseHtml.includes('>PR<'), false, 'CI badge avoids redundant PR text');
-  assert.equal(/class="[^"]*pr-indicator[^"]*"[^>]*>PR</.test(ciPulseHtml), false, 'CI tabs never render a standalone PR text pill');
-  assert.equal(ciPulseHtml.includes('pr-indicator'), false, 'failing CI suppresses the separate PR number badge');
-  assert.equal(ciPulseHtml.includes('>#13<'), false, 'failing CI suppresses the PR number chip');
-  assert.equal((ciPulseHtml.match(/>CI<\/span>/g) || []).length, 1, 'failing open PR renders exactly one CI badge');
-  const passingInfo = {
-    project: {
-      git: {branch: 'feature'},
-      pull_request: {number: 14, status_label: 'open', checks: {state: 'passing'}},
-    },
-  };
-  api.applyServerMetadataPulsesForTest('10', {ci: 20000});
-  const passingHtml = api.tmuxPaneTabHtml('10', passingInfo, {key: 'idle'}, true);
-  assert.equal(passingHtml.includes('>PR<'), false, 'passing CI avoids redundant PR text');
-  assert.equal(/class="[^"]*pr-indicator[^"]*"[^>]*>PR</.test(passingHtml), false, 'passing CI tabs never render a standalone PR text pill');
-  assert.equal(passingHtml.includes('pr-indicator'), false, 'passing CI suppresses the separate PR number badge');
-  assert.equal(passingHtml.includes('>#14<'), false, 'passing CI suppresses the PR number chip');
-  assert.ok(passingHtml.includes('pr-status-passing metadata-pulse'), 'passing CI badge is green and marked after CI change');
-  assert.ok(passingHtml.includes('>CI</span>'), 'passing CI renders a CI badge');
-  assert.equal((passingHtml.match(/>CI<\/span>/g) || []).length, 1, 'passing open PR renders exactly one CI badge');
-  const pendingInfo = {
-    project: {
-      git: {branch: 'feature'},
-      pull_request: {number: 15, status_label: 'open', checks: {state: 'pending'}},
-    },
-  };
-  const pendingHtml = api.tmuxPaneTabHtml('11', pendingInfo, {key: 'idle'}, true);
-  assert.equal(pendingHtml.includes('>PR<'), false, 'pending CI avoids redundant PR text');
-  assert.equal(pendingHtml.includes('pr-indicator'), false, 'pending CI suppresses the separate PR number badge');
-  assert.equal(pendingHtml.includes('>#15<'), false, 'pending CI suppresses the PR number chip');
-  assert.ok(pendingHtml.includes('pr-status-pending'), 'pending CI badge is gold');
-  assert.ok(pendingHtml.includes('>CI</span>'), 'pending CI renders a CI badge');
-  assert.equal((pendingHtml.match(/>CI<\/span>/g) || []).length, 1, 'pending open PR renders exactly one CI badge');
-  const unknownCiInfo = {
-    project: {
-      git: {branch: 'feature'},
-      pull_request: {number: 16, status_label: 'open', checks: {state: 'unknown'}},
-    },
-  };
-  const unknownCiHtml = api.tmuxPaneTabHtml('12', unknownCiInfo, {key: 'idle'}, true);
-  assert.equal(unknownCiHtml.includes('pr-indicator'), false, 'unknown open PR does not show a separate PR number badge');
-  assert.equal(unknownCiHtml.includes('>#16<'), false, 'unknown open PR does not show a #number chip');
+  [
+    {session: '9', number: 13, state: 'failure', statusLabel: 'CI failing', statusClass: 'pr-status-failing', pulse: true, label: 'failing open PR'},
+    {session: '10', number: 14, state: 'passing', statusLabel: 'open', statusClass: 'pr-status-passing', pulse: true, label: 'passing open PR'},
+    {session: '11', number: 15, state: 'pending', statusLabel: 'open', statusClass: 'pr-status-pending', pulse: false, label: 'pending open PR'},
+    {session: '12', number: 16, state: 'unknown', statusLabel: 'open', statusClass: '', pulse: false, label: 'unknown open PR'},
+  ].forEach(({session, number, state, statusLabel, statusClass, pulse, label}) => {
+    if (pulse) api.applyServerMetadataPulsesForTest(session, {ci: 20000});
+    const ciHtml = api.tmuxPaneTabHtml(session, {
+      project: {
+        git: {branch: 'feature'},
+        pull_request: {number, status_label: statusLabel, checks: {state}},
+      },
+    }, {key: 'idle'}, true);
+    assertNoStandalonePrBadge(ciHtml, label);
+    if (statusClass) assert.ok(ciHtml.includes(statusClass), `${label} renders ${statusClass}`);
+    if (pulse) assert.ok(ciHtml.includes('metadata-pulse'), `${label} CI badge is marked after CI change`);
+    if (state !== 'unknown') assertSingleCiBadge(ciHtml, label);
+  });
 }
 
 {

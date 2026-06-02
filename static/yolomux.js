@@ -645,6 +645,7 @@ let layoutItems = [infoItemId, yoagentItemId, fileExplorerItemId, prefsItemId, .
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
+let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
 let activitySummaryRequestId = 0;
@@ -1646,7 +1647,7 @@ function showSessionContextMenu(session, x, y, options = {}) {
   for (const item of tmuxSessionActionCommands(session, {renameAction, includeKill: false})) {
     appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
   }
-  const viewItems = tmuxSessionViewCommands(session).filter(item => ['Transcript', 'AI summary', 'Event log'].includes(item.label));
+  const viewItems = tmuxSessionViewCommands(session).filter(item => item.label !== 'Pane details');
   for (const item of viewItems) {
     appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {
       disabled: item.disabled,
@@ -2553,7 +2554,17 @@ function autoApproveScreenIsWorking(payload) {
 }
 
 function sessionYoloIsWorking(session, payload = autoApproveStates.get(session)) {
-  return autoApproveEnabledHere(payload) && autoApproveScreenIsWorking(payload);
+  // Spin the YO ball whenever the agent is working, regardless of auto-approve state.
+  return autoApproveScreenIsWorking(payload);
+}
+
+function runningAgentCount() {
+  return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session))).length;
+}
+
+function updateDocumentTitle() {
+  const count = runningAgentCount();
+  document.title = count > 0 ? `YOLOmux [${count} running]` : 'YOLOmux [idle]';
 }
 
 function yoloRotationDelay(now = Date.now()) {
@@ -3457,7 +3468,7 @@ function showAttentionAlert(session, state) {
     `YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}`,
     state.reason,
     {
-      container: displayToastContainer(session),
+      container: attentionAlerts,
       onClick: () => selectSession(session),
     },
   );
@@ -3962,30 +3973,34 @@ function tmuxSessionViewCommands(session) {
   const active = hasSession && activeSessions.includes(session);
   const focusDetail = hasSession ? menuTabDetail(session) : 'Focus a tmux session first';
   const disabledDetail = hasSession ? 'Open the tab in a pane first' : 'No tmux tab focused';
+  const viewLabel = sessionLabel(session);
+  const transcriptName = `Transcript for session '${viewLabel}'`;
+  const summaryName = `AI Transcript for session '${viewLabel}'`;
+  const eventLogName = `Event log for session '${viewLabel}'`;
   return [
-    menuCommand('Transcript', () => {
+    menuCommand(transcriptName, () => {
       if (active) activateTab(session, 'transcript');
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
       checked: active && panelActiveTabName(session) === 'transcript',
-      ariaLabel: ['Transcript', focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: [transcriptName, focusDetail].filter(Boolean).join(' - '),
     }),
-    menuCommand('AI summary', () => {
+    menuCommand(summaryName, () => {
       if (active) activateTab(session, 'summary');
     }, {
       disabled: readOnlyMode || !active,
       detail: readOnlyMode ? 'Admin only' : (active ? '' : disabledDetail),
       checked: active && panelActiveTabName(session) === 'summary',
-      ariaLabel: ['AI summary', focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: [summaryName, focusDetail].filter(Boolean).join(' - '),
     }),
-    menuCommand('Event log', () => {
+    menuCommand(eventLogName, () => {
       if (active) activateTab(session, 'events');
     }, {
       disabled: !active,
       detail: active ? '' : disabledDetail,
       checked: active && panelActiveTabName(session) === 'events',
-      ariaLabel: ['Event log', focusDetail].filter(Boolean).join(' - '),
+      ariaLabel: [eventLogName, focusDetail].filter(Boolean).join(' - '),
     }),
     menuCommand('Pane details', () => {
       if (!active) return;
@@ -4254,6 +4269,7 @@ function renderSessionButtons(options = {}) {
   };
   sessionButtons.classList.remove('drag-over');
   sessionButtons.appendChild(createAppMenuBar());
+  sessionButtons.appendChild(createTopbarSearch());
   scheduleTopbarMetricsUpdate();
 }
 
@@ -4264,6 +4280,32 @@ function createAppMenuBar() {
   bar.setAttribute('role', 'menubar');
   for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
   return bar;
+}
+
+// Universal search affordance in the topbar's empty middle gap: a launcher that
+// opens the existing unified palette (files/tabs/settings by default, `>` for
+// commands) — it reuses openFileQuickOpen, it does not fork the palette logic.
+function createTopbarSearch() {
+  const isMac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || '');
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'topbarSearch';
+  button.className = 'topbar-search';
+  button.setAttribute('aria-label', 'Search files, tabs, settings, and commands');
+  button.title = `Search files, tabs, and settings (${isMac ? 'Cmd' : 'Ctrl'}-P) — type > for commands (${isMac ? 'Cmd' : 'Ctrl'}-Shift-P)`;
+  const icon = document.createElement('span');
+  icon.className = 'topbar-search-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = '⌕';
+  const label = document.createElement('span');
+  label.className = 'topbar-search-label';
+  label.textContent = 'Search files, commands…';
+  const hint = document.createElement('kbd');
+  hint.className = 'topbar-search-hint';
+  hint.textContent = isMac ? '⌘P' : 'Ctrl+P';
+  button.append(icon, label, hint);
+  button.addEventListener('click', () => openFileQuickOpen());
+  return button;
 }
 
 function appMenuAnchorInlineSize(popover) {
@@ -5858,12 +5900,17 @@ function fileExplorerDirectoryIsIndexed(path) {
   return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
 }
 
+function fileExplorerIndexedRootList() {
+  return compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
+    .map(normalizeStoredFileExplorerIndexedDir)
+    .filter(Boolean));
+}
+
 function fileExplorerIndexedAncestor(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized) return '';
-  return Array.from(fileExplorerIndexedDirs || [])
-    .map(normalizeStoredFileExplorerIndexedDir)
-    .filter(candidate => candidate && candidate !== normalized && pathIsInsideDirectory(normalized, candidate))
+  return fileExplorerIndexedRootList()
+    .filter(candidate => candidate !== normalized && pathIsInsideDirectory(normalized, candidate))
     .sort((left, right) => right.length - left.length)[0] || '';
 }
 
@@ -5920,9 +5967,7 @@ function updateFileExplorerIndexedDirectoryRows() {
 
 function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch()) {
   const defaultPath = normalizeStoredFileExplorerIndexedDir(defaultRoot);
-  const indexedRoots = compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
-    .map(normalizeStoredFileExplorerIndexedDir)
-    .filter(Boolean));
+  const indexedRoots = fileExplorerIndexedRootList();
   const defaultCoveredByIndexed = defaultPath && indexedRoots.some(root => root !== defaultPath && pathIsInsideDirectory(defaultPath, root));
   const roots = defaultPath && !defaultCoveredByIndexed ? [defaultPath] : [];
   for (const indexedRoot of indexedRoots) {
@@ -6935,6 +6980,16 @@ function applyOpenFileDiffPayload(state, payload) {
   state.diffError = '';
 }
 
+function markOpenFileDiffUnavailable(state, error) {
+  state.diff = '';
+  state.diffLineClasses = parseUnifiedDiffLineClasses('');
+  state.diffOriginal = '';
+  state.diffWorking = '';
+  state.diffLoaded = true;
+  state.diffUnavailable = true;
+  state.diffError = String(error || 'diff unavailable');
+}
+
 async function refreshOpenFileDiff(path, options = {}) {
   const state = openFiles.get(path);
   if (!state || state.kind !== 'text') return false;
@@ -6952,8 +7007,7 @@ async function refreshOpenFileDiff(path, options = {}) {
     }
     return true;
   } catch (error) {
-    state.diffError = String(error);
-    state.diffUnavailable = true;
+    markOpenFileDiffUnavailable(state, error);
     if (!options.silent) {
       for (const panel of fileEditorPanelsForPath(path)) setFileEditorPanelStatus(panel, `diff unavailable: ${String(error)}`, 'warn');
     }
@@ -8320,8 +8374,12 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   const active = editorViewModeFor(path, item) === 'diff';
   const available = openFileDiffAvailable(state);
   const loading = state?.diffLoading === true;
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (!available && !active);
-  button.disabled = !active && (loading || !available);
+  // Keep the diff toggle on ANY text file (not just md/html) so .py/.js/.rs can switch edit<->diff.
+  // The diff loads lazily on click (refreshOpenFileDiff); only hide the button once a load has
+  // confirmed there is nothing to diff (diffLoaded && !available), and never while in diff mode.
+  const confirmedNoDiff = state?.diffLoaded === true && !available;
+  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (confirmedNoDiff && !active);
+  button.disabled = !active && loading;
   const label = !active && loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
   setFileEditorIcon(button, 'file-editor-icon-diff');
@@ -8918,11 +8976,11 @@ function yoloMarkerHtml(session, auto, options = {}) {
   if (auto) classes.push('active');
   else if (locked) classes.push('locked');
   else classes.push('inactive');
-  if (auto && options.yoloWorking) classes.push('working');
+  if (options.yoloWorking) classes.push('working');
   if (readOnlyMode) classes.push('readonly');
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
-  const rotationStyle = auto && options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
+  const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
   const stateText = auto ? 'on here' : (locked ? 'on elsewhere' : 'off');
   const title = options.toggle && readOnlyMode
     ? `YOLO ${stateText} for ${sessionLabel(session)}; readonly access`
@@ -8931,9 +8989,10 @@ function yoloMarkerHtml(session, auto, options = {}) {
 }
 
 function pullRequestCompactBadgesHtml(session, pr) {
+  const numberHtml = pullRequestNumberIndicatorHtml(session, pr);
   const statusHtml = pullRequestStatusIndicatorHtml(session, pr);
   const ciHtml = pullRequestCiIndicatorHtml(session, pr);
-  return [statusHtml, ciHtml].filter(Boolean).join('');
+  return [numberHtml, statusHtml, ciHtml].filter(Boolean).join('');
 }
 
 function applySessionStateClasses(node, state) {
@@ -10285,6 +10344,11 @@ function pullRequestCiIndicatorHtml(session, pr) {
   return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestCiStatusClass(pr)}`)}">CI</span>`;
 }
 
+function pullRequestNumberIndicatorHtml(session, pr) {
+  if (!pr?.number) return '';
+  return `<span class="ci-indicator tab-symbol pr-number-chip" title="PR #${esc(String(pr.number))}">#${esc(String(pr.number))}</span>`;
+}
+
 function pullRequestLinkHtml(pr) {
   return linkHtml(pr.url, pullRequestLinkLabel(pr), pr.title || pr.description || '', pullRequestStatusClass(pr));
 }
@@ -10647,6 +10711,7 @@ async function killTmuxSession(session) {
     stopSessionUi(session);
     const sessionsChanged = updateSessionList(payload.sessions || []);
     autoApproveStates.delete(session);
+    updateDocumentTitle();
     renderSessionButtons();
     renderPanels(previousActive);
     if (sessionsChanged) renderPaneTabStrips();
@@ -12612,6 +12677,8 @@ function preferenceSections() {
       {path: 'general.auto_focus', label: 'Auto-focus active pane', type: 'boolean', help: 'Focus panes and enable hover-open menus after tab switches, layout moves, and hover gestures. Off by default.'},
       {path: 'general.default_layout', label: 'Default layout', type: 'select', choices: ['single', 'grid', 'wall'], help: 'Preferred starting pane layout for new browser visits.'},
       {path: 'general.default_sessions', label: 'Default sessions', type: 'list', help: 'Preferred tmux sessions to open first, one session name per line.'},
+      {path: 'general.reload_on_update', label: 'Notify on server update', type: 'boolean', help: 'When the server ships a newer version, show a "New version available — Reload" banner in this open client. Off by default.'},
+      {path: 'general.reload_on_update_auto', label: 'Auto-reload on server update', type: 'boolean', help: 'When the above is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).'},
     ]},
     {title: 'Appearance', items: [
       {path: 'appearance.theme', label: 'Global app theme', type: 'select', choices: [
@@ -13775,7 +13842,6 @@ function changesPanelHtml() {
   const files = sessionFilesPayload.files || [];
   const loaded = sessionFilesPayload.loaded === true;
   const options = sessions.map(session => `<option value="${esc(session)}"${session === target ? ' selected' : ''}>${esc(sessionLabel(session))} ${esc(session)}</option>`).join('');
-  const summary = changesSummaryHtml(files, target, sessionFilesLoading, loaded);
   const errorHtml = (sessionFilesPayload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const comparison = changesComparisonHeaderHtml(sessionFilesPayload, files, {loading: sessionFilesLoading});
   const groups = changesRepoGroupsHtml(files, {payload: sessionFilesPayload});
@@ -13789,7 +13855,6 @@ function changesPanelHtml() {
       </select></label>
       ${diffRefControlsHtml()}
       <button type="button" class="changes-refresh" data-session-files-refresh>Refresh</button>
-      <span class="changes-summary">${summary}</span>
     </div>
     ${comparison}
     ${errorHtml}
@@ -13802,7 +13867,6 @@ function fileExplorerChangesPanelHtml() {
   const files = payload.files || [];
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
-  const summary = changesSummaryHtml(files, session, loading, loaded);
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? '<div class="changes-empty">No modified files for this session.</div>' : '';
   const compact = fileExplorerChangesDisplayMode === 'compact';
@@ -13814,7 +13878,6 @@ function fileExplorerChangesPanelHtml() {
       ${diffRefControlsHtml({compact: true})}
       <button type="button" class="changes-display-toggle${compact ? ' compact' : ' detailed'}" data-session-files-display-toggle title="${esc(densityTitle)}" aria-label="${esc(densityTitle)}" aria-pressed="${compact ? 'true' : 'false'}">${esc(densityIcon)}</button>
       <button type="button" class="changes-refresh" data-session-files-refresh title="Refresh modified files">Refresh</button>
-      <span class="changes-summary">${summary}</span>
     </div>
     ${changesComparisonHeaderHtml(payload, files, {loading})}
     ${errorHtml}
@@ -14678,6 +14741,9 @@ function restoreFileEditorPanelViewState(item, panel) {
 function destroyCodeMirrorPanel(panel) {
   panel?._cmResizeObserver?.disconnect?.();
   if (panel) panel._cmResizeObserver = null;
+  // Clear the diff scrollbar overview so its red/green ticks don't linger after switching to
+  // edit/normal mode (only the diff build re-adds it via updateCodeMirrorDiffOverview).
+  panel?.querySelector?.('.cm-diff-overview')?.remove();
   if (panel?._cmMergeView) {
     panel._cmMergeView.destroy();
     panel._cmMergeView = null;
@@ -14891,46 +14957,34 @@ function reconfigureCodeMirrorPanelTheme(panel) {
   return true;
 }
 
-function diffOverviewChunks(diff, totalLines) {
+function diffOverviewCollector() {
   const chunks = [];
-  let oldLine = 0;
-  let newLine = 0;
   let current = null;
   const pushCurrent = () => {
     if (current) chunks.push(current);
     current = null;
   };
-  const addChunk = (kind, line) => {
-    const start = Math.max(1, Number(line || 1));
-    if (current && current.kind === kind && start <= current.end + 1) {
-      current.end = Math.max(current.end, start);
-      return;
-    }
-    pushCurrent();
-    current = {kind, start, end: start};
+  return {
+    add(kind, line) {
+      const start = Math.max(1, Number(line || 1));
+      if (current && current.kind === kind && start <= current.end + 1) {
+        current.end = Math.max(current.end, start);
+        return;
+      }
+      pushCurrent();
+      current = {kind, start, end: start};
+    },
+    flush() {
+      pushCurrent();
+    },
+    finish() {
+      pushCurrent();
+      return chunks;
+    },
   };
-  for (const line of String(diff || '').split('\n')) {
-    const hunk = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
-    if (hunk) {
-      pushCurrent();
-      oldLine = Math.max(1, Number(hunk[1]) || 1);
-      newLine = Math.max(1, Number(hunk[2]) || 1);
-      continue;
-    }
-    if (!newLine || line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+')) {
-      addChunk('add', newLine);
-      newLine += 1;
-    } else if (line.startsWith('-')) {
-      addChunk('remove', newLine || oldLine);
-      oldLine += 1;
-    } else {
-      pushCurrent();
-      oldLine += 1;
-      newLine += 1;
-    }
-  }
-  pushCurrent();
+}
+
+function diffOverviewChunkPercentages(chunks, totalLines) {
   return chunks.map(chunk => ({
     ...chunk,
     top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
@@ -14938,41 +14992,50 @@ function diffOverviewChunks(diff, totalLines) {
   }));
 }
 
+function diffOverviewChunks(diff, totalLines) {
+  const collector = diffOverviewCollector();
+  let oldLine = 0;
+  let newLine = 0;
+  for (const line of String(diff || '').split('\n')) {
+    const hunk = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
+    if (hunk) {
+      collector.flush();
+      oldLine = Math.max(1, Number(hunk[1]) || 1);
+      newLine = Math.max(1, Number(hunk[2]) || 1);
+      continue;
+    }
+    if (!newLine || line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) {
+      collector.add('add', newLine);
+      newLine += 1;
+    } else if (line.startsWith('-')) {
+      collector.add('remove', newLine || oldLine);
+      oldLine += 1;
+    } else {
+      collector.flush();
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  return diffOverviewChunkPercentages(collector.finish(), totalLines);
+}
+
 function diffOverviewChunksFromDocuments(original, current, totalLines) {
   const left = String(original || '').split('\n');
   const right = String(current || '').split('\n');
-  const chunks = [];
-  let currentChunk = null;
-  const pushCurrent = () => {
-    if (currentChunk) chunks.push(currentChunk);
-    currentChunk = null;
-  };
-  const addChunk = (kind, line) => {
-    const start = Math.max(1, Number(line || 1));
-    if (currentChunk && currentChunk.kind === kind && start <= currentChunk.end + 1) {
-      currentChunk.end = Math.max(currentChunk.end, start);
-      return;
-    }
-    pushCurrent();
-    currentChunk = {kind, start, end: start};
-  };
+  const collector = diffOverviewCollector();
   const max = Math.max(left.length, right.length);
   for (let index = 0; index < max; index += 1) {
     const leftLine = left[index];
     const rightLine = right[index];
     if (leftLine === rightLine) {
-      pushCurrent();
+      collector.flush();
       continue;
     }
-    if (rightLine !== undefined) addChunk('add', index + 1);
-    if (leftLine !== undefined) addChunk('remove', Math.min(index + 1, totalLines));
+    if (rightLine !== undefined) collector.add('add', index + 1);
+    if (leftLine !== undefined) collector.add('remove', Math.min(index + 1, totalLines));
   }
-  pushCurrent();
-  return chunks.map(chunk => ({
-    ...chunk,
-    top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
-    height: Math.max(0.8, ((chunk.end - chunk.start + 1) / Math.max(1, totalLines)) * 100),
-  }));
+  return diffOverviewChunkPercentages(collector.finish(), totalLines);
 }
 
 function updateCodeMirrorDiffOverview(panel, container, state, currentText, original) {
@@ -15039,7 +15102,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmGeneration = generation;
   container.hidden = false;
   container.classList.add('file-editor-diff-codemirror');
-  if (!state.diffLoaded && !state.diffLoading) await refreshOpenFileDiff(path, {silent: true});
+  if (!state.diffLoaded && !state.diffLoading && !state.diffUnavailable) await refreshOpenFileDiff(path, {silent: true});
   if (panel._cmGeneration !== generation) return null;
   if (!openFileDiffAvailable(state) && !state.diffLoading) {
     setFileEditorPanelStatus(panel, state.diffError ? `diff unavailable: ${state.diffError}` : 'No diff for this file', 'warn');
@@ -15708,6 +15771,30 @@ function htmlPreviewHasDisabledJavaScript(text) {
   return /<script\b/i.test(source) || /\son[a-z]+\s*=/i.test(source);
 }
 
+function htmlPreviewUrl(path) {
+  return `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+}
+
+async function openHtmlPreviewWithAuth(path) {
+  const previewWindow = window.open('about:blank', '_blank');
+  if (previewWindow) previewWindow.opener = null;
+  try {
+    const response = await apiFetch(htmlPreviewUrl(path));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const source = await response.text();
+    const blobUrl = URL.createObjectURL(new Blob([source], {type: 'text/html'}));
+    if (previewWindow) {
+      previewWindow.location.href = blobUrl;
+    } else {
+      window.open(blobUrl, '_blank', 'noopener,noreferrer');
+    }
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+  } catch (error) {
+    if (previewWindow) previewWindow.close();
+    statusEl.innerHTML = `<span class="err">HTML preview failed: ${esc(error)}</span>`;
+  }
+}
+
 function renderHtmlPreviewInto(container, path, text) {
   const children = [];
   if (htmlPreviewHasDisabledJavaScript(text)) {
@@ -15716,9 +15803,14 @@ function renderHtmlPreviewInto(container, path, text) {
     const message = document.createElement('span');
     message.textContent = 'JavaScript is disabled in this sandboxed preview.';
     const link = document.createElement('a');
-    link.href = `/api/fs/html-preview?path=${encodeURIComponent(path)}`;
+    link.href = htmlPreviewUrl(path);
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
+    link.dataset.htmlPreviewAuth = '1';
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      openHtmlPreviewWithAuth(path);
+    });
     link.textContent = 'Open with JavaScript';
     notice.append(message, link);
     children.push(notice);
@@ -16249,7 +16341,7 @@ function panelControlsHtml(session, options = {}) {
   const readonlyAttrs = label => ` type="button" disabled title="${esc(label)} requires admin access" aria-label="${esc(label)}"`;
   const tabAttrs = (name, label = '') => {
     if (disabled) return disabledAttrs(label || name);
-    if (readOnlyMode && name === 'summary') return readonlyAttrs('AI summary');
+    if (readOnlyMode && name === 'summary') return readonlyAttrs('AI Transcript');
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
@@ -16327,9 +16419,9 @@ function createPanel(session) {
       </div>
       <div id="summary-pane-${session}" class="tab-pane">
         <div class="summary">
-          <div class="transcript-head">AI summary</div>
+          <div class="transcript-head">AI Transcript for session '${esc(sessionLabel(session))}'</div>
           <div id="summary-context-${session}" class="summary-context">loading session context...</div>
-          <pre id="summary-${session}" class="summary-preview">click AI summary to generate a Codex summary of the last hour</pre>
+          <div id="summary-${session}" class="summary-preview markdown-body">click "AI Transcript" to generate a Codex summary of the last hour</div>
         </div>
       </div>
       <div id="events-pane-${session}" class="tab-pane">
@@ -17332,6 +17424,7 @@ async function setAutoApprove(session, enabled) {
     if (!response.ok) {
       if (payload?.target || payload?.session) {
         autoApproveStates.set(session, payload);
+        updateDocumentTitle();
         updateSessionButtonStates();
         renderAutoApproveButton(session, payload);
       }
@@ -17339,6 +17432,7 @@ async function setAutoApprove(session, enabled) {
       return;
     }
     autoApproveStates.set(session, payload);
+    updateDocumentTitle();
     updateSessionButtonStates();
     renderAutoApproveButton(session, payload);
     statusEl.innerHTML = payload.enabled
@@ -17383,6 +17477,7 @@ async function loadAutoStatuses() {
       } catch (_) {}
     }
   }
+  updateDocumentTitle();
 }
 
 function autoApproveOwnerLabel(payload) {
@@ -17435,52 +17530,62 @@ function startSummaryStream(session) {
   const node = document.getElementById(`summary-${session}`);
   if (!node) return;
   if (readOnlyMode) {
-    node.textContent = 'AI summary requires admin access.';
-    statusEl.innerHTML = '<span class="err">readonly access cannot run AI summary</span>';
+    node.textContent = 'AI Transcript requires admin access.';
+    statusEl.innerHTML = '<span class="err">readonly access cannot run AI Transcript</span>';
     return;
   }
-  node.textContent = 'starting structured Codex summary for the last hour...\n\n';
+  // Accumulate the raw streamed text and render it through the markdown pipeline
+  // (coalesced to one render per frame) so the panel shows formatted markdown,
+  // not raw `##`/`**`/backticks. The leading `[codex]` status lines render as
+  // plain paragraphs, then the model's markdown summary renders properly.
+  let raw = 'Starting structured Codex summary for the last hour…\n\n';
+  let renderScheduled = false;
+  const renderSummary = () => {
+    renderScheduled = false;
+    renderMarkdownPreviewInto(node, raw);
+    node.scrollTop = node.scrollHeight;
+  };
+  const appendSummary = text => {
+    raw += text;
+    if (!renderScheduled) {
+      renderScheduled = true;
+      requestAnimationFrame(renderSummary);
+    }
+  };
+  renderSummary();
   const source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
   summaryStreams.set(session, source);
   source.addEventListener('meta', event => {
     const payload = JSON.parse(event.data);
     const fallback = payload.fallback ? 'recent transcript tail' : 'last hour';
     const projectCount = Array.isArray(payload.projects) ? payload.projects.length : 0;
-    node.textContent += `[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`;
-    if (payload.summary_model) node.textContent += `[codex] model: ${payload.summary_model}; effort: ${payload.summary_effort || 'default'}\n`;
-    node.textContent += `[codex] project inventory: ${projectCount} sessions\n\n`;
-    node.scrollTop = node.scrollHeight;
+    appendSummary(`[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`);
+    if (payload.summary_model) appendSummary(`[codex] model: ${payload.summary_model}; effort: ${payload.summary_effort || 'default'}\n`);
+    appendSummary(`[codex] project inventory: ${projectCount} sessions\n\n`);
   });
   source.addEventListener('log', event => {
     const payload = JSON.parse(event.data);
-    if (payload.text) {
-      node.textContent += `[codex] ${payload.text}\n`;
-      node.scrollTop = node.scrollHeight;
-    }
+    if (payload.text) appendSummary(`[codex] ${payload.text}\n`);
   });
   source.addEventListener('delta', event => {
     const payload = JSON.parse(event.data);
-    if (payload.text) {
-      node.textContent += payload.text;
-      node.scrollTop = node.scrollHeight;
-    }
+    if (payload.text) appendSummary(payload.text);
   });
   source.addEventListener('summary_error', event => {
     const payload = JSON.parse(event.data);
-    node.textContent += `\n[error] ${payload.error || 'summary failed'}\n`;
-    node.scrollTop = node.scrollHeight;
+    appendSummary(`\n[error] ${payload.error || 'summary failed'}\n`);
     stopSummaryStream(session);
   });
   source.addEventListener('done', event => {
     const payload = JSON.parse(event.data);
     if (payload.return_code && payload.return_code !== 0) {
-      node.textContent += `\n[codex exited ${payload.return_code}]\n`;
+      appendSummary(`\n[codex exited ${payload.return_code}]\n`);
     }
     stopSummaryStream(session);
   });
   source.onerror = () => {
     if (summaryStreams.get(session) !== source) return;
-    node.textContent += '\n[error] summary stream disconnected\n';
+    appendSummary('\n[error] summary stream disconnected\n');
     stopSummaryStream(session);
   };
 }
@@ -17492,10 +17597,63 @@ function stopSummaryStream(session) {
   summaryStreams.delete(session);
 }
 
+function reloadIsSafe() {
+  // Don't yank the page out from under unsaved work or active typing.
+  for (const file of openFiles.values()) {
+    if (file?.dirty) return false;
+  }
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return false;
+  return true;
+}
+
+function showServerUpdateBanner(version) {
+  let banner = document.getElementById('serverUpdateBanner');
+  if (banner) {
+    banner.dataset.version = version;
+    return;
+  }
+  banner = document.createElement('div');
+  banner.id = 'serverUpdateBanner';
+  banner.className = 'server-update-banner';
+  banner.dataset.version = version;
+  const msg = document.createElement('span');
+  msg.className = 'server-update-banner-msg';
+  msg.textContent = 'New YOLOmux version available';
+  const reload = document.createElement('button');
+  reload.type = 'button';
+  reload.className = 'server-update-banner-reload';
+  reload.textContent = 'Reload';
+  reload.addEventListener('click', () => location.reload());
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'server-update-banner-dismiss';
+  dismiss.setAttribute('aria-label', 'Dismiss');
+  dismiss.textContent = '×';
+  dismiss.addEventListener('click', () => banner.remove());
+  banner.append(msg, reload, dismiss);
+  document.body.appendChild(banner);
+}
+
+function maybeHandleServerVersionChange(serverVersion) {
+  // The boot version (bootstrap.version) only updates on page load; this lets a
+  // long-lived open client learn that a newer server shipped, via the metadata poll.
+  if (!serverVersion || serverVersion === bootstrap.version) return;
+  if (!boolSetting('general.reload_on_update', false)) return;
+  if (serverVersionReloadHandled === serverVersion) return;
+  serverVersionReloadHandled = serverVersion;
+  if (boolSetting('general.reload_on_update_auto', false) && reloadIsSafe()) {
+    location.reload();
+    return;
+  }
+  showServerUpdateBanner(serverVersion);
+}
+
 async function refreshTranscripts() {
   try {
     const response = await apiFetch('/api/transcripts');
     transcriptMeta = await response.json();
+    maybeHandleServerVersionChange(transcriptMeta.server_version);
     updateMetadataBadgePulses(transcriptMeta);
     const previousActive = activeSessions.slice();
     const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);

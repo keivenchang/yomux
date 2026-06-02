@@ -936,7 +936,7 @@ function showSessionContextMenu(session, x, y, options = {}) {
   for (const item of tmuxSessionActionCommands(session, {renameAction, includeKill: false})) {
     appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {disabled: item.disabled, checked: item.checked});
   }
-  const viewItems = tmuxSessionViewCommands(session).filter(item => ['Transcript', 'AI summary', 'Event log'].includes(item.label));
+  const viewItems = tmuxSessionViewCommands(session).filter(item => item.label !== 'Pane details');
   for (const item of viewItems) {
     appendContextMenuButton(menu, item.label, item.action, closeSessionContextMenu, {
       disabled: item.disabled,

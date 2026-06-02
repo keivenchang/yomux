@@ -228,6 +228,23 @@ def test_search_files_recursive_walks_indexed_non_repo_root_but_skips_heavy_dirs
     assert "node_modules/target_file.js" not in paths
 
 
+def test_search_files_ranks_exact_filename_above_large_generated_sibling(tmp_path):
+    root = tmp_path / "dynamo"
+    logs = root / "commits" / "logs"
+    target_dir = root / "notes" / "tool-calling" / "DIS-1850__jinja-spike"
+    logs.mkdir(parents=True)
+    target_dir.mkdir(parents=True)
+    for index in range(30):
+        (logs / f"ea-1850-{index:02d}-premerge.html").write_text("generated\n", encoding="utf-8")
+    target = target_dir / "DIS-1850.md"
+    target.write_text("# DIS-1850\n", encoding="utf-8")
+
+    payload = filesystem.search_files(str(root), "DIS-1850", 5, recursive=True)
+
+    assert payload["truncated"] is True
+    assert payload["files"][0]["relative_path"] == "notes/tool-calling/DIS-1850__jinja-spike/DIS-1850.md"
+
+
 def test_search_files_matches_absolute_path_segments(tmp_path):
     project = tmp_path / "home" / "keivenc" / "project"
     project.mkdir(parents=True)

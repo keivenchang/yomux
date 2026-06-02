@@ -20,6 +20,7 @@ from .common import CONFIG_DIR
 from .common import git
 from .common import is_generated_upload_name
 from .common import run_cmd
+from . import file_index
 
 MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
 MAX_WRITE_BYTES = 5 * 1024 * 1024  # 5 MB cap on file write
@@ -274,17 +275,77 @@ def list_directory(raw_path: str) -> dict[str, Any]:
 
 
 def _fuzzy_subsequence_match(query: str, text: str) -> bool:
+    return _fuzzy_subsequence_span(query, text) is not None
+
+
+def _compact_search_text(value: str) -> str:
+    return "".join(str(value or "").lower().split())
+
+
+def _fuzzy_subsequence_span(query: str, text: str) -> int | None:
     needle = "".join(str(query or "").lower().split())
     if not needle:
-        return True
+        return 0
     position = 0
     haystack = str(text or "").lower()
+    start = -1
+    end = -1
     for char in needle:
         index = haystack.find(char, position)
         if index < 0:
-            return False
+            return None
+        if start < 0:
+            start = index
+        end = index
         position = index + 1
-    return True
+    return end - start + 1
+
+
+def _search_token_rank(token: str, path: Path, rel: str) -> int | None:
+    needle = _compact_search_text(token)
+    if not needle:
+        return 0
+    basename = _compact_search_text(path.name)
+    stem = _compact_search_text(path.stem)
+    rel_text = _compact_search_text(rel)
+    path_text = _compact_search_text(str(path))
+
+    if needle in (stem, basename):
+        return 0
+    if stem.startswith(needle) or basename.startswith(needle):
+        return 10
+    index = stem.find(needle)
+    if index >= 0:
+        return 20 + index
+    index = basename.find(needle)
+    if index >= 0:
+        return 30 + index
+    span = _fuzzy_subsequence_span(needle, stem)
+    if span is not None:
+        return 50 + span
+    span = _fuzzy_subsequence_span(needle, basename)
+    if span is not None:
+        return 60 + span
+    index = rel_text.find(needle)
+    if index >= 0:
+        return 90 + index
+    span = _fuzzy_subsequence_span(needle, rel_text)
+    if span is not None:
+        return 130 + rel.count("/") * 4 + span
+    span = _fuzzy_subsequence_span(needle, path_text)
+    if span is not None:
+        return 170 + rel.count("/") * 4 + span
+    return None
+
+
+def _search_entry_sort_key(path: Path, rel: str, tokens: list[str]) -> tuple[int, int, int, int, int, str] | None:
+    ranks = [_search_token_rank(token, path, rel) for token in tokens]
+    if any(rank is None for rank in ranks):
+        return None
+    if not ranks:
+        return (0, 0, 0, rel.count("/"), len(rel), rel.lower())
+    basename_hits = sum(1 for rank in ranks if rank is not None and rank < 90)
+    return (min(ranks), sum(ranks), -basename_hits, rel.count("/"), len(rel), rel.lower())
 
 
 def _search_limit(raw_limit: int | str | None) -> int:
@@ -306,8 +367,8 @@ def _search_file_entry(root: Path, path: Path, tokens: list[str]) -> dict[str, A
         rel = path.relative_to(root).as_posix()
     except ValueError:
         rel = path.name
-    haystack = f"{path} {rel} {path.name}"
-    if tokens and not all(_fuzzy_subsequence_match(token, haystack) for token in tokens):
+    sort_key = _search_entry_sort_key(path, rel, tokens)
+    if sort_key is None:
         return None
     return {
         "name": path.name,
@@ -317,10 +378,11 @@ def _search_file_entry(root: Path, path: Path, tokens: list[str]) -> dict[str, A
         "size": int(st.st_size),
         "mtime": int(st.st_mtime),
         "uploaded": is_generated_upload_name(path),
+        "_sort_key": sort_key,
     }
 
 
-def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results: list[dict[str, Any]], max_results: int) -> tuple[int, int, bool]:
+def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results: list[dict[str, Any]]) -> tuple[int, int, bool]:
     visited_dirs = 0
     visited_files = 0
     truncated = False
@@ -344,11 +406,7 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
             entry = _search_file_entry(root, Path(current) / name, tokens)
             if entry is not None:
                 results.append(entry)
-                if len(results) >= max_results:
-                    truncated = True
-                    dirs[:] = []
-                    break
-        if len(results) >= max_results or visited_files > MAX_SEARCH_FILES:
+        if visited_files > MAX_SEARCH_FILES:
             break
     return visited_dirs, visited_files, truncated
 
@@ -361,13 +419,43 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
         raise FilesystemError(f"not a directory: {root}", status=400)
     max_results = _search_limit(limit)
     tokens = [token for token in str(query or "").split() if token]
+    full_tree = bool(recursive) or bool(git_root_for_path(root))
+    if full_tree:
+        # Accelerate full-tree quick-open with the persistent index: it covers the
+        # whole tree (no 20k/50k walk cap) and needs no per-query walk. Warm/refresh
+        # it in the background; until it is ready we fall back to the live walk below
+        # (stale-while-revalidate), so search never blocks on indexing.
+        index = file_index.ensure_index(root, SEARCH_SKIP_DIRS)
+        if tokens and index.ready:
+            def _match(path_str: str, name: str, rel: str) -> dict[str, Any] | None:
+                sort_key = _search_entry_sort_key(Path(path_str), rel, tokens)
+                if sort_key is None:
+                    return None
+                return {
+                    "name": name,
+                    "path": path_str,
+                    "relative_path": rel,
+                    "kind": "file",
+                    "uploaded": is_generated_upload_name(Path(path_str)),
+                    "_sort_key": sort_key,
+                }
+            indexed_results, indexed_truncated = file_index.search_index(index, _match, max_results)
+            for entry in indexed_results:
+                entry.pop("_sort_key", None)
+            return {
+                "root": str(root),
+                "query": str(query or ""),
+                "limit": max_results,
+                "truncated": indexed_truncated,
+                "files": indexed_results,
+            }
     results: list[dict[str, Any]] = []
     visited_dirs = 0
     visited_files = 0
     truncated = False
     try:
-        if recursive or git_root_for_path(root):
-            visited_dirs, visited_files, truncated = _search_full_tree(root, root, tokens, results, max_results)
+        if full_tree:
+            visited_dirs, visited_files, truncated = _search_full_tree(root, root, tokens, results)
         else:
             visited_dirs = 1
             direct_names = sorted(os.listdir(root), key=str.lower)
@@ -376,7 +464,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                     continue
                 path = root / name
                 if path.is_dir() and _directory_is_repo(path):
-                    child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results, max_results)
+                    child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results)
                     visited_dirs += child_dirs
                     visited_files += child_files
                     truncated = truncated or child_truncated
@@ -392,13 +480,16 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                 if entry is None:
                     continue
                 results.append(entry)
-                if len(results) >= max_results:
-                    truncated = True
-                    break
     except PermissionError as exc:
         raise FilesystemError(str(exc), status=403)
     except OSError as exc:
         raise FilesystemError(str(exc), status=500)
+    results.sort(key=lambda entry: entry.get("_sort_key", (999, 999, 0, 999, 999, "")))
+    if len(results) > max_results:
+        truncated = True
+        results = results[:max_results]
+    for entry in results:
+        entry.pop("_sort_key", None)
     return {
         "root": str(root),
         "query": str(query or ""),

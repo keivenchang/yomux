@@ -22,6 +22,8 @@ from .tmux_utils import tmux
 
 
 TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
+# Newest-by-name rollout files to consider per cwd lookup (bounds work on a large tree).
+CODEX_TRANSCRIPT_SCAN_LIMIT = 80
 _TRANSCRIPT_LOOKUP_CACHE_LOCK = threading.Lock()
 _TRANSCRIPT_LOOKUP_CACHE: dict[tuple[str, str, str], tuple[float, Path | None]] = {}
 
@@ -319,12 +321,16 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
     cached = cached_transcript_lookup("codex-cwd", root, cwd)
     if cached is not _CACHE_MISS:
         return cached
-    files = sorted(root.glob("**/rollout-*.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
-    for path in files[:80]:
+    # rollout files are named rollout-<ISO timestamp>-<uuid>.jsonl, so a reverse
+    # lexicographic sort by filename is recency-ordered without a per-file stat() —
+    # avoiding an O(files) syscall storm over the whole tree on every cache miss.
+    # Capping the candidate window also bounds work on a large ~/.codex/sessions tree.
+    files = sorted(root.glob("**/rollout-*.jsonl"), key=lambda path: path.name, reverse=True)[:CODEX_TRANSCRIPT_SCAN_LIMIT]
+    for path in files:
         if codex_transcript_header_cwd(path) == cwd:
             return set_cached_transcript_lookup("codex-cwd", root, cwd, path)
     needle = json.dumps(cwd)
-    for path in files[:80]:
+    for path in files:
         try:
             tail = tail_file_lines(path, 300)
         except OSError:

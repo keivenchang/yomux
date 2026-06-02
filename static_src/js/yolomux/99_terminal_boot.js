@@ -70,7 +70,7 @@ function panelControlsHtml(session, options = {}) {
   const readonlyAttrs = label => ` type="button" disabled title="${esc(label)} requires admin access" aria-label="${esc(label)}"`;
   const tabAttrs = (name, label = '') => {
     if (disabled) return disabledAttrs(label || name);
-    if (readOnlyMode && name === 'summary') return readonlyAttrs('AI summary');
+    if (readOnlyMode && name === 'summary') return readonlyAttrs('AI Transcript');
     const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
     return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
   };
@@ -148,9 +148,9 @@ function createPanel(session) {
       </div>
       <div id="summary-pane-${session}" class="tab-pane">
         <div class="summary">
-          <div class="transcript-head">AI summary</div>
+          <div class="transcript-head">AI Transcript for session '${esc(sessionLabel(session))}'</div>
           <div id="summary-context-${session}" class="summary-context">loading session context...</div>
-          <pre id="summary-${session}" class="summary-preview">click AI summary to generate a Codex summary of the last hour</pre>
+          <div id="summary-${session}" class="summary-preview markdown-body">click "AI Transcript" to generate a Codex summary of the last hour</div>
         </div>
       </div>
       <div id="events-pane-${session}" class="tab-pane">
@@ -1153,6 +1153,7 @@ async function setAutoApprove(session, enabled) {
     if (!response.ok) {
       if (payload?.target || payload?.session) {
         autoApproveStates.set(session, payload);
+        updateDocumentTitle();
         updateSessionButtonStates();
         renderAutoApproveButton(session, payload);
       }
@@ -1160,6 +1161,7 @@ async function setAutoApprove(session, enabled) {
       return;
     }
     autoApproveStates.set(session, payload);
+    updateDocumentTitle();
     updateSessionButtonStates();
     renderAutoApproveButton(session, payload);
     statusEl.innerHTML = payload.enabled
@@ -1204,6 +1206,7 @@ async function loadAutoStatuses() {
       } catch (_) {}
     }
   }
+  updateDocumentTitle();
 }
 
 function autoApproveOwnerLabel(payload) {
@@ -1256,52 +1259,62 @@ function startSummaryStream(session) {
   const node = document.getElementById(`summary-${session}`);
   if (!node) return;
   if (readOnlyMode) {
-    node.textContent = 'AI summary requires admin access.';
-    statusEl.innerHTML = '<span class="err">readonly access cannot run AI summary</span>';
+    node.textContent = 'AI Transcript requires admin access.';
+    statusEl.innerHTML = '<span class="err">readonly access cannot run AI Transcript</span>';
     return;
   }
-  node.textContent = 'starting structured Codex summary for the last hour...\n\n';
+  // Accumulate the raw streamed text and render it through the markdown pipeline
+  // (coalesced to one render per frame) so the panel shows formatted markdown,
+  // not raw `##`/`**`/backticks. The leading `[codex]` status lines render as
+  // plain paragraphs, then the model's markdown summary renders properly.
+  let raw = 'Starting structured Codex summary for the last hour…\n\n';
+  let renderScheduled = false;
+  const renderSummary = () => {
+    renderScheduled = false;
+    renderMarkdownPreviewInto(node, raw);
+    node.scrollTop = node.scrollHeight;
+  };
+  const appendSummary = text => {
+    raw += text;
+    if (!renderScheduled) {
+      renderScheduled = true;
+      requestAnimationFrame(renderSummary);
+    }
+  };
+  renderSummary();
   const source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
   summaryStreams.set(session, source);
   source.addEventListener('meta', event => {
     const payload = JSON.parse(event.data);
     const fallback = payload.fallback ? 'recent transcript tail' : 'last hour';
     const projectCount = Array.isArray(payload.projects) ? payload.projects.length : 0;
-    node.textContent += `[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`;
-    if (payload.summary_model) node.textContent += `[codex] model: ${payload.summary_model}; effort: ${payload.summary_effort || 'default'}\n`;
-    node.textContent += `[codex] project inventory: ${projectCount} sessions\n\n`;
-    node.scrollTop = node.scrollHeight;
+    appendSummary(`[codex] summarizing ${fallback} for ${payload.focus_root || session}\n`);
+    if (payload.summary_model) appendSummary(`[codex] model: ${payload.summary_model}; effort: ${payload.summary_effort || 'default'}\n`);
+    appendSummary(`[codex] project inventory: ${projectCount} sessions\n\n`);
   });
   source.addEventListener('log', event => {
     const payload = JSON.parse(event.data);
-    if (payload.text) {
-      node.textContent += `[codex] ${payload.text}\n`;
-      node.scrollTop = node.scrollHeight;
-    }
+    if (payload.text) appendSummary(`[codex] ${payload.text}\n`);
   });
   source.addEventListener('delta', event => {
     const payload = JSON.parse(event.data);
-    if (payload.text) {
-      node.textContent += payload.text;
-      node.scrollTop = node.scrollHeight;
-    }
+    if (payload.text) appendSummary(payload.text);
   });
   source.addEventListener('summary_error', event => {
     const payload = JSON.parse(event.data);
-    node.textContent += `\n[error] ${payload.error || 'summary failed'}\n`;
-    node.scrollTop = node.scrollHeight;
+    appendSummary(`\n[error] ${payload.error || 'summary failed'}\n`);
     stopSummaryStream(session);
   });
   source.addEventListener('done', event => {
     const payload = JSON.parse(event.data);
     if (payload.return_code && payload.return_code !== 0) {
-      node.textContent += `\n[codex exited ${payload.return_code}]\n`;
+      appendSummary(`\n[codex exited ${payload.return_code}]\n`);
     }
     stopSummaryStream(session);
   });
   source.onerror = () => {
     if (summaryStreams.get(session) !== source) return;
-    node.textContent += '\n[error] summary stream disconnected\n';
+    appendSummary('\n[error] summary stream disconnected\n');
     stopSummaryStream(session);
   };
 }
@@ -1313,10 +1326,63 @@ function stopSummaryStream(session) {
   summaryStreams.delete(session);
 }
 
+function reloadIsSafe() {
+  // Don't yank the page out from under unsaved work or active typing.
+  for (const file of openFiles.values()) {
+    if (file?.dirty) return false;
+  }
+  const active = document.activeElement;
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return false;
+  return true;
+}
+
+function showServerUpdateBanner(version) {
+  let banner = document.getElementById('serverUpdateBanner');
+  if (banner) {
+    banner.dataset.version = version;
+    return;
+  }
+  banner = document.createElement('div');
+  banner.id = 'serverUpdateBanner';
+  banner.className = 'server-update-banner';
+  banner.dataset.version = version;
+  const msg = document.createElement('span');
+  msg.className = 'server-update-banner-msg';
+  msg.textContent = 'New YOLOmux version available';
+  const reload = document.createElement('button');
+  reload.type = 'button';
+  reload.className = 'server-update-banner-reload';
+  reload.textContent = 'Reload';
+  reload.addEventListener('click', () => location.reload());
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button';
+  dismiss.className = 'server-update-banner-dismiss';
+  dismiss.setAttribute('aria-label', 'Dismiss');
+  dismiss.textContent = '×';
+  dismiss.addEventListener('click', () => banner.remove());
+  banner.append(msg, reload, dismiss);
+  document.body.appendChild(banner);
+}
+
+function maybeHandleServerVersionChange(serverVersion) {
+  // The boot version (bootstrap.version) only updates on page load; this lets a
+  // long-lived open client learn that a newer server shipped, via the metadata poll.
+  if (!serverVersion || serverVersion === bootstrap.version) return;
+  if (!boolSetting('general.reload_on_update', false)) return;
+  if (serverVersionReloadHandled === serverVersion) return;
+  serverVersionReloadHandled = serverVersion;
+  if (boolSetting('general.reload_on_update_auto', false) && reloadIsSafe()) {
+    location.reload();
+    return;
+  }
+  showServerUpdateBanner(serverVersion);
+}
+
 async function refreshTranscripts() {
   try {
     const response = await apiFetch('/api/transcripts');
     transcriptMeta = await response.json();
+    maybeHandleServerVersionChange(transcriptMeta.server_version);
     updateMetadataBadgePulses(transcriptMeta);
     const previousActive = activeSessions.slice();
     const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);

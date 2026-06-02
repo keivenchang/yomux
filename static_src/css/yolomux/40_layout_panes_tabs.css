@@ -90,11 +90,7 @@
 .layout-resizing .resizer-row::before {
   left: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
   right: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
-  background: repeating-linear-gradient(
-    to bottom,
-    var(--drop-outline-strong) 0 6px,
-    transparent 6px 10px
-  );
+  background: var(--pane-resizer-hover-bg);
 }
 .resizer-column {
   height: var(--pane-resizer-size);
@@ -111,11 +107,7 @@
 .layout-resizing .resizer-column::before {
   top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
   bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
-  background: repeating-linear-gradient(
-    to right,
-    var(--drop-outline-strong) 0 6px,
-    transparent 6px 10px
-  );
+  background: var(--pane-resizer-hover-bg);
 }
 body.layout-resizing-row,
 body.layout-resizing-row * {
