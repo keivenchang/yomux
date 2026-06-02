@@ -1535,9 +1535,13 @@ function codeMirrorConfigSignature(path, options = {}) {
   });
 }
 
-function codeMirrorDiffLayout(container) {
-  const width = Math.round(container?.getBoundingClientRect?.().width || 0);
-  return width >= 800 ? 'side' : 'inline';
+function codeMirrorDiffLayout(_container) {
+  // Always use the unified (inline) merge view at every pane width: deleted rows render as read-only
+  // widgets with NO line number. The side-by-side MergeView numbers the old file (including deleted
+  // rows), and @codemirror/merge exposes no public chunk access to suppress only those numbers, so a
+  // wide pane previously showed numbered red lines (image 075). Unified guarantees the user's "no
+  // number on red lines in ANY layout" requirement.
+  return 'inline';
 }
 
 function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {

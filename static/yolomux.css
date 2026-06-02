@@ -2745,6 +2745,23 @@ button:disabled:hover { border-color: var(--line); }
   bottom: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
   background: var(--pane-resizer-hover-bg);
 }
+/* Invisible grab zone extending ~5px past the 1px line on each side (absolute overlay = no layout
+   width), so the divider is easy to grab while the visible seam stays 1px. */
+.layout-resizer::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+}
+.resizer-row::after {
+  inset-block: 0;
+  inset-inline: -5px;
+  cursor: col-resize;
+}
+.resizer-column::after {
+  inset-inline: 0;
+  inset-block: -5px;
+  cursor: row-resize;
+}
 body.layout-resizing-row,
 body.layout-resizing-row * {
   cursor: col-resize !important;
@@ -2809,6 +2826,15 @@ body.layout-resizing {
   left: 6px;
   height: calc(50% - 9px);
 }
+/* Root top/bottom preview must not cover a docked Finder (which is sacred): start after it and span
+   only the non-Finder content width. The vars are set by applyDockedFileExplorerBoundaryPreviewGeometry
+   when a Finder is docked, and default to the full grid width (minus the 6px insets) otherwise. */
+.grid.drop-preview-root.drop-preview-top::before,
+.grid.drop-preview-root.drop-preview-bottom::before {
+  right: auto;
+  left: var(--drop-preview-left, 6px);
+  width: var(--drop-preview-width, calc(100% - 12px));
+}
 .drop-slot.drop-preview-left::before,
 .grid.drop-preview-root.drop-preview-left::before {
   top: 6px;
@@ -2834,7 +2860,7 @@ body.layout-resizing {
   min-width: 0;
   min-height: 0;
   height: 100%;
-  border: 1px solid var(--line);
+  border: 0;
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
   display: grid;
