@@ -550,7 +550,14 @@ function positionPaneTabPopover(tab) {
   const bridgeGap = 3;
   const edgeGap = popoverEdgeGapPx();
   const topbarBottom = Math.ceil(topbar?.getBoundingClientRect?.().bottom || rootCssLengthPx('--topbar-height') || 0);
-  const width = Math.ceil(popover?.getBoundingClientRect?.().width || rect.width || 0);
+  const bounds = viewportBounds(edgeGap);
+  const maxInline = Math.max(0, bounds.right - bounds.left);
+  // #45: when the live popover width measures 0 (e.g. before first paint), fall back to the popover's
+  // CSS inline size (capped to the viewport) — NOT the tiny tab width. Over-estimating only pulls a
+  // near-right-edge popover further left; clamping to the tab width let a wide needs-input popover
+  // overflow and clip off the top-right corner.
+  const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
+  const width = Math.min(maxInline, measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const position = clampToViewport(
     Math.floor(rect.left),

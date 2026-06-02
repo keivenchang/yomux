@@ -1942,7 +1942,9 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       },
       parent: container,
       revertControls: 'a-to-b',
-      highlightChanges: true,
+      // DOIT.6 #44: show each change as TWO uniform full lines (old solid red + new solid green) with
+      // NO intra-line word/token highlight — even a 1-char edit shows whole-line red + whole-line green.
+      highlightChanges: false,
       gutter: true,
       collapseUnchanged: {margin: 3, minSize: 8},
     });
@@ -1955,7 +1957,8 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       extensions: [
         api.unifiedMergeView({
           original,
-          highlightChanges: true,
+          // DOIT.6 #44: full-line red/green only, no intra-line token highlight (see MergeView above).
+          highlightChanges: false,
           gutter: true,
           mergeControls: !readOnlyMode && diffEditsAllowed,
           collapseUnchanged: {margin: 3, minSize: 8},

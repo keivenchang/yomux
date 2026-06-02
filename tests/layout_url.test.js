@@ -1833,7 +1833,10 @@ function makeFileTree(paths) {
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
   const changedFilesCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.changes-status\s*\{[\s\S]*width:\s*13px/.test(changedFilesCss), 'modified-file status chips are skinny');
-  assert.ok(/\.changes-file-name\s*\{[\s\S]*font-weight:\s*500/.test(changedFilesCss), 'modified-file names are not bold');
+  // #46: Modified-files rows match the Finder file tree — the row uses the file-explorer font size and
+  // the filename carries no semibold/bold weight (regular, not big bold white).
+  assert.ok(/\.changes-file-row\s*\{[\s\S]*font-size:\s*var\(--file-explorer-font-size\)/.test(changedFilesCss), '#46: modified-file rows use the Finder file-tree font size');
+  assert.equal(/\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
   assert.ok(/\.changes-tree-folder-row\s*\{[\s\S]*grid-template-columns:\s*12px 16px minmax\(0, 1fr\) auto/.test(changedFilesCss), 'modified-file folders use a compact GitLens-style tree row');
   assert.ok(changedFilesCss.includes('.changes-status-r,'), 'modified-file rename/copy statuses get distinct colors');
   assert.ok(changedFilesCss.includes('body.theme-light .changes-comparison-head'), 'light theme explicitly restyles the Changes comparison header');
@@ -2078,8 +2081,6 @@ function makeFileTree(paths) {
   assert.equal(preferencesCss.includes('--code-diff-remove: #e06c75'), false, 'muted one-dark diff red must not return as the YOLOmux dark default');
   assert.ok(preferencesCss.includes('var(--code-diff-remove) 76%'), '#39: dark diff removed-line fill is high-contrast');
   assert.ok(preferencesCss.includes('var(--code-diff-add) 74%'), '#39: dark diff added-line fill is high-contrast');
-  assert.ok(preferencesCss.includes('var(--code-diff-remove) 90%'), '#39: dark diff removed-token fill is stronger than the line tint');
-  assert.ok(preferencesCss.includes('var(--code-diff-add) 88%'), '#39: dark diff added-token fill is stronger than the line tint');
   assert.ok(preferencesCss.includes('.file-editor-icon-side-split'), 'cross-pane side preview has a distinct icon');
   assert.ok(preferencesCss.includes('.panel.preview-linked:not(.active-pane)'), 'paired side-preview pane gets a thinner linked ring');
   assert.ok(/\.yoagent-global\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent global summary fits narrow panes');
@@ -2099,7 +2100,13 @@ function makeFileTree(paths) {
   assert.ok(/--diff-remove-line-bg:\s*color-mix\(in srgb, var\(--code-diff-remove\) 76%/.test(preferencesCss), '#39: diff removed lines use a high-contrast red fill');
   assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(preferencesCss), false, 'deleted rows carry no number via unified-merge read-only widgets, not a transparent-text gutter hack');
   assert.ok(preferencesCss.includes('clip-path: inset(0 -100vw)'), 'diff line backgrounds extend to the full editor width');
-  assert.ok(preferencesCss.includes('.file-editor-diff-codemirror .cm-insertedLine .cm-insertedText'), 'whole-line inserted rows suppress ragged token overlays');
+  // #44: diffs render as full-line red/green only (highlightChanges:false in both merge views) — there
+  // is no intra-line token overlay at all, so the .cm-*Text rules and --diff-*-text-bg tokens are gone.
+  const diffBundle = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.equal((diffBundle.match(/highlightChanges: false/g) || []).length, 2, '#44: both merge views disable intra-line change highlighting');
+  assert.equal(diffBundle.includes('highlightChanges: true'), false, '#44: no merge view re-enables intra-line highlighting');
+  assert.equal(preferencesCss.includes('cm-insertedText'), false, '#44: the dead intra-line token rules are removed');
+  assert.equal(preferencesCss.includes('--diff-add-text-bg'), false, '#44: the unused intra-line text-bg token is removed');
   assert.ok(preferencesCss.includes('.file-tree-row.repo-non-main'), 'Finder repo rows have non-main branch styling');
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
@@ -2300,6 +2307,16 @@ function makeFileTree(paths) {
   });
   const clampedPopoverLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
   assert.ok(clampedPopoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
+  // #45: a needs-input popover near the top-right whose live width measures 0 (pre-paint) must still
+  // clamp fully on-screen for its real rendered width — using the popover inline-size fallback, NOT the
+  // tiny tab width (which let a wide popover overflow/clip off the right edge).
+  const zeroWidthPopover = {getBoundingClientRect() { return {left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0}; }};
+  api.positionPaneTabPopover({
+    getBoundingClientRect() { return {left: 1080, right: 1160, top: 40, bottom: 68, width: 80, height: 28}; },
+    querySelector() { return zeroWidthPopover; },
+  });
+  const zeroWidthLeft = Number.parseInt(popoverStyle.getPropertyValue('--pane-tab-popover-left'), 10);
+  assert.ok(zeroWidthLeft + 520 <= 1200, '#45: an unmeasured (0-width) right-edge popover still clamps on-screen for its real width');
   const viewportClamp = api.clampToViewport(1190, 790, 100, 100, {edgeGap: 8});
   assert.equal(viewportClamp.left, 1092);
   assert.equal(viewportClamp.top, 692);

@@ -278,7 +278,9 @@
   color: var(--text);
   text-align: left;
   font-family: var(--ui-font);
-  line-height: 1.12;
+  /* DOIT.6 #46: Modified-files rows read like the Finder file tree (same font size + line-height). */
+  font-size: var(--file-explorer-font-size);
+  line-height: 1.4;
   cursor: pointer;
 }
 .changes-file-row.compact {
@@ -355,8 +357,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--ui-font-size-sm);
-  font-weight: 500;
+  /* DOIT.6 #46: match the Finder file tree — regular weight + the file-explorer font size (inherited
+     from the row), not a larger semibold bright filename. */
 }
 .changes-file-path,
 .changes-file-meta {
