@@ -421,6 +421,7 @@
   "filetab.missing": "丢失",
   "preview.jsDisabled": "此沙箱预览已禁用 JavaScript。",
   "preview.openWithJs": "以 JavaScript 打开",
+  "preview.openFailed": "无法打开 {path}",
   "transcript.adminRequired": "AI 逐字记录需要管理员权限。",
   "transcript.adminStatus": "只读访问无法运行 AI 逐字记录",
   "upload.copiedRsync": "已复制 rsync 示例",

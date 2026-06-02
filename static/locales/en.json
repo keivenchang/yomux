@@ -382,6 +382,7 @@
   "pref.yolo.rule_file_path.help": "YAML file with ordered first-match YOLO rules.",
   "pref.yolo.rule_file_path.label": "Rule file",
   "preview.jsDisabled": "JavaScript is disabled in this sandboxed preview.",
+  "preview.openFailed": "Can't open {path}",
   "preview.openWithJs": "Open with JavaScript",
   "rename.aria": "Rename tmux session",
   "rename.cancel": "Cancel",

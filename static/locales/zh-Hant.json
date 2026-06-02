@@ -382,6 +382,7 @@
   "pref.yolo.rule_file_path.help": "包含依序首次符合 YOLO 規則的 YAML 檔案。",
   "pref.yolo.rule_file_path.label": "規則檔案",
   "preview.jsDisabled": "此沙箱預覽已停用 JavaScript。",
+  "preview.openFailed": "無法開啟 {path}",
   "preview.openWithJs": "以 JavaScript 開啟",
   "rename.aria": "重新命名 tmux 工作階段",
   "rename.cancel": "取消",

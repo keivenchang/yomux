@@ -284,6 +284,7 @@ globalThis.__layoutTestApi = {
   tPlural,
   yoagentInlineMarkdown,
   yoagentTightMarkdown,
+  joinAndNormalize,
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
@@ -3995,6 +3996,26 @@ function makeFileTree(paths) {
   assert.equal(api.yoagentInlineMarkdown('## H\n\n- a\n\n- b'), '**H**\n\n- a\n- b', '#129: inline-markdown downgrades headings AND tightens the list');
   // DOIT.6 #128: a <p> inside an <li> carries no margin so loose lists render tight.
   assert.ok(/\.markdown-body li > p\s*\{[^}]*margin:\s*0/.test(fs.readFileSync('static/yolomux.css', 'utf8')), '#128: .markdown-body li > p has zero margin');
+}
+
+{
+  // DOIT.6 #133: the markdown-preview relative-link path normalizer + the in-pane link handler.
+  const api = loadYolomux('', ['1']);
+  assert.equal(api.joinAndNormalize('/a/b/c', './x.md'), '/a/b/c/x.md', '#133: ./ resolves against the base dir');
+  assert.equal(api.joinAndNormalize('/a/b/c', '../y/z.md'), '/a/b/y/z.md', '#133: ../ pops a segment');
+  assert.equal(api.joinAndNormalize('/a/b', 'bare.md'), '/a/b/bare.md', '#133: a bare name resolves against the base dir');
+  assert.equal(api.joinAndNormalize('/a/b', '/abs/x.md'), '/abs/x.md', '#133: an absolute rel ignores the base');
+  assert.equal(api.joinAndNormalize('/a/b/c', '../../top.md'), '/a/top.md', '#133: multiple ../ collapse');
+  const src = fs.readFileSync('static/yolomux.js', 'utf8');
+  // The handler reads the RAW href, opens external/other-scheme links in a new tab, and routes relative
+  // file links through openFileInEditor with a preview/edit mode + a failure toast.
+  assert.ok(/function handleMarkdownPreviewLinkClick/.test(src), '#133: the markdown-preview link handler exists');
+  assert.ok(/a\.getAttribute\('href'\)/.test(src), '#133: the handler reads the raw href attribute');
+  assert.ok(/window\.open\(a\.href, '_blank', 'noopener,noreferrer'\)/.test(src), '#133: external/other-scheme links open in a new tab');
+  assert.ok(/openFileInEditor\(resolved, basenameOf\(resolved\), \{[\s\S]*?viewMode: isMarkdownPath\(resolved\) \? 'preview' : 'edit'/.test(src), '#133: a relative file link opens in the editor (md -> preview, else edit)');
+  assert.ok(/t\('preview\.openFailed'/.test(src), "#133: a failed open surfaces a toast");
+  // The handler is wired ONLY to the file-editor preview (path provided), not to yoagent bodies.
+  assert.ok(/renderMarkdownPreviewInto\(container, text, path\)/.test(src), '#133: the file-editor preview threads the owning path (basePath); yoagent bodies pass no path');
 }
 
 {

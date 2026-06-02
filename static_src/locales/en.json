@@ -421,6 +421,7 @@
   "filetab.missing": "missing",
   "preview.jsDisabled": "JavaScript is disabled in this sandboxed preview.",
   "preview.openWithJs": "Open with JavaScript",
+  "preview.openFailed": "Can't open {path}",
   "transcript.adminRequired": "AI Transcript requires admin access.",
   "transcript.adminStatus": "readonly access cannot run AI Transcript",
   "upload.copiedRsync": "copied rsync example",

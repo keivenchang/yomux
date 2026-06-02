@@ -6886,6 +6886,21 @@ function dirnameOf(path) {
   return path.slice(0, idx);
 }
 
+// DOIT.6 #133: resolve a relative href against a base dir, collapsing '.'/'..' segments. An absolute
+// `rel` (leading '/') ignores the base. Used to open relative markdown-preview links in the editor.
+function joinAndNormalize(base, rel) {
+  const relStr = String(rel || '');
+  const combined = relStr.startsWith('/') ? relStr : `${String(base || '/')}/${relStr}`;
+  const isAbs = combined.startsWith('/');
+  const out = [];
+  for (const seg of combined.split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') { out.pop(); continue; }
+    out.push(seg);
+  }
+  return (isAbs ? '/' : '') + out.join('/');
+}
+
 async function fetchFileEntry(path) {
   const result = await fetchFileEntryStatus(path);
   return result.entry;
@@ -16544,7 +16559,7 @@ function sanitizeMarkdownPreviewHtml(html) {
   return template.content;
 }
 
-function renderMarkdownPreviewInto(container, text) {
+function renderMarkdownPreviewInto(container, text, markdownPath) {
   if (typeof window.marked === 'undefined') {
     container.textContent = 'marked.js not loaded (offline CDN?)';
     return;
@@ -16552,11 +16567,48 @@ function renderMarkdownPreviewInto(container, text) {
   const html = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
   container.replaceChildren(sanitizeMarkdownPreviewHtml(html));
   applyMarkdownSourceLines(container, text);
+  // DOIT.6 #133: when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
+  // remember the owning file's dir so relative links resolve, and bind the in-pane link handler once.
+  if (markdownPath) {
+    container.dataset.mdPath = markdownPath;
+    container.dataset.basePath = dirnameOf(markdownPath);
+    if (!container.dataset.mdLinkBound) {
+      container.dataset.mdLinkBound = '1';
+      container.addEventListener('click', handleMarkdownPreviewLinkClick);
+    }
+  }
   if (typeof window.hljs !== 'undefined') {
     container.querySelectorAll('pre code').forEach(block => {
       try { window.hljs.highlightElement(block); } catch (_) {}
     });
   }
+}
+
+// DOIT.6 #133: in the file-editor markdown preview, route link clicks: in-page #anchors keep default;
+// external/other-scheme links open in a new tab (instead of blowing away the SPA); relative file links
+// resolve against the owning file's dir and open in the editor (markdown -> rendered preview, else code).
+// The server's read endpoint already rejects out-of-root paths, so a `../../etc/passwd` link just toasts.
+function handleMarkdownPreviewLinkClick(event) {
+  const a = event.target.closest?.('a');
+  if (!a) return;
+  const container = event.currentTarget;
+  const href = a.getAttribute('href') || '';
+  if (!href || href.startsWith('#')) return;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) {
+    event.preventDefault();
+    window.open(a.href, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  event.preventDefault();
+  const clean = href.split('#')[0].split('?')[0];
+  if (!clean) return;
+  const basePath = container?.dataset?.basePath || '/';
+  const resolved = joinAndNormalize(clean.startsWith('/') ? '/' : basePath, clean);
+  const owner = openFileOwnerSessionsForPath(container?.dataset?.mdPath || '')[0] || undefined;
+  Promise.resolve(openFileInEditor(resolved, basenameOf(resolved), {
+    viewMode: isMarkdownPath(resolved) ? 'preview' : 'edit',
+    ownerSession: owner,
+  })).catch(() => showToast(t('preview.openFailed', {path: resolved}), '', {level: 'error'}));
 }
 
 function isMarkdownPath(path) {
@@ -16690,7 +16742,7 @@ function renderEditorPreviewPane(container, path, text) {
   container.classList.toggle('markdown-body', isMarkdownPath(path));
   container.classList.toggle('html-preview-body', isHtmlPath(path));
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
-  if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text);
+  if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text, path);
   else if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
   else renderEditorCodePreviewInto(container, path, text);
   restoreElementScrollPosition(container, scrollTop, scrollLeft);

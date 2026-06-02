@@ -1934,6 +1934,21 @@ function dirnameOf(path) {
   return path.slice(0, idx);
 }
 
+// DOIT.6 #133: resolve a relative href against a base dir, collapsing '.'/'..' segments. An absolute
+// `rel` (leading '/') ignores the base. Used to open relative markdown-preview links in the editor.
+function joinAndNormalize(base, rel) {
+  const relStr = String(rel || '');
+  const combined = relStr.startsWith('/') ? relStr : `${String(base || '/')}/${relStr}`;
+  const isAbs = combined.startsWith('/');
+  const out = [];
+  for (const seg of combined.split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') { out.pop(); continue; }
+    out.push(seg);
+  }
+  return (isAbs ? '/' : '') + out.join('/');
+}
+
 async function fetchFileEntry(path) {
   const result = await fetchFileEntryStatus(path);
   return result.entry;
