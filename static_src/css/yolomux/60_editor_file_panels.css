@@ -1486,7 +1486,9 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {
 }
 body.editor-cursor-block .file-editor-codemirror .cm-cursor,
 body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
-  width: 0.62ch !important;
+  /* DOIT.6 #122: 1ch == the monospace cell advance (the "0"-glyph width), so the block cursor
+     fills the whole character cell. 0.62ch left it looking like a fat line, not a true block. */
+  width: 1ch !important;
   margin-left: 0 !important;
   border-left: 0 !important;
   background: var(--editor-cursor) !important;

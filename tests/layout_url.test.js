@@ -4080,6 +4080,27 @@ function makeFileTree(paths) {
 }
 
 {
+  // DOIT.6 #124: the Performance section sits immediately before the YO!agent section.
+  const api = loadYolomux('', ['1']);
+  api.setActiveLocaleForTest('en');
+  const html = api.preferencesPanelHtmlForTest('');
+  const perfTitle = api.t('pref.section.performance');
+  const yoagentTitle = api.t('pref.section.yoagent');
+  const perfIdx = html.indexOf(`data-preference-section="${perfTitle}"`);
+  const yoagentIdx = html.indexOf(`data-preference-section="${yoagentTitle}"`);
+  assert.ok(perfIdx >= 0 && yoagentIdx >= 0, '#124: both Performance and YO!agent sections render');
+  assert.ok(perfIdx < yoagentIdx, '#124: the Performance section appears above the YO!agent section');
+  // Adjacent: no other section starts between Performance and YO!agent.
+  assert.equal(html.slice(perfIdx, yoagentIdx).match(/data-preference-section="/g).length, 1, '#124: Performance is the section immediately before YO!agent');
+}
+
+{
+  // DOIT.6 #122: the block cursor fills the full monospace cell (width: 1ch), not a fat line.
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/body\.editor-cursor-block[^{]*\.cm-cursor[\s\S]*?\{[\s\S]*?width: 1ch !important;/.test(css), '#122: the block editor cursor is one full character cell wide (1ch)');
+}
+
+{
   // DOIT.6 #7: the default (files-mode) search bar blends matching commands/tabs into the results.
   const api = loadYolomux('', ['1']);
   const prefsLabel = api.itemLabel(api.prefsItemId);
