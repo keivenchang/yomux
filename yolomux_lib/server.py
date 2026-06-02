@@ -278,6 +278,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/fs/search":
             self.handle_fs_search(parsed)
             return
+        if parsed.path == "/api/fs/index-status":
+            self.handle_fs_index_status(parsed)
+            return
         if parsed.path == "/api/fs/read":
             self.handle_fs_read(parsed)
             return
@@ -310,6 +313,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         limit = qs.get("limit", ["400"])[0]
         recursive = qs.get("recursive", [""])[0] in {"1", "true", "yes"}
         self.write_filesystem_json(raw_root, lambda: filesystem.search_files(raw_root, query, limit, recursive=recursive))
+
+    def handle_fs_index_status(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_root = qs.get("root", qs.get("path", ["/"]))[0]
+        self.write_filesystem_json(raw_root, lambda: filesystem.index_status(raw_root))
 
     def handle_fs_read(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -447,6 +455,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         raw_path = payload.get("path", "")
         self.write_filesystem_json(raw_path, lambda: filesystem.delete_path(raw_path))
 
+    def handle_fs_unindex(self, parsed: Any) -> None:
+        payload = self.read_json_body(4096)
+        if payload is None:
+            return
+        raw_path = payload.get("path", payload.get("root", ""))
+        self.write_filesystem_json(raw_path, lambda: filesystem.unindex_root(raw_path))
+
     def handle_fs_rename(self, parsed: Any) -> None:
         payload = self.read_json_body(4096)
         if payload is None:
@@ -549,6 +564,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/fs/delete":
             self.handle_fs_delete(parsed)
+            return
+        if parsed.path == "/api/fs/unindex":
+            self.handle_fs_unindex(parsed)
             return
         if parsed.path == "/api/fs/rename":
             self.handle_fs_rename(parsed)

@@ -922,7 +922,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
-  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : (indexedDirectory ? 'indexed' : '');
+  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : fileExplorerIndexBadgeText(fullPath);
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
     row.classList.toggle(className, className === gitClass);
@@ -1245,6 +1245,57 @@ function fileExplorerDirectoryIsIndexed(path) {
   return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
 }
 
+// Badge text for an indexed directory: "indexing…" while the backend persistent index is still
+// building, otherwise the steady "indexed". Reads the cached per-root status so it stays stable
+// across fs-poll re-renders (and a background TTL rebuild keeps the backend `ready`, so it never
+// flips back to "indexing").
+function fileExplorerIndexBadgeText(path) {
+  if (!fileExplorerDirectoryIsIndexed(path)) return '';
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+}
+
+// Warm the backend index for a root (kicks the build) and track building/ready; polls while
+// building so the badge transitions indexing… -> indexed exactly once.
+async function refreshFileIndexStatus(root) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(root);
+  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
+  let payload;
+  try {
+    const response = await apiFetch(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
+    payload = await response.json();
+  } catch (error) {
+    return;  // transient error: keep the prior badge, don't flip it
+  }
+  if (!fileExplorerIndexedDirs.has(normalized)) return;  // un-indexed while the request was in flight
+  const status = payload && payload.ready ? 'ready' : 'building';
+  const previous = fileExplorerIndexStatus.get(normalized);
+  fileExplorerIndexStatus.set(normalized, status);
+  clearTimeout(fileIndexStatusTimers.get(normalized));
+  fileIndexStatusTimers.delete(normalized);
+  if (status === 'building') {
+    fileIndexStatusTimers.set(normalized, setTimeout(() => refreshFileIndexStatus(normalized), 1500));
+  }
+  if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+}
+
+// Lazily warm/poll an indexed root's status, without re-fetching once it is known ready or while a
+// poll is already pending (so per-row render calls don't spam the endpoint).
+function ensureFileIndexStatus(path) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
+  if (fileExplorerIndexStatus.get(normalized) === 'ready' || fileIndexStatusTimers.has(normalized)) return;
+  refreshFileIndexStatus(normalized);
+}
+
+function clearFileIndexStatus(root) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(root);
+  if (!normalized) return;
+  fileExplorerIndexStatus.delete(normalized);
+  clearTimeout(fileIndexStatusTimers.get(normalized));
+  fileIndexStatusTimers.delete(normalized);
+}
+
 function fileExplorerIndexedRootList() {
   return compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
     .map(normalizeStoredFileExplorerIndexedDir)
@@ -1276,14 +1327,62 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
     }
     fileExplorerIndexedDirs.add(normalized);
     fileExplorerIndexedDirs = new Set(compactNestedPaths(Array.from(fileExplorerIndexedDirs)));
+    // Eagerly build the backend index now (warm) so the first quick-open query hits a warm index,
+    // and show "indexing…" immediately until the build reports ready.
+    fileExplorerIndexStatus.set(normalized, 'building');
+    refreshFileIndexStatus(normalized);
   } else {
     fileExplorerIndexedDirs.delete(normalized);
+    clearFileIndexStatus(normalized);
     abortFileQuickOpenSearch();
+    if (!applyingIndexedDirsSetting) {
+      apiFetch(`/api/fs/unindex?root=${encodeURIComponent(normalized)}`, {method: 'POST', body: JSON.stringify({root: normalized})}).catch(() => {});
+    }
   }
   writeStoredFileExplorerIndexedDirs();
+  // Mirror the set into the file_explorer.indexed_dirs setting so the Preferences list stays in sync
+  // (skip when this change WAS driven by the setting, to avoid a write-back loop).
+  if (!applyingIndexedDirsSetting) persistIndexedDirsSetting();
   updateFileExplorerIndexedDirectoryRows();
   if (statusEl) {
     statusEl.textContent = indexed ? `indexed ${compactHomePath(normalized)}` : `removed index ${compactHomePath(normalized)}`;
+  }
+}
+
+function persistIndexedDirsSetting() {
+  const dirs = fileExplorerIndexedRootList();
+  const current = initialSetting('file_explorer.indexed_dirs', []);
+  const currentList = Array.isArray(current) ? current : [];
+  if (currentList.length === dirs.length && currentList.every((value, index) => value === dirs[index])) return;
+  saveSettingsPatch({file_explorer: {indexed_dirs: dirs}}, {silent: true}).catch(() => {});
+}
+
+// Reconcile the localStorage indexed-dir set FROM the file_explorer.indexed_dirs setting (so editing
+// the Preferences list adds/removes indexed dirs). Idempotent + guarded so it never loops with the
+// set->setting mirror in setFileExplorerDirectoryIndexed.
+function reconcileIndexedDirsFromSetting(options = {}) {
+  const raw = initialSetting('file_explorer.indexed_dirs', []);
+  const list = Array.isArray(raw) ? raw : [];
+  if (options.initial && !list.length && fileExplorerIndexedDirs.size) {
+    // First load: the setting has not been populated yet but localStorage already has indexed dirs —
+    // migrate the set INTO the setting rather than wiping the user's existing indexed directories.
+    persistIndexedDirsSetting();
+    return;
+  }
+  const desired = new Set(compactNestedPaths(list.map(normalizeStoredFileExplorerIndexedDir).filter(Boolean)));
+  const current = new Set(fileExplorerIndexedDirs);
+  const adds = Array.from(desired).filter(dir => !current.has(dir));
+  const removes = Array.from(current).filter(dir => !desired.has(dir));
+  if (!adds.length && !removes.length) return;
+  applyingIndexedDirsSetting = true;
+  try {
+    for (const dir of adds) setFileExplorerDirectoryIndexed(dir, true);
+    for (const dir of removes) {
+      setFileExplorerDirectoryIndexed(dir, false);
+      apiFetch(`/api/fs/unindex?root=${encodeURIComponent(dir)}`, {method: 'POST', body: JSON.stringify({root: dir})}).catch(() => {});
+    }
+  } finally {
+    applyingIndexedDirsSetting = false;
   }
 }
 
@@ -1295,17 +1394,20 @@ function toggleFileExplorerDirectoryIndexed(path) {
 
 function updateFileExplorerIndexedDirectoryRows() {
   document.querySelectorAll('.file-tree-row.kind-dir[data-path]').forEach(row => {
-    const indexed = fileExplorerDirectoryIsIndexed(row.dataset.path || '');
+    const path = row.dataset.path || '';
+    const indexed = fileExplorerDirectoryIsIndexed(path);
     row.dataset.indexed = indexed ? 'true' : 'false';
     row.classList.toggle('indexed-directory', indexed);
+    if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
     const icon = row.querySelector(':scope > .file-tree-icon');
     if (icon) {
       icon.className = ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' ');
     }
     const status = row.querySelector(':scope > .file-tree-git-status');
     if (status) {
-      status.textContent = indexed ? 'indexed' : '';
-      status.hidden = !indexed;
+      const badge = fileExplorerIndexBadgeText(path);
+      status.textContent = badge;
+      status.hidden = !badge;
     }
   });
 }

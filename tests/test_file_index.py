@@ -54,6 +54,17 @@ def test_search_files_uses_index_to_find_deep_file(tmp_path, monkeypatch):
     assert "a/b/c/deep_target.md" in relative_paths
 
 
+def test_index_status_warms_and_reports_state(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    status = filesystem.index_status(str(tmp_path))
+    assert status["root"] == str(tmp_path)
+    assert status["ready"] is True
+    assert status["count"] >= 2  # deep_target.md + top.txt (node_modules skipped)
+
+
 def test_unindex_drops_registry_and_disk(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")

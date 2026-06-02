@@ -420,6 +420,7 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
+  reconcileIndexedDirsFromSetting({initial: options.initial === true});
   uploadMaxBytes = numberSetting('uploads.max_bytes', 20 * 1024 * 1024);
   terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
   editorFontSize = numberSetting('appearance.editor_font_size', 13);

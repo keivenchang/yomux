@@ -499,6 +499,30 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
     }
 
 
+def index_status(raw_root: str) -> dict[str, Any]:
+    """Warm the persistent quick-open index for a root (kick the background build if missing/stale)
+    and report its build state, so the client can eagerly index and show a stable indexing/indexed
+    badge instead of paying a cold live walk on the first query."""
+    root = _validated_path(raw_root)
+    if not root.is_dir():
+        raise FilesystemError(f"not a directory: {root}", status=400)
+    index = file_index.ensure_index(root, SEARCH_SKIP_DIRS)
+    with index.lock:
+        return {
+            "root": str(root),
+            "building": bool(index.building),
+            "ready": bool(index.ready),
+            "count": len(index.entries),
+        }
+
+
+def unindex_root(raw_root: str) -> dict[str, Any]:
+    """Drop the persistent quick-open index for a root (cancel any build, free memory + on-disk)."""
+    root = _validated_path(raw_root)
+    file_index.unindex(root)
+    return {"root": str(root), "ok": True}
+
+
 def _looks_binary(data: bytes) -> bool:
     return b"\x00" in data[:BINARY_SNIFF_BYTES]
 

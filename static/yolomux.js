@@ -277,6 +277,9 @@ let sessionFilesSelectedSession = '';
 let fileExplorerTreeShowDates = readStoredFileExplorerTreeShowDates();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
+const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready'
+const fileIndexStatusTimers = new Map();  // normalized indexed root -> poll timer while building
+let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
 let fileExplorerChangesDisplayMode = 'compact';
@@ -5577,7 +5580,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
-  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : (indexedDirectory ? 'indexed' : '');
+  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : fileExplorerIndexBadgeText(fullPath);
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
     row.classList.toggle(className, className === gitClass);
@@ -5900,6 +5903,57 @@ function fileExplorerDirectoryIsIndexed(path) {
   return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
 }
 
+// Badge text for an indexed directory: "indexing…" while the backend persistent index is still
+// building, otherwise the steady "indexed". Reads the cached per-root status so it stays stable
+// across fs-poll re-renders (and a background TTL rebuild keeps the backend `ready`, so it never
+// flips back to "indexing").
+function fileExplorerIndexBadgeText(path) {
+  if (!fileExplorerDirectoryIsIndexed(path)) return '';
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+}
+
+// Warm the backend index for a root (kicks the build) and track building/ready; polls while
+// building so the badge transitions indexing… -> indexed exactly once.
+async function refreshFileIndexStatus(root) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(root);
+  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
+  let payload;
+  try {
+    const response = await apiFetch(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
+    payload = await response.json();
+  } catch (error) {
+    return;  // transient error: keep the prior badge, don't flip it
+  }
+  if (!fileExplorerIndexedDirs.has(normalized)) return;  // un-indexed while the request was in flight
+  const status = payload && payload.ready ? 'ready' : 'building';
+  const previous = fileExplorerIndexStatus.get(normalized);
+  fileExplorerIndexStatus.set(normalized, status);
+  clearTimeout(fileIndexStatusTimers.get(normalized));
+  fileIndexStatusTimers.delete(normalized);
+  if (status === 'building') {
+    fileIndexStatusTimers.set(normalized, setTimeout(() => refreshFileIndexStatus(normalized), 1500));
+  }
+  if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+}
+
+// Lazily warm/poll an indexed root's status, without re-fetching once it is known ready or while a
+// poll is already pending (so per-row render calls don't spam the endpoint).
+function ensureFileIndexStatus(path) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
+  if (fileExplorerIndexStatus.get(normalized) === 'ready' || fileIndexStatusTimers.has(normalized)) return;
+  refreshFileIndexStatus(normalized);
+}
+
+function clearFileIndexStatus(root) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(root);
+  if (!normalized) return;
+  fileExplorerIndexStatus.delete(normalized);
+  clearTimeout(fileIndexStatusTimers.get(normalized));
+  fileIndexStatusTimers.delete(normalized);
+}
+
 function fileExplorerIndexedRootList() {
   return compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
     .map(normalizeStoredFileExplorerIndexedDir)
@@ -5931,14 +5985,62 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
     }
     fileExplorerIndexedDirs.add(normalized);
     fileExplorerIndexedDirs = new Set(compactNestedPaths(Array.from(fileExplorerIndexedDirs)));
+    // Eagerly build the backend index now (warm) so the first quick-open query hits a warm index,
+    // and show "indexing…" immediately until the build reports ready.
+    fileExplorerIndexStatus.set(normalized, 'building');
+    refreshFileIndexStatus(normalized);
   } else {
     fileExplorerIndexedDirs.delete(normalized);
+    clearFileIndexStatus(normalized);
     abortFileQuickOpenSearch();
+    if (!applyingIndexedDirsSetting) {
+      apiFetch(`/api/fs/unindex?root=${encodeURIComponent(normalized)}`, {method: 'POST', body: JSON.stringify({root: normalized})}).catch(() => {});
+    }
   }
   writeStoredFileExplorerIndexedDirs();
+  // Mirror the set into the file_explorer.indexed_dirs setting so the Preferences list stays in sync
+  // (skip when this change WAS driven by the setting, to avoid a write-back loop).
+  if (!applyingIndexedDirsSetting) persistIndexedDirsSetting();
   updateFileExplorerIndexedDirectoryRows();
   if (statusEl) {
     statusEl.textContent = indexed ? `indexed ${compactHomePath(normalized)}` : `removed index ${compactHomePath(normalized)}`;
+  }
+}
+
+function persistIndexedDirsSetting() {
+  const dirs = fileExplorerIndexedRootList();
+  const current = initialSetting('file_explorer.indexed_dirs', []);
+  const currentList = Array.isArray(current) ? current : [];
+  if (currentList.length === dirs.length && currentList.every((value, index) => value === dirs[index])) return;
+  saveSettingsPatch({file_explorer: {indexed_dirs: dirs}}, {silent: true}).catch(() => {});
+}
+
+// Reconcile the localStorage indexed-dir set FROM the file_explorer.indexed_dirs setting (so editing
+// the Preferences list adds/removes indexed dirs). Idempotent + guarded so it never loops with the
+// set->setting mirror in setFileExplorerDirectoryIndexed.
+function reconcileIndexedDirsFromSetting(options = {}) {
+  const raw = initialSetting('file_explorer.indexed_dirs', []);
+  const list = Array.isArray(raw) ? raw : [];
+  if (options.initial && !list.length && fileExplorerIndexedDirs.size) {
+    // First load: the setting has not been populated yet but localStorage already has indexed dirs —
+    // migrate the set INTO the setting rather than wiping the user's existing indexed directories.
+    persistIndexedDirsSetting();
+    return;
+  }
+  const desired = new Set(compactNestedPaths(list.map(normalizeStoredFileExplorerIndexedDir).filter(Boolean)));
+  const current = new Set(fileExplorerIndexedDirs);
+  const adds = Array.from(desired).filter(dir => !current.has(dir));
+  const removes = Array.from(current).filter(dir => !desired.has(dir));
+  if (!adds.length && !removes.length) return;
+  applyingIndexedDirsSetting = true;
+  try {
+    for (const dir of adds) setFileExplorerDirectoryIndexed(dir, true);
+    for (const dir of removes) {
+      setFileExplorerDirectoryIndexed(dir, false);
+      apiFetch(`/api/fs/unindex?root=${encodeURIComponent(dir)}`, {method: 'POST', body: JSON.stringify({root: dir})}).catch(() => {});
+    }
+  } finally {
+    applyingIndexedDirsSetting = false;
   }
 }
 
@@ -5950,17 +6052,20 @@ function toggleFileExplorerDirectoryIndexed(path) {
 
 function updateFileExplorerIndexedDirectoryRows() {
   document.querySelectorAll('.file-tree-row.kind-dir[data-path]').forEach(row => {
-    const indexed = fileExplorerDirectoryIsIndexed(row.dataset.path || '');
+    const path = row.dataset.path || '';
+    const indexed = fileExplorerDirectoryIsIndexed(path);
     row.dataset.indexed = indexed ? 'true' : 'false';
     row.classList.toggle('indexed-directory', indexed);
+    if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
     const icon = row.querySelector(':scope > .file-tree-icon');
     if (icon) {
       icon.className = ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' ');
     }
     const status = row.querySelector(':scope > .file-tree-git-status');
     if (status) {
-      status.textContent = indexed ? 'indexed' : '';
-      status.hidden = !indexed;
+      const badge = fileExplorerIndexBadgeText(path);
+      status.textContent = badge;
+      status.hidden = !badge;
     }
   });
 }
@@ -8554,6 +8659,7 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
+  reconcileIndexedDirsFromSetting({initial: options.initial === true});
   uploadMaxBytes = numberSetting('uploads.max_bytes', 20 * 1024 * 1024);
   terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
   editorFontSize = numberSetting('appearance.editor_font_size', 13);
@@ -12744,6 +12850,7 @@ function preferenceSections() {
       {path: 'file_explorer.image_open_mode', label: 'Image open mode', type: 'select', choices: ['same-tab', 'new-tab'], help: 'Same-tab reuses one image viewer while browsing. New-tab keeps one image tab per file.'},
       {path: 'file_explorer.image_preview_max_px', label: 'Image preview max size', type: 'number', min: 120, max: 1200, step: 20, suffix: 'px', help: 'Maximum width and height for hover previews in Finder/File Explorer.'},
       {path: 'file_explorer.quick_access_paths', label: 'Quick paths', type: 'list', help: 'Pinned Finder/File Explorer roots, one path per line.'},
+      {path: 'file_explorer.indexed_dirs', label: 'Indexed directories', type: 'list', help: 'Directories with a pre-built quick-open index, one path per line. Add a path to index it (same as the Finder right-click); remove a line to un-index it.'},
       {path: 'file_explorer.refresh_ms', label: `${fileExplorerLabel()} refresh interval`, type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: 'How often YOLOmux checks changed Finder/File Explorer directories and open files. Client-side jitter avoids synchronized polling.'},
       {path: 'file_explorer.new_entry_highlight_ms', label: 'New file highlight duration', type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: 'How long newly detected files or directories stay colored in Finder/File Explorer.'},
     ]},
@@ -12863,6 +12970,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('uploads.')) add(['upload', 'paste', 'drop', 'filename', 'template', 'file']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
+  if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
   if (path === 'file_explorer.new_entry_highlight_ms') add(['new file', 'recent']);
   if (path.startsWith('yolo.')) add(['auto approve', 'approve', 'approval', 'permission', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger']);

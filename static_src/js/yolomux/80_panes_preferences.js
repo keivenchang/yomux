@@ -1481,6 +1481,7 @@ function preferenceSections() {
       {path: 'file_explorer.image_open_mode', label: 'Image open mode', type: 'select', choices: ['same-tab', 'new-tab'], help: 'Same-tab reuses one image viewer while browsing. New-tab keeps one image tab per file.'},
       {path: 'file_explorer.image_preview_max_px', label: 'Image preview max size', type: 'number', min: 120, max: 1200, step: 20, suffix: 'px', help: 'Maximum width and height for hover previews in Finder/File Explorer.'},
       {path: 'file_explorer.quick_access_paths', label: 'Quick paths', type: 'list', help: 'Pinned Finder/File Explorer roots, one path per line.'},
+      {path: 'file_explorer.indexed_dirs', label: 'Indexed directories', type: 'list', help: 'Directories with a pre-built quick-open index, one path per line. Add a path to index it (same as the Finder right-click); remove a line to un-index it.'},
       {path: 'file_explorer.refresh_ms', label: `${fileExplorerLabel()} refresh interval`, type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: 'How often YOLOmux checks changed Finder/File Explorer directories and open files. Client-side jitter avoids synchronized polling.'},
       {path: 'file_explorer.new_entry_highlight_ms', label: 'New file highlight duration', type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: 'How long newly detected files or directories stay colored in Finder/File Explorer.'},
     ]},
@@ -1600,6 +1601,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('uploads.')) add(['upload', 'paste', 'drop', 'filename', 'template', 'file']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
+  if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
   if (path === 'file_explorer.new_entry_highlight_ms') add(['new file', 'recent']);
   if (path.startsWith('yolo.')) add(['auto approve', 'approve', 'approval', 'permission', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger']);
