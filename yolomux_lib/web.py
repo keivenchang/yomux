@@ -13,6 +13,7 @@ from .common import YOLOMUX_VERSION
 from .common import login_username
 from .common import xterm_asset_path
 from .common import yolomux_commit_time_pt
+from .settings import save_settings
 from .settings import settings_payload
 from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
@@ -229,7 +230,46 @@ def agent_login_notice_html(css_class: str = "login-warning") -> str:
     return f'<div class="{html.escape(css_class)}">{lead} — run {commands}</div>'
 
 
-def login_html(next_path: str = "/", error: str = "", secure: bool = True) -> str:
+# DOIT.8 Phase 1: the login-screen language picker (entry point #1). Endonym-labeled (each language in
+# its own script) so the pre-auth screen needs no localization; Traditional Chinese before Simplified.
+# 'system' = follow the browser. A choice here is saved to general.language after a successful sign-in,
+# so all three entry points (login / topbar / Preferences) write the SAME setting.
+LOGIN_LOCALE_CHOICES: list[tuple[str, str]] = [
+    ("system", "System"),
+    ("en", "English"),
+    ("zh-Hant", "繁體中文"),
+    ("zh-Hans", "简体中文"),
+]
+_LOGIN_LOCALE_VALUES = {value for value, _ in LOGIN_LOCALE_CHOICES}
+
+
+def current_language_pref() -> str:
+    settings = (settings_payload().get("settings") or {})
+    language = (settings.get("general") or {}).get("language", "system")
+    return language if isinstance(language, str) and language in _LOGIN_LOCALE_VALUES else "system"
+
+
+def login_locale_field_html(current: str = "system") -> str:
+    options = "".join(
+        f'<option value="{html.escape(value, quote=True)}"{" selected" if value == current else ""}>{html.escape(label)}</option>'
+        for value, label in LOGIN_LOCALE_CHOICES
+    )
+    return (
+        '<label class="login-locale">'
+        "<span>Language</span>"
+        f'<select name="locale" aria-label="Language">{options}</select>'
+        "</label>"
+    )
+
+
+def save_login_locale(value: str) -> None:
+    """Persist a login-screen language choice to general.language (called only AFTER successful auth)."""
+    locale = str(value or "").strip()
+    if locale in _LOGIN_LOCALE_VALUES:
+        save_settings({"general": {"language": locale}})
+
+
+def login_html(next_path: str = "/", error: str = "", secure: bool = True, current_locale: str = "system") -> str:
     safe_next = html.escape(next_path if next_path.startswith("/") else "/", quote=True)
     error_html = f'<div class="login-error" role="alert">{html.escape(error)}</div>' if error else ""
     security_html = "" if secure else '<div class="login-warning">No HTTPS. Highly recommend that you restart with <code>python3 yolomux.py --port 9998 --self-signed</code>.</div>'
@@ -264,6 +304,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True) -> st
           <button id="togglePassword" class="password-toggle" type="button" aria-label="Show password" aria-pressed="false">Show</button>
         </span>
       </label>
+      {login_locale_field_html(current_locale)}
       <button type="submit">Sign in</button>
     </form>
   </section>

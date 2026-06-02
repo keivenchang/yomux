@@ -21,7 +21,9 @@ from .common import auth_cookie_value
 from .common import auth_identity_for_credentials
 from .common import auth_setup_required
 from .common import current_auth_users
+from .web import current_language_pref
 from .web import login_html
+from .web import save_login_locale
 from .web import setup_auth_html
 
 
@@ -215,7 +217,7 @@ class AuthMixin:
         if not self.has_logout_marker() and self.cookie_auth_identity() is not None:
             self.write_redirect(self.login_success_path(next_path))
             return
-        self.write_html(login_html(next_path=next_path, secure=self.request_is_https()))
+        self.write_html(login_html(next_path=next_path, secure=self.request_is_https(), current_locale=current_language_pref()))
 
     def handle_login_submit(self, parsed: Any) -> None:
         if auth_setup_required():
@@ -233,5 +235,9 @@ class AuthMixin:
                 status=HTTPStatus.UNAUTHORIZED,
             )
             return
+        # DOIT.8 Phase 1: persist the login-screen language choice to general.language now that auth
+        # succeeded, so the picked language carries into the app (the same setting the topbar/Preferences
+        # switchers write). Done post-auth so an unauthenticated POST can't mutate settings.
+        save_login_locale(form.get("locale", [""])[0])
         self._auth_cookie_identity = identity
         self.write_redirect(self.login_success_path(next_path))

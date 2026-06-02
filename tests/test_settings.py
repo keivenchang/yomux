@@ -140,3 +140,26 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     assert result["settings"]["appearance"]["ui_font_size"] == 20  # clamped to the max
     ok = save_settings({"appearance": {"ui_font_size": 14}}, path)
     assert ok["coerced"] == []
+
+
+def test_login_locale_picker_writes_general_language():
+    # DOIT.8 Phase 1: the login-screen language picker (entry point #1) renders endonym options and a
+    # successful pick is persisted to general.language (the same setting topbar/Preferences write).
+    from yolomux_lib.web import LOGIN_LOCALE_CHOICES
+    from yolomux_lib.web import current_language_pref
+    from yolomux_lib.web import login_html
+    from yolomux_lib.web import save_login_locale
+
+    assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans"]
+    page = login_html()
+    assert 'name="locale"' in page
+    assert "繁體中文" in page and "简体中文" in page  # endonym-labeled, Traditional before Simplified
+    assert page.index("繁體中文") < page.index("简体中文")
+    try:
+        save_login_locale("zh-Hant")
+        assert current_language_pref() == "zh-Hant"
+        assert ' value="zh-Hant" selected>' in login_html(current_locale=current_language_pref())
+        save_login_locale("bogus-locale")  # invalid -> ignored, no change
+        assert current_language_pref() == "zh-Hant"
+    finally:
+        save_login_locale("system")  # reset so the shared test config dir isn't left in Chinese

@@ -68,6 +68,23 @@ input:focus {
   border-color: #9be33d;
   box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.18);
 }
+/* DOIT.8 Phase 1: the login-screen language picker matches the text inputs. */
+.login-form select {
+  width: 100%;
+  height: 38px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: #0d1219;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: 14px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  cursor: pointer;
+}
+.login-form select:focus {
+  outline: 0;
+  border-color: #9be33d;
+  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.18);
+}
 .password-field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 68px;
