@@ -37,7 +37,7 @@
   "pref.appearance.theme.help": "選單、窗格、檔案總管、偏好設定、已修改檔案與編輯器預設值的主題。",
   "pref.appearance.theme.label": "全域配色主題",
   "pref.appearance.theme.light": "淺色",
-  "pref.appearance.theme.system": "系統",
+  "pref.appearance.theme.system": "系統/System",
   "pref.appearance.ui_font_size.help": "選單、分頁與精簡介面文字的字型大小。超出範圍的值會被限制。",
   "pref.appearance.ui_font_size.label": "介面字型大小",
   "pref.appearance.yolo_rotate_ms.help": "使用中的 YO 指示器完成一次旋轉的頻率。設為 0 可停用。",

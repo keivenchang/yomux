@@ -31,7 +31,7 @@
   "pref.appearance.theme.label": "全域配色主題",
   "pref.appearance.theme.dark": "深色",
   "pref.appearance.theme.light": "淺色",
-  "pref.appearance.theme.system": "系統",
+  "pref.appearance.theme.system": "系統/System",
   "pref.appearance.theme.help": "選單、窗格、檔案總管、偏好設定、已修改檔案與編輯器預設值的主題。",
   "pref.appearance.terminal_theme.label": "終端機配色主題",
   "pref.appearance.terminal_theme.dark": "深色",

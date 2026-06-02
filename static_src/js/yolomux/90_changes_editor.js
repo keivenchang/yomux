@@ -818,7 +818,10 @@ function activePreferenceControl(panel) {
 }
 
 function preferenceFocusTargetIsInteractive(target) {
-  return Boolean(target?.closest?.('input, textarea, select, button, a, [contenteditable="true"], [data-setting-path], [data-preferences-search], [data-preferences-search-action], [data-preference-section-toggle], [data-preferences-reset-all], [data-preferences-reset-confirm], [data-preferences-reset-cancel]'));
+  // DOIT.6 #53: `.panel-head` is the draggable drag handle (chrome, not content). A pointerdown there
+  // must NOT synchronously focus the Preferences search — that focus steal aborts the native tab drag,
+  // so the Preferences tab "can't be dragged". Body clicks still focus the search.
+  return Boolean(target?.closest?.('.panel-head, input, textarea, select, button, a, [contenteditable="true"], [data-setting-path], [data-preferences-search], [data-preferences-search-action], [data-preference-section-toggle], [data-preferences-reset-all], [data-preferences-reset-confirm], [data-preferences-reset-cancel]'));
 }
 
 function clampPreferenceNumber(item, value) {

@@ -1371,6 +1371,9 @@ function makeFileTree(paths) {
   assert.ok(panelShellStart > 0 && panelShellEnd > panelShellStart, 'could not locate bindPanelShell body');
   const panelShellBody = source.slice(panelShellStart, panelShellEnd);
   assert.ok(panelShellBody.includes('preferenceFocusTargetIsInteractive(event.target)'), 'clicking an existing Preferences control does not steal focus back to search');
+  // #53: the draggable panel head is treated as non-focus-stealing so a drag-initiating pointerdown on
+  // the Preferences tab does not steal focus to the search and abort the native drag.
+  assert.ok(/function preferenceFocusTargetIsInteractive[\s\S]*?closest\?\.\('\.panel-head,/.test(source), '#53: a pointerdown on the draggable panel head does not steal focus from a tab drag');
   const resetAllStart = source.indexOf('function resetAllPreferences(');
   const resetAllEnd = source.indexOf('function createFileExplorerPanel(', resetAllStart);
   assert.ok(resetAllStart > 0 && resetAllEnd > resetAllStart, 'could not locate resetAllPreferences body');
@@ -4038,6 +4041,10 @@ function makeFileTree(paths) {
     // #52: the wordmark glyphs localize to 優樂 / 优乐.
     assert.equal(catalog['brand.wordmark.yo'], locale === 'zh-Hant' ? '優' : '优', `${locale} wordmark YO glyph`);
     assert.equal(catalog['brand.wordmark.lo'], locale === 'zh-Hant' ? '樂' : '乐', `${locale} wordmark LO glyph`);
+    // #54: the System theme option is bilingual (localized + "/System") so the OS-following option is
+    // unambiguous in any locale; Dark/Light stay fully localized.
+    assert.ok(catalog['pref.appearance.theme.system'].endsWith('/System'), `${locale} System theme option is bilingual`);
+    assert.equal(catalog['pref.appearance.theme.dark'].includes('/'), false, `${locale} Dark theme option stays fully localized`);
     for (const englishLeak of ['Global color theme', 'Upload size cap', 'Terminal scrollback']) {
       assert.equal(zhHtml.includes(englishLeak), false, `${locale}: no plain-English "${englishLeak}" leaks`);
     }

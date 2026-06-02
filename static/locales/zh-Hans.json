@@ -37,7 +37,7 @@
   "pref.appearance.theme.help": "菜单、窗格、文件浏览器、首选项、已修改文件和编辑器默认值的主题。",
   "pref.appearance.theme.label": "全局配色主题",
   "pref.appearance.theme.light": "浅色",
-  "pref.appearance.theme.system": "系统",
+  "pref.appearance.theme.system": "系统/System",
   "pref.appearance.ui_font_size.help": "菜单、标签页和紧凑界面文本的字体大小。超出范围的值会被限制。",
   "pref.appearance.ui_font_size.label": "界面字体大小",
   "pref.appearance.yolo_rotate_ms.help": "活动 YO 指示器完成一次旋转的频率。设为 0 可禁用。",
