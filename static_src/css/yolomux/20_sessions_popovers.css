@@ -225,20 +225,11 @@
   background: #3a3524;
   border-color: #f0b85d;
 }
-/* Working spin: fast and driven by the agent's working state alone (not auto-approve),
-   so any working session's YO ball spins visibly. Its own duration, not the slow ambient. */
+/* DOIT.6 #23: the YO ball spins ONLY when the agent is working, and SLOWLY — at the
+   "Active YO rotation period" setting (appearance.yolo_rotate_ms, default 20s), not a fast hardcoded
+   value. An idle marker (auto-on or not) is STATIC — there is no ambient idle rotation rule.
+   yolo_rotate_ms = 0 -> --yolo-rotation-duration: 0s -> the rotation renders static (disabled). */
 .session-yolo-marker.working {
-  transform-origin: center;
-  animation-name: yolo-marker-rotate !important;
-  animation-duration: var(--yolo-working-duration, 1.2s) !important;
-  animation-delay: var(--yolo-rotate-delay, 0s) !important;
-  animation-timing-function: linear !important;
-  animation-iteration-count: infinite !important;
-}
-/* Ambient rotation for an auto-on, idle marker (the "Active YO rotation period" setting);
-   stays slow. renderAutoApproveButton toggles .inactive/.locked/.working live (not .active),
-   so key off those rather than .active. yolo_rotate_ms = 0 -> 0s duration disables it. */
-.session-yolo-marker:not(.inactive):not(.locked):not(.working) {
   transform-origin: center;
   animation-name: yolo-marker-rotate !important;
   animation-duration: var(--yolo-rotation-duration, 20s) !important;

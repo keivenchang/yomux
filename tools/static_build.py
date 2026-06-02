@@ -5,15 +5,34 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# i18n: source catalogs live in static_src/locales/<locale>.json; en.json is the source of truth.
+# The build copies them to static/locales/ (all-static-fetch delivery), validates key parity, and
+# generates the en-XA pseudo-locale (accented + padded) to surface unextracted strings + overflow.
+LOCALES_SRC = REPO_ROOT / "static_src" / "locales"
+LOCALES_OUT = REPO_ROOT / "static" / "locales"
+SOURCE_LOCALE = "en"
+PSEUDO_LOCALE = "en-XA"
+_PSEUDO_ACCENTS = str.maketrans({
+    "a": "á", "b": "ƀ", "c": "ç", "d": "đ", "e": "é", "f": "ƒ", "g": "ǧ", "h": "ĥ", "i": "í",
+    "j": "ĵ", "k": "ķ", "l": "ł", "m": "ɱ", "n": "ñ", "o": "ó", "p": "ƥ", "q": "ɋ", "r": "ř",
+    "s": "š", "t": "ť", "u": "ú", "v": "ṽ", "w": "ŵ", "x": "ẋ", "y": "ý", "z": "ž",
+    "A": "Á", "B": "Ɓ", "C": "Ç", "D": "Đ", "E": "É", "F": "Ƒ", "G": "Ǧ", "H": "Ĥ", "I": "Í",
+    "J": "Ĵ", "K": "Ķ", "L": "Ł", "M": "Ɱ", "N": "Ñ", "O": "Ó", "P": "Ƥ", "Q": "Ɋ", "R": "Ř",
+    "S": "Š", "T": "Ť", "U": "Ú", "V": "Ṽ", "W": "Ŵ", "X": "Ẋ", "Y": "Ý", "Z": "Ž",
+})
+
 ASSETS: dict[str, list[str]] = {
     "yolomux.js": [
         "static_src/js/yolomux/00_bootstrap_state.js",
+        "static_src/js/yolomux/05_i18n.js",
         "static_src/js/yolomux/10_core_utils.js",
         "static_src/js/yolomux/20_layout_state.js",
         "static_src/js/yolomux/30_app_menus.js",
@@ -72,6 +91,102 @@ def check_asset(asset: str) -> bool:
     return read_text(output_path) == build_asset(asset)
 
 
+class BuildError(Exception):
+    """Raised when the build cannot proceed (e.g. i18n key-parity failure)."""
+
+
+def source_catalogs() -> dict[str, dict]:
+    """All hand-authored locale catalogs from static_src/locales (excludes the generated pseudo)."""
+    catalogs: dict[str, dict] = {}
+    if not LOCALES_SRC.is_dir():
+        return catalogs
+    for path in sorted(LOCALES_SRC.glob("*.json")):
+        locale = path.stem
+        if locale == PSEUDO_LOCALE:
+            continue
+        catalogs[locale] = json.loads(read_text(path))
+    return catalogs
+
+
+def locale_key_errors(catalogs: dict[str, dict]) -> list[str]:
+    """Every non-source catalog must have EXACTLY the en.json key set (no missing, no extra)."""
+    errors: list[str] = []
+    source = catalogs.get(SOURCE_LOCALE)
+    if source is None:
+        return errors
+    source_keys = set(source)
+    for locale, catalog in catalogs.items():
+        if locale == SOURCE_LOCALE:
+            continue
+        keys = set(catalog)
+        missing = sorted(source_keys - keys)
+        extra = sorted(keys - source_keys)
+        if missing:
+            errors.append(f"{locale}.json missing keys: {', '.join(missing)}")
+        if extra:
+            errors.append(f"{locale}.json has unknown keys: {', '.join(extra)}")
+    return errors
+
+
+def pseudo_value(value: str) -> str:
+    """Accent the letters (keep {tokens} intact) and pad ~40% to surface overflow / missed strings."""
+    segments = re.split(r"(\{\w+\})", str(value))
+    accented = "".join(seg if (seg.startswith("{") and seg.endswith("}")) else seg.translate(_PSEUDO_ACCENTS) for seg in segments)
+    visible = re.sub(r"\{\w+\}", "", str(value))
+    pad = "·" * max(1, round(len(visible) * 0.4))
+    return f"⟦{accented}{pad}⟧"
+
+
+def build_pseudo_catalog(source: dict) -> dict:
+    return {key: pseudo_value(value) for key, value in source.items()}
+
+
+def expected_locale_outputs() -> dict[str, str]:
+    """Map of static/locales/<locale>.json -> JSON text the build should produce."""
+    catalogs = source_catalogs()
+    errors = locale_key_errors(catalogs)
+    if errors:
+        raise BuildError("i18n key-parity check failed:\n  " + "\n  ".join(errors))
+    outputs: dict[str, str] = {}
+    for locale, catalog in catalogs.items():
+        outputs[locale] = json.dumps(catalog, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    source = catalogs.get(SOURCE_LOCALE)
+    if source is not None:
+        outputs[PSEUDO_LOCALE] = json.dumps(build_pseudo_catalog(source), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return outputs
+
+
+def write_locales() -> bool:
+    outputs = expected_locale_outputs()
+    if not outputs:
+        return False
+    LOCALES_OUT.mkdir(parents=True, exist_ok=True)
+    changed = False
+    for locale, text in outputs.items():
+        path = LOCALES_OUT / f"{locale}.json"
+        try:
+            current = read_text(path)
+        except FileNotFoundError:
+            current = None
+        if current != text:
+            path.write_text(text, encoding="utf-8")
+            changed = True
+    return changed
+
+
+def check_locales() -> list[str]:
+    stale: list[str] = []
+    for locale, text in expected_locale_outputs().items():
+        path = LOCALES_OUT / f"{locale}.json"
+        try:
+            current = read_text(path)
+        except FileNotFoundError:
+            current = None
+        if current != text:
+            stale.append(f"locales/{locale}.json")
+    return stale
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("assets", nargs="*", choices=sorted(ASSETS), help="assets to build; defaults to all")
@@ -79,17 +194,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     assets = args.assets or sorted(ASSETS)
-    if args.check:
-        stale = [asset for asset in assets if not check_asset(asset)]
-        if stale:
-            print("stale static assets: " + ", ".join(stale), file=sys.stderr)
-            return 1
-        return 0
+    try:
+        if args.check:
+            stale = [asset for asset in assets if not check_asset(asset)]
+            stale += check_locales()
+            if stale:
+                print("stale static assets: " + ", ".join(stale), file=sys.stderr)
+                return 1
+            return 0
 
-    changed = [asset for asset in assets if write_asset(asset)]
-    if changed:
-        print("rebuilt static assets: " + ", ".join(changed))
-    return 0
+        changed = [asset for asset in assets if write_asset(asset)]
+        if write_locales():
+            changed.append("locales")
+        if changed:
+            print("rebuilt static assets: " + ", ".join(changed))
+        return 0
+    except BuildError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

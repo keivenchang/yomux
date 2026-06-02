@@ -163,10 +163,26 @@ function terminalThemeSettingForGlobalMode(mode) {
   return 'dark';
 }
 
+// DOIT.6: set a SPECIFIC global theme mode (one-click from the Theme submenu) and flip the terminal
+// palette in lockstep. Any target (system/dark/light) applies in one click and in both directions.
+function setGlobalThemeMode(mode) {
+  const next = normalizeGlobalThemeMode(mode);
+  const patch = settingPatch('appearance.theme', next);
+  patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
+  return saveSettingsPatch(patch)
+    .then(() => {
+      statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
+    })
+    .catch(error => {
+      statusEl.innerHTML = `<span class="err">theme save failed: ${esc(error)}</span>`;
+      refreshSettings({force: true});
+    });
+}
+
 function cycleGlobalThemeSetting() {
   const next = nextGlobalThemeMode();
-  // DOIT.6: View -> Theme flips the app chrome AND the terminal palette together in one save (the two
-  // Preferences fields stay independently settable; only this menu toggle moves them in lockstep).
+  // The app chrome AND the terminal palette move together (the two Preferences fields stay
+  // independently settable; only this menu toggle moves them in lockstep).
   const patch = settingPatch('appearance.theme', next);
   patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
   saveSettingsPatch(patch)
@@ -469,9 +485,11 @@ function appMenuTree() {
         menuCommand('Refresh', refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
         }),
-        menuCommand(`Theme: ${globalThemeLabel()}`, cycleGlobalThemeSetting, {
-          detail: `Switch to ${globalThemeLabel(nextGlobalThemeMode())}`,
-        }),
+        menuSubmenu('Theme', [
+          menuCommand('System', () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', detail: `Match the OS theme (${resolvedGlobalThemeMode()})`}),
+          menuCommand('Dark', () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
+          menuCommand('Light', () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
+        ]),
         menuSubmenu('Layout', [
           menuCommand('Single pane', setLayoutToSinglePane, {detail: 'Consolidate visible non-Finder tabs'}),
           menuCommand('Split', setLayoutToSplitPanes, {detail: 'Split visible non-Finder tabs left/right'}),

@@ -389,6 +389,22 @@ def test_visible_agent_working_detects_claude_boxed_input_chrome_below_spinner()
     assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
 
 
+def test_visible_agent_working_false_for_finished_agent_without_live_spinner():
+    # DOIT.6 #23: the YO marker must spin only on a LIVE spinner. A finished agent shows a completed
+    # bullet (no '…'/time/'esc to interrupt' annotation) + the input box; that is idle, not working.
+    visible_text = "\n".join([
+        "● Updated 3 files and finished the task.",
+        "",
+        "╭────────────────────────────────────────────╮",
+        "│ >                                          │",
+        "╰────────────────────────────────────────────╯",
+        "▶▶ bypass permissions on · 1 shell",
+    ])
+
+    assert prompt_detector.visible_agent_working(visible_text) is False
+    assert prompt_detector.agent_screen_state(visible_text)["key"] != "working"
+
+
 def test_visible_agent_working_detects_claude_work_queue_below_spinner():
     visible_text = "\n".join([
         "● Honking… (1m 12s · ↓ 5.8k tokens)",

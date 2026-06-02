@@ -221,7 +221,6 @@
   --red-reminder-easing: ease-in-out;
   --yolo-reminder-duration: 2.8s;
   --yolo-rotation-duration: 20s;
-  --yolo-working-duration: 1.2s;
 }
 body.theme-dark {
   color-scheme: dark;

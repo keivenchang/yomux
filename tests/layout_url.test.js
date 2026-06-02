@@ -392,6 +392,7 @@ globalThis.__layoutTestApi = {
   commandPaletteItemScore,
   commandPaletteCommandItems,
   commandPaletteItems,
+  dedupeFileSearchResults,
   setCommandPaletteStateForTest(mode, query) { commandPaletteMode = mode; commandPaletteQuery = query || ''; },
   commandPaletteMatches,
   openFileQuickOpen,
@@ -3547,7 +3548,12 @@ function makeFileTree(paths) {
   assert.ok(/session-yolo-marker[^"]*\bworking\b/.test(autoOffWorkingHtml), 'a working agent spins its YO ball even when auto-approve is off');
   assert.equal(/session-yolo-marker[^"]*\bactive\b/.test(autoOffWorkingHtml), false, 'an auto-off working marker is not rendered as active');
   const yoloMarkerCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.session-yolo-marker\.working\s*\{[^}]*--yolo-working-duration/.test(yoloMarkerCss), 'working YO spin uses its own fast duration, separate from the slow ambient rotation');
+  // DOIT.6 #23: the YO ball spins ONLY when .working, and at the slow rotation setting (not a fast
+  // hardcoded value); there is NO ambient idle-rotation rule, so an idle marker is static.
+  assert.ok(/\.session-yolo-marker\.working\s*\{[^}]*--yolo-rotation-duration/.test(yoloMarkerCss), '#23: working YO spin is driven by the slow yolo_rotate_ms setting');
+  assert.equal(/\.session-yolo-marker\.working\s*\{[^}]*--yolo-working-duration/.test(yoloMarkerCss), false, '#23: the fast hardcoded working duration is gone');
+  assert.equal(yoloMarkerCss.includes('--yolo-working-duration'), false, '#23: the dead --yolo-working-duration token is removed');
+  assert.equal(/\.session-yolo-marker:not\(\.inactive\):not\(\.locked\):not\(\.working\)/.test(yoloMarkerCss), false, '#23: the ambient idle-rotation rule is deleted (idle markers are static)');
 
   api.setAutoApproveStateForTest('4', {enabled: false, enabled_elsewhere: true, locked: true, lock_owner: {pid: 1234}, screen: {key: 'working'}});
   const externalHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, false);
@@ -3780,6 +3786,39 @@ function makeFileTree(paths) {
 }
 
 {
+  // DOIT.6 #24: View -> Theme is a submenu of discrete System/Dark/Light one-click items.
+  const api = loadYolomux('', ['1']);
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const themeSubmenu = api.appMenuTree()
+    .flatMap(menu => Array.isArray(menu.items) ? menu.items : [])
+    .find(item => item.type === 'submenu' && item.label === 'Theme');
+  assert.ok(themeSubmenu, '#24: View has a Theme submenu');
+  const themeLabels = themeSubmenu.items.filter(item => item.type === 'command').map(item => item.label);
+  assert.deepStrictEqual([...themeLabels], ['System', 'Dark', 'Light'], '#24: Theme submenu offers System/Dark/Light as discrete one-click items');
+  assert.ok(themeSubmenu.items.some(item => item.label === 'Dark' && item.checked !== undefined), '#24: Theme items carry a checked state for the current mode');
+  // Picking a theme moves the terminal palette in lockstep (symmetric for dark and light).
+  assert.ok(/function setGlobalThemeMode[\s\S]*?patch\.appearance\.terminal_theme = terminalThemeSettingForGlobalMode\(next\)/.test(source), '#24: setGlobalThemeMode sets the terminal palette alongside the global theme');
+}
+
+{
+  // DOIT.6 #25: file-search dedupe folds mirror + symlink copies, keeps different-content same-name.
+  const api = loadYolomux('', ['1']);
+  const deduped = api.dedupeFileSearchResults([
+    {path: '/a/notes/DIS-1842.md', realpath: '/a/notes/DIS-1842.md', size: 100},
+    {path: '/b/notes/DIS-1842.md', realpath: '/b/notes/DIS-1842.md', size: 100},   // content mirror -> folded
+    {path: '/c/DIS-1842.md', realpath: '/c/DIS-1842.md', size: 250},                // different content -> kept
+    {path: '/d/link.md', realpath: '/a/notes/DIS-1842.md', size: 100},              // symlink overlap -> folded
+  ]).map(file => file.path);
+  assert.deepStrictEqual([...deduped], ['/a/notes/DIS-1842.md', '/c/DIS-1842.md'], '#25: mirror + symlink copies fold; different-content same-name both survive');
+  // Unknown-size hits dedupe only by path/realpath (never collapse two same-name unknown-size files).
+  const unknown = api.dedupeFileSearchResults([
+    {path: '/x/a.md', realpath: '/x/a.md'},
+    {path: '/y/a.md', realpath: '/y/a.md'},
+  ]).map(file => file.path);
+  assert.deepStrictEqual([...unknown], ['/x/a.md', '/y/a.md'], '#25: unknown-size same-name files are not collapsed');
+}
+
+{
   // DOIT.6 #7: the default (files-mode) search bar blends matching commands/tabs into the results.
   const api = loadYolomux('', ['1']);
   const prefsLabel = api.itemLabel(api.prefsItemId);
@@ -3837,8 +3876,12 @@ function makeFileTree(paths) {
   // neighbor moves it past that neighbor (no center-overshoot required for the left->right case).
   const api = loadYolomux('', ['6']);
   const strip = tabStrip([tabElement('6', 100, 100), tabElement('P', 203, 100)]);
-  assert.equal(api.paneTabDropPlacement(strip, {clientX: 230, clientY: 8}, '6').index, 1, 'left tab dropped onto its right neighbor reorders RIGHT');
-  assert.equal(api.paneTabDropPlacement(strip, {clientX: 180, clientY: 8}, 'P').index, 0, 'right tab dropped onto its left neighbor reorders LEFT');
+  // DOIT.6 #26 (re-open of #12): a drop ANYWHERE on the neighbor reorders — BOTH halves, BOTH ways.
+  // P spans 203-303 (center 253); L spans 100-200 (center 150).
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 225, clientY: 8}, '6').index, 1, 'L dropped on R LEFT half reorders RIGHT (was the no-op pre-fix)');
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 290, clientY: 8}, '6').index, 1, 'L dropped on R RIGHT half reorders RIGHT');
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 120, clientY: 8}, 'P').index, 0, 'R dropped on L LEFT half reorders LEFT');
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 190, clientY: 8}, 'P').index, 0, 'R dropped on L RIGHT half reorders LEFT');
   // Cross-pane drops keep the centered insert threshold (unchanged behavior).
   assert.equal(api.paneTabDropPlacement(strip, {clientX: 230, clientY: 8}, '9').index, 1, 'cross-pane drop keeps the centered threshold');
 }

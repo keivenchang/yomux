@@ -157,6 +157,7 @@ def pc_controls_fixture_html():
           <button id="hidden-pane-zoom" class="tab pane-expand pc-window-control pc-zoom" hidden></button>
         </div>
         <span id="working-yolo" class="session-yolo-marker active working">YO</span>
+        <span id="idle-yolo" class="session-yolo-marker active">YO</span>
         <button type="button" class="pane-tab active">
           <span class="pane-tab-core"><span class="session-button-name">1</span></span>
           <span id="tab-minimize" class="pane-tab-close pc-window-control pc-minimize"></span>
@@ -959,6 +960,10 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert browser.execute_script("return getComputedStyle(document.getElementById('collapsed-preferences')).display") == "none"
     assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationName") == "yolo-marker-rotate"
     assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo'), '::after').content") == "none"
+    # DOIT.6 #23: working YO spins SLOWLY at the yolo_rotate_ms setting (20s), not a fast hardcoded value.
+    assert browser.execute_script("return getComputedStyle(document.getElementById('working-yolo')).animationDuration") == "20s"
+    # An idle (auto-on, NON-working) marker must be STATIC — no ambient rotation.
+    assert browser.execute_script("return getComputedStyle(document.getElementById('idle-yolo')).animationName") == "none"
     triangle_sizes = browser.execute_script(
         """
         const collapsed = getComputedStyle(document.querySelector('#collapsed-dir > .file-tree-icon'));

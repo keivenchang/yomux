@@ -714,6 +714,88 @@ let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
 let fileExplorerSyncPathInFlight = '';
 let fileExplorerSyncGeneration = 0;
+// i18n runtime: a tiny key-based string catalog with a t() helper. Catalogs are fetched from
+// /static/locales/<locale>.json (all-static-fetch delivery); `en` is the source-of-truth fallback.
+// This partial loads right after the bootstrap (00) and before everything else (10+), so all code
+// can call t(). Keys are dotted ids (e.g. pref.appearance.theme.label); values may hold {tokens}.
+
+let i18nActiveLocale = (typeof bootstrap === 'object' && bootstrap && bootstrap.locale) ? String(bootstrap.locale) : 'en';
+const i18nFallbackLocale = 'en';
+const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
+
+function i18nCatalogValue(locale, key) {
+  const catalog = i18nCatalogs.get(locale);
+  const value = catalog ? catalog[key] : undefined;
+  return typeof value === 'string' ? value : null;
+}
+
+// Resolve a key: active locale -> en fallback -> null (caller shows the key itself).
+function i18nResolve(key) {
+  return i18nCatalogValue(i18nActiveLocale, key)
+    ?? (i18nActiveLocale === i18nFallbackLocale ? null : i18nCatalogValue(i18nFallbackLocale, key));
+}
+
+function i18nInterpolate(text, params) {
+  if (!params) return text;
+  return String(text).replace(/\{(\w+)\}/g, (match, name) =>
+    Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match);
+}
+
+// Translate KEY, interpolating {params}. Falls back active -> en -> the key itself (never blank).
+function t(key, params) {
+  const value = i18nResolve(key);
+  return i18nInterpolate(value == null ? String(key) : value, params);
+}
+
+// Plural form via Intl.PluralRules. Catalog keys are `${key}.${category}` (e.g. files.changed.one /
+// files.changed.other); `count` is always available as a {count} token.
+function tPlural(key, count, params) {
+  const number = Number(count) || 0;
+  let category = 'other';
+  try { category = new Intl.PluralRules(i18nActiveLocale).select(number); } catch (_) {}
+  const value = i18nResolve(`${key}.${category}`) ?? i18nResolve(`${key}.other`);
+  return i18nInterpolate(value == null ? String(key) : value, {...(params || {}), count: number});
+}
+
+function i18nActiveLocaleId() {
+  return i18nActiveLocale;
+}
+
+function i18nSetCatalogForTest(locale, catalog) {
+  i18nCatalogs.set(locale, catalog || {});
+}
+
+async function i18nLoadCatalog(locale) {
+  if (!locale) return null;
+  if (i18nCatalogs.has(locale)) return i18nCatalogs.get(locale);
+  try {
+    const response = await fetch(`/static/locales/${encodeURIComponent(locale)}.json`, {cache: 'no-store'});
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      i18nCatalogs.set(locale, data);
+      return data;
+    }
+  } catch (_) {}
+  return null;
+}
+
+// Switch the active locale: ensure the en fallback + the active catalog are loaded, then re-render
+// the localized surfaces. Safe to call before the render functions exist (guarded).
+async function applyLocale(locale) {
+  const next = String(locale || i18nFallbackLocale);
+  await i18nLoadCatalog(i18nFallbackLocale);
+  if (next !== i18nFallbackLocale) await i18nLoadCatalog(next);
+  i18nActiveLocale = next;
+  rerenderForLocale();
+}
+
+function rerenderForLocale() {
+  // Re-render the surfaces that contain localized text. Guarded so this is safe at any load order.
+  if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels();
+  if (typeof renderSessionButtons === 'function') renderSessionButtons();
+  if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+}
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
@@ -3290,6 +3372,24 @@ function abortFileQuickOpenSearch() {
   fileQuickOpenLoading = false;
 }
 
+// Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
+// overlap), or same basename+size (content-mirror copies kept in two repos). Genuinely-different
+// same-name files (different size) both survive; unknown-size hits dedupe by path/realpath only.
+function dedupeFileSearchResults(files) {
+  const seen = new Set();
+  const out = [];
+  for (const file of Array.isArray(files) ? files : []) {
+    const path = file?.path || '';
+    if (!path) continue;
+    const keys = [`p:${path}`, `r:${file.realpath || path}`];
+    if (Number.isFinite(Number(file.size))) keys.push(`n:${basenameOf(path)}|${Number(file.size)}`);
+    if (keys.some(key => seen.has(key))) continue;
+    keys.forEach(key => seen.add(key));
+    out.push(file);
+  }
+  return out;
+}
+
 async function refreshFileQuickOpenCandidates(query = '') {
   const root = fileQuickOpenRoot || fileQuickOpenRootForSearch();
   if (!root) return;
@@ -3340,14 +3440,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
         throw new Error(firstError);
       }
       fileQuickOpenRoot = root;
-      const seenPaths = new Set();
-      fileQuickOpenCandidates = successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root})))
-        .filter(file => {
-          const path = file?.path || '';
-          if (!path || seenPaths.has(path)) return false;
-          seenPaths.add(path);
-          return true;
-        });
+      fileQuickOpenCandidates = dedupeFileSearchResults(
+        successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root}))),
+      );
     }
     fileQuickOpenError = '';
   } catch (error) {
@@ -3937,10 +4032,26 @@ function terminalThemeSettingForGlobalMode(mode) {
   return 'dark';
 }
 
+// DOIT.6: set a SPECIFIC global theme mode (one-click from the Theme submenu) and flip the terminal
+// palette in lockstep. Any target (system/dark/light) applies in one click and in both directions.
+function setGlobalThemeMode(mode) {
+  const next = normalizeGlobalThemeMode(mode);
+  const patch = settingPatch('appearance.theme', next);
+  patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
+  return saveSettingsPatch(patch)
+    .then(() => {
+      statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
+    })
+    .catch(error => {
+      statusEl.innerHTML = `<span class="err">theme save failed: ${esc(error)}</span>`;
+      refreshSettings({force: true});
+    });
+}
+
 function cycleGlobalThemeSetting() {
   const next = nextGlobalThemeMode();
-  // DOIT.6: View -> Theme flips the app chrome AND the terminal palette together in one save (the two
-  // Preferences fields stay independently settable; only this menu toggle moves them in lockstep).
+  // The app chrome AND the terminal palette move together (the two Preferences fields stay
+  // independently settable; only this menu toggle moves them in lockstep).
   const patch = settingPatch('appearance.theme', next);
   patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
   saveSettingsPatch(patch)
@@ -4243,9 +4354,11 @@ function appMenuTree() {
         menuCommand('Refresh', refreshAll, {
           iconHtml: appMenuUiIcon('refresh'),
         }),
-        menuCommand(`Theme: ${globalThemeLabel()}`, cycleGlobalThemeSetting, {
-          detail: `Switch to ${globalThemeLabel(nextGlobalThemeMode())}`,
-        }),
+        menuSubmenu('Theme', [
+          menuCommand('System', () => setGlobalThemeMode('system'), {checked: normalizeGlobalThemeMode() === 'system', detail: `Match the OS theme (${resolvedGlobalThemeMode()})`}),
+          menuCommand('Dark', () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
+          menuCommand('Light', () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
+        ]),
         menuSubmenu('Layout', [
           menuCommand('Single pane', setLayoutToSinglePane, {detail: 'Consolidate visible non-Finder tabs'}),
           menuCommand('Split', setLayoutToSplitPanes, {detail: 'Split visible non-Finder tabs left/right'}),
@@ -13140,6 +13253,7 @@ function preferenceSections() {
       ], help: 'Caret shape for CodeMirror editors. Both styles use the active editor cursor color.'},
       {path: 'appearance.file_explorer_font_size', label: `${fileExplorerLabel()} font size`, type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: 'Font size used by Finder/File Explorer rows.'},
       {path: 'appearance.tab_width', label: 'Tab width', type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: 'Target width for pane tabs before they wrap to additional rows.'},
+      {path: 'appearance.max_tabs_per_pane', label: 'Max tabs per pane', type: 'number', min: 2, max: 30, step: 1, help: 'Caps open tabs per pane (2-30); the oldest unused tabs auto-close (LRU) when the limit is exceeded (dirty editors are kept).'},
       {path: 'appearance.red_reminder_ms', label: 'Red reminder duration', type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: 'Duration of the red attention pulse for sessions that need input or approval. Set 0 to disable.'},
       {path: 'appearance.yolo_rotate_ms', label: 'Active YO rotation period', type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: 'How often the active YO indicator completes a rotation. Set 0 to disable.'},
       {path: 'appearance.metadata_badge_pulse_seconds', label: 'Badge pulse duration', type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: 'When branch, PR, status, or CI metadata changes, badges like PR and CI flash for this many seconds.'},

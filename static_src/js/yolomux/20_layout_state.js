@@ -1623,6 +1623,24 @@ function abortFileQuickOpenSearch() {
   fileQuickOpenLoading = false;
 }
 
+// Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
+// overlap), or same basename+size (content-mirror copies kept in two repos). Genuinely-different
+// same-name files (different size) both survive; unknown-size hits dedupe by path/realpath only.
+function dedupeFileSearchResults(files) {
+  const seen = new Set();
+  const out = [];
+  for (const file of Array.isArray(files) ? files : []) {
+    const path = file?.path || '';
+    if (!path) continue;
+    const keys = [`p:${path}`, `r:${file.realpath || path}`];
+    if (Number.isFinite(Number(file.size))) keys.push(`n:${basenameOf(path)}|${Number(file.size)}`);
+    if (keys.some(key => seen.has(key))) continue;
+    keys.forEach(key => seen.add(key));
+    out.push(file);
+  }
+  return out;
+}
+
 async function refreshFileQuickOpenCandidates(query = '') {
   const root = fileQuickOpenRoot || fileQuickOpenRootForSearch();
   if (!root) return;
@@ -1673,14 +1691,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
         throw new Error(firstError);
       }
       fileQuickOpenRoot = root;
-      const seenPaths = new Set();
-      fileQuickOpenCandidates = successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root})))
-        .filter(file => {
-          const path = file?.path || '';
-          if (!path || seenPaths.has(path)) return false;
-          seenPaths.add(path);
-          return true;
-        });
+      fileQuickOpenCandidates = dedupeFileSearchResults(
+        successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root}))),
+      );
     }
     fileQuickOpenError = '';
   } catch (error) {

@@ -187,6 +187,10 @@ def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp
     paths = [item["relative_path"] for item in payload["files"]]
     assert "src/hello_x_and_y.py" in paths
     assert "node_modules/hello_x_and_y.js" not in paths
+    # DOIT.6 #25: search hits carry realpath + size so the client can fold symlink/mirror duplicates.
+    hit = next(item for item in payload["files"] if item["relative_path"] == "src/hello_x_and_y.py")
+    assert hit["realpath"] == os.path.realpath(str(tmp_path / "src" / "hello_x_and_y.py"))
+    assert hit["size"] == len("print('ok')\n")
 
 
 def test_search_files_non_repo_root_stays_shallow_but_indexes_child_repos(tmp_path):

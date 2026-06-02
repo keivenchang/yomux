@@ -373,6 +373,7 @@ def _search_file_entry(root: Path, path: Path, tokens: list[str]) -> dict[str, A
     return {
         "name": path.name,
         "path": str(path),
+        "realpath": os.path.realpath(path),
         "relative_path": rel,
         "kind": "file",
         "size": int(st.st_size),
@@ -380,6 +381,19 @@ def _search_file_entry(root: Path, path: Path, tokens: list[str]) -> dict[str, A
         "uploaded": is_generated_upload_name(path),
         "_sort_key": sort_key,
     }
+
+
+def _annotate_search_dedupe_fields(entry: dict[str, Any]) -> None:
+    """Add realpath + size to an indexed search hit so the client can fold mirror/symlink copies."""
+    path_str = entry.get("path")
+    if not isinstance(path_str, str):
+        return
+    entry.setdefault("realpath", os.path.realpath(path_str))
+    if "size" not in entry:
+        try:
+            entry["size"] = int(os.stat(path_str).st_size)
+        except OSError:
+            entry["size"] = None
 
 
 def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results: list[dict[str, Any]]) -> tuple[int, int, bool]:
@@ -442,6 +456,9 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             indexed_results, indexed_truncated = file_index.search_index(index, _match, max_results)
             for entry in indexed_results:
                 entry.pop("_sort_key", None)
+                # Annotate the (capped) results with realpath + size so the client can dedupe symlink
+                # overlaps and content-mirror copies. Bounded to <= max_results, so the stat is cheap.
+                _annotate_search_dedupe_fields(entry)
             return {
                 "root": str(root),
                 "query": str(query or ""),
