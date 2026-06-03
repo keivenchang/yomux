@@ -41,7 +41,7 @@ def is_dangerous(cmd_line: str) -> bool:
 _SKIP_LINE = re.compile(
     r"^("
     r"─+$"
-    r"|Bash command$"
+    r"|Bash command\b"
     r"|Permission rule\b"
     r"|Do you want"
     r"|Running"
@@ -147,14 +147,11 @@ def extract_command(pane_text: str) -> str | None:
     if trigger_idx is None:
         return None
 
-    # DOIT.6 #79: anchor to the canonical `● Bash(<cmd>)` arg when present — that is the exact command,
-    # so we never fold the adjacent description prose into the text handed to is_dangerous.
-    for i in range(trigger_idx - 1, max(-1, trigger_idx - 40), -1):
-        bash_call = _BASH_CALL_RE.search(lines[i])
-        if bash_call:
-            cmd = bash_call.group(1).strip()
-            return cmd or None
-
+    # DOIT.17: find the top of the CURRENT prompt block FIRST, so neither the `● Bash(<cmd>)` anchor
+    # search nor the command gather can cross a `─────` separator (or a prior `●` transcript bullet) into
+    # the PREVIOUS step and return its (stale, often safe-looking) command. Before this fix the unbounded
+    # backward search grabbed the prior `● Bash(chmod …)` when the live prompt — correctly matching real
+    # Claude — shows the command in the box with no `● Bash()` until after approval.
     top_idx = 0
     found_content = False
     for i in range(trigger_idx - 1, -1, -1):
@@ -165,6 +162,11 @@ def extract_command(pane_text: str) -> str | None:
             break
 
         if stripped.startswith("●"):
+            # DOIT.6 #79: a `● Bash(<cmd>)` bullet at the block top IS the command (the post-approval
+            # transcript form); otherwise the bullet just bounds the block (prior step's output).
+            bash_call = _BASH_CALL_RE.search(lines[i])
+            if bash_call:
+                return bash_call.group(1).strip() or None
             top_idx = i + 1
             break
 
@@ -174,6 +176,13 @@ def extract_command(pane_text: str) -> str | None:
 
         if stripped:
             found_content = True
+
+    # DOIT.6 #79: anchor to the canonical `● Bash(<cmd>)` arg WITHIN the block (bounded by top_idx — never
+    # crosses into a prior step) so we never fold the adjacent description prose into the danger string.
+    for i in range(top_idx, trigger_idx):
+        bash_call = _BASH_CALL_RE.search(lines[i])
+        if bash_call:
+            return bash_call.group(1).strip() or None
 
     cmd_parts: list[str] = []
     for i in range(top_idx, trigger_idx):

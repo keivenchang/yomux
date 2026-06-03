@@ -640,9 +640,14 @@ def print_bash_prompt(command: str, description: str = "Run shell command") -> i
         print(); n += 1
         print(" Would you like to run the following command?"); n += 1
         print(); n += 1
-        for line in cmd_lines:
-            print(f"   {line}"); n += 1
+        # Real Codex prints the Reason FIRST, then the command on a `$ `-prefixed line (continuations
+        # indented under it). The detector's Codex extractor keys on that `$ ` line and stops at the
+        # selector boundary, so the command MUST be `$ `-prefixed and the Reason MUST come before it —
+        # otherwise extract_command folds the Reason into the command or returns nothing.
         print(f"   Reason: {description}"); n += 1
+        print(); n += 1
+        for i, line in enumerate(cmd_lines):
+            print(f"   {'$ ' if i == 0 else '  '}{line}"); n += 1
         print(); n += 1
     else:
         print(" Bash command (unsandboxed)"); n += 1

@@ -213,6 +213,30 @@ def test_extract_command_anchors_to_bash_call_arg_not_prose():
     assert prompt_detector.extract_command(visible_text) == "git status --short"
 
 
+def test_extract_command_does_not_cross_separator_into_prior_step():
+    # DOIT.17: the LIVE Claude prompt shows the command in the box with NO `● Bash()` (that renders only
+    # after approval). The `● Bash()` anchor search must be bounded to the current block so it does not
+    # walk past the `─────` separator and return the PREVIOUS step's (stale, safe-looking) command.
+    visible_text = "\n".join([
+        "● Bash(chmod +x scripts/deploy.sh)",
+        "  ⎿  ok",
+        "● Done.",
+        "──────────────────────────────────────────────",
+        " Bash command (unsandboxed)",
+        "",
+        "   cp -r src/ dist/",
+        "   [3/10] Copy sources into dist/",
+        "",
+        " Permission rule Bash requires confirmation for this command.",
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+        "   2. No",
+    ])
+    cmd = prompt_detector.extract_command(visible_text)
+    assert cmd is not None and cmd.startswith("cp -r src/ dist/")
+    assert "chmod" not in cmd
+
+
 def test_extract_command_does_not_fold_long_description_prose():
     # DOIT.6 #79: a long description line (no shell metacharacters) is NOT folded into the command.
     visible_text = "\n".join([
