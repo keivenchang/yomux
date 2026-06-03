@@ -176,3 +176,20 @@ def test_login_locale_picker_writes_general_language():
         assert current_language_pref() == "zh-Hant"
     finally:
         save_login_locale("system")  # reset so the shared test config dir isn't left in Chinese
+
+
+def test_deterministic_yoagent_reply_localizes_framing():
+    # DOIT.8 Phase 3: the no-agent fallback localizes its fixed framing (prefix + no-activity headline)
+    # via the saved/active locale. The generated per-session prose stays English (LLM backends localize).
+    from yolomux_lib.activity_summary import deterministic_yoagent_reply
+
+    en_reply = deterministic_yoagent_reply("status?", {}, {}, "en")
+    assert "No AI backend is answering" in en_reply
+    assert "No AI agent activity is available yet." in en_reply
+
+    es_reply = deterministic_yoagent_reply("status?", {}, {}, "es")
+    assert "Ningún backend de IA está respondiendo" in es_reply
+    assert "Aún no hay actividad del agente de IA disponible." in es_reply
+
+    ja_reply = deterministic_yoagent_reply("status?", {}, {}, "ja")
+    assert "応答する AI バックエンドがありません" in ja_reply

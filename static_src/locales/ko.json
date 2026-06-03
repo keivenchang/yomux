@@ -491,5 +491,9 @@
   "login.showPassword": "비밀번호 표시",
   "login.hidePassword": "비밀번호 숨기기",
   "login.language": "언어",
-  "login.error.invalid": "사용자 이름 또는 비밀번호가 올바르지 않습니다."
+  "login.error.invalid": "사용자 이름 또는 비밀번호가 올바르지 않습니다.",
+  "yoagent.updated.wrap": "마지막 업데이트 {rel}",
+  "det.noBackend": "응답하는 AI 백엔드가 없습니다. 활동 요약을 표시합니다. 채팅하려면 환경설정에서 Claude/Codex 백엔드를 설정하거나 로그인하세요.",
+  "det.noActivity": "아직 사용 가능한 AI 에이전트 활동이 없습니다.",
+  "det.openPending": "열림 / 대기 중:"
 }

@@ -781,6 +781,22 @@ function i18nActiveLocaleId() {
   return i18nActiveLocale;
 }
 
+// DOIT.8 Phase 3: render an "N units ago" relative time in the active locale's native phrasing via
+// Intl.RelativeTimeFormat. Falls back to a plain English string if the API is unavailable.
+function relativeTimeFormat(secondsAgo) {
+  const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
+  let value;
+  let unit;
+  if (sec < 3600) { value = Math.round(sec / 60); unit = 'minute'; }
+  else if (sec < 86400) { value = Math.round(sec / 3600); unit = 'hour'; }
+  else { value = Math.round(sec / 86400); unit = 'day'; }
+  try {
+    return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always'}).format(-value, unit);
+  } catch (_) {
+    return `${value} ${unit}${value === 1 ? '' : 's'} ago`;
+  }
+}
+
 function i18nSetCatalogForTest(locale, catalog) {
   i18nCatalogs.set(locale, catalog || {});
 }
@@ -13301,11 +13317,11 @@ function relativeActivityGeneratedText(payload = activitySummaryPayload) {
   const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
   if (!Number.isFinite(ts) || ts <= 0) return {text: t('yoagent.notLoaded'), title: ''};
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  // DOIT.8 Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
+  // locale phrasing, wrapped by the localized "last updated {rel}" string.
   const text = seconds < 60
     ? t('yoagent.updated.justNow')
-    : seconds < 3600
-      ? t('yoagent.updated.minAgo', {n: Math.round(seconds / 60)})
-      : t('yoagent.updated.hrAgo', {n: Math.round(seconds / 3600)});
+    : t('yoagent.updated.wrap', {rel: relativeTimeFormat(seconds)});
   let title = payload?.generated_at || '';
   try {
     title = new Intl.DateTimeFormat(undefined, {

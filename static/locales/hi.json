@@ -31,6 +31,9 @@
   "common.loading": "लोड हो रहा है...",
   "conflict.onDisk": "डिस्क पर",
   "conflict.unsaved": "Unsaved editor",
+  "det.noActivity": "अभी तक कोई AI एजेंट गतिविधि उपलब्ध नहीं है।",
+  "det.noBackend": "कोई AI बैकएंड जवाब नहीं दे रहा; गतिविधि सारांश दिखाया जा रहा है। चैट करने के लिए Preferences में Claude/Codex बैकएंड सेट करें या लॉग इन करें।",
+  "det.openPending": "खुला / लंबित:",
   "dialog.autosaveFailed": "बंद करते समय auto-save विफल। इस editor में unsaved changes हैं।",
   "dialog.cancel": "रद्द करें",
   "dialog.closeTitle": "{name} बंद करें?",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "{n} घंटे पहले अपडेट हुआ",
   "yoagent.updated.justNow": "अभी अपडेट हुआ",
   "yoagent.updated.minAgo": "{n} मिनट पहले अपडेट हुआ",
+  "yoagent.updated.wrap": "अंतिम बार अपडेट {rel}",
   "yoagent.you": "आप"
 }

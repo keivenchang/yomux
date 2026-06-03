@@ -16,6 +16,7 @@ from .common import truncate_text
 from .transcripts import compact_transcript_items
 from .transcripts import newest_transcript_timestamp
 from .transcripts import session_transcript_activity_state
+from .web import server_string
 
 
 ACTIVITY_SUMMARY_FORMAT_VERSION = 4
@@ -734,13 +735,17 @@ def yoagent_session_section(index: int, summary: dict[str, Any]) -> list[str]:
     return lines
 
 
-def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any], settings: dict[str, Any] | None = None) -> str:
+def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any], settings: dict[str, Any] | None = None, locale: str = "en") -> str:
+    # DOIT.8 Phase 3: localize the FIXED framing of the no-agent fallback (prefix, no-activity headline,
+    # "Open / pending:"). The generated per-session activity prose stays English — its sentence assembly
+    # is grammar-complex and built at poll time without a locale; the LLM backends localize it instead.
     help_reply = deterministic_yoagent_help_reply(question)
     if help_reply:
         return help_reply
+    no_activity = server_string(locale, "det.noActivity")
     global_summary = activity_payload.get("global") if isinstance(activity_payload, dict) else {}
     sessions = activity_payload.get("sessions") if isinstance(activity_payload, dict) else {}
-    headline = str(global_summary.get("headline") or "No AI agent activity is available yet.") if isinstance(global_summary, dict) else "No AI agent activity is available yet."
+    headline = str(global_summary.get("headline") or no_activity) if isinstance(global_summary, dict) else no_activity
     question_text = str(question or "").lower()
     all_summaries: list[dict[str, Any]] = []
     if isinstance(sessions, dict):
@@ -754,7 +759,7 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
     chosen = selected or all_summaries
     # Active sessions first, then freshest by last-activity timestamp, so the report leads with live work.
     chosen = sorted(chosen, key=lambda summary: (0 if summary.get("active") else 1, -summary_last_activity_ts(summary)))
-    prefix = "No AI backend is answering; showing the activity summary. Set or log in a Claude/Codex backend in Preferences to chat."
+    prefix = server_string(locale, "det.noBackend")
     out = [prefix, "", headline]
     if not chosen:
         return "\n".join(out).strip()
@@ -770,6 +775,6 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
     if stale:
         pending.append(f"- {stale}")
     if pending:
-        out.append("**Open / pending:**")
+        out.append(f'**{server_string(locale, "det.openPending")}**')
         out.extend(pending)
     return "\n".join(out).strip()

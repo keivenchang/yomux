@@ -31,6 +31,9 @@
   "common.loading": "загрузка...",
   "conflict.onDisk": "На диске",
   "conflict.unsaved": "Несохранённый редактор",
+  "det.noActivity": "Активность ИИ-агента пока недоступна.",
+  "det.noBackend": "Ни один ИИ-бэкенд не отвечает; показывается сводка активности. Настройте или войдите в бэкенд Claude/Codex в Настройках, чтобы общаться.",
+  "det.openPending": "Открыто / в ожидании:",
   "dialog.autosaveFailed": "Автосохранение при закрытии не удалось. В этом редакторе есть несохранённые изменения.",
   "dialog.cancel": "Отмена",
   "dialog.closeTitle": "Закрыть {name}?",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "обновлено {n} ч назад",
   "yoagent.updated.justNow": "обновлено только что",
   "yoagent.updated.minAgo": "обновлено {n} мин назад",
+  "yoagent.updated.wrap": "обновлено {rel}",
   "yoagent.you": "Вы"
 }

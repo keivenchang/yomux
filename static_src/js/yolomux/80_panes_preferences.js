@@ -1259,11 +1259,11 @@ function relativeActivityGeneratedText(payload = activitySummaryPayload) {
   const ts = Number(payload?.generated_ts || 0) || Date.parse(payload?.generated_at || '') / 1000;
   if (!Number.isFinite(ts) || ts <= 0) return {text: t('yoagent.notLoaded'), title: ''};
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - ts));
+  // DOIT.8 Phase 3: render the relative time with Intl.RelativeTimeFormat(activeLocale) for native
+  // locale phrasing, wrapped by the localized "last updated {rel}" string.
   const text = seconds < 60
     ? t('yoagent.updated.justNow')
-    : seconds < 3600
-      ? t('yoagent.updated.minAgo', {n: Math.round(seconds / 60)})
-      : t('yoagent.updated.hrAgo', {n: Math.round(seconds / 3600)});
+    : t('yoagent.updated.wrap', {rel: relativeTimeFormat(seconds)});
   let title = payload?.generated_at || '';
   try {
     title = new Intl.DateTimeFormat(undefined, {

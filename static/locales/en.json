@@ -31,6 +31,9 @@
   "common.loading": "loading...",
   "conflict.onDisk": "On disk",
   "conflict.unsaved": "Unsaved editor",
+  "det.noActivity": "No AI agent activity is available yet.",
+  "det.noBackend": "No AI backend is answering; showing the activity summary. Set or log in a Claude/Codex backend in Preferences to chat.",
+  "det.openPending": "Open / pending:",
   "dialog.autosaveFailed": "Auto-save on close failed. This editor has unsaved changes.",
   "dialog.cancel": "Cancel",
   "dialog.closeTitle": "Close {name}?",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "last updated {n} hr ago",
   "yoagent.updated.justNow": "last updated just now",
   "yoagent.updated.minAgo": "last updated {n} min ago",
+  "yoagent.updated.wrap": "last updated {rel}",
   "yoagent.you": "You"
 }

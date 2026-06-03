@@ -31,6 +31,9 @@
   "common.loading": "carregando...",
   "conflict.onDisk": "No disco",
   "conflict.unsaved": "Editor não salvo",
+  "det.noActivity": "Ainda não há atividade de agente de IA disponível.",
+  "det.noBackend": "Nenhum backend de IA está respondendo; exibindo o resumo de atividades. Defina ou faça login em um backend Claude/Codex nas Preferências para conversar.",
+  "det.openPending": "Aberto / pendente:",
   "dialog.autosaveFailed": "Salvamento automático ao fechar falhou. Este editor tem alterações não salvas.",
   "dialog.cancel": "Cancelar",
   "dialog.closeTitle": "Fechar {name}?",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "atualizado há {n} h",
   "yoagent.updated.justNow": "atualizado agora mesmo",
   "yoagent.updated.minAgo": "atualizado há {n} min",
+  "yoagent.updated.wrap": "última atualização {rel}",
   "yoagent.you": "Você"
 }

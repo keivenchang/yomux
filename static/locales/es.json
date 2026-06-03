@@ -31,6 +31,9 @@
   "common.loading": "cargando...",
   "conflict.onDisk": "En disco",
   "conflict.unsaved": "Editor sin guardar",
+  "det.noActivity": "Aún no hay actividad del agente de IA disponible.",
+  "det.noBackend": "Ningún backend de IA está respondiendo; mostrando el resumen de actividad. Configura o inicia sesión en un backend de Claude/Codex en Preferencias para chatear.",
+  "det.openPending": "Abierto / pendiente:",
   "dialog.autosaveFailed": "El autoguardado al cerrar falló. Este editor tiene cambios sin guardar.",
   "dialog.cancel": "Cancelar",
   "dialog.closeTitle": "¿Cerrar {name}?",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "actualizado hace {n} h",
   "yoagent.updated.justNow": "actualizado ahora mismo",
   "yoagent.updated.minAgo": "actualizado hace {n} min",
+  "yoagent.updated.wrap": "última actualización {rel}",
   "yoagent.you": "Tú"
 }

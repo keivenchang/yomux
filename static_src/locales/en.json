@@ -491,5 +491,9 @@
   "login.showPassword": "Show password",
   "login.hidePassword": "Hide password",
   "login.language": "Language",
-  "login.error.invalid": "Invalid username or password."
+  "login.error.invalid": "Invalid username or password.",
+  "yoagent.updated.wrap": "last updated {rel}",
+  "det.noBackend": "No AI backend is answering; showing the activity summary. Set or log in a Claude/Codex backend in Preferences to chat.",
+  "det.noActivity": "No AI agent activity is available yet.",
+  "det.openPending": "Open / pending:"
 }

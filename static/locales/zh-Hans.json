@@ -31,6 +31,9 @@
   "common.loading": "加载中…",
   "conflict.onDisk": "磁盘上的版本",
   "conflict.unsaved": "未保存的编辑器",
+  "det.noActivity": "目前尚无可用的 AI 代理活动。",
+  "det.noBackend": "没有 AI 后端在响应；正在显示活动摘要。请在偏好设置中设置或登录 Claude/Codex 后端以聊天。",
+  "det.openPending": "打开／待处理：",
   "dialog.autosaveFailed": "关闭时自动保存失败。此编辑器有未保存的更改。",
   "dialog.cancel": "取消",
   "dialog.closeTitle": "关闭 {name}？",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "{n} 小时前更新",
   "yoagent.updated.justNow": "刚刚更新",
   "yoagent.updated.minAgo": "{n} 分钟前更新",
+  "yoagent.updated.wrap": "最后更新 {rel}",
   "yoagent.you": "你"
 }

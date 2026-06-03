@@ -52,6 +52,22 @@ function i18nActiveLocaleId() {
   return i18nActiveLocale;
 }
 
+// DOIT.8 Phase 3: render an "N units ago" relative time in the active locale's native phrasing via
+// Intl.RelativeTimeFormat. Falls back to a plain English string if the API is unavailable.
+function relativeTimeFormat(secondsAgo) {
+  const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
+  let value;
+  let unit;
+  if (sec < 3600) { value = Math.round(sec / 60); unit = 'minute'; }
+  else if (sec < 86400) { value = Math.round(sec / 3600); unit = 'hour'; }
+  else { value = Math.round(sec / 86400); unit = 'day'; }
+  try {
+    return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always'}).format(-value, unit);
+  } catch (_) {
+    return `${value} ${unit}${value === 1 ? '' : 's'} ago`;
+  }
+}
+
 function i18nSetCatalogForTest(locale, catalog) {
   i18nCatalogs.set(locale, catalog || {});
 }

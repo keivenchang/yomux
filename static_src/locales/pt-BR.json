@@ -491,5 +491,9 @@
   "login.showPassword": "Exibir senha",
   "login.hidePassword": "Ocultar senha",
   "login.language": "Idioma",
-  "login.error.invalid": "Usuário ou senha inválidos."
+  "login.error.invalid": "Usuário ou senha inválidos.",
+  "yoagent.updated.wrap": "última atualização {rel}",
+  "det.noBackend": "Nenhum backend de IA está respondendo; exibindo o resumo de atividades. Defina ou faça login em um backend Claude/Codex nas Preferências para conversar.",
+  "det.noActivity": "Ainda não há atividade de agente de IA disponível.",
+  "det.openPending": "Aberto / pendente:"
 }

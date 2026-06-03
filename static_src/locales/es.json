@@ -491,5 +491,9 @@
   "login.showPassword": "Mostrar contraseña",
   "login.hidePassword": "Ocultar contraseña",
   "login.language": "Idioma",
-  "login.error.invalid": "Usuario o contraseña no válidos."
+  "login.error.invalid": "Usuario o contraseña no válidos.",
+  "yoagent.updated.wrap": "última actualización {rel}",
+  "det.noBackend": "Ningún backend de IA está respondiendo; mostrando el resumen de actividad. Configura o inicia sesión en un backend de Claude/Codex en Preferencias para chatear.",
+  "det.noActivity": "Aún no hay actividad del agente de IA disponible.",
+  "det.openPending": "Abierto / pendiente:"
 }

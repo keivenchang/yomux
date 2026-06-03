@@ -330,7 +330,7 @@ class TmuxWebtermApp:
         elif backend in {"codex", "claude"} and invocation != "cli":
             fallback_reason = f"{backend} {invocation} invocation is not available yet"
         if not answer:
-            answer = deterministic_yoagent_reply(question, activity_payload, settings)
+            answer = deterministic_yoagent_reply(question, activity_payload, settings, locale)
         return {
             "answer": answer,
             "backend": requested_backend,

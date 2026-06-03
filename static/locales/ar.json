@@ -31,6 +31,9 @@
   "common.loading": "جارٍ التحميل...",
   "conflict.onDisk": "على القرص",
   "conflict.unsaved": "محرر غير محفوظ",
+  "det.noActivity": "لا يوجد نشاط لوكيل الذكاء الاصطناعي متاح بعد.",
+  "det.noBackend": "لا يوجد خادم ذكاء اصطناعي يستجيب؛ يتم عرض ملخص النشاط. عيّن أو سجّل الدخول إلى خادم Claude/Codex في التفضيلات للدردشة.",
+  "det.openPending": "مفتوح / معلّق:",
   "dialog.autosaveFailed": "فشل الحفظ التلقائي عند الإغلاق. يحتوي هذا المحرر على تغييرات غير محفوظة.",
   "dialog.cancel": "إلغاء",
   "dialog.closeTitle": "إغلاق {name}؟",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "آخر تحديث منذ {n} ساعة",
   "yoagent.updated.justNow": "آخر تحديث الآن",
   "yoagent.updated.minAgo": "آخر تحديث منذ {n} دقيقة",
+  "yoagent.updated.wrap": "آخر تحديث {rel}",
   "yoagent.you": "أنت"
 }

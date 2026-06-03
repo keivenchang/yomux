@@ -31,6 +31,9 @@
   "common.loading": "chargement...",
   "conflict.onDisk": "Sur le disque",
   "conflict.unsaved": "Éditeur non enregistré",
+  "det.noActivity": "Aucune activité d'agent IA disponible pour l'instant.",
+  "det.noBackend": "Aucun backend d'IA ne répond ; affichage du résumé d'activité. Définissez ou connectez un backend Claude/Codex dans les Préférences pour discuter.",
+  "det.openPending": "Ouvert / en attente :",
   "dialog.autosaveFailed": "L'enregistrement automatique à la fermeture a échoué. Cet éditeur a des modifications non enregistrées.",
   "dialog.cancel": "Annuler",
   "dialog.closeTitle": "Fermer {name} ?",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "mis à jour il y a {n} h",
   "yoagent.updated.justNow": "mis à jour à l'instant",
   "yoagent.updated.minAgo": "mis à jour il y a {n} min",
+  "yoagent.updated.wrap": "dernière mise à jour {rel}",
   "yoagent.you": "Vous"
 }

@@ -491,5 +491,9 @@
   "login.showPassword": "パスワードを表示",
   "login.hidePassword": "パスワードを非表示",
   "login.language": "言語",
-  "login.error.invalid": "ユーザー名またはパスワードが無効です。"
+  "login.error.invalid": "ユーザー名またはパスワードが無効です。",
+  "yoagent.updated.wrap": "最終更新 {rel}",
+  "det.noBackend": "応答する AI バックエンドがありません。アクティビティの概要を表示しています。チャットするには設定で Claude/Codex バックエンドを設定するかログインしてください。",
+  "det.noActivity": "利用可能な AI エージェントのアクティビティはまだありません。",
+  "det.openPending": "未対応 / 保留中:"
 }

@@ -31,6 +31,9 @@
   "common.loading": "読み込み中...",
   "conflict.onDisk": "ディスク上",
   "conflict.unsaved": "未保存のエディター",
+  "det.noActivity": "利用可能な AI エージェントのアクティビティはまだありません。",
+  "det.noBackend": "応答する AI バックエンドがありません。アクティビティの概要を表示しています。チャットするには設定で Claude/Codex バックエンドを設定するかログインしてください。",
+  "det.openPending": "未対応 / 保留中:",
   "dialog.autosaveFailed": "閉じる際の自動保存に失敗しました。このエディターには未保存の変更があります。",
   "dialog.cancel": "キャンセル",
   "dialog.closeTitle": "{name} を閉じますか？",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "{n} 時間前に更新",
   "yoagent.updated.justNow": "たった今更新",
   "yoagent.updated.minAgo": "{n} 分前に更新",
+  "yoagent.updated.wrap": "最終更新 {rel}",
   "yoagent.you": "あなた"
 }

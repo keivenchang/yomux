@@ -288,6 +288,7 @@ globalThis.__layoutTestApi = {
   resolveLocalePref,
   i18nLocaleChoices,
   i18nIsRtl,
+  relativeTimeFormat,
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
@@ -4109,7 +4110,24 @@ function makeFileTree(paths) {
     assert.ok(cat['pref.appearance.file_explorer_font_size.label'].includes('{name}'), `Phase 2: ${loc} preserves the {name} placeholder`);
     assert.ok(cat['yoagent.files'].includes('{count}') && cat['yoagent.files'].includes('{added}'), `Phase 2: ${loc} preserves count/added placeholders`);
     assert.notEqual(cat['menu.file'], 'File', `Phase 2: ${loc} actually translates (menu.file not English)`);
+    // DOIT.8 Phase 3: the new Intl-wrap + deterministic-framing keys ship in every locale.
+    for (const k of ['yoagent.updated.wrap', 'det.noBackend', 'det.noActivity', 'det.openPending']) {
+      assert.ok(typeof cat[k] === 'string' && cat[k].length, `Phase 3: ${loc} has ${k}`);
+    }
+    assert.ok(cat['yoagent.updated.wrap'].includes('{rel}'), `Phase 3: ${loc} preserves the {rel} placeholder`);
   }
+}
+
+{
+  // DOIT.8 Phase 3: relative time renders via Intl.RelativeTimeFormat(activeLocale) (native phrasing).
+  const api = loadYolomux('', ['1']);
+  api.setActiveLocaleForTest('en');
+  assert.equal(api.relativeTimeFormat(120), '2 minutes ago', 'Phase 3: en relative time is "2 minutes ago" via Intl');
+  assert.equal(api.relativeTimeFormat(7200), '2 hours ago', 'Phase 3: hours via Intl');
+  assert.equal(api.relativeTimeFormat(172800), '2 days ago', 'Phase 3: days via Intl');
+  const src = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/new Intl\.RelativeTimeFormat\(i18nActiveLocale/.test(src), 'Phase 3: relativeTimeFormat uses Intl.RelativeTimeFormat with the active locale');
+  assert.ok(/t\('yoagent\.updated\.wrap', \{rel: relativeTimeFormat\(seconds\)\}\)/.test(src), 'Phase 3: the activity "last updated" line wraps the Intl relative time');
 }
 
 {

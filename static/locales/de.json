@@ -31,6 +31,9 @@
   "common.loading": "lädt...",
   "conflict.onDisk": "Auf Festplatte",
   "conflict.unsaved": "Ungespeicherter Editor",
+  "det.noActivity": "Noch keine KI-Agentenaktivität verfügbar.",
+  "det.noBackend": "Kein KI-Backend antwortet; die Aktivitätsübersicht wird angezeigt. Lege in den Einstellungen ein Claude-/Codex-Backend fest oder melde dich an, um zu chatten.",
+  "det.openPending": "Offen / ausstehend:",
   "dialog.autosaveFailed": "Automatisches Speichern beim Schließen fehlgeschlagen. Dieser Editor hat ungespeicherte Änderungen.",
   "dialog.cancel": "Abbrechen",
   "dialog.closeTitle": "{name} schließen?",
@@ -491,5 +494,6 @@
   "yoagent.updated.hrAgo": "vor {n} Std. aktualisiert",
   "yoagent.updated.justNow": "gerade aktualisiert",
   "yoagent.updated.minAgo": "vor {n} Min. aktualisiert",
+  "yoagent.updated.wrap": "zuletzt aktualisiert {rel}",
   "yoagent.you": "Du"
 }

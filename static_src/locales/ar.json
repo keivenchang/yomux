@@ -491,5 +491,9 @@
   "login.showPassword": "إظهار كلمة المرور",
   "login.hidePassword": "إخفاء كلمة المرور",
   "login.language": "اللغة",
-  "login.error.invalid": "اسم المستخدم أو كلمة المرور غير صحيحة."
+  "login.error.invalid": "اسم المستخدم أو كلمة المرور غير صحيحة.",
+  "yoagent.updated.wrap": "آخر تحديث {rel}",
+  "det.noBackend": "لا يوجد خادم ذكاء اصطناعي يستجيب؛ يتم عرض ملخص النشاط. عيّن أو سجّل الدخول إلى خادم Claude/Codex في التفضيلات للدردشة.",
+  "det.noActivity": "لا يوجد نشاط لوكيل الذكاء الاصطناعي متاح بعد.",
+  "det.openPending": "مفتوح / معلّق:"
 }
