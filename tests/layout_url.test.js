@@ -287,6 +287,7 @@ globalThis.__layoutTestApi = {
   joinAndNormalize,
   resolveLocalePref,
   i18nLocaleChoices,
+  i18nIsRtl,
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
@@ -4050,11 +4051,16 @@ function makeFileTree(paths) {
   assert.equal(api.resolveLocalePref('system'), 'en', 'Phase 1: system falls back to en without a browser locale');
   // The switcher choices: system + en + Traditional-before-Simplified + pseudo, endonym-labeled.
   const choices = api.i18nLocaleChoices();
-  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'en-XA'], 'Phase 1/2: the locale choices are ordered system/en/Hant/Hans/es/ja/de/fr/pseudo');
+  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'en-XA'], 'Phase 1/2: the locale choices are ordered with all shipped locales then pseudo');
   assert.equal(choices.find(c => c.value === 'de').label, 'Deutsch', 'Phase 2: German is labeled with its endonym');
-  assert.equal(choices.find(c => c.value === 'fr').label, 'Français', 'Phase 2: French is labeled with its endonym');
-  assert.equal(api.resolveLocalePref('de'), 'de', 'Phase 2: German resolves to itself');
-  assert.equal(api.resolveLocalePref('fr'), 'fr', 'Phase 2: French resolves to itself');
+  assert.equal(choices.find(c => c.value === 'ru').label, 'Русский', 'Phase 2: Russian is labeled with its endonym');
+  assert.equal(choices.find(c => c.value === 'ar').label, 'العربية', 'Phase 2: Arabic is labeled with its endonym');
+  for (const loc of ['de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar']) {
+    assert.equal(api.resolveLocalePref(loc), loc, `Phase 2: ${loc} resolves to itself`);
+  }
+  // RTL: Arabic is detected as right-to-left; LTR locales are not.
+  assert.equal(api.i18nIsRtl('ar'), true, 'Phase 2: ar is RTL');
+  assert.equal(api.i18nIsRtl('de'), false, 'Phase 2: de is LTR');
   assert.equal(choices.find(c => c.value === 'es').label, 'Español', 'Phase 1: Spanish is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ja').label, '日本語', 'Phase 1: Japanese is labeled with its endonym');
   assert.equal(api.resolveLocalePref('es'), 'es', 'Phase 1: Spanish resolves to itself');
@@ -4089,6 +4095,15 @@ function makeFileTree(paths) {
   assert.deepEqual(Object.keys(fr).sort(), Object.keys(en).sort(), 'Phase 2: fr.json has exactly the same keys as en.json (parity)');
   assert.equal(fr['menu.file'], 'Fichier', 'Phase 2: fr translates a representative menu label');
   assert.equal(fr['pref.reset.cancel'], 'Annuler', 'Phase 2: fr translates the reset cancel button');
+  // The Phase 2 tail locales all ship with full key-parity and preserve placeholders.
+  for (const loc of ['pt-BR', 'ru', 'ko', 'hi', 'ar']) {
+    const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
+    assert.deepEqual(Object.keys(cat).sort(), Object.keys(en).sort(), `Phase 2: ${loc}.json has exactly the same keys as en.json (parity)`);
+    assert.equal(cat['brand.marker'], 'YO', `Phase 2: ${loc} keeps the YO brand marker`);
+    assert.ok(cat['pref.appearance.file_explorer_font_size.label'].includes('{name}'), `Phase 2: ${loc} preserves the {name} placeholder`);
+    assert.ok(cat['yoagent.files'].includes('{count}') && cat['yoagent.files'].includes('{added}'), `Phase 2: ${loc} preserves count/added placeholders`);
+    assert.notEqual(cat['menu.file'], 'File', `Phase 2: ${loc} actually translates (menu.file not English)`);
+  }
 }
 
 {

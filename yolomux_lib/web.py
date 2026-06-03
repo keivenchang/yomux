@@ -80,6 +80,15 @@ def bootstrap_locale_catalogs(locale: str) -> dict:
     return catalogs
 
 
+def html_lang_dir_attrs(locale: str) -> str:
+    """`lang="…" dir="…"` for the <html> shell. DOIT.8 Phase 2: RTL locales (ar) get dir="rtl" so the
+    server-rendered first paint already mirrors before the JS i18n runtime sets it."""
+    code = str(locale or "en")
+    base = code.lower().split("-")[0]
+    direction = "rtl" if base in {"ar", "he", "fa", "ur"} else "ltr"
+    return f'lang="{html.escape(code, quote=True)}" dir="{direction}"'
+
+
 def server_string(locale: str, key: str, **params: str) -> str:
     """Resolve a catalog key SERVER-SIDE (active locale -> en fallback -> key) for the pre-auth shell.
 
@@ -157,7 +166,7 @@ def html_page(sessions: list[str], access_role: str = "admin") -> str:
         .replace("&", "\\u0026")
     )
     return f"""<!doctype html>
-<html lang="en">
+<html {html_lang_dir_attrs(bootstrap["locale"])}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -256,6 +265,11 @@ LOGIN_LOCALE_CHOICES: list[tuple[str, str]] = [
     ("ja", "日本語"),
     ("de", "Deutsch"),
     ("fr", "Français"),
+    ("pt-BR", "Português (BR)"),
+    ("ru", "Русский"),
+    ("ko", "한국어"),
+    ("hi", "हिन्दी"),
+    ("ar", "العربية"),
 ]
 _LOGIN_LOCALE_VALUES = {value for value, _ in LOGIN_LOCALE_CHOICES}
 
@@ -306,7 +320,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
         "hideAria": server_string(current_locale, "login.hidePassword"),
     })
     return f"""<!doctype html>
-<html lang="en">
+<html {html_lang_dir_attrs(current_locale)}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

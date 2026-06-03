@@ -807,13 +807,24 @@ async function applyLocale(locale) {
   await i18nLoadCatalog(i18nFallbackLocale);
   if (next !== i18nFallbackLocale) await i18nLoadCatalog(next);
   i18nActiveLocale = next;
+  // DOIT.8 Phase 2: flip the document direction so RTL locales (ar) mirror the whole layout.
+  if (typeof document !== 'undefined' && document.documentElement) {
+    document.documentElement.setAttribute('dir', i18nIsRtl(next) ? 'rtl' : 'ltr');
+    document.documentElement.setAttribute('lang', next);
+  }
   rerenderForLocale();
 }
 
 // The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
 // navigator.language to one of these. Add new locales here as their catalogs ship.
 function i18nSupportedLocales() {
-  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'en'];
+  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'en'];
+}
+
+// DOIT.8 Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
+function i18nIsRtl(locale) {
+  const base = String(locale || '').toLowerCase().split('-')[0];
+  return base === 'ar' || base === 'he' || base === 'fa' || base === 'ur';
 }
 
 // The language-switcher choices (Preferences picker + topbar switcher). Endonyms stay in their own
@@ -828,6 +839,11 @@ function i18nLocaleChoices() {
     {value: 'ja', label: '日本語'},
     {value: 'de', label: 'Deutsch'},
     {value: 'fr', label: 'Français'},
+    {value: 'pt-BR', label: 'Português (BR)'},
+    {value: 'ru', label: 'Русский'},
+    {value: 'ko', label: '한국어'},
+    {value: 'hi', label: 'हिन्दी'},
+    {value: 'ar', label: 'العربية'},
     {value: 'en-XA', label: t('pref.general.language.pseudo')},
   ];
 }
@@ -13553,6 +13569,11 @@ function preferenceSections() {
         {value: 'ja', label: '日本語'},
         {value: 'de', label: 'Deutsch'},
         {value: 'fr', label: 'Français'},
+        {value: 'pt-BR', label: 'Português (BR)'},
+        {value: 'ru', label: 'Русский'},
+        {value: 'ko', label: '한국어'},
+        {value: 'hi', label: 'हिन्दी'},
+        {value: 'ar', label: 'العربية'},
         {value: 'en-XA', label: t('pref.general.language.pseudo')},
       ], help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},

@@ -150,11 +150,17 @@ def test_login_locale_picker_writes_general_language():
     from yolomux_lib.web import login_html
     from yolomux_lib.web import save_login_locale
 
-    assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr"]
+    assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr", "pt-BR", "ru", "ko", "hi", "ar"]
     page = login_html()
     assert 'name="locale"' in page
     assert "繁體中文" in page and "简体中文" in page  # endonym-labeled, Traditional before Simplified
     assert page.index("繁體中文") < page.index("简体中文")
+    # DOIT.8 Phase 2: the <html> shell carries lang + dir; Arabic is rendered right-to-left.
+    from yolomux_lib.web import html_lang_dir_attrs
+    assert html_lang_dir_attrs("en") == 'lang="en" dir="ltr"'
+    assert html_lang_dir_attrs("ar") == 'lang="ar" dir="rtl"'
+    assert 'dir="rtl"' in login_html(current_locale="ar")
+    assert 'dir="ltr"' in login_html(current_locale="de")
     # The login chrome localizes to the saved locale (server-side, pre-auth).
     assert "Sign in" in login_html(current_locale="en")
     assert "登入" in login_html(current_locale="zh-Hant")  # Sign in (Traditional)
