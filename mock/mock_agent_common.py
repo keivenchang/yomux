@@ -801,6 +801,11 @@ def advance_yesno_queue(state: dict[str, str], approved: bool) -> None:
     cmd, _, desc = remaining[0].partition("\t")
     state["yesno_idx"] = str(idx + 1)
     state["yesno_queue"] = "\n".join(remaining[1:])
+    # `ask N` cadence: think briefly (~1s) between asks so the sequence looks like a real agent working
+    # through steps — ask -> think -> ask -> think -> … — not a burst of back-to-back prompts. The
+    # spinner erases itself, so the next prompt is still the clean bottom-of-screen block the detector
+    # needs (it reads `working` during the think, then `approval` once the prompt renders).
+    print_thinking(seconds=1)
     start_yesno_step(state, cmd, desc)
 
 
@@ -1155,6 +1160,13 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
     m = re.match(r"^(?:yesno|confirm|script)(?:\s+(\d+))?$", lower)
     if m:
         cmd_yesno(state, int(m.group(1)) if m.group(1) else 3)
+        return
+
+    # `ask N` — N consecutive Yes/No permission asks, thinking ~1s between each (ask -> think -> repeat).
+    # Bare `ask`/`question`/`choose` (no count) falls through to the single AskUserQuestion below.
+    m = re.match(r"^ask\s+(\d+)$", lower)
+    if m:
+        cmd_yesno(state, int(m.group(1)))
         return
 
     # todos / plan — Ctrl-T style task list (the overlay that renders below a prompt).

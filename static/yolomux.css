@@ -58,7 +58,7 @@
   --pane-tab-yolo-border: #9be33d;
   --pane-tab-panel-ring: #76b900;
   --pane-tab-panel-ring-shadow: rgba(118, 185, 0, 0.95);
-  --pane-tab-panel-ring-width: 2px;
+  --pane-tab-panel-ring-width: 4px;
   --pane-tab-panel-head-bg: #3f6f00;
   --pane-tab-panel-head-text: #f4ffe8;
   --pane-tab-panel-detail-bg: #1f3026;
@@ -2015,16 +2015,31 @@ body.theme-light .branch-link {
   background: var(--panel);
 }
 .changes-repo-head {
+  /* DOIT.23: now a collapse toggle (button), mirroring .changes-uploaded-toggle. */
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   padding: 6px 8px;
   background: var(--panel2);
   color: var(--text);
+  border: 0;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
+  text-align: start;
+  cursor: pointer;
+}
+.changes-repo-head:hover,
+.changes-repo-head:focus-visible {
+  color: var(--brand-green);
+  outline: none;
+}
+.changes-repo-caret {
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 12px;
 }
 .changes-repo-title {
   min-width: 0;
@@ -2626,6 +2641,27 @@ body.theme-light .branch-link {
 }
 .command-palette-label {
   font-weight: 700;
+}
+/* DOIT.22: view-mode chips on a deduped file row (one row for a file open as editor + preview). */
+.command-palette-views {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.command-palette-view-chip {
+  padding: 0 5px;
+  border: 1px solid rgba(158, 232, 93, 0.34);
+  border-radius: 999px;
+  color: #bddcaf;
+  background: rgba(118, 185, 0, 0.12);
+  font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
+  text-transform: lowercase;
+}
+body.theme-light .command-palette-view-chip {
+  border-color: rgba(95, 150, 42, 0.4);
+  color: #3f6312;
+  background: rgba(118, 185, 0, 0.14);
 }
 .command-palette-label .fuzzy-match,
 .command-palette-detail .fuzzy-match {
@@ -3285,6 +3321,8 @@ body.theme-light .drop-slot.drag-over {
        the .active / [aria-pressed=true] state = green. Buttons never hardcode their own colors.
      Raw values come from theme tokens, so everything flips light/dark automatically. */
   --pane-bar-bg: var(--panel2);
+  /* DOIT.20: default = no ring on a plain inactive pane; per-state rules below set green/red/white. */
+  --panel-ring-color: transparent;
   --pane-ctl-bg: var(--pane-tab-control-bg);
   --pane-ctl-fg: var(--pc-control-fg);
   --pane-ctl-border: var(--pane-tab-control-border);
@@ -3296,7 +3334,13 @@ body.theme-light .drop-slot.drag-over {
      border (box-sizing: border-box) it is part of the pane's box — it sits flush against the resizer
      (no gap to the red/yellow line) and is never clipped like an outset box-shadow was. At spacing 0
      the border is 0px (no gutter, panes flush to the 1px separator). */
-  border: var(--pane-split-gap) solid transparent;
+  /* DOIT.24 C1: the green/red/white state ring IS this gutter border, colored per state via the unified
+     --panel-ring-color and faded by --pane-ring-opacity. Because it fills the pane's OUTER edge (the
+     gutter, flush to the resizer), an active (green) pane and a needs (red) pane meet at the seam with
+     only the 1px resizer between them — they TOUCH (image 038). Inactive = transparent (--panel-ring-color
+     default). At spacing 0 the border is 0px (panes flush). This puts the ring back at the seam after
+     DOIT.20's content-edge overlay made adjacent rings sit a gutter apart. */
+  border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--pane-ring-opacity, 50%), transparent);
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
   display: grid;
@@ -3462,22 +3506,23 @@ body.theme-light .drop-slot.drag-over {
 }
 .panel.active-pane {
   --panel-ring-color: var(--pane-tab-panel-ring);
-  border-color: var(--pane-tab-panel-ring);
   background: var(--panel);
 }
-/* The active/focus pane colors its "natural border" (the --pane-split-gap-wide border above) with the
-   state color: box | green(spacing) | line(1px) | background(spacing) | box. Only the ACTIVE pane's
-   border is colored — the inactive side keeps its transparent border (shows the background). Because
-   it's a real border it sits flush against the resizer (no gap to the line) and is never clipped. The
-   red needs-* attention ring is a separate constant-width ::after below. */
+/* DOIT.20 + DOIT.24 C1: the green/red/white pane ring is the translucent --pane-split-gap GUTTER BORDER
+   (above), colored per state by the unified --panel-ring-color and faded by --pane-ring-opacity. Because
+   it fills the pane's outer edge, an active (green) pane and a needs (red) pane meet at the seam (image
+   038). ONE marker means no "red inside green" nesting: a focused+needs pane just resolves --panel-ring-
+   color to red. (DOIT.20 first tried a content-edge .panel::after overlay for opacity, but that sat a
+   gutter away from the neighbor; DOIT.24 moved it back to the seam border, keeping the opacity.) */
 .panel.active-pane,
 .panel.typing-ready-pane {
-  border-color: var(--pane-tab-panel-ring);
   /* focused pane: all chrome bars switch from neutral gray to the bright tab-strip green together. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 .panel.typing-ready-pane {
-  --panel-ring-color: var(--active-ring);
+  /* a hover-selected/typing-ready pane shows the same green focus ring as the active pane (it did
+     before this refactor, when both colored their real border green). */
+  --panel-ring-color: var(--pane-tab-panel-ring);
 }
 .panel.typing-ready-pane.yolo-ready-pane {
   --panel-ring-color: var(--brand-green);
@@ -3487,14 +3532,9 @@ body.theme-light .drop-slot.drag-over {
 .panel.needs-blocked-pane {
   --panel-ring-color: #ff3347;
 }
-/* image 20260603-001: when a needs-attention pane is ALSO focused, carry the red on the BORDER (where the
-   green focus border already is) instead of a separate nested inset ::after — so red sits ON the green
-   edge, not one border-width inside it. Higher specificity (0,3,0) than the green focus rules, so it wins.
-   Inactive needs panes (transparent border) keep the inset red ring below.
-   image 20260603-028: ALSO pin --panel-ring-color red HERE. On a --dangerously-yolo server a focused
-   needs pane is also .yolo-ready-pane, and `.typing-ready-pane.yolo-ready-pane{--panel-ring-color:green}`
-   (0,3,0) otherwise out-specifies the needs red (0,2,0) → the alert went green on hover/focus. This rule
-   is the same specificity but later in source, so red wins; attention always beats the yolo-ready tint. */
+/* image 028: attention ALWAYS beats the yolo-ready green tint. A focused needs pane is also
+   .yolo-ready-pane, whose green --panel-ring-color (0,3,0) would otherwise out-specify the needs red
+   (0,2,0). Same specificity, later in source → red wins. */
 .panel.active-pane.needs-input-pane,
 .panel.active-pane.needs-exec-pane,
 .panel.active-pane.needs-blocked-pane,
@@ -3502,33 +3542,16 @@ body.theme-light .drop-slot.drag-over {
 .panel.typing-ready-pane.needs-exec-pane,
 .panel.typing-ready-pane.needs-blocked-pane {
   --panel-ring-color: #ff3347;
-  border-color: var(--panel-ring-color);
 }
-.panel.preview-linked:not(.active-pane):not(.typing-ready-pane):not(.needs-input-pane):not(.needs-exec-pane):not(.needs-blocked-pane)::after {
-  content: "";
-  position: absolute;
-  inset: 1px;
-  z-index: 19;
-  border: 1.5px solid color-mix(in srgb, var(--brand-green) 72%, transparent);
-  border-radius: inherit;
-  pointer-events: none;
+/* preview-linked shows an ambient green tint ONLY when no higher state owns the ring (the :not() chain
+   makes it mutually exclusive, so active/needs override it). Folded into the unified --panel-ring-color. */
+.panel.preview-linked:not(.active-pane):not(.typing-ready-pane):not(.needs-input-pane):not(.needs-exec-pane):not(.needs-blocked-pane) {
+  --panel-ring-color: var(--brand-green);
 }
-/* The red attention states keep an INSET ::after ring (it carries the pulsing animation). The
-   active/typing-ready focus ring is the outset box-shadow above instead. */
-.panel.needs-input-pane:not(.active-pane):not(.typing-ready-pane)::after,
-.panel.needs-exec-pane:not(.active-pane):not(.typing-ready-pane)::after,
-.panel.needs-blocked-pane:not(.active-pane):not(.typing-ready-pane)::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  border: var(--pane-tab-panel-ring-width) solid var(--panel-ring-color);
-  border-radius: inherit;
-  pointer-events: none;
-}
-.panel.needs-input-pane:not(.active-pane):not(.typing-ready-pane)::after,
-.panel.needs-exec-pane:not(.active-pane):not(.typing-ready-pane)::after,
-.panel.needs-blocked-pane:not(.active-pane):not(.typing-ready-pane)::after {
+/* needs-* panes PULSE the red ring (the keyframes drive border-color directly on the gutter border). */
+.panel.needs-input-pane,
+.panel.needs-exec-pane,
+.panel.needs-blocked-pane {
   --attention-ring-border: 1px;
   animation: attention-ring-fade var(--red-reminder-duration) var(--red-reminder-easing) infinite;
   animation-delay: var(--attention-animation-delay, 0s);
@@ -4304,6 +4327,19 @@ body.theme-light .meta a:hover,
 body.theme-light .summary-context a:hover {
   color: #1e3a8a;
 }
+/* DOIT.19: a MERGED PR link must read purple (GitHub convention + matches the purple MERGED tab badge),
+   not the generic link blue above. The dark `.meta a.pr-status-merged{#c084fc}` (20_*.css) is out-won in
+   light mode by `body.theme-light .meta a` (same 0,2,1, later in source), so re-assert at 0,3,1 here. */
+body.theme-light .popover-value a.pr-status-merged,
+body.theme-light .meta a.pr-status-merged,
+body.theme-light .summary-context a.pr-status-merged,
+body.theme-light .branch-meta a.pr-status-merged {
+  color: #8250df;
+}
+body.theme-light .meta a.pr-status-merged:hover,
+body.theme-light .summary-context a.pr-status-merged:hover {
+  color: #6639ba;
+}
 body.theme-light .pane-tab:hover {
   border-color: rgba(15, 23, 42, 0.5);
 }
@@ -4333,9 +4369,12 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   min-width: 0;
   max-width: 100%;
   min-height: 0;
-  /* No horizontal padding: the terminal sits flush to the pane edge so its dark box meets the resizer
-     directly (the old 2px left/right padding showed a dark sliver between the terminal and the seam). */
-  padding: 2px 0 0;
+  /* No padding: the terminal sits flush to the pane edges so its box meets the resizer directly (the
+     old 2px left/right padding showed a dark sliver at the seam). The former `padding-top: 2px` gave a
+     small breathing gap below the detail-row border, but it just wasted vertical real estate — removed
+     so the terminal uses the full pane (user request, image 034). Restore `padding-top: 2px` here if a
+     gap is wanted back. */
+  padding: 0;
   overflow: hidden;
   border: 0;
   border-radius: 0;
@@ -4365,6 +4404,18 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .terminal .xterm {
   height: 100%;
+}
+/* THE BLACK LINE FIX (image 034): xterm.css ships `.xterm:not(.allow-transparency) .xterm-viewport {
+   background-color: #000 }` — a dark-page assumption so the OS-X scrollbar slider reads as opaque.
+   `.xterm-viewport` is positioned top:0/bottom:0 and the canvas (`.xterm-screen`) paints the text rows
+   ON TOP of it; the few px the canvas doesn't cover at the top show the viewport's #000 as a stark
+   black line on our LIGHT terminal (verified by pixel-scan: the strip's element is `.xterm-viewport`,
+   bg rgb(0,0,0), with NO inline override — present even on an empty shell, so it is NOT agent output).
+   Our `.terminal` container already carries the theme background (set in JS), so make the viewport
+   transparent and let that show through — removes the black line in BOTH themes. Specificity 0,4,0
+   beats xterm's 0,3,0, so no !important. (Restore xterm's #000 if a viewport bg is ever needed.) */
+.terminal .xterm:not(.allow-transparency) .xterm-viewport {
+  background-color: transparent;
 }
 .terminal .xterm-screen,
 .terminal .xterm-screen canvas,
@@ -4659,14 +4710,14 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .transcript {
   height: 100%;
   min-height: 0;
-  background: #11151d;
+  background: var(--bg);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 .transcript-head {
   padding: 6px 8px;
   color: var(--muted);
-  background: #171d27;
+  background: var(--panel2);
   border-bottom: 1px solid var(--line);
   font-size: var(--ui-font-size-sm);
 }
@@ -4677,13 +4728,13 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   gap: 7px;
   padding: 5px 8px;
   color: var(--muted);
-  background: #141b25;
+  background: var(--panel2);
   border-bottom: 1px solid var(--line);
   font: var(--ui-font-size-xs)/1.25 var(--mono-font);
 }
 .transcript-path-label {
   flex: 0 0 auto;
-  color: #8ca0b6;
+  color: var(--muted);
   text-transform: uppercase;
   font: 700 var(--ui-font-size-2xs)/1 var(--ui-font);
 }
@@ -4693,7 +4744,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #dfe6ef;
+  color: var(--text);
 }
 .transcript-path-missing {
   min-width: 0;
@@ -4709,24 +4760,24 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   min-height: 0;
   padding: 8px;
   overflow: auto;
-  color: #dfe6ef;
+  color: var(--text);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .transcript-item {
-  border-inline-start: 3px solid #667085;
-  background: #141b25;
+  border-inline-start: 3px solid var(--line);
+  background: var(--panel2);
   margin: 0 0 8px 0;
   padding: 7px 9px;
   border-radius: 5px;
 }
-.transcript-item.user { border-color: #60a5fa; background: #102033; }
-.transcript-item.assistant { border-color: #4ade80; background: #122719; }
-.transcript-item.tool_use { border-color: #f59e0b; background: #2a2112; }
-.transcript-item.tool_result { border-color: #c084fc; background: #21172f; }
-.transcript-item.summary { border-color: #f472b6; background: #2b1724; }
-.transcript-item.system { border-color: #94a3b8; background: #1c2430; }
+.transcript-item.user { border-color: #60a5fa; background: color-mix(in srgb, #60a5fa 12%, var(--panel)); }
+.transcript-item.assistant { border-color: #4ade80; background: color-mix(in srgb, #4ade80 12%, var(--panel)); }
+.transcript-item.tool_use { border-color: #f59e0b; background: color-mix(in srgb, #f59e0b 12%, var(--panel)); }
+.transcript-item.tool_result { border-color: #c084fc; background: color-mix(in srgb, #c084fc 12%, var(--panel)); }
+.transcript-item.summary { border-color: #f472b6; background: color-mix(in srgb, #f472b6 12%, var(--panel)); }
+.transcript-item.system { border-color: #94a3b8; background: color-mix(in srgb, #94a3b8 12%, var(--panel)); }
 .transcript-role {
-  color: #d7dde5;
+  color: var(--text);
   font-weight: 700;
   margin-bottom: 5px;
 }
@@ -4739,12 +4790,12 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   min-height: 0;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
-  background: #11151d;
+  background: var(--bg);
 }
 .summary-context {
   padding: 7px 10px;
-  color: #b7c0ce;
-  background: #141b25;
+  color: var(--muted);
+  background: var(--panel2);
   border-bottom: 1px solid var(--line);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
   overflow: hidden;
@@ -4755,7 +4806,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   white-space: nowrap;
 }
 .summary-context-label {
-  color: #d7dde5;
+  color: var(--text);
   font-weight: 700;
 }
 .summary-preview {
@@ -4764,14 +4815,14 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   padding: 10px;
   overflow: auto;
   overflow-wrap: anywhere;
-  color: #dfe6ef;
+  color: var(--text);
 }
 .event-list {
   height: 100%;
   min-height: 0;
   overflow: auto;
   padding: 8px;
-  background: #0f141d;
+  background: var(--bg);
   border-top: 1px solid var(--line);
 }
 .event-item {
@@ -4779,8 +4830,8 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   grid-template-columns: 132px 118px minmax(0, 1fr);
   gap: 8px;
   padding: 6px 7px;
-  border-bottom: 1px solid #243044;
-  color: #d9e2ef;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .event-item:last-child {
@@ -4788,17 +4839,18 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .event-time,
 .event-type {
-  color: #8f9bae;
+  align-self: start;
+  color: var(--muted);
   white-space: nowrap;
 }
 .event-type {
   text-transform: uppercase;
 }
 .event-message {
+  /* DOIT.25: wrap the command across lines instead of one-line ellipsis (no horizontal scroll). */
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .event-empty {
   padding: 12px;
@@ -5328,6 +5380,43 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
 }
 .info-cell a.pr-status-closed:hover {
   color: #aeb8c7;
+}
+/* Light mode (DOIT.18 C1): the whole YO!info table hardcoded dark-mode colors with NO light
+   override — near-white row text vanished on the white pane, header/current rows were dark bars,
+   and the PR/branch links were low-contrast pastels. Repaint for the white surface; dark unchanged. */
+body.theme-light .info-row {
+  color: var(--text);
+  border-bottom-color: var(--line);
+}
+body.theme-light .info-row.header {
+  color: var(--muted);
+  background: var(--panel2);
+}
+body.theme-light .info-row.current {
+  color: var(--text);
+  background: var(--file-selection-bg);
+}
+body.theme-light .info-cell a {
+  color: #1d4ed8;
+}
+body.theme-light .info-cell a:hover {
+  color: #0a3bc0;
+}
+body.theme-light .info-cell a.pr-status-failing,
+body.theme-light .info-cell a.pr-status-failing:hover {
+  color: #c0143c;
+}
+body.theme-light .info-cell a.pr-status-passing,
+body.theme-light .info-cell a.pr-status-passing:hover {
+  color: #1a7f37;
+}
+body.theme-light .info-cell a.pr-status-merged,
+body.theme-light .info-cell a.pr-status-merged:hover {
+  color: #8250df;
+}
+body.theme-light .info-cell a.pr-status-closed,
+body.theme-light .info-cell a.pr-status-closed:hover {
+  color: #57606a;
 }
 .info-branch-current {
   color: var(--accent-gold);
@@ -7373,6 +7462,8 @@ body.editor-theme-light .file-editor-content {
 .file-editor-theme-panel,
 .file-editor-reload-panel,
 .file-editor-cross-split-panel,
+.file-editor-nav-back,
+.file-editor-nav-forward,
 .file-editor-save-panel {
   height: 20px;
   flex: 0 0 auto;
@@ -7384,6 +7475,17 @@ body.editor-theme-light .file-editor-content {
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   cursor: pointer;
+}
+/* DOIT.21: back/forward history buttons (left of the toolbar). Disabled at the ends of the stack. */
+.file-editor-nav-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.file-editor-nav-back:disabled,
+.file-editor-nav-forward:disabled {
+  opacity: 0.32;
+  cursor: default;
 }
 .file-editor-save-panel {
   min-width: 20px;
@@ -7398,6 +7500,8 @@ body.editor-theme-light .file-editor-content {
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
+.file-editor-nav-back,
+.file-editor-nav-forward,
 .file-editor-theme-panel {
   min-width: 20px;
   width: 20px;

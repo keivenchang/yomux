@@ -1240,8 +1240,20 @@ function commandPaletteKeybinding(label, detail = '') {
   return /\b(?:Ctrl|Cmd|Shift|Esc|Alt)[^,;]*/.exec(detail)?.[0] || '';
 }
 
+// DOIT.22: a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
+function commandPaletteViewModeLabel(mode) {
+  if (mode === 'preview') return t('editor.mode.preview');
+  if (mode === 'split') return t('editor.mode.split');
+  if (mode === 'diff') return t('editor.diff');
+  return t('editor.mode.edit');
+}
+
 function commandPaletteCommandItems() {
-  const tabItems = commandPaletteAllTabItems().map(item => ({
+  // DOIT.22: a single file can be open as TWO layout items (the editor tab AND the preview tab) — the
+  // old map emitted two IDENTICAL palette rows (same name + path). Group FILE items by path and emit
+  // ONE row per file, surfacing which views are open as edit/preview/diff chips; non-file tabs (sessions,
+  // Finder/Info/Prefs/Changes) stay one row each. Selecting the row focuses the editor view (default).
+  const tabRow = (item, extra = {}) => ({
     group: t('palette.group.tabs'),
     label: itemLabel(item),
     detail: menuTabDetail(item),
@@ -1250,7 +1262,23 @@ function commandPaletteCommandItems() {
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
     run: () => selectSession(item),
-  }));
+    ...extra,
+  });
+  const fileGroups = new Map();   // path -> [items], in discovery order
+  const tabItems = [];
+  for (const item of commandPaletteAllTabItems()) {
+    const path = fileItemPath(item);
+    if (!path) { tabItems.push(tabRow(item)); continue; }
+    if (!fileGroups.has(path)) fileGroups.set(path, []);
+    fileGroups.get(path).push(item);
+  }
+  for (const [path, items] of fileGroups) {
+    if (items.length === 1) { tabItems.push(tabRow(items[0])); continue; }
+    // editor + preview of the same file → ONE row; focus the editor view, chip the open views' modes.
+    const editorItem = items.find(it => !isFilePreviewItem(it)) || items[0];
+    const viewModes = [...new Set(items.map(it => editorViewModeFor(path, it)))].map(commandPaletteViewModeLabel);
+    tabItems.push(tabRow(editorItem, {key: `file:${path}`, viewModes}));
+  }
   const tabItemIds = new Set(commandPaletteAllTabItems());
   const menuItems = appMenuTree()
     .flatMap(menu => flattenMenuCommands(menu.items, [menu.label]))
@@ -1580,7 +1608,7 @@ function renderCommandPaletteResults() {
   results.innerHTML = commandPaletteItemsCache.map((item, index) => `
     <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
-      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span></span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
+      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views" aria-hidden="true">${item.viewModes.map(v => `<span class="command-palette-view-chip">${esc(v)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
     </button>`).join('');
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});

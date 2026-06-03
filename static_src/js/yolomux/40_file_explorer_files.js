@@ -2609,6 +2609,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   };
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
   else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
+  recordEditorNav(fullPath);   // DOIT.21: push to the back/forward history (no-op while navigating)
   if (openFiles.has(fullPath)) {
     await showFileEditorPaneForPath(fullPath, openOptions);
     if (options.viewMode) renderOpenFilePath(fullPath);

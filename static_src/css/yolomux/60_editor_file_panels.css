@@ -1241,6 +1241,8 @@ body.editor-theme-light .file-editor-content {
 .file-editor-theme-panel,
 .file-editor-reload-panel,
 .file-editor-cross-split-panel,
+.file-editor-nav-back,
+.file-editor-nav-forward,
 .file-editor-save-panel {
   height: 20px;
   flex: 0 0 auto;
@@ -1252,6 +1254,17 @@ body.editor-theme-light .file-editor-content {
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   cursor: pointer;
+}
+/* DOIT.21: back/forward history buttons (left of the toolbar). Disabled at the ends of the stack. */
+.file-editor-nav-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.file-editor-nav-back:disabled,
+.file-editor-nav-forward:disabled {
+  opacity: 0.32;
+  cursor: default;
 }
 .file-editor-save-panel {
   min-width: 20px;
@@ -1266,6 +1279,8 @@ body.editor-theme-light .file-editor-content {
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
+.file-editor-nav-back,
+.file-editor-nav-forward,
 .file-editor-theme-panel {
   min-width: 20px;
   width: 20px;

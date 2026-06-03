@@ -60,6 +60,7 @@ const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
+const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
 const fileEditorLineNumbersStorageKey = 'yolomux.editorLineNumbers';
 const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1';
@@ -268,6 +269,16 @@ let uploadedFilesCollapsed = (() => {
 let changesFolderCollapsed = (() => {
   try {
     const value = window.localStorage?.getItem(changesFolderCollapsedStorageKey);
+    const parsed = value ? JSON.parse(value) : [];
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch (_) {
+    return new Set();
+  }
+})();
+// DOIT.23: per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
+let changesRepoCollapsed = (() => {
+  try {
+    const value = window.localStorage?.getItem(changesRepoCollapsedStorageKey);
     const parsed = value ? JSON.parse(value) : [];
     return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
   } catch (_) {
@@ -703,6 +714,10 @@ let transparentDragImage = null;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 let dragTabRectCache = null;
+// DOIT.21: one global editor navigation history (Cursor-style back/forward through visited files).
+// stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
+// back/forward re-open is in flight (so it doesn't push a new entry).
+const editorNav = {stack: [], index: -1, navigating: false};
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
@@ -3128,8 +3143,20 @@ function commandPaletteKeybinding(label, detail = '') {
   return /\b(?:Ctrl|Cmd|Shift|Esc|Alt)[^,;]*/.exec(detail)?.[0] || '';
 }
 
+// DOIT.22: a short localized label for an editor/preview view mode, shown as a chip on a deduped row.
+function commandPaletteViewModeLabel(mode) {
+  if (mode === 'preview') return t('editor.mode.preview');
+  if (mode === 'split') return t('editor.mode.split');
+  if (mode === 'diff') return t('editor.diff');
+  return t('editor.mode.edit');
+}
+
 function commandPaletteCommandItems() {
-  const tabItems = commandPaletteAllTabItems().map(item => ({
+  // DOIT.22: a single file can be open as TWO layout items (the editor tab AND the preview tab) — the
+  // old map emitted two IDENTICAL palette rows (same name + path). Group FILE items by path and emit
+  // ONE row per file, surfacing which views are open as edit/preview/diff chips; non-file tabs (sessions,
+  // Finder/Info/Prefs/Changes) stay one row each. Selecting the row focuses the editor view (default).
+  const tabRow = (item, extra = {}) => ({
     group: t('palette.group.tabs'),
     label: itemLabel(item),
     detail: menuTabDetail(item),
@@ -3138,7 +3165,23 @@ function commandPaletteCommandItems() {
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
     run: () => selectSession(item),
-  }));
+    ...extra,
+  });
+  const fileGroups = new Map();   // path -> [items], in discovery order
+  const tabItems = [];
+  for (const item of commandPaletteAllTabItems()) {
+    const path = fileItemPath(item);
+    if (!path) { tabItems.push(tabRow(item)); continue; }
+    if (!fileGroups.has(path)) fileGroups.set(path, []);
+    fileGroups.get(path).push(item);
+  }
+  for (const [path, items] of fileGroups) {
+    if (items.length === 1) { tabItems.push(tabRow(items[0])); continue; }
+    // editor + preview of the same file → ONE row; focus the editor view, chip the open views' modes.
+    const editorItem = items.find(it => !isFilePreviewItem(it)) || items[0];
+    const viewModes = [...new Set(items.map(it => editorViewModeFor(path, it)))].map(commandPaletteViewModeLabel);
+    tabItems.push(tabRow(editorItem, {key: `file:${path}`, viewModes}));
+  }
   const tabItemIds = new Set(commandPaletteAllTabItems());
   const menuItems = appMenuTree()
     .flatMap(menu => flattenMenuCommands(menu.items, [menu.label]))
@@ -3468,7 +3511,7 @@ function renderCommandPaletteResults() {
   results.innerHTML = commandPaletteItemsCache.map((item, index) => `
     <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
-      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span></span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
+      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views" aria-hidden="true">${item.viewModes.map(v => `<span class="command-palette-view-chip">${esc(v)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
     </button>`).join('');
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
@@ -7690,6 +7733,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   };
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
   else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
+  recordEditorNav(fullPath);   // DOIT.21: push to the back/forward history (no-op while navigating)
   if (openFiles.has(fullPath)) {
     await showFileEditorPaneForPath(fullPath, openOptions);
     if (options.viewMode) renderOpenFilePath(fullPath);
@@ -9117,8 +9161,11 @@ function applyCssSettings() {
   // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
   // panes sit flush to the 1px separator. The red needs-* attention ring keeps its own constant width
   // (--pane-tab-panel-ring-width, unchanged) so it stays visible even at spacing 0.
-  const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 2)));
+  const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 4)));
   root.setProperty('--pane-split-gap', `${paneSpacing}px`);
+  // DOIT.20: opacity (20-100%) of the translucent green/red pane ring drawn over the content edge.
+  const paneRingOpacity = Math.max(20, Math.min(100, numberSetting('appearance.pane_ring_opacity', 50)));
+  root.setProperty('--pane-ring-opacity', `${paneRingOpacity}%`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
@@ -13752,6 +13799,7 @@ function preferenceSections() {
       ], help: t('pref.appearance.editor_cursor_color.help')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
       {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
+      {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'number', min: 20, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
       {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
       {path: 'appearance.red_reminder_ms', label: t('pref.appearance.red_reminder_ms.label'), type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: t('pref.appearance.red_reminder_ms.help')},
       {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
@@ -14719,6 +14767,10 @@ function writeStoredChangesFolderCollapsed() {
   storageSet(changesFolderCollapsedStorageKey, JSON.stringify(Array.from(changesFolderCollapsed).sort()));
 }
 
+function writeStoredChangesRepoCollapsed() {
+  storageSet(changesRepoCollapsedStorageKey, JSON.stringify(Array.from(changesRepoCollapsed).sort()));
+}
+
 function changeStatusClassKey(statusKey) {
   const key = String(statusKey || 'M').toLowerCase();
   return /^[a-z0-9_-]+$/.test(key) ? key : 'unknown';
@@ -14890,10 +14942,12 @@ function changesRepoGroupsHtml(files, options = {}) {
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
     const repoInfo = repoMap.get(repo) || {};
     const tree = changeTreeForEntries(entries);
-    const rows = changesTreeChildrenHtml(tree, {session: payload.session || '', repo, compact: options.compact === true}, 0);
-    return `<section class="changes-repo-group">
-      <div class="changes-repo-head"><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></div>
-      <div class="changes-file-list changes-tree">${rows}</div>
+    // DOIT.23: the repo header is a collapse toggle (per-repo, keyed by path), mirroring the uploaded group.
+    const collapsed = changesRepoCollapsed.has(repo);
+    const rows = collapsed ? '' : changesTreeChildrenHtml(tree, {session: payload.session || '', repo, compact: options.compact === true}, 0);
+    return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
+      <button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></button>
+      ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
     </section>`;
   }).join('');
   if (!uploaded.length) return repoHtml;
@@ -14996,7 +15050,7 @@ function createChangesPanel() {
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-uploaded-files-toggle], [data-changes-folder-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
 function renderChangesPanels(options = {}) {
@@ -15085,6 +15139,17 @@ function bindChangesPanel(panel) {
       event.preventDefault();
       uploadedFilesCollapsed = !uploadedFilesCollapsed;
       writeStoredUploadedFilesCollapsed();
+      renderChangesPanels({force: true});
+      renderFileExplorerChangesPanels({force: true});
+      return;
+    }
+    const repoToggle = event.target.closest('[data-changes-repo-toggle]');
+    if (repoToggle && panel.contains(repoToggle)) {
+      event.preventDefault();
+      const repo = repoToggle.dataset.changesRepoToggle || '';
+      if (changesRepoCollapsed.has(repo)) changesRepoCollapsed.delete(repo);
+      else changesRepoCollapsed.add(repo);
+      writeStoredChangesRepoCollapsed();
       renderChangesPanels({force: true});
       renderFileExplorerChangesPanels({force: true});
       return;
@@ -15548,6 +15613,11 @@ function createFileEditorPanel(item) {
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
+        <div class="file-editor-nav-control" role="group" aria-label="${esc(t('editor.nav.aria'))}" hidden>
+          <button type="button" class="file-editor-nav-back" title="${esc(t('editor.nav.back'))}" aria-label="${esc(t('editor.nav.back'))}" disabled><span class="file-editor-icon file-editor-icon-nav-back" aria-hidden="true">←</span></button>
+          <button type="button" class="file-editor-nav-forward" title="${esc(t('editor.nav.forward'))}" aria-label="${esc(t('editor.nav.forward'))}" disabled><span class="file-editor-icon file-editor-icon-nav-forward" aria-hidden="true">→</span></button>
+        </div>
+        <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="nav" aria-hidden="true" hidden></span>
         <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="${esc(t('editor.mode.aria'))}" hidden>
           <button type="button" data-editor-mode="edit" title="${esc(t('editor.mode.edit'))}" aria-label="${esc(t('editor.mode.edit'))}"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
           <button type="button" data-editor-mode="preview" title="${esc(t('editor.mode.preview'))}" aria-label="${esc(t('editor.mode.preview'))}"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
@@ -15590,6 +15660,16 @@ function createFileEditorPanel(item) {
     event.preventDefault();
     event.stopPropagation();
     reloadOpenFileFromDisk(path);
+  });
+  panel.querySelector('.file-editor-nav-back')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    editorNavBack();
+  });
+  panel.querySelector('.file-editor-nav-forward')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    editorNavForward();
   });
   panel.querySelector('.file-editor-mode-control-panel')?.addEventListener('click', event => {
     const mode = event.target?.closest?.('[data-editor-mode]')?.dataset?.editorMode;
@@ -16699,7 +16779,55 @@ function setFileEditorToolbarSeparator(panel, key, visible) {
   if (separator) separator.hidden = !visible;
 }
 
+// DOIT.21 — editor back/forward navigation history (Cursor-style file stack).
+// recordEditorNav pushes a user-initiated open; back/forward replay the stack via the normal open path.
+function recordEditorNav(path) {
+  if (editorNav.navigating || !path) return;
+  if (editorNav.stack[editorNav.index] === path) return;   // dedupe consecutive same-file opens
+  editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new open after Back drops the forward tail
+  editorNav.stack.push(path);
+  editorNav.index = editorNav.stack.length - 1;
+  updateEditorNavButtons();
+}
+
+async function editorNavGo(delta) {
+  const next = editorNav.index + delta;
+  if (next < 0 || next >= editorNav.stack.length) return;
+  editorNav.index = next;
+  const path = editorNav.stack[next];
+  editorNav.navigating = true;   // re-opening must NOT record a new entry
+  try {
+    await openFileInEditor(path, basenameOf(path), {item: fileEditorItemFor(path)});
+  } finally {
+    editorNav.navigating = false;
+  }
+  updateEditorNavButtons();
+}
+
+function editorNavBack() { return editorNavGo(-1); }
+function editorNavForward() { return editorNavGo(1); }
+
+// Derive the nav group's visibility + button disabled state from editorNav (called on every toolbar
+// refresh, so the buttons stay in sync without bespoke per-call wiring).
+function applyEditorNavButtonsToPanel(panel) {
+  const group = panel?.querySelector?.('.file-editor-nav-control');
+  if (!group) return;
+  group.hidden = editorNav.stack.length <= 1;   // show only once there's somewhere to go
+  const back = panel.querySelector('.file-editor-nav-back');
+  const forward = panel.querySelector('.file-editor-nav-forward');
+  if (back) back.disabled = editorNav.index <= 0;
+  if (forward) forward.disabled = editorNav.index >= editorNav.stack.length - 1;
+}
+
+function updateEditorNavButtons() {
+  for (const panel of document.querySelectorAll('.file-editor-panel')) {
+    updateFileEditorToolbarSeparators(panel);   // re-applies nav state + recomputes toolbar/separator visibility
+  }
+}
+
 function updateFileEditorToolbarSeparators(panel) {
+  applyEditorNavButtonsToPanel(panel);   // DOIT.21: sync the nav group hidden/disabled from editorNav first
+  const nav = fileEditorToolbarControlVisible(panel, '.file-editor-nav-control');
   const mode = fileEditorToolbarControlVisible(panel, '.file-editor-mode-control-panel');
   const tools = [
     '.file-editor-gutter-panel',
@@ -16713,11 +16841,12 @@ function updateFileEditorToolbarSeparators(panel) {
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
   // #42: the editor controls now live on their own toolbar row below the tab strip (no frame
   // controls sit beside them), so separators only sit between adjacent visible control groups.
+  setFileEditorToolbarSeparator(panel, 'nav', nav && (mode || tools || theme || save));
   setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || theme || save));
   setFileEditorToolbarSeparator(panel, 'tools', tools && (theme || save));
   setFileEditorToolbarSeparator(panel, 'theme', theme && save);
   const toolbar = panel?.querySelector?.('.file-editor-toolbar');
-  if (toolbar) toolbar.hidden = !(mode || tools || theme || save);
+  if (toolbar) toolbar.hidden = !(nav || mode || tools || theme || save);
 }
 
 function setFileEditorPanelStatus(panel, message, level) {

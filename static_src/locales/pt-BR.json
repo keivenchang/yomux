@@ -300,6 +300,9 @@
   "editor.closePane": "Fechar painel",
   "editor.toolbar.aria": "Controles do editor",
   "editor.mode.aria": "Modo do editor",
+  "editor.nav.back": "Voltar (visitado antes)",
+  "editor.nav.forward": "Avançar",
+  "editor.nav.aria": "Navegar no histórico",
   "editor.mode.edit": "Editar",
   "editor.mode.preview": "Pré-visualizar",
   "editor.mode.split": "Visão dividida",
@@ -511,5 +514,7 @@
   "det.noActivity": "Ainda não há atividade de agente de IA disponível.",
   "det.openPending": "Aberto / pendente:",
   "pref.appearance.pane_spacing.label": "Espaçamento dos painéis",
-  "pref.appearance.pane_spacing.help": "Pixels, 0–20. Espaço entre painéis; em 0 eles se tocam e o contorno verde ativo cobre o divisor."
+  "pref.appearance.pane_spacing.help": "Pixels, 0–20. Espaço entre painéis; em 0 eles se tocam e o contorno verde ativo cobre o divisor.",
+  "pref.appearance.pane_ring_opacity.label": "Opacidade da borda do painel",
+  "pref.appearance.pane_ring_opacity.help": "Porcentagem, 20–100. Opacidade da borda verde/vermelha do painel desenhada sobre a borda do conteúdo."
 }

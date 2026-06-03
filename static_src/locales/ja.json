@@ -300,6 +300,9 @@
   "editor.closePane": "ペインを閉じる",
   "editor.toolbar.aria": "エディターのコントロール",
   "editor.mode.aria": "エディターのモード",
+  "editor.nav.back": "戻る（前に表示）",
+  "editor.nav.forward": "進む",
+  "editor.nav.aria": "履歴をたどる",
   "editor.mode.edit": "編集",
   "editor.mode.preview": "プレビュー",
   "editor.mode.split": "分割表示",
@@ -511,5 +514,7 @@
   "det.noActivity": "利用可能な AI エージェントのアクティビティはまだありません。",
   "det.openPending": "未対応 / 保留中:",
   "pref.appearance.pane_spacing.label": "ペイン間隔",
-  "pref.appearance.pane_spacing.help": "ピクセル、0〜20。ペイン間の隙間。0 にするとペインが接し、緑のアクティブ枠が区切り線を覆います。"
+  "pref.appearance.pane_spacing.help": "ピクセル、0〜20。ペイン間の隙間。0 にするとペインが接し、緑のアクティブ枠が区切り線を覆います。",
+  "pref.appearance.pane_ring_opacity.label": "ペイン枠の不透明度",
+  "pref.appearance.pane_ring_opacity.help": "パーセント、20–100。コンテンツの端に描画される緑/赤のペイン枠の不透明度。"
 }

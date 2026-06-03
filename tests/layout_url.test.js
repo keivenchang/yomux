@@ -309,6 +309,8 @@ globalThis.__layoutTestApi = {
   codeMirrorSearchMatchSummary,
   emptyPlaceholderPaneState,
   emptyLayoutSlots,
+  editorNav,
+  recordEditorNav,
   fileEditorPaneTabHtml,
   fileQuickOpenItem,
   fileQuickOpenItems,
@@ -2112,7 +2114,7 @@ function makeFileTree(paths) {
   assert.ok(/body\.theme-light\s*\{[\s\S]*--pane-tab-strip-bg:\s*#dce8d2/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background');
   assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (DOIT.6 #6 + images 003/004: undimmed, un-lightened per-pane highlight)');
   assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
-  assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 2px'), 'the red needs-* attention ring uses a thin constant width token');
+  assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 4px'), 'the pane ring uses the 4px width token (DOIT.20)');
   // Light mode uses a RED pane separator (dark mode keeps amber/yellow).
   assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-resizer-bg:\s*rgba\(220, 38, 38/.test(preferencesCss), 'light mode uses a red pane separator');
   // Pane chrome bars (strip, detail row, editor toolbar, find) all read the shared --pane-bar-bg, which is
@@ -2135,16 +2137,23 @@ function makeFileTree(paths) {
   // The active/focus outline is the pane's "natural border" (a --pane-split-gap-wide real border, never
   // clipped, flush to the resizer) colored green — the SAME mechanism for every pane type. Every pane
   // has the transparent border; the active one colors it. No box-shadow, no inset ::after for focus.
-  assert.ok(/\.panel\s*\{[^}]*border:\s*var\(--pane-split-gap\) solid transparent/.test(preferencesCss), 'every pane has a --pane-split-gap-wide transparent border (the natural-border gutter)');
-  assert.ok(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'every focused pane (active or typing-ready, terminal or not) colors its border the same green');
+  // DOIT.24 C1: the state ring IS the --pane-split-gap gutter border, colored per state via the unified
+  // --panel-ring-color and faded by --pane-ring-opacity (transparent on a plain inactive pane). Sitting at
+  // the seam edge, an active (green) pane and a needs (red) pane touch across the 1px resizer.
+  assert.ok(/\.panel\s*\{[^}]*border:\s*var\(--pane-split-gap\) solid color-mix\(in srgb, var\(--panel-ring-color\) var\(--pane-ring-opacity/.test(preferencesCss), 'the pane ring is the --pane-split-gap gutter border, colored by --panel-ring-color at --pane-ring-opacity (touches the neighbor at the seam)');
+  // DOIT.20: every focused pane (active or typing-ready) drives the SAME green ring via --panel-ring-color.
+  assert.ok(/\.panel\.active-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'the active pane sets the green ring color');
+  assert.ok(/\.panel\.typing-ready-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'a typing-ready pane sets the SAME green ring color as active');
   assert.equal(/\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#465267/.test(preferencesCss), false, 'no gray focus border — focused panes are green, not the old typing-ready gray');
   assert.equal(/body\.theme-light \.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#9aa6b6/.test(preferencesCss), false, 'no LIGHT-mode gray focus border on terminals (the #465267 twin) — focused terminals stay green in light mode too');
-  assert.equal(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*box-shadow:/.test(preferencesCss), false, 'the active ring is a real border, not a clipped outset box-shadow');
-  // image 20260603-001: a focused pane that needs attention carries the red ON the border (where the
-  // green focus border is), not as a nested inset ::after one border-width inside it.
-  assert.ok(/\.panel\.active-pane\.needs-input-pane[\s\S]*?\.panel\.typing-ready-pane\.needs-blocked-pane\s*\{[^}]*border-color:\s*var\(--panel-ring-color\)/.test(preferencesCss), 'a focused needs-attention pane paints the red on its border, not a nested inset ring');
-  assert.ok(/\.panel\.needs-input-pane:not\(\.active-pane\):not\(\.typing-ready-pane\)::after/.test(preferencesCss), 'the inset red attention ring is scoped to INACTIVE needs panes (focused ones use the border)');
-  assert.equal(/\.panel\.active-pane::after[\s\S]{0,40}\{/.test(preferencesCss), false, 'active panes no longer use the inset ::after ring (only the red needs-* states do)');
+  // DOIT.24 C1: no content-edge overlay ring — the ring is the gutter border (asserted above). The
+  // needs-* PULSE animates the border-color directly on .panel (not a ::after).
+  assert.equal(/\.panel::after\s*\{/.test(preferencesCss), false, 'no .panel::after overlay ring — the ring is the gutter border, so adjacent rings touch at the seam (DOIT.24)');
+  assert.ok(/\.panel\.needs-input-pane,[\s\S]*?\{[^}]*--panel-ring-color:\s*#ff3347/.test(preferencesCss), 'needs-* panes set the red ring color');
+  assert.ok(/\.panel\.needs-input-pane,[\s\S]*?\.panel\.needs-blocked-pane\s*\{[^}]*animation:\s*attention-ring-fade/.test(preferencesCss), 'needs-* panes pulse the red ring (animation on .panel, not ::after)');
+  // image 028: a focused needs-attention pane resolves RED (attention beats the yolo-ready green tint).
+  assert.ok(/\.panel\.active-pane\.needs-input-pane[\s\S]*?\.panel\.typing-ready-pane\.needs-blocked-pane\s*\{[^}]*--panel-ring-color:\s*#ff3347/.test(preferencesCss), 'a focused needs-attention pane resolves the red ring color, not the green/yolo tint');
+  assert.equal(/\.panel\.active-pane\s*\{[^}]*border-color:/.test(preferencesCss), false, 'the active pane sets --panel-ring-color (which colors the shared gutter border), not its own border-color');
   // images 003/004 pane-color polish:
   assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-inactive-tab-bg:\s*#e6f1dd/.test(preferencesCss), 'light-mode inactive tabs are a very-light green (not white)');
   // image 008: inactive-tab text is DARK in light mode (readable on the light-green tabs/strip), not the
@@ -2164,7 +2173,7 @@ function makeFileTree(paths) {
     // #261: a 0-20px pane spacing setting drives the inter-pane gap; the active pane's green box width
     // == that gap (--pane-split-gap), so it's 0 at spacing 0 and fills the active side up to the line.
     const paneSpacingSrc = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 2)"), '#261: runtime reads appearance.pane_spacing with a 2px fallback (matches the backend default)');
+    assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 4)"), 'DOIT.20: runtime reads appearance.pane_spacing with a 4px fallback (matches the backend default)');
     assert.ok(paneSpacingSrc.includes("setProperty('--pane-split-gap'"), '#261: pane spacing drives the --pane-split-gap inter-pane gap');
     assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
     assert.ok(/path: 'appearance\.pane_spacing'[\s\S]{0,90}min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field');
@@ -2181,8 +2190,13 @@ function makeFileTree(paths) {
   // single-panel column), so appearance.pane_spacing now actually changes the gap, not just the ring.
   assert.ok(/\.layout-split\s*\{[\s\S]*?gap:\s*0;/.test(preferencesCss), '#261: the flex split container has no gap — pane spacing is the pane border width instead');
   // image 046: the terminal has no horizontal padding, so its dark box meets the resizer flush (the old
-  // 2px left/right padding showed a dark sliver between the terminal and the yellow seam).
-  assert.ok(/\.terminal\s*\{[^}]*padding:\s*2px 0 0/.test(preferencesCss), 'terminal box is flush to the pane edge (no horizontal padding sliver beside the resizer)');
+  // 2px left/right padding showed a dark sliver between the terminal and the yellow seam). image 034:
+  // the former `padding-top: 2px` gap was also removed so the terminal uses the full pane → `padding: 0`.
+  assert.ok(/\.terminal\s*\{[^}]*padding:\s*0;/.test(preferencesCss), 'terminal box is flush to the pane edge (padding:0 — no horizontal sliver and no top gap)');
+  // image 034: xterm.css defaults `.xterm-viewport` to background #000, which showed as a black line at
+  // the top of the LIGHT terminal (the strip the canvas rows don't cover). Force it transparent so the
+  // .terminal container's theme background shows through.
+  assert.ok(/\.terminal \.xterm:not\(\.allow-transparency\) \.xterm-viewport\s*\{[^}]*background-color:\s*transparent/.test(preferencesCss), 'xterm viewport is transparent (no black #000 line at the top of the terminal)');
   assert.ok(/\.layout-resizer\s*\{[\s\S]*flex:\s*0 0 var\(--pane-resizer-size\)/.test(preferencesCss), 'pane splitters read the compact size token');
   assert.ok(/\.resizer-row::before\s*\{[\s\S]*left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(preferencesCss), 'row splitters draw a tokenized centered visible line');
   assert.ok(/\.resizer-row:hover::before,[\s\S]*var\(--pane-resizer-hover-line-size\)/.test(preferencesCss), 'row splitters widen on hover without increasing the resting seam');
@@ -2194,7 +2208,7 @@ function makeFileTree(paths) {
   assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
   assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
   assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*#1d4ed8/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
-  assert.ok(/\.file-editor-cross-split-panel,\s*\n\.file-editor-save-panel/.test(preferencesCss), 'side preview button uses the compact editor toolbar button sizing');
+  assert.ok(/\.file-editor-cross-split-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'side preview button shares the compact editor toolbar button sizing rule');
   assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
   assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
   assert.ok(preferencesCss.includes('--code-diff-add: #3fb950'), 'dark diff add base is vivid green');
@@ -4851,4 +4865,44 @@ function makeFileTree(paths) {
   assert.equal(strip.style.getPropertyValue('--tab-drop-x'), '103px');
   assert.equal(strip.style.getPropertyValue('--tab-drop-y'), '0px');
   assert.equal(strip.style.getPropertyValue('--tab-drop-height'), '27px');
+}
+
+// DOIT.21: editor back/forward navigation history (Cursor-style file stack). Tests the record/dedupe/
+// truncate logic of recordEditorNav (the async back/forward re-open goes through the live open path).
+{
+  const api = loadYolomux();
+  api.editorNav.stack = [];
+  api.editorNav.index = -1;
+  api.recordEditorNav('/repo/a.txt');
+  api.recordEditorNav('/repo/b.txt');
+  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/b.txt'], 'DOIT.21: opens push onto the nav stack');
+  assert.equal(api.editorNav.index, 1, 'DOIT.21: index points at the latest open');
+  api.recordEditorNav('/repo/b.txt');
+  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/b.txt'], 'DOIT.21: a consecutive same-file open does not duplicate');
+  assert.equal(api.editorNav.index, 1);
+  api.editorNav.index = 0; // simulate Back to A
+  api.recordEditorNav('/repo/c.txt');
+  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/c.txt'], 'DOIT.21: a new open after Back drops the forward tail');
+  assert.equal(api.editorNav.index, 1);
+  api.editorNav.navigating = true; // a back/forward re-open must NOT record a new entry
+  api.recordEditorNav('/repo/d.txt');
+  assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/c.txt'], 'DOIT.21: recording is suppressed while navigating');
+  api.editorNav.navigating = false;
+}
+
+// DOIT.22: the quick-open palette collapses a file's editor-tab + preview-tab into ONE row with
+// edit/preview view chips (it used to emit two identical rows — same name + path).
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/const fileGroups = new Map\(\);[\s\S]{0,400}?fileItemPath\(item\)/.test(source), 'DOIT.22: the palette groups file tabs by path (fileItemPath)');
+  assert.ok(source.includes('tabRow(editorItem, {key: `file:${path}`, viewModes})'), 'DOIT.22: editor+preview of one file collapse to a single `file:` row carrying view chips');
+  assert.ok(source.includes('command-palette-view-chip'), 'DOIT.22: the deduped file row renders edit/preview view chips');
+}
+
+// DOIT.23: the Modified-files repo header is a collapse toggle (button + caret), per-repo state.
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('data-changes-repo-toggle="${esc(repo)}"'), 'DOIT.23: the repo header is a collapse toggle keyed by repo path');
+  assert.ok(source.includes('changesRepoCollapsed.has(repo)'), 'DOIT.23: the repo head reads per-repo collapse state');
+  assert.ok(source.includes('changes-repo-caret'), 'DOIT.23: the repo head shows a collapse caret');
 }

@@ -190,16 +190,31 @@
   background: var(--panel);
 }
 .changes-repo-head {
+  /* DOIT.23: now a collapse toggle (button), mirroring .changes-uploaded-toggle. */
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   padding: 6px 8px;
   background: var(--panel2);
   color: var(--text);
+  border: 0;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
+  text-align: start;
+  cursor: pointer;
+}
+.changes-repo-head:hover,
+.changes-repo-head:focus-visible {
+  color: var(--brand-green);
+  outline: none;
+}
+.changes-repo-caret {
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 12px;
 }
 .changes-repo-title {
   min-width: 0;
@@ -801,6 +816,27 @@
 }
 .command-palette-label {
   font-weight: 700;
+}
+/* DOIT.22: view-mode chips on a deduped file row (one row for a file open as editor + preview). */
+.command-palette-views {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.command-palette-view-chip {
+  padding: 0 5px;
+  border: 1px solid rgba(158, 232, 93, 0.34);
+  border-radius: 999px;
+  color: #bddcaf;
+  background: rgba(118, 185, 0, 0.12);
+  font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
+  text-transform: lowercase;
+}
+body.theme-light .command-palette-view-chip {
+  border-color: rgba(95, 150, 42, 0.4);
+  color: #3f6312;
+  background: rgba(118, 185, 0, 0.14);
 }
 .command-palette-label .fuzzy-match,
 .command-palette-detail .fuzzy-match {

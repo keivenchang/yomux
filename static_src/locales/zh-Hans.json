@@ -300,6 +300,9 @@
   "editor.closePane": "关闭窗格",
   "editor.toolbar.aria": "编辑器控件",
   "editor.mode.aria": "编辑器模式",
+  "editor.nav.back": "返回（先前访问）",
+  "editor.nav.forward": "前进",
+  "editor.nav.aria": "导航历史",
   "editor.mode.edit": "编辑",
   "editor.mode.preview": "预览",
   "editor.mode.split": "拆分视图",
@@ -511,5 +514,7 @@
   "det.noActivity": "目前尚无可用的 AI 代理活动。",
   "det.openPending": "打开／待处理：",
   "pref.appearance.pane_spacing.label": "窗格间距",
-  "pref.appearance.pane_spacing.help": "像素，0–20。窗格之间的间距；为 0 时窗格相连，绿色活动外框会覆盖分隔线。"
+  "pref.appearance.pane_spacing.help": "像素，0–20。窗格之间的间距；为 0 时窗格相连，绿色活动外框会覆盖分隔线。",
+  "pref.appearance.pane_ring_opacity.label": "窗格边框透明度",
+  "pref.appearance.pane_ring_opacity.help": "百分比，20–100。绘制在内容边缘的绿/红窗格边框的不透明度。"
 }

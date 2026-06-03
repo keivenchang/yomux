@@ -300,6 +300,9 @@
   "editor.closePane": "סגור חלונית",
   "editor.toolbar.aria": "פקדי העורך",
   "editor.mode.aria": "מצב עורך",
+  "editor.nav.back": "אחורה (נצפה קודם)",
+  "editor.nav.forward": "קדימה",
+  "editor.nav.aria": "ניווט בהיסטוריה",
   "editor.mode.edit": "עריכה",
   "editor.mode.preview": "תצוגה מקדימה",
   "editor.mode.split": "תצוגה מפוצלת",
@@ -511,5 +514,7 @@
   "det.noActivity": "אין עדיין פעילות זמינה של סוכן בינה מלאכותית.",
   "det.openPending": "פתוח / ממתין:",
   "pref.appearance.pane_spacing.label": "מרווח בין חלוניות",
-  "pref.appearance.pane_spacing.help": "פיקסלים, 0–20. הרווח בין חלוניות; ב-0 הן נוגעות וקו המתאר הירוק הפעיל מכסה את המפריד."
+  "pref.appearance.pane_spacing.help": "פיקסלים, 0–20. הרווח בין חלוניות; ב-0 הן נוגעות וקו המתאר הירוק הפעיל מכסה את המפריד.",
+  "pref.appearance.pane_ring_opacity.label": "אטימות מסגרת החלונית",
+  "pref.appearance.pane_ring_opacity.help": "אחוז, 20–100. האטימות של מסגרת החלונית הירוקה/אדומה המצוירת על קצה התוכן."
 }

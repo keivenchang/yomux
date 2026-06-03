@@ -300,6 +300,9 @@
   "editor.closePane": "Close pane",
   "editor.toolbar.aria": "Editor controls",
   "editor.mode.aria": "Editor mode",
+  "editor.nav.back": "Back (previously visited)",
+  "editor.nav.forward": "Forward",
+  "editor.nav.aria": "Navigate history",
   "editor.mode.edit": "Edit",
   "editor.mode.preview": "Preview",
   "editor.mode.split": "Split view",
@@ -511,5 +514,7 @@
   "det.noActivity": "No AI agent activity is available yet.",
   "det.openPending": "Open / pending:",
   "pref.appearance.pane_spacing.label": "Pane spacing",
-  "pref.appearance.pane_spacing.help": "Pixels, 0–20. Gap between panes; at 0 they touch and the green active outline covers the divider."
+  "pref.appearance.pane_spacing.help": "Pixels, 0–20. Gap between panes; at 0 they touch and the green active outline covers the divider.",
+  "pref.appearance.pane_ring_opacity.label": "Pane ring opacity",
+  "pref.appearance.pane_ring_opacity.help": "Percent, 20–100. Opacity of the green/red pane ring drawn over the content edge."
 }

@@ -392,6 +392,10 @@ function writeStoredChangesFolderCollapsed() {
   storageSet(changesFolderCollapsedStorageKey, JSON.stringify(Array.from(changesFolderCollapsed).sort()));
 }
 
+function writeStoredChangesRepoCollapsed() {
+  storageSet(changesRepoCollapsedStorageKey, JSON.stringify(Array.from(changesRepoCollapsed).sort()));
+}
+
 function changeStatusClassKey(statusKey) {
   const key = String(statusKey || 'M').toLowerCase();
   return /^[a-z0-9_-]+$/.test(key) ? key : 'unknown';
@@ -563,10 +567,12 @@ function changesRepoGroupsHtml(files, options = {}) {
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
     const repoInfo = repoMap.get(repo) || {};
     const tree = changeTreeForEntries(entries);
-    const rows = changesTreeChildrenHtml(tree, {session: payload.session || '', repo, compact: options.compact === true}, 0);
-    return `<section class="changes-repo-group">
-      <div class="changes-repo-head"><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></div>
-      <div class="changes-file-list changes-tree">${rows}</div>
+    // DOIT.23: the repo header is a collapse toggle (per-repo, keyed by path), mirroring the uploaded group.
+    const collapsed = changesRepoCollapsed.has(repo);
+    const rows = collapsed ? '' : changesTreeChildrenHtml(tree, {session: payload.session || '', repo, compact: options.compact === true}, 0);
+    return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
+      <button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></button>
+      ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
     </section>`;
   }).join('');
   if (!uploaded.length) return repoHtml;
@@ -669,7 +675,7 @@ function createChangesPanel() {
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-uploaded-files-toggle], [data-changes-folder-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
 function renderChangesPanels(options = {}) {
@@ -758,6 +764,17 @@ function bindChangesPanel(panel) {
       event.preventDefault();
       uploadedFilesCollapsed = !uploadedFilesCollapsed;
       writeStoredUploadedFilesCollapsed();
+      renderChangesPanels({force: true});
+      renderFileExplorerChangesPanels({force: true});
+      return;
+    }
+    const repoToggle = event.target.closest('[data-changes-repo-toggle]');
+    if (repoToggle && panel.contains(repoToggle)) {
+      event.preventDefault();
+      const repo = repoToggle.dataset.changesRepoToggle || '';
+      if (changesRepoCollapsed.has(repo)) changesRepoCollapsed.delete(repo);
+      else changesRepoCollapsed.add(repo);
+      writeStoredChangesRepoCollapsed();
       renderChangesPanels({force: true});
       renderFileExplorerChangesPanels({force: true});
       return;
@@ -1221,6 +1238,11 @@ function createFileEditorPanel(item) {
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
+        <div class="file-editor-nav-control" role="group" aria-label="${esc(t('editor.nav.aria'))}" hidden>
+          <button type="button" class="file-editor-nav-back" title="${esc(t('editor.nav.back'))}" aria-label="${esc(t('editor.nav.back'))}" disabled><span class="file-editor-icon file-editor-icon-nav-back" aria-hidden="true">←</span></button>
+          <button type="button" class="file-editor-nav-forward" title="${esc(t('editor.nav.forward'))}" aria-label="${esc(t('editor.nav.forward'))}" disabled><span class="file-editor-icon file-editor-icon-nav-forward" aria-hidden="true">→</span></button>
+        </div>
+        <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="nav" aria-hidden="true" hidden></span>
         <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="${esc(t('editor.mode.aria'))}" hidden>
           <button type="button" data-editor-mode="edit" title="${esc(t('editor.mode.edit'))}" aria-label="${esc(t('editor.mode.edit'))}"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
           <button type="button" data-editor-mode="preview" title="${esc(t('editor.mode.preview'))}" aria-label="${esc(t('editor.mode.preview'))}"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
@@ -1263,6 +1285,16 @@ function createFileEditorPanel(item) {
     event.preventDefault();
     event.stopPropagation();
     reloadOpenFileFromDisk(path);
+  });
+  panel.querySelector('.file-editor-nav-back')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    editorNavBack();
+  });
+  panel.querySelector('.file-editor-nav-forward')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    editorNavForward();
   });
   panel.querySelector('.file-editor-mode-control-panel')?.addEventListener('click', event => {
     const mode = event.target?.closest?.('[data-editor-mode]')?.dataset?.editorMode;
@@ -2372,7 +2404,55 @@ function setFileEditorToolbarSeparator(panel, key, visible) {
   if (separator) separator.hidden = !visible;
 }
 
+// DOIT.21 — editor back/forward navigation history (Cursor-style file stack).
+// recordEditorNav pushes a user-initiated open; back/forward replay the stack via the normal open path.
+function recordEditorNav(path) {
+  if (editorNav.navigating || !path) return;
+  if (editorNav.stack[editorNav.index] === path) return;   // dedupe consecutive same-file opens
+  editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new open after Back drops the forward tail
+  editorNav.stack.push(path);
+  editorNav.index = editorNav.stack.length - 1;
+  updateEditorNavButtons();
+}
+
+async function editorNavGo(delta) {
+  const next = editorNav.index + delta;
+  if (next < 0 || next >= editorNav.stack.length) return;
+  editorNav.index = next;
+  const path = editorNav.stack[next];
+  editorNav.navigating = true;   // re-opening must NOT record a new entry
+  try {
+    await openFileInEditor(path, basenameOf(path), {item: fileEditorItemFor(path)});
+  } finally {
+    editorNav.navigating = false;
+  }
+  updateEditorNavButtons();
+}
+
+function editorNavBack() { return editorNavGo(-1); }
+function editorNavForward() { return editorNavGo(1); }
+
+// Derive the nav group's visibility + button disabled state from editorNav (called on every toolbar
+// refresh, so the buttons stay in sync without bespoke per-call wiring).
+function applyEditorNavButtonsToPanel(panel) {
+  const group = panel?.querySelector?.('.file-editor-nav-control');
+  if (!group) return;
+  group.hidden = editorNav.stack.length <= 1;   // show only once there's somewhere to go
+  const back = panel.querySelector('.file-editor-nav-back');
+  const forward = panel.querySelector('.file-editor-nav-forward');
+  if (back) back.disabled = editorNav.index <= 0;
+  if (forward) forward.disabled = editorNav.index >= editorNav.stack.length - 1;
+}
+
+function updateEditorNavButtons() {
+  for (const panel of document.querySelectorAll('.file-editor-panel')) {
+    updateFileEditorToolbarSeparators(panel);   // re-applies nav state + recomputes toolbar/separator visibility
+  }
+}
+
 function updateFileEditorToolbarSeparators(panel) {
+  applyEditorNavButtonsToPanel(panel);   // DOIT.21: sync the nav group hidden/disabled from editorNav first
+  const nav = fileEditorToolbarControlVisible(panel, '.file-editor-nav-control');
   const mode = fileEditorToolbarControlVisible(panel, '.file-editor-mode-control-panel');
   const tools = [
     '.file-editor-gutter-panel',
@@ -2386,11 +2466,12 @@ function updateFileEditorToolbarSeparators(panel) {
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
   // #42: the editor controls now live on their own toolbar row below the tab strip (no frame
   // controls sit beside them), so separators only sit between adjacent visible control groups.
+  setFileEditorToolbarSeparator(panel, 'nav', nav && (mode || tools || theme || save));
   setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || theme || save));
   setFileEditorToolbarSeparator(panel, 'tools', tools && (theme || save));
   setFileEditorToolbarSeparator(panel, 'theme', theme && save);
   const toolbar = panel?.querySelector?.('.file-editor-toolbar');
-  if (toolbar) toolbar.hidden = !(mode || tools || theme || save);
+  if (toolbar) toolbar.hidden = !(nav || mode || tools || theme || save);
 }
 
 function setFileEditorPanelStatus(panel, message, level) {

@@ -300,6 +300,9 @@
   "editor.closePane": "Fermer le panneau",
   "editor.toolbar.aria": "Contrôles de l'éditeur",
   "editor.mode.aria": "Mode de l'éditeur",
+  "editor.nav.back": "Précédent (déjà visité)",
+  "editor.nav.forward": "Suivant",
+  "editor.nav.aria": "Naviguer dans l'historique",
   "editor.mode.edit": "Modifier",
   "editor.mode.preview": "Aperçu",
   "editor.mode.split": "Vue divisée",
@@ -511,5 +514,7 @@
   "det.noActivity": "Aucune activité d'agent IA disponible pour l'instant.",
   "det.openPending": "Ouvert / en attente :",
   "pref.appearance.pane_spacing.label": "Espacement des volets",
-  "pref.appearance.pane_spacing.help": "Pixels, 0–20. Espace entre les volets ; à 0 ils se touchent et le contour vert actif recouvre le séparateur."
+  "pref.appearance.pane_spacing.help": "Pixels, 0–20. Espace entre les volets ; à 0 ils se touchent et le contour vert actif recouvre le séparateur.",
+  "pref.appearance.pane_ring_opacity.label": "Opacité du cadre de panneau",
+  "pref.appearance.pane_ring_opacity.help": "Pourcentage, 20–100. Opacité du cadre vert/rouge du panneau dessiné sur le bord du contenu."
 }

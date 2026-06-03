@@ -300,6 +300,9 @@
   "editor.closePane": "Fenster schließen",
   "editor.toolbar.aria": "Editor-Steuerung",
   "editor.mode.aria": "Editor-Modus",
+  "editor.nav.back": "Zurück (zuvor besucht)",
+  "editor.nav.forward": "Vorwärts",
+  "editor.nav.aria": "Verlauf navigieren",
   "editor.mode.edit": "Bearbeiten",
   "editor.mode.preview": "Vorschau",
   "editor.mode.split": "Geteilte Ansicht",
@@ -511,5 +514,7 @@
   "det.noActivity": "Noch keine KI-Agentenaktivität verfügbar.",
   "det.openPending": "Offen / ausstehend:",
   "pref.appearance.pane_spacing.label": "Bereichsabstand",
-  "pref.appearance.pane_spacing.help": "Pixel, 0–20. Abstand zwischen Bereichen; bei 0 berühren sie sich und der grüne aktive Rahmen überdeckt die Trennlinie."
+  "pref.appearance.pane_spacing.help": "Pixel, 0–20. Abstand zwischen Bereichen; bei 0 berühren sie sich und der grüne aktive Rahmen überdeckt die Trennlinie.",
+  "pref.appearance.pane_ring_opacity.label": "Deckkraft des Bereichsrahmens",
+  "pref.appearance.pane_ring_opacity.help": "Prozent, 20–100. Deckkraft des grün/roten Bereichsrahmens über der Inhaltskante."
 }

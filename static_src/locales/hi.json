@@ -300,6 +300,9 @@
   "editor.closePane": "Pane बंद करें",
   "editor.toolbar.aria": "Editor नियंत्रण",
   "editor.mode.aria": "Editor मोड",
+  "editor.nav.back": "पीछे (पहले देखा गया)",
+  "editor.nav.forward": "आगे",
+  "editor.nav.aria": "इतिहास नेविगेट करें",
   "editor.mode.edit": "Edit",
   "editor.mode.preview": "Preview",
   "editor.mode.split": "Split view",
@@ -511,5 +514,7 @@
   "det.noActivity": "अभी तक कोई AI एजेंट गतिविधि उपलब्ध नहीं है।",
   "det.openPending": "खुला / लंबित:",
   "pref.appearance.pane_spacing.label": "पैन रिक्ति",
-  "pref.appearance.pane_spacing.help": "पिक्सेल, 0–20। पैन के बीच का अंतर; 0 पर वे आपस में सटे होते हैं और हरी सक्रिय रूपरेखा विभाजक को ढक देती है।"
+  "pref.appearance.pane_spacing.help": "पिक्सेल, 0–20। पैन के बीच का अंतर; 0 पर वे आपस में सटे होते हैं और हरी सक्रिय रूपरेखा विभाजक को ढक देती है।",
+  "pref.appearance.pane_ring_opacity.label": "पेन रिंग अपारदर्शिता",
+  "pref.appearance.pane_ring_opacity.help": "प्रतिशत, 20–100। सामग्री के किनारे पर खींची गई हरी/लाल पेन रिंग की अपारदर्शिता।"
 }

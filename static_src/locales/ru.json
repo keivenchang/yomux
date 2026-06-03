@@ -300,6 +300,9 @@
   "editor.closePane": "Закрыть панель",
   "editor.toolbar.aria": "Управление редактором",
   "editor.mode.aria": "Режим редактора",
+  "editor.nav.back": "Назад (ранее открыто)",
+  "editor.nav.forward": "Вперёд",
+  "editor.nav.aria": "Навигация по истории",
   "editor.mode.edit": "Редактировать",
   "editor.mode.preview": "Превью",
   "editor.mode.split": "Разделённый вид",
@@ -511,5 +514,7 @@
   "det.noActivity": "Активность ИИ-агента пока недоступна.",
   "det.openPending": "Открыто / в ожидании:",
   "pref.appearance.pane_spacing.label": "Отступ между панелями",
-  "pref.appearance.pane_spacing.help": "Пиксели, 0–20. Зазор между панелями; при 0 они соприкасаются, а зелёная активная рамка перекрывает разделитель."
+  "pref.appearance.pane_spacing.help": "Пиксели, 0–20. Зазор между панелями; при 0 они соприкасаются, а зелёная активная рамка перекрывает разделитель.",
+  "pref.appearance.pane_ring_opacity.label": "Непрозрачность рамки панели",
+  "pref.appearance.pane_ring_opacity.help": "Проценты, 20–100. Непрозрачность зелёной/красной рамки панели поверх края содержимого."
 }

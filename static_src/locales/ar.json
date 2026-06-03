@@ -300,6 +300,9 @@
   "editor.closePane": "إغلاق الجزء",
   "editor.toolbar.aria": "أدوات التحكم في المحرر",
   "editor.mode.aria": "وضع المحرر",
+  "editor.nav.back": "رجوع (سبق فتحه)",
+  "editor.nav.forward": "تقدّم",
+  "editor.nav.aria": "التنقل في السجل",
   "editor.mode.edit": "تحرير",
   "editor.mode.preview": "معاينة",
   "editor.mode.split": "عرض مقسّم",
@@ -511,5 +514,7 @@
   "det.noActivity": "لا يوجد نشاط لوكيل الذكاء الاصطناعي متاح بعد.",
   "det.openPending": "مفتوح / معلّق:",
   "pref.appearance.pane_spacing.label": "تباعد الأجزاء",
-  "pref.appearance.pane_spacing.help": "بكسل، 0–20. المسافة بين الأجزاء؛ عند 0 تتلاصق ويغطي الإطار الأخضر النشط الفاصل."
+  "pref.appearance.pane_spacing.help": "بكسل، 0–20. المسافة بين الأجزاء؛ عند 0 تتلاصق ويغطي الإطار الأخضر النشط الفاصل.",
+  "pref.appearance.pane_ring_opacity.label": "شفافية إطار اللوحة",
+  "pref.appearance.pane_ring_opacity.help": "نسبة مئوية، 20–100. شفافية إطار اللوحة الأخضر/الأحمر المرسوم على حافة المحتوى."
 }

@@ -239,6 +239,8 @@ body.theme-light .drop-slot.drag-over {
        the .active / [aria-pressed=true] state = green. Buttons never hardcode their own colors.
      Raw values come from theme tokens, so everything flips light/dark automatically. */
   --pane-bar-bg: var(--panel2);
+  /* DOIT.20: default = no ring on a plain inactive pane; per-state rules below set green/red/white. */
+  --panel-ring-color: transparent;
   --pane-ctl-bg: var(--pane-tab-control-bg);
   --pane-ctl-fg: var(--pc-control-fg);
   --pane-ctl-border: var(--pane-tab-control-border);
@@ -250,7 +252,13 @@ body.theme-light .drop-slot.drag-over {
      border (box-sizing: border-box) it is part of the pane's box — it sits flush against the resizer
      (no gap to the red/yellow line) and is never clipped like an outset box-shadow was. At spacing 0
      the border is 0px (no gutter, panes flush to the 1px separator). */
-  border: var(--pane-split-gap) solid transparent;
+  /* DOIT.24 C1: the green/red/white state ring IS this gutter border, colored per state via the unified
+     --panel-ring-color and faded by --pane-ring-opacity. Because it fills the pane's OUTER edge (the
+     gutter, flush to the resizer), an active (green) pane and a needs (red) pane meet at the seam with
+     only the 1px resizer between them — they TOUCH (image 038). Inactive = transparent (--panel-ring-color
+     default). At spacing 0 the border is 0px (panes flush). This puts the ring back at the seam after
+     DOIT.20's content-edge overlay made adjacent rings sit a gutter apart. */
+  border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--pane-ring-opacity, 50%), transparent);
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
   display: grid;
@@ -416,22 +424,23 @@ body.theme-light .drop-slot.drag-over {
 }
 .panel.active-pane {
   --panel-ring-color: var(--pane-tab-panel-ring);
-  border-color: var(--pane-tab-panel-ring);
   background: var(--panel);
 }
-/* The active/focus pane colors its "natural border" (the --pane-split-gap-wide border above) with the
-   state color: box | green(spacing) | line(1px) | background(spacing) | box. Only the ACTIVE pane's
-   border is colored — the inactive side keeps its transparent border (shows the background). Because
-   it's a real border it sits flush against the resizer (no gap to the line) and is never clipped. The
-   red needs-* attention ring is a separate constant-width ::after below. */
+/* DOIT.20 + DOIT.24 C1: the green/red/white pane ring is the translucent --pane-split-gap GUTTER BORDER
+   (above), colored per state by the unified --panel-ring-color and faded by --pane-ring-opacity. Because
+   it fills the pane's outer edge, an active (green) pane and a needs (red) pane meet at the seam (image
+   038). ONE marker means no "red inside green" nesting: a focused+needs pane just resolves --panel-ring-
+   color to red. (DOIT.20 first tried a content-edge .panel::after overlay for opacity, but that sat a
+   gutter away from the neighbor; DOIT.24 moved it back to the seam border, keeping the opacity.) */
 .panel.active-pane,
 .panel.typing-ready-pane {
-  border-color: var(--pane-tab-panel-ring);
   /* focused pane: all chrome bars switch from neutral gray to the bright tab-strip green together. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 .panel.typing-ready-pane {
-  --panel-ring-color: var(--active-ring);
+  /* a hover-selected/typing-ready pane shows the same green focus ring as the active pane (it did
+     before this refactor, when both colored their real border green). */
+  --panel-ring-color: var(--pane-tab-panel-ring);
 }
 .panel.typing-ready-pane.yolo-ready-pane {
   --panel-ring-color: var(--brand-green);
@@ -441,14 +450,9 @@ body.theme-light .drop-slot.drag-over {
 .panel.needs-blocked-pane {
   --panel-ring-color: #ff3347;
 }
-/* image 20260603-001: when a needs-attention pane is ALSO focused, carry the red on the BORDER (where the
-   green focus border already is) instead of a separate nested inset ::after — so red sits ON the green
-   edge, not one border-width inside it. Higher specificity (0,3,0) than the green focus rules, so it wins.
-   Inactive needs panes (transparent border) keep the inset red ring below.
-   image 20260603-028: ALSO pin --panel-ring-color red HERE. On a --dangerously-yolo server a focused
-   needs pane is also .yolo-ready-pane, and `.typing-ready-pane.yolo-ready-pane{--panel-ring-color:green}`
-   (0,3,0) otherwise out-specifies the needs red (0,2,0) → the alert went green on hover/focus. This rule
-   is the same specificity but later in source, so red wins; attention always beats the yolo-ready tint. */
+/* image 028: attention ALWAYS beats the yolo-ready green tint. A focused needs pane is also
+   .yolo-ready-pane, whose green --panel-ring-color (0,3,0) would otherwise out-specify the needs red
+   (0,2,0). Same specificity, later in source → red wins. */
 .panel.active-pane.needs-input-pane,
 .panel.active-pane.needs-exec-pane,
 .panel.active-pane.needs-blocked-pane,
@@ -456,33 +460,16 @@ body.theme-light .drop-slot.drag-over {
 .panel.typing-ready-pane.needs-exec-pane,
 .panel.typing-ready-pane.needs-blocked-pane {
   --panel-ring-color: #ff3347;
-  border-color: var(--panel-ring-color);
 }
-.panel.preview-linked:not(.active-pane):not(.typing-ready-pane):not(.needs-input-pane):not(.needs-exec-pane):not(.needs-blocked-pane)::after {
-  content: "";
-  position: absolute;
-  inset: 1px;
-  z-index: 19;
-  border: 1.5px solid color-mix(in srgb, var(--brand-green) 72%, transparent);
-  border-radius: inherit;
-  pointer-events: none;
+/* preview-linked shows an ambient green tint ONLY when no higher state owns the ring (the :not() chain
+   makes it mutually exclusive, so active/needs override it). Folded into the unified --panel-ring-color. */
+.panel.preview-linked:not(.active-pane):not(.typing-ready-pane):not(.needs-input-pane):not(.needs-exec-pane):not(.needs-blocked-pane) {
+  --panel-ring-color: var(--brand-green);
 }
-/* The red attention states keep an INSET ::after ring (it carries the pulsing animation). The
-   active/typing-ready focus ring is the outset box-shadow above instead. */
-.panel.needs-input-pane:not(.active-pane):not(.typing-ready-pane)::after,
-.panel.needs-exec-pane:not(.active-pane):not(.typing-ready-pane)::after,
-.panel.needs-blocked-pane:not(.active-pane):not(.typing-ready-pane)::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  border: var(--pane-tab-panel-ring-width) solid var(--panel-ring-color);
-  border-radius: inherit;
-  pointer-events: none;
-}
-.panel.needs-input-pane:not(.active-pane):not(.typing-ready-pane)::after,
-.panel.needs-exec-pane:not(.active-pane):not(.typing-ready-pane)::after,
-.panel.needs-blocked-pane:not(.active-pane):not(.typing-ready-pane)::after {
+/* needs-* panes PULSE the red ring (the keyframes drive border-color directly on the gutter border). */
+.panel.needs-input-pane,
+.panel.needs-exec-pane,
+.panel.needs-blocked-pane {
   --attention-ring-border: 1px;
   animation: attention-ring-fade var(--red-reminder-duration) var(--red-reminder-easing) infinite;
   animation-delay: var(--attention-animation-delay, 0s);
@@ -1257,6 +1244,19 @@ body.theme-light .summary-context a {
 body.theme-light .meta a:hover,
 body.theme-light .summary-context a:hover {
   color: #1e3a8a;
+}
+/* DOIT.19: a MERGED PR link must read purple (GitHub convention + matches the purple MERGED tab badge),
+   not the generic link blue above. The dark `.meta a.pr-status-merged{#c084fc}` (20_*.css) is out-won in
+   light mode by `body.theme-light .meta a` (same 0,2,1, later in source), so re-assert at 0,3,1 here. */
+body.theme-light .popover-value a.pr-status-merged,
+body.theme-light .meta a.pr-status-merged,
+body.theme-light .summary-context a.pr-status-merged,
+body.theme-light .branch-meta a.pr-status-merged {
+  color: #8250df;
+}
+body.theme-light .meta a.pr-status-merged:hover,
+body.theme-light .summary-context a.pr-status-merged:hover {
+  color: #6639ba;
 }
 body.theme-light .pane-tab:hover {
   border-color: rgba(15, 23, 42, 0.5);

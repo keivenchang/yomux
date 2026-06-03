@@ -300,6 +300,9 @@
   "editor.closePane": "關閉窗格",
   "editor.toolbar.aria": "編輯器控制項",
   "editor.mode.aria": "編輯器模式",
+  "editor.nav.back": "返回（先前造訪）",
+  "editor.nav.forward": "前進",
+  "editor.nav.aria": "導覽歷史",
   "editor.mode.edit": "編輯",
   "editor.mode.preview": "預覽",
   "editor.mode.split": "分割檢視",
@@ -511,5 +514,7 @@
   "det.noActivity": "目前尚無可用的 AI 代理活動。",
   "det.openPending": "開啟／待處理：",
   "pref.appearance.pane_spacing.label": "窗格間距",
-  "pref.appearance.pane_spacing.help": "像素，0–20。窗格之間的間距；為 0 時窗格相連，綠色作用中外框會覆蓋分隔線。"
+  "pref.appearance.pane_spacing.help": "像素，0–20。窗格之間的間距；為 0 時窗格相連，綠色作用中外框會覆蓋分隔線。",
+  "pref.appearance.pane_ring_opacity.label": "窗格邊框透明度",
+  "pref.appearance.pane_ring_opacity.help": "百分比，20–100。繪製在內容邊緣的綠/紅窗格邊框的不透明度。"
 }

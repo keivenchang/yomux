@@ -1234,7 +1234,8 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
           markerContent,
           markerHeight: marker.height,
           markerColor: markerStyle.color,
-          panelRingBorderColor: panelRing.borderTopColor,
+          // DOIT.24 C1: the focus ring is the translucent gutter border (color-mix of --panel-ring-color).
+          panelRingBorderColor: getComputedStyle(document.querySelector('.file-editor-panel')).borderTopColor,
           searchLabel,
           editorBg: editorStyle.backgroundColor,
           editorColor: editorStyle.color,
@@ -1299,8 +1300,8 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["markerContent"] in ("none", '""')
     assert metrics["markerHeight"] > 0
     assert metrics["markerColor"] != "rgb(0, 0, 0)"
-    # The active pane's focus ring is its natural border colored green (not a box-shadow / inset ::after);
-    # assert the active pane shows a colored (non-transparent) border.
+    # DOIT.24 C1: the active pane's focus ring is the translucent gutter border; assert it shows a
+    # colored (non-transparent) ring color (color-mix of --panel-ring-color at --pane-ring-opacity).
     assert metrics["panelRingBorderColor"] not in ("rgba(0, 0, 0, 0)", "transparent")
     assert metrics["searchLabel"] in ("none", '""')
     assert metrics["editorBg"] != "rgb(15, 17, 21)"
@@ -1446,6 +1447,12 @@ LIGHT_MODE_SURFACES = """
 </div>
 <input class="file-tree-rename-input" id="rename-inp" value="name">
 <div class="yoagent-message-body markdown-body"><pre id="md-pre"><code>code</code></pre></div>
+<div class="info-pane" style="background:var(--bg)">
+  <div class="info-row header"><div class="info-cell" id="info-hdr">Session</div></div>
+  <div class="info-row"><div class="info-cell" id="info-row-text">main</div>
+    <div class="info-cell"><a id="info-link" href="#">branch</a></div></div>
+  <div class="info-row current"><div class="info-cell" id="info-cur">current</div></div>
+</div>
 """
 
 
@@ -1503,6 +1510,8 @@ def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
         "badge-neutral": "badge-neutral", "badge-done": "badge-done", "ym-inactive": "ym-inactive",
         "fm-dir": "fm-tab", "fm-badge": "fm-tab", "sub": "sub", "sub-dismiss": "sub",
         "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "md-pre": "md-pre",
+        # DOIT.18 C1: the YO!info table — rows/header/current/links must read on the light pane.
+        "info-hdr": None, "info-row-text": None, "info-link": None, "info-cur": None,
     }
     for eid, bg_id in text_checks.items():
         bg = style[bg_id]["bg"] if bg_id else page_white

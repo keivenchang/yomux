@@ -59,6 +59,7 @@ const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
+const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';
 const fileEditorWrapStorageKey = 'yolomux.editorWrap';
 const fileEditorLineNumbersStorageKey = 'yolomux.editorLineNumbers';
 const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1';
@@ -267,6 +268,16 @@ let uploadedFilesCollapsed = (() => {
 let changesFolderCollapsed = (() => {
   try {
     const value = window.localStorage?.getItem(changesFolderCollapsedStorageKey);
+    const parsed = value ? JSON.parse(value) : [];
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch (_) {
+    return new Set();
+  }
+})();
+// DOIT.23: per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
+let changesRepoCollapsed = (() => {
+  try {
+    const value = window.localStorage?.getItem(changesRepoCollapsedStorageKey);
     const parsed = value ? JSON.parse(value) : [];
     return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
   } catch (_) {
@@ -702,6 +713,10 @@ let transparentDragImage = null;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 let dragTabRectCache = null;
+// DOIT.21: one global editor navigation history (Cursor-style back/forward through visited files).
+// stack holds file paths; index points at the current entry; `navigating` suppresses recording while a
+// back/forward re-open is in flight (so it doesn't push a new entry).
+const editorNav = {stack: [], index: -1, navigating: false};
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();

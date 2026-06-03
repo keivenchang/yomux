@@ -15,9 +15,12 @@
   min-width: 0;
   max-width: 100%;
   min-height: 0;
-  /* No horizontal padding: the terminal sits flush to the pane edge so its dark box meets the resizer
-     directly (the old 2px left/right padding showed a dark sliver between the terminal and the seam). */
-  padding: 2px 0 0;
+  /* No padding: the terminal sits flush to the pane edges so its box meets the resizer directly (the
+     old 2px left/right padding showed a dark sliver at the seam). The former `padding-top: 2px` gave a
+     small breathing gap below the detail-row border, but it just wasted vertical real estate — removed
+     so the terminal uses the full pane (user request, image 034). Restore `padding-top: 2px` here if a
+     gap is wanted back. */
+  padding: 0;
   overflow: hidden;
   border: 0;
   border-radius: 0;
@@ -47,6 +50,18 @@
 }
 .terminal .xterm {
   height: 100%;
+}
+/* THE BLACK LINE FIX (image 034): xterm.css ships `.xterm:not(.allow-transparency) .xterm-viewport {
+   background-color: #000 }` — a dark-page assumption so the OS-X scrollbar slider reads as opaque.
+   `.xterm-viewport` is positioned top:0/bottom:0 and the canvas (`.xterm-screen`) paints the text rows
+   ON TOP of it; the few px the canvas doesn't cover at the top show the viewport's #000 as a stark
+   black line on our LIGHT terminal (verified by pixel-scan: the strip's element is `.xterm-viewport`,
+   bg rgb(0,0,0), with NO inline override — present even on an empty shell, so it is NOT agent output).
+   Our `.terminal` container already carries the theme background (set in JS), so make the viewport
+   transparent and let that show through — removes the black line in BOTH themes. Specificity 0,4,0
+   beats xterm's 0,3,0, so no !important. (Restore xterm's #000 if a viewport bg is ever needed.) */
+.terminal .xterm:not(.allow-transparency) .xterm-viewport {
+  background-color: transparent;
 }
 .terminal .xterm-screen,
 .terminal .xterm-screen canvas,
@@ -341,14 +356,14 @@
 .transcript {
   height: 100%;
   min-height: 0;
-  background: #11151d;
+  background: var(--bg);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 .transcript-head {
   padding: 6px 8px;
   color: var(--muted);
-  background: #171d27;
+  background: var(--panel2);
   border-bottom: 1px solid var(--line);
   font-size: var(--ui-font-size-sm);
 }
@@ -359,13 +374,13 @@
   gap: 7px;
   padding: 5px 8px;
   color: var(--muted);
-  background: #141b25;
+  background: var(--panel2);
   border-bottom: 1px solid var(--line);
   font: var(--ui-font-size-xs)/1.25 var(--mono-font);
 }
 .transcript-path-label {
   flex: 0 0 auto;
-  color: #8ca0b6;
+  color: var(--muted);
   text-transform: uppercase;
   font: 700 var(--ui-font-size-2xs)/1 var(--ui-font);
 }
@@ -375,7 +390,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #dfe6ef;
+  color: var(--text);
 }
 .transcript-path-missing {
   min-width: 0;
@@ -391,24 +406,24 @@
   min-height: 0;
   padding: 8px;
   overflow: auto;
-  color: #dfe6ef;
+  color: var(--text);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .transcript-item {
-  border-inline-start: 3px solid #667085;
-  background: #141b25;
+  border-inline-start: 3px solid var(--line);
+  background: var(--panel2);
   margin: 0 0 8px 0;
   padding: 7px 9px;
   border-radius: 5px;
 }
-.transcript-item.user { border-color: #60a5fa; background: #102033; }
-.transcript-item.assistant { border-color: #4ade80; background: #122719; }
-.transcript-item.tool_use { border-color: #f59e0b; background: #2a2112; }
-.transcript-item.tool_result { border-color: #c084fc; background: #21172f; }
-.transcript-item.summary { border-color: #f472b6; background: #2b1724; }
-.transcript-item.system { border-color: #94a3b8; background: #1c2430; }
+.transcript-item.user { border-color: #60a5fa; background: color-mix(in srgb, #60a5fa 12%, var(--panel)); }
+.transcript-item.assistant { border-color: #4ade80; background: color-mix(in srgb, #4ade80 12%, var(--panel)); }
+.transcript-item.tool_use { border-color: #f59e0b; background: color-mix(in srgb, #f59e0b 12%, var(--panel)); }
+.transcript-item.tool_result { border-color: #c084fc; background: color-mix(in srgb, #c084fc 12%, var(--panel)); }
+.transcript-item.summary { border-color: #f472b6; background: color-mix(in srgb, #f472b6 12%, var(--panel)); }
+.transcript-item.system { border-color: #94a3b8; background: color-mix(in srgb, #94a3b8 12%, var(--panel)); }
 .transcript-role {
-  color: #d7dde5;
+  color: var(--text);
   font-weight: 700;
   margin-bottom: 5px;
 }
@@ -421,12 +436,12 @@
   min-height: 0;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
-  background: #11151d;
+  background: var(--bg);
 }
 .summary-context {
   padding: 7px 10px;
-  color: #b7c0ce;
-  background: #141b25;
+  color: var(--muted);
+  background: var(--panel2);
   border-bottom: 1px solid var(--line);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
   overflow: hidden;
@@ -437,7 +452,7 @@
   white-space: nowrap;
 }
 .summary-context-label {
-  color: #d7dde5;
+  color: var(--text);
   font-weight: 700;
 }
 .summary-preview {
@@ -446,14 +461,14 @@
   padding: 10px;
   overflow: auto;
   overflow-wrap: anywhere;
-  color: #dfe6ef;
+  color: var(--text);
 }
 .event-list {
   height: 100%;
   min-height: 0;
   overflow: auto;
   padding: 8px;
-  background: #0f141d;
+  background: var(--bg);
   border-top: 1px solid var(--line);
 }
 .event-item {
@@ -461,8 +476,8 @@
   grid-template-columns: 132px 118px minmax(0, 1fr);
   gap: 8px;
   padding: 6px 7px;
-  border-bottom: 1px solid #243044;
-  color: #d9e2ef;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .event-item:last-child {
@@ -470,17 +485,18 @@
 }
 .event-time,
 .event-type {
-  color: #8f9bae;
+  align-self: start;
+  color: var(--muted);
   white-space: nowrap;
 }
 .event-type {
   text-transform: uppercase;
 }
 .event-message {
+  /* DOIT.25: wrap the command across lines instead of one-line ellipsis (no horizontal scroll). */
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .event-empty {
   padding: 12px;
@@ -1010,6 +1026,43 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
 }
 .info-cell a.pr-status-closed:hover {
   color: #aeb8c7;
+}
+/* Light mode (DOIT.18 C1): the whole YO!info table hardcoded dark-mode colors with NO light
+   override — near-white row text vanished on the white pane, header/current rows were dark bars,
+   and the PR/branch links were low-contrast pastels. Repaint for the white surface; dark unchanged. */
+body.theme-light .info-row {
+  color: var(--text);
+  border-bottom-color: var(--line);
+}
+body.theme-light .info-row.header {
+  color: var(--muted);
+  background: var(--panel2);
+}
+body.theme-light .info-row.current {
+  color: var(--text);
+  background: var(--file-selection-bg);
+}
+body.theme-light .info-cell a {
+  color: #1d4ed8;
+}
+body.theme-light .info-cell a:hover {
+  color: #0a3bc0;
+}
+body.theme-light .info-cell a.pr-status-failing,
+body.theme-light .info-cell a.pr-status-failing:hover {
+  color: #c0143c;
+}
+body.theme-light .info-cell a.pr-status-passing,
+body.theme-light .info-cell a.pr-status-passing:hover {
+  color: #1a7f37;
+}
+body.theme-light .info-cell a.pr-status-merged,
+body.theme-light .info-cell a.pr-status-merged:hover {
+  color: #8250df;
+}
+body.theme-light .info-cell a.pr-status-closed,
+body.theme-light .info-cell a.pr-status-closed:hover {
+  color: #57606a;
 }
 .info-branch-current {
   color: var(--accent-gold);

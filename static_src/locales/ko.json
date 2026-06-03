@@ -300,6 +300,9 @@
   "editor.closePane": "창 닫기",
   "editor.toolbar.aria": "에디터 컨트롤",
   "editor.mode.aria": "에디터 모드",
+  "editor.nav.back": "뒤로(이전 방문)",
+  "editor.nav.forward": "앞으로",
+  "editor.nav.aria": "기록 탐색",
   "editor.mode.edit": "편집",
   "editor.mode.preview": "미리보기",
   "editor.mode.split": "분할 보기",
@@ -511,5 +514,7 @@
   "det.noActivity": "아직 사용 가능한 AI 에이전트 활동이 없습니다.",
   "det.openPending": "열림 / 대기 중:",
   "pref.appearance.pane_spacing.label": "패널 간격",
-  "pref.appearance.pane_spacing.help": "픽셀, 0–20. 패널 사이 간격. 0이면 패널이 맞닿고 녹색 활성 테두리가 구분선을 덮습니다."
+  "pref.appearance.pane_spacing.help": "픽셀, 0–20. 패널 사이 간격. 0이면 패널이 맞닿고 녹색 활성 테두리가 구분선을 덮습니다.",
+  "pref.appearance.pane_ring_opacity.label": "창 테두리 불투명도",
+  "pref.appearance.pane_ring_opacity.help": "백분율, 20–100. 콘텐츠 가장자리에 그려지는 녹색/빨간색 창 테두리의 불투명도."
 }
