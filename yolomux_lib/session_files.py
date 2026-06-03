@@ -241,7 +241,11 @@ def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = 
     if untracked and untracked.returncode == 0:
         for rel_path in untracked.stdout.split("\0"):
             if rel_path:
-                statuses[rel_path] = "A"
+                # Untracked working-tree files get "?" (git's own untracked marker — `git status` shows
+                # "??"), distinct from a genuine staged/committed add "A" (from `git diff --name-status`
+                # above). Both are "new", but "A" means git is tracking the add; "?" means the file is
+                # not in the index at all.
+                statuses[rel_path] = "?"
     return statuses, ""
 
 
@@ -453,7 +457,7 @@ def session_files_payload_for_info(
             counts = numstat.get(rel_path, {})
             added = counts.get("added")
             removed = counts.get("removed")
-            if status == "A" and rel_path not in numstat:
+            if status in {"A", "?"} and rel_path not in numstat:
                 added = untracked_added_line_count(path)
                 removed = 0
             agent = next(

@@ -1056,6 +1056,42 @@ body.theme-light .app-menu-ui-icon {
   background: #f7f9fc;
   border-color: #c9d2df;
 }
+/* #251 (image 032): finish the light-mode coverage so NO app-menu icon button shows a dark fill. The
+   default + hover/open + ui-icon base are handled above; the active and hover/focus icon-button states
+   still kept dark-mode fills. Active stays green (the on-state cue) but tuned for a white topbar. */
+body.theme-light .app-menu-ui-icon:hover,
+body.theme-light .app-menu-ui-icon:focus-visible {
+  color: #0f172a;
+  background: #dfe7f2;
+  border-color: #9aa6b6;
+}
+body.theme-light .app-menu-ui-icon.active {
+  color: #08120a;
+  background: #5f9800;
+  border-color: #4a7600;
+}
+body.theme-light .app-menu-ui-icon.active:hover,
+body.theme-light .app-menu-ui-icon.active:focus-visible {
+  background: #6fab0a;
+  border-color: #4a7600;
+}
+/* #252 (image 033): the rich Tabs/Changes dropdown rows are `.app-menu-tab-command` (NOT
+   `.app-menu-command`), so the light text/hover overrides above never reach them — their text children
+   kept dark-mode grays on the white popover and read as washed out. Force dark text + a visible hover. */
+body.theme-light .app-menu-tab-command,
+body.theme-light .app-menu-tab-command .app-menu-rich,
+body.theme-light .app-menu-tab-command .pane-tab-core,
+body.theme-light .app-menu-tab-command .session-button-text,
+body.theme-light .app-menu-tab-command .session-button-prefix,
+body.theme-light .app-menu-tab-command .session-button-dir {
+  color: var(--text);
+}
+body.theme-light .app-menu-tab-command:hover:not(:disabled),
+body.theme-light .app-menu-tab-command:focus-visible {
+  color: #0f172a;
+  background: #e8f0fb;
+  border-color: #1d4ed8;
+}
 body.theme-light .latency-meter {
   background: #ffffff;
   border-color: var(--line);
@@ -6454,12 +6490,23 @@ body.theme-light .file-explorer-changes-head {
 /* #44(d): compact the Modified-files header chrome so the section spends its height on files. The
    comparison box collapses to one tight, borderless line and the close X is a small square. */
 .file-explorer-changes-panel .changes-comparison-head {
+  /* #253 (image 034): this "Comparing … N files changed · +N −N" line is an informational caption, not
+     a control — strip the box chrome (border / panel background / radius / padding from the base rule)
+     so it blends as plain text. The bold title + green/red ±counts keep their own colors. */
   flex-wrap: nowrap;
   gap: 4px 8px;
   margin-bottom: 4px;
-  padding: 2px 6px;
-  border-radius: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   font-size: var(--ui-font-size-xs);
+}
+/* Win over `body.theme-light .changes-comparison-head` (higher specificity) so the caption stays
+   chrome-free in light mode too, not re-boxed with a panel background + border. */
+body.theme-light .file-explorer-changes-panel .changes-comparison-head {
+  background: transparent;
+  border-color: transparent;
 }
 .file-explorer-changes-panel .changes-comparison-title {
   font-weight: 600;
@@ -6609,7 +6656,7 @@ body.theme-light .file-explorer-changes-head {
   background: rgba(118, 185, 0, 0.88);
 }
 .cm-yolomux-diff-add {
-  background: color-mix(in srgb, var(--code-diff-add) 74%, transparent);
+  background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
 }
 /* #49: a deletion is a between-line tick on the present line below it — a top border, NOT a red
    background on present content (a deleted line has no current-document line to fill). */
@@ -6624,8 +6671,10 @@ body.theme-light .file-explorer-changes-head {
 }
 .file-editor-diff-codemirror {
   position: relative;
-  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 74%, transparent);
-  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 76%, transparent);
+  /* #250: a changed line should read as a soft tint, not a saturated block. Muted mix strength over
+     the dark editor bg (was 74%/76% — far too vibrant); the light variant below is already soft. */
+  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
+  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 32%, transparent);
 }
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;

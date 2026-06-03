@@ -93,7 +93,8 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert by_path["tracked.txt"]["agent"] == "codex"
     assert by_path["tracked.txt"]["added"] == 1
     assert by_path["tracked.txt"]["removed"] == 1
-    assert by_path["new.txt"]["status"] == "A"
+    # new.txt is untracked (never `git add`ed) -> "?", distinct from a staged/committed add "A".
+    assert by_path["new.txt"]["status"] == "?"
     assert by_path["new.txt"]["added"] == 1
     assert by_path["new.txt"]["removed"] == 0
     assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2, "added": 2, "removed": 1}]
@@ -145,6 +146,29 @@ def test_git_status_parses_renames_and_tab_paths(tmp_path):
     assert old_name not in statuses
     assert statuses[new_name] == "R"
     assert counts[new_name] == {"added": 0, "removed": 0}
+
+
+def test_git_status_labels_untracked_question_distinct_from_staged_add_A(tmp_path):
+    # An untracked working-tree file must read as "?" (git's own untracked marker), while a genuinely
+    # staged add reads as "A", so the changes pane can tell "git is tracking this add" apart from
+    # "this file isn't tracked yet".
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    git(repo, "add", "base.txt")
+    git(repo, "commit", "-m", "base")
+    (repo / "staged.txt").write_text("staged\n", encoding="utf-8")
+    git(repo, "add", "staged.txt")
+    (repo / "loose.txt").write_text("loose\n", encoding="utf-8")  # untracked, never added
+
+    statuses, error = session_files.git_name_status(repo, "HEAD")
+
+    assert error == ""
+    assert statuses["staged.txt"] == "A"
+    assert statuses["loose.txt"] == "?"
 
 
 def test_git_numstat_parses_paths_with_tabs(tmp_path):

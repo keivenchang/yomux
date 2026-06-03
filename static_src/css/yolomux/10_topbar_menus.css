@@ -739,6 +739,42 @@ body.theme-light .app-menu-ui-icon {
   background: #f7f9fc;
   border-color: #c9d2df;
 }
+/* #251 (image 032): finish the light-mode coverage so NO app-menu icon button shows a dark fill. The
+   default + hover/open + ui-icon base are handled above; the active and hover/focus icon-button states
+   still kept dark-mode fills. Active stays green (the on-state cue) but tuned for a white topbar. */
+body.theme-light .app-menu-ui-icon:hover,
+body.theme-light .app-menu-ui-icon:focus-visible {
+  color: #0f172a;
+  background: #dfe7f2;
+  border-color: #9aa6b6;
+}
+body.theme-light .app-menu-ui-icon.active {
+  color: #08120a;
+  background: #5f9800;
+  border-color: #4a7600;
+}
+body.theme-light .app-menu-ui-icon.active:hover,
+body.theme-light .app-menu-ui-icon.active:focus-visible {
+  background: #6fab0a;
+  border-color: #4a7600;
+}
+/* #252 (image 033): the rich Tabs/Changes dropdown rows are `.app-menu-tab-command` (NOT
+   `.app-menu-command`), so the light text/hover overrides above never reach them — their text children
+   kept dark-mode grays on the white popover and read as washed out. Force dark text + a visible hover. */
+body.theme-light .app-menu-tab-command,
+body.theme-light .app-menu-tab-command .app-menu-rich,
+body.theme-light .app-menu-tab-command .pane-tab-core,
+body.theme-light .app-menu-tab-command .session-button-text,
+body.theme-light .app-menu-tab-command .session-button-prefix,
+body.theme-light .app-menu-tab-command .session-button-dir {
+  color: var(--text);
+}
+body.theme-light .app-menu-tab-command:hover:not(:disabled),
+body.theme-light .app-menu-tab-command:focus-visible {
+  color: #0f172a;
+  background: #e8f0fb;
+  border-color: #1d4ed8;
+}
 body.theme-light .latency-meter {
   background: #ffffff;
   border-color: var(--line);
