@@ -18,7 +18,7 @@
   gap: 8px;
 }
 .info-refresh {
-  margin-left: auto;
+  margin-inline-start: auto;
   height: 22px;
   padding: 0 8px;
   border: 1px solid var(--line);
@@ -117,7 +117,7 @@
   cursor: pointer;
 }
 .changes-summary {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted);
 }
 .changes-summary-separator {
@@ -191,7 +191,7 @@
   display: inline-flex;
   flex-wrap: wrap;
   gap: 4px 8px;
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted);
   font-weight: 600;
 }
@@ -202,7 +202,7 @@
   width: 100%;
   border: 0;
   cursor: pointer;
-  text-align: left;
+  text-align: start;
 }
 .changes-uploaded-toggle:hover,
 .changes-uploaded-toggle:focus-visible {
@@ -227,7 +227,7 @@
   top: 22px;
   bottom: 0;
   left: calc(10px + (var(--changes-tree-depth, 0) * 16px));
-  border-left: 1px solid var(--changes-indent-line);
+  border-inline-start: 1px solid var(--changes-indent-line);
   pointer-events: none;
 }
 .changes-tree-folder.collapsed::before {
@@ -245,7 +245,7 @@
   background: var(--changes-folder-bg);
   color: var(--changes-folder-text);
   font: 700 var(--ui-font-size-sm)/1.15 var(--ui-font);
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 .changes-tree-folder-row:hover,
@@ -276,7 +276,7 @@
   border-top: 1px solid rgba(148, 163, 184, 0.18);
   background: transparent;
   color: var(--text);
-  text-align: left;
+  text-align: start;
   font-family: var(--ui-font);
   /* DOIT.6 #46: Modified-files rows read like the Finder file tree (same font size + line-height). */
   font-size: var(--file-explorer-font-size);
@@ -411,7 +411,7 @@
   font-weight: 800;
 }
 .changes-count-badge {
-  margin-left: 5px;
+  margin-inline-start: 5px;
 }
 .preferences-path-row {
   display: grid;
@@ -473,7 +473,7 @@
   color: var(--text);
   background: transparent;
   font: 700 var(--ui-font-size)/1.2 var(--ui-font);
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 .preferences-section.collapsed .preferences-section-toggle {
@@ -485,7 +485,7 @@
   height: 0;
   border-top: 4px solid transparent;
   border-bottom: 4px solid transparent;
-  border-left: 6px solid currentColor;
+  border-inline-start: 6px solid currentColor;
   transform: rotate(90deg);
 }
 .preferences-section.collapsed .preferences-section-caret {
@@ -752,7 +752,7 @@
   background: transparent;
   border: 1px solid transparent;
   border-radius: 5px;
-  text-align: left;
+  text-align: start;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
 }
@@ -1094,7 +1094,7 @@ body.theme-light .keyboard-shortcut-row kbd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-left: 4px;
+  margin-inline-start: 4px;
   width: 24px;
   min-width: 24px;
   height: 18px;

@@ -4061,6 +4061,12 @@ function makeFileTree(paths) {
   // RTL: Arabic is detected as right-to-left; LTR locales are not.
   assert.equal(api.i18nIsRtl('ar'), true, 'Phase 2: ar is RTL');
   assert.equal(api.i18nIsRtl('de'), false, 'Phase 2: de is LTR');
+  // applyLocale flips document.dir; the build CSS uses logical flow properties so RTL mirrors.
+  const rtlSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/document\.documentElement\.setAttribute\('dir', i18nIsRtl\(next\) \? 'rtl' : 'ltr'\)/.test(rtlSrc), 'Phase 2: applyLocale sets the document direction for RTL locales');
+  const rtlCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.equal(/(^|[^-])(margin|padding|border)-(left|right):/m.test(rtlCss.replace(/[a-z-]*-(left|right)-radius/g, '')), false, 'Phase 2: flow-spacing CSS uses logical (inline) properties, not physical left/right, so RTL mirrors');
+  assert.ok(rtlCss.includes('margin-inline-start:') && rtlCss.includes('padding-inline-start:'), 'Phase 2: the CSS uses logical inline properties');
   assert.equal(choices.find(c => c.value === 'es').label, 'Español', 'Phase 1: Spanish is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ja').label, '日本語', 'Phase 1: Japanese is labeled with its endonym');
   assert.equal(api.resolveLocalePref('es'), 'es', 'Phase 1: Spanish resolves to itself');

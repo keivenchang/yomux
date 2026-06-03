@@ -477,7 +477,7 @@ body {
 .latency-number {
   min-width: 34px;
   font: var(--ui-font-size-xs)/1 var(--mono-font);
-  text-align: right;
+  text-align: end;
 }
 .app-menu-area {
   width: 100%;
@@ -544,7 +544,7 @@ body.theme-light .topbar-language {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
+  text-align: start;
 }
 .topbar-search-hint {
   flex: 0 0 auto;
@@ -661,8 +661,8 @@ body.theme-light .topbar-language {
   content: "";
   width: 0;
   height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
+  border-inline-start: 4px solid transparent;
+  border-inline-end: 4px solid transparent;
   border-top: 5px solid currentColor;
   opacity: 0.62;
 }
@@ -764,7 +764,7 @@ body.theme-light .topbar-language {
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
-  text-align: left;
+  text-align: start;
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
 .app-menu-check {
@@ -1484,7 +1484,7 @@ body.theme-light .ci-indicator.branch-indicator {
   height: 10px;
   transform: rotate(45deg);
   background: #081f08;
-  border-left: 1px solid rgba(95, 150, 42, 0.64);
+  border-inline-start: 1px solid rgba(95, 150, 42, 0.64);
   border-top: 1px solid rgba(95, 150, 42, 0.64);
 }
 .popover-head {
@@ -1694,7 +1694,7 @@ body.theme-light .ci-indicator.branch-indicator {
   gap: 8px;
 }
 .info-refresh {
-  margin-left: auto;
+  margin-inline-start: auto;
   height: 22px;
   padding: 0 8px;
   border: 1px solid var(--line);
@@ -1793,7 +1793,7 @@ body.theme-light .ci-indicator.branch-indicator {
   cursor: pointer;
 }
 .changes-summary {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted);
 }
 .changes-summary-separator {
@@ -1867,7 +1867,7 @@ body.theme-light .ci-indicator.branch-indicator {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 4px 8px;
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted);
   font-weight: 600;
 }
@@ -1878,7 +1878,7 @@ body.theme-light .ci-indicator.branch-indicator {
   width: 100%;
   border: 0;
   cursor: pointer;
-  text-align: left;
+  text-align: start;
 }
 .changes-uploaded-toggle:hover,
 .changes-uploaded-toggle:focus-visible {
@@ -1903,7 +1903,7 @@ body.theme-light .ci-indicator.branch-indicator {
   top: 22px;
   bottom: 0;
   left: calc(10px + (var(--changes-tree-depth, 0) * 16px));
-  border-left: 1px solid var(--changes-indent-line);
+  border-inline-start: 1px solid var(--changes-indent-line);
   pointer-events: none;
 }
 .changes-tree-folder.collapsed::before {
@@ -1921,7 +1921,7 @@ body.theme-light .ci-indicator.branch-indicator {
   background: var(--changes-folder-bg);
   color: var(--changes-folder-text);
   font: 700 var(--ui-font-size-sm)/1.15 var(--ui-font);
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 .changes-tree-folder-row:hover,
@@ -1952,7 +1952,7 @@ body.theme-light .ci-indicator.branch-indicator {
   border-top: 1px solid rgba(148, 163, 184, 0.18);
   background: transparent;
   color: var(--text);
-  text-align: left;
+  text-align: start;
   font-family: var(--ui-font);
   /* DOIT.6 #46: Modified-files rows read like the Finder file tree (same font size + line-height). */
   font-size: var(--file-explorer-font-size);
@@ -2087,7 +2087,7 @@ body.theme-light .ci-indicator.branch-indicator {
   font-weight: 800;
 }
 .changes-count-badge {
-  margin-left: 5px;
+  margin-inline-start: 5px;
 }
 .preferences-path-row {
   display: grid;
@@ -2149,7 +2149,7 @@ body.theme-light .ci-indicator.branch-indicator {
   color: var(--text);
   background: transparent;
   font: 700 var(--ui-font-size)/1.2 var(--ui-font);
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 .preferences-section.collapsed .preferences-section-toggle {
@@ -2161,7 +2161,7 @@ body.theme-light .ci-indicator.branch-indicator {
   height: 0;
   border-top: 4px solid transparent;
   border-bottom: 4px solid transparent;
-  border-left: 6px solid currentColor;
+  border-inline-start: 6px solid currentColor;
   transform: rotate(90deg);
 }
 .preferences-section.collapsed .preferences-section-caret {
@@ -2428,7 +2428,7 @@ body.theme-light .ci-indicator.branch-indicator {
   background: transparent;
   border: 1px solid transparent;
   border-radius: 5px;
-  text-align: left;
+  text-align: start;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
 }
@@ -2770,7 +2770,7 @@ body.theme-light .keyboard-shortcut-row kbd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-left: 4px;
+  margin-inline-start: 4px;
   width: 24px;
   min-width: 24px;
   height: 18px;
@@ -3145,8 +3145,8 @@ body.layout-resizing {
   flex: 0 0 14px;
   width: 14px;
   height: 14px;
-  margin-left: auto;
-  margin-right: 0;
+  margin-inline-start: auto;
+  margin-inline-end: 0;
   align-self: center;
   position: relative;
   padding: 0;
@@ -3283,7 +3283,7 @@ body.layout-resizing {
   align-items: center;
   gap: 4px;
   height: max(16px, calc(var(--ui-font-size) + 5px));
-  padding-right: 0;
+  padding-inline-end: 0;
   white-space: nowrap;
 }
 .panel-session-label:empty {
@@ -3319,7 +3319,7 @@ body.layout-resizing {
   box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.26);
 }
 .panel-session-label .agent-icon {
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 .panel-session-tab {
   cursor: default;
@@ -3440,7 +3440,7 @@ body.layout-resizing {
   border-bottom-color: var(--pane-inactive-tab-border);
   line-height: var(--tab-line-height);
   white-space: nowrap;
-  text-align: left;
+  text-align: start;
   font-family: var(--tab-font);
   font-size: var(--tab-label-size);
   font-stretch: condensed;
@@ -3533,7 +3533,7 @@ body.layout-resizing {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-left: 0;
+  margin-inline-start: 0;
   padding: 0;
   color: currentColor;
   opacity: 0.58;
@@ -4150,7 +4150,7 @@ body.theme-light .panel.typing-ready-pane {
   background: transparent;
   border: 0;
   border-radius: 5px;
-  text-align: left;
+  text-align: start;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
 }
@@ -4402,7 +4402,7 @@ body.theme-light .panel.typing-ready-pane {
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .transcript-item {
-  border-left: 3px solid #667085;
+  border-inline-start: 3px solid #667085;
   background: #141b25;
   margin: 0 0 8px 0;
   padding: 7px 9px;
@@ -4548,7 +4548,7 @@ body.theme-light .panel.typing-ready-pane {
 }
 .info-subtab:last-child {
   border-radius: 0 6px 6px 0;
-  border-left: 0;
+  border-inline-start: 0;
 }
 .info-subtab.active {
   color: #f4fff0;
@@ -4573,7 +4573,7 @@ body.theme-light .panel.typing-ready-pane {
   color: #dfe6ef;
   background: #151d24;
   border: 1px solid #314154;
-  border-left: 3px solid var(--brand-green);
+  border-inline-start: 3px solid var(--brand-green);
   border-radius: 4px;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
@@ -4635,7 +4635,7 @@ body.theme-light .panel.typing-ready-pane {
   color: var(--text);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--inactive-tab-border);
+  border-inline-start: 3px solid var(--inactive-tab-border);
   border-radius: 4px;
 }
 .yoagent-session-summary.active {
@@ -4835,7 +4835,7 @@ body.theme-light .yoagent-line {
   border: 0;
   font: inherit;
   font-weight: 700;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 .info-sort-button span:first-child {
@@ -5101,7 +5101,7 @@ body.theme-light .yoagent-line {
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   box-shadow: 4px 0 18px rgba(0, 0, 0, 0.35);
   overflow: hidden;
   font-family: var(--ui-font);
@@ -5132,7 +5132,7 @@ body.theme-light .yoagent-line {
   text-overflow: ellipsis;
   white-space: nowrap;
   direction: ltr;
-  text-align: left;
+  text-align: start;
   outline: none;
 }
 .file-explorer-path {
@@ -5441,21 +5441,21 @@ body.theme-light .yoagent-line {
   color: currentColor;
 }
 .file-tree-git-status {
-  margin-left: auto;
-  padding-left: 6px;
+  margin-inline-start: auto;
+  padding-inline-start: 6px;
   color: currentColor;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;
 }
 .file-tree-date {
-  margin-left: auto;
-  padding-left: 8px;
+  margin-inline-start: auto;
+  padding-inline-start: 8px;
   color: var(--muted);
   white-space: nowrap;
 }
 .file-tree-git-status:not([hidden]) + .file-tree-date:not([hidden]) {
-  margin-left: 4px;
+  margin-inline-start: 4px;
 }
 .file-tree-children {
   position: relative;
@@ -5466,7 +5466,7 @@ body.theme-light .yoagent-line {
   top: 0;
   bottom: 0;
   left: 15px;
-  border-left: 1px solid rgba(148, 163, 184, 0.18);
+  border-inline-start: 1px solid rgba(148, 163, 184, 0.18);
   pointer-events: none;
 }
 .file-tree-children {
@@ -5557,7 +5557,7 @@ body.theme-light .file-tree-children::before {
   width: var(--file-explorer-tree-inline-size);
   flex: 0 0 var(--file-explorer-tree-inline-size);
   height: 100%;
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   background: var(--panel);
   overflow: hidden;
 }
@@ -5652,7 +5652,7 @@ body.theme-light .file-tree-children::before {
   flex: 0 0 var(--file-explorer-editor-inline-size);
   height: 100%;
   background: var(--panel2);
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   overflow: hidden;
 }
 .file-editor[hidden] {
@@ -5676,7 +5676,7 @@ body.theme-light .file-tree-children::before {
   text-overflow: ellipsis;
   white-space: nowrap;
   direction: rtl;
-  text-align: left;
+  text-align: start;
 }
 .file-editor-html-preview {
   display: block;
@@ -5840,7 +5840,7 @@ body.theme-light .file-tree-children::before {
   width: 4px;
   height: 6px;
   border: 1.5px solid currentColor;
-  border-left: 0;
+  border-inline-start: 0;
 }
 .file-editor-icon-side-split {
   overflow: visible;
@@ -5977,7 +5977,7 @@ body.theme-light .file-tree-children::before {
   display: block;
   min-height: 1.35em;
   padding: 1px 8px;
-  border-left: 3px solid transparent;
+  border-inline-start: 3px solid transparent;
 }
 .file-compare-line.added {
   color: #d9ffe0;
@@ -6066,14 +6066,14 @@ body.theme-light .file-tree-children::before {
   display: inline-block;
   width: 6px;
   height: 6px;
-  margin-right: 2px;
+  margin-inline-end: 2px;
   border-radius: 999px;
   background: var(--accent-gold);
   flex: 0 0 6px;
 }
 .file-tab-owner {
   flex: 0 0 auto;
-  margin-right: 5px;
+  margin-inline-end: 5px;
   padding: 0 4px;
   color: #071000;
   background: var(--brand-green);
@@ -6104,7 +6104,7 @@ body.theme-light .file-tree-children::before {
   width: 20px;
   padding: 0;
   border: 0;
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
   color: var(--muted);
@@ -6114,7 +6114,7 @@ body.theme-light .file-tree-children::before {
   cursor: pointer;
 }
 .file-editor-mode-control button:last-child {
-  border-right: 0;
+  border-inline-end: 0;
 }
 .file-editor-mode-control button:hover,
 .file-editor-mode-control button.active {
@@ -6189,7 +6189,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 /* DOIT.6 #128: a <p> directly inside an <li> (loose lists) carries no vertical margin, so a loose
    list renders as tightly as a tight one. Safe for the file-editor preview too. */
 .markdown-body li > p { margin: 0; }
-.markdown-body blockquote { border-left: 3px solid var(--line); margin: 6px 0; padding: 3px 8px; color: var(--muted); }
+.markdown-body blockquote { border-inline-start: 3px solid var(--line); margin: 6px 0; padding: 3px 8px; color: var(--muted); }
 .markdown-body table { border-collapse: collapse; margin: 8px 0; }
 .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }
 .markdown-body th { background: var(--panel2); }
@@ -6483,7 +6483,7 @@ body.theme-light .file-explorer-changes-head {
 .file-explorer-changes-panel .changes-summary {
   justify-self: end;
   min-width: 0;
-  margin-left: 0;
+  margin-inline-start: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6669,7 +6669,7 @@ body.theme-light .file-explorer-changes-head {
 }
 .file-editor-diff-codemirror .cm-deletedChunk {
   position: relative;
-  padding-right: 58px;
+  padding-inline-end: 58px;
 }
 .file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons {
   position: absolute !important;
@@ -6776,7 +6776,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 6%, transparent);
 }
 .file-editor-panel-actions .pane-frame-controls {
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 /* #42: the frame controls (zoom / minimize / close) sit plainly in the tab strip — drop the
    bordered control pill that used to wrap the moved editor controls. */
@@ -7063,12 +7063,12 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 .file-editor-content.split-preview .file-editor-codemirror-panel {
   inset: 0 50% 0 0;
   width: auto;
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
 }
 .file-editor-content.split-preview .file-editor-preview-pane,
 .file-editor-content.split-preview .file-editor-preview-pane-panel {
   inset: 0 0 0 50%;
-  border-left: 1px solid rgba(0, 0, 0, 0.2);
+  border-inline-start: 1px solid rgba(0, 0, 0, 0.2);
 }
 .file-editor-content.preview-mode .file-editor-preview-pane,
 .file-editor-content.preview-mode .file-editor-preview-pane-panel {
@@ -7112,7 +7112,7 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor.editor-wrap .file-editor-codemirror .cm-lineWrapping .cm-line,
 .file-editor-panel.editor-wrap .file-editor-codemirror-panel .cm-lineWrapping .cm-line {
-  padding-left: calc(6px + var(--editor-wrap-marker-col));
+  padding-inline-start: calc(6px + var(--editor-wrap-marker-col));
   text-indent: calc(-1 * var(--editor-wrap-marker-col));
 }
 .cm-wrap-marker-layer {
@@ -7161,8 +7161,8 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   /* DOIT.6 #122: 1ch == the monospace cell advance (the "0"-glyph width), so the block cursor
      fills the whole character cell. 0.62ch left it looking like a fat line, not a true block. */
   width: 1ch !important;
-  margin-left: 0 !important;
-  border-left: 0 !important;
+  margin-inline-start: 0 !important;
+  border-inline-start: 0 !important;
   background: var(--editor-cursor) !important;
   opacity: 0.78;
 }
@@ -7216,7 +7216,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror-panel .cm-search input[name="replace"].cm-textfield {
   grid-column: 1;
   grid-row: 2;
-  margin-left: 0;
+  margin-inline-start: 0;
   border-color: #6f7b8c;
   box-shadow: none;
 }
@@ -7306,7 +7306,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror .cm-search .cm-button[name="replaceAll"],
 .file-editor-codemirror-panel .cm-search .cm-button[name="replaceAll"] {
   grid-column: 3;
-  margin-left: -2px;
+  margin-inline-start: -2px;
 }
 .file-editor-codemirror .cm-search .cm-search-count,
 .file-editor-codemirror-panel .cm-search .cm-search-count {
@@ -7479,15 +7479,15 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   min-height: calc(var(--editor-line-height) * 1em);
 }
 .editor-line-number {
-  padding-right: 0.8ch;
+  padding-inline-end: 0.8ch;
   color: var(--editor-line-number);
-  text-align: right;
+  text-align: end;
   user-select: none;
 }
 .file-editor:not(.editor-line-numbers) .editor-line-number,
 .file-editor-panel:not(.editor-line-numbers) .editor-line-number {
   width: 0;
-  padding-right: 0;
+  padding-inline-end: 0;
   overflow: hidden;
 }
 .editor-soft-wrap-marker {
@@ -7703,7 +7703,7 @@ body.editor-theme-light .file-editor-code-preview .md-code {
   white-space: nowrap;
 }
 .file-editor-cursor-status {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--text);
   white-space: nowrap;
 }
@@ -7746,7 +7746,7 @@ body.editor-theme-light .file-editor-code-preview .md-code {
 }
 .file-tab-kind {
   flex: 0 0 auto;
-  margin-right: 5px;
+  margin-inline-end: 5px;
   padding: 0 4px;
   border: 1px solid rgba(245, 197, 66, 0.55);
   border-radius: 4px;

@@ -421,7 +421,7 @@ body.theme-light .ci-indicator.branch-indicator {
   height: 10px;
   transform: rotate(45deg);
   background: #081f08;
-  border-left: 1px solid rgba(95, 150, 42, 0.64);
+  border-inline-start: 1px solid rgba(95, 150, 42, 0.64);
   border-top: 1px solid rgba(95, 150, 42, 0.64);
 }
 .popover-head {

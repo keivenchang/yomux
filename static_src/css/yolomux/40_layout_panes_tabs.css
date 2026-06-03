@@ -329,8 +329,8 @@ body.layout-resizing {
   flex: 0 0 14px;
   width: 14px;
   height: 14px;
-  margin-left: auto;
-  margin-right: 0;
+  margin-inline-start: auto;
+  margin-inline-end: 0;
   align-self: center;
   position: relative;
   padding: 0;
@@ -467,7 +467,7 @@ body.layout-resizing {
   align-items: center;
   gap: 4px;
   height: max(16px, calc(var(--ui-font-size) + 5px));
-  padding-right: 0;
+  padding-inline-end: 0;
   white-space: nowrap;
 }
 .panel-session-label:empty {
@@ -503,7 +503,7 @@ body.layout-resizing {
   box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.26);
 }
 .panel-session-label .agent-icon {
-  margin-left: 0;
+  margin-inline-start: 0;
 }
 .panel-session-tab {
   cursor: default;
@@ -624,7 +624,7 @@ body.layout-resizing {
   border-bottom-color: var(--pane-inactive-tab-border);
   line-height: var(--tab-line-height);
   white-space: nowrap;
-  text-align: left;
+  text-align: start;
   font-family: var(--tab-font);
   font-size: var(--tab-label-size);
   font-stretch: condensed;
@@ -717,7 +717,7 @@ body.layout-resizing {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  margin-left: 0;
+  margin-inline-start: 0;
   padding: 0;
   color: currentColor;
   opacity: 0.58;

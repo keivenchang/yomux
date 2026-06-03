@@ -160,7 +160,7 @@
 .latency-number {
   min-width: 34px;
   font: var(--ui-font-size-xs)/1 var(--mono-font);
-  text-align: right;
+  text-align: end;
 }
 .app-menu-area {
   width: 100%;
@@ -227,7 +227,7 @@ body.theme-light .topbar-language {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: left;
+  text-align: start;
 }
 .topbar-search-hint {
   flex: 0 0 auto;
@@ -344,8 +344,8 @@ body.theme-light .topbar-language {
   content: "";
   width: 0;
   height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
+  border-inline-start: 4px solid transparent;
+  border-inline-end: 4px solid transparent;
   border-top: 5px solid currentColor;
   opacity: 0.62;
 }
@@ -447,7 +447,7 @@ body.theme-light .topbar-language {
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
-  text-align: left;
+  text-align: start;
   font: var(--ui-font-size)/1.2 var(--ui-font);
 }
 .app-menu-check {

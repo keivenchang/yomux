@@ -133,7 +133,7 @@
   background: transparent;
   border: 0;
   border-radius: 5px;
-  text-align: left;
+  text-align: start;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
 }
@@ -385,7 +385,7 @@
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .transcript-item {
-  border-left: 3px solid #667085;
+  border-inline-start: 3px solid #667085;
   background: #141b25;
   margin: 0 0 8px 0;
   padding: 7px 9px;
@@ -531,7 +531,7 @@
 }
 .info-subtab:last-child {
   border-radius: 0 6px 6px 0;
-  border-left: 0;
+  border-inline-start: 0;
 }
 .info-subtab.active {
   color: #f4fff0;
@@ -556,7 +556,7 @@
   color: #dfe6ef;
   background: #151d24;
   border: 1px solid #314154;
-  border-left: 3px solid var(--brand-green);
+  border-inline-start: 3px solid var(--brand-green);
   border-radius: 4px;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
@@ -618,7 +618,7 @@
   color: var(--text);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--inactive-tab-border);
+  border-inline-start: 3px solid var(--inactive-tab-border);
   border-radius: 4px;
 }
 .yoagent-session-summary.active {
@@ -818,7 +818,7 @@ body.theme-light .yoagent-line {
   border: 0;
   font: inherit;
   font-weight: 700;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 .info-sort-button span:first-child {
@@ -1084,7 +1084,7 @@ body.theme-light .yoagent-line {
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   box-shadow: 4px 0 18px rgba(0, 0, 0, 0.35);
   overflow: hidden;
   font-family: var(--ui-font);
@@ -1115,7 +1115,7 @@ body.theme-light .yoagent-line {
   text-overflow: ellipsis;
   white-space: nowrap;
   direction: ltr;
-  text-align: left;
+  text-align: start;
   outline: none;
 }
 .file-explorer-path {
@@ -1424,21 +1424,21 @@ body.theme-light .yoagent-line {
   color: currentColor;
 }
 .file-tree-git-status {
-  margin-left: auto;
-  padding-left: 6px;
+  margin-inline-start: auto;
+  padding-inline-start: 6px;
   color: currentColor;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;
 }
 .file-tree-date {
-  margin-left: auto;
-  padding-left: 8px;
+  margin-inline-start: auto;
+  padding-inline-start: 8px;
   color: var(--muted);
   white-space: nowrap;
 }
 .file-tree-git-status:not([hidden]) + .file-tree-date:not([hidden]) {
-  margin-left: 4px;
+  margin-inline-start: 4px;
 }
 .file-tree-children {
   position: relative;
@@ -1449,7 +1449,7 @@ body.theme-light .yoagent-line {
   top: 0;
   bottom: 0;
   left: 15px;
-  border-left: 1px solid rgba(148, 163, 184, 0.18);
+  border-inline-start: 1px solid rgba(148, 163, 184, 0.18);
   pointer-events: none;
 }
 .file-tree-children {
@@ -1540,7 +1540,7 @@ body.theme-light .file-tree-children::before {
   width: var(--file-explorer-tree-inline-size);
   flex: 0 0 var(--file-explorer-tree-inline-size);
   height: 100%;
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   background: var(--panel);
   overflow: hidden;
 }
@@ -1635,7 +1635,7 @@ body.theme-light .file-tree-children::before {
   flex: 0 0 var(--file-explorer-editor-inline-size);
   height: 100%;
   background: var(--panel2);
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   overflow: hidden;
 }
 .file-editor[hidden] {
