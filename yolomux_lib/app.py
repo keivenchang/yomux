@@ -870,7 +870,8 @@ class TmuxWebtermApp:
         sessions, errors = discover_sessions([session])
         info = sessions.get(session)
         target = info.selected_pane.target if info and info.selected_pane else session
-        result = tmux(["capture-pane", "-t", target, "-p", "-S", f"-{max(1, min(lines, 1000))}"], timeout=3.0)
+        # DOIT.6 #144: -J rejoins tmux-wrapped lines so a wrapped command is captured as one logical line.
+        result = tmux(["capture-pane", "-t", target, "-p", "-J", "-S", f"-{max(1, min(lines, 1000))}"], timeout=3.0)
         if result.returncode != 0:
             error = (result.stderr or result.stdout or "tmux capture-pane failed").strip()
             return {"session": session, "target": target, "errors": [*errors, error]}, HTTPStatus.INTERNAL_SERVER_ERROR

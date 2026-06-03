@@ -2134,9 +2134,9 @@ function renderFileEditorPanel(panel, item) {
     setFileEditorPanelStatus(panel, status, 'error');
     return;
   }
-  if (state.kind === 'text' && !state.diffLoaded && !state.diffLoading && !state.diffUnavailable) {
-    refreshOpenFileDiff(path, {silent: true});
-  }
+  // DOIT.6 #149: do NOT auto-load the diff when a file opens/renders. The diff loads only on explicit
+  // diff-mode entry (the Diff button + the Modified-files menu both open in diff view and load there),
+  // so opening/editing a file does zero diff work (one fewer network round-trip + re-render; ties to DOIT.9).
   if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && !openFileDiffAvailable(state)) {
     setFileEditorViewMode(path, 'edit', item);
   }

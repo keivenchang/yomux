@@ -123,10 +123,13 @@ def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False, 
     request thread (the synchronous /api/auto-approve path runs several captures inline).
     """
     exact_target = tmux_exact_target(target)
+    # DOIT.6 #144: -J rejoins lines that tmux wrapped across visual rows, so a command that wraps is
+    # captured as one logical line. Without it, extract_command joins wrapped rows with a space and can
+    # insert a spurious space mid-token (e.g. "rm -r"+"f /path" -> "rm -r f /path"), flipping a verdict.
     if visible_only:
-        result = tmux_run("capture-pane", "-t", exact_target, "-p", check=False, timeout=timeout)
+        result = tmux_run("capture-pane", "-t", exact_target, "-p", "-J", check=False, timeout=timeout)
     else:
-        result = tmux_run("capture-pane", "-t", exact_target, "-p", "-S", f"-{lines}", check=False, timeout=timeout)
+        result = tmux_run("capture-pane", "-t", exact_target, "-p", "-J", "-S", f"-{lines}", check=False, timeout=timeout)
     if result.returncode != 0:
         return None
     return result.stdout

@@ -327,7 +327,6 @@ globalThis.__layoutTestApi = {
   diffRefParams,
   diffRefFromSuggestions,
   diffRefToSuggestions,
-  parseUnifiedDiffLineClasses,
   globalActivitySummaryHtml,
   yoagentSessionSummariesHtml,
   yoagentChatHtml,
@@ -1900,23 +1899,15 @@ function makeFileTree(paths) {
   assert.equal(fakeChangesScroll.innerHTML, '<div>updated</div>');
   assert.equal(fakeChangesScroll.scrollTop, 45, 'modified-files refresh preserves vertical scroll');
   assert.equal(fakeChangesScroll.scrollLeft, 3, 'modified-files refresh preserves horizontal scroll');
-  const diffLines = api.parseUnifiedDiffLineClasses(`@@ -1,2 +1,3 @@
- one
--old
-+new
-+extra
-`);
-  assert.deepStrictEqual(Array.from(diffLines.added), [2, 3]);
-  // #49: deletions are between-line markers on the present line below them, never a full red line fill.
-  assert.deepStrictEqual(Array.from(diffLines.deletionMarkers), [2]);
-  assert.equal(diffLines.removed, undefined, '#49: there is no full-line red-fill set for deletions');
-  // A pure deletion (no adjacent add) must NOT paint the following present line green/red — only a tick.
-  const pureDel = api.parseUnifiedDiffLineClasses('@@ -1,3 +1,2 @@\n keep1\n-gone\n keep2\n');
-  assert.deepStrictEqual(Array.from(pureDel.added), [], '#49: a pure deletion adds no green lines');
-  assert.deepStrictEqual(Array.from(pureDel.deletionMarkers), [2], '#49: a pure deletion marks the present line below it (not a red fill)');
-  const diffDecoCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.cm-yolomux-diff-deletion\s*\{[\s\S]*?box-shadow:\s*inset 0 2px 0/.test(diffDecoCss), '#49: the deletion marker is a top tick, not a line background');
-  assert.equal(diffDecoCss.includes('.cm-yolomux-diff-remove'), false, '#49: the full-line red-fill decoration class is removed');
+  // DOIT.6 #149/#150: the edit view no longer auto-loads the diff or paints inline diff decorations.
+  // Changes are shown ONLY in the explicit diff VIEW (the MergeView). The inline-decoration helpers and
+  // the edit-mode auto-load are removed; parseUnifiedDiffLineClasses/codeMirrorDiffLineExtension are gone.
+  const editSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.equal(/function parseUnifiedDiffLineClasses/.test(editSrc), false, '#150: parseUnifiedDiffLineClasses is deleted (no inline diff decorations)');
+  assert.equal(/function codeMirrorDiffLineExtension/.test(editSrc), false, '#150: codeMirrorDiffLineExtension is deleted');
+  assert.equal(/state\.diffLineClasses/.test(editSrc), false, '#150: the dead state.diffLineClasses is removed');
+  const renderPanelBody = editSrc.slice(editSrc.indexOf('function renderFileEditorPanel'), editSrc.indexOf('function renderFileEditorPanel') + 4000);
+  assert.equal(/!state\.diffLoaded && !state\.diffLoading && !state\.diffUnavailable/.test(renderPanelBody), false, '#149: renderFileEditorPanel no longer auto-loads the diff on open/render');
   const filesTab = api.fileExplorerPaneTabHtml();
   assert.equal(api.fileExplorerLabel(), 'File Explorer');
   assert.ok(filesTab.includes('File Explorer'));

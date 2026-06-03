@@ -240,6 +240,22 @@ def test_approval_prompt_ignores_exact_claude_ctrl_b_footer():
     assert state["type"] == "bash"
 
 
+def test_approval_prompt_ignores_multi_key_parenthetical_footer():
+    # DOIT.6 #143: a footer hint with one-or-more keys plus a parenthetical — e.g.
+    # "(ctrl+b ctrl+b (twice) to run in background)" — must read as a footer (not later activity), so the
+    # live approval prompt is still detected and auto-approvable.
+    visible_text = claude_bash_prompt_with_footer(
+        " Esc to cancel · Tab to amend · ctrl+e to explain",
+        " (ctrl+b ctrl+b (twice) to run in background)",
+    )
+    assert prompt_detector.approval_prompt_has_later_activity(visible_text) is False
+    state = prompt_detector.agent_screen_state(visible_text)
+    assert state["key"] == "approval"
+    assert "Do you want to proceed?" in state["text"]
+    # Sanity: a real command sentence ending in "to <verb>" is NOT swallowed as a footer.
+    assert prompt_detector._FOOTER_HINT_PART_RE.match("rm -rf / to delete everything") is None
+
+
 def test_approval_prompt_ignores_dot_separated_ctrl_hint_cluster():
     visible_text = claude_bash_prompt_with_footer(
         " Esc to cancel · Tab to amend · ctrl+e to explain",

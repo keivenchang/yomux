@@ -2515,7 +2515,6 @@ function openFileDiffAvailable(state) {
 
 function applyOpenFileDiffPayload(state, payload) {
   state.diff = payload.diff || '';
-  state.diffLineClasses = parseUnifiedDiffLineClasses(state.diff);
   state.diffOriginal = payload.original || '';
   state.diffOriginalError = payload.original_error || '';
   state.diffWorking = payload.working || '';
@@ -2533,7 +2532,6 @@ function applyOpenFileDiffPayload(state, payload) {
 
 function markOpenFileDiffUnavailable(state, error) {
   state.diff = '';
-  state.diffLineClasses = parseUnifiedDiffLineClasses('');
   state.diffOriginal = '';
   state.diffWorking = '';
   state.diffLoaded = true;
@@ -3307,65 +3305,10 @@ function codeMirrorMarkdownStrongExtension(api, path) {
   });
 }
 
-function parseUnifiedDiffLineClasses(diff) {
-  // DOIT.6 #49: map the unified hunk to CURRENT-document line numbers. A deleted (`-`) line occupies NO
-  // current-doc line, so it must NOT advance the new-file counter and must NOT paint a present line red.
-  // Only added/changed lines get a green line background; a deletion is recorded as a between-line
-  // marker on the present line that now sits where the removed content was (rendered as a top tick).
-  const added = new Set();
-  const deletionMarkers = new Set();
-  let newLine = 0;
-  for (const line of String(diff || '').split('\n')) {
-    const hunk = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
-    if (hunk) {
-      newLine = Math.max(1, Number(hunk[1]) || 1);
-      continue;
-    }
-    if (!newLine || line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+')) {
-      added.add(newLine);
-      newLine += 1;
-    } else if (line.startsWith('-')) {
-      // The deletion sits BETWEEN newLine-1 and newLine; mark the present line below it (never red-fill
-      // it) so the user sees where content was removed. Do not advance the new-file counter.
-      deletionMarkers.add(Math.max(1, newLine));
-    } else {
-      newLine += 1;
-    }
-  }
-  return {added, deletionMarkers};
-}
-
-function codeMirrorDiffLineExtension(api, path) {
-  if (!api.ViewPlugin || !api.Decoration) return [];
-  const addLine = api.Decoration.line({class: 'cm-yolomux-diff-add'});
-  // #49: a deletion marker is a top-edge tick on the present line below the removed content — NOT a red
-  // background on a present line (a deleted line does not exist in the current document).
-  const deletionMarker = api.Decoration.line({class: 'cm-yolomux-diff-deletion'});
-  return api.ViewPlugin.fromClass(class {
-    constructor(view) {
-      this.decorations = this.build(view);
-    }
-
-    update(update) {
-      this.decorations = this.build(update.view);
-    }
-
-    build(view) {
-      const diff = openFiles.get(path)?.diffLineClasses || {};
-      const ranges = [];
-      for (const lineNumber of diff.added || []) {
-        if (lineNumber <= view.state.doc.lines) ranges.push(addLine.range(view.state.doc.line(lineNumber).from));
-      }
-      for (const lineNumber of diff.deletionMarkers || []) {
-        if (lineNumber <= view.state.doc.lines) ranges.push(deletionMarker.range(view.state.doc.line(lineNumber).from));
-      }
-      return api.Decoration.set(ranges, true);
-    }
-  }, {
-    decorations: plugin => plugin.decorations,
-  });
-}
+// DOIT.6 #150: parseUnifiedDiffLineClasses + codeMirrorDiffLineExtension were removed. The edit view no
+// longer paints inline diff decorations (cm-yolomux-diff-add / deletion markers); changes are shown
+// ONLY in the explicit diff VIEW (the MergeView built by ensureCodeMirrorDiffPanel, with its own
+// .cm-changedLine/.cm-insertedChunk styling). The per-file cached diff-line class map is gone too.
 
 function escapeRegExpLiteral(text) {
   return String(text || '').replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
@@ -3583,7 +3526,6 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
     api.highlightSelectionMatches(),
-    codeMirrorDiffLineExtension(api, path),
     saveKeymap,
     findKeymap,
     powerKeymap,

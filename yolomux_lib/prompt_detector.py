@@ -422,7 +422,10 @@ _FOOTER_HINT_PART_RE = re.compile(
     # (and ←/→), and a bare single-letter key like "n to add notes".
     r"^(?:"
     r"\? for shortcuts"
-    r"|(?:esc|escape|enter|return|tab|shift\+tab|ctrl\+[a-z0-9]|cmd\+[a-z0-9]|alt\+[a-z0-9]|option\+[a-z0-9]|↑/↓|←/→|↑|↓|←|→|[a-z])\s+to\s+.+"
+    # DOIT.6 #143: accept ONE-OR-MORE key tokens plus an optional parenthetical before "to", so a
+    # footer like "ctrl+b ctrl+b (twice) to run in background" is recognized as a footer hint (not a
+    # live command/prompt). Single-key footers like "n to add notes" still match.
+    r"|(?:(?:esc|escape|enter|return|tab|shift\+tab|ctrl\+[a-z0-9]|cmd\+[a-z0-9]|alt\+[a-z0-9]|option\+[a-z0-9]|↑/↓|←/→|↑|↓|←|→|[a-z])\s+)+(?:\([^)]*\)\s+)?to\s+.+"
     r")$",
     re.IGNORECASE,
 )
