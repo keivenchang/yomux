@@ -1011,7 +1011,7 @@ async function ensureSession(session) {
     const response = await apiFetch(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session create failed')}</span>`;
+      statusErr(`${esc(payload.error || 'session create failed')}`);
       return false;
     }
     statusEl.innerHTML = payload.created
@@ -1019,14 +1019,14 @@ async function ensureSession(session) {
       : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
     return true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">session check failed: ${esc(error)}</span>`;
+    statusErr(`session check failed: ${esc(error)}`);
     return false;
   }
 }
 
 async function createNextSession(agent) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot create sessions</span>';
+    statusErr('readonly access cannot create sessions');
     return;
   }
   const agentLabel = agentName(agent) || 'agent';
@@ -1035,7 +1035,7 @@ async function createNextSession(agent) {
     const response = await apiFetch(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session create failed')}</span>`;
+      statusErr(`${esc(payload.error || 'session create failed')}`);
       return;
     }
     const previousActive = activeSessions.slice();
@@ -1046,9 +1046,9 @@ async function createNextSession(agent) {
     await ensureTerminalRunning(payload.session);
     refreshTranscripts();
     renderAutoApproveButtons();
-    statusEl.innerHTML = `<span class="ok">created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}</span>`;
+    statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">session create failed: ${esc(error)}</span>`;
+    statusErr(`session create failed: ${esc(error)}`);
   }
 }
 
@@ -1130,7 +1130,7 @@ function sessionRenameDialogKeydown(event) {
 
 function showSessionRenameDialog(session) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename sessions</span>';
+    statusErr('readonly access cannot rename sessions');
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -1190,7 +1190,7 @@ function showSessionRenameDialog(session) {
 
 async function renameTmuxSession(session, proposedName) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename sessions</span>';
+    statusErr('readonly access cannot rename sessions');
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -1199,7 +1199,7 @@ async function renameTmuxSession(session, proposedName) {
   const newName = String(rawName || '').trim();
   const nameError = tmuxSessionNameError(newName);
   if (nameError) {
-    statusEl.innerHTML = `<span class="err">${esc(nameError)}</span>`;
+    statusErr(`${esc(nameError)}`);
     return false;
   }
   if (newName === session) {
@@ -1211,7 +1211,7 @@ async function renameTmuxSession(session, proposedName) {
     const response = await apiFetch(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session rename failed')}</span>`;
+      statusErr(`${esc(payload.error || 'session rename failed')}`);
       return false;
     }
     const renamed = payload.new_session || newName;
@@ -1220,17 +1220,17 @@ async function renameTmuxSession(session, proposedName) {
     await ensureTerminalRunning(renamed);
     refreshTranscripts();
     renderAutoApproveButtons();
-    statusEl.innerHTML = `<span class="ok">renamed ${esc(session)} to ${esc(renamed)}</span>`;
+    statusOk(`renamed ${esc(session)} to ${esc(renamed)}`);
     return true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">session rename failed: ${esc(error)}</span>`;
+    statusErr(`session rename failed: ${esc(error)}`);
     return false;
   }
 }
 
 async function killTmuxSession(session) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot kill sessions</span>';
+    statusErr('readonly access cannot kill sessions');
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -1240,7 +1240,7 @@ async function killTmuxSession(session) {
     const response = await apiFetch(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session kill failed')}</span>`;
+      statusErr(`${esc(payload.error || 'session kill failed')}`);
       return false;
     }
     const previousActive = activeSessions.slice();
@@ -1253,10 +1253,10 @@ async function killTmuxSession(session) {
     if (sessionsChanged) renderPaneTabStrips();
     refreshTranscripts();
     renderAutoApproveButtons();
-    statusEl.innerHTML = `<span class="ok">killed ${esc(sessionLabel(session))}</span>`;
+    statusOk(`killed ${esc(sessionLabel(session))}`);
     return true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">session kill failed: ${esc(error)}</span>`;
+    statusErr(`session kill failed: ${esc(error)}`);
     return false;
   }
 }
@@ -1468,7 +1468,7 @@ function scheduleTerminalReconnect(session, item) {
   const delay = Math.min(8000, 1000 * 2 ** item.reconnectAttempt);
   item.reconnectAttempt += 1;
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
-  statusEl.innerHTML = `<span class="err">${esc(sessionLabel(session))} disconnected; reconnecting in ${Math.round(delay / 1000)}s</span>`;
+  statusErr(`${esc(sessionLabel(session))} disconnected; reconnecting in ${Math.round(delay / 1000)}s`);
   showTerminalConnectionToast(session, `Disconnected. Reconnecting in ${Math.round(delay / 1000)}s.`, delay);
   item.reconnectTimer = setTimeout(() => {
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
@@ -1494,7 +1494,7 @@ function pruneDeadSession(session) {
   renderPanels(previousActive);
   renderPaneTabStrips();
   renderAutoApproveButtons();
-  statusEl.innerHTML = `<span class="ok">${esc(sessionLabel(session))} ended</span>`;
+  statusOk(`${esc(sessionLabel(session))} ended`);
 }
 
 // On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,

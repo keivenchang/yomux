@@ -235,10 +235,7 @@ let fileExplorerRoot = null;
 let filesystemRefreshInFlight = false;
 let fileExplorerRepoInfoCacheLoaded = false;
 let fileExplorerRootMode = readStoredFileExplorerRootMode();
-let fileExplorerShowHidden = (() => {
-  try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
-  catch (_) { return false; }
-})();
+let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
 const fileEditorViewMode = new Map();  // layout item or path -> "edit" | "preview" | "split"
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
@@ -295,7 +292,7 @@ const tabLastActivatedAt = new Map();  // layout item -> last-activated timestam
 let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
-let fileExplorerChangesHidden = (() => { try { return localStorage.getItem('yolomux.fileExplorerChangesHidden') === '1'; } catch (_) { return false; } })();
+let fileExplorerChangesHidden = storageGet('yolomux.fileExplorerChangesHidden') === '1';
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
 let commandPaletteMode = 'command';

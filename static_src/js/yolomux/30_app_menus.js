@@ -165,13 +165,11 @@ function terminalThemeSettingForGlobalMode(mode) {
   return 'dark';
 }
 
-// DOIT.6: set a SPECIFIC global theme mode (one-click from the Theme submenu) and flip the terminal
-// palette in lockstep. Any target (system/dark/light) applies in one click and in both directions.
-function setGlobalThemeMode(mode) {
-  const next = normalizeGlobalThemeMode(mode);
-  // #258: APPLY the theme live (the menu used to only save the patch, so body.theme-* never flipped).
-  // #261: do NOT pin appearance.terminal_theme — the terminal keeps its own setting (default
-  // follow-app/System) and follows the app automatically via applyGlobalThemeMode's terminal update.
+// Apply a resolved global theme mode live and persist it — shared by the one-click Theme submenu
+// (setGlobalThemeMode) and the View cycle shortcut (cycleGlobalThemeSetting). #258: APPLY live (the menu
+// used to only save the patch, so body.theme-* never flipped). #261: do NOT pin appearance.terminal_theme
+// — the terminal keeps its own setting (default follow-app/System) and follows the app on its own.
+function applyAndSaveGlobalTheme(next) {
   globalThemeMode = next;
   applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
   renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
@@ -180,26 +178,18 @@ function setGlobalThemeMode(mode) {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
     .catch(error => {
-      statusEl.innerHTML = `<span class="err">theme save failed: ${esc(error)}</span>`;
+      statusErr(`theme save failed: ${esc(error)}`);
       refreshSettings({force: true});
     });
 }
 
+// One-click from the Theme submenu: any target (system/dark/light) applies in one click, both directions.
+function setGlobalThemeMode(mode) {
+  return applyAndSaveGlobalTheme(normalizeGlobalThemeMode(mode));
+}
+
 function cycleGlobalThemeSetting() {
-  const next = nextGlobalThemeMode();
-  // #258/#261: apply live and leave the terminal theme alone (it follows the app when set to
-  // follow-app/System; only the Terminal Preferences field pins it to a concrete palette).
-  globalThemeMode = next;
-  applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
-  renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
-  saveSettingsPatch(settingPatch('appearance.theme', next))
-    .then(() => {
-      statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
-    })
-    .catch(error => {
-      statusEl.innerHTML = `<span class="err">theme save failed: ${esc(error)}</span>`;
-      refreshSettings({force: true});
-    });
+  return applyAndSaveGlobalTheme(nextGlobalThemeMode());
 }
 
 function yoloRuleStatusDetail() {
@@ -214,7 +204,7 @@ function yoloRuleStatusDetail() {
 
 async function openYoloRuleFile() {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot create YOLO rule files</span>';
+    statusErr('readonly access cannot create YOLO rule files');
     return;
   }
   try {
@@ -226,7 +216,7 @@ async function openYoloRuleFile() {
     await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
     statusEl.textContent = t('status.openedYoloRule');
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">open YOLO rule file failed: ${esc(error)}</span>`;
+    statusErr(`open YOLO rule file failed: ${esc(error)}`);
   }
 }
 
@@ -243,7 +233,7 @@ async function reloadYoloRules() {
       : `<span class="ok">reloaded YOLO rules</span>`;
     showToast('YOLO rules', payload.error || yoloRuleStatusDetail(), {level});
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">reload YOLO rules failed: ${esc(error)}</span>`;
+    statusErr(`reload YOLO rules failed: ${esc(error)}`);
   }
 }
 
@@ -256,7 +246,7 @@ async function refreshYoloRulesStatus(options = {}) {
     renderPreferencesPanels();
     return payload;
   } catch (error) {
-    if (!options.silent) statusEl.innerHTML = `<span class="err">YOLO rule status failed: ${esc(error)}</span>`;
+    if (!options.silent) statusErr(`YOLO rule status failed: ${esc(error)}`);
     return null;
   }
 }
@@ -682,7 +672,7 @@ function createTopbarLanguageSwitcher() {
     applyLocale(resolveLocalePref(value));
     if (readOnlyMode) return;
     saveSettingsPatch(settingPatch('general.language', value))
-      .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
   });
   return select;
 }
@@ -883,11 +873,11 @@ function runAppMenuCommand(item) {
         if (keepOpen) renderSessionButtons({force: true});
       })
       .catch(error => {
-        statusEl.innerHTML = `<span class="err">menu command failed: ${esc(error)}</span>`;
+        statusErr(`menu command failed: ${esc(error)}`);
         if (keepOpen) renderSessionButtons({force: true});
       });
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">menu command failed: ${esc(error)}</span>`;
+    statusErr(`menu command failed: ${esc(error)}`);
     if (keepOpen) renderSessionButtons({force: true});
   }
 }

@@ -1046,7 +1046,7 @@ function renderNotifyToggle() {
 
 async function toggleNotifications() {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot change Notify</span>';
+    statusErr('readonly access cannot change Notify');
     return;
   }
   const nextEnabled = !notificationsEnabled;
@@ -1063,19 +1063,19 @@ async function toggleNotifications() {
     if (!response.ok) throw new Error(payload.error || response.statusText || `HTTP ${response.status}`);
     notificationsEnabled = payload.enabled === true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">Notify request failed: ${esc(error)}</span>`;
+    statusErr(`Notify request failed: ${esc(error)}`);
     return;
   }
   renderNotifyToggle();
   renderSessionButtons();
   if (notificationsEnabled) {
     if (browserPermission !== 'granted') {
-      statusEl.innerHTML = `<span class="ok">in-page alerts on; browser notifications ${esc(browserPermission)}</span>`;
+      statusOk(`in-page alerts on; browser notifications ${esc(browserPermission)}`);
     }
     sendTestNotification();
     notifyCurrentAttentionStates();
   } else {
-    statusEl.innerHTML = `<span class="ok">${esc(t('status.notifyOff'))}</span>`;
+    statusOk(`${esc(t('status.notifyOff'))}`);
   }
 }
 
@@ -1113,7 +1113,7 @@ function projectReadmePath() {
 async function openProjectReadme() {
   const path = projectReadmePath();
   if (!path) {
-    statusEl.innerHTML = '<span class="err">README path is unavailable</span>';
+    statusErr('README path is unavailable');
     return;
   }
   // DOIT.6: open the README as rendered markdown by default (the user can switch to edit via the
@@ -1958,7 +1958,7 @@ function sendTestNotification() {
     });
     postEvent(null, 'notification_test_sent', 'notification test sent', {hostname: serverHostname});
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">notification failed: ${esc(error)}</span>`;
+    statusErr(`notification failed: ${esc(error)}`);
     postEvent(null, 'notification_error', `notification test failed: ${error}`, {hostname: serverHostname});
   }
 }

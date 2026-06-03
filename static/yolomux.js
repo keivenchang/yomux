@@ -236,10 +236,7 @@ let fileExplorerRoot = null;
 let filesystemRefreshInFlight = false;
 let fileExplorerRepoInfoCacheLoaded = false;
 let fileExplorerRootMode = readStoredFileExplorerRootMode();
-let fileExplorerShowHidden = (() => {
-  try { return window.localStorage?.getItem(fileExplorerHiddenStorageKey) === '1'; }
-  catch (_) { return false; }
-})();
+let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
 const fileEditorViewMode = new Map();  // layout item or path -> "edit" | "preview" | "split"
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
@@ -296,7 +293,7 @@ const tabLastActivatedAt = new Map();  // layout item -> last-activated timestam
 let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
-let fileExplorerChangesHidden = (() => { try { return localStorage.getItem('yolomux.fileExplorerChangesHidden') === '1'; } catch (_) { return false; } })();
+let fileExplorerChangesHidden = storageGet('yolomux.fileExplorerChangesHidden') === '1';
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
 let commandPaletteMode = 'command';
@@ -836,7 +833,7 @@ async function applyLocale(locale) {
 // The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
 // navigator.language to one of these. Add new locales here as their catalogs ship.
 function i18nSupportedLocales() {
-  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'en'];
+  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'en'];
 }
 
 // DOIT.8 Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
@@ -862,6 +859,7 @@ function i18nLocaleChoices() {
     {value: 'ko', label: '한국어'},
     {value: 'hi', label: 'हिन्दी'},
     {value: 'ar', label: 'العربية'},
+    {value: 'he', label: 'עברית'},
     {value: 'en-XA', label: t('pref.general.language.pseudo')},
   ];
 }
@@ -897,6 +895,10 @@ function rerenderForLocale() {
   // head repaints in the new locale on the same switch (force bypasses the active-control guard).
   if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
   if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
+  // The Finder's toolbar chrome (root/dates/sort labels) is baked into the panel at creation time, so the
+  // body re-renders above never touch it — rebuild the Finder panel from source so a language switch
+  // repaints its buttons too (the bug where switching to Hebrew left the toolbar in the previous locale).
+  if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
 }
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
@@ -921,21 +923,40 @@ async function redirectToLogin(response) {
   window.location.assign(loginUrl);
 }
 
-function readStoredTabMetaVisible() {
+// localStorage can throw (privacy mode, blocked, quota) — these swallow failures so a blocked store
+// never breaks the page. storageGet returns the raw string (or `fallback` when absent/blocked);
+// storageSet coerces to string and no-ops on failure. Every readStored*/writeStored* builds on these.
+function storageGet(key, fallback = null) {
   try {
-    const stored = window.localStorage?.getItem(tabMetaStorageKey);
-    return stored === null || stored === undefined ? true : stored !== '0';
+    const value = window.localStorage?.getItem(key);
+    return value == null ? fallback : value;
   } catch (_) {
-    return true;
+    return fallback;
   }
 }
 
-function writeStoredTabMetaVisible(value) {
+function storageSet(key, value) {
   try {
-    window.localStorage?.setItem(tabMetaStorageKey, value ? '1' : '0');
-  } catch (_) {
-    // The toggle is still useful for the current page when storage is blocked.
-  }
+    window.localStorage?.setItem(key, String(value));
+  } catch (_) {}
+}
+
+// Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
+// call sites that report a result. Both take already-built (and esc'd) inner HTML.
+function statusErr(html) {
+  statusEl.innerHTML = `<span class="err">${html}</span>`;
+}
+
+function statusOk(html) {
+  statusEl.innerHTML = `<span class="ok">${html}</span>`;
+}
+
+function readStoredTabMetaVisible() {
+  return storageGet(tabMetaStorageKey) !== '0';  // absent (null) or anything but '0' => visible
+}
+
+function writeStoredTabMetaVisible(value) {
+  storageSet(tabMetaStorageKey, value ? '1' : '0');
 }
 
 // DOIT.6 #40: persist the merged YO!info pane's active sub-tab ('info' | 'yoagent'), default 'info'.
@@ -944,47 +965,27 @@ function normalizedInfoSubTab(value) {
 }
 
 function readStoredInfoSubTab() {
-  try {
-    return normalizedInfoSubTab(window.localStorage?.getItem(infoSubTabStorageKey));
-  } catch (_) {
-    return 'info';
-  }
+  return normalizedInfoSubTab(storageGet(infoSubTabStorageKey));
 }
 
 function writeStoredInfoSubTab(value) {
-  try {
-    window.localStorage?.setItem(infoSubTabStorageKey, normalizedInfoSubTab(value));
-  } catch (_) {
-    // Sub-tab selection still works for the current page when storage is blocked.
-  }
+  storageSet(infoSubTabStorageKey, normalizedInfoSubTab(value));
 }
 
 function readStoredEditorWrap() {
-  try {
-    return window.localStorage?.getItem(fileEditorWrapStorageKey) === '1';
-  } catch (_) {
-    return false;
-  }
+  return storageGet(fileEditorWrapStorageKey) === '1';
 }
 
 function writeStoredEditorWrap(value) {
-  try {
-    window.localStorage?.setItem(fileEditorWrapStorageKey, value ? '1' : '0');
-  } catch (_) {}
+  storageSet(fileEditorWrapStorageKey, value ? '1' : '0');
 }
 
 function readStoredEditorLineNumbers() {
-  try {
-    return window.localStorage?.getItem(fileEditorLineNumbersStorageKey) === '1';
-  } catch (_) {
-    return false;
-  }
+  return storageGet(fileEditorLineNumbersStorageKey) === '1';
 }
 
 function writeStoredEditorLineNumbers(value) {
-  try {
-    window.localStorage?.setItem(fileEditorLineNumbersStorageKey, value ? '1' : '0');
-  } catch (_) {}
+  storageSet(fileEditorLineNumbersStorageKey, value ? '1' : '0');
 }
 
 function defaultCollapsedPreferenceSections() {
@@ -992,9 +993,9 @@ function defaultCollapsedPreferenceSections() {
 }
 
 function readStoredCollapsedPreferenceSections() {
+  const raw = storageGet(preferencesCollapsedStorageKey);
+  if (!raw) return defaultCollapsedPreferenceSections();
   try {
-    const raw = window.localStorage?.getItem(preferencesCollapsedStorageKey);
-    if (!raw) return defaultCollapsedPreferenceSections();
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
     return new Set(parsed.filter(item => typeof item === 'string' && item));
@@ -1004,9 +1005,7 @@ function readStoredCollapsedPreferenceSections() {
 }
 
 function writeStoredCollapsedPreferenceSections() {
-  try {
-    window.localStorage?.setItem(preferencesCollapsedStorageKey, JSON.stringify(Array.from(collapsedPreferenceSections)));
-  } catch (_) {}
+  storageSet(preferencesCollapsedStorageKey, JSON.stringify(Array.from(collapsedPreferenceSections)));
 }
 
 function cleanDiffRef(value, fallback = '') {
@@ -1017,47 +1016,29 @@ function cleanDiffRef(value, fallback = '') {
 }
 
 function readStoredDiffRef(key, fallback) {
-  try {
-    return cleanDiffRef(window.localStorage?.getItem(key), fallback);
-  } catch (_) {
-    return fallback;
-  }
+  return cleanDiffRef(storageGet(key), fallback);
 }
 
 function writeStoredDiffRefs() {
-  try {
-    window.localStorage?.setItem(diffRefFromStorageKey, diffRefFrom);
-    window.localStorage?.setItem(diffRefToStorageKey, diffRefTo);
-  } catch (_) {}
+  storageSet(diffRefFromStorageKey, diffRefFrom);
+  storageSet(diffRefToStorageKey, diffRefTo);
 }
 
 function readStoredFileExplorerTreeShowDates() {
-  try {
-    return window.localStorage?.getItem(fileExplorerTreeShowDatesStorageKey) === '1';
-  } catch (_) {
-    return false;
-  }
+  return storageGet(fileExplorerTreeShowDatesStorageKey) === '1';
 }
 
 function writeStoredFileExplorerTreeShowDates(value) {
-  try {
-    window.localStorage?.setItem(fileExplorerTreeShowDatesStorageKey, value ? '1' : '0');
-  } catch (_) {}
+  storageSet(fileExplorerTreeShowDatesStorageKey, value ? '1' : '0');
 }
 
 function readStoredFileExplorerTreeSortMode() {
-  try {
-    const value = window.localStorage?.getItem(fileExplorerTreeSortStorageKey);
-    return ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az';
-  } catch (_) {
-    return 'az';
-  }
+  const value = storageGet(fileExplorerTreeSortStorageKey);
+  return ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az';
 }
 
 function writeStoredFileExplorerTreeSortMode(value) {
-  try {
-    window.localStorage?.setItem(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
-  } catch (_) {}
+  storageSet(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
 }
 
 function normalizeStoredFileExplorerIndexedDir(path) {
@@ -1066,8 +1047,8 @@ function normalizeStoredFileExplorerIndexedDir(path) {
 }
 
 function readStoredFileExplorerIndexedDirs() {
+  const raw = storageGet(fileExplorerIndexedDirsStorageKey);
   try {
-    const raw = window.localStorage?.getItem(fileExplorerIndexedDirsStorageKey);
     const parsed = raw ? JSON.parse(raw) : [];
     const paths = Array.isArray(parsed) ? parsed : [];
     return new Set(paths.map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
@@ -1077,13 +1058,11 @@ function readStoredFileExplorerIndexedDirs() {
 }
 
 function writeStoredFileExplorerIndexedDirs() {
-  try {
-    const paths = Array.from(fileExplorerIndexedDirs || [])
-      .map(normalizeStoredFileExplorerIndexedDir)
-      .filter(Boolean)
-      .sort((left, right) => left.localeCompare(right));
-    window.localStorage?.setItem(fileExplorerIndexedDirsStorageKey, JSON.stringify(Array.from(new Set(paths))));
-  } catch (_) {}
+  const paths = Array.from(fileExplorerIndexedDirs || [])
+    .map(normalizeStoredFileExplorerIndexedDir)
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+  storageSet(fileExplorerIndexedDirsStorageKey, JSON.stringify(Array.from(new Set(paths))));
 }
 
 function nestedSetting(source, path, fallback) {
@@ -1114,17 +1093,11 @@ function mergeSettingObjects(base, patch) {
 }
 
 function readStoredFileExplorerRootMode() {
-  try {
-    return window.localStorage?.getItem(fileExplorerRootModeStorageKey) === 'sync' ? 'sync' : 'fixed';
-  } catch (_) {
-    return 'fixed';
-  }
+  return storageGet(fileExplorerRootModeStorageKey) === 'sync' ? 'sync' : 'fixed';
 }
 
 function writeStoredFileExplorerRootMode(mode) {
-  try {
-    window.localStorage?.setItem(fileExplorerRootModeStorageKey, mode === 'sync' ? 'sync' : 'fixed');
-  } catch (_) {}
+  storageSet(fileExplorerRootModeStorageKey, mode === 'sync' ? 'sync' : 'fixed');
 }
 
 function normalizeEditorSchemeId(value) {
@@ -1224,18 +1197,11 @@ function configuredEditorSchemeForMode(dark) {
 }
 
 function readStoredEditorThemeMode() {
-  try {
-    const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey);
-    return normalizeEditorThemeMode(value || editorThemeInheritMode);
-  } catch (_) {
-    return editorThemeInheritMode;
-  }
+  return normalizeEditorThemeMode(storageGet(fileEditorThemeModeStorageKey) || editorThemeInheritMode);
 }
 
 function writeStoredEditorThemeMode(mode) {
-  try {
-    window.localStorage?.setItem(fileEditorThemeModeStorageKey, normalizeEditorThemeMode(mode));
-  } catch (_) {}
+  storageSet(fileEditorThemeModeStorageKey, normalizeEditorThemeMode(mode));
 }
 
 function readConfiguredEditorScheme() {
@@ -1552,9 +1518,9 @@ function openTerminalLink(rawLink) {
   if (!link) return;
   try {
     const opened = window.open(link, '_blank', 'noopener,noreferrer');
-    if (!opened) statusEl.innerHTML = `<span class="err">browser blocked link: ${esc(link)}</span>`;
+    if (!opened) statusErr(`browser blocked link: ${esc(link)}`);
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">could not open link: ${esc(error)}</span>`;
+    statusErr(`could not open link: ${esc(error)}`);
   }
 }
 
@@ -1804,7 +1770,7 @@ async function copyTerminalSelection(session, term, options = {}) {
     await copyTextToClipboard(text);
     statusEl.textContent = options.dedent ? 'copied without indent' : 'copied';
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`;
+    statusErr(`copy failed: ${esc(error)}`);
   }
 }
 
@@ -2930,7 +2896,7 @@ function renderNotifyToggle() {
 
 async function toggleNotifications() {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot change Notify</span>';
+    statusErr('readonly access cannot change Notify');
     return;
   }
   const nextEnabled = !notificationsEnabled;
@@ -2947,19 +2913,19 @@ async function toggleNotifications() {
     if (!response.ok) throw new Error(payload.error || response.statusText || `HTTP ${response.status}`);
     notificationsEnabled = payload.enabled === true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">Notify request failed: ${esc(error)}</span>`;
+    statusErr(`Notify request failed: ${esc(error)}`);
     return;
   }
   renderNotifyToggle();
   renderSessionButtons();
   if (notificationsEnabled) {
     if (browserPermission !== 'granted') {
-      statusEl.innerHTML = `<span class="ok">in-page alerts on; browser notifications ${esc(browserPermission)}</span>`;
+      statusOk(`in-page alerts on; browser notifications ${esc(browserPermission)}`);
     }
     sendTestNotification();
     notifyCurrentAttentionStates();
   } else {
-    statusEl.innerHTML = `<span class="ok">${esc(t('status.notifyOff'))}</span>`;
+    statusOk(`${esc(t('status.notifyOff'))}`);
   }
 }
 
@@ -2997,7 +2963,7 @@ function projectReadmePath() {
 async function openProjectReadme() {
   const path = projectReadmePath();
   if (!path) {
-    statusEl.innerHTML = '<span class="err">README path is unavailable</span>';
+    statusErr('README path is unavailable');
     return;
   }
   // DOIT.6: open the README as rendered markdown by default (the user can switch to edit via the
@@ -3842,7 +3808,7 @@ function sendTestNotification() {
     });
     postEvent(null, 'notification_test_sent', 'notification test sent', {hostname: serverHostname});
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">notification failed: ${esc(error)}</span>`;
+    statusErr(`notification failed: ${esc(error)}`);
     postEvent(null, 'notification_error', `notification test failed: ${error}`, {hostname: serverHostname});
   }
 }
@@ -4218,13 +4184,11 @@ function terminalThemeSettingForGlobalMode(mode) {
   return 'dark';
 }
 
-// DOIT.6: set a SPECIFIC global theme mode (one-click from the Theme submenu) and flip the terminal
-// palette in lockstep. Any target (system/dark/light) applies in one click and in both directions.
-function setGlobalThemeMode(mode) {
-  const next = normalizeGlobalThemeMode(mode);
-  // #258: APPLY the theme live (the menu used to only save the patch, so body.theme-* never flipped).
-  // #261: do NOT pin appearance.terminal_theme — the terminal keeps its own setting (default
-  // follow-app/System) and follows the app automatically via applyGlobalThemeMode's terminal update.
+// Apply a resolved global theme mode live and persist it — shared by the one-click Theme submenu
+// (setGlobalThemeMode) and the View cycle shortcut (cycleGlobalThemeSetting). #258: APPLY live (the menu
+// used to only save the patch, so body.theme-* never flipped). #261: do NOT pin appearance.terminal_theme
+// — the terminal keeps its own setting (default follow-app/System) and follows the app on its own.
+function applyAndSaveGlobalTheme(next) {
   globalThemeMode = next;
   applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
   renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
@@ -4233,26 +4197,18 @@ function setGlobalThemeMode(mode) {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
     .catch(error => {
-      statusEl.innerHTML = `<span class="err">theme save failed: ${esc(error)}</span>`;
+      statusErr(`theme save failed: ${esc(error)}`);
       refreshSettings({force: true});
     });
 }
 
+// One-click from the Theme submenu: any target (system/dark/light) applies in one click, both directions.
+function setGlobalThemeMode(mode) {
+  return applyAndSaveGlobalTheme(normalizeGlobalThemeMode(mode));
+}
+
 function cycleGlobalThemeSetting() {
-  const next = nextGlobalThemeMode();
-  // #258/#261: apply live and leave the terminal theme alone (it follows the app when set to
-  // follow-app/System; only the Terminal Preferences field pins it to a concrete palette).
-  globalThemeMode = next;
-  applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
-  renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
-  saveSettingsPatch(settingPatch('appearance.theme', next))
-    .then(() => {
-      statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
-    })
-    .catch(error => {
-      statusEl.innerHTML = `<span class="err">theme save failed: ${esc(error)}</span>`;
-      refreshSettings({force: true});
-    });
+  return applyAndSaveGlobalTheme(nextGlobalThemeMode());
 }
 
 function yoloRuleStatusDetail() {
@@ -4267,7 +4223,7 @@ function yoloRuleStatusDetail() {
 
 async function openYoloRuleFile() {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot create YOLO rule files</span>';
+    statusErr('readonly access cannot create YOLO rule files');
     return;
   }
   try {
@@ -4279,7 +4235,7 @@ async function openYoloRuleFile() {
     await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
     statusEl.textContent = t('status.openedYoloRule');
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">open YOLO rule file failed: ${esc(error)}</span>`;
+    statusErr(`open YOLO rule file failed: ${esc(error)}`);
   }
 }
 
@@ -4296,7 +4252,7 @@ async function reloadYoloRules() {
       : `<span class="ok">reloaded YOLO rules</span>`;
     showToast('YOLO rules', payload.error || yoloRuleStatusDetail(), {level});
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">reload YOLO rules failed: ${esc(error)}</span>`;
+    statusErr(`reload YOLO rules failed: ${esc(error)}`);
   }
 }
 
@@ -4309,7 +4265,7 @@ async function refreshYoloRulesStatus(options = {}) {
     renderPreferencesPanels();
     return payload;
   } catch (error) {
-    if (!options.silent) statusEl.innerHTML = `<span class="err">YOLO rule status failed: ${esc(error)}</span>`;
+    if (!options.silent) statusErr(`YOLO rule status failed: ${esc(error)}`);
     return null;
   }
 }
@@ -4735,7 +4691,7 @@ function createTopbarLanguageSwitcher() {
     applyLocale(resolveLocalePref(value));
     if (readOnlyMode) return;
     saveSettingsPatch(settingPatch('general.language', value))
-      .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
   });
   return select;
 }
@@ -4936,11 +4892,11 @@ function runAppMenuCommand(item) {
         if (keepOpen) renderSessionButtons({force: true});
       })
       .catch(error => {
-        statusEl.innerHTML = `<span class="err">menu command failed: ${esc(error)}</span>`;
+        statusErr(`menu command failed: ${esc(error)}`);
         if (keepOpen) renderSessionButtons({force: true});
       });
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">menu command failed: ${esc(error)}</span>`;
+    statusErr(`menu command failed: ${esc(error)}`);
     if (keepOpen) renderSessionButtons({force: true});
   }
 }
@@ -6687,7 +6643,7 @@ async function copyFilePath(path, label, options = {}) {
     const prefix = options.raw === true ? 'raw ' : '';
     statusEl.textContent = label === 'relative' ? `copied ${prefix}relative path` : `copied ${prefix}full path`;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`;
+    statusErr(`copy failed: ${esc(error)}`);
   }
 }
 
@@ -6719,7 +6675,7 @@ function childNameToPath(root, name) {
 
 async function createFileExplorerFile() {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot create files</span>';
+    statusErr('readonly access cannot create files');
     return;
   }
   const name = window.prompt('New file name');
@@ -6737,13 +6693,13 @@ async function createFileExplorerFile() {
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">new file failed: ${esc(error)}</span>`;
+    statusErr(`new file failed: ${esc(error)}`);
   }
 }
 
 async function createFileExplorerFolder() {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot create folders</span>';
+    statusErr('readonly access cannot create folders');
     return;
   }
   const name = window.prompt('New folder name');
@@ -6760,7 +6716,7 @@ async function createFileExplorerFolder() {
     statusEl.textContent = `created ${basenameOf(path)}`;
     await refreshFileExplorerTrees();
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">new folder failed: ${esc(error)}</span>`;
+    statusErr(`new folder failed: ${esc(error)}`);
   }
 }
 
@@ -6800,7 +6756,7 @@ function bindFileExplorerHeaderActions(container = document) {
 
 async function deleteFileTreePath(fullPath, entry, paths = null) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot delete files</span>';
+    statusErr('readonly access cannot delete files');
     return;
   }
   const deletePaths = compactNestedPaths(paths || fileTreeActionPaths(fullPath));
@@ -6831,13 +6787,13 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     renderSessionButtons();
     renderPaneTabStrips();
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">delete failed: ${esc(error)}</span>`;
+    statusErr(`delete failed: ${esc(error)}`);
   }
 }
 
 function beginFileTreeRename(row, fullPath, entry) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename files</span>';
+    statusErr('readonly access cannot rename files');
     return;
   }
   closeFileContextMenu();
@@ -6901,7 +6857,7 @@ function beginFileTreeRename(row, fullPath, entry) {
 
 async function renameFileTreePath(fullPath, entry, newName) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename files</span>';
+    statusErr('readonly access cannot rename files');
     return false;
   }
   const currentName = entry?.name || basenameOf(fullPath);
@@ -6927,7 +6883,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
     await refreshFileExplorerTrees();
     return true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">rename failed: ${esc(error)}</span>`;
+    statusErr(`rename failed: ${esc(error)}`);
     return false;
   }
 }
@@ -7124,6 +7080,20 @@ function removePanelForItem(item) {
   if (!panel) return;
   panel.remove();
   panelNodes.delete(item);
+}
+
+// A language switch must repaint the Finder's toolbar chrome (root/dates/sort/new-file… labels), which
+// createFileExplorerPanel() bakes in at creation time and caches in panelNodes. Re-rendering only the
+// panel BODIES (rerenderForLocale's other calls) leaves that chrome stale, and the toolbar mixes direct
+// and delegated click handlers — so relabel-and-rebind would be fragile. Instead evict the cached Finder
+// panel and let renderPanels() rebuild it from the single source of truth, then repopulate the tree and
+// quick-access (state-bearing toggles read live globals / localStorage, so they survive the rebuild).
+function relocalizeFileExplorerPanels() {
+  if (!panelNodes.has(fileExplorerItemId)) return;
+  removePanelForItem(fileExplorerItemId);
+  renderPanels(activePaneItems());
+  refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  renderFileExplorerQuickAccessControls();
 }
 
 function setOpenFileOwner(path, item, options = {}) {
@@ -9253,7 +9223,7 @@ async function refreshSettings(options = {}) {
     if (changed) refreshYoloRulesStatus({silent: true});
     if (changed && !options.silent) statusEl.textContent = 'settings reloaded';
   } catch (error) {
-    if (!options.silent) statusEl.innerHTML = `<span class="err">settings reload failed: ${esc(error)}</span>`;
+    if (!options.silent) statusErr(`settings reload failed: ${esc(error)}`);
   }
 }
 
@@ -9300,8 +9270,7 @@ function installRuntimeIntervals() {
 }
 function toggleHiddenFiles() {
   fileExplorerShowHidden = !fileExplorerShowHidden;
-  try { window.localStorage?.setItem(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0'); }
-  catch (_) {}
+  storageSet(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0');
   syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
@@ -10098,7 +10067,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       showFileOpenError(path, error);
     }
   }
-  if (opened) statusEl.innerHTML = `<span class="ok">opened ${esc(opened === 1 ? basenameOf(paths[0]) : `${opened} files`)}</span>`;
+  if (opened) statusOk(`opened ${esc(opened === 1 ? basenameOf(paths[0]) : `${opened} files`)}`);
 }
 
 function terminalCurrentPath(session) {
@@ -11257,7 +11226,7 @@ async function ensureSession(session) {
     const response = await apiFetch(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session create failed')}</span>`;
+      statusErr(`${esc(payload.error || 'session create failed')}`);
       return false;
     }
     statusEl.innerHTML = payload.created
@@ -11265,14 +11234,14 @@ async function ensureSession(session) {
       : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
     return true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">session check failed: ${esc(error)}</span>`;
+    statusErr(`session check failed: ${esc(error)}`);
     return false;
   }
 }
 
 async function createNextSession(agent) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot create sessions</span>';
+    statusErr('readonly access cannot create sessions');
     return;
   }
   const agentLabel = agentName(agent) || 'agent';
@@ -11281,7 +11250,7 @@ async function createNextSession(agent) {
     const response = await apiFetch(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session create failed')}</span>`;
+      statusErr(`${esc(payload.error || 'session create failed')}`);
       return;
     }
     const previousActive = activeSessions.slice();
@@ -11292,9 +11261,9 @@ async function createNextSession(agent) {
     await ensureTerminalRunning(payload.session);
     refreshTranscripts();
     renderAutoApproveButtons();
-    statusEl.innerHTML = `<span class="ok">created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}</span>`;
+    statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">session create failed: ${esc(error)}</span>`;
+    statusErr(`session create failed: ${esc(error)}`);
   }
 }
 
@@ -11376,7 +11345,7 @@ function sessionRenameDialogKeydown(event) {
 
 function showSessionRenameDialog(session) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename sessions</span>';
+    statusErr('readonly access cannot rename sessions');
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -11436,7 +11405,7 @@ function showSessionRenameDialog(session) {
 
 async function renameTmuxSession(session, proposedName) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename sessions</span>';
+    statusErr('readonly access cannot rename sessions');
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -11445,7 +11414,7 @@ async function renameTmuxSession(session, proposedName) {
   const newName = String(rawName || '').trim();
   const nameError = tmuxSessionNameError(newName);
   if (nameError) {
-    statusEl.innerHTML = `<span class="err">${esc(nameError)}</span>`;
+    statusErr(`${esc(nameError)}`);
     return false;
   }
   if (newName === session) {
@@ -11457,7 +11426,7 @@ async function renameTmuxSession(session, proposedName) {
     const response = await apiFetch(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session rename failed')}</span>`;
+      statusErr(`${esc(payload.error || 'session rename failed')}`);
       return false;
     }
     const renamed = payload.new_session || newName;
@@ -11466,17 +11435,17 @@ async function renameTmuxSession(session, proposedName) {
     await ensureTerminalRunning(renamed);
     refreshTranscripts();
     renderAutoApproveButtons();
-    statusEl.innerHTML = `<span class="ok">renamed ${esc(session)} to ${esc(renamed)}</span>`;
+    statusOk(`renamed ${esc(session)} to ${esc(renamed)}`);
     return true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">session rename failed: ${esc(error)}</span>`;
+    statusErr(`session rename failed: ${esc(error)}`);
     return false;
   }
 }
 
 async function killTmuxSession(session) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot kill sessions</span>';
+    statusErr('readonly access cannot kill sessions');
     return false;
   }
   if (!isTmuxSession(session)) return false;
@@ -11486,7 +11455,7 @@ async function killTmuxSession(session) {
     const response = await apiFetch(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'session kill failed')}</span>`;
+      statusErr(`${esc(payload.error || 'session kill failed')}`);
       return false;
     }
     const previousActive = activeSessions.slice();
@@ -11499,10 +11468,10 @@ async function killTmuxSession(session) {
     if (sessionsChanged) renderPaneTabStrips();
     refreshTranscripts();
     renderAutoApproveButtons();
-    statusEl.innerHTML = `<span class="ok">killed ${esc(sessionLabel(session))}</span>`;
+    statusOk(`killed ${esc(sessionLabel(session))}`);
     return true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">session kill failed: ${esc(error)}</span>`;
+    statusErr(`session kill failed: ${esc(error)}`);
     return false;
   }
 }
@@ -11714,7 +11683,7 @@ function scheduleTerminalReconnect(session, item) {
   const delay = Math.min(8000, 1000 * 2 ** item.reconnectAttempt);
   item.reconnectAttempt += 1;
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
-  statusEl.innerHTML = `<span class="err">${esc(sessionLabel(session))} disconnected; reconnecting in ${Math.round(delay / 1000)}s</span>`;
+  statusErr(`${esc(sessionLabel(session))} disconnected; reconnecting in ${Math.round(delay / 1000)}s`);
   showTerminalConnectionToast(session, `Disconnected. Reconnecting in ${Math.round(delay / 1000)}s.`, delay);
   item.reconnectTimer = setTimeout(() => {
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
@@ -11740,7 +11709,7 @@ function pruneDeadSession(session) {
   renderPanels(previousActive);
   renderPaneTabStrips();
   renderAutoApproveButtons();
-  statusEl.innerHTML = `<span class="ok">${esc(sessionLabel(session))} ended</span>`;
+  statusOk(`${esc(sessionLabel(session))} ended`);
 }
 
 // On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
@@ -12659,7 +12628,7 @@ function beginFileTabRename(tab, item) {
     return;
   }
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename files</span>';
+    statusErr('readonly access cannot rename files');
     return;
   }
   const currentName = basenameOf(path);
@@ -13333,7 +13302,7 @@ function createInfoPanel() {
     if (!backend || !panel.contains(backend) || readOnlyMode) return;
     saveSettingsPatch(settingPatch('yoagent.backend', backend.value))
       .then(() => { statusEl.textContent = `YO!agent backend: ${yoagentBackendLabel(backend.value)}`; renderYoagentPanel(); })
-      .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
   });
   applyInfoSubTab(panel);
   renderInfoPanel();
@@ -13577,7 +13546,7 @@ async function clearYoagentConversation() {
     await apiFetch('/api/yoagent/reset', {method: 'POST'});
     statusEl.textContent = t('yoagent.statusCleared');
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">${esc(t('yoagent.statusClearFailed', {error}))}</span>`;
+    statusErr(`${esc(t('yoagent.statusClearFailed', {error}))}`);
   }
 }
 
@@ -13632,7 +13601,7 @@ async function refreshActivitySummary(options = {}) {
       errors: [String(error)],
       global: {lines: [`activity summary unavailable: ${String(error)}`]},
     };
-    if (!options.silent) statusEl.innerHTML = `<span class="err">activity summary failed: ${esc(error)}</span>`;
+    if (!options.silent) statusErr(`activity summary failed: ${esc(error)}`);
   } finally {
     if (requestIsCurrent()) {
       activitySummaryRefreshing = false;
@@ -14243,7 +14212,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copy.dataset.copyPath || '')
         .then(() => { statusEl.textContent = 'copied path'; })
-        .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
       return;
     }
     const copyText = event.target.closest('[data-copy-text]');
@@ -14251,7 +14220,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copyText.dataset.copyText || '')
         .then(() => { statusEl.textContent = 'copied text'; })
-        .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
       return;
     }
     const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');
@@ -14599,7 +14568,7 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     if (destination === 'finder') fileExplorerSessionFilesCache.set(session, {payload: nextPayload, signature});
-    if (!options.silent) statusEl.innerHTML = `<span class="ok">loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}</span>`;
+    if (!options.silent) statusOk(`loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}`);
   } catch (err) {
     const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
@@ -14607,7 +14576,7 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
-    if (!options.silent) statusEl.innerHTML = `<span class="err">changed files failed: ${esc(err)}</span>`;
+    if (!options.silent) statusErr(`changed files failed: ${esc(err)}`);
   } finally {
     if (requestIsCurrent()) setSessionFilesLoadingForDestination(destination, false);
     if (requestIsCurrent() && shouldRender) {
@@ -14675,13 +14644,11 @@ function splitUploadedSessionFiles(files) {
 }
 
 function writeStoredUploadedFilesCollapsed() {
-  try { window.localStorage?.setItem(uploadedFilesCollapsedStorageKey, uploadedFilesCollapsed ? '1' : '0'); }
-  catch (_) {}
+  storageSet(uploadedFilesCollapsedStorageKey, uploadedFilesCollapsed ? '1' : '0');
 }
 
 function writeStoredChangesFolderCollapsed() {
-  try { window.localStorage?.setItem(changesFolderCollapsedStorageKey, JSON.stringify(Array.from(changesFolderCollapsed).sort())); }
-  catch (_) {}
+  storageSet(changesFolderCollapsedStorageKey, JSON.stringify(Array.from(changesFolderCollapsed).sort()));
 }
 
 function changeStatusClassKey(statusKey) {
@@ -14926,7 +14893,7 @@ function applyFileExplorerChangesHidden() {
 
 function setFileExplorerChangesHidden(hidden) {
   fileExplorerChangesHidden = Boolean(hidden);
-  try { localStorage.setItem('yolomux.fileExplorerChangesHidden', fileExplorerChangesHidden ? '1' : '0'); } catch (_) {}
+  storageSet('yolomux.fileExplorerChangesHidden', fileExplorerChangesHidden ? '1' : '0');
   applyFileExplorerChangesHidden();
 }
 
@@ -15203,7 +15170,7 @@ function showUploadRsyncRecommendation(options = {}) {
     event.stopPropagation();
     copyTextToClipboard(command)
       .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
-      .catch(error => { statusEl.innerHTML = `<span class="err">${esc(t('upload.copyFailed', {error}))}</span>`; });
+      .catch(error => { statusErr(`${esc(t('upload.copyFailed', {error}))}`); });
   });
   const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
   return showToast(t('upload.toastTitle'), [
@@ -15248,7 +15215,7 @@ function savePreferenceControl(control) {
       }
       statusEl.textContent = `saved ${path}`;
     })
-    .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+    .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
 }
 
 function resetPreference(path) {
@@ -15258,7 +15225,7 @@ function resetPreference(path) {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => { statusEl.textContent = `reset ${path}`; })
-    .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
+    .catch(error => { statusErr(`settings reset failed: ${esc(error)}`); });
 }
 
 function resetAllPreferences() {
@@ -15273,7 +15240,7 @@ function resetAllPreferences() {
       renderPreferencesPanels({force: true});
       statusEl.textContent = 'reset all preferences';
     })
-    .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
+    .catch(error => { statusErr(`settings reset failed: ${esc(error)}`); });
 }
 
 // File Explorer pane content is self-contained so layout panes do not depend on
@@ -16912,7 +16879,7 @@ async function openHtmlPreviewWithAuth(path) {
     window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
   } catch (error) {
     if (previewWindow) previewWindow.close();
-    statusEl.innerHTML = `<span class="err">HTML preview failed: ${esc(error)}</span>`;
+    statusErr(`HTML preview failed: ${esc(error)}`);
   }
 }
 
@@ -17868,7 +17835,7 @@ function bindPanelControls(panel, session) {
     if (!path) return;
     copyTextToClipboard(path)
       .then(() => { statusEl.textContent = 'copied transcript path'; })
-      .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+      .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
   });
   panel.querySelector('.meta')?.addEventListener('click', event => event.stopPropagation());
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
@@ -17971,7 +17938,7 @@ function bindClipboardPaste() {
     if (!file) return;
     const session = pasteTargetSession(event);
     if (!session) {
-      statusEl.innerHTML = '<span class="err">select a YOLOmux pane before pasting an image</span>';
+      statusErr('select a YOLOmux pane before pasting an image');
       return;
     }
     event.preventDefault();
@@ -18109,14 +18076,14 @@ function imageSuffix(mimeType) {
 
 async function uploadFiles(session, fileList, options = {}) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot upload files</span>';
+    statusErr('readonly access cannot upload files');
     return;
   }
   const files = Array.from(fileList || []);
   if (!files.length) return;
   const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
   if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
-    statusEl.innerHTML = `<span class="err">upload failed: ${esc(`selected files total ${formatFileSize(totalBytes)}; limit is ${formatFileSize(uploadMaxBytes)}`)}</span>`;
+    statusErr(`upload failed: ${esc(`selected files total ${formatFileSize(totalBytes)}; limit is ${formatFileSize(uploadMaxBytes)}`)}`);
     showUploadRsyncRecommendation({session, sizeBytes: totalBytes});
     return;
   }
@@ -18132,7 +18099,7 @@ async function uploadFiles(session, fileList, options = {}) {
     });
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">upload failed: ${esc(payload.error || response.statusText)}</span>`;
+      statusErr(`upload failed: ${esc(payload.error || response.statusText)}`);
       return;
     }
     const paths = (payload.files || []).map(file => file.path).filter(Boolean);
@@ -18145,7 +18112,7 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts();
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">upload failed: ${esc(error)}</span>`;
+    statusErr(`upload failed: ${esc(error)}`);
   }
 }
 
@@ -18204,7 +18171,7 @@ function syncPasteCounterFromPath(path) {
 
 function insertIntoTerminal(session, text) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot type into terminal sessions</span>';
+    statusErr('readonly access cannot type into terminal sessions');
     return false;
   }
   const item = terminals.get(session);
@@ -18391,18 +18358,18 @@ function activateTab(session, name, options = {}) {
 
 function tmuxWindow(session, key, label) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot switch tmux windows</span>';
+    statusErr('readonly access cannot switch tmux windows');
     return;
   }
   const item = terminals.get(session);
   if (!item || item.socket?.readyState !== WebSocket.OPEN) {
-    statusEl.innerHTML = `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
+    statusErr(`${esc(sessionLabel(session))} terminal is not connected`);
     return;
   }
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
   previewTmuxWindowLabel(session, key);
-  statusEl.innerHTML = `<span class="ok">${esc(label)}: ${esc(sessionLabel(session))}</span>`;
+  statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
   setTimeout(refreshTranscripts, 250);
@@ -18483,7 +18450,7 @@ function startTerminal(session) {
   const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
   if (!TerminalCtor) {
     container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
-    statusEl.innerHTML = '<span class="err">xterm unavailable</span>';
+    statusErr('xterm unavailable');
     return;
   }
   container.innerHTML = '';
@@ -18580,7 +18547,7 @@ function updateStatus() {
 
 async function toggleAutoApprove(session) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot change YOLO</span>';
+    statusErr('readonly access cannot change YOLO');
     return;
   }
   const state = autoApproveStates.get(session) || {};
@@ -18590,7 +18557,7 @@ async function toggleAutoApprove(session) {
 
 async function setAutoApprove(session, enabled) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot change YOLO</span>';
+    statusErr('readonly access cannot change YOLO');
     return;
   }
   try {
@@ -18603,7 +18570,7 @@ async function setAutoApprove(session, enabled) {
         updateSessionButtonStates();
         renderAutoApproveButton(session, payload);
       }
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'YOLO approval failed')}</span>`;
+      statusErr(`${esc(payload.error || 'YOLO approval failed')}`);
       return;
     }
     autoApproveStates.set(session, payload);
@@ -18614,7 +18581,7 @@ async function setAutoApprove(session, enabled) {
       ? `<span class="ok">enabled YOLO for ${esc(sessionLabel(session))}</span>`
       : `<span class="ok">disabled YOLO for ${esc(sessionLabel(session))}</span>`;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">YOLO request failed: ${esc(error)}</span>`;
+    statusErr(`YOLO request failed: ${esc(error)}`);
   }
 }
 
@@ -18710,7 +18677,7 @@ function startSummaryStream(session) {
   if (!node) return;
   if (readOnlyMode) {
     node.textContent = t('transcript.adminRequired');
-    statusEl.innerHTML = `<span class="err">${esc(t('transcript.adminStatus'))}</span>`;
+    statusErr(`${esc(t('transcript.adminStatus'))}`);
     return;
   }
   // Accumulate the raw streamed text and render it through the markdown pipeline
@@ -18977,7 +18944,7 @@ function startTranscriptStream(session, options = {}) {
     stopTranscriptStream(session);
     const pane = document.getElementById(`transcript-pane-${session}`);
     if (pane?.classList.contains('active')) {
-      statusEl.innerHTML = `<span class="err">${esc(sessionLabel(session))} transcript stream disconnected</span>`;
+      statusErr(`${esc(sessionLabel(session))} transcript stream disconnected`);
       setTimeout(() => {
         if (document.getElementById(`transcript-pane-${session}`)?.classList.contains('active')) {
           startTranscriptStream(session, {scrollBottom: false});

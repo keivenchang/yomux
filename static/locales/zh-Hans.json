@@ -174,7 +174,7 @@
   "menu.tmux.yolo.disableFor": "停用 tmux 会话“{session}”的 YOLO",
   "menu.tmux.yolo.enable": "启用 tmux 会话的 YOLO",
   "menu.tmux.yolo.enableFor": "启用 tmux 会话“{session}”的 YOLO",
-  "menu.tmux.yoloSubmenu": "YOLO",
+  "menu.tmux.yoloSubmenu": "优乐",
   "menu.view": "视图",
   "menu.view.alert": "提醒",
   "menu.view.alert.adminDetail": "需要管理员权限",

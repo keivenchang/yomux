@@ -1,7 +1,6 @@
 function toggleHiddenFiles() {
   fileExplorerShowHidden = !fileExplorerShowHidden;
-  try { window.localStorage?.setItem(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0'); }
-  catch (_) {}
+  storageSet(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0');
   syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
   if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
@@ -798,7 +797,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       showFileOpenError(path, error);
     }
   }
-  if (opened) statusEl.innerHTML = `<span class="ok">opened ${esc(opened === 1 ? basenameOf(paths[0]) : `${opened} files`)}</span>`;
+  if (opened) statusOk(`opened ${esc(opened === 1 ? basenameOf(paths[0]) : `${opened} files`)}`);
 }
 
 function terminalCurrentPath(session) {

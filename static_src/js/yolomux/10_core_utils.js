@@ -21,21 +21,40 @@ async function redirectToLogin(response) {
   window.location.assign(loginUrl);
 }
 
-function readStoredTabMetaVisible() {
+// localStorage can throw (privacy mode, blocked, quota) — these swallow failures so a blocked store
+// never breaks the page. storageGet returns the raw string (or `fallback` when absent/blocked);
+// storageSet coerces to string and no-ops on failure. Every readStored*/writeStored* builds on these.
+function storageGet(key, fallback = null) {
   try {
-    const stored = window.localStorage?.getItem(tabMetaStorageKey);
-    return stored === null || stored === undefined ? true : stored !== '0';
+    const value = window.localStorage?.getItem(key);
+    return value == null ? fallback : value;
   } catch (_) {
-    return true;
+    return fallback;
   }
 }
 
-function writeStoredTabMetaVisible(value) {
+function storageSet(key, value) {
   try {
-    window.localStorage?.setItem(tabMetaStorageKey, value ? '1' : '0');
-  } catch (_) {
-    // The toggle is still useful for the current page when storage is blocked.
-  }
+    window.localStorage?.setItem(key, String(value));
+  } catch (_) {}
+}
+
+// Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
+// call sites that report a result. Both take already-built (and esc'd) inner HTML.
+function statusErr(html) {
+  statusEl.innerHTML = `<span class="err">${html}</span>`;
+}
+
+function statusOk(html) {
+  statusEl.innerHTML = `<span class="ok">${html}</span>`;
+}
+
+function readStoredTabMetaVisible() {
+  return storageGet(tabMetaStorageKey) !== '0';  // absent (null) or anything but '0' => visible
+}
+
+function writeStoredTabMetaVisible(value) {
+  storageSet(tabMetaStorageKey, value ? '1' : '0');
 }
 
 // DOIT.6 #40: persist the merged YO!info pane's active sub-tab ('info' | 'yoagent'), default 'info'.
@@ -44,47 +63,27 @@ function normalizedInfoSubTab(value) {
 }
 
 function readStoredInfoSubTab() {
-  try {
-    return normalizedInfoSubTab(window.localStorage?.getItem(infoSubTabStorageKey));
-  } catch (_) {
-    return 'info';
-  }
+  return normalizedInfoSubTab(storageGet(infoSubTabStorageKey));
 }
 
 function writeStoredInfoSubTab(value) {
-  try {
-    window.localStorage?.setItem(infoSubTabStorageKey, normalizedInfoSubTab(value));
-  } catch (_) {
-    // Sub-tab selection still works for the current page when storage is blocked.
-  }
+  storageSet(infoSubTabStorageKey, normalizedInfoSubTab(value));
 }
 
 function readStoredEditorWrap() {
-  try {
-    return window.localStorage?.getItem(fileEditorWrapStorageKey) === '1';
-  } catch (_) {
-    return false;
-  }
+  return storageGet(fileEditorWrapStorageKey) === '1';
 }
 
 function writeStoredEditorWrap(value) {
-  try {
-    window.localStorage?.setItem(fileEditorWrapStorageKey, value ? '1' : '0');
-  } catch (_) {}
+  storageSet(fileEditorWrapStorageKey, value ? '1' : '0');
 }
 
 function readStoredEditorLineNumbers() {
-  try {
-    return window.localStorage?.getItem(fileEditorLineNumbersStorageKey) === '1';
-  } catch (_) {
-    return false;
-  }
+  return storageGet(fileEditorLineNumbersStorageKey) === '1';
 }
 
 function writeStoredEditorLineNumbers(value) {
-  try {
-    window.localStorage?.setItem(fileEditorLineNumbersStorageKey, value ? '1' : '0');
-  } catch (_) {}
+  storageSet(fileEditorLineNumbersStorageKey, value ? '1' : '0');
 }
 
 function defaultCollapsedPreferenceSections() {
@@ -92,9 +91,9 @@ function defaultCollapsedPreferenceSections() {
 }
 
 function readStoredCollapsedPreferenceSections() {
+  const raw = storageGet(preferencesCollapsedStorageKey);
+  if (!raw) return defaultCollapsedPreferenceSections();
   try {
-    const raw = window.localStorage?.getItem(preferencesCollapsedStorageKey);
-    if (!raw) return defaultCollapsedPreferenceSections();
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
     return new Set(parsed.filter(item => typeof item === 'string' && item));
@@ -104,9 +103,7 @@ function readStoredCollapsedPreferenceSections() {
 }
 
 function writeStoredCollapsedPreferenceSections() {
-  try {
-    window.localStorage?.setItem(preferencesCollapsedStorageKey, JSON.stringify(Array.from(collapsedPreferenceSections)));
-  } catch (_) {}
+  storageSet(preferencesCollapsedStorageKey, JSON.stringify(Array.from(collapsedPreferenceSections)));
 }
 
 function cleanDiffRef(value, fallback = '') {
@@ -117,47 +114,29 @@ function cleanDiffRef(value, fallback = '') {
 }
 
 function readStoredDiffRef(key, fallback) {
-  try {
-    return cleanDiffRef(window.localStorage?.getItem(key), fallback);
-  } catch (_) {
-    return fallback;
-  }
+  return cleanDiffRef(storageGet(key), fallback);
 }
 
 function writeStoredDiffRefs() {
-  try {
-    window.localStorage?.setItem(diffRefFromStorageKey, diffRefFrom);
-    window.localStorage?.setItem(diffRefToStorageKey, diffRefTo);
-  } catch (_) {}
+  storageSet(diffRefFromStorageKey, diffRefFrom);
+  storageSet(diffRefToStorageKey, diffRefTo);
 }
 
 function readStoredFileExplorerTreeShowDates() {
-  try {
-    return window.localStorage?.getItem(fileExplorerTreeShowDatesStorageKey) === '1';
-  } catch (_) {
-    return false;
-  }
+  return storageGet(fileExplorerTreeShowDatesStorageKey) === '1';
 }
 
 function writeStoredFileExplorerTreeShowDates(value) {
-  try {
-    window.localStorage?.setItem(fileExplorerTreeShowDatesStorageKey, value ? '1' : '0');
-  } catch (_) {}
+  storageSet(fileExplorerTreeShowDatesStorageKey, value ? '1' : '0');
 }
 
 function readStoredFileExplorerTreeSortMode() {
-  try {
-    const value = window.localStorage?.getItem(fileExplorerTreeSortStorageKey);
-    return ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az';
-  } catch (_) {
-    return 'az';
-  }
+  const value = storageGet(fileExplorerTreeSortStorageKey);
+  return ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az';
 }
 
 function writeStoredFileExplorerTreeSortMode(value) {
-  try {
-    window.localStorage?.setItem(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
-  } catch (_) {}
+  storageSet(fileExplorerTreeSortStorageKey, ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'az');
 }
 
 function normalizeStoredFileExplorerIndexedDir(path) {
@@ -166,8 +145,8 @@ function normalizeStoredFileExplorerIndexedDir(path) {
 }
 
 function readStoredFileExplorerIndexedDirs() {
+  const raw = storageGet(fileExplorerIndexedDirsStorageKey);
   try {
-    const raw = window.localStorage?.getItem(fileExplorerIndexedDirsStorageKey);
     const parsed = raw ? JSON.parse(raw) : [];
     const paths = Array.isArray(parsed) ? parsed : [];
     return new Set(paths.map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
@@ -177,13 +156,11 @@ function readStoredFileExplorerIndexedDirs() {
 }
 
 function writeStoredFileExplorerIndexedDirs() {
-  try {
-    const paths = Array.from(fileExplorerIndexedDirs || [])
-      .map(normalizeStoredFileExplorerIndexedDir)
-      .filter(Boolean)
-      .sort((left, right) => left.localeCompare(right));
-    window.localStorage?.setItem(fileExplorerIndexedDirsStorageKey, JSON.stringify(Array.from(new Set(paths))));
-  } catch (_) {}
+  const paths = Array.from(fileExplorerIndexedDirs || [])
+    .map(normalizeStoredFileExplorerIndexedDir)
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+  storageSet(fileExplorerIndexedDirsStorageKey, JSON.stringify(Array.from(new Set(paths))));
 }
 
 function nestedSetting(source, path, fallback) {
@@ -214,17 +191,11 @@ function mergeSettingObjects(base, patch) {
 }
 
 function readStoredFileExplorerRootMode() {
-  try {
-    return window.localStorage?.getItem(fileExplorerRootModeStorageKey) === 'sync' ? 'sync' : 'fixed';
-  } catch (_) {
-    return 'fixed';
-  }
+  return storageGet(fileExplorerRootModeStorageKey) === 'sync' ? 'sync' : 'fixed';
 }
 
 function writeStoredFileExplorerRootMode(mode) {
-  try {
-    window.localStorage?.setItem(fileExplorerRootModeStorageKey, mode === 'sync' ? 'sync' : 'fixed');
-  } catch (_) {}
+  storageSet(fileExplorerRootModeStorageKey, mode === 'sync' ? 'sync' : 'fixed');
 }
 
 function normalizeEditorSchemeId(value) {
@@ -324,18 +295,11 @@ function configuredEditorSchemeForMode(dark) {
 }
 
 function readStoredEditorThemeMode() {
-  try {
-    const value = window.localStorage?.getItem(fileEditorThemeModeStorageKey);
-    return normalizeEditorThemeMode(value || editorThemeInheritMode);
-  } catch (_) {
-    return editorThemeInheritMode;
-  }
+  return normalizeEditorThemeMode(storageGet(fileEditorThemeModeStorageKey) || editorThemeInheritMode);
 }
 
 function writeStoredEditorThemeMode(mode) {
-  try {
-    window.localStorage?.setItem(fileEditorThemeModeStorageKey, normalizeEditorThemeMode(mode));
-  } catch (_) {}
+  storageSet(fileEditorThemeModeStorageKey, normalizeEditorThemeMode(mode));
 }
 
 function readConfiguredEditorScheme() {
@@ -652,9 +616,9 @@ function openTerminalLink(rawLink) {
   if (!link) return;
   try {
     const opened = window.open(link, '_blank', 'noopener,noreferrer');
-    if (!opened) statusEl.innerHTML = `<span class="err">browser blocked link: ${esc(link)}</span>`;
+    if (!opened) statusErr(`browser blocked link: ${esc(link)}`);
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">could not open link: ${esc(error)}</span>`;
+    statusErr(`could not open link: ${esc(error)}`);
   }
 }
 
@@ -904,7 +868,7 @@ async function copyTerminalSelection(session, term, options = {}) {
     await copyTextToClipboard(text);
     statusEl.textContent = options.dedent ? 'copied without indent' : 'copied';
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`;
+    statusErr(`copy failed: ${esc(error)}`);
   }
 }
 

@@ -270,6 +270,7 @@ LOGIN_LOCALE_CHOICES: list[tuple[str, str]] = [
     ("ko", "한국어"),
     ("hi", "हिन्दी"),
     ("ar", "العربية"),
+    ("he", "עברית"),
 ]
 _LOGIN_LOCALE_VALUES = {value for value, _ in LOGIN_LOCALE_CHOICES}
 

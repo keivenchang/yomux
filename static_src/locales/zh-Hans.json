@@ -210,7 +210,7 @@
   "menu.tmux.runLogin": "运行 {command}",
   "menu.tmux.limitReached": "已达上限",
   "menu.tmux.resume": "恢复会话",
-  "menu.tmux.yoloSubmenu": "YOLO",
+  "menu.tmux.yoloSubmenu": "优乐",
   "menu.yolo.openRuleFile": "打开规则文件",
   "menu.yolo.reloadRules": "重新加载规则",
   "menu.yolo.ruleCount.one": "{count} 条规则",

@@ -7,6 +7,7 @@ for scope checks so a link inside an allowed tree cannot escape it.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import stat
@@ -67,6 +68,22 @@ class FilesystemError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status
+
+
+@contextlib.contextmanager
+def _fs_io_errors():
+    """Map a filesystem IO failure to a FilesystemError: PermissionError -> 403, other OSError -> 500.
+
+    Wraps the read/write/delete/rename/mkdir call sites that all shared this exact except-pair. Only the
+    sites that distinguish PermissionError from other OSErrors use this; the plain ``stat()`` probes keep
+    their OSError -> 500 mapping inline (a PermissionError there is intentionally a 500, not a 403).
+    """
+    try:
+        yield
+    except PermissionError as exc:
+        raise FilesystemError(str(exc), status=403) from exc
+    except OSError as exc:
+        raise FilesystemError(str(exc), status=500) from exc
 
 
 def _validated_path(raw: str) -> Path:
@@ -557,13 +574,9 @@ def read_file(raw_path: str) -> dict[str, Any]:
         raise FilesystemError(str(exc), status=500)
     if size > MAX_READ_BYTES:
         raise FilesystemError(f"file too large ({size} bytes; max {MAX_READ_BYTES})", status=413)
-    try:
+    with _fs_io_errors():
         with path.open("rb") as fh:
             raw = fh.read(MAX_READ_BYTES + 1)
-    except PermissionError as exc:
-        raise FilesystemError(str(exc), status=403)
-    except OSError as exc:
-        raise FilesystemError(str(exc), status=500)
     if _looks_binary(raw):
         raise FilesystemError("file appears to be binary", status=415)
     try:
@@ -600,14 +613,10 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
                 f"file changed on disk (expected mtime {expected_mtime}, got {actual})",
                 status=409,
             )
-    try:
+    with _fs_io_errors():
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as fh:
             fh.write(data)
-    except PermissionError as exc:
-        raise FilesystemError(str(exc), status=403)
-    except OSError as exc:
-        raise FilesystemError(str(exc), status=500)
     file_stat = path.stat()
     return {
         "path": str(path),
@@ -633,17 +642,13 @@ def delete_path(raw_path: str) -> dict[str, Any]:
     _ensure_not_configured_root(path, "delete")
     if not path.exists() and not path.is_symlink():
         raise FilesystemError(f"path not found: {path}", status=404)
-    try:
+    with _fs_io_errors():
         if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path)
             kind = "dir"
         else:
             path.unlink()
             kind = "file"
-    except PermissionError as exc:
-        raise FilesystemError(str(exc), status=403)
-    except OSError as exc:
-        raise FilesystemError(str(exc), status=500)
     return {"path": str(path), "deleted": True, "kind": kind}
 
 
@@ -656,12 +661,8 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     target = path.with_name(name)
     if target.exists() or target.is_symlink():
         raise FilesystemError(f"target already exists: {target}", status=409)
-    try:
+    with _fs_io_errors():
         path.rename(target)
-    except PermissionError as exc:
-        raise FilesystemError(str(exc), status=403)
-    except OSError as exc:
-        raise FilesystemError(str(exc), status=500)
     return {"path": str(target), "old_path": str(path), "name": name}
 
 
@@ -669,12 +670,8 @@ def create_directory(raw_path: str) -> dict[str, Any]:
     path = _validated_path(raw_path)
     if path.exists() or path.is_symlink():
         raise FilesystemError(f"target already exists: {path}", status=409)
-    try:
+    with _fs_io_errors():
         path.mkdir()
-    except PermissionError as exc:
-        raise FilesystemError(str(exc), status=403)
-    except OSError as exc:
-        raise FilesystemError(str(exc), status=500)
     return {"path": str(path), "created": True, "kind": "dir"}
 
 
@@ -859,12 +856,8 @@ def read_raw(raw_path: str) -> tuple[bytes, str]:
         raise FilesystemError(str(exc), status=500)
     if size > MAX_RAW_BYTES:
         raise FilesystemError(f"file too large ({size} bytes; max {MAX_RAW_BYTES})", status=413)
-    try:
+    with _fs_io_errors():
         with path.open("rb") as fh:
             data = fh.read(MAX_RAW_BYTES + 1)
-    except PermissionError as exc:
-        raise FilesystemError(str(exc), status=403)
-    except OSError as exc:
-        raise FilesystemError(str(exc), status=500)
     mime = IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
     return data, mime

@@ -105,7 +105,7 @@ async function applyLocale(locale) {
 // The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
 // navigator.language to one of these. Add new locales here as their catalogs ship.
 function i18nSupportedLocales() {
-  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'en'];
+  return ['zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'en'];
 }
 
 // DOIT.8 Phase 2: right-to-left locales. Drives document.dir so the browser mirrors the layout.
@@ -131,6 +131,7 @@ function i18nLocaleChoices() {
     {value: 'ko', label: '한국어'},
     {value: 'hi', label: 'हिन्दी'},
     {value: 'ar', label: 'العربية'},
+    {value: 'he', label: 'עברית'},
     {value: 'en-XA', label: t('pref.general.language.pseudo')},
   ];
 }
@@ -166,4 +167,8 @@ function rerenderForLocale() {
   // head repaints in the new locale on the same switch (force bypasses the active-control guard).
   if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
   if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
+  // The Finder's toolbar chrome (root/dates/sort labels) is baked into the panel at creation time, so the
+  // body re-renders above never touch it — rebuild the Finder panel from source so a language switch
+  // repaints its buttons too (the bug where switching to Hebrew left the toolbar in the previous locale).
+  if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
 }

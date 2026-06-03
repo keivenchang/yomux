@@ -309,7 +309,7 @@ async function fetchSessionFiles(options = {}) {
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     if (destination === 'finder') fileExplorerSessionFilesCache.set(session, {payload: nextPayload, signature});
-    if (!options.silent) statusEl.innerHTML = `<span class="ok">loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}</span>`;
+    if (!options.silent) statusOk(`loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}`);
   } catch (err) {
     const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
@@ -317,7 +317,7 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
-    if (!options.silent) statusEl.innerHTML = `<span class="err">changed files failed: ${esc(err)}</span>`;
+    if (!options.silent) statusErr(`changed files failed: ${esc(err)}`);
   } finally {
     if (requestIsCurrent()) setSessionFilesLoadingForDestination(destination, false);
     if (requestIsCurrent() && shouldRender) {
@@ -385,13 +385,11 @@ function splitUploadedSessionFiles(files) {
 }
 
 function writeStoredUploadedFilesCollapsed() {
-  try { window.localStorage?.setItem(uploadedFilesCollapsedStorageKey, uploadedFilesCollapsed ? '1' : '0'); }
-  catch (_) {}
+  storageSet(uploadedFilesCollapsedStorageKey, uploadedFilesCollapsed ? '1' : '0');
 }
 
 function writeStoredChangesFolderCollapsed() {
-  try { window.localStorage?.setItem(changesFolderCollapsedStorageKey, JSON.stringify(Array.from(changesFolderCollapsed).sort())); }
-  catch (_) {}
+  storageSet(changesFolderCollapsedStorageKey, JSON.stringify(Array.from(changesFolderCollapsed).sort()));
 }
 
 function changeStatusClassKey(statusKey) {
@@ -636,7 +634,7 @@ function applyFileExplorerChangesHidden() {
 
 function setFileExplorerChangesHidden(hidden) {
   fileExplorerChangesHidden = Boolean(hidden);
-  try { localStorage.setItem('yolomux.fileExplorerChangesHidden', fileExplorerChangesHidden ? '1' : '0'); } catch (_) {}
+  storageSet('yolomux.fileExplorerChangesHidden', fileExplorerChangesHidden ? '1' : '0');
   applyFileExplorerChangesHidden();
 }
 
@@ -913,7 +911,7 @@ function showUploadRsyncRecommendation(options = {}) {
     event.stopPropagation();
     copyTextToClipboard(command)
       .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
-      .catch(error => { statusEl.innerHTML = `<span class="err">${esc(t('upload.copyFailed', {error}))}</span>`; });
+      .catch(error => { statusErr(`${esc(t('upload.copyFailed', {error}))}`); });
   });
   const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
   return showToast(t('upload.toastTitle'), [
@@ -958,7 +956,7 @@ function savePreferenceControl(control) {
       }
       statusEl.textContent = `saved ${path}`;
     })
-    .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+    .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
 }
 
 function resetPreference(path) {
@@ -968,7 +966,7 @@ function resetPreference(path) {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => { statusEl.textContent = `reset ${path}`; })
-    .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
+    .catch(error => { statusErr(`settings reset failed: ${esc(error)}`); });
 }
 
 function resetAllPreferences() {
@@ -983,7 +981,7 @@ function resetAllPreferences() {
       renderPreferencesPanels({force: true});
       statusEl.textContent = 'reset all preferences';
     })
-    .catch(error => { statusEl.innerHTML = `<span class="err">settings reset failed: ${esc(error)}</span>`; });
+    .catch(error => { statusErr(`settings reset failed: ${esc(error)}`); });
 }
 
 // File Explorer pane content is self-contained so layout panes do not depend on
@@ -2622,7 +2620,7 @@ async function openHtmlPreviewWithAuth(path) {
     window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
   } catch (error) {
     if (previewWindow) previewWindow.close();
-    statusEl.innerHTML = `<span class="err">HTML preview failed: ${esc(error)}</span>`;
+    statusErr(`HTML preview failed: ${esc(error)}`);
   }
 }
 

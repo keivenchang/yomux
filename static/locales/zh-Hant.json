@@ -174,7 +174,7 @@
   "menu.tmux.yolo.disableFor": "停用 tmux 工作階段「{session}」的 YOLO",
   "menu.tmux.yolo.enable": "啟用 tmux 工作階段的 YOLO",
   "menu.tmux.yolo.enableFor": "啟用 tmux 工作階段「{session}」的 YOLO",
-  "menu.tmux.yoloSubmenu": "YOLO",
+  "menu.tmux.yoloSubmenu": "優樂",
   "menu.view": "檢視",
   "menu.view.alert": "提醒",
   "menu.view.alert.adminDetail": "需要管理員權限",

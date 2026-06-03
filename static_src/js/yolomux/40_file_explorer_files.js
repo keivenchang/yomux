@@ -1600,7 +1600,7 @@ async function copyFilePath(path, label, options = {}) {
     const prefix = options.raw === true ? 'raw ' : '';
     statusEl.textContent = label === 'relative' ? `copied ${prefix}relative path` : `copied ${prefix}full path`;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`;
+    statusErr(`copy failed: ${esc(error)}`);
   }
 }
 
@@ -1632,7 +1632,7 @@ function childNameToPath(root, name) {
 
 async function createFileExplorerFile() {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot create files</span>';
+    statusErr('readonly access cannot create files');
     return;
   }
   const name = window.prompt('New file name');
@@ -1650,13 +1650,13 @@ async function createFileExplorerFile() {
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">new file failed: ${esc(error)}</span>`;
+    statusErr(`new file failed: ${esc(error)}`);
   }
 }
 
 async function createFileExplorerFolder() {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot create folders</span>';
+    statusErr('readonly access cannot create folders');
     return;
   }
   const name = window.prompt('New folder name');
@@ -1673,7 +1673,7 @@ async function createFileExplorerFolder() {
     statusEl.textContent = `created ${basenameOf(path)}`;
     await refreshFileExplorerTrees();
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">new folder failed: ${esc(error)}</span>`;
+    statusErr(`new folder failed: ${esc(error)}`);
   }
 }
 
@@ -1713,7 +1713,7 @@ function bindFileExplorerHeaderActions(container = document) {
 
 async function deleteFileTreePath(fullPath, entry, paths = null) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot delete files</span>';
+    statusErr('readonly access cannot delete files');
     return;
   }
   const deletePaths = compactNestedPaths(paths || fileTreeActionPaths(fullPath));
@@ -1744,13 +1744,13 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     renderSessionButtons();
     renderPaneTabStrips();
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">delete failed: ${esc(error)}</span>`;
+    statusErr(`delete failed: ${esc(error)}`);
   }
 }
 
 function beginFileTreeRename(row, fullPath, entry) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename files</span>';
+    statusErr('readonly access cannot rename files');
     return;
   }
   closeFileContextMenu();
@@ -1814,7 +1814,7 @@ function beginFileTreeRename(row, fullPath, entry) {
 
 async function renameFileTreePath(fullPath, entry, newName) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename files</span>';
+    statusErr('readonly access cannot rename files');
     return false;
   }
   const currentName = entry?.name || basenameOf(fullPath);
@@ -1840,7 +1840,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
     await refreshFileExplorerTrees();
     return true;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">rename failed: ${esc(error)}</span>`;
+    statusErr(`rename failed: ${esc(error)}`);
     return false;
   }
 }
@@ -2037,6 +2037,20 @@ function removePanelForItem(item) {
   if (!panel) return;
   panel.remove();
   panelNodes.delete(item);
+}
+
+// A language switch must repaint the Finder's toolbar chrome (root/dates/sort/new-file… labels), which
+// createFileExplorerPanel() bakes in at creation time and caches in panelNodes. Re-rendering only the
+// panel BODIES (rerenderForLocale's other calls) leaves that chrome stale, and the toolbar mixes direct
+// and delegated click handlers — so relabel-and-rebind would be fragile. Instead evict the cached Finder
+// panel and let renderPanels() rebuild it from the single source of truth, then repopulate the tree and
+// quick-access (state-bearing toggles read live globals / localStorage, so they survive the rebuild).
+function relocalizeFileExplorerPanels() {
+  if (!panelNodes.has(fileExplorerItemId)) return;
+  removePanelForItem(fileExplorerItemId);
+  renderPanels(activePaneItems());
+  refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  renderFileExplorerQuickAccessControls();
 }
 
 function setOpenFileOwner(path, item, options = {}) {

@@ -567,7 +567,7 @@ function beginFileTabRename(tab, item) {
     return;
   }
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot rename files</span>';
+    statusErr('readonly access cannot rename files');
     return;
   }
   const currentName = basenameOf(path);
@@ -1241,7 +1241,7 @@ function createInfoPanel() {
     if (!backend || !panel.contains(backend) || readOnlyMode) return;
     saveSettingsPatch(settingPatch('yoagent.backend', backend.value))
       .then(() => { statusEl.textContent = `YO!agent backend: ${yoagentBackendLabel(backend.value)}`; renderYoagentPanel(); })
-      .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
+      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
   });
   applyInfoSubTab(panel);
   renderInfoPanel();
@@ -1485,7 +1485,7 @@ async function clearYoagentConversation() {
     await apiFetch('/api/yoagent/reset', {method: 'POST'});
     statusEl.textContent = t('yoagent.statusCleared');
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">${esc(t('yoagent.statusClearFailed', {error}))}</span>`;
+    statusErr(`${esc(t('yoagent.statusClearFailed', {error}))}`);
   }
 }
 
@@ -1540,7 +1540,7 @@ async function refreshActivitySummary(options = {}) {
       errors: [String(error)],
       global: {lines: [`activity summary unavailable: ${String(error)}`]},
     };
-    if (!options.silent) statusEl.innerHTML = `<span class="err">activity summary failed: ${esc(error)}</span>`;
+    if (!options.silent) statusErr(`activity summary failed: ${esc(error)}`);
   } finally {
     if (requestIsCurrent()) {
       activitySummaryRefreshing = false;
@@ -2151,7 +2151,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copy.dataset.copyPath || '')
         .then(() => { statusEl.textContent = 'copied path'; })
-        .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
       return;
     }
     const copyText = event.target.closest('[data-copy-text]');
@@ -2159,7 +2159,7 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       copyTextToClipboard(copyText.dataset.copyText || '')
         .then(() => { statusEl.textContent = 'copied text'; })
-        .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+        .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
       return;
     }
     const yoloRuleOpen = event.target.closest('[data-yolo-rule-open]');

@@ -151,7 +151,7 @@ def test_login_locale_picker_writes_general_language():
     from yolomux_lib.web import login_html
     from yolomux_lib.web import save_login_locale
 
-    assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr", "pt-BR", "ru", "ko", "hi", "ar"]
+    assert [value for value, _ in LOGIN_LOCALE_CHOICES] == ["system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr", "pt-BR", "ru", "ko", "hi", "ar", "he"]
     page = login_html()
     assert 'name="locale"' in page
     assert "繁體中文" in page and "简体中文" in page  # endonym-labeled, Traditional before Simplified

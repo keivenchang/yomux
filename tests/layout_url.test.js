@@ -4010,7 +4010,11 @@ function makeFileTree(paths) {
   // setGlobalThemeMode rebuilds the menu bar so the marker updates immediately (not on the next poll).
   assert.ok(/function setGlobalThemeMode[\s\S]*?applyGlobalThemeMode\([^)]*\);\s*renderSessionButtons\(\)/.test(source), 'setGlobalThemeMode re-renders the menu bar so the active marker updates at once');
   // #258: picking a theme APPLIES it live (the menu used to only save the patch).
-  assert.ok(/function setGlobalThemeMode[\s\S]*?globalThemeMode = next;\s*applyGlobalThemeMode\(\{updateEditor: true, updateTerminals: true\}\)/.test(source), '#258: setGlobalThemeMode applies the theme live (applyGlobalThemeMode)');
+  // #258: the theme applies live (body.theme-* flips), now via the shared apply+save helper that both
+  // the one-click Theme submenu and the View cycle delegate to.
+  assert.ok(/function applyAndSaveGlobalTheme[\s\S]*?globalThemeMode = next;\s*applyGlobalThemeMode\(\{updateEditor: true, updateTerminals: true\}\)/.test(source), '#258: applyAndSaveGlobalTheme applies the theme live');
+  assert.ok(/function setGlobalThemeMode\(mode\)\s*\{\s*return applyAndSaveGlobalTheme\(normalizeGlobalThemeMode\(mode\)\)/.test(source), '#258: setGlobalThemeMode delegates to the shared apply+save helper');
+  assert.ok(/function cycleGlobalThemeSetting\(\)\s*\{\s*return applyAndSaveGlobalTheme\(nextGlobalThemeMode\(\)\)/.test(source), '#258: cycleGlobalThemeSetting delegates to the shared apply+save helper');
   // #261: the View menu no longer PINS the terminal palette — it just follows the app (follow-app stays).
   assert.equal(/function setGlobalThemeMode[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: setGlobalThemeMode no longer pins appearance.terminal_theme');
   assert.equal(/function cycleGlobalThemeSetting[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: cycleGlobalThemeSetting no longer pins appearance.terminal_theme');
@@ -4144,19 +4148,25 @@ function makeFileTree(paths) {
   assert.equal(api.resolveLocalePref('system'), 'en', 'Phase 1: system falls back to en without a browser locale');
   // The switcher choices: system + en + Traditional-before-Simplified + pseudo, endonym-labeled.
   const choices = api.i18nLocaleChoices();
-  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'en-XA'], 'Phase 1/2: the locale choices are ordered with all shipped locales then pseudo');
+  assert.deepEqual(choices.map(c => c.value), ['system', 'en', 'zh-Hant', 'zh-Hans', 'es', 'ja', 'de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he', 'en-XA'], 'Phase 1/2: the locale choices are ordered with all shipped locales then pseudo');
   assert.equal(choices.find(c => c.value === 'de').label, 'Deutsch', 'Phase 2: German is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ru').label, 'Русский', 'Phase 2: Russian is labeled with its endonym');
   assert.equal(choices.find(c => c.value === 'ar').label, 'العربية', 'Phase 2: Arabic is labeled with its endonym');
-  for (const loc of ['de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar']) {
+  assert.equal(choices.find(c => c.value === 'he').label, 'עברית', 'Hebrew is labeled with its endonym');
+  for (const loc of ['de', 'fr', 'pt-BR', 'ru', 'ko', 'hi', 'ar', 'he']) {
     assert.equal(api.resolveLocalePref(loc), loc, `Phase 2: ${loc} resolves to itself`);
   }
-  // RTL: Arabic is detected as right-to-left; LTR locales are not.
+  // RTL: Arabic and Hebrew are detected as right-to-left; LTR locales are not.
   assert.equal(api.i18nIsRtl('ar'), true, 'Phase 2: ar is RTL');
+  assert.equal(api.i18nIsRtl('he'), true, 'he is RTL');
   assert.equal(api.i18nIsRtl('de'), false, 'Phase 2: de is LTR');
   // applyLocale flips document.dir; the build CSS uses logical flow properties so RTL mirrors.
   const rtlSrc = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/document\.documentElement\.setAttribute\('dir', i18nIsRtl\(next\) \? 'rtl' : 'ltr'\)/.test(rtlSrc), 'Phase 2: applyLocale sets the document direction for RTL locales');
+  // A language switch must repaint the Finder's static toolbar chrome, not just panel bodies — so
+  // rerenderForLocale rebuilds the Finder panel from source (fixes stale prev-locale toolbar labels).
+  assert.ok(/function rerenderForLocale[\s\S]*?relocalizeFileExplorerPanels\(\)/.test(rtlSrc), 'rerenderForLocale rebuilds the Finder toolbar chrome on a language switch');
+  assert.ok(/function relocalizeFileExplorerPanels\(\)[\s\S]*?removePanelForItem\(fileExplorerItemId\)[\s\S]*?renderPanels\(/.test(rtlSrc), 'relocalizeFileExplorerPanels evicts then rebuilds the Finder panel from its single source of truth');
   const rtlCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.equal(/(^|[^-])(margin|padding|border)-(left|right):/m.test(rtlCss.replace(/[a-z-]*-(left|right)-radius/g, '')), false, 'Phase 2: flow-spacing CSS uses logical (inline) properties, not physical left/right, so RTL mirrors');
   assert.ok(rtlCss.includes('margin-inline-start:') && rtlCss.includes('padding-inline-start:'), 'Phase 2: the CSS uses logical inline properties');
@@ -4233,7 +4243,7 @@ function makeFileTree(paths) {
   assert.equal(fr['menu.file'], 'Fichier', 'Phase 2: fr translates a representative menu label');
   assert.equal(fr['pref.reset.cancel'], 'Annuler', 'Phase 2: fr translates the reset cancel button');
   // The Phase 2 tail locales all ship with full key-parity and preserve placeholders.
-  for (const loc of ['pt-BR', 'ru', 'ko', 'hi', 'ar']) {
+  for (const loc of ['pt-BR', 'ru', 'ko', 'hi', 'ar', 'he']) {
     const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
     assert.deepEqual(Object.keys(cat).sort(), Object.keys(en).sort(), `Phase 2: ${loc}.json has exactly the same keys as en.json (parity)`);
     assert.equal(cat['brand.marker'], 'YO', `Phase 2: ${loc} keeps the YO brand marker`);
@@ -4371,9 +4381,10 @@ function makeFileTree(paths) {
     // The user's request: YO!info -> 優!資料 / 优!资料, YO!agent -> 優!助手 / 优!助手.
     assert.equal(catalog['brand.tab.info'], locale === 'zh-Hant' ? '優!資料' : '优!资料', `${locale} YO!info tab label`);
     assert.equal(catalog['brand.tab.agent'], locale === 'zh-Hant' ? '優!助手' : '优!助手', `${locale} YO!agent tab label`);
-    // The YOLO-toggle menu labels use the localized brand glyph (優/优), not a Latin "YO" (image #57).
+    // The YOLO-toggle menu labels + the YOLO submenu header use the localized brand glyph (優/优 and
+    // 優樂/优乐), not a Latin "YO"/"YOLO" (images #57 / #59).
     const glyph = locale === 'zh-Hant' ? '優' : '优';
-    for (const k of ['menu.tmux.yo.on', 'menu.tmux.yo.off', 'menu.tmux.yo.elsewhere', 'menu.tmux.yo.none']) {
+    for (const k of ['menu.tmux.yo.on', 'menu.tmux.yo.off', 'menu.tmux.yo.elsewhere', 'menu.tmux.yo.none', 'menu.tmux.yoloSubmenu']) {
       assert.equal(/[A-Za-z]/.test(catalog[k]), false, `${locale} ${k} has no Latin "YO" leak`);
       assert.ok(catalog[k].startsWith(glyph), `${locale} ${k} leads with the localized brand glyph`);
     }

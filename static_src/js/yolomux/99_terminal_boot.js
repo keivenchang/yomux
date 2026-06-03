@@ -463,7 +463,7 @@ function bindPanelControls(panel, session) {
     if (!path) return;
     copyTextToClipboard(path)
       .then(() => { statusEl.textContent = 'copied transcript path'; })
-      .catch(error => { statusEl.innerHTML = `<span class="err">copy failed: ${esc(error)}</span>`; });
+      .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
   });
   panel.querySelector('.meta')?.addEventListener('click', event => event.stopPropagation());
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
@@ -566,7 +566,7 @@ function bindClipboardPaste() {
     if (!file) return;
     const session = pasteTargetSession(event);
     if (!session) {
-      statusEl.innerHTML = '<span class="err">select a YOLOmux pane before pasting an image</span>';
+      statusErr('select a YOLOmux pane before pasting an image');
       return;
     }
     event.preventDefault();
@@ -704,14 +704,14 @@ function imageSuffix(mimeType) {
 
 async function uploadFiles(session, fileList, options = {}) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot upload files</span>';
+    statusErr('readonly access cannot upload files');
     return;
   }
   const files = Array.from(fileList || []);
   if (!files.length) return;
   const totalBytes = files.reduce((total, file) => total + (Number(file?.size) || 0), 0);
   if (uploadMaxBytes > 0 && totalBytes > uploadMaxBytes) {
-    statusEl.innerHTML = `<span class="err">upload failed: ${esc(`selected files total ${formatFileSize(totalBytes)}; limit is ${formatFileSize(uploadMaxBytes)}`)}</span>`;
+    statusErr(`upload failed: ${esc(`selected files total ${formatFileSize(totalBytes)}; limit is ${formatFileSize(uploadMaxBytes)}`)}`);
     showUploadRsyncRecommendation({session, sizeBytes: totalBytes});
     return;
   }
@@ -727,7 +727,7 @@ async function uploadFiles(session, fileList, options = {}) {
     });
     const payload = await response.json();
     if (!response.ok) {
-      statusEl.innerHTML = `<span class="err">upload failed: ${esc(payload.error || response.statusText)}</span>`;
+      statusErr(`upload failed: ${esc(payload.error || response.statusText)}`);
       return;
     }
     const paths = (payload.files || []).map(file => file.path).filter(Boolean);
@@ -740,7 +740,7 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts();
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">upload failed: ${esc(error)}</span>`;
+    statusErr(`upload failed: ${esc(error)}`);
   }
 }
 
@@ -799,7 +799,7 @@ function syncPasteCounterFromPath(path) {
 
 function insertIntoTerminal(session, text) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot type into terminal sessions</span>';
+    statusErr('readonly access cannot type into terminal sessions');
     return false;
   }
   const item = terminals.get(session);
@@ -986,18 +986,18 @@ function activateTab(session, name, options = {}) {
 
 function tmuxWindow(session, key, label) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot switch tmux windows</span>';
+    statusErr('readonly access cannot switch tmux windows');
     return;
   }
   const item = terminals.get(session);
   if (!item || item.socket?.readyState !== WebSocket.OPEN) {
-    statusEl.innerHTML = `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
+    statusErr(`${esc(sessionLabel(session))} terminal is not connected`);
     return;
   }
   fitTerminal(session);
   item.socket.send(JSON.stringify({type: 'input', data: String.fromCharCode(2) + key}));
   previewTmuxWindowLabel(session, key);
-  statusEl.innerHTML = `<span class="ok">${esc(label)}: ${esc(sessionLabel(session))}</span>`;
+  statusOk(`${esc(label)}: ${esc(sessionLabel(session))}`);
   scheduleFit(session);
   focusTerminalFromUserAction(session, 75);
   setTimeout(refreshTranscripts, 250);
@@ -1078,7 +1078,7 @@ function startTerminal(session) {
   const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
   if (!TerminalCtor) {
     container.innerHTML = '<pre class="terminal-error">xterm.js failed to load from /static/xterm.js. Terminal cannot attach.</pre>';
-    statusEl.innerHTML = '<span class="err">xterm unavailable</span>';
+    statusErr('xterm unavailable');
     return;
   }
   container.innerHTML = '';
@@ -1175,7 +1175,7 @@ function updateStatus() {
 
 async function toggleAutoApprove(session) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot change YOLO</span>';
+    statusErr('readonly access cannot change YOLO');
     return;
   }
   const state = autoApproveStates.get(session) || {};
@@ -1185,7 +1185,7 @@ async function toggleAutoApprove(session) {
 
 async function setAutoApprove(session, enabled) {
   if (readOnlyMode) {
-    statusEl.innerHTML = '<span class="err">readonly access cannot change YOLO</span>';
+    statusErr('readonly access cannot change YOLO');
     return;
   }
   try {
@@ -1198,7 +1198,7 @@ async function setAutoApprove(session, enabled) {
         updateSessionButtonStates();
         renderAutoApproveButton(session, payload);
       }
-      statusEl.innerHTML = `<span class="err">${esc(payload.error || 'YOLO approval failed')}</span>`;
+      statusErr(`${esc(payload.error || 'YOLO approval failed')}`);
       return;
     }
     autoApproveStates.set(session, payload);
@@ -1209,7 +1209,7 @@ async function setAutoApprove(session, enabled) {
       ? `<span class="ok">enabled YOLO for ${esc(sessionLabel(session))}</span>`
       : `<span class="ok">disabled YOLO for ${esc(sessionLabel(session))}</span>`;
   } catch (error) {
-    statusEl.innerHTML = `<span class="err">YOLO request failed: ${esc(error)}</span>`;
+    statusErr(`YOLO request failed: ${esc(error)}`);
   }
 }
 
@@ -1305,7 +1305,7 @@ function startSummaryStream(session) {
   if (!node) return;
   if (readOnlyMode) {
     node.textContent = t('transcript.adminRequired');
-    statusEl.innerHTML = `<span class="err">${esc(t('transcript.adminStatus'))}</span>`;
+    statusErr(`${esc(t('transcript.adminStatus'))}`);
     return;
   }
   // Accumulate the raw streamed text and render it through the markdown pipeline
@@ -1572,7 +1572,7 @@ function startTranscriptStream(session, options = {}) {
     stopTranscriptStream(session);
     const pane = document.getElementById(`transcript-pane-${session}`);
     if (pane?.classList.contains('active')) {
-      statusEl.innerHTML = `<span class="err">${esc(sessionLabel(session))} transcript stream disconnected</span>`;
+      statusErr(`${esc(sessionLabel(session))} transcript stream disconnected`);
       setTimeout(() => {
         if (document.getElementById(`transcript-pane-${session}`)?.classList.contains('active')) {
           startTranscriptStream(session, {scrollBottom: false});

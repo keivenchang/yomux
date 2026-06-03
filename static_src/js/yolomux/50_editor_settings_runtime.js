@@ -508,7 +508,7 @@ async function refreshSettings(options = {}) {
     if (changed) refreshYoloRulesStatus({silent: true});
     if (changed && !options.silent) statusEl.textContent = 'settings reloaded';
   } catch (error) {
-    if (!options.silent) statusEl.innerHTML = `<span class="err">settings reload failed: ${esc(error)}</span>`;
+    if (!options.silent) statusErr(`settings reload failed: ${esc(error)}`);
   }
 }
 
