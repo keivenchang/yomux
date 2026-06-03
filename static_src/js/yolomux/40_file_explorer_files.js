@@ -2426,6 +2426,12 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
 async function promptExternalChangeBeforeEditing(path, panel = null) {
   const state = openFiles.get(path);
   if (!state?.externalChanged || state.externalChangeEditPrompted) return false;
+  // If the editor has NO unsaved changes, just reload the new disk content silently — never ask. The
+  // reload dialog is only for the genuine conflict case (the editor has unsaved edits AND disk changed).
+  if (!state.dirty) {
+    await reloadOpenFileFromDisk(path, {force: true});
+    return true;
+  }
   state.externalChangeEditPrompted = true;
   const action = await showFileEditorDecisionDialog({
     title: t('dialog.externalTitle'),

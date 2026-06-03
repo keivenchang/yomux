@@ -335,6 +335,12 @@ function applyCssSettings() {
   root.setProperty('--editor-font-size', `${editorFontSize}px`);
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
   root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 180)}px`);
+  // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
+  // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
+  // panes sit flush to the 1px separator. The red needs-* attention ring keeps its own constant width
+  // (--pane-tab-panel-ring-width, unchanged) so it stays visible even at spacing 0.
+  const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 4)));
+  root.setProperty('--pane-split-gap', `${paneSpacing}px`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
@@ -369,6 +375,15 @@ function installGlobalThemeMediaListener() {
   globalThemeMediaListenerInstalled = true;
 }
 
+// The ACTIVE pane's terminal gets a blinking yellow cursor so it's obvious which terminal you're
+// typing into; every other terminal keeps its theme's default cursor color.
+const activeTerminalCursorColor = '#ffd000';
+
+function terminalThemeForSession(session, baseTheme) {
+  const theme = baseTheme || terminalThemeForGlobalTheme();
+  return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColor} : theme;
+}
+
 function applyTerminalRuntimeSettings(options = {}) {
   // DOIT.6 #32: one theme source for every terminal AND its container, so all panes share the same
   // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
@@ -379,10 +394,22 @@ function applyTerminalRuntimeSettings(options = {}) {
     if (!item?.term) continue;
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
-    item.term.options.theme = theme;
+    item.term.options.theme = terminalThemeForSession(session, theme);
     item.term.options.minimumContrastRatio = minContrast;
     if (item.container?.style) item.container.style.background = theme.background;
     if (options.fit !== false) scheduleFit(session);
+  }
+}
+
+// Lightweight cursor-only refresh for focus changes: re-color just the cursor so the active pane's
+// terminal blinks yellow and the rest revert to their theme default, without re-fitting every pane.
+function refreshActiveTerminalCursor() {
+  const base = terminalThemeForGlobalTheme();
+  for (const [session, item] of terminals.entries()) {
+    if (!item?.term?.options) continue;
+    const cursor = session === focusedPanelItem ? activeTerminalCursorColor : base.cursor;
+    const current = item.term.options.theme || base;
+    if (current.cursor !== cursor) item.term.options.theme = {...current, cursor};
   }
 }
 

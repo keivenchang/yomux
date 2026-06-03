@@ -2,6 +2,8 @@
   "brand.marker": "YO",
   "brand.wordmark.yo": "YO",
   "brand.wordmark.lo": "LO",
+  "brand.tab.info": "YO!info",
+  "brand.tab.agent": "YO!agent",
   "menu.file": "फ़ाइल",
   "menu.view": "देखें",
   "menu.tabs": "टैब",
@@ -495,5 +497,7 @@
   "yoagent.updated.wrap": "अंतिम बार अपडेट {rel}",
   "det.noBackend": "कोई AI बैकएंड जवाब नहीं दे रहा; गतिविधि सारांश दिखाया जा रहा है। चैट करने के लिए Preferences में Claude/Codex बैकएंड सेट करें या लॉग इन करें।",
   "det.noActivity": "अभी तक कोई AI एजेंट गतिविधि उपलब्ध नहीं है।",
-  "det.openPending": "खुला / लंबित:"
+  "det.openPending": "खुला / लंबित:",
+  "pref.appearance.pane_spacing.label": "पैन रिक्ति",
+  "pref.appearance.pane_spacing.help": "पिक्सेल, 0–20। पैन के बीच का अंतर; 0 पर वे आपस में सटे होते हैं और हरी सक्रिय रूपरेखा विभाजक को ढक देती है।"
 }

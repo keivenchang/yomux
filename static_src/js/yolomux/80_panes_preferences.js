@@ -841,7 +841,8 @@ function getOrCreatePanel(session) {
 }
 
 function bindPanelShell(panel, session) {
-  installPanelInactiveOverlays(panel, session);
+  // Inactive-pane dimming is pure CSS now (`.panel:not(.focused-pane) .panel-overlay-root::after`,
+  // keyed off the uniformly-toggled .focused-pane class) — no per-pane overlay <div> to install.
   bindPanelPopover(panel);
   bindPaneFrameControls(panel, session);
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
@@ -1147,26 +1148,6 @@ function updatePanelControlLabels(session, info) {
   }
 }
 
-function installPanelInactiveOverlays(panel, session) {
-  // #255: virtual panes (Finder/Modified-files, Preferences, Info, Changes) used to be skipped here, so
-  // they never dimmed when inactive while every terminal pane did. Install the overlay for them too so
-  // dimming is consistent. `updatePanelInactiveOverlays` already adds `.focused-pane` to the focused
-  // pane (virtual ones included), and `.panel.focused-pane .panel-inactive-overlay { display:none }`
-  // un-dims it — so hovering/focusing the pane (auto-focus ON by default) clears the dim and lets
-  // clicks through; only with auto-focus OFF does the overlay swallow the first click to focus.
-  for (const root of panel.querySelectorAll('.panel-overlay-root')) {
-    if (root.querySelector(':scope > .panel-inactive-overlay')) continue;
-    const overlay = document.createElement('div');
-    overlay.className = 'panel-inactive-overlay';
-    overlay.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      focusPanel(session, {userInitiated: true});
-    });
-    root.appendChild(overlay);
-  }
-}
-
 // DOIT.6 #40: ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
 // summary), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
 // own containers (#info-content / #yoagent-content) and the active one is shown via CSS; the chosen
@@ -1178,32 +1159,32 @@ function createInfoPanel() {
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.innerHTML = `
       <div class="panel-head">
-        ${virtualPanelControlsHtml(infoItemId, infoTabLabel)}
+        ${virtualPanelControlsHtml(infoItemId, infoTabLabel())}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
-          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel)}</span></div>
+          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel())}</span></div>
           <div id="meta-${infoItemId}" class="meta">${esc(t('info.subtitle'))}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
-      <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel)} / ${esc(yoagentTabLabel)}">
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel)}</span></button>
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel)}</span></button>
+      <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel())} / ${esc(yoagentTabLabel())}">
+        <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel())}</span></button>
+        <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
         <div class="info-subview" data-info-subview="info">
           <div class="transcript-head info-head">
-            <span>${esc(infoTabLabel)}</span>
+            <span>${esc(infoTabLabel())}</span>
             <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
           </div>
           <div id="info-content" class="info-list"></div>
         </div>
         <div class="info-subview yoagent-subview" data-info-subview="yoagent">
           <div class="transcript-head info-head">
-            <span>${esc(yoagentTabLabel)}</span>
+            <span>${esc(yoagentTabLabel())}</span>
             <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
           </div>
           <div id="yoagent-content" class="info-list yoagent-list"></div>
@@ -1252,6 +1233,15 @@ function createInfoPanel() {
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
     if (input && panel.contains(input)) yoagentDraft = input.value || '';
+  });
+  panel.addEventListener('change', event => {
+    // The composer's backend pill writes the real yoagent.backend setting and re-renders (which also
+    // flips chat enablement when switching to/from No agent).
+    const backend = event.target.closest('[data-yoagent-backend]');
+    if (!backend || !panel.contains(backend) || readOnlyMode) return;
+    saveSettingsPatch(settingPatch('yoagent.backend', backend.value))
+      .then(() => { statusEl.textContent = `YO!agent backend: ${yoagentBackendLabel(backend.value)}`; renderYoagentPanel(); })
+      .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
   });
   applyInfoSubTab(panel);
   renderInfoPanel();
@@ -1331,9 +1321,9 @@ function globalActivitySummaryHtml() {
   const detailLines = lines.filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)));
   const generated = relativeActivityGeneratedText();
   const refreshBar = activitySummaryRefreshing ? `<div class="yoagent-refresh-progress" aria-label="${esc(t('yoagent.refreshing'))}"></div>` : '';
-  return `<section class="yoagent-global" aria-label="${esc(t('yoagent.globalAria', {name: yoagentTabLabel}))}">
+  return `<section class="yoagent-global" aria-label="${esc(t('yoagent.globalAria', {name: yoagentTabLabel()}))}">
     <div class="yoagent-global-head">
-      <span>${esc(yoagentTabLabel)}</span>
+      <span>${esc(yoagentTabLabel())}</span>
       <span class="yoagent-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
     </div>
     ${refreshBar}
@@ -1373,10 +1363,10 @@ function yoagentChatMessagesHtml() {
     if (!yoagentChatEnabled()) {
       return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatDisabled'))}</div>`;
     }
-    return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatEmpty', {name: yoagentTabLabel}))}</div>`;
+    return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatEmpty', {name: yoagentTabLabel()}))}</div>`;
   }
   return messages.map(message => {
-    const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel;
+    const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel();
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
     // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
     // renderYoagentMessageMarkdown() can render it. The escaped text stays as the no-marked fallback.
@@ -1423,12 +1413,30 @@ function yoagentChatEnabled() {
   return ['claude', 'codex'].includes(yoagentResolvedBackend());
 }
 
+// The composer's "Auto" pill = the real yoagent.backend setting (Auto / Claude / Codex / No agent),
+// rendered as a styled select so it can be changed inline (the mockup's mode pill). No other mockup
+// pills are rendered — they have no YO!agent mapping.
+function yoagentBackendPillHtml(disabled) {
+  const current = yoagentBackendKey();
+  // Only Auto / Claude / Codex are selectable. "No agent" (deterministic) stays as an internal
+  // auto-fallback when no agent is logged in, but is never offered as a pick.
+  const options = ['auto', 'claude', 'codex']
+    .map(value => `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(yoagentBackendLabel(value))}</option>`)
+    .join('');
+  return `<label class="yoagent-backend-pill" title="${esc(t('pref.yoagent.backend.label'))}">
+    <span class="yoagent-backend-pill-dot" aria-hidden="true"></span>
+    <select data-yoagent-backend aria-label="${esc(t('pref.yoagent.backend.label'))}"${disabled}>${options}</select>
+  </label>`;
+}
+
 function yoagentChatHtml() {
   const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
-  const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel}) : t('yoagent.chatPlaceholder');
+  const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel()}) : t('yoagent.chatPlaceholder');
   const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || yoagentBusy || yoagentError);
+  // Strip any trailing dots/ellipsis from the localized label so the three animated dots carry the motion.
+  const thinkingLabel = esc(t('yoagent.thinking').replace(/[.…\s]+$/, ''));
   const busy = yoagentBusy
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span>${esc(t('yoagent.thinking'))}</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingLabel}<span class="yoagent-thinking-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
@@ -1438,13 +1446,17 @@ function yoagentChatHtml() {
   const form = yoagentChatEnabled()
     ? `<form class="yoagent-chat-form" data-yoagent-chat-form>
       <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
-      <div class="yoagent-chat-actions">
-        <button type="submit" class="yoagent-chat-send"${disabled}>${esc(t('yoagent.ask'))}</button>
+      <div class="yoagent-chat-controls">
+        ${yoagentBackendPillHtml(disabled)}
+        <span class="yoagent-chat-controls-spacer"></span>
         <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('yoagent.clear'))}</button>
+        <button type="submit" class="yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
+          <svg class="yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
       </div>
     </form>`
     : '';
-  return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel}))}">
+  return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
     <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
     ${form}
   </section>`;
@@ -1610,6 +1622,7 @@ function preferenceSections() {
       ], help: t('pref.appearance.editor_cursor_style.help')},
       {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
+      {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
       {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
       {path: 'appearance.red_reminder_ms', label: t('pref.appearance.red_reminder_ms.label'), type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: t('pref.appearance.red_reminder_ms.help')},
       {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
@@ -1664,7 +1677,6 @@ function preferenceSections() {
     {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'select', choices: [
         {value: 'auto', label: t('pref.yoagent.backend.auto')},
-        {value: 'deterministic', label: t('pref.yoagent.backend.deterministic')},
         {value: 'codex', label: t('pref.yoagent.backend.codex')},
         {value: 'claude', label: t('pref.yoagent.backend.claude')},
       ], help: t('pref.yoagent.backend.help')},

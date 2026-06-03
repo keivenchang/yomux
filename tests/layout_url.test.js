@@ -227,6 +227,9 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     repoRoot: '/home/test/yolomux.dev',
     maxSessionTabs: 99,
     serverHostname: 'test-host',
+    // Seed the en catalog the way production inlines bootstrap.strings, so localized labels (the brand
+    // tab labels infoTabLabel()/yoagentTabLabel() etc.) resolve synchronously at first render under en.
+    strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))},
   });
   const elements = new Map();
   const element = id => {
@@ -2086,10 +2089,12 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('--pane-tab-width: 180px'), 'pane tabs default to the compact 180px width');
   assert.ok(changedFilesSource.includes("numberSetting('appearance.tab_width', 180)"), 'runtime settings fallback keeps the 180px tab width default');
   assert.ok(/body\.theme-dark\s*\{[\s\S]*--pane-tab-strip-bg:\s*#1f3026/.test(preferencesCss), 'dark theme uses a greenish dark pane tab-strip background');
-  assert.ok(/body\.theme-light\s*\{[\s\S]*--pane-tab-strip-bg:\s*#cfd4dd/.test(preferencesCss), 'light theme uses a bright pane tab-strip background');
+  assert.ok(/body\.theme-light\s*\{[\s\S]*--pane-tab-strip-bg:\s*#dce8d2/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background');
   assert.ok(preferencesCss.includes('--pane-tab-unfocused-active-bg: #4f9e3a'), 'unfocused active tabs use a clearly-visible green, not gray (DOIT.6 #6: undimmed per-pane highlight)');
   assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
-  assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 2px'), 'active pane ring uses a thin shared width token');
+  assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 2px'), 'the red needs-* attention ring uses a thin constant width token');
+  // Light mode uses a RED pane separator (dark mode keeps amber/yellow).
+  assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-resizer-bg:\s*rgba\(220, 38, 38/.test(preferencesCss), 'light mode uses a red pane separator');
   assert.ok(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'focused panes keep the same bright tab-strip background');
   assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
   assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder or Changes panes');
@@ -2097,15 +2102,38 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('--pane-resizer-size: 1px'), 'pane splitter reserves only the 1px separator line');
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(255, 225, 77, 0.72)'), 'dark pane splitter is a visible bright-yellow divider at rest');
   assert.ok(preferencesCss.includes('--pane-resizer-hover-bg: rgba(255, 225, 77, 0.96)'), 'dark pane splitter turns brighter on hover/resize');
-  assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(217, 119, 6, 0.78)'), 'light pane splitter uses readable amber at rest');
+  assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(220, 38, 38, 0.80)'), 'light pane splitter is red at rest');
   assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 1.5px'), 'pane splitter hover thickens only modestly (1.5px) over the 1px resting line');
   assert.ok(preferencesCss.includes('--pane-tile-radius: 0'), 'adjacent panes meet flush with square corners (no rounded-corner seam wedges)');
   assert.ok(/\.topbar-search\s*\{[^}]*margin:\s*0 auto/.test(preferencesCss), '#29: topbar universal search is centered (auto margins both sides) between the menubar and the right-side actions, not right-aligned');
   assert.ok(/\.resizer-row::after\s*\{[^}]*inset-inline: -5px/.test(preferencesCss), '#34: the resizer has a wide invisible grab zone (~5px past the line) so it is easy to grab');
   assert.equal(/\.panel \{[^}]*border: 1px solid var\(--line\)/.test(preferencesCss), false, '#35: panes drop the per-pane border so the only divider is the 1px separator');
-  assert.ok(preferencesCss.includes('box-shadow: inset 0 0 0 var(--pane-tab-panel-ring-width)'), '#35: the focused-pane green ring survives via an inset box-shadow (no seam width)');
+  // The active/focus outline is the pane's "natural border" (a --pane-split-gap-wide real border, never
+  // clipped, flush to the resizer) colored green — the SAME mechanism for every pane type. Every pane
+  // has the transparent border; the active one colors it. No box-shadow, no inset ::after for focus.
+  assert.ok(/\.panel\s*\{[^}]*border:\s*var\(--pane-split-gap\) solid transparent/.test(preferencesCss), 'every pane has a --pane-split-gap-wide transparent border (the natural-border gutter)');
+  assert.ok(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'every focused pane (active or typing-ready, terminal or not) colors its border the same green');
+  assert.equal(/\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#465267/.test(preferencesCss), false, 'no gray focus border — focused panes are green, not the old typing-ready gray');
+  assert.equal(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*box-shadow:/.test(preferencesCss), false, 'the active ring is a real border, not a clipped outset box-shadow');
+  assert.equal(/\.panel\.active-pane::after[\s\S]{0,40}\{/.test(preferencesCss), false, 'active panes no longer use the inset ::after ring (only the red needs-* states do)');
+  {
+    // #261: a 0-20px pane spacing setting drives the inter-pane gap; the active pane's green box width
+    // == that gap (--pane-split-gap), so it's 0 at spacing 0 and fills the active side up to the line.
+    const paneSpacingSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing'"), '#261: runtime reads appearance.pane_spacing');
+    assert.ok(paneSpacingSrc.includes("setProperty('--pane-split-gap'"), '#261: pane spacing drives the --pane-split-gap inter-pane gap');
+    assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
+    assert.ok(/path: 'appearance\.pane_spacing'[\s\S]{0,90}min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field');
+    assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_spacing.label'], 'Pane spacing', '#261: the pane spacing field has a localized label');
+  }
   assert.ok(/\.grid\.drop-preview-root\.drop-preview-top::before,[^{]*\{[^}]*var\(--drop-preview-width/.test(preferencesCss), '#36: the root top/bottom drop preview spans only the non-Finder content width (never covers the docked Finder)');
   assert.ok(/\.layout-column\s*\{[\s\S]*gap:\s*var\(--pane-split-gap\)/.test(preferencesCss), 'pane split layout reads the compact gap token');
+  // #261: the REAL inter-pane gap is the flex split container (the column grid gap is a no-op for a
+  // single-panel column), so appearance.pane_spacing now actually changes the gap, not just the ring.
+  assert.ok(/\.layout-split\s*\{[\s\S]*?gap:\s*0;/.test(preferencesCss), '#261: the flex split container has no gap — pane spacing is the pane border width instead');
+  // image 046: the terminal has no horizontal padding, so its dark box meets the resizer flush (the old
+  // 2px left/right padding showed a dark sliver between the terminal and the yellow seam).
+  assert.ok(/\.terminal\s*\{[^}]*padding:\s*2px 0 0/.test(preferencesCss), 'terminal box is flush to the pane edge (no horizontal padding sliver beside the resizer)');
   assert.ok(/\.layout-resizer\s*\{[\s\S]*flex:\s*0 0 var\(--pane-resizer-size\)/.test(preferencesCss), 'pane splitters read the compact size token');
   assert.ok(/\.resizer-row::before\s*\{[\s\S]*left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(preferencesCss), 'row splitters draw a tokenized centered visible line');
   assert.ok(/\.resizer-row:hover::before,[\s\S]*var\(--pane-resizer-hover-line-size\)/.test(preferencesCss), 'row splitters widen on hover without increasing the resting seam');
@@ -2206,7 +2234,9 @@ function makeFileTree(paths) {
   assert.ok(/preferences-setting-row preferences-setting-row--wide"><label class="preferences-setting-label" for="preference-uploads-filename_template"/.test(preferencesHtml), '#38: the upload filename template is a full-width row so its long value is not clipped');
   assert.ok(/preferences-setting-row preferences-setting-row--wide"><label class="preferences-setting-label" for="preference-yolo-rule_file_path"/.test(preferencesHtml), '#38: the YOLO rule file path is a full-width row so the long path is not clipped');
   assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-text input\[type="text"\][\s\S]*?\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-select select\s*\{[\s\S]*?width:\s*100%/.test(preferencesCss), '#38: text/select inputs fill the full width inside wide rows');
-  assert.ok(preferencesHtml.includes('No agent'), 'Preferences rename the local YO!agent backend to No agent');
+  // "No agent" (deterministic) is no longer a selectable backend — Auto still falls back to it internally,
+  // but it is never offered as a pick in Preferences or the composer pill.
+  assert.equal(/data-setting-path="yoagent\.backend"[\s\S]*?<option value="deterministic"/.test(preferencesHtml), false, 'Preferences no longer offer No agent (deterministic) as a backend option');
   assert.equal(preferencesHtml.includes('Deterministic'), false, 'Preferences do not expose the internal deterministic backend label');
   // #41: the YO!agent backend defaults to auto (codex -> claude -> No agent) and the select offers it.
   assert.ok(/data-setting-path="yoagent\.backend"[\s\S]*?<option value="auto"[^>]*>Auto \(Codex → Claude\)<\/option>/.test(preferencesHtml), '#41: the YO!agent backend select offers the Auto option');
@@ -2544,6 +2574,8 @@ function makeFileTree(paths) {
   assert.ok(source.includes('showFileSaveConflictDialog'), 'editor saves route conflicts through the shared conflict dialog');
   assert.ok(source.includes('autoSaveFileEditor'), 'editor autosave is wired into the built client');
   assert.ok(source.includes('promptExternalChangeBeforeEditing'), 'editing a changed-on-disk buffer prompts before continuing');
+  // A non-dirty editor reloads disk changes silently (the prompt is only for the genuine unsaved-edits conflict).
+  assert.ok(/function promptExternalChangeBeforeEditing[\s\S]*?if \(!state\.dirty\) \{[\s\S]*?reloadOpenFileFromDisk\(path, \{force: true\}\)/.test(source), 'a non-dirty editor reloads external disk changes silently (no dialog)');
   const splitButtonIndex = source.indexOf('data-editor-mode="split"');
   const sidePreviewButtonIndex = source.indexOf('file-editor-cross-split-panel');
   const modeSeparatorIndex = source.indexOf('data-editor-toolbar-separator="mode"');
@@ -3820,10 +3852,22 @@ function makeFileTree(paths) {
   assert.ok(enabledChatHtml.includes('Ask YO!agent'), 'Claude-backed YO!agent chat starts with an empty prompt');
   assert.ok(enabledChatHtml.includes('yoagent-chat empty'), 'empty YO!agent chat uses the compact empty layout');
   assert.equal(enabledChatHtml.includes('yoagent-chat-toolbar'), false, 'YO!agent chat does not put Clear in a detached toolbar');
-  assert.ok(enabledChatHtml.indexOf('yoagent-chat-send') < enabledChatHtml.indexOf('yoagent-chat-clear'), 'YO!agent Ask and Clear buttons render together in the footer row');
+  assert.ok(enabledChatHtml.includes('yoagent-chat-controls'), 'YO!agent composer has a control row');
+  assert.ok(enabledChatHtml.includes('data-yoagent-backend'), 'YO!agent composer shows the backend (Auto) pill mapped to yoagent.backend');
+  // The composer pill offers only Auto / Claude / Codex — never "No agent" (deterministic), which stays
+  // an internal Auto fallback.
+  assert.ok(/data-yoagent-backend[\s\S]*?<option value="auto"/.test(enabledChatHtml), 'YO!agent composer pill offers Auto');
+  assert.ok(/data-yoagent-backend[\s\S]*?<option value="claude"/.test(enabledChatHtml), 'YO!agent composer pill offers Claude');
+  assert.ok(/data-yoagent-backend[\s\S]*?<option value="codex"/.test(enabledChatHtml), 'YO!agent composer pill offers Codex');
+  assert.equal(/data-yoagent-backend[\s\S]*?<option value="deterministic"/.test(enabledChatHtml), false, 'YO!agent composer pill does not offer No agent (deterministic)');
+  assert.ok(enabledChatHtml.includes('yoagent-chat-send-icon'), 'YO!agent send button is a circular arrow icon');
+  assert.ok(enabledChatHtml.indexOf('yoagent-chat-clear') < enabledChatHtml.indexOf('yoagent-chat-send'), 'YO!agent send arrow is the last (far-right) control, after Clear');
   api.setYoagentBusyForTest(true);
   assert.ok(api.yoagentChatHtml().includes('yoagent-chat-spinner'), 'YO!agent busy state includes an animated spinner');
-  assert.ok(api.yoagentChatHtml().includes('thinking...'), 'YO!agent busy state uses concise thinking text');
+  // The "thinking" label keeps its word but the trailing dots are three animated <i> dots, so it reads
+  // as a live agent rather than static "thinking..." text.
+  assert.ok(api.yoagentChatHtml().includes('thinking'), 'YO!agent busy state keeps the concise thinking label');
+  assert.ok(/yoagent-thinking-dots[\s\S]*?<i>\.<\/i><i>\.<\/i><i>\.<\/i>/.test(api.yoagentChatHtml()), 'YO!agent thinking dots are three animated dots, not static text');
   assert.ok(api.yoagentChatHtml().includes('session-yolo-marker active working'), 'YO!agent busy spinner reuses the YO tab working marker');
   api.setYoagentBusyForTest(false);
   api.setYoagentDraftForTest('half typed question');
@@ -3951,11 +3995,60 @@ function makeFileTree(paths) {
   const themeLabels = themeSubmenu.items.filter(item => item.type === 'command').map(item => item.label);
   assert.deepStrictEqual([...themeLabels], ['System', 'Dark', 'Light'], '#24: Theme submenu offers System/Dark/Light as discrete one-click items');
   assert.ok(themeSubmenu.items.some(item => item.label === 'Dark' && item.checked !== undefined), '#24: Theme items carry a checked state for the current mode');
+  // The active marker tracks the LIVE theme (regression: normalizeGlobalThemeMode() with no arg used to
+  // always return 'dark', so Dark stayed marked even after switching to Light).
+  const themeCheckedFor = mode => {
+    api.setGlobalThemeModeForTest(mode);
+    return api.appMenuTree()
+      .flatMap(menu => Array.isArray(menu.items) ? menu.items : [])
+      .find(item => item.type === 'submenu' && item.label === 'Theme')
+      .items.filter(item => item.checked === true).map(item => item.label);
+  };
+  assert.deepStrictEqual([...themeCheckedFor('light')], ['Light'], 'theme marker: only Light is checked when light is the live mode');
+  assert.deepStrictEqual([...themeCheckedFor('dark')], ['Dark'], 'theme marker: only Dark is checked when dark is the live mode');
+  assert.deepStrictEqual([...themeCheckedFor('system')], ['System'], 'theme marker: only System is checked when system is the live mode');
+  // setGlobalThemeMode rebuilds the menu bar so the marker updates immediately (not on the next poll).
+  assert.ok(/function setGlobalThemeMode[\s\S]*?applyGlobalThemeMode\([^)]*\);\s*renderSessionButtons\(\)/.test(source), 'setGlobalThemeMode re-renders the menu bar so the active marker updates at once');
   // #258: picking a theme APPLIES it live (the menu used to only save the patch).
   assert.ok(/function setGlobalThemeMode[\s\S]*?globalThemeMode = next;\s*applyGlobalThemeMode\(\{updateEditor: true, updateTerminals: true\}\)/.test(source), '#258: setGlobalThemeMode applies the theme live (applyGlobalThemeMode)');
   // #261: the View menu no longer PINS the terminal palette — it just follows the app (follow-app stays).
   assert.equal(/function setGlobalThemeMode[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: setGlobalThemeMode no longer pins appearance.terminal_theme');
   assert.equal(/function cycleGlobalThemeSetting[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: cycleGlobalThemeSetting no longer pins appearance.terminal_theme');
+  // Active-terminal cursor: the focused pane's terminal shows a blinking yellow cursor.
+  assert.ok(/const activeTerminalCursorColor = '#ffd000'/.test(source), 'active-terminal cursor: yellow cursor color is defined');
+  assert.ok(/function terminalThemeForSession[\s\S]*?session === focusedPanelItem \? \{\.\.\.theme, cursor: activeTerminalCursorColor\}/.test(source), 'active-terminal cursor: the focused session gets the yellow cursor, others keep theme default');
+  assert.ok(/item\.term\.options\.theme = terminalThemeForSession\(session, theme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings themes the active terminal with the yellow cursor');
+  assert.ok(/theme: terminalThemeForSession\(session\)/.test(source), 'active-terminal cursor: a newly-created terminal uses terminalThemeForSession (yellow when focused)');
+  assert.ok(/function updatePanelInactiveOverlays[\s\S]*?refreshActiveTerminalCursor\(\)/.test(source), 'active-terminal cursor: focus changes refresh the cursor color (refreshActiveTerminalCursor)');
+}
+
+{
+  // YO!agent composer redesign (mockup 044): a rounded input bar with the input on top and a control
+  // row below — backend "Auto" pill (wired to yoagent.backend) + subtle Clear + a circular send arrow.
+  const src = fs.readFileSync('static/yolomux.js', 'utf8');
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/class="yoagent-chat-controls"/.test(src), 'YO!agent composer has a control row');
+  assert.ok(/function yoagentBackendPillHtml/.test(src) && /data-yoagent-backend/.test(src), 'composer renders the backend (Auto) pill');
+  assert.ok(/\[data-yoagent-backend\][\s\S]*?saveSettingsPatch\(settingPatch\('yoagent\.backend'/.test(src), 'changing the backend pill writes the real yoagent.backend setting');
+  assert.ok(/class="yoagent-chat-send-icon"[\s\S]*?<path/.test(src), 'send button is a circular arrow icon (not a text "Ask" button)');
+  assert.ok(/\.yoagent-chat-form\s*\{[^}]*border-radius:\s*14px/.test(css), 'composer is one rounded container');
+  assert.ok(/\.yoagent-chat-send\s*\{[^}]*border-radius:\s*50%/.test(css), 'send button is circular');
+  assert.ok(/\.yoagent-backend-pill\s*\{/.test(css), 'backend pill is styled as a pill');
+  assert.ok(/\.yoagent-chat \.markdown-body pre[\s\S]*?border-radius:\s*8px/.test(css), 'YO!agent code blocks are soft rounded boxes');
+  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre/.test(css), 'YO!agent code blocks get a light box + dark text in light mode');
+  // Rendered-markdown chat bodies drop pre-wrap so bullet lists are tightly spaced (the preserved
+  // newlines between/inside the generated <ul><li> HTML were widening them).
+  assert.ok(/\.yoagent-message-body\.markdown-body\s*\{[^}]*white-space:\s*normal/.test(css), 'rendered markdown chat bodies use white-space:normal so bullets are not widely spaced');
+  // The "thinking" busy indicator animates three dots (live agent), not static "thinking..." text.
+  assert.ok(/\.yoagent-thinking-dots i\s*\{[^}]*animation:\s*yoagent-thinking-bounce/.test(css), 'thinking dots animate via the bounce keyframes');
+  assert.ok(/@keyframes yoagent-thinking-bounce/.test(css), 'the thinking-dots bounce keyframes exist');
+  // #YO!info scroll: the body pane (a grid item of the .panel grid) must keep min-width:0 so wide
+  // content scrolls inside .info-list (overflow:auto) instead of blowing the column out past the
+  // overflow:hidden panel (which silently clipped the right side — the user could not scroll right).
+  assert.ok(/\.info-pane\s*\{[^}]*min-width:\s*0/.test(css), 'YO!info body pane keeps min-width:0 so wide content scrolls instead of being clipped');
+  assert.ok(/\.info-list\s*\{[^}]*overflow:\s*auto/.test(css), 'YO!info list owns the scroll (overflow:auto, both axes)');
+  const en = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
+  assert.equal(en['yoagent.chatPlaceholder'], 'Ask anything…', 'composer placeholder matches the mockup ("Ask anything…")');
 }
 
 {
@@ -4089,6 +4182,11 @@ function makeFileTree(paths) {
     assert.equal(/\.topbar-theme\s*\{/.test(css), false, '#257: the .topbar-theme CSS is removed with the switcher');
     // #254: light-mode inactive-pane dim is darker + warm (not the old faint cool 0.14 overlay).
     assert.ok(css.includes('--inactive-pane-overlay: rgba(90, 96, 105, 0.24)'), '#259: light-mode inactive panes dim a neutral gray (no red cast)');
+    // Light-mode pane header (image 043): greenish-light tab-strip container + light frame-control
+    // buttons (the minimize/zoom squares used to render dark/"black" with no light values).
+    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-strip-bg:\s*#dce8d2/.test(css), 'light mode: the pane tab-strip container is greenish-light');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-control-bg:\s*#f7f9fc/.test(css), 'light mode: the pane minimize/frame button has a light fill (not a dark square)');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-zoom-bg:\s*#4f9e3a/.test(css), 'light mode: the pane zoom button is green (readable with its light glyph), not a dark square');
     assert.equal(css.includes('--inactive-pane-overlay: rgba(124, 82, 88, 0.24)'), false, '#259: the earlier warm/red tint is gone (superseded by gray)');
     assert.equal(css.includes('--inactive-pane-overlay: rgba(91, 101, 115, 0.14)'), false, '#254: the old faint cool light overlay is gone');
     // #258: the editor diff FROM/TO group is pushed to the right edge of the toolbar.
@@ -4100,10 +4198,11 @@ function makeFileTree(paths) {
     assert.ok(/\.toast-line\s*\{[^}]*white-space:\s*normal/.test(css), '#258: toast messages wrap (white-space:normal) instead of ellipsis-clipping');
     assert.equal(/\.toast-line\s*\{[^}]*white-space:\s*nowrap/.test(css), false, '#258: the old nowrap/ellipsis clipping of the toast message line is gone');
   }
-  // #255: virtual panes (Finder/Modified-files, Preferences, Info, Changes) now dim when inactive —
-  // installPanelInactiveOverlays no longer early-returns + strips the overlay for isVirtualItem.
-  assert.equal(/function installPanelInactiveOverlays[\s\S]*?if \(isVirtualItem\(session\)\) \{\s*panel\.querySelectorAll\('\.panel-inactive-overlay'\)\.forEach\(node => node\.remove\(\)\);\s*return;/.test(src), false, '#255: installPanelInactiveOverlays no longer skips virtual panes');
-  assert.ok(/function installPanelInactiveOverlays[\s\S]*?for \(const root of panel\.querySelectorAll\('\.panel-overlay-root'\)\)/.test(src), '#255: installPanelInactiveOverlays still installs the inactive overlay (now for virtual panes too)');
+  // #255: inactive-pane dimming is now ONE CSS rule keyed off the uniformly-toggled .focused-pane class
+  // — no per-pane JS overlay, no isVirtualItem special-case, every pane type dims identically.
+  assert.equal(/function installPanelInactiveOverlays/.test(src), false, '#255: the per-pane JS overlay installer is deleted (dimming is pure CSS)');
+  assert.equal(/class="panel-inactive-overlay"/.test(src), false, '#255: no per-pane inactive-overlay div is injected anymore');
+  assert.ok(/\.panel:not\(\.focused-pane\)[^{]*\.panel-overlay-root::after\s*\{[^}]*background:\s*var\(--inactive-pane-overlay\)/.test(fs.readFileSync('static/yolomux.css', 'utf8')), '#255: inactive panes dim via one CSS rule on .panel:not(.focused-pane) .panel-overlay-root::after');
   // #260: a drag-drop open establishes a clean baseline (clears external-change flags on a fresh,
   // non-dirty open) so it never pops a spurious reload prompt — matching double-click.
   assert.ok(/function openDraggedFilesInEditor[\s\S]*?if \(draggedState && !draggedState\.dirty\) \{[\s\S]*?delete draggedState\.externalChanged/.test(src), '#260: drag-drop open clears externalChanged on a non-dirty fresh open (no spurious reload prompt)');
@@ -4113,6 +4212,10 @@ function makeFileTree(paths) {
   const en = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
   const es = JSON.parse(fs.readFileSync('static/locales/es.json', 'utf8'));
   assert.deepEqual(Object.keys(es).sort(), Object.keys(en).sort(), 'Phase 1: es.json has exactly the same keys as en.json (parity)');
+  // The YO!info / YO!agent tab labels are localized via brand.tab.*; en (and non-Chinese locales) keep
+  // the English brand text, while the two Chinese catalogs render the requested glyphs (asserted below).
+  assert.equal(en['brand.tab.info'], 'YO!info', 'en YO!info tab label');
+  assert.equal(en['brand.tab.agent'], 'YO!agent', 'en YO!agent tab label');
   assert.equal(es['menu.file'], 'Archivo', 'Phase 1: es translates a representative menu label');
   assert.equal(es['pref.reset.cancel'], 'Cancelar', 'Phase 1: es translates the reset cancel button');
   assert.ok(es['pref.appearance.file_explorer_font_size.label'].includes('{name}'), 'Phase 1: es preserves interpolation placeholders');
@@ -4134,6 +4237,8 @@ function makeFileTree(paths) {
     const cat = JSON.parse(fs.readFileSync(`static/locales/${loc}.json`, 'utf8'));
     assert.deepEqual(Object.keys(cat).sort(), Object.keys(en).sort(), `Phase 2: ${loc}.json has exactly the same keys as en.json (parity)`);
     assert.equal(cat['brand.marker'], 'YO', `Phase 2: ${loc} keeps the YO brand marker`);
+    assert.equal(cat['brand.tab.info'], 'YO!info', `Phase 2: ${loc} keeps the YO!info tab label`);
+    assert.equal(cat['brand.tab.agent'], 'YO!agent', `Phase 2: ${loc} keeps the YO!agent tab label`);
     assert.ok(cat['pref.appearance.file_explorer_font_size.label'].includes('{name}'), `Phase 2: ${loc} preserves the {name} placeholder`);
     assert.ok(cat['yoagent.files'].includes('{count}') && cat['yoagent.files'].includes('{added}'), `Phase 2: ${loc} preserves count/added placeholders`);
     assert.notEqual(cat['menu.file'], 'File', `Phase 2: ${loc} actually translates (menu.file not English)`);
@@ -4263,6 +4368,15 @@ function makeFileTree(paths) {
     // #52: the wordmark glyphs localize to 優樂 / 优乐.
     assert.equal(catalog['brand.wordmark.yo'], locale === 'zh-Hant' ? '優' : '优', `${locale} wordmark YO glyph`);
     assert.equal(catalog['brand.wordmark.lo'], locale === 'zh-Hant' ? '樂' : '乐', `${locale} wordmark LO glyph`);
+    // The user's request: YO!info -> 優!資料 / 优!资料, YO!agent -> 優!助手 / 优!助手.
+    assert.equal(catalog['brand.tab.info'], locale === 'zh-Hant' ? '優!資料' : '优!资料', `${locale} YO!info tab label`);
+    assert.equal(catalog['brand.tab.agent'], locale === 'zh-Hant' ? '優!助手' : '优!助手', `${locale} YO!agent tab label`);
+    // The YOLO-toggle menu labels use the localized brand glyph (優/优), not a Latin "YO" (image #57).
+    const glyph = locale === 'zh-Hant' ? '優' : '优';
+    for (const k of ['menu.tmux.yo.on', 'menu.tmux.yo.off', 'menu.tmux.yo.elsewhere', 'menu.tmux.yo.none']) {
+      assert.equal(/[A-Za-z]/.test(catalog[k]), false, `${locale} ${k} has no Latin "YO" leak`);
+      assert.ok(catalog[k].startsWith(glyph), `${locale} ${k} leads with the localized brand glyph`);
+    }
     // #54: the System theme option is bilingual (localized + "/System") so the OS-following option is
     // unambiguous in any locale; Dark/Light stay fully localized.
     assert.ok(catalog['pref.appearance.theme.system'].endsWith('/System'), `${locale} System theme option is bilingual`);
@@ -4386,8 +4500,10 @@ function makeFileTree(paths) {
   const api = loadYolomux('', ['1']);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
-  // #8: Branch Info -> YO!info (single constant drives tab/menu/palette).
-  assert.ok(source.includes("const infoTabLabel = 'YO!info'"), '#8: the info tab is renamed YO!info');
+  // #8: Branch Info -> YO!info. The tab/menu/palette labels are now localized (functions, not consts) so
+  // a runtime language switch repaints them; en still resolves to "YO!info" / "YO!agent".
+  assert.ok(/function infoTabLabel\(\)\s*\{\s*return t\('brand\.tab\.info'\)/.test(source), '#8: the YO!info tab label is localized via brand.tab.info');
+  assert.ok(/function yoagentTabLabel\(\)\s*\{\s*return t\('brand\.tab\.agent'\)/.test(source), 'the YO!agent tab label is localized via brand.tab.agent');
   // #9: File -> Finder toggles via toggleFinderPane (hide when in layout, else open).
   assert.ok(source.includes('menuCommand(fileExplorerLabel(), () => toggleFinderPane()'), '#9: File -> Finder uses the toggle');
   assert.ok(/function toggleFinderPane\(\)\s*\{[^}]*itemInLayout\(fileExplorerItemId\)[^}]*removeSessionFromLayout\(fileExplorerItemId\)/.test(source), '#9: toggle hides the Finder when it is already in the layout');

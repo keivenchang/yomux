@@ -15,25 +15,28 @@
   min-width: 0;
   max-width: 100%;
   min-height: 0;
-  padding: 2px 2px 0;
+  /* No horizontal padding: the terminal sits flush to the pane edge so its dark box meets the resizer
+     directly (the old 2px left/right padding showed a dark sliver between the terminal and the seam). */
+  padding: 2px 0 0;
   overflow: hidden;
   border: 0;
   border-radius: 0;
 }
-.panel-inactive-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 6;
-  display: block;
-  background: var(--inactive-pane-overlay);
-  cursor: text;
-}
 .panel-overlay-root {
   position: relative;
 }
-.panel.focused-pane .panel-inactive-overlay,
-.panel.typing-ready-pane .panel-inactive-overlay {
-  display: none;
+/* Inactive-pane dimming: ONE CSS rule keyed off the uniformly-toggled .focused-pane class. Every pane
+   — terminal, Finder, Preferences, Info, Changes, editor — dims identically; there is no per-pane JS
+   overlay <div> (and so no isVirtualItem special-case). pointer-events:none lets a click on a dimmed
+   pane fall through to focus it (the old overlay swallowed the first click). The focused/typing-ready
+   pane is not dimmed. */
+.panel:not(.focused-pane):not(.typing-ready-pane) .panel-overlay-root::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  background: var(--inactive-pane-overlay);
+  pointer-events: none;
 }
 .terminal.typing-ready {
   border-color: transparent;
@@ -484,6 +487,11 @@
   position: relative;
   height: 100%;
   min-height: 0;
+  /* min-width:0 is REQUIRED: .info-pane is the body grid item of the .panel grid, whose single column is
+     an implicit `auto` track. Without this, wide YO!info content (long PR/commit/CI lines) forces the
+     item past the panel width and `.panel { overflow:hidden }` CLIPS it — so the user can't scroll right.
+     Constraining it to 0 lets the inner .info-list (overflow:auto) own the horizontal scroll instead. */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: #11151d;
@@ -493,6 +501,7 @@
 .info-subview {
   display: none;
   min-height: 0;
+  min-width: 0;
   flex: 1;
   flex-direction: column;
 }
@@ -698,6 +707,28 @@
   height: 18px;
   flex: 0 0 auto;
 }
+/* "thinking" with three dots that bounce in sequence, so it reads as a live agent, not static text. */
+.yoagent-thinking {
+  display: inline-flex;
+  align-items: baseline;
+}
+.yoagent-thinking-dots {
+  display: inline-flex;
+}
+.yoagent-thinking-dots i {
+  display: inline-block;
+  font-style: normal;
+  animation: yoagent-thinking-bounce 1.25s infinite ease-in-out both;
+}
+.yoagent-thinking-dots i:nth-child(2) { animation-delay: 0.16s; }
+.yoagent-thinking-dots i:nth-child(3) { animation-delay: 0.32s; }
+@keyframes yoagent-thinking-bounce {
+  0%, 70%, 100% { transform: translateY(0); opacity: 0.3; }
+  35% { transform: translateY(-3px); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .yoagent-thinking-dots i { animation: none; opacity: 1; }
+}
 .yoagent-chat-error {
   display: flex;
   flex-wrap: wrap;
@@ -746,37 +777,111 @@
   overflow-wrap: anywhere;
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
 }
+/* Rendered Markdown brings its own block layout — keep pre-wrap only for the plain-text fallback/user
+   messages. On a markdown body it would preserve the newlines between/inside the generated <ul><li>
+   HTML as blank lines, which is why the bullets looked far too widely spaced. */
+.yoagent-message-body.markdown-body {
+  white-space: normal;
+}
+/* Composer (mockup 044): one rounded container with the input on top and a control row below —
+   the backend "Auto" pill on the left, a subtle Clear, and a circular send-arrow on the right. */
 .yoagent-chat-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.yoagent-chat-form:focus-within {
+  border-color: color-mix(in srgb, var(--brand-green) 55%, var(--line));
 }
 .yoagent-chat-input {
   min-width: 0;
-  height: 30px;
-  padding: 0 8px;
+  width: 100%;
+  height: 26px;
+  padding: 0 2px;
   color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  font: var(--ui-font-size-sm)/1.2 var(--ui-font);
+  background: transparent;
+  border: 0;
+  font: var(--ui-font-size-sm)/1.3 var(--ui-font);
 }
-.yoagent-chat-send {
-  height: 30px;
-  padding: 0 10px;
-  color: #071000;
-  background: var(--brand-green);
-  border: 1px solid var(--auto-border);
-  border-radius: 4px;
-  font: 800 var(--ui-font-size-sm)/1 var(--ui-font);
-}
-.yoagent-chat-actions {
-  display: inline-flex;
+.yoagent-chat-input:focus { outline: none; }
+.yoagent-chat-controls {
+  display: flex;
   align-items: center;
   gap: 6px;
 }
-.yoagent-chat-actions .yoagent-chat-clear {
+.yoagent-chat-controls-spacer { flex: 1 1 auto; }
+.yoagent-backend-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 6px 0 9px;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.yoagent-backend-pill-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid var(--brand-green);
+}
+.yoagent-backend-pill select {
+  height: 22px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.yoagent-backend-pill select:focus { outline: none; }
+.yoagent-chat-clear {
+  height: 24px;
+  padding: 0 9px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.yoagent-chat-clear:hover:not(:disabled),
+.yoagent-chat-clear:focus-visible {
+  color: var(--text);
+  background: var(--panel2);
+}
+.yoagent-chat-clear:disabled { display: none; }
+.yoagent-chat-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
   height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  color: #071000;
+  background: var(--brand-green);
+  border: 1px solid var(--auto-border);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.yoagent-chat-send:disabled { opacity: 0.5; cursor: default; }
+.yoagent-chat-send-icon { width: 16px; height: 16px; }
+/* YO!agent rendered code blocks: soft rounded boxes (not the editor's near-black slab). */
+.yoagent-chat .markdown-body pre,
+.yoagent-session-summary .markdown-body pre {
+  background: color-mix(in srgb, var(--panel2) 60%, var(--bg));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
 }
 body.theme-light .info-pane {
   background: var(--bg);
@@ -790,6 +895,19 @@ body.theme-light .yoagent-global-head,
 body.theme-light .yoagent-headline,
 body.theme-light .yoagent-line {
   color: var(--text);
+}
+/* Light mode: the composer + pills adapt via theme tokens; the rendered code blocks need an explicit
+   light box + dark text (the shared `.markdown-body pre` is dark-only and only the file editor had a
+   light override). Matches the soft gray code boxes in mockup 044. */
+body.theme-light .yoagent-chat .markdown-body pre,
+body.theme-light .yoagent-session-summary .markdown-body pre {
+  background: #f3f4f6;
+  border-color: #e4e7ec;
+  color: #1f2328;
+}
+body.theme-light .yoagent-chat .markdown-body pre code,
+body.theme-light .yoagent-session-summary .markdown-body pre code {
+  color: #1f2328;
 }
 .info-row {
   display: grid;

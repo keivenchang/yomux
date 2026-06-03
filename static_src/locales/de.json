@@ -2,6 +2,8 @@
   "brand.marker": "YO",
   "brand.wordmark.yo": "YO",
   "brand.wordmark.lo": "LO",
+  "brand.tab.info": "YO!info",
+  "brand.tab.agent": "YO!agent",
   "menu.file": "Datei",
   "menu.view": "Ansicht",
   "menu.tabs": "Tabs",
@@ -495,5 +497,7 @@
   "yoagent.updated.wrap": "zuletzt aktualisiert {rel}",
   "det.noBackend": "Kein KI-Backend antwortet; die Aktivitätsübersicht wird angezeigt. Lege in den Einstellungen ein Claude-/Codex-Backend fest oder melde dich an, um zu chatten.",
   "det.noActivity": "Noch keine KI-Agentenaktivität verfügbar.",
-  "det.openPending": "Offen / ausstehend:"
+  "det.openPending": "Offen / ausstehend:",
+  "pref.appearance.pane_spacing.label": "Bereichsabstand",
+  "pref.appearance.pane_spacing.help": "Pixel, 0–20. Abstand zwischen Bereichen; bei 0 berühren sie sich und der grüne aktive Rahmen überdeckt die Trennlinie."
 }

@@ -571,7 +571,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
   rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
   const activity = sessionActivitySummary(session);
-  if (activity?.local) rows.push(popoverRow(yoagentTabLabel, esc(activity.local)));
+  if (activity?.local) rows.push(popoverRow(yoagentTabLabel(), esc(activity.local)));
   rows.push(popoverRow(t('popover.path'), displayPath));
   if (git?.branch) rows.push(popoverRow(t('popover.branch'), `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {

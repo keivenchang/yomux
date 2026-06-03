@@ -19,6 +19,8 @@
   min-width: 0;
   min-height: 0;
   display: flex;
+  /* No flex gap: the inter-pane spacing is provided by each pane's own --pane-split-gap-wide border
+     (so the active pane's colored border sits flush against the 1px resizer with no gap to the line). */
   gap: 0;
 }
 .layout-split {
@@ -224,7 +226,12 @@ body.layout-resizing {
   min-width: 0;
   min-height: 0;
   height: 100%;
-  border: 0;
+  /* Every pane has a "natural border" = the pane spacing (--pane-split-gap), transparent by default so
+     it just shows the background gutter. The ACTIVE pane colors it green (below). Because it's a real
+     border (box-sizing: border-box) it is part of the pane's box — it sits flush against the resizer
+     (no gap to the red/yellow line) and is never clipped like an outset box-shadow was. At spacing 0
+     the border is 0px (no gutter, panes flush to the 1px separator). */
+  border: var(--pane-split-gap) solid transparent;
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
   display: grid;
@@ -392,12 +399,18 @@ body.layout-resizing {
   --panel-ring-color: var(--pane-tab-panel-ring);
   border-color: var(--pane-tab-panel-ring);
   background: var(--panel);
-  box-shadow: inset 0 0 0 var(--pane-tab-panel-ring-width) var(--pane-tab-panel-ring-shadow);
+}
+/* The active/focus pane colors its "natural border" (the --pane-split-gap-wide border above) with the
+   state color: box | green(spacing) | line(1px) | background(spacing) | box. Only the ACTIVE pane's
+   border is colored — the inactive side keeps its transparent border (shows the background). Because
+   it's a real border it sits flush against the resizer (no gap to the line) and is never clipped. The
+   red needs-* attention ring is a separate constant-width ::after below. */
+.panel.active-pane,
+.panel.typing-ready-pane {
+  border-color: var(--pane-tab-panel-ring);
 }
 .panel.typing-ready-pane {
   --panel-ring-color: var(--active-ring);
-  border-color: #465267;
-  box-shadow: none;
 }
 .panel.typing-ready-pane.yolo-ready-pane {
   --panel-ring-color: var(--brand-green);
@@ -416,8 +429,8 @@ body.layout-resizing {
   border-radius: inherit;
   pointer-events: none;
 }
-.panel.active-pane::after,
-.panel.typing-ready-pane::after,
+/* The red attention states keep an INSET ::after ring (it carries the pulsing animation). The
+   active/typing-ready focus ring is the outset box-shadow above instead. */
 .panel.needs-input-pane::after,
 .panel.needs-exec-pane::after,
 .panel.needs-blocked-pane::after {

@@ -942,6 +942,7 @@ function savePreferenceControl(control) {
   if (path === 'appearance.theme') {
     globalThemeMode = normalizeGlobalThemeMode(value);
     applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+    renderSessionButtons();  // keep the View -> Theme active marker in sync with the Preferences radio
   }
   saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',

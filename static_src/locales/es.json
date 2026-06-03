@@ -2,6 +2,8 @@
   "brand.marker": "YO",
   "brand.wordmark.yo": "YO",
   "brand.wordmark.lo": "LO",
+  "brand.tab.info": "YO!info",
+  "brand.tab.agent": "YO!agent",
   "menu.file": "Archivo",
   "menu.view": "Ver",
   "menu.tabs": "Pestañas",
@@ -495,5 +497,7 @@
   "yoagent.updated.wrap": "última actualización {rel}",
   "det.noBackend": "Ningún backend de IA está respondiendo; mostrando el resumen de actividad. Configura o inicia sesión en un backend de Claude/Codex en Preferencias para chatear.",
   "det.noActivity": "Aún no hay actividad del agente de IA disponible.",
-  "det.openPending": "Abierto / pendiente:"
+  "det.openPending": "Abierto / pendiente:",
+  "pref.appearance.pane_spacing.label": "Espaciado de paneles",
+  "pref.appearance.pane_spacing.help": "Píxeles, 0–20. Espacio entre paneles; en 0 se tocan y el contorno verde activo cubre el divisor."
 }

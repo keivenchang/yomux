@@ -393,10 +393,12 @@ const layoutBoundaryDropMaxPx = 64;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
-const infoTabLabel = 'YO!info';
+// Localized brand tab labels — functions (not consts) so a runtime language switch repaints them via
+// rerenderForLocale(); `t` resolves lazily at call time (it's defined in 05_i18n, loaded after this).
+function infoTabLabel() { return t('brand.tab.info'); }
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
-const yoagentTabLabel = 'YO!agent';
+function yoagentTabLabel() { return t('brand.tab.agent'); }
 // DOIT.6 #40: the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
@@ -418,9 +420,9 @@ const TAB_TYPES = [
     id: infoItemId,
     aliases: ['info', infoItemId, 'yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
     match: item => item === infoItemId || item === yoagentItemId || item === legacyYosupItemId,
-    label: () => infoTabLabel,
+    label: () => infoTabLabel(),
     shortLabel: () => 'Term',
-    terminalTitle: () => `unavailable for ${infoTabLabel}`,
+    terminalTitle: () => `unavailable for ${infoTabLabel()}`,
     sortRank: 0,
     param: () => 'info',
     detail: () => 'Repo metadata, PRs, CI, and the AI activity summary',
@@ -1131,7 +1133,10 @@ function normalizeEditorSchemeId(value) {
   return EDITOR_SCHEMES[normalized] ? normalized : defaultEditorScheme;
 }
 
-function normalizeGlobalThemeMode(value) {
+function normalizeGlobalThemeMode(value = globalThemeMode) {
+  // Default to the LIVE globalThemeMode (like resolvedGlobalThemeMode) so a no-arg call reflects the
+  // current theme — calling it with no argument used to fall through to defaultGlobalTheme ('dark'),
+  // which made the View -> Theme menu always mark Dark as active regardless of the real theme.
   const normalized = String(value || '').trim().toLowerCase();
   return ['system', 'dark', 'light'].includes(normalized) ? normalized : defaultGlobalTheme;
 }
@@ -1368,6 +1373,8 @@ function updatePanelInactiveOverlays() {
     panel.classList.toggle('active-pane', item === focusedPanelItem);
   }
   if (typeof updateLinkedFilePreviewRings === 'function') updateLinkedFilePreviewRings();
+  // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
+  if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
 }
 
 function esc(value) {
@@ -4220,6 +4227,7 @@ function setGlobalThemeMode(mode) {
   // follow-app/System) and follows the app automatically via applyGlobalThemeMode's terminal update.
   globalThemeMode = next;
   applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
   return saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
@@ -4236,6 +4244,7 @@ function cycleGlobalThemeSetting() {
   // follow-app/System; only the Terminal Preferences field pins it to a concrete palette).
   globalThemeMode = next;
   applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
   saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
@@ -4506,7 +4515,7 @@ function appMenuTree() {
           }),
           fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
           // #40: YO!agent is now a sub-tab of the merged YO!info pane — this entry opens that pane on it.
-          menuCommand(yoagentTabLabel, () => openInfoSubTab('yoagent'), {
+          menuCommand(yoagentTabLabel(), () => openInfoSubTab('yoagent'), {
             checked: itemInLayout(infoItemId) && infoPanelSubTab === 'yoagent',
             detail: t('menu.file.yoagent.detail'),
             iconHtml: appMenuUiIcon('yoagent'),
@@ -7504,6 +7513,12 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
 async function promptExternalChangeBeforeEditing(path, panel = null) {
   const state = openFiles.get(path);
   if (!state?.externalChanged || state.externalChangeEditPrompted) return false;
+  // If the editor has NO unsaved changes, just reload the new disk content silently — never ask. The
+  // reload dialog is only for the genuine conflict case (the editor has unsaved edits AND disk changed).
+  if (!state.dirty) {
+    await reloadOpenFileFromDisk(path, {force: true});
+    return true;
+  }
   state.externalChangeEditPrompted = true;
   const action = await showFileEditorDecisionDialog({
     title: t('dialog.externalTitle'),
@@ -9065,6 +9080,12 @@ function applyCssSettings() {
   root.setProperty('--editor-font-size', `${editorFontSize}px`);
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
   root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 180)}px`);
+  // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
+  // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
+  // panes sit flush to the 1px separator. The red needs-* attention ring keeps its own constant width
+  // (--pane-tab-panel-ring-width, unchanged) so it stays visible even at spacing 0.
+  const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 4)));
+  root.setProperty('--pane-split-gap', `${paneSpacing}px`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
@@ -9099,6 +9120,15 @@ function installGlobalThemeMediaListener() {
   globalThemeMediaListenerInstalled = true;
 }
 
+// The ACTIVE pane's terminal gets a blinking yellow cursor so it's obvious which terminal you're
+// typing into; every other terminal keeps its theme's default cursor color.
+const activeTerminalCursorColor = '#ffd000';
+
+function terminalThemeForSession(session, baseTheme) {
+  const theme = baseTheme || terminalThemeForGlobalTheme();
+  return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColor} : theme;
+}
+
 function applyTerminalRuntimeSettings(options = {}) {
   // DOIT.6 #32: one theme source for every terminal AND its container, so all panes share the same
   // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
@@ -9109,10 +9139,22 @@ function applyTerminalRuntimeSettings(options = {}) {
     if (!item?.term) continue;
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
-    item.term.options.theme = theme;
+    item.term.options.theme = terminalThemeForSession(session, theme);
     item.term.options.minimumContrastRatio = minContrast;
     if (item.container?.style) item.container.style.background = theme.background;
     if (options.fit !== false) scheduleFit(session);
+  }
+}
+
+// Lightweight cursor-only refresh for focus changes: re-color just the cursor so the active pane's
+// terminal blinks yellow and the rest revert to their theme default, without re-fitting every pane.
+function refreshActiveTerminalCursor() {
+  const base = terminalThemeForGlobalTheme();
+  for (const [session, item] of terminals.entries()) {
+    if (!item?.term?.options) continue;
+    const cursor = session === focusedPanelItem ? activeTerminalCursorColor : base.cursor;
+    const current = item.term.options.theme || base;
+    if (current.cursor !== cursor) item.term.options.theme = {...current, cursor};
   }
 }
 
@@ -9829,7 +9871,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
   rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
   const activity = sessionActivitySummary(session);
-  if (activity?.local) rows.push(popoverRow(yoagentTabLabel, esc(activity.local)));
+  if (activity?.local) rows.push(popoverRow(yoagentTabLabel(), esc(activity.local)));
   rows.push(popoverRow(t('popover.path'), displayPath));
   if (git?.branch) rows.push(popoverRow(t('popover.branch'), `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
   if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {
@@ -12891,7 +12933,8 @@ function getOrCreatePanel(session) {
 }
 
 function bindPanelShell(panel, session) {
-  installPanelInactiveOverlays(panel, session);
+  // Inactive-pane dimming is pure CSS now (`.panel:not(.focused-pane) .panel-overlay-root::after`,
+  // keyed off the uniformly-toggled .focused-pane class) — no per-pane overlay <div> to install.
   bindPanelPopover(panel);
   bindPaneFrameControls(panel, session);
   panel.addEventListener('pointerenter', () => selectPanelOnHover(session));
@@ -13197,26 +13240,6 @@ function updatePanelControlLabels(session, info) {
   }
 }
 
-function installPanelInactiveOverlays(panel, session) {
-  // #255: virtual panes (Finder/Modified-files, Preferences, Info, Changes) used to be skipped here, so
-  // they never dimmed when inactive while every terminal pane did. Install the overlay for them too so
-  // dimming is consistent. `updatePanelInactiveOverlays` already adds `.focused-pane` to the focused
-  // pane (virtual ones included), and `.panel.focused-pane .panel-inactive-overlay { display:none }`
-  // un-dims it — so hovering/focusing the pane (auto-focus ON by default) clears the dim and lets
-  // clicks through; only with auto-focus OFF does the overlay swallow the first click to focus.
-  for (const root of panel.querySelectorAll('.panel-overlay-root')) {
-    if (root.querySelector(':scope > .panel-inactive-overlay')) continue;
-    const overlay = document.createElement('div');
-    overlay.className = 'panel-inactive-overlay';
-    overlay.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      focusPanel(session, {userInitiated: true});
-    });
-    root.appendChild(overlay);
-  }
-}
-
 // DOIT.6 #40: ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
 // summary), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
 // own containers (#info-content / #yoagent-content) and the active one is shown via CSS; the chosen
@@ -13228,32 +13251,32 @@ function createInfoPanel() {
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.innerHTML = `
       <div class="panel-head">
-        ${virtualPanelControlsHtml(infoItemId, infoTabLabel)}
+        ${virtualPanelControlsHtml(infoItemId, infoTabLabel())}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
         <div class="panel-copy">
-          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel)}</span></div>
+          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel())}</span></div>
           <div id="meta-${infoItemId}" class="meta">${esc(t('info.subtitle'))}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
-      <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel)} / ${esc(yoagentTabLabel)}">
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel)}</span></button>
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel)}</span></button>
+      <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel())} / ${esc(yoagentTabLabel())}">
+        <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel())}</span></button>
+        <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
         <div class="info-subview" data-info-subview="info">
           <div class="transcript-head info-head">
-            <span>${esc(infoTabLabel)}</span>
+            <span>${esc(infoTabLabel())}</span>
             <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
           </div>
           <div id="info-content" class="info-list"></div>
         </div>
         <div class="info-subview yoagent-subview" data-info-subview="yoagent">
           <div class="transcript-head info-head">
-            <span>${esc(yoagentTabLabel)}</span>
+            <span>${esc(yoagentTabLabel())}</span>
             <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
           </div>
           <div id="yoagent-content" class="info-list yoagent-list"></div>
@@ -13302,6 +13325,15 @@ function createInfoPanel() {
   panel.addEventListener('input', event => {
     const input = event.target.closest('[data-yoagent-chat-input]');
     if (input && panel.contains(input)) yoagentDraft = input.value || '';
+  });
+  panel.addEventListener('change', event => {
+    // The composer's backend pill writes the real yoagent.backend setting and re-renders (which also
+    // flips chat enablement when switching to/from No agent).
+    const backend = event.target.closest('[data-yoagent-backend]');
+    if (!backend || !panel.contains(backend) || readOnlyMode) return;
+    saveSettingsPatch(settingPatch('yoagent.backend', backend.value))
+      .then(() => { statusEl.textContent = `YO!agent backend: ${yoagentBackendLabel(backend.value)}`; renderYoagentPanel(); })
+      .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
   });
   applyInfoSubTab(panel);
   renderInfoPanel();
@@ -13381,9 +13413,9 @@ function globalActivitySummaryHtml() {
   const detailLines = lines.filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)));
   const generated = relativeActivityGeneratedText();
   const refreshBar = activitySummaryRefreshing ? `<div class="yoagent-refresh-progress" aria-label="${esc(t('yoagent.refreshing'))}"></div>` : '';
-  return `<section class="yoagent-global" aria-label="${esc(t('yoagent.globalAria', {name: yoagentTabLabel}))}">
+  return `<section class="yoagent-global" aria-label="${esc(t('yoagent.globalAria', {name: yoagentTabLabel()}))}">
     <div class="yoagent-global-head">
-      <span>${esc(yoagentTabLabel)}</span>
+      <span>${esc(yoagentTabLabel())}</span>
       <span class="yoagent-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
     </div>
     ${refreshBar}
@@ -13423,10 +13455,10 @@ function yoagentChatMessagesHtml() {
     if (!yoagentChatEnabled()) {
       return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatDisabled'))}</div>`;
     }
-    return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatEmpty', {name: yoagentTabLabel}))}</div>`;
+    return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatEmpty', {name: yoagentTabLabel()}))}</div>`;
   }
   return messages.map(message => {
-    const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel;
+    const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel();
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
     // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
     // renderYoagentMessageMarkdown() can render it. The escaped text stays as the no-marked fallback.
@@ -13473,12 +13505,30 @@ function yoagentChatEnabled() {
   return ['claude', 'codex'].includes(yoagentResolvedBackend());
 }
 
+// The composer's "Auto" pill = the real yoagent.backend setting (Auto / Claude / Codex / No agent),
+// rendered as a styled select so it can be changed inline (the mockup's mode pill). No other mockup
+// pills are rendered — they have no YO!agent mapping.
+function yoagentBackendPillHtml(disabled) {
+  const current = yoagentBackendKey();
+  // Only Auto / Claude / Codex are selectable. "No agent" (deterministic) stays as an internal
+  // auto-fallback when no agent is logged in, but is never offered as a pick.
+  const options = ['auto', 'claude', 'codex']
+    .map(value => `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(yoagentBackendLabel(value))}</option>`)
+    .join('');
+  return `<label class="yoagent-backend-pill" title="${esc(t('pref.yoagent.backend.label'))}">
+    <span class="yoagent-backend-pill-dot" aria-hidden="true"></span>
+    <select data-yoagent-backend aria-label="${esc(t('pref.yoagent.backend.label'))}"${disabled}>${options}</select>
+  </label>`;
+}
+
 function yoagentChatHtml() {
   const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
-  const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel}) : t('yoagent.chatPlaceholder');
+  const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel()}) : t('yoagent.chatPlaceholder');
   const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || yoagentBusy || yoagentError);
+  // Strip any trailing dots/ellipsis from the localized label so the three animated dots carry the motion.
+  const thinkingLabel = esc(t('yoagent.thinking').replace(/[.…\s]+$/, ''));
   const busy = yoagentBusy
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span>${esc(t('yoagent.thinking'))}</span></div>`
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingLabel}<span class="yoagent-thinking-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
@@ -13488,13 +13538,17 @@ function yoagentChatHtml() {
   const form = yoagentChatEnabled()
     ? `<form class="yoagent-chat-form" data-yoagent-chat-form>
       <input type="text" class="yoagent-chat-input" data-yoagent-chat-input value="${esc(yoagentDraft)}" placeholder="${esc(placeholder)}"${disabled}>
-      <div class="yoagent-chat-actions">
-        <button type="submit" class="yoagent-chat-send"${disabled}>${esc(t('yoagent.ask'))}</button>
+      <div class="yoagent-chat-controls">
+        ${yoagentBackendPillHtml(disabled)}
+        <span class="yoagent-chat-controls-spacer"></span>
         <button type="button" class="yoagent-chat-clear" data-yoagent-clear${clearDisabled}>${esc(t('yoagent.clear'))}</button>
+        <button type="submit" class="yoagent-chat-send"${disabled} title="${esc(t('yoagent.ask'))}" aria-label="${esc(t('yoagent.ask'))}">
+          <svg class="yoagent-chat-send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
       </div>
     </form>`
     : '';
-  return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel}))}">
+  return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
     <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
     ${form}
   </section>`;
@@ -13660,6 +13714,7 @@ function preferenceSections() {
       ], help: t('pref.appearance.editor_cursor_style.help')},
       {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
+      {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
       {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
       {path: 'appearance.red_reminder_ms', label: t('pref.appearance.red_reminder_ms.label'), type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: t('pref.appearance.red_reminder_ms.help')},
       {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
@@ -13714,7 +13769,6 @@ function preferenceSections() {
     {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'select', choices: [
         {value: 'auto', label: t('pref.yoagent.backend.auto')},
-        {value: 'deterministic', label: t('pref.yoagent.backend.deterministic')},
         {value: 'codex', label: t('pref.yoagent.backend.codex')},
         {value: 'claude', label: t('pref.yoagent.backend.claude')},
       ], help: t('pref.yoagent.backend.help')},
@@ -15178,6 +15232,7 @@ function savePreferenceControl(control) {
   if (path === 'appearance.theme') {
     globalThemeMode = normalizeGlobalThemeMode(value);
     applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+    renderSessionButtons();  // keep the View -> Theme active marker in sync with the Preferences radio
   }
   saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
@@ -17382,8 +17437,8 @@ function paneFrameControlsHtml(session, options = {}) {
   }
   if (includeDetails) {
     controls.push(disabled
-      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(infoTabLabel)}></button>`
-      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel)}" aria-label="${esc(infoTabLabel)}" aria-pressed="true"></button>`);
+      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(infoTabLabel())}></button>`
+      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel())}" aria-label="${esc(infoTabLabel())}" aria-pressed="true"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -18444,7 +18499,7 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
-    theme: terminalThemeForGlobalTheme(),
+    theme: terminalThemeForSession(session),
     minimumContrastRatio: terminalMinimumContrastRatio(),
   });
   term.open(container);
@@ -18509,7 +18564,7 @@ function updateStatus() {
   }
   const activeTmuxSessions = activeSessions.filter(isTmuxSession);
   if (!activeTmuxSessions.length) {
-    statusEl.textContent = `${infoTabLabel} shown`;
+    statusEl.textContent = `${infoTabLabel()} shown`;
     statusEl.removeAttribute('title');
     return;
   }

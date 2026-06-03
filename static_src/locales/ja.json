@@ -2,6 +2,8 @@
   "brand.marker": "YO",
   "brand.wordmark.yo": "YO",
   "brand.wordmark.lo": "LO",
+  "brand.tab.info": "YO!info",
+  "brand.tab.agent": "YO!agent",
   "menu.file": "ファイル",
   "menu.view": "表示",
   "menu.tabs": "タブ",
@@ -495,5 +497,7 @@
   "yoagent.updated.wrap": "最終更新 {rel}",
   "det.noBackend": "応答する AI バックエンドがありません。アクティビティの概要を表示しています。チャットするには設定で Claude/Codex バックエンドを設定するかログインしてください。",
   "det.noActivity": "利用可能な AI エージェントのアクティビティはまだありません。",
-  "det.openPending": "未対応 / 保留中:"
+  "det.openPending": "未対応 / 保留中:",
+  "pref.appearance.pane_spacing.label": "ペイン間隔",
+  "pref.appearance.pane_spacing.help": "ピクセル、0〜20。ペイン間の隙間。0 にするとペインが接し、緑のアクティブ枠が区切り線を覆います。"
 }

@@ -2,6 +2,8 @@
   "brand.marker": "YO",
   "brand.wordmark.yo": "YO",
   "brand.wordmark.lo": "LO",
+  "brand.tab.info": "YO!info",
+  "brand.tab.agent": "YO!agent",
   "menu.file": "ملف",
   "menu.view": "عرض",
   "menu.tabs": "تبويبات",
@@ -495,5 +497,7 @@
   "yoagent.updated.wrap": "آخر تحديث {rel}",
   "det.noBackend": "لا يوجد خادم ذكاء اصطناعي يستجيب؛ يتم عرض ملخص النشاط. عيّن أو سجّل الدخول إلى خادم Claude/Codex في التفضيلات للدردشة.",
   "det.noActivity": "لا يوجد نشاط لوكيل الذكاء الاصطناعي متاح بعد.",
-  "det.openPending": "مفتوح / معلّق:"
+  "det.openPending": "مفتوح / معلّق:",
+  "pref.appearance.pane_spacing.label": "تباعد الأجزاء",
+  "pref.appearance.pane_spacing.help": "بكسل، 0–20. المسافة بين الأجزاء؛ عند 0 تتلاصق ويغطي الإطار الأخضر النشط الفاصل."
 }

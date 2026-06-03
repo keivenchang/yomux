@@ -233,7 +233,10 @@ function normalizeEditorSchemeId(value) {
   return EDITOR_SCHEMES[normalized] ? normalized : defaultEditorScheme;
 }
 
-function normalizeGlobalThemeMode(value) {
+function normalizeGlobalThemeMode(value = globalThemeMode) {
+  // Default to the LIVE globalThemeMode (like resolvedGlobalThemeMode) so a no-arg call reflects the
+  // current theme — calling it with no argument used to fall through to defaultGlobalTheme ('dark'),
+  // which made the View -> Theme menu always mark Dark as active regardless of the real theme.
   const normalized = String(value || '').trim().toLowerCase();
   return ['system', 'dark', 'light'].includes(normalized) ? normalized : defaultGlobalTheme;
 }
@@ -470,6 +473,8 @@ function updatePanelInactiveOverlays() {
     panel.classList.toggle('active-pane', item === focusedPanelItem);
   }
   if (typeof updateLinkedFilePreviewRings === 'function') updateLinkedFilePreviewRings();
+  // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
+  if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
 }
 
 function esc(value) {

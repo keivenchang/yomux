@@ -2,6 +2,8 @@
   "brand.marker": "YO",
   "brand.wordmark.yo": "YO",
   "brand.wordmark.lo": "LO",
+  "brand.tab.info": "YO!info",
+  "brand.tab.agent": "YO!agent",
   "menu.file": "파일",
   "menu.view": "보기",
   "menu.tabs": "탭",
@@ -495,5 +497,7 @@
   "yoagent.updated.wrap": "마지막 업데이트 {rel}",
   "det.noBackend": "응답하는 AI 백엔드가 없습니다. 활동 요약을 표시합니다. 채팅하려면 환경설정에서 Claude/Codex 백엔드를 설정하거나 로그인하세요.",
   "det.noActivity": "아직 사용 가능한 AI 에이전트 활동이 없습니다.",
-  "det.openPending": "열림 / 대기 중:"
+  "det.openPending": "열림 / 대기 중:",
+  "pref.appearance.pane_spacing.label": "패널 간격",
+  "pref.appearance.pane_spacing.help": "픽셀, 0–20. 패널 사이 간격. 0이면 패널이 맞닿고 녹색 활성 테두리가 구분선을 덮습니다."
 }

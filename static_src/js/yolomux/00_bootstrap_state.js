@@ -392,10 +392,12 @@ const layoutBoundaryDropMaxPx = 64;
 const minSplitPercent = 5;
 const maxSplitPercent = 95;
 const infoItemId = '__info__';
-const infoTabLabel = 'YO!info';
+// Localized brand tab labels — functions (not consts) so a runtime language switch repaints them via
+// rerenderForLocale(); `t` resolves lazily at call time (it's defined in 05_i18n, loaded after this).
+function infoTabLabel() { return t('brand.tab.info'); }
 const yoagentItemId = '__yoagent__';
 const legacyYosupItemId = '__yosup__';
-const yoagentTabLabel = 'YO!agent';
+function yoagentTabLabel() { return t('brand.tab.agent'); }
 // DOIT.6 #40: the active sub-tab within the merged YO!info pane ('info' | 'yoagent'), remembered.
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
@@ -417,9 +419,9 @@ const TAB_TYPES = [
     id: infoItemId,
     aliases: ['info', infoItemId, 'yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
     match: item => item === infoItemId || item === yoagentItemId || item === legacyYosupItemId,
-    label: () => infoTabLabel,
+    label: () => infoTabLabel(),
     shortLabel: () => 'Term',
-    terminalTitle: () => `unavailable for ${infoTabLabel}`,
+    terminalTitle: () => `unavailable for ${infoTabLabel()}`,
     sortRank: 0,
     param: () => 'info',
     detail: () => 'Repo metadata, PRs, CI, and the AI activity summary',

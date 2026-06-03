@@ -843,10 +843,17 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
         """
     )
     assert theme_metrics["dark"]["panelHeadBg"] == "rgb(31, 48, 38)"
-    assert theme_metrics["light"]["panelHeadBg"] == "rgb(207, 212, 221)"
-    # DOIT.6 #31: the active-tab greens are tuned PER THEME so a theme switch visibly repaints the
-    # active pane tab; every other surface stays token-equal across themes (only panelHeadBg differed).
-    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor"}
+    assert theme_metrics["light"]["panelHeadBg"] == "rgb(220, 232, 210)"
+    # Pane frame controls (image 043): in light mode the minimize button gets a light fill and the zoom
+    # button is green (both were dark "black" squares before, with no light token values).
+    assert theme_metrics["dark"]["paneControlBg"] == "rgb(27, 36, 50)"
+    assert theme_metrics["light"]["paneControlBg"] == "rgb(247, 249, 252)"
+    assert theme_metrics["dark"]["zoomControlBg"] == "rgb(47, 95, 58)"
+    assert theme_metrics["light"]["zoomControlBg"] == "rgb(79, 158, 58)"
+    # DOIT.6 #31: the active-tab greens are tuned PER THEME so a theme switch visibly repaints the active
+    # pane tab; the frame controls are also theme-specific now (image 043). Every OTHER surface stays
+    # token-equal across themes.
+    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "paneControlBg", "paneControlBorder", "zoomControlBg"}
     for key, value in theme_metrics["dark"].items():
         if key not in theme_specific:
             assert theme_metrics["light"][key] == value
@@ -1139,7 +1146,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
         const markerContent = getComputedStyle(document.getElementById('wrapped-line'), '::before').content;
         const marker = document.getElementById('wrap-marker').getBoundingClientRect();
         const markerStyle = getComputedStyle(document.getElementById('wrap-marker'));
-        const panelRing = getComputedStyle(document.querySelector('.file-editor-panel'), '::after');
+        const panelRing = getComputedStyle(document.querySelector('.file-editor-panel'));
         const searchLabel = getComputedStyle(document.querySelector('.cm-search'), '::before').content;
         const editorStyle = getComputedStyle(document.getElementById('cm-editor'));
         const themeStyle = getComputedStyle(document.querySelector('.file-editor-theme-panel'));
@@ -1199,7 +1206,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
           markerContent,
           markerHeight: marker.height,
           markerColor: markerStyle.color,
-          panelRingWidth: Number.parseFloat(panelRing.borderTopWidth),
+          panelRingBorderColor: panelRing.borderTopColor,
           searchLabel,
           editorBg: editorStyle.backgroundColor,
           editorColor: editorStyle.color,
@@ -1264,7 +1271,9 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["markerContent"] in ("none", '""')
     assert metrics["markerHeight"] > 0
     assert metrics["markerColor"] != "rgb(0, 0, 0)"
-    assert 1.5 <= metrics["panelRingWidth"] <= 2.5
+    # The active pane's focus ring is its natural border colored green (not a box-shadow / inset ::after);
+    # assert the active pane shows a colored (non-transparent) border.
+    assert metrics["panelRingBorderColor"] not in ("rgba(0, 0, 0, 0)", "transparent")
     assert metrics["searchLabel"] in ("none", '""')
     assert metrics["editorBg"] != "rgb(15, 17, 21)"
     assert metrics["editorColor"] != "rgb(228, 232, 238)"

@@ -228,7 +228,19 @@ body.theme-dark {
 }
 body.theme-light {
   color-scheme: light;
-  --pane-tab-strip-bg: #cfd4dd;
+  /* The pane tab-strip container reads greenish-light (matching the detail row), not the old cool gray. */
+  --pane-tab-strip-bg: #dce8d2;
+  /* Pane frame controls (minimize / zoom) had NO light values, so they rendered as dark "black"
+     squares on the light header. Give the minimize button a light fill (dark glyph via --pc-control-fg)
+     and keep the zoom button green so its built-in light glyph stays readable. */
+  --pane-tab-control-bg: #f7f9fc;
+  --pane-tab-control-border: #9aa6b6;
+  --pane-tab-control-hover-bg: #e9eef6;
+  --pane-tab-control-hover-border: #6b7788;
+  --pane-tab-zoom-bg: #4f9e3a;
+  --pane-tab-zoom-border: #3f8f2d;
+  --pane-tab-zoom-hover-bg: #5fae46;
+  --pane-tab-zoom-hover-border: #4f9e3a;
   /* DOIT.6 #31: active-tab greens tuned for the light surface so a theme switch visibly repaints the
      active pane tab (the dark-mode neon lime looked "stuck" with no light override). */
   --pane-tab-active-bg: #4f9e3a;
@@ -244,9 +256,10 @@ body.theme-light {
   --pane-meta-branch: #243245;
   --pane-meta-path: #111827;
   --pane-meta-desc: #4b5563;
-  --pane-resizer-bg: rgba(217, 119, 6, 0.78);
-  --pane-resizer-hover-bg: rgba(245, 158, 11, 0.96);
-  --pane-resizer-shadow: rgba(180, 83, 9, 0.62);
+  /* Light mode uses a RED separator (dark mode keeps amber/yellow). */
+  --pane-resizer-bg: rgba(220, 38, 38, 0.80);
+  --pane-resizer-hover-bg: rgba(239, 68, 68, 0.96);
+  --pane-resizer-shadow: rgba(185, 28, 28, 0.62);
   --bg: #f6f8fb;
   --panel: #ffffff;
   --panel-inactive: #eef2f7;

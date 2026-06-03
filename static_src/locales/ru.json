@@ -2,6 +2,8 @@
   "brand.marker": "YO",
   "brand.wordmark.yo": "YO",
   "brand.wordmark.lo": "LO",
+  "brand.tab.info": "YO!info",
+  "brand.tab.agent": "YO!agent",
   "menu.file": "Файл",
   "menu.view": "Вид",
   "menu.tabs": "Вкладки",
@@ -495,5 +497,7 @@
   "yoagent.updated.wrap": "обновлено {rel}",
   "det.noBackend": "Ни один ИИ-бэкенд не отвечает; показывается сводка активности. Настройте или войдите в бэкенд Claude/Codex в Настройках, чтобы общаться.",
   "det.noActivity": "Активность ИИ-агента пока недоступна.",
-  "det.openPending": "Открыто / в ожидании:"
+  "det.openPending": "Открыто / в ожидании:",
+  "pref.appearance.pane_spacing.label": "Отступ между панелями",
+  "pref.appearance.pane_spacing.help": "Пиксели, 0–20. Зазор между панелями; при 0 они соприкасаются, а зелёная активная рамка перекрывает разделитель."
 }

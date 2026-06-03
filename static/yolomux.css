@@ -229,7 +229,19 @@ body.theme-dark {
 }
 body.theme-light {
   color-scheme: light;
-  --pane-tab-strip-bg: #cfd4dd;
+  /* The pane tab-strip container reads greenish-light (matching the detail row), not the old cool gray. */
+  --pane-tab-strip-bg: #dce8d2;
+  /* Pane frame controls (minimize / zoom) had NO light values, so they rendered as dark "black"
+     squares on the light header. Give the minimize button a light fill (dark glyph via --pc-control-fg)
+     and keep the zoom button green so its built-in light glyph stays readable. */
+  --pane-tab-control-bg: #f7f9fc;
+  --pane-tab-control-border: #9aa6b6;
+  --pane-tab-control-hover-bg: #e9eef6;
+  --pane-tab-control-hover-border: #6b7788;
+  --pane-tab-zoom-bg: #4f9e3a;
+  --pane-tab-zoom-border: #3f8f2d;
+  --pane-tab-zoom-hover-bg: #5fae46;
+  --pane-tab-zoom-hover-border: #4f9e3a;
   /* DOIT.6 #31: active-tab greens tuned for the light surface so a theme switch visibly repaints the
      active pane tab (the dark-mode neon lime looked "stuck" with no light override). */
   --pane-tab-active-bg: #4f9e3a;
@@ -245,9 +257,10 @@ body.theme-light {
   --pane-meta-branch: #243245;
   --pane-meta-path: #111827;
   --pane-meta-desc: #4b5563;
-  --pane-resizer-bg: rgba(217, 119, 6, 0.78);
-  --pane-resizer-hover-bg: rgba(245, 158, 11, 0.96);
-  --pane-resizer-shadow: rgba(180, 83, 9, 0.62);
+  /* Light mode uses a RED separator (dark mode keeps amber/yellow). */
+  --pane-resizer-bg: rgba(220, 38, 38, 0.80);
+  --pane-resizer-hover-bg: rgba(239, 68, 68, 0.96);
+  --pane-resizer-shadow: rgba(185, 28, 28, 0.62);
   --bg: #f6f8fb;
   --panel: #ffffff;
   --panel-inactive: #eef2f7;
@@ -2868,6 +2881,8 @@ button:disabled:hover { border-color: var(--line); }
   min-width: 0;
   min-height: 0;
   display: flex;
+  /* No flex gap: the inter-pane spacing is provided by each pane's own --pane-split-gap-wide border
+     (so the active pane's colored border sits flush against the 1px resizer with no gap to the line). */
   gap: 0;
 }
 .layout-split {
@@ -3073,7 +3088,12 @@ body.layout-resizing {
   min-width: 0;
   min-height: 0;
   height: 100%;
-  border: 0;
+  /* Every pane has a "natural border" = the pane spacing (--pane-split-gap), transparent by default so
+     it just shows the background gutter. The ACTIVE pane colors it green (below). Because it's a real
+     border (box-sizing: border-box) it is part of the pane's box — it sits flush against the resizer
+     (no gap to the red/yellow line) and is never clipped like an outset box-shadow was. At spacing 0
+     the border is 0px (no gutter, panes flush to the 1px separator). */
+  border: var(--pane-split-gap) solid transparent;
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
   display: grid;
@@ -3241,12 +3261,18 @@ body.layout-resizing {
   --panel-ring-color: var(--pane-tab-panel-ring);
   border-color: var(--pane-tab-panel-ring);
   background: var(--panel);
-  box-shadow: inset 0 0 0 var(--pane-tab-panel-ring-width) var(--pane-tab-panel-ring-shadow);
+}
+/* The active/focus pane colors its "natural border" (the --pane-split-gap-wide border above) with the
+   state color: box | green(spacing) | line(1px) | background(spacing) | box. Only the ACTIVE pane's
+   border is colored — the inactive side keeps its transparent border (shows the background). Because
+   it's a real border it sits flush against the resizer (no gap to the line) and is never clipped. The
+   red needs-* attention ring is a separate constant-width ::after below. */
+.panel.active-pane,
+.panel.typing-ready-pane {
+  border-color: var(--pane-tab-panel-ring);
 }
 .panel.typing-ready-pane {
   --panel-ring-color: var(--active-ring);
-  border-color: #465267;
-  box-shadow: none;
 }
 .panel.typing-ready-pane.yolo-ready-pane {
   --panel-ring-color: var(--brand-green);
@@ -3265,8 +3291,8 @@ body.layout-resizing {
   border-radius: inherit;
   pointer-events: none;
 }
-.panel.active-pane::after,
-.panel.typing-ready-pane::after,
+/* The red attention states keep an INSET ::after ring (it carries the pulsing animation). The
+   active/typing-ready focus ring is the outset box-shadow above instead. */
 .panel.needs-input-pane::after,
 .panel.needs-exec-pane::after,
 .panel.needs-blocked-pane::after {
@@ -4065,25 +4091,28 @@ body.theme-light .panel.typing-ready-pane {
   min-width: 0;
   max-width: 100%;
   min-height: 0;
-  padding: 2px 2px 0;
+  /* No horizontal padding: the terminal sits flush to the pane edge so its dark box meets the resizer
+     directly (the old 2px left/right padding showed a dark sliver between the terminal and the seam). */
+  padding: 2px 0 0;
   overflow: hidden;
   border: 0;
   border-radius: 0;
 }
-.panel-inactive-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 6;
-  display: block;
-  background: var(--inactive-pane-overlay);
-  cursor: text;
-}
 .panel-overlay-root {
   position: relative;
 }
-.panel.focused-pane .panel-inactive-overlay,
-.panel.typing-ready-pane .panel-inactive-overlay {
-  display: none;
+/* Inactive-pane dimming: ONE CSS rule keyed off the uniformly-toggled .focused-pane class. Every pane
+   — terminal, Finder, Preferences, Info, Changes, editor — dims identically; there is no per-pane JS
+   overlay <div> (and so no isVirtualItem special-case). pointer-events:none lets a click on a dimmed
+   pane fall through to focus it (the old overlay swallowed the first click). The focused/typing-ready
+   pane is not dimmed. */
+.panel:not(.focused-pane):not(.typing-ready-pane) .panel-overlay-root::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  background: var(--inactive-pane-overlay);
+  pointer-events: none;
 }
 .terminal.typing-ready {
   border-color: transparent;
@@ -4534,6 +4563,11 @@ body.theme-light .panel.typing-ready-pane {
   position: relative;
   height: 100%;
   min-height: 0;
+  /* min-width:0 is REQUIRED: .info-pane is the body grid item of the .panel grid, whose single column is
+     an implicit `auto` track. Without this, wide YO!info content (long PR/commit/CI lines) forces the
+     item past the panel width and `.panel { overflow:hidden }` CLIPS it — so the user can't scroll right.
+     Constraining it to 0 lets the inner .info-list (overflow:auto) own the horizontal scroll instead. */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background: #11151d;
@@ -4543,6 +4577,7 @@ body.theme-light .panel.typing-ready-pane {
 .info-subview {
   display: none;
   min-height: 0;
+  min-width: 0;
   flex: 1;
   flex-direction: column;
 }
@@ -4748,6 +4783,28 @@ body.theme-light .panel.typing-ready-pane {
   height: 18px;
   flex: 0 0 auto;
 }
+/* "thinking" with three dots that bounce in sequence, so it reads as a live agent, not static text. */
+.yoagent-thinking {
+  display: inline-flex;
+  align-items: baseline;
+}
+.yoagent-thinking-dots {
+  display: inline-flex;
+}
+.yoagent-thinking-dots i {
+  display: inline-block;
+  font-style: normal;
+  animation: yoagent-thinking-bounce 1.25s infinite ease-in-out both;
+}
+.yoagent-thinking-dots i:nth-child(2) { animation-delay: 0.16s; }
+.yoagent-thinking-dots i:nth-child(3) { animation-delay: 0.32s; }
+@keyframes yoagent-thinking-bounce {
+  0%, 70%, 100% { transform: translateY(0); opacity: 0.3; }
+  35% { transform: translateY(-3px); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .yoagent-thinking-dots i { animation: none; opacity: 1; }
+}
 .yoagent-chat-error {
   display: flex;
   flex-wrap: wrap;
@@ -4796,37 +4853,111 @@ body.theme-light .panel.typing-ready-pane {
   overflow-wrap: anywhere;
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
 }
+/* Rendered Markdown brings its own block layout — keep pre-wrap only for the plain-text fallback/user
+   messages. On a markdown body it would preserve the newlines between/inside the generated <ul><li>
+   HTML as blank lines, which is why the bullets looked far too widely spaced. */
+.yoagent-message-body.markdown-body {
+  white-space: normal;
+}
+/* Composer (mockup 044): one rounded container with the input on top and a control row below —
+   the backend "Auto" pill on the left, a subtle Clear, and a circular send-arrow on the right. */
 .yoagent-chat-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.yoagent-chat-form:focus-within {
+  border-color: color-mix(in srgb, var(--brand-green) 55%, var(--line));
 }
 .yoagent-chat-input {
   min-width: 0;
-  height: 30px;
-  padding: 0 8px;
+  width: 100%;
+  height: 26px;
+  padding: 0 2px;
   color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  font: var(--ui-font-size-sm)/1.2 var(--ui-font);
+  background: transparent;
+  border: 0;
+  font: var(--ui-font-size-sm)/1.3 var(--ui-font);
 }
-.yoagent-chat-send {
-  height: 30px;
-  padding: 0 10px;
-  color: #071000;
-  background: var(--brand-green);
-  border: 1px solid var(--auto-border);
-  border-radius: 4px;
-  font: 800 var(--ui-font-size-sm)/1 var(--ui-font);
-}
-.yoagent-chat-actions {
-  display: inline-flex;
+.yoagent-chat-input:focus { outline: none; }
+.yoagent-chat-controls {
+  display: flex;
   align-items: center;
   gap: 6px;
 }
-.yoagent-chat-actions .yoagent-chat-clear {
+.yoagent-chat-controls-spacer { flex: 1 1 auto; }
+.yoagent-backend-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 6px 0 9px;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+}
+.yoagent-backend-pill-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid var(--brand-green);
+}
+.yoagent-backend-pill select {
+  height: 22px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.yoagent-backend-pill select:focus { outline: none; }
+.yoagent-chat-clear {
+  height: 24px;
+  padding: 0 9px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.yoagent-chat-clear:hover:not(:disabled),
+.yoagent-chat-clear:focus-visible {
+  color: var(--text);
+  background: var(--panel2);
+}
+.yoagent-chat-clear:disabled { display: none; }
+.yoagent-chat-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
   height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  color: #071000;
+  background: var(--brand-green);
+  border: 1px solid var(--auto-border);
+  border-radius: 50%;
+  cursor: pointer;
+}
+.yoagent-chat-send:disabled { opacity: 0.5; cursor: default; }
+.yoagent-chat-send-icon { width: 16px; height: 16px; }
+/* YO!agent rendered code blocks: soft rounded boxes (not the editor's near-black slab). */
+.yoagent-chat .markdown-body pre,
+.yoagent-session-summary .markdown-body pre {
+  background: color-mix(in srgb, var(--panel2) 60%, var(--bg));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
 }
 body.theme-light .info-pane {
   background: var(--bg);
@@ -4840,6 +4971,19 @@ body.theme-light .yoagent-global-head,
 body.theme-light .yoagent-headline,
 body.theme-light .yoagent-line {
   color: var(--text);
+}
+/* Light mode: the composer + pills adapt via theme tokens; the rendered code blocks need an explicit
+   light box + dark text (the shared `.markdown-body pre` is dark-only and only the file editor had a
+   light override). Matches the soft gray code boxes in mockup 044. */
+body.theme-light .yoagent-chat .markdown-body pre,
+body.theme-light .yoagent-session-summary .markdown-body pre {
+  background: #f3f4f6;
+  border-color: #e4e7ec;
+  color: #1f2328;
+}
+body.theme-light .yoagent-chat .markdown-body pre code,
+body.theme-light .yoagent-session-summary .markdown-body pre code {
+  color: #1f2328;
 }
 .info-row {
   display: grid;

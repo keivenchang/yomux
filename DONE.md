@@ -29,6 +29,8 @@ dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 - `capture-pane` uses `-J` so a wrapped command is captured as one logical line (a wrap can otherwise split a token and flip a danger verdict).
 - YO marker spins only while working (slow, configurable period), never when idle.
 - Backend safety/correctness pass (P0/P1/P2): YOLO hard-floor always-on, takeover re-acquire, send-action re-verify, worker stop-join, WS frame cap, metadata TTL + bounded cache, settings coerced-keys reporting, transcript tail windowing, and related hardening.
+- DECISION (DOIT.10, resolved/archived): keep the fail-safe TUI prompt-liveness guard as-is. Rejected the "default-to-live" rework — it flips the safety bias toward typing into a stale prompt (false-positive keystrokes), which is worse than the recurring footer whack-a-mole it would fix. The footer-hint band-aid + `-J` capture are the standing solution; the recurring breakage is the correct price of failing safe.
+- Reliable-auto-approve groundwork (DOIT.11, partial): the Claude `PreToolUse` permission hook (`yolomux_lib/claude_permission_hook.py`) + 17 tests landed — reuses the existing rule engine, returns allow/deny/ask programmatically (no keystrokes, no TUI scraping), fails safe. Still OPEN and user-gated (tracked in DOIT.11.md): wiring it into `~/.claude/settings.json`, live validation, standing the keystroke worker down once live; Codex (`app-server` JSON-RPC) deferred.
 
 ### Editor, diff & markdown
 - The editor is plain by default — no auto-loaded diff and no inline diff coloring on open; changes appear only in the explicit diff view (the diff button / Modified-files menu).

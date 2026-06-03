@@ -2,6 +2,8 @@
   "brand.marker": "YO",
   "brand.wordmark.yo": "YO",
   "brand.wordmark.lo": "LO",
+  "brand.tab.info": "YO!info",
+  "brand.tab.agent": "YO!agent",
   "menu.file": "File",
   "menu.view": "View",
   "menu.tabs": "Tabs",
@@ -384,7 +386,7 @@
   "yoagent.backend.auto": "Auto",
   "yoagent.backend.none": "No agent",
   "yoagent.chatAdminPlaceholder": "{name} chat requires admin access",
-  "yoagent.chatPlaceholder": "Ask about agents, repos, files, CI, blockers...",
+  "yoagent.chatPlaceholder": "Ask anything…",
   "yoagent.thinking": "thinking...",
   "yoagent.retry": "Retry",
   "yoagent.ask": "Ask",
@@ -495,5 +497,7 @@
   "yoagent.updated.wrap": "last updated {rel}",
   "det.noBackend": "No AI backend is answering; showing the activity summary. Set or log in a Claude/Codex backend in Preferences to chat.",
   "det.noActivity": "No AI agent activity is available yet.",
-  "det.openPending": "Open / pending:"
+  "det.openPending": "Open / pending:",
+  "pref.appearance.pane_spacing.label": "Pane spacing",
+  "pref.appearance.pane_spacing.help": "Pixels, 0–20. Gap between panes; at 0 they touch and the green active outline covers the divider."
 }

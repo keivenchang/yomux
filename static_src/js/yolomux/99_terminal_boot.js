@@ -32,8 +32,8 @@ function paneFrameControlsHtml(session, options = {}) {
   }
   if (includeDetails) {
     controls.push(disabled
-      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(infoTabLabel)}></button>`
-      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel)}" aria-label="${esc(infoTabLabel)}" aria-pressed="true"></button>`);
+      ? `<button class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')}" ${disabledAttrs(infoTabLabel())}></button>`
+      : `<button type="button" class="tab panel-detail-toggle pane-detail-toggle ${platformWindowControlClass('minimize')} active" data-detail-toggle="${esc(session)}" title="${esc(infoTabLabel())}" aria-label="${esc(infoTabLabel())}" aria-pressed="true"></button>`);
   }
   if (includeMinimize) {
     controls.push(disabled
@@ -1094,7 +1094,7 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
-    theme: terminalThemeForGlobalTheme(),
+    theme: terminalThemeForSession(session),
     minimumContrastRatio: terminalMinimumContrastRatio(),
   });
   term.open(container);
@@ -1159,7 +1159,7 @@ function updateStatus() {
   }
   const activeTmuxSessions = activeSessions.filter(isTmuxSession);
   if (!activeTmuxSessions.length) {
-    statusEl.textContent = `${infoTabLabel} shown`;
+    statusEl.textContent = `${infoTabLabel()} shown`;
     statusEl.removeAttribute('title');
     return;
   }

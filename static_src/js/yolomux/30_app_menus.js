@@ -174,6 +174,7 @@ function setGlobalThemeMode(mode) {
   // follow-app/System) and follows the app automatically via applyGlobalThemeMode's terminal update.
   globalThemeMode = next;
   applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
   return saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
@@ -190,6 +191,7 @@ function cycleGlobalThemeSetting() {
   // follow-app/System; only the Terminal Preferences field pins it to a concrete palette).
   globalThemeMode = next;
   applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  renderSessionButtons();  // rebuild the menu bar so the View -> Theme active marker tracks the new mode
   saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
@@ -460,7 +462,7 @@ function appMenuTree() {
           }),
           fileMenuVirtualCommand(infoItemId, t('menu.file.info.detail')),
           // #40: YO!agent is now a sub-tab of the merged YO!info pane — this entry opens that pane on it.
-          menuCommand(yoagentTabLabel, () => openInfoSubTab('yoagent'), {
+          menuCommand(yoagentTabLabel(), () => openInfoSubTab('yoagent'), {
             checked: itemInLayout(infoItemId) && infoPanelSubTab === 'yoagent',
             detail: t('menu.file.yoagent.detail'),
             iconHtml: appMenuUiIcon('yoagent'),
