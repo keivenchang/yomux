@@ -160,4 +160,10 @@ function rerenderForLocale() {
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true});
   if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
+  // The Modified-files / Changes panels (the Finder's panel AND the standalone Changes tab) localize
+  // their title, FROM/TO, session/sort, and Refresh strings in the panel head — but the loop above
+  // never touched them, so a language switch left them stale. Force-re-render BOTH destinations so the
+  // head repaints in the new locale on the same switch (force bypasses the active-control guard).
+  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
+  if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
 }

@@ -6441,6 +6441,16 @@ body.theme-light .file-explorer-changes-head {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* FROM hugs the left edge of the refs area, TO hugs the right (user: "FROM left, TO right indented").
+   The controls span the full width of their cell/row and push apart instead of bunching together. */
+.file-explorer-changes-head .diff-ref-controls {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+}
 /* #44(d): compact the Modified-files header chrome so the section spends its height on files. The
    comparison box collapses to one tight, borderless line and the close X is a small square. */
 .file-explorer-changes-panel .changes-comparison-head {
@@ -6503,20 +6513,20 @@ body.theme-light .file-explorer-changes-head {
     grid-area: close;
   }
   .file-explorer-changes-head .diff-ref-controls {
+    /* The full-width flex space-between from the base rule above already pins FROM left / TO right
+       across this dedicated refs row — don't re-impose a 3-column grid (it left an empty third and
+       bunched both controls to the left). */
     grid-area: refs;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
-    gap: 4px;
   }
   .file-explorer-changes-head .diff-ref-control {
     min-width: 0;
   }
   .file-explorer-changes-head .diff-ref-control input {
-    width: 100%;
+    width: auto;
     min-width: 0;
   }
   .file-explorer-changes-head .diff-ref-select {
-    width: 100%;
+    width: auto;
     min-width: 0;
   }
   .file-explorer-changes-head .changes-refresh {
