@@ -2120,7 +2120,7 @@ function makeFileTree(paths) {
     // #261: a 0-20px pane spacing setting drives the inter-pane gap; the active pane's green box width
     // == that gap (--pane-split-gap), so it's 0 at spacing 0 and fills the active side up to the line.
     const paneSpacingSrc = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing'"), '#261: runtime reads appearance.pane_spacing');
+    assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 2)"), '#261: runtime reads appearance.pane_spacing with a 2px fallback (matches the backend default)');
     assert.ok(paneSpacingSrc.includes("setProperty('--pane-split-gap'"), '#261: pane spacing drives the --pane-split-gap inter-pane gap');
     assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
     assert.ok(/path: 'appearance\.pane_spacing'[\s\S]{0,90}min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field');
@@ -3670,7 +3670,9 @@ function makeFileTree(paths) {
   assert.ok(body.includes('container: attentionAlerts'), 'attention notifications use the global fixed stack');
   assert.equal(body.includes('displayToastContainer(session)'), false, 'attention notifications do not use pane-local toast stacks');
   const attentionCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.attention-alerts\s*\{[\s\S]*top:\s*12px[\s\S]*right:\s*12px[\s\S]*left:\s*auto/.test(attentionCss), 'global attention stack is fixed to the top-right corner');
+  // The attention toast must clear the topbar (z-index:180): it sits below the topbar's height and above
+  // it in z (200), so the amber Keep/x toast is never painted under the topbar and clipped.
+  assert.ok(/\.attention-alerts\s*\{[\s\S]*top:\s*calc\(var\(--compact-control-height\) \+ 20px\)[\s\S]*right:\s*12px[\s\S]*left:\s*auto[\s\S]*z-index:\s*200/.test(attentionCss), 'global attention stack is pinned top-right BELOW the topbar (clears its height) and above it in z (200)');
 }
 
 {

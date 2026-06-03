@@ -339,7 +339,7 @@ function applyCssSettings() {
   // pane's green "border" (which fills its side of that gap up to the line). At 0: no gap, no green —
   // panes sit flush to the 1px separator. The red needs-* attention ring keeps its own constant width
   // (--pane-tab-panel-ring-width, unchanged) so it stays visible even at spacing 0.
-  const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 4)));
+  const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 2)));
   root.setProperty('--pane-split-gap', `${paneSpacing}px`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);

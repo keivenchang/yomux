@@ -45,7 +45,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "editor_cursor_style": "line",
         "file_explorer_font_size": 13,
         "tab_width": 180,
-        "pane_spacing": 4,
+        "pane_spacing": 2,
         "max_tabs_per_pane": 10,
         "red_reminder_ms": 1550,
         "yolo_rotate_ms": 20000,

@@ -12,6 +12,12 @@ from yolomux_lib.settings import sanitize_settings
 from yolomux_lib.settings import settings_payload
 
 
+def test_pane_spacing_default_is_2px():
+    # The default inter-pane gap is 2px (the JS runtime fallback in 50_editor_settings_runtime.js must
+    # match this so a fresh profile and a reset-to-defaults both render a 2px gap).
+    assert default_settings()["appearance"]["pane_spacing"] == 2
+
+
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {

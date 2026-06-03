@@ -5097,11 +5097,14 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
 .err { color: var(--bad); }
 .attention-alerts {
   position: fixed;
-  top: 12px;
+  /* Clear the topbar: it is z-index:180 and occupies the top band (~--compact-control-height + padding),
+     so a top:12px / z:140 toast rendered INSIDE that band was painted over by the topbar (the Keep/x row
+     was clipped). Drop below the topbar height + a gap, and sit above it in z so it is never covered. */
+  top: calc(var(--compact-control-height) + 20px);
   right: 12px;
   bottom: auto;
   left: auto;
-  z-index: 140;
+  z-index: 200;
   display: flex;
   flex-direction: column;
   gap: 6px;

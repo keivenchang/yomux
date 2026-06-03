@@ -415,7 +415,9 @@ class TmuxWebtermApp:
             "--ignore-rules",
         ]
         if resume and session_id:
-            args = ["codex", "exec", "resume", *common, "--sandbox", "read-only", "--cd", str(PROJECT_ROOT), session_id, "-"]
+            # `codex exec resume` rejects --sandbox/--cd (it restores the original session's cwd + sandbox);
+            # the subprocess already runs with cwd=PROJECT_ROOT. Only the first-turn `exec` takes them.
+            args = ["codex", "exec", "resume", *common, session_id, "-"]
         else:
             args = ["codex", "exec", *common, "--sandbox", "read-only", "--cd", str(PROJECT_ROOT), "-"]
         try:

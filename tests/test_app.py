@@ -515,4 +515,7 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
     assert calls[1][:4] == ["codex", "exec", "resume", "--json"]
     assert "codex-session" in calls[1]
     assert calls[0][calls[0].index("--sandbox") + 1] == "read-only"
-    assert calls[1][calls[1].index("--sandbox") + 1] == "read-only"
+    # `codex exec resume` rejects --sandbox/--cd (it restores the original session's cwd + sandbox), so
+    # the resume call must NOT pass them — passing them raised "unexpected argument '--sandbox'".
+    assert "--sandbox" not in calls[1]
+    assert "--cd" not in calls[1]
