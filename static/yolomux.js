@@ -242,8 +242,11 @@ const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
+// B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
+let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
 let fileEditorCursorStyle = 'line';
+let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cursor) | 'theme' (per-scheme caret)
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
@@ -8218,8 +8221,10 @@ function codeMirrorThemeExtension(api) {
       borderRightColor: scheme.line,
     },
     '.cm-panels': {
+      // shared pane-chrome bar: the find/replace panel matches the tab-strip bar (bright when this pane
+      // is focused, neutral gray when not) instead of a fixed gray — see --pane-bar-bg.
       color: scheme.fg,
-      backgroundColor: scheme.panel2,
+      backgroundColor: 'var(--pane-bar-bg)',
     },
     '.cm-searchMatch': {
       backgroundColor: scheme.dark ? 'rgba(245, 197, 66, 0.62)' : 'rgba(255, 204, 0, 0.78)',
@@ -8805,7 +8810,9 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-scheme-panel2': scheme.panel2,
     '--editor-scheme-gutter-bg': scheme.gutterBg,
     '--editor-scheme-preview-bg': scheme.previewBg,
-    '--editor-cursor': scheme.cursor,
+    // 'yellow' matches the active terminal's caret (#ffd000) for a consistent typing cursor across
+    // terminal + editor; 'theme' keeps the per-scheme caret. Drives both the line and block cursor CSS.
+    '--editor-cursor': fileEditorCursorColor === 'theme' ? scheme.cursor : activeTerminalCursorColor,
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
@@ -9010,6 +9017,21 @@ function toggleEditorWrap() {
   setEditorWrapEnabled(enabled);
 }
 
+// B4 (DOIT.12): toggle showing ALL diff context vs collapsing unchanged regions. Persisted; re-renders
+// every open editor in diff mode (the signature includes `expand`, so the diff view rebuilds).
+function setDiffExpandUnchanged(enabled) {
+  diffExpandUnchanged = enabled === true;
+  storageSet('yolomux.diffExpandUnchanged', diffExpandUnchanged ? '1' : '0');
+  document.querySelectorAll('.file-editor-panel').forEach(panel => {
+    const path = panel.dataset.filePath;
+    if (path) renderFileEditorPanel(panel, fileEditorItemFor(path));
+  });
+}
+
+function toggleDiffExpandUnchanged() {
+  setDiffExpandUnchanged(!diffExpandUnchanged);
+}
+
 function setEditorLineNumbersEnabled(enabled) {
   fileEditorLineNumbersEnabled = enabled === true;
   writeStoredEditorLineNumbers(fileEditorLineNumbersEnabled);
@@ -9033,6 +9055,10 @@ function boolSetting(path, fallback) {
 
 function normalizeEditorCursorStyle(value) {
   return value === 'block' ? 'block' : 'line';
+}
+
+function normalizeEditorCursorColor(value) {
+  return value === 'theme' ? 'theme' : 'yellow';
 }
 
 function applyEditorCursorStyle() {
@@ -9183,6 +9209,7 @@ function applySettingsPayload(payload, options = {}) {
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'line'));
+  fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', 'yellow'));
   fileEditorThemeMode = readConfiguredEditorScheme();
   if (options.initial || options.applyEditorDefaults) {
     fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
@@ -13681,6 +13708,10 @@ function preferenceSections() {
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
       ], help: t('pref.appearance.editor_cursor_style.help')},
+      {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'select', choices: [
+        {value: 'yellow', label: t('pref.appearance.editor_cursor_color.yellow')},
+        {value: 'theme', label: t('pref.appearance.editor_cursor_color.theme')},
+      ], help: t('pref.appearance.editor_cursor_color.help')},
       {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
       {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
@@ -15485,6 +15516,7 @@ function createFileEditorPanel(item) {
         <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${diffExpandUnchanged ? 'true' : 'false'}" hidden>↕</button>
         <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
         <button type="button" class="file-editor-theme-panel" title="${esc(t('editor.theme'))}" aria-label="${esc(t('editor.theme'))}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
@@ -15546,6 +15578,11 @@ function createFileEditorPanel(item) {
     setFileEditorViewMode(path, nextMode, item);
     if (nextMode === 'diff') refreshOpenFileDiff(path, {silent: true});
     renderFileEditorPanel(panel, item);
+  });
+  panel.querySelector('.file-editor-diff-expand-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleDiffExpandUnchanged();  // B4: show all context vs collapse unchanged runs (persisted, rebuilds the diff)
   });
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   diffRefPanel?.addEventListener('change', event => {
@@ -16027,12 +16064,27 @@ function diffOverviewCollector() {
   };
 }
 
-function diffOverviewChunkPercentages(chunks, totalLines) {
-  return chunks.map(chunk => ({
-    ...chunk,
+// B3 (DOIT.12): position one overview tick for a diff chunk. When the CM view is laid out, use its REAL
+// rendered geometry (lineBlockAt/contentHeight) so the tick tracks collapsed-fold space and re-tracks when
+// a fold expands; before first measure (or with no view) fall back to the line-number fraction. Returns
+// {top, height} as percentages of the scroll track, plus scrollTop (px) for click-to-scroll (null = use %).
+function diffOverviewTickPosition(view, chunk, totalLines) {
+  if (view && view.state && view.contentHeight > 1) {
+    const doc = view.state.doc;
+    const startLine = Math.max(1, Math.min(doc.lines, chunk.start));
+    const endLine = Math.max(startLine, Math.min(doc.lines, chunk.end));
+    const topBlock = view.lineBlockAt(doc.line(startLine).from);
+    const endBlock = view.lineBlockAt(doc.line(endLine).from);
+    const contentHeight = Math.max(1, view.contentHeight);
+    const top = Math.max(0, Math.min(100, (topBlock.top / contentHeight) * 100));
+    const bottom = Math.max(top, Math.min(100, (endBlock.bottom / contentHeight) * 100));
+    return {top, height: Math.max(0.8, bottom - top), scrollTop: topBlock.top};
+  }
+  return {
     top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
     height: Math.max(0.8, ((chunk.end - chunk.start + 1) / Math.max(1, totalLines)) * 100),
-  }));
+    scrollTop: null,
+  };
 }
 
 function diffOverviewChunks(diff, totalLines) {
@@ -16060,7 +16112,7 @@ function diffOverviewChunks(diff, totalLines) {
       newLine += 1;
     }
   }
-  return diffOverviewChunkPercentages(collector.finish(), totalLines);
+  return collector.finish();  // raw {kind,start,end}; positioning happens in updateCodeMirrorDiffOverview
 }
 
 function diffOverviewChunksFromDocuments(original, current, totalLines) {
@@ -16078,36 +16130,63 @@ function diffOverviewChunksFromDocuments(original, current, totalLines) {
     if (rightLine !== undefined) collector.add('add', index + 1);
     if (leftLine !== undefined) collector.add('remove', Math.min(index + 1, totalLines));
   }
-  return diffOverviewChunkPercentages(collector.finish(), totalLines);
+  return collector.finish();  // raw {kind,start,end}; positioning happens in updateCodeMirrorDiffOverview
 }
 
 function updateCodeMirrorDiffOverview(panel, container, state, currentText, original) {
+  // Remember the inputs so a fold expand/collapse (geometryChanged) can REBUILD the ticks against the new
+  // rendered layout — see codeMirrorDiffOverviewListener (B3: ticks were built once and went stale on fold).
+  if (panel) panel._diffOverviewCtx = {container, state, currentText, original};
   container?.querySelector?.('.cm-diff-overview')?.remove();
   const totalLines = Math.max(String(currentText || '').split('\n').length, String(original || '').split('\n').length, 1);
   const parsedChunks = diffOverviewChunks(state?.diff || '', totalLines);
   const chunks = parsedChunks.length ? parsedChunks : diffOverviewChunksFromDocuments(original, currentText, totalLines);
   if (!container || !chunks.length) return;
+  const view = panel?._cmView;
   const overview = document.createElement('div');
   overview.className = 'cm-diff-overview';
   overview.setAttribute('aria-hidden', 'true');
   for (const chunk of chunks) {
+    const pos = diffOverviewTickPosition(view, chunk, totalLines);
     const tick = document.createElement('button');
     tick.type = 'button';
     tick.className = `cm-diff-overview-tick ${chunk.kind}`;
-    tick.style.top = `${chunk.top}%`;
-    tick.style.height = `${chunk.height}%`;
+    tick.style.top = `${pos.top}%`;
+    tick.style.height = `${pos.height}%`;
     tick.title = `${chunk.kind === 'add' ? 'Added' : 'Removed'} lines ${chunk.start}-${chunk.end}`;
     tick.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
-      const scrollTarget = panel._cmView?.scrollDOM || container.querySelector('.cm-scroller') || container.querySelector('.cm-mergeView');
+      const scrollTarget = view?.scrollDOM || container.querySelector('.cm-scroller') || container.querySelector('.cm-mergeView');
       if (!scrollTarget) return;
-      const maxTop = Math.max(0, scrollTarget.scrollHeight - scrollTarget.clientHeight);
-      scrollTarget.scrollTop = Math.round(maxTop * (chunk.top / 100));
+      // Prefer the chunk's REAL rendered top (reflects folds); fall back to the % approximation.
+      if (pos.scrollTop != null) scrollTarget.scrollTop = Math.round(pos.scrollTop);
+      else scrollTarget.scrollTop = Math.round(Math.max(0, scrollTarget.scrollHeight - scrollTarget.clientHeight) * (pos.top / 100));
     });
     overview.appendChild(tick);
   }
   container.appendChild(overview);
+}
+
+// B3: rebuild the diff overview ticks whenever the editor's rendered geometry changes (a fold expanding/
+// collapsing fires heightChanged), so the ticks re-track instead of going stale. Debounced via rAF.
+function scheduleDiffOverviewRebuild(panel) {
+  const ctx = panel?._diffOverviewCtx;
+  if (!ctx || panel._diffOverviewRebuildQueued) return;
+  panel._diffOverviewRebuildQueued = true;
+  requestAnimationFrame(() => {
+    panel._diffOverviewRebuildQueued = false;
+    if (panel._diffOverviewCtx && panel._cmMode === 'diff') {
+      const c = panel._diffOverviewCtx;
+      updateCodeMirrorDiffOverview(panel, c.container, c.state, c.currentText, c.original);
+    }
+  });
+}
+
+function codeMirrorDiffOverviewListener(api, panel) {
+  return api.EditorView.updateListener.of(update => {
+    if (update.geometryChanged || update.heightChanged) scheduleDiffOverviewRebuild(panel);
+  });
 }
 
 function installCodeMirrorDiffCollapsedScrollGuard(panel, container) {
@@ -16165,7 +16244,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';
   const currentText = diffTargetIsCurrent ? String(state.content || '') : String(state.diffWorking || '');
   const diffEditsAllowed = diffTargetIsCurrent;
-  const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});
+  const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef, expand: diffExpandUnchanged});
   installCodeMirrorDiffCollapsedScrollGuard(panel, container);
   if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
     installCodeMirrorDiffResizeObserver(panel, item, path, container);
@@ -16203,12 +16282,16 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       },
       b: {
         doc: currentText,
-        extensions: diffEditsAllowed
-          ? [
-              ...codeMirrorExtensions(api, panel, path, {wrap: false}),
-              codeMirrorWorkingUpdateExtension(api, panel, path),
-            ]
-          : codeMirrorReadOnlyExtensions(api, path, panel, {wrap: false}),
+        extensions: [
+          ...(diffEditsAllowed
+            ? [
+                ...codeMirrorExtensions(api, panel, path, {wrap: false}),
+                codeMirrorWorkingUpdateExtension(api, panel, path),
+              ]
+            : codeMirrorReadOnlyExtensions(api, path, panel, {wrap: false})),
+          // B3: panel._cmView is this `b` editor (side-by-side), so the overview rebuild listener lives here.
+          codeMirrorDiffOverviewListener(api, panel),
+        ],
       },
       parent: container,
       revertControls: 'a-to-b',
@@ -16216,7 +16299,8 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       // NO intra-line word/token highlight — even a 1-char edit shows whole-line red + whole-line green.
       highlightChanges: false,
       gutter: true,
-      collapseUnchanged: {margin: 3, minSize: 8},
+      // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
+      ...(diffExpandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
     });
     panel._cmView = panel._cmMergeView.b;
     trackCodeMirrorThemeViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
@@ -16231,9 +16315,11 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           highlightChanges: false,
           gutter: true,
           mergeControls: !readOnlyMode && diffEditsAllowed,
-          collapseUnchanged: {margin: 3, minSize: 8},
+          // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
+          ...(diffExpandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
         }),
         ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path) : codeMirrorReadOnlyExtensions(api, path, panel)),
+        codeMirrorDiffOverviewListener(api, panel),  // B3: rebuild overview ticks on fold/geometry change
       ],
     });
     panel._cmView = new api.EditorView({
@@ -16351,11 +16437,12 @@ function renderFileEditorPanel(panel, item) {
   const findButton = panel.querySelector('.file-editor-find-panel');
   const diffButton = panel.querySelector('.file-editor-diff-panel');
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
+  const diffExpandButton = panel.querySelector('.file-editor-diff-expand-panel');
   const crossSplitButton = panel.querySelector('.file-editor-cross-split-panel');
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   const themeButton = panel.querySelector('.file-editor-theme-panel');
   const content = panel.querySelector('.file-editor-content');
-  const textControls = [modeControl, gutterButton, wrapButton, findButton, diffButton, diffRefPanel, crossSplitButton, reloadButton];
+  const textControls = [modeControl, gutterButton, wrapButton, findButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
   updateEditorThemeButton(themeButton);
   if (!state) {
     setElementsHidden(textControls, true);
@@ -16423,6 +16510,11 @@ function renderFileEditorPanel(panel, item) {
   if (diffRefPanel) {
     diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
     syncDiffRefControlValues(diffRefPanel);
+  }
+  if (diffExpandButton) {
+    // B4: the expand/collapse-all-unchanged toggle is diff-only; reflect the persisted state.
+    diffExpandButton.hidden = mode !== 'diff' || state.kind !== 'text';
+    diffExpandButton.setAttribute('aria-pressed', diffExpandUnchanged ? 'true' : 'false');
   }
   updateFileEditorToolbarSeparators(panel);
   if (state.kind === 'image') {

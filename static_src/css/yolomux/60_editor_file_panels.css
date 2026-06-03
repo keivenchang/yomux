@@ -380,6 +380,11 @@
   object-fit: contain;
   background: #0b0e14;
 }
+/* Light editor: the image backdrop + the transparency checkerboard are tuned dark
+   (white-on-dark checker). Repaint as a light backdrop with a dark checker (DOIT.12 B5). */
+body.editor-theme-light .file-editor-image {
+  background: #eef1f5;
+}
 .file-editor-status {
   padding: 3px 10px;
   font-family: var(--mono-font);
@@ -499,6 +504,16 @@
   font-size: 0.9em;
 }
 .markdown-body pre { background: #0b0e14; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; overflow: auto; margin: 6px 0; }
+/* Light mode (DOIT.12 B5): the near-black code block is a dark box on the light app
+   chrome. Scoped to the chrome-themed markdown surfaces (YO!agent chat/summary, the
+   transcript summary) — the file-editor preview's `pre` is handled separately under
+   `body.editor-theme-light .file-editor-content` so a dark editor keeps a dark block. */
+body.theme-light .yoagent-message-body pre,
+body.theme-light .yoagent-session-summary-body pre,
+body.theme-light .summary-preview pre {
+  color: #1f2937;
+  background: #f3f6fa;
+}
 .markdown-body pre code {
   color: inherit;
   background: transparent;
@@ -588,6 +603,12 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   border-radius: 3px;
   outline: none;
   box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.18);
+}
+/* Light mode (DOIT.12 B5): the rename box hardcodes a near-black fill while its text
+   uses the theme-aware --text (dark in light) → dark-on-dark while renaming. */
+body.theme-light .file-tree-rename-input {
+  color: #1f2937;
+  background: #ffffff;
 }
 .file-explorer-toolbar {
   display: flex;
@@ -1069,15 +1090,33 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 body.editor-theme-light .file-editor-diff-codemirror {
   --code-diff-add: #00a152;
   --code-diff-remove: #d81f32;
-  --diff-add-line-bg: #e6ffec;
-  --diff-remove-line-bg: #ffebe9;
+  /* Light diff: the pleasant soft green/pink palette the user picked (image 025) — clearly visible
+     on the white editor but light enough for dark code text on top (was the near-white #e6ffec/
+     #ffebe9). Gutters use the deeper accent tone from the same palette. */
+  --diff-add-line-bg: #d2f0d6;
+  --diff-remove-line-bg: #fbe5e5;
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-changedLineGutter {
   color: #116329;
-  background: #dafbe1;
+  background: #a8dfb2;
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
-  background: #ffebe9;
+  background: #f1c5c5;
+}
+/* Light editor (DOIT.12 B5): the overview-ruler ticks kept saturated dark green/red
+   that mismatched the light diff line fills — match them to --code-diff-*. */
+body.editor-theme-light .file-editor-diff-codemirror .cm-diff-overview-tick.add {
+  background: #00a152;
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-diff-overview-tick.remove {
+  background: #d81f32;
+}
+/* Inline (non-mergeview) editor diff decorations read --code-diff-* from the content
+   scope; the light values were scoped ONLY to .file-editor-diff-codemirror, so the
+   inline editor used the dark mix in editor-light. Re-map at the content scope. */
+body.editor-theme-light .file-editor-content {
+  --code-diff-add: #00a152;
+  --code-diff-remove: #d81f32;
 }
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {
@@ -1146,13 +1185,18 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
+  /* #3 (image 008): the editor tool buttons (#, wrap, find, theme, save) sit on the RIGHT, and the
+     toolbar reads like the pane's tab-strip "bar" (same --pane-tab-strip-bg). In diff mode the FROM/TO
+     panel keeps its order:-1 + margin-inline-end:auto, which already pushes the buttons to the right. */
+  justify-content: flex-end;
   gap: 2px;
   min-height: 26px;
   padding: 2px 6px;
   overflow-x: auto;
   scrollbar-width: none;
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel2) 70%, var(--bg) 30%);
+  /* shared pane-chrome bar: bright when this pane is focused, neutral gray when not (image 011). */
+  background: var(--pane-bar-bg);
 }
 .file-editor-toolbar::-webkit-scrollbar {
   display: none;
@@ -1193,6 +1237,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
 .file-editor-wrap-panel,
 .file-editor-find-panel,
 .file-editor-diff-panel,
+.file-editor-diff-expand-panel,
 .file-editor-theme-panel,
 .file-editor-reload-panel,
 .file-editor-cross-split-panel,
@@ -1219,6 +1264,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
 .file-editor-wrap-panel,
 .file-editor-gutter-panel,
 .file-editor-find-panel,
+.file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
 .file-editor-theme-panel {
   min-width: 20px;
@@ -1226,6 +1272,12 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
   display: grid;
   place-items: center;
   padding: 0;
+}
+/* B4: the diff expand/collapse-all toggle goes green when ON (showing all context), like a pressed control. */
+.file-editor-diff-expand-panel[aria-pressed="true"] {
+  color: var(--pane-tab-active-text);
+  background: var(--brand-green);
+  border-color: var(--brand-green);
 }
 .file-editor-save-panel:disabled {
   opacity: 0.44;
@@ -1238,6 +1290,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
 .file-editor-wrap-panel:hover,
 .file-editor-wrap-panel.active,
 .file-editor-find-panel:hover,
+.file-editor-diff-expand-panel:not([aria-pressed="true"]):hover,
 .file-editor-cross-split-panel:hover,
 .file-editor-theme-panel:hover,
 .file-editor-reload-panel:hover {
@@ -1528,7 +1581,10 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror .cm-panels,
 .file-editor-codemirror-panel .cm-panels {
   color: var(--text);
-  background: var(--panel2);
+  /* shared pane-chrome bar (same token as the tab strip + editor toolbar): bright when
+     this pane is focused, neutral when not — the find/replace panel is a pane-head bar
+     like the others, so it INHERITS --pane-bar-bg rather than pinning a static --panel2. */
+  background: var(--pane-bar-bg);
   border-color: var(--line);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
 }
@@ -1543,8 +1599,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   column-gap: var(--cm-search-column-gap);
   row-gap: 4px;
   padding: 5px 34px 5px 7px;
-  font: 700 var(--ui-font-size-sm)/1 var(--control-font);
-  font-stretch: condensed;
+  font: 700 var(--ui-font-size-sm)/1 var(--ui-font);
 }
 .file-editor-codemirror .cm-search::before,
 .file-editor-codemirror-panel .cm-search::before {
@@ -1600,8 +1655,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   background-image: none;
   border: 1px solid #6f7b8c;
   border-radius: 4px;
-  font: 700 0/1 var(--control-font);
-  font-stretch: condensed;
+  font: 700 0/1 var(--ui-font);
   white-space: nowrap;
 }
 .file-editor-codemirror .cm-search .cm-button::before,
@@ -1628,8 +1682,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror-panel .cm-search .cm-button[name="replaceAll"]::before {
   content: "All";
   font-size: var(--ui-font-size-2xs);
-  font-family: var(--control-font);
-  font-stretch: condensed;
+  font-family: var(--ui-font);
 }
 .file-editor-codemirror .cm-search .cm-button[name="replace"]::before,
 .file-editor-codemirror-panel .cm-search .cm-button[name="replace"]::before {
@@ -1673,8 +1726,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   grid-row: 1;
   min-width: 4ch;
   color: #c9ff7a;
-  font: 800 var(--ui-font-size-xs)/1 var(--control-font);
-  font-stretch: condensed;
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
   white-space: nowrap;
 }
 .file-editor-codemirror .cm-search .cm-button:hover,
@@ -1698,10 +1750,19 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid #6f7b8c;
   border-radius: 4px;
-  font: 700 0/1 var(--control-font);
-  font-stretch: condensed;
+  font: 700 0/1 var(--ui-font);
   white-space: nowrap;
   cursor: pointer;
+}
+/* CodeMirror's baseTheme injects `.cm-panel.cm-search label { font-size: 80% }` at RUNTIME — a
+   specificity TIE (0,2,1) with the rule above that wins on source order (CM mounts its <style>
+   after our <link>). That un-hides CM's native toggle text ("match case"/"regexp"/"by word"),
+   which overflows the 24px box and collides with our compact ::after glyph (images 019/021).
+   The panel carries BOTH classes (verified: class="cm-search cm-panel"), so qualifying with
+   .cm-panel here is +1 class (0,3,1) and wins the tie — leaving only the "Aa"/".*"/"word" glyph. */
+.file-editor-codemirror .cm-search.cm-panel label,
+.file-editor-codemirror-panel .cm-search.cm-panel label {
+  font-size: 0;
 }
 .file-editor-codemirror .cm-search label:nth-of-type(1),
 .file-editor-codemirror-panel .cm-search label:nth-of-type(1) {
@@ -1720,8 +1781,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 }
 .file-editor-codemirror .cm-search label::after,
 .file-editor-codemirror-panel .cm-search label::after {
-  font: 800 var(--ui-font-size-2xs)/1 var(--control-font);
-  font-stretch: condensed;
+  font: 800 var(--ui-font-size-2xs)/1 var(--ui-font);
 }
 .file-editor-codemirror .cm-search label:nth-of-type(1)::after,
 .file-editor-codemirror-panel .cm-search label:nth-of-type(1)::after {
@@ -2002,6 +2062,14 @@ body.editor-theme-light .file-editor-code-preview .md-code {
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
   background-size: 24px 24px;
   overflow: auto;
+}
+body.editor-theme-light .file-editor-image-panel {
+  background-color: #e9edf2;
+  background-image:
+    linear-gradient(45deg, rgba(15, 23, 42, 0.07) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(15, 23, 42, 0.07) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(15, 23, 42, 0.07) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(15, 23, 42, 0.07) 75%);
 }
 .file-editor-image-panel.fit-size {
   place-items: center;

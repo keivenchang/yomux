@@ -4,6 +4,32 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 detail (file/symbol, fix, tests) lives in the git commit history on `main`. Each item shipped to
 dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 
+## 2026-06-03
+
+### Pane chrome — one shared, state-driven theming system (no per-button/per-bar one-offs)
+- All pane-head BARS (tab strip, info/detail row, editor toolbar, CodeMirror find panel) read one `--pane-bar-bg`: the bright tab-strip green when the pane is focused, neutral gray when not — so the info bar/find no longer stay green when unfocused (DOIT.12 B5 / images 010/011).
+- All control BUTTONS (terminal/agent pill, window-step, actions, info toggle, minimize, expand `+`, close) read `--pane-ctl-*`: rest = white (light) / near-black (dark), pressed/active = green. Killed the navy active-tab and always-green `+` one-offs (DOIT.12 B5 toolbar `.tab.active`; image 009). The agent pill is green when active, `+` is white/black.
+- Light-mode tab text fixed (was white-on-white): `--pane-tab-text` dark in light, plus a dark override for the `.session-button-name/dir/detail` spans that hardcoded near-white. Added a headless contrast guard (computed text color vs tab bg) — the gap that let it ship was a browser test measuring backgrounds but never nested text colors.
+- Inactive-pane dimming is ONE CSS rule keyed off the uniformly-toggled `.focused-pane` class; deleted the per-pane JS overlay + `isVirtualItem` special-casing (DOIT.12 B2).
+
+### Topbar
+- The "big space" above the green tabs was the topbar's own cool-gray background showing where the shorter pills sit centered in a too-tall bar (DOIT.12 A1/A2). Painted the topbar the green tab-strip color (`--pane-tab-strip-bg`) in both themes so it's one continuous green with no band, tightened its height (`+4px`, `line-height:1` on the brand title), and completed the Notify-toggle active state. Guard in layout_url.
+- Topbar light-mode coloring sweep (DOIT.12 A4): defined `--accent` per theme (was undefined → literal light-blue hover hairline in both themes); and light overrides for the menu-count badge halo, the near-black `.transport-warning` tooltip, the garish `#tabMetaToggle.active` green (→ `#5f9800`), and the invisible menu row separator.
+
+### Auto-approve (YOLO) reliability
+- Claude `PreToolUse` permission hook shipped (DOIT.11): `yolomux_lib/claude_permission_hook.py` decides allow/deny/ask from the agent's structured request via the existing `yolo_rules` engine (no TUI scraping, no keystrokes), with 17 tests pinning the mapping + the hard-floor + fail-safe. **Remaining is user-gated / deferred and tracked in TODO Big-Bang #1**: the manual `~/.claude/settings.json` install (must not be auto-edited), live validation, the keystroke-worker stand-down (gated on the hook being live), and the Codex `app-server` re-architecture. DOIT.11.md is kept as the research record until those land.
+
+### Diff
+- Diff "expand / collapse all unchanged" toolbar toggle (DOIT.12 B4): a diff-only button (persisted `diffExpandUnchanged`, green when on) that shows full context (omits `collapseUnchanged`) or restores the collapsed runs, in both side-by-side and unified diff; the config signature includes it so toggling rebuilds. Localized in all 13 locales.
+- Diff overview-ruler ticks were misaligned and went stale after expanding an "N unchanged lines" fold (DOIT.12 B3). Now positioned from the editor's rendered geometry (`lineBlockAt`/`contentHeight`, so they track folded space; line-fraction fallback before first measure), click-to-scroll jumps to the chunk's real rendered top, and a CM `updateListener` rebuilds the ticks on any geometry/height change (incl. fold expand/collapse) on both the unified and side-by-side views.
+
+### Build / structural
+- `10_topbar_menus.css` had a TRUNCATED `.notify-toggle.active {` rule whose body was split into the next partial — it only rebalanced by accident in the bundle (DOIT.12 B1). Completed the rule, removed the orphaned body, and added a `check_css_braces()` build step that fails on any brace-unbalanced CSS partial (with a regression test). The check immediately caught the latent split.
+
+### Light mode — full surface sweep (DOIT.12 B5, all HIGH items in AUDIT-LIGHTMODE.md)
+- Cleared every HIGH "dark box / invisible text on white" bug. The root cause was component rules hardcoding a dark color literal with no `body.theme-light` / `body.editor-theme-light` counterpart, so the dark value rendered on the white surface. Fixed surfaces: the whole session/tab/file hover popover (near-black-green box + pale-green text → light card, dark text, re-tinted the label/value/desc/legend cluster — the audit's "highest single fix"); the neutral session-state badges + inactive YO marker (dark-slate chips → light gray); the command palette + keyboard-shortcuts dialog (were dark-on-dark: dark fill with theme-aware `--text` → light cards, dark rows/kbd); the global-reset warning bar (cream-on-brown wash → light amber tint, dark amber text); the `.agent-icon` glyphs (white → dark); the drop-target fill, the file-missing tab (dark maroon → light error tint), the server-update banner (dark navy slab → white), the file-tree current/repo-non-main/indexed rows (near-white-green / washed-amber text → darkened) + a visible selection ring; the rename input (near-black fill with `--text` → white); YO!agent markdown code blocks (`#0b0e14` → light); and in the light editor: the image backdrop + transparency checkerboard (dark/inverted → light), the diff overview-ruler ticks + inline diff decorations (saturated/dark → matched to the light `--code-diff-*` fills).
+- Made it durable: two headless `test_browser_layout.py` guards (`test_light_mode_surfaces_are_readable_not_dark_boxes`, `test_light_editor_image_backdrop_is_light`) build each surface in light mode and assert backgrounds are light AND nested text meets a real contrast ratio (≥3.0). This closes the exact gap that let the white-on-white tab text ship — the prior tests measured backgrounds but never nested text colors. Verified live with a headless computed-color probe across all surfaces (every fixed text 5–15:1 on its surface). The pane-head `.tab.active` and white-on-white tab text were already cleared via the pane-chrome refactor (above); CSS brace/parse enforcement (audit Durable Fix C) shipped as `check_css_braces()`.
+
 ## 2026-06-02 (versions 0.1.76 – 0.1.101)
 
 ### Internationalization (i18n)

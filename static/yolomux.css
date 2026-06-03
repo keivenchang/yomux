@@ -14,6 +14,9 @@
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
   --accent-gold: #f5c542;
+  /* DOIT.12 A4: --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
+     literal light-blue (#6ea8fe) in BOTH themes. Define it per theme (light gets a darker, readable blue). */
+  --accent: #6ea8fe;
   --drop-outline: #ffffff;
   --drop-outline-text: #2b2100;
   --drop-outline-bg: rgba(245, 197, 66, 0.18);
@@ -32,7 +35,7 @@
   --bad: #ff6673;
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
-  --inactive-pane-overlay: rgba(178, 190, 210, 0.20);
+  --inactive-pane-overlay: rgba(178, 190, 210, 0.14);
   --inactive-tab-bg: #293240;
   --inactive-tab-bg-hover: #354052;
   --inactive-tab-border: #667286;
@@ -44,9 +47,11 @@
   --pane-tab-active-bg: #86d600;
   --pane-tab-active-border: #9be33d;
   --pane-tab-active-accent: #86d600;
-  --pane-tab-unfocused-active-text: #f1f9e8;
-  --pane-tab-unfocused-active-bg: #4f9e3a;
-  --pane-tab-unfocused-active-border: #8fd069;
+  /* image 003/004: an inactive pane's ACTIVE tab keeps the SAME full green as the focused pane's active
+     tab (no lightening) — alias the unfocused-active tokens to the focused ones (light + dark). */
+  --pane-tab-unfocused-active-text: var(--pane-tab-active-text);
+  --pane-tab-unfocused-active-bg: var(--pane-tab-active-bg);
+  --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
   --pane-tab-strip-bg: #1f3026;
   --pane-tab-yolo-text: #071000;
   --pane-tab-yolo-bg: #76b900;
@@ -231,6 +236,14 @@ body.theme-light {
   color-scheme: light;
   /* The pane tab-strip container reads greenish-light (matching the detail row), not the old cool gray. */
   --pane-tab-strip-bg: #dce8d2;
+  /* image 003/004: light-mode inactive/minimized tabs were white; tint them a very-light green a hair
+     lighter than the strip so a tab still reads as a tab (dark mode keeps its own #285a2f). */
+  --pane-inactive-tab-bg: #e6f1dd;
+  --pane-inactive-tab-bg-hover: #d8ebcb;
+  /* image 008: the inactive-tab text token (#dfe6ef, tuned for the DARK tab bg) was near-white on the
+     new light-green tabs/strip — white-on-white. Light mode needs DARK tab text. (Active tabs keep
+     their own --pane-tab-active-text white-on-green.) */
+  --pane-tab-text: #1f2937;
   /* Pane frame controls (minimize / zoom) had NO light values, so they rendered as dark "black"
      squares on the light header. Give the minimize button a light fill (dark glyph via --pc-control-fg)
      and keep the zoom button green so its built-in light glyph stays readable. */
@@ -248,9 +261,12 @@ body.theme-light {
   --pane-tab-active-text: #ffffff;
   --pane-tab-active-border: #3f8f2d;
   --pane-tab-active-accent: #4f9e3a;
-  --pane-tab-unfocused-active-bg: #d2ecc2;
-  --pane-tab-unfocused-active-text: #16320c;
-  --pane-tab-unfocused-active-border: #7bbf5a;
+  /* image 003/004: an inactive pane's active tab is full green here too. MUST re-alias in this theme
+     block — `--unfocused: var(--focused)` set only in :root captures the DARK focused value and inherits
+     it, so the light override of --pane-tab-active-* would otherwise be ignored. */
+  --pane-tab-unfocused-active-text: var(--pane-tab-active-text);
+  --pane-tab-unfocused-active-bg: var(--pane-tab-active-bg);
+  --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
   --pane-tab-panel-head-text: #1f2937;
   --pane-tab-panel-detail-bg: #dce8d2;
   --pane-detail-bg: #e7edf5;
@@ -274,6 +290,7 @@ body.theme-light {
   --brand-green: #5f9800;
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
+  --accent: #2563eb;
   --drop-outline: #1d4ed8;
   --drop-outline-text: #071327;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
@@ -295,7 +312,7 @@ body.theme-light {
   /* #254/#259: in light mode dim inactive panes more (was a faint cool rgba(91,101,115,0.14)) — a
      NEUTRAL gray at that darkness, no red cast (user superseded the earlier warm value). Dark-mode
      token (top of file) is left as-is. */
-  --inactive-pane-overlay: rgba(90, 96, 105, 0.24);
+  --inactive-pane-overlay: rgba(90, 96, 105, 0.16);
   --inactive-tab-bg: #e3e8f0;
   --inactive-tab-bg-hover: #d7deea;
   --inactive-tab-border: #9aa6b6;
@@ -332,7 +349,10 @@ body {
   font: var(--ui-font-size)/1.4 var(--ui-font);
 }
 .topbar {
-  min-height: calc(var(--compact-control-height) + 8px);
+  /* DOIT.12 A1/A2: the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
+     the shorter pills sit centered in a too-tall bar. Fix: paint the topbar the same green as the tab
+     strip (so it's one continuous green, no contrasting band) and tighten the height (+4px, not +8px). */
+  min-height: calc(var(--compact-control-height) + 4px);
   position: relative;
   z-index: 180;
   display: grid;
@@ -341,9 +361,14 @@ body {
   gap: 8px;
   padding: 3px 8px;
   border-bottom: 1px solid var(--line);
-  background: #0b0d11;
+  background: var(--pane-tab-strip-bg);
   overflow: visible;
   white-space: nowrap;
+}
+/* cap the brand title's line-box so it doesn't make the bar tall (it drove most of the centering band). */
+.topbar .title,
+.topbar .brand {
+  line-height: 1;
 }
 .title {
   font-size: var(--ui-font-size-xl);
@@ -1014,7 +1039,24 @@ body.theme-light .topbar-language {
   transform: rotate(90deg);
 }
 body.theme-light .topbar {
-  background: #eef3f9;
+  background: var(--pane-tab-strip-bg);
+}
+/* DOIT.12 A4: light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
+   on the light (now green) bar. */
+body.theme-light #tabMetaToggle.active {
+  background: #5f9800;           /* match the .app-menu-ui-icon.active light tuning, not the garish #8cc63f */
+  border-color: #5f9800;
+}
+body.theme-light .app-menu-button-badge {
+  border-color: var(--brand-green); /* border matches the green count fill — drops the bright #b8ee5c halo */
+}
+body.theme-light .transport-warning::after {
+  color: #5a1116;                /* light tooltip (dark-red text on a light-red surface), not near-black */
+  background: #fdeaec;
+  border-color: #d56b7a;
+}
+body.theme-light .app-menu-tab-command + .app-menu-tab-command {
+  border-top-color: rgba(70, 80, 95, 0.22);  /* a visible row separator on the white menu */
 }
 body.theme-light .app-menu-button {
   color: var(--text);
@@ -1112,10 +1154,13 @@ body.theme-light .latency-meter {
   background: #ffffff;
   border-color: var(--line);
 }
+/* B1/DOIT.12: this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
+   concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
+   toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
 .notify-toggle.active {
-  color: #082014;
-  background: #52d273;
-  border-color: #9befad;
+  color: #081205;
+  background: var(--brand-green);
+  border-color: var(--brand-green);
 }
 .session-button-number {
   flex: 0 0 auto;
@@ -1340,6 +1385,24 @@ body.theme-light .latency-meter {
   background: #3a3524;
   border-color: #f0b85d;
 }
+/* Light mode: the NEUTRAL badges/markers hardcode dark slate boxes (the saturated
+   status colors — red/blue/green — already read on white and are left alone).
+   Repaint the neutral chips as light gray with dark text (DOIT.12 B5). */
+body.theme-light .session-state-badge {
+  color: #52617a;
+  background: #eef1f5;
+  border-color: #cdd5e0;
+}
+body.theme-light .session-state-done {
+  color: #3a4659;
+  background: #e2e8f1;
+  border-color: #b8c2d2;
+}
+body.theme-light .session-yolo-marker.inactive {
+  color: #52617a;
+  background: #e2e6ec;
+  border-color: #c2cad6;
+}
 /* DOIT.6 #23: the YO ball spins ONLY when the agent is working, and SLOWLY — at the
    "Active YO rotation period" setting (appearance.yolo_rotate_ms, default 20s), not a fast hardcoded
    value. An idle marker (auto-on or not) is STATIC — there is no ambient idle rotation rule.
@@ -1538,6 +1601,40 @@ body.theme-light .ci-indicator.branch-indicator {
   background: #081f08;
   border-inline-start: 1px solid rgba(95, 150, 42, 0.64);
   border-top: 1px solid rgba(95, 150, 42, 0.64);
+}
+/* Light mode: the dark-green popover (#081f08 + pale-green text) is unreadable on
+   white. Repaint as a light card with dark text and re-tint the muted text cluster
+   so every label/value/desc/legend line meets contrast (DOIT.12 B5 — highest fix). */
+body.theme-light .session-popover {
+  color: #1f2937;
+  background: #ffffff;
+  border-color: rgba(95, 150, 42, 0.45);
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.16);
+}
+body.theme-light .session-popover::before {
+  background: #ffffff;
+  border-inline-start-color: rgba(95, 150, 42, 0.45);
+  border-top-color: rgba(95, 150, 42, 0.45);
+}
+body.theme-light .popover-row {
+  border-top-color: rgba(15, 23, 42, 0.10);
+}
+body.theme-light .popover-subtitle,
+body.theme-light .popover-label,
+body.theme-light .popover-desc-body,
+body.theme-light .state-legend-item,
+body.theme-light .session-popover .meta-muted {
+  color: #586072;
+}
+body.theme-light .session-popover .meta-sep {
+  color: #9aa3b2;
+}
+body.theme-light .popover-desc {
+  color: #1f2937;
+}
+body.theme-light .session-popover a,
+body.theme-light .branch-link {
+  color: #2563eb;
 }
 .popover-head {
   display: flex;
@@ -2843,6 +2940,73 @@ body.theme-light .keyboard-shortcut-row kbd {
 .agent-icon.claude {
   color: #ffffff;
 }
+/* ============================================================================
+   Light mode (DOIT.12 B5): dialogs and warning chrome hardcode dark fills + light
+   text. The dialogs combine a dark bg with theme-aware `var(--text)` (dark in light)
+   → dark-on-dark. Repaint as light cards with dark/readable text. The white agent
+   glyphs are invisible on the white Changes panel → darken.
+   ============================================================================ */
+body.theme-light .command-palette-dialog,
+body.theme-light .keyboard-shortcuts-dialog {
+  background: #ffffff;
+  border-color: #cdd5e0;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+}
+body.theme-light .command-palette-input {
+  background: #f3f6fa;
+}
+body.theme-light .command-palette-row {
+  color: #1f2937;
+}
+body.theme-light .command-palette-row.active,
+body.theme-light .command-palette-row:hover {
+  color: #1f2937;
+  background: #e6f1dd;
+  border-color: rgba(118, 185, 0, 0.55);
+}
+body.theme-light .command-palette-group,
+body.theme-light .command-palette-detail,
+body.theme-light .command-palette-keybinding {
+  color: #586072;
+}
+body.theme-light .keyboard-shortcuts-section h3 {
+  color: #5f9800;
+}
+body.theme-light .keyboard-shortcuts-close:hover,
+body.theme-light .keyboard-shortcuts-close:focus-visible {
+  background: rgba(15, 23, 42, 0.06);
+}
+body.theme-light .keyboard-shortcut-row {
+  border-bottom-color: rgba(15, 23, 42, 0.08);
+}
+body.theme-light .keyboard-shortcut-row kbd {
+  color: #1f2937;
+  background: #eef1f5;
+  border-color: rgba(15, 23, 42, 0.18);
+}
+body.theme-light .preferences-global-reset {
+  color: #7a4a00;
+  background: rgba(255, 177, 66, 0.16);
+  border-color: rgba(214, 140, 30, 0.6);
+}
+body.theme-light .preferences-global-reset.confirming {
+  background: rgba(220, 40, 30, 0.10);
+  border-color: #d9534f;
+}
+body.theme-light .preferences-global-reset-title {
+  color: #9a5b00;
+}
+body.theme-light .preferences-global-reset-warning {
+  color: #7a4a00;
+}
+body.theme-light .preferences-reset-cancel {
+  background: rgba(15, 23, 42, 0.05);
+  border-color: rgba(15, 23, 42, 0.18);
+}
+body.theme-light .agent-icon.codex,
+body.theme-light .agent-icon.claude {
+  color: #1f2937;
+}
 button {
   min-width: 34px;
   border: 1px solid var(--line);
@@ -3018,6 +3182,11 @@ body.layout-resizing {
   border-color: var(--drop-outline);
   background: #1a2230;
 }
+/* Light mode: the dark drop-target fill is a black box on the white grid; the dashed
+   border already uses the theme-aware --drop-outline token (DOIT.12 B5). */
+body.theme-light .drop-slot.drag-over {
+  background: rgba(15, 23, 42, 0.06);
+}
 .drop-slot.drop-preview::before,
 .grid.drop-preview::before {
   content: attr(data-drop-label);
@@ -3088,6 +3257,20 @@ body.layout-resizing {
   min-width: 0;
   min-height: 0;
   height: 100%;
+  /* SHARED PANE-CHROME THEMING (one source of truth — no per-button/per-bar one-offs):
+     • --pane-bar-bg  : every chrome BAR (tab strip, info/detail row, editor toolbar, find panel) reads
+       this. Default = neutral gray (--panel2) for an UNFOCUSED pane; the focused override below sets it
+       to the bright tab-strip green. So all bars track focus together.
+     • --pane-ctl-*   : every chrome BUTTON reads these. Rest state = white (light) / near-black (dark);
+       the .active / [aria-pressed=true] state = green. Buttons never hardcode their own colors.
+     Raw values come from theme tokens, so everything flips light/dark automatically. */
+  --pane-bar-bg: var(--panel2);
+  --pane-ctl-bg: var(--pane-tab-control-bg);
+  --pane-ctl-fg: var(--pc-control-fg);
+  --pane-ctl-border: var(--pane-tab-control-border);
+  --pane-ctl-pressed-bg: var(--pane-tab-active-bg);
+  --pane-ctl-pressed-fg: var(--pane-tab-active-text);
+  --pane-ctl-pressed-border: var(--pane-tab-active-border);
   /* Every pane has a "natural border" = the pane spacing (--pane-split-gap), transparent by default so
      it just shows the background gutter. The ACTIVE pane colors it green (below). Because it's a real
      border (box-sizing: border-box) it is part of the pane's box — it sits flush against the resizer
@@ -3170,7 +3353,7 @@ body.layout-resizing {
   padding: 2px 5px 0 6px;
   border-bottom: 0;
   color: var(--pane-tab-text);
-  background: var(--pane-tab-strip-bg);
+  background: var(--pane-bar-bg);
   overflow: hidden;
 }
 .panel-head:not(.file-explorer-head)::after {
@@ -3190,7 +3373,7 @@ body.layout-resizing {
   max-width: 100%;
   padding: 1px 2px 1px 8px;
   color: var(--pane-meta-path);
-  background: var(--pane-detail-bg);
+  background: var(--pane-bar-bg);
   border-bottom: 1px solid var(--line);
   overflow: hidden;
 }
@@ -3270,6 +3453,8 @@ body.layout-resizing {
 .panel.active-pane,
 .panel.typing-ready-pane {
   border-color: var(--pane-tab-panel-ring);
+  /* focused pane: all chrome bars switch from neutral gray to the bright tab-strip green together. */
+  --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 .panel.typing-ready-pane {
   --panel-ring-color: var(--active-ring);
@@ -3282,6 +3467,18 @@ body.layout-resizing {
 .panel.needs-blocked-pane {
   --panel-ring-color: #ff3347;
 }
+/* image 20260603-001: when a needs-attention pane is ALSO focused, carry the red on the BORDER (where the
+   green focus border already is) instead of a separate nested inset ::after — so red sits ON the green
+   edge, not one border-width inside it. Higher specificity (0,3,0) than the green focus rules, so it wins.
+   Inactive needs panes (transparent border) keep the inset red ring below. */
+.panel.active-pane.needs-input-pane,
+.panel.active-pane.needs-exec-pane,
+.panel.active-pane.needs-blocked-pane,
+.panel.typing-ready-pane.needs-input-pane,
+.panel.typing-ready-pane.needs-exec-pane,
+.panel.typing-ready-pane.needs-blocked-pane {
+  border-color: var(--panel-ring-color);
+}
 .panel.preview-linked:not(.active-pane):not(.typing-ready-pane):not(.needs-input-pane):not(.needs-exec-pane):not(.needs-blocked-pane)::after {
   content: "";
   position: absolute;
@@ -3293,9 +3490,9 @@ body.layout-resizing {
 }
 /* The red attention states keep an INSET ::after ring (it carries the pulsing animation). The
    active/typing-ready focus ring is the outset box-shadow above instead. */
-.panel.needs-input-pane::after,
-.panel.needs-exec-pane::after,
-.panel.needs-blocked-pane::after {
+.panel.needs-input-pane:not(.active-pane):not(.typing-ready-pane)::after,
+.panel.needs-exec-pane:not(.active-pane):not(.typing-ready-pane)::after,
+.panel.needs-blocked-pane:not(.active-pane):not(.typing-ready-pane)::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -3304,20 +3501,17 @@ body.layout-resizing {
   border-radius: inherit;
   pointer-events: none;
 }
-.panel.needs-input-pane::after,
-.panel.needs-exec-pane::after,
-.panel.needs-blocked-pane::after {
+.panel.needs-input-pane:not(.active-pane):not(.typing-ready-pane)::after,
+.panel.needs-exec-pane:not(.active-pane):not(.typing-ready-pane)::after,
+.panel.needs-blocked-pane:not(.active-pane):not(.typing-ready-pane)::after {
   --attention-ring-border: 1px;
   animation: attention-ring-fade var(--red-reminder-duration) var(--red-reminder-easing) infinite;
   animation-delay: var(--attention-animation-delay, 0s);
 }
 .panel.active-pane .panel-head {
-  background: var(--pane-tab-strip-bg);
+  /* bg comes from --pane-bar-bg (focused = bright strip); no per-state override here. */
   color: var(--pane-tab-text);
   box-shadow: none;
-}
-.panel.active-pane .panel-detail-row {
-  background: var(--pane-tab-panel-detail-bg);
 }
 .panel.active-pane .panel-detail-row .meta,
 .panel.active-pane .panel-detail-row .meta-branch,
@@ -3534,10 +3728,24 @@ body.layout-resizing {
 .panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active {
   opacity: 1;
 }
+/* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
+   when the pane is unfocused). The bars themselves (strip, detail row, editor toolbar, find) already read
+   --pane-bar-bg, so only the tabs need this; the active tab stays green. */
+.panel:not(.active-pane):not(.typing-ready-pane) .pane-tab:not(.active) {
+  background: var(--pane-bar-bg);
+}
 .pane-tab.active .session-button-name,
 .pane-tab.active .session-button-dir,
 .pane-tab.active .session-button-detail {
   color: var(--pane-tab-unfocused-active-text);
+}
+/* image 008: the inactive-tab name/dir/detail hardcode near-white colors (tuned for the dark tab bg),
+   so on the light-green/gray inactive tabs in LIGHT mode they were white-on-white. Give them dark text
+   (active tabs keep their own white-on-green via the rules above; dark mode keeps the near-white). */
+body.theme-light .pane-tab:not(.active) .session-button-name,
+body.theme-light .pane-tab:not(.active) .session-button-dir,
+body.theme-light .pane-tab:not(.active) .session-button-detail {
+  color: #1f2937;
 }
 .panel.active-pane .pane-tab.active .session-button-name,
 .panel.active-pane .pane-tab.active .session-button-dir,
@@ -3582,6 +3790,33 @@ body.layout-resizing {
 }
 .pane-tab.file-missing.active .file-tab-missing-badge {
   color: #ffe0e5;
+}
+/* Light mode (DOIT.12 B5): the file-missing tab is a dark-maroon box and the inactive
+   YO marker inside an active tab is a dark-slate box — both unreadable on the white head.
+   Repaint as a light error tint (dark-red text) / light neutral chip. */
+body.theme-light .pane-tab.file-missing {
+  color: #9b2c3a;
+  background: #fdecee;
+  border-color: #e8a9b2;
+}
+body.theme-light .pane-tab.file-missing:hover {
+  background: #fbe0e4;
+  border-color: #d56b7a;
+}
+body.theme-light .pane-tab.file-missing.active {
+  color: #7a1f2c;
+  background: #f7d2d8;
+  border-color: #cf5566;
+  border-bottom-color: #f7d2d8;
+}
+body.theme-light .pane-tab.file-missing .file-tab-missing-badge,
+body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
+  color: #b3263a;
+}
+body.theme-light .pane-tab.active .session-yolo-marker.inactive {
+  color: #52617a;
+  background: #e2e6ec;
+  border-color: #c2cad6;
 }
 .pane-tab-close {
   position: relative;
@@ -3943,12 +4178,8 @@ body.layout-resizing {
 .tabs .pane-minimize::after {
   display: none;
 }
-.tabs .pane-detail-toggle.active,
-.panel.active-pane .panel-head .tabs .pane-detail-toggle.active {
-  color: var(--pc-control-fg);
-  background: var(--pc-control-bg);
-  border-color: var(--pc-control-border);
-}
+/* (the detail/info toggle's pressed = green now comes from the shared .tab[aria-pressed=true] rule — no
+   per-button white override here.) */
 .tabs .pane-detail-toggle::before {
   width: 10px;
   height: 8px;
@@ -3969,41 +4200,39 @@ body.layout-resizing {
 .tabs .pane-expand::after {
   transform: translate(-50%, -50%) rotate(90deg);
 }
-.tabs .pc-window-control {
-  color: var(--pc-control-fg);
-  background: var(--pane-tab-control-bg);
-  border-color: var(--pane-tab-control-border);
+/* ── SHARED pane-head control buttons (single source of truth) ──────────────────────────────────────
+   Every control button (terminal/agent pill, window-step < >, actions …, detail/info toggle, minimize,
+   expand +, close ×) shares ONE color treatment — they only add their own glyph/layout, never their own
+   colors. Rest = white (light) / near-black (dark) via --pane-ctl-*; the PRESSED/ACTIVE state (active
+   terminal/agent tab, a toggled-on info toggle, etc.) = green. The .auto-toggle (YO/YOLO) keeps its own
+   green-glow below. This replaces the old per-button one-offs (navy active tab, always-green zoom). */
+.tabs .tab:not(.auto-toggle) {
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  border-color: var(--pane-ctl-border, var(--pane-tab-control-border));
 }
-.tabs .pc-window-control:hover {
+.tabs .tab:not(.auto-toggle):hover {
   color: var(--pc-control-hover-fg);
   background: var(--pane-tab-control-hover-bg);
   border-color: var(--pane-tab-control-hover-border);
 }
-.tabs .pc-zoom {
-  color: #eef9ea;
-  background: var(--pane-tab-zoom-bg);
-  border-color: var(--pane-tab-zoom-border);
+.tabs .tab.active:not(.auto-toggle),
+.tabs .tab[aria-pressed="true"]:not(.auto-toggle) {
+  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
+  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
+  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
+  font-weight: 700;
 }
-.tabs .pc-zoom:hover {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-zoom-hover-bg);
-  border-color: var(--pane-tab-zoom-hover-border);
-}
+/* Fallback for any .tab.active OUTSIDE a pane head (e.g. detached/menu contexts). */
 .tab.active {
   color: var(--text);
   background: #263044;
   border-color: #566176;
   font-weight: 700;
 }
-.panel-head .tab.active:not(.auto-toggle) {
-  color: #ffffff;
-  background: #263044;
-  border-color: #93c5fd;
-}
-.panel.active-pane .panel-head .tab.active:not(.auto-toggle) {
-  color: #ffffff;
-  background: #14385f;
-  border-color: #bfdbfe;
+body.theme-light .tab.active {
+  background: #dce3ec;
+  border-color: #b3bdcb;
 }
 .tab.auto-toggle.active {
   color: var(--pane-tab-yolo-text);
@@ -4011,18 +4240,6 @@ body.layout-resizing {
   border-color: var(--pane-tab-yolo-border);
   font-weight: 700;
   box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.28), 0 0 14px var(--auto-glow);
-}
-.panel-head .tabs .pane-detail-toggle.active,
-.panel.active-pane .panel-head .tabs .pane-detail-toggle.active {
-  color: var(--pc-control-fg);
-  background: var(--pane-tab-control-bg);
-  border-color: var(--pane-tab-control-border);
-}
-.panel-head .tabs .pane-detail-toggle.active:hover,
-.panel.active-pane .panel-head .tabs .pane-detail-toggle.active:hover {
-  color: var(--pc-control-hover-fg);
-  background: var(--pane-tab-control-hover-bg);
-  border-color: var(--pane-tab-control-hover-border);
 }
 body.theme-light .panel.empty-pane-panel {
   background: #edf2f8;
@@ -4035,8 +4252,8 @@ body.theme-light .empty-pane-fill {
     rgba(15, 23, 42, 0.018);
 }
 body.theme-light .panel-detail-row {
+  /* bg comes from the shared --pane-bar-bg (bright when focused, gray when not) — no light override. */
   color: var(--text);
-  background: #eef3f9;
 }
 /* DOIT.6 #35: the detail-row header LABEL (.session-button-name, e.g. "YO!info") is the one header
    element NOT covered by the active-pane color rule (which lists .meta*/.session-button-dir/detail),
@@ -4071,9 +4288,9 @@ body.theme-light .tabs .panel-tab-overflow:hover,
 body.theme-light .tabs .panel-tab-overflow:focus-visible {
   color: #0f172a;
 }
-body.theme-light .panel.typing-ready-pane {
-  border-color: #9aa6b6;
-}
+/* (removed) a light-mode gray #9aa6b6 border on focused terminals — the light twin of the dark #465267
+   gray focus bug. Focused terminals now fall through to the shared green focus border (var(--pane-tab-
+   panel-ring)) like every other focused pane, in both light and dark. */
 .tab-pane {
   position: relative;
   min-width: 0;
@@ -5619,6 +5836,40 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
   background: var(--accent-gold);
   box-shadow: 0 0 0 1px rgba(12, 15, 20, 0.9), 0 0 7px rgba(245, 197, 66, 0.75);
 }
+/* ============================================================================
+   Light mode (DOIT.12 B5): the update banner is a dark navy slab, and the file-tree
+   "current"/"repo-non-main"/"indexed" rows hardcode near-white-green or washed-amber
+   text that vanishes on the white tree. Darken the text; strengthen the selection
+   ring (the --file-selection-* fill/border tokens are already theme-aware).
+   ============================================================================ */
+body.theme-light .server-update-banner {
+  background: #ffffff;
+  color: #1f2937;
+  border-color: #d68c1e;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.18);
+}
+body.theme-light .server-update-banner-dismiss {
+  color: #586072;
+}
+body.theme-light .file-tree-row.selected {
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
+}
+body.theme-light .file-tree-row.current-file:not(.selected),
+body.theme-light .file-tree-row.current-directory:not(.selected) {
+  color: #1f2937;
+}
+body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
+  color: #b06a00;
+  text-decoration-color: rgba(176, 106, 0, 0.6);
+}
+body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name,
+body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
+  color: #3f6312;
+}
+body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
+  color: #5f9800;
+  text-shadow: none;
+}
 .file-tree-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6233,6 +6484,11 @@ body.theme-light .file-tree-children::before {
   object-fit: contain;
   background: #0b0e14;
 }
+/* Light editor: the image backdrop + the transparency checkerboard are tuned dark
+   (white-on-dark checker). Repaint as a light backdrop with a dark checker (DOIT.12 B5). */
+body.editor-theme-light .file-editor-image {
+  background: #eef1f5;
+}
 .file-editor-status {
   padding: 3px 10px;
   font-family: var(--mono-font);
@@ -6352,6 +6608,16 @@ body.theme-light .file-tree-children::before {
   font-size: 0.9em;
 }
 .markdown-body pre { background: #0b0e14; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; overflow: auto; margin: 6px 0; }
+/* Light mode (DOIT.12 B5): the near-black code block is a dark box on the light app
+   chrome. Scoped to the chrome-themed markdown surfaces (YO!agent chat/summary, the
+   transcript summary) — the file-editor preview's `pre` is handled separately under
+   `body.editor-theme-light .file-editor-content` so a dark editor keeps a dark block. */
+body.theme-light .yoagent-message-body pre,
+body.theme-light .yoagent-session-summary-body pre,
+body.theme-light .summary-preview pre {
+  color: #1f2937;
+  background: #f3f6fa;
+}
 .markdown-body pre code {
   color: inherit;
   background: transparent;
@@ -6441,6 +6707,12 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   border-radius: 3px;
   outline: none;
   box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.18);
+}
+/* Light mode (DOIT.12 B5): the rename box hardcodes a near-black fill while its text
+   uses the theme-aware --text (dark in light) → dark-on-dark while renaming. */
+body.theme-light .file-tree-rename-input {
+  color: #1f2937;
+  background: #ffffff;
 }
 .file-explorer-toolbar {
   display: flex;
@@ -6922,15 +7194,33 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 body.editor-theme-light .file-editor-diff-codemirror {
   --code-diff-add: #00a152;
   --code-diff-remove: #d81f32;
-  --diff-add-line-bg: #e6ffec;
-  --diff-remove-line-bg: #ffebe9;
+  /* Light diff: the pleasant soft green/pink palette the user picked (image 025) — clearly visible
+     on the white editor but light enough for dark code text on top (was the near-white #e6ffec/
+     #ffebe9). Gutters use the deeper accent tone from the same palette. */
+  --diff-add-line-bg: #d2f0d6;
+  --diff-remove-line-bg: #fbe5e5;
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-changedLineGutter {
   color: #116329;
-  background: #dafbe1;
+  background: #a8dfb2;
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
-  background: #ffebe9;
+  background: #f1c5c5;
+}
+/* Light editor (DOIT.12 B5): the overview-ruler ticks kept saturated dark green/red
+   that mismatched the light diff line fills — match them to --code-diff-*. */
+body.editor-theme-light .file-editor-diff-codemirror .cm-diff-overview-tick.add {
+  background: #00a152;
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-diff-overview-tick.remove {
+  background: #d81f32;
+}
+/* Inline (non-mergeview) editor diff decorations read --code-diff-* from the content
+   scope; the light values were scoped ONLY to .file-editor-diff-codemirror, so the
+   inline editor used the dark mix in editor-light. Re-map at the content scope. */
+body.editor-theme-light .file-editor-content {
+  --code-diff-add: #00a152;
+  --code-diff-remove: #d81f32;
 }
 /* File editor panels are layout siblings of terminals and Files. */
 .panel.file-editor-panel {
@@ -6999,13 +7289,18 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
+  /* #3 (image 008): the editor tool buttons (#, wrap, find, theme, save) sit on the RIGHT, and the
+     toolbar reads like the pane's tab-strip "bar" (same --pane-tab-strip-bg). In diff mode the FROM/TO
+     panel keeps its order:-1 + margin-inline-end:auto, which already pushes the buttons to the right. */
+  justify-content: flex-end;
   gap: 2px;
   min-height: 26px;
   padding: 2px 6px;
   overflow-x: auto;
   scrollbar-width: none;
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel2) 70%, var(--bg) 30%);
+  /* shared pane-chrome bar: bright when this pane is focused, neutral gray when not (image 011). */
+  background: var(--pane-bar-bg);
 }
 .file-editor-toolbar::-webkit-scrollbar {
   display: none;
@@ -7046,6 +7341,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
 .file-editor-wrap-panel,
 .file-editor-find-panel,
 .file-editor-diff-panel,
+.file-editor-diff-expand-panel,
 .file-editor-theme-panel,
 .file-editor-reload-panel,
 .file-editor-cross-split-panel,
@@ -7072,6 +7368,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
 .file-editor-wrap-panel,
 .file-editor-gutter-panel,
 .file-editor-find-panel,
+.file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
 .file-editor-theme-panel {
   min-width: 20px;
@@ -7079,6 +7376,12 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
   display: grid;
   place-items: center;
   padding: 0;
+}
+/* B4: the diff expand/collapse-all toggle goes green when ON (showing all context), like a pressed control. */
+.file-editor-diff-expand-panel[aria-pressed="true"] {
+  color: var(--pane-tab-active-text);
+  background: var(--brand-green);
+  border-color: var(--brand-green);
 }
 .file-editor-save-panel:disabled {
   opacity: 0.44;
@@ -7091,6 +7394,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
 .file-editor-wrap-panel:hover,
 .file-editor-wrap-panel.active,
 .file-editor-find-panel:hover,
+.file-editor-diff-expand-panel:not([aria-pressed="true"]):hover,
 .file-editor-cross-split-panel:hover,
 .file-editor-theme-panel:hover,
 .file-editor-reload-panel:hover {
@@ -7381,7 +7685,10 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror .cm-panels,
 .file-editor-codemirror-panel .cm-panels {
   color: var(--text);
-  background: var(--panel2);
+  /* shared pane-chrome bar (same token as the tab strip + editor toolbar): bright when
+     this pane is focused, neutral when not — the find/replace panel is a pane-head bar
+     like the others, so it INHERITS --pane-bar-bg rather than pinning a static --panel2. */
+  background: var(--pane-bar-bg);
   border-color: var(--line);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
 }
@@ -7396,8 +7703,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   column-gap: var(--cm-search-column-gap);
   row-gap: 4px;
   padding: 5px 34px 5px 7px;
-  font: 700 var(--ui-font-size-sm)/1 var(--control-font);
-  font-stretch: condensed;
+  font: 700 var(--ui-font-size-sm)/1 var(--ui-font);
 }
 .file-editor-codemirror .cm-search::before,
 .file-editor-codemirror-panel .cm-search::before {
@@ -7453,8 +7759,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   background-image: none;
   border: 1px solid #6f7b8c;
   border-radius: 4px;
-  font: 700 0/1 var(--control-font);
-  font-stretch: condensed;
+  font: 700 0/1 var(--ui-font);
   white-space: nowrap;
 }
 .file-editor-codemirror .cm-search .cm-button::before,
@@ -7481,8 +7786,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 .file-editor-codemirror-panel .cm-search .cm-button[name="replaceAll"]::before {
   content: "All";
   font-size: var(--ui-font-size-2xs);
-  font-family: var(--control-font);
-  font-stretch: condensed;
+  font-family: var(--ui-font);
 }
 .file-editor-codemirror .cm-search .cm-button[name="replace"]::before,
 .file-editor-codemirror-panel .cm-search .cm-button[name="replace"]::before {
@@ -7526,8 +7830,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   grid-row: 1;
   min-width: 4ch;
   color: #c9ff7a;
-  font: 800 var(--ui-font-size-xs)/1 var(--control-font);
-  font-stretch: condensed;
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
   white-space: nowrap;
 }
 .file-editor-codemirror .cm-search .cm-button:hover,
@@ -7551,10 +7854,19 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid #6f7b8c;
   border-radius: 4px;
-  font: 700 0/1 var(--control-font);
-  font-stretch: condensed;
+  font: 700 0/1 var(--ui-font);
   white-space: nowrap;
   cursor: pointer;
+}
+/* CodeMirror's baseTheme injects `.cm-panel.cm-search label { font-size: 80% }` at RUNTIME — a
+   specificity TIE (0,2,1) with the rule above that wins on source order (CM mounts its <style>
+   after our <link>). That un-hides CM's native toggle text ("match case"/"regexp"/"by word"),
+   which overflows the 24px box and collides with our compact ::after glyph (images 019/021).
+   The panel carries BOTH classes (verified: class="cm-search cm-panel"), so qualifying with
+   .cm-panel here is +1 class (0,3,1) and wins the tie — leaving only the "Aa"/".*"/"word" glyph. */
+.file-editor-codemirror .cm-search.cm-panel label,
+.file-editor-codemirror-panel .cm-search.cm-panel label {
+  font-size: 0;
 }
 .file-editor-codemirror .cm-search label:nth-of-type(1),
 .file-editor-codemirror-panel .cm-search label:nth-of-type(1) {
@@ -7573,8 +7885,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 }
 .file-editor-codemirror .cm-search label::after,
 .file-editor-codemirror-panel .cm-search label::after {
-  font: 800 var(--ui-font-size-2xs)/1 var(--control-font);
-  font-stretch: condensed;
+  font: 800 var(--ui-font-size-2xs)/1 var(--ui-font);
 }
 .file-editor-codemirror .cm-search label:nth-of-type(1)::after,
 .file-editor-codemirror-panel .cm-search label:nth-of-type(1)::after {
@@ -7855,6 +8166,14 @@ body.editor-theme-light .file-editor-code-preview .md-code {
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
   background-size: 24px 24px;
   overflow: auto;
+}
+body.editor-theme-light .file-editor-image-panel {
+  background-color: #e9edf2;
+  background-image:
+    linear-gradient(45deg, rgba(15, 23, 42, 0.07) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(15, 23, 42, 0.07) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(15, 23, 42, 0.07) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(15, 23, 42, 0.07) 75%);
 }
 .file-editor-image-panel.fit-size {
   place-items: center;

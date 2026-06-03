@@ -1665,6 +1665,9 @@ function makeFileTree(paths) {
   assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorTabsIdx)), '#42: the editor tab strip is uncluttered — only tabs + frame controls remain');
   assert.ok(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(css), '#42: the editor panel grid reserves a row for the toolbar between tabs and body');
   assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');
+  // #3 (image 008): editor tool buttons right-aligned, and the toolbar reads like the pane tab-strip bar.
+  assert.ok(/\.file-editor-toolbar\s*\{[^}]*justify-content:\s*flex-end/.test(css), '#3: editor toolbar buttons are right-aligned');
+  assert.ok(/\.file-editor-toolbar\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(css), '#3: editor toolbar background matches the pane chrome bar (--pane-bar-bg: bright focused / gray unfocused)');
   assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
   assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
   assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
@@ -1931,6 +1934,18 @@ function makeFileTree(paths) {
   assert.ok(appSource.includes("const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';"), 'diff editor editability follows TO=current after the FROM/TO flip');
   assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent;'), 'diff editor allows edits on the new/current side');
   assert.ok(/function destroyCodeMirrorPanel[\s\S]*\.cm-diff-overview'\)\?\.remove\(\)/.test(appSource), '#26: tearing down the CodeMirror panel removes the diff scrollbar overview so its red/green ticks do not linger in edit/normal mode');
+  // DOIT.12 B3: overview ticks are positioned from the editor's RENDERED geometry (lineBlockAt/contentHeight)
+  // so they track collapsed folds, with a line-fraction fallback before first measure...
+  assert.ok(/function diffOverviewTickPosition[\s\S]*?view\.lineBlockAt\(doc\.line\([\s\S]*?view\.contentHeight/.test(appSource), 'B3: diff overview ticks use rendered geometry (lineBlockAt/contentHeight)');
+  assert.ok(/function diffOverviewTickPosition[\s\S]*?\(chunk\.start - 1\) \/ Math\.max\(1, totalLines\)/.test(appSource), 'B3: diff overview ticks fall back to the line-number fraction pre-measure');
+  // ...and they REBUILD when a fold expands/collapses (geometry/height change), instead of going stale.
+  assert.ok(/function codeMirrorDiffOverviewListener[\s\S]*?update\.geometryChanged \|\| update\.heightChanged[\s\S]*?scheduleDiffOverviewRebuild/.test(appSource), 'B3: a CM updateListener rebuilds the overview on geometry/fold change');
+  assert.ok(/panel\._diffOverviewCtx = \{container, state, currentText, original\}/.test(appSource), 'B3: the overview build stores its context so the fold-rebuild can recompute from live geometry');
+  // DOIT.12 B4: a diff-only toolbar toggle shows ALL context (omits collapseUnchanged) vs collapsing runs.
+  assert.ok(appSource.includes('file-editor-diff-expand-panel'), 'B4: the diff toolbar has an expand/collapse-all-unchanged toggle');
+  assert.ok(/function toggleDiffExpandUnchanged[\s\S]*?setDiffExpandUnchanged/.test(appSource), 'B4: the toggle flips + persists diffExpandUnchanged and re-renders');
+  assert.ok(/diffExpandUnchanged \? \{\} : \{collapseUnchanged: \{margin: 3, minSize: 8\}\}/.test(appSource), 'B4: expanded omits collapseUnchanged so every unchanged line shows (both diff layouts)');
+  assert.ok(/mode: 'diff'[^;]*expand: diffExpandUnchanged/.test(appSource), 'B4: the diff config signature includes expand so toggling rebuilds the diff view');
   const diffLayoutFn = appSource.slice(appSource.indexOf('function codeMirrorDiffLayout('), appSource.indexOf('function codeMirrorDiffLayout(') + 800);
   assert.ok(diffLayoutFn.includes("return 'inline';"), '#33: the diff always uses the unified (inline) layout');
   assert.equal(diffLayoutFn.includes("'side'"), false, '#33: the wide-pane side-by-side layout (which numbered deleted rows) is no longer selected, so deleted rows are unnumbered widgets at every width');
@@ -2090,12 +2105,16 @@ function makeFileTree(paths) {
   assert.ok(changedFilesSource.includes("numberSetting('appearance.tab_width', 180)"), 'runtime settings fallback keeps the 180px tab width default');
   assert.ok(/body\.theme-dark\s*\{[\s\S]*--pane-tab-strip-bg:\s*#1f3026/.test(preferencesCss), 'dark theme uses a greenish dark pane tab-strip background');
   assert.ok(/body\.theme-light\s*\{[\s\S]*--pane-tab-strip-bg:\s*#dce8d2/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background');
-  assert.ok(preferencesCss.includes('--pane-tab-unfocused-active-bg: #4f9e3a'), 'unfocused active tabs use a clearly-visible green, not gray (DOIT.6 #6: undimmed per-pane highlight)');
+  assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (DOIT.6 #6 + images 003/004: undimmed, un-lightened per-pane highlight)');
   assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
   assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 2px'), 'the red needs-* attention ring uses a thin constant width token');
   // Light mode uses a RED pane separator (dark mode keeps amber/yellow).
   assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-resizer-bg:\s*rgba\(220, 38, 38/.test(preferencesCss), 'light mode uses a red pane separator');
-  assert.ok(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'focused panes keep the same bright tab-strip background');
+  // Pane chrome bars (strip, detail row, editor toolbar, find) all read the shared --pane-bar-bg, which is
+  // the bright tab-strip green when the pane is focused and neutral gray when not. Focus sets it on .panel.
+  assert.ok(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'focused panes set --pane-bar-bg to the bright tab-strip green');
+  assert.ok(/\.panel-head\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the tab strip reads the shared --pane-bar-bg');
+  assert.ok(/\.panel-detail-row\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the info/detail bar reads the shared --pane-bar-bg (gray when unfocused, not green)');
   assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
   assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder or Changes panes');
   assert.ok(preferencesCss.includes('--pane-split-gap: 0px'), 'pane split layout collapses gap through a shared token');
@@ -2114,8 +2133,28 @@ function makeFileTree(paths) {
   assert.ok(/\.panel\s*\{[^}]*border:\s*var\(--pane-split-gap\) solid transparent/.test(preferencesCss), 'every pane has a --pane-split-gap-wide transparent border (the natural-border gutter)');
   assert.ok(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'every focused pane (active or typing-ready, terminal or not) colors its border the same green');
   assert.equal(/\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#465267/.test(preferencesCss), false, 'no gray focus border — focused panes are green, not the old typing-ready gray');
+  assert.equal(/body\.theme-light \.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#9aa6b6/.test(preferencesCss), false, 'no LIGHT-mode gray focus border on terminals (the #465267 twin) — focused terminals stay green in light mode too');
   assert.equal(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*box-shadow:/.test(preferencesCss), false, 'the active ring is a real border, not a clipped outset box-shadow');
+  // image 20260603-001: a focused pane that needs attention carries the red ON the border (where the
+  // green focus border is), not as a nested inset ::after one border-width inside it.
+  assert.ok(/\.panel\.active-pane\.needs-input-pane[\s\S]*?\.panel\.typing-ready-pane\.needs-blocked-pane\s*\{[^}]*border-color:\s*var\(--panel-ring-color\)/.test(preferencesCss), 'a focused needs-attention pane paints the red on its border, not a nested inset ring');
+  assert.ok(/\.panel\.needs-input-pane:not\(\.active-pane\):not\(\.typing-ready-pane\)::after/.test(preferencesCss), 'the inset red attention ring is scoped to INACTIVE needs panes (focused ones use the border)');
   assert.equal(/\.panel\.active-pane::after[\s\S]{0,40}\{/.test(preferencesCss), false, 'active panes no longer use the inset ::after ring (only the red needs-* states do)');
+  // images 003/004 pane-color polish:
+  assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-inactive-tab-bg:\s*#e6f1dd/.test(preferencesCss), 'light-mode inactive tabs are a very-light green (not white)');
+  // image 008: inactive-tab text is DARK in light mode (readable on the light-green tabs/strip), not the
+  // dark-tuned near-white #dfe6ef that made it white-on-white.
+  assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-text:\s*#1f2937/.test(preferencesCss), 'light-mode tab text is dark (no white-on-white inactive tabs)');
+  // The name/dir/detail spans hardcode near-white (for dark tabs); light mode overrides them dark too,
+  // or the branch/path text stays white-on-white even with a dark base tab color.
+  assert.ok(/body\.theme-light \.pane-tab:not\(\.active\) \.session-button-name,[\s\S]*?\.session-button-detail\s*\{[^}]*color:\s*#1f2937/.test(preferencesCss), 'light-mode inactive-tab name/dir/detail text is dark (fixes white-on-white branch/path text)');
+  // An inactive pane's inactive tabs follow the gray bar (--pane-bar-bg, which is --panel2 when unfocused);
+  // the bars themselves go gray via --pane-bar-bg (asserted above), so only the tabs need this rule.
+  assert.ok(/\.panel:not\(\.active-pane\):not\(\.typing-ready-pane\) \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'an inactive pane\'s inactive tabs follow the gray bar (--pane-bar-bg)');
+  assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), "an inactive pane's active tab is full green (unfocused-active aliases the focused token)");
+  assert.equal(/--pane-tab-unfocused-active-bg:\s*#d2ecc2/.test(preferencesCss), false, 'no lightened light-mode unfocused-active green remains');
+  assert.ok(/--inactive-pane-overlay:\s*rgba\(178, 190, 210, 0\.14\)/.test(preferencesCss), 'inactive-pane dim brightened (dark overlay alpha 0.14)');
+  assert.ok(/--inactive-pane-overlay:\s*rgba\(90, 96, 105, 0\.16\)/.test(preferencesCss), 'inactive-pane dim brightened (light overlay alpha 0.16)');
   {
     // #261: a 0-20px pane spacing setting drives the inter-pane gap; the active pane's green box width
     // == that gap (--pane-split-gap), so it's 0 at spacing 0 and fills the active side up to the line.
@@ -2125,6 +2164,11 @@ function makeFileTree(paths) {
     assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
     assert.ok(/path: 'appearance\.pane_spacing'[\s\S]{0,90}min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field');
     assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_spacing.label'], 'Pane spacing', '#261: the pane spacing field has a localized label');
+    // The terminal "follow" theme option reads "Follow global color theme" (NOT "app theme"), matching
+    // the "Global color theme" setting it follows; the help references the global color theme too.
+    const enT = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
+    assert.equal(enT['pref.appearance.terminal_theme.follow-app'], 'Follow global color theme', 'terminal follow option reads "Follow global color theme"');
+    assert.ok(enT['pref.appearance.terminal_theme.help'].includes('global color theme'), 'terminal theme help references the global color theme');
   }
   assert.ok(/\.grid\.drop-preview-root\.drop-preview-top::before,[^{]*\{[^}]*var\(--drop-preview-width/.test(preferencesCss), '#36: the root top/bottom drop preview spans only the non-Finder content width (never covers the docked Finder)');
   assert.ok(/\.layout-column\s*\{[\s\S]*gap:\s*var\(--pane-split-gap\)/.test(preferencesCss), 'pane split layout reads the compact gap token');
@@ -2168,8 +2212,8 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('inset-inline-end: 8px !important'), 'diff merge controls sit on the right edge');
   assert.ok(preferencesCss.includes('.cm-diff-overview-tick'), 'diff overview ruler ticks are styled');
   assert.ok(/--diff-add-line-bg:\s*color-mix\(in srgb, var\(--code-diff-add\) 30%/.test(preferencesCss), '#250: diff added lines use a muted green fill (soft tint over the dark bg)');
-  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#e6ffec/.test(preferencesCss), 'light diff added lines use GitHub-soft green');
-  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#ffebe9/.test(preferencesCss), 'light diff removed lines use GitHub-soft red');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#d2f0d6/.test(preferencesCss), 'light diff added lines use the pleasant soft green (image 025)');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#fbe5e5/.test(preferencesCss), 'light diff removed lines use the pleasant soft pink (image 025)');
   assert.ok(/--diff-remove-line-bg:\s*color-mix\(in srgb, var\(--code-diff-remove\) 32%/.test(preferencesCss), '#250: diff removed lines use a muted red fill (soft tint over the dark bg)');
   assert.ok(/body\.theme-light \.app-menu-ui-icon\.active\s*\{[\s\S]*background:\s*#5f9800/.test(preferencesCss), '#251: light mode gives the active app-menu icon button a light-tuned green fill (no dark square)');
   assert.ok(/body\.theme-light \.app-menu-tab-command[\s\S]*\{[\s\S]*color:\s*var\(--text\)/.test(preferencesCss), '#252: light mode forces dark text on the rich Tabs/Changes dropdown rows so they are not washed out');
@@ -2219,6 +2263,13 @@ function makeFileTree(paths) {
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_dark_color_scheme"'), 'preferences expose the dark editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_light_color_scheme"'), 'preferences expose the light editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_cursor_style"'), 'preferences expose the editor cursor style setting');
+  // The editor cursor COLOR is a preference (yellow matches the active terminal caret, or the theme caret).
+  assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_cursor_color"'), 'preferences expose the editor cursor color setting');
+  {
+    const cursorSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(/fileEditorCursorColor === 'theme' \? scheme\.cursor : activeTerminalCursorColor/.test(cursorSrc), 'editor cursor color: yellow reuses the active terminal cursor color (#ffd000), theme uses the scheme caret');
+    assert.ok(cursorSrc.includes("initialSetting('appearance.editor_cursor_color', 'yellow')"), 'editor cursor color defaults to yellow (consistent with the terminal cursor)');
+  }
   assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave"'), 'preferences expose editor autosave');
   assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave_delay_seconds"'), 'preferences expose editor autosave delay');
   assert.ok(preferencesHtml.includes('data-setting-path="yoagent.backend"'), 'preferences expose YO!agent backend');
@@ -4193,7 +4244,7 @@ function makeFileTree(paths) {
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.equal(/\.topbar-theme\s*\{/.test(css), false, '#257: the .topbar-theme CSS is removed with the switcher');
     // #254: light-mode inactive-pane dim is darker + warm (not the old faint cool 0.14 overlay).
-    assert.ok(css.includes('--inactive-pane-overlay: rgba(90, 96, 105, 0.24)'), '#259: light-mode inactive panes dim a neutral gray (no red cast)');
+    assert.ok(css.includes('--inactive-pane-overlay: rgba(90, 96, 105, 0.16)'), '#259: light-mode inactive panes dim a neutral gray (no red cast); images 003/004 brightened the alpha to 0.16');
     // Light-mode pane header (image 043): greenish-light tab-strip container + light frame-control
     // buttons (the minimize/zoom squares used to render dark/"black" with no light values).
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-strip-bg:\s*#dce8d2/.test(css), 'light mode: the pane tab-strip container is greenish-light');
@@ -4541,7 +4592,7 @@ function makeFileTree(paths) {
   // DOIT.6 #6: every pane keeps its active tab clearly green (no dimming); focused pane = brighter
   // lime + ring. Source-guards on the shared tokens + the un-dimmed unfocused-active rule.
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/--pane-tab-unfocused-active-bg:\s*#4f9e3a/.test(css), '#11: unfocused panes show a clearly-visible green active tab');
+  assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(css), '#11: unfocused panes show a clearly-visible green active tab (aliased to the focused full-green token; images 003/004)');
   assert.ok(/\.panel:not\(\.active-pane\):not\(\.file-explorer-panel\):not\(\.changes-panel\) \.pane-tab\.active\s*\{\s*opacity:\s*1/.test(css), '#11: unfocused active tabs are no longer dimmed');
   assert.ok(/--pane-tab-active-bg:\s*#86d600/.test(css), '#11: the focused pane keeps the brighter lime active tab as its extra cue');
 }
@@ -4571,6 +4622,10 @@ function makeFileTree(paths) {
   assert.ok(dragSrc.includes('item.term.options.minimumContrastRatio = minContrast'), '#32: live terminals re-apply minimumContrastRatio');
   assert.ok(/item\.container\.style\.background = theme\.background/.test(dragSrc), '#32: all terminal containers share one theme background');
   assert.ok(/body\.theme-light \.topbar-search\s*\{[^}]*background/.test(dragCss), '#33: the topbar search blends in light mode (no dark pill)');
+  // DOIT.12 A1/A2: the topbar paints the green tab-strip color (both themes) so there's no contrasting
+  // gray/black band above the tabs (the "big space"); its height is tightened.
+  assert.ok(/\.topbar\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'DOIT.12 A2: topbar bg matches the green tab strip (no band above the tabs)');
+  assert.ok(/body\.theme-light \.topbar\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'DOIT.12 A2: light-mode topbar also uses the green tab-strip bg (was #eef3f9)');
   // DOIT.6 #114: the dragSession guard MUST precede movePanelsToPool()/grid.innerHTML in renderPanels,
   // and endSessionDrag MUST flush the deferred render after clearing dragSession.
   assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,400}?if \(dragSession != null\) \{ pendingPanelsRender = true; return; \}[\s\S]{0,40}movePanelsToPool\(\)/.test(dragSrc), '#114: renderPanels defers (sets pendingPanelsRender) before pooling panels / clearing the grid');

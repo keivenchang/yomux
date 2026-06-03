@@ -241,8 +241,11 @@ const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
+// B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
+let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
 let fileEditorCursorStyle = 'line';
+let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cursor) | 'theme' (per-scheme caret)
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();

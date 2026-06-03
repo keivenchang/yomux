@@ -90,7 +90,9 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-scheme-panel2': scheme.panel2,
     '--editor-scheme-gutter-bg': scheme.gutterBg,
     '--editor-scheme-preview-bg': scheme.previewBg,
-    '--editor-cursor': scheme.cursor,
+    // 'yellow' matches the active terminal's caret (#ffd000) for a consistent typing cursor across
+    // terminal + editor; 'theme' keeps the per-scheme caret. Drives both the line and block cursor CSS.
+    '--editor-cursor': fileEditorCursorColor === 'theme' ? scheme.cursor : activeTerminalCursorColor,
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
@@ -295,6 +297,21 @@ function toggleEditorWrap() {
   setEditorWrapEnabled(enabled);
 }
 
+// B4 (DOIT.12): toggle showing ALL diff context vs collapsing unchanged regions. Persisted; re-renders
+// every open editor in diff mode (the signature includes `expand`, so the diff view rebuilds).
+function setDiffExpandUnchanged(enabled) {
+  diffExpandUnchanged = enabled === true;
+  storageSet('yolomux.diffExpandUnchanged', diffExpandUnchanged ? '1' : '0');
+  document.querySelectorAll('.file-editor-panel').forEach(panel => {
+    const path = panel.dataset.filePath;
+    if (path) renderFileEditorPanel(panel, fileEditorItemFor(path));
+  });
+}
+
+function toggleDiffExpandUnchanged() {
+  setDiffExpandUnchanged(!diffExpandUnchanged);
+}
+
 function setEditorLineNumbersEnabled(enabled) {
   fileEditorLineNumbersEnabled = enabled === true;
   writeStoredEditorLineNumbers(fileEditorLineNumbersEnabled);
@@ -318,6 +335,10 @@ function boolSetting(path, fallback) {
 
 function normalizeEditorCursorStyle(value) {
   return value === 'block' ? 'block' : 'line';
+}
+
+function normalizeEditorCursorColor(value) {
+  return value === 'theme' ? 'theme' : 'yellow';
 }
 
 function applyEditorCursorStyle() {
@@ -468,6 +489,7 @@ function applySettingsPayload(payload, options = {}) {
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'line'));
+  fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', 'yellow'));
   fileEditorThemeMode = readConfiguredEditorScheme();
   if (options.initial || options.applyEditorDefaults) {
     fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);

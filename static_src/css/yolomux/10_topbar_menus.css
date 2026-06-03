@@ -1,5 +1,8 @@
 .topbar {
-  min-height: calc(var(--compact-control-height) + 8px);
+  /* DOIT.12 A1/A2: the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
+     the shorter pills sit centered in a too-tall bar. Fix: paint the topbar the same green as the tab
+     strip (so it's one continuous green, no contrasting band) and tighten the height (+4px, not +8px). */
+  min-height: calc(var(--compact-control-height) + 4px);
   position: relative;
   z-index: 180;
   display: grid;
@@ -8,9 +11,14 @@
   gap: 8px;
   padding: 3px 8px;
   border-bottom: 1px solid var(--line);
-  background: #0b0d11;
+  background: var(--pane-tab-strip-bg);
   overflow: visible;
   white-space: nowrap;
+}
+/* cap the brand title's line-box so it doesn't make the bar tall (it drove most of the centering band). */
+.topbar .title,
+.topbar .brand {
+  line-height: 1;
 }
 .title {
   font-size: var(--ui-font-size-xl);
@@ -681,7 +689,24 @@ body.theme-light .topbar-language {
   transform: rotate(90deg);
 }
 body.theme-light .topbar {
-  background: #eef3f9;
+  background: var(--pane-tab-strip-bg);
+}
+/* DOIT.12 A4: light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
+   on the light (now green) bar. */
+body.theme-light #tabMetaToggle.active {
+  background: #5f9800;           /* match the .app-menu-ui-icon.active light tuning, not the garish #8cc63f */
+  border-color: #5f9800;
+}
+body.theme-light .app-menu-button-badge {
+  border-color: var(--brand-green); /* border matches the green count fill — drops the bright #b8ee5c halo */
+}
+body.theme-light .transport-warning::after {
+  color: #5a1116;                /* light tooltip (dark-red text on a light-red surface), not near-black */
+  background: #fdeaec;
+  border-color: #d56b7a;
+}
+body.theme-light .app-menu-tab-command + .app-menu-tab-command {
+  border-top-color: rgba(70, 80, 95, 0.22);  /* a visible row separator on the white menu */
 }
 body.theme-light .app-menu-button {
   color: var(--text);
@@ -779,4 +804,11 @@ body.theme-light .latency-meter {
   background: #ffffff;
   border-color: var(--line);
 }
+/* B1/DOIT.12: this rule was TRUNCATED (open brace, no body) and unbalanced the file's braces, so in the
+   concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
+   toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
 .notify-toggle.active {
+  color: #081205;
+  background: var(--brand-green);
+  border-color: var(--brand-green);
+}

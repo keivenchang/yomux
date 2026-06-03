@@ -1620,6 +1620,10 @@ function preferenceSections() {
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
       ], help: t('pref.appearance.editor_cursor_style.help')},
+      {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'select', choices: [
+        {value: 'yellow', label: t('pref.appearance.editor_cursor_color.yellow')},
+        {value: 'theme', label: t('pref.appearance.editor_cursor_color.theme')},
+      ], help: t('pref.appearance.editor_cursor_color.help')},
       {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
       {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},

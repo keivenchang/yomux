@@ -21,7 +21,7 @@ def test_pane_spacing_default_is_2px():
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
-            "appearance": {"theme": "neon", "terminal_theme": "neon", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50},
+            "appearance": {"theme": "neon", "terminal_theme": "neon", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "purple", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_ms": 3000},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "performance": {"metadata_refresh_ms": 15000, "pane_state_refresh_ms": 1200},
@@ -42,6 +42,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["editor_dark_color_scheme"] == "dark"
     assert settings["appearance"]["editor_light_color_scheme"] == "yolomux-light"
     assert settings["appearance"]["editor_cursor_style"] == "line"
+    assert settings["appearance"]["editor_cursor_color"] == "yellow"  # invalid choice clamps to the default
     assert settings["appearance"]["file_explorer_font_size"] == 8
     assert settings["appearance"]["tab_width"] == 120
     assert settings["appearance"]["pane_spacing"] == 20

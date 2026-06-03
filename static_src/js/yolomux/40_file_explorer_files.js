@@ -3175,8 +3175,10 @@ function codeMirrorThemeExtension(api) {
       borderRightColor: scheme.line,
     },
     '.cm-panels': {
+      // shared pane-chrome bar: the find/replace panel matches the tab-strip bar (bright when this pane
+      // is focused, neutral gray when not) instead of a fixed gray — see --pane-bar-bg.
       color: scheme.fg,
-      backgroundColor: scheme.panel2,
+      backgroundColor: 'var(--pane-bar-bg)',
     },
     '.cm-searchMatch': {
       backgroundColor: scheme.dark ? 'rgba(245, 197, 66, 0.62)' : 'rgba(255, 204, 0, 0.78)',

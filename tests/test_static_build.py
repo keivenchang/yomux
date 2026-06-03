@@ -4,6 +4,7 @@ from tools.static_build import ASSETS
 from tools.static_build import BuildError
 from tools.static_build import build_asset
 from tools.static_build import build_pseudo_catalog
+from tools.static_build import check_css_braces
 from tools.static_build import locale_key_errors
 from tools.static_build import pseudo_value
 from tools.static_build import repo_path
@@ -46,6 +47,22 @@ def test_build_pseudo_catalog_covers_every_source_key():
     pseudo = build_pseudo_catalog(source)
     assert set(pseudo) == set(source)
     assert "{n}" in pseudo["y"]
+
+
+def test_css_braces_are_balanced_in_every_partial():
+    # The shipped CSS partials must each be brace-balanced (DOIT.12 B1: a truncated rule once split across
+    # two partials and only rebalanced by accident in the bundle). This passes today; it guards regressions.
+    check_css_braces()
+
+
+def test_check_css_braces_flags_an_unbalanced_partial(monkeypatch, tmp_path):
+    import tools.static_build as sb
+    bad = tmp_path / "bad.css"
+    bad.write_text(".a { color: red; } .b {\n", encoding="utf-8")  # truncated rule, missing }
+    monkeypatch.setitem(sb.ASSETS, "probe.css", ["__bad__.css"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: bad if p == "__bad__.css" else sb.REPO_ROOT / p)
+    with pytest.raises(BuildError, match="unbalanced CSS braces"):
+        sb.check_css_braces()
 
 
 def test_expected_locale_outputs_raises_on_parity_failure(monkeypatch):

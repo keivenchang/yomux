@@ -231,15 +231,52 @@ def print_startup() -> None:
 
 
 def print_minimal_header() -> None:
-    print(f"  ▐▛███▜▌  Mock {AGENT_PRODUCT_NAME} v{VERSION}")
-    print(f"▝▜█████▛▘  {MODEL_LINE}")
-    print(f"  ▘▘ ▝▝    {display_cwd()}")
+    print(f" {CLAUDE_ORANGE}▐▛███▜▌{ANSI_RESET}   {AGENT_PRODUCT_NAME}{ANSI_DIM} v{VERSION}{ANSI_RESET}")
+    print(f"{CLAUDE_ORANGE}▝▜█████▛▘{ANSI_RESET}  {ANSI_DIM}{MODEL_LINE}{ANSI_RESET}")
+    print(f"  {CLAUDE_ORANGE}▘▘ ▝▝{ANSI_RESET}    {ANSI_DIM}{display_cwd()}{ANSI_RESET}")
 
 
 def centered_in(text: str, width: int) -> str:
     if len(text) >= width:
         return text[:width]
     pad = width - len(text)
+    left = pad // 2
+    return (" " * left) + text + (" " * (pad - left))
+
+
+# Claude Code welcome-box palette: truecolor "Claude orange" plus standard SGR.
+CLAUDE_ORANGE = "\x1b[38;2;215;119;87m"
+ANSI_BOLD = "\x1b[1m"
+ANSI_DIM = "\x1b[2m"
+ANSI_ITALIC = "\x1b[3m"
+ANSI_RESET = "\x1b[0m"
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# Enterprise identity lines shown under the robot in the real welcome box.
+WELCOME_ORG_LINE = "Keiven Chang - Claude"
+WELCOME_PLAN_LABEL = "Claude Enterprise"
+
+
+def visible_len(text: str) -> int:
+    """Display width of a string, ignoring ANSI SGR color escapes."""
+    return len(ANSI_RE.sub("", text))
+
+
+def pad_cell(text: str, width: int) -> str:
+    """Left-justify to a visible width so embedded color codes don't shift the
+    box borders. Colored cells (always short here) are only padded; plain text
+    that overflows is clipped with an ellipsis."""
+    vis = visible_len(text)
+    if vis <= width:
+        return text + (" " * (width - vis))
+    return clipped(ANSI_RE.sub("", text), width)
+
+
+def center_cell(text: str, width: int) -> str:
+    """Center on visible width, ignoring ANSI color escapes."""
+    vis = visible_len(text)
+    if vis >= width:
+        return pad_cell(text, width)
+    pad = width - vis
     left = pad // 2
     return (" " * left) + text + (" " * (pad - left))
 
@@ -253,48 +290,58 @@ def print_welcome_box() -> None:
         print_minimal_header()
         return
 
-    title = f" Mock {AGENT_PRODUCT_NAME} v{VERSION} "
-    head = "───" + title
-    fill = max(0, inner - len(head))
-    print("╭" + head + ("─" * fill) + "╮")
-
     user_name = os.environ.get("USER") or "there"
     user_name = user_name[:1].upper() + user_name[1:]
-    welcome = f"Welcome back {user_name}!"
+
+    title = f"{AGENT_PRODUCT_NAME}{ANSI_DIM}  v{VERSION}{ANSI_RESET}"
+    welcome = f"{ANSI_BOLD}Welcome back {user_name}!{ANSI_RESET}"
+
+    indent = "        "
+    # The body row (▝▜█████▛▘, 9 cells) is the widest; center the narrower head
+    # (7) and legs (5) under it with per-row offsets (+1 / +2) rather than a
+    # uniform indent, so the three rows stack into one robot.
+    robot = [
+        f"{indent} {CLAUDE_ORANGE}▐▛███▜▌{ANSI_RESET}",
+        f"{indent}{CLAUDE_ORANGE}▝▜█████▛▘{ANSI_RESET}",
+        f"{indent}  {CLAUDE_ORANGE}▘▘ ▝▝{ANSI_RESET}",
+    ]
+    enterprise = f"{ANSI_DIM}{WELCOME_PLAN_LABEL}{ANSI_RESET}"
+    gap = max(2, left_w - 3 - visible_len(robot[1]) - visible_len(enterprise))
+    robot_mid = robot[1] + (" " * gap) + enterprise
 
     left_lines = [
+        title,
+        center_cell(welcome, left_w),
+        robot[0],
+        robot_mid,
+        robot[2],
         "",
-        centered_in(welcome, left_w),
-        "",
-        centered_in("▐▛███▜▌", left_w),
-        centered_in("▝▜█████▛▘", left_w),
-        centered_in("▘▘ ▝▝", left_w),
-        "",
-        " " + MODEL_LINE,
-        centered_in(display_cwd(), left_w),
+        f" {ANSI_DIM}{MODEL_LINE}{ANSI_RESET}",
+        f" {ANSI_DIM}{WELCOME_ORG_LINE}{ANSI_RESET}",
+        f" {ANSI_DIM}{display_cwd()}{ANSI_RESET}",
     ]
 
     tip = f"Run /init to create a CLAUDE.md file with instructions for {AGENT_DISPLAY_NAME}"
-    notes = [
-        f"Mock build of {AGENT_PRODUCT_NAME} — every banner is hand-rendered text, not Ink",
-        "Try `exec <cmd>`, `!<cmd>`, `guess`, or `project rename` to see tool flows",
-        "/help lists all commands, including mock-only triggers",
+    whats_new = [
+        "Internal infrastructure improvements (no user-facing changes)",
+        "Auto mode is now available on Bedrock, Vertex AI, and more",
+        "Plugins in `.claude/skills` directories are now supported",
     ]
     right_lines = [
-        "Tips for getting started",
+        f"{CLAUDE_ORANGE}{ANSI_BOLD}Tips for getting started{ANSI_RESET}",
         tip,
-        "─" * (right_w - 2),
-        "What's new",
-        notes[0],
-        notes[1],
-        notes[2],
-        "/release-notes for more",
+        "",
+        f"{CLAUDE_ORANGE}{ANSI_BOLD}What's new{ANSI_RESET}",
+        whats_new[0],
+        whats_new[1],
+        whats_new[2],
+        f"{ANSI_DIM}{ANSI_ITALIC}/release-notes for more{ANSI_RESET}",
         "",
     ]
 
+    print("╭" + ("─" * inner) + "╮")
     for left, right in zip(left_lines, right_lines):
-        print("│" + clipped(left, left_w) + "│" + clipped(" " + right, right_w) + "│")
-
+        print("│" + pad_cell(left, left_w) + "│" + pad_cell(" " + right, right_w) + "│")
     print("╰" + ("─" * inner) + "╯")
 
 
@@ -388,8 +435,9 @@ def claude_working_status_lines(frame: int, started_at: float, verb: str, tip: s
     elapsed = max(1, time.time() - started_at)
     tokens = max(1, int(elapsed * 24))
     spinner = FRAMES[frame % len(FRAMES)]
+    meta = f"{format_working_elapsed(elapsed)} · ↓ {tokens} tokens · thinking with {EFFORT} effort"
     return [
-        f"{spinner} {verb}… ({format_working_elapsed(elapsed)} · ↓ {tokens} tokens)",
+        f"{CLAUDE_ORANGE}{spinner}{ANSI_RESET} {verb}… {ANSI_DIM}({meta}){ANSI_RESET}",
         f"  ⎿  Tip: {tip}",
     ]
 
@@ -578,15 +626,13 @@ def preview_verb(command: str) -> str:
 def print_bash_prompt(command: str, description: str = "Run shell command") -> int:
     """Render the Bash permission block. Returns total newlines emitted so
     the approval/cancel handler can erase exactly this block."""
-    print_thinking()
-    n = 1  # leading blank from print_thinking
-    print(f"● Bash({command})"); n += 1
-    print(f"  ⎿  {preview_verb(command)}… (ctrl+o to expand)"); n += 1
+    # A command awaiting approval is NOT running yet: real Claude shows ONLY the
+    # permission block here. The `● Bash(...)`/Running/result render happens AFTER
+    # approval (see approve_pending_permission). Emitting no `⎿ Running…` working
+    # line is also what lets the auto-approve detector see a clean LIVE prompt
+    # instead of mistaking the screen for "agent working" and skipping it.
     cmd_lines = textwrap.wrap(command, width=76) or [""]
-    for i, line in enumerate(cmd_lines):
-        prefix = "     $ " if i == 0 else "     | "
-        print(f"{prefix}{line}"); n += 1
-    print(); n += 1
+    n = 0
     prompt_rule(terminal_width()); n += 1
     print(); n += 1
     if PERMISSION_STYLE == "codex":
@@ -663,30 +709,6 @@ def print_confirm_menu(title: str, body: str, options: list[tuple[str, str]]) ->
     print()
 
 
-def print_project_rename_flow() -> tuple[str, str, int]:
-    print_thinking(seconds=2)
-    command = "tmux ls 2>/dev/null | grep -E '^project[0-9]+:' || echo \"no project sessions\""
-    print_tool_error(command)
-    print_tool_multiline(
-        command,
-        [
-            "project1: 2 windows (created Thu May  7 14:34:50 2026) (attached)",
-            "project2: 2 windows (created Wed May  6 13:46:17 2026) (attached)",
-            "project3: 2 windows (created Fri May  8 12:41:25 2026) (attached)",
-        ],
-        more=2,
-    )
-    print("● Found 5 sessions: project1-4, project6. Rename them?")
-    print()
-    print(f"● User answered {AGENT_DISPLAY_NAME}'s questions:")
-    print("  ⎿  · Rename project1, project2, project3, project4, project6 → 1, 2, 3, 4, 6? → Yes, rename all")
-    print()
-    rename_command = "for n in 1 2 3 4 6; do tmux rename-session -t project$n $n; done && tmux ls"
-    description = "Rename project sessions"
-    n = print_bash_prompt(rename_command, description)
-    return rename_command, description, n
-
-
 def set_pending_permission(state: dict[str, str], command: str, description: str, lines: int = 0) -> None:
     state["pending"] = "permission"
     state["command"] = command
@@ -696,9 +718,85 @@ def set_pending_permission(state: dict[str, str], command: str, description: str
 
 
 def clear_pending(state: dict[str, str]) -> None:
-    keep = {k: v for k, v in state.items() if k in {"tokens_in", "tokens_out", "turn"}}
+    # Preserve session counters AND any in-flight yesno sequence — approve/cancel call
+    # clear_pending between steps, and advance_yesno_queue needs the queue to survive.
+    keep = {k: v for k, v in state.items()
+            if k in {"tokens_in", "tokens_out", "turn",
+                     "yesno_total", "yesno_idx", "yesno_queue"}}
     state.clear()
     state.update(keep)
+
+
+# Realistic-looking (but mock-executed — no real side effects) unix commands a build/create
+# script would run, each behind its own Yes/No permission prompt. `yesno N` queues N of these.
+YESNO_STEPS = [
+    ("mkdir -p build/output", "Create the build output directory"),
+    ("chmod +x scripts/deploy.sh", "Make the deploy script executable"),
+    ("cp -r src/ dist/", "Copy sources into dist/"),
+    ("rm -f dist/*.tmp", "Remove temporary build files"),
+    ("git add -A", "Stage all changes"),
+    ("tar czf release.tgz dist/", "Create the release archive"),
+    ("npm ci", "Install pinned npm dependencies"),
+    ("docker build -t mockapp:latest .", "Build the container image"),
+    ("sed -i 's/0.0.0/1.0.0/' VERSION", "Bump the version string"),
+    ("git commit -m 'mock build'", "Commit the build"),
+]
+
+
+def clear_yesno(state: dict[str, str]) -> None:
+    for key in ("yesno_total", "yesno_idx", "yesno_queue"):
+        state.pop(key, None)
+
+
+def start_yesno_step(state: dict[str, str], command: str, description: str) -> None:
+    idx = state.get("yesno_idx", "1")
+    total = state.get("yesno_total", "1")
+    label = f"[{idx}/{total}] {description}" if description else f"[{idx}/{total}]"
+    n = print_bash_prompt(command, label)
+    set_pending_permission(state, command, label, lines=n)
+
+
+def cmd_yesno(state: dict[str, str], count: int) -> None:
+    """Queue COUNT mock-build steps, each asking Yes/No. Approving advances to the
+    next step; declining aborts the rest. Useful for exercising auto-approve across
+    several consecutive prompts."""
+    count = max(1, min(count, 50))
+    steps = [YESNO_STEPS[i % len(YESNO_STEPS)] for i in range(count)]
+    plural = "s" if count != 1 else ""
+    print(f"● Mock build script — {count} step{plural}, each needs Yes/No.")
+    print()
+    state["yesno_total"] = str(count)
+    state["yesno_idx"] = "1"
+    state["yesno_queue"] = "\n".join(f"{cmd}\t{desc}" for cmd, desc in steps[1:])
+    first_cmd, first_desc = steps[0]
+    start_yesno_step(state, first_cmd, first_desc)
+
+
+def advance_yesno_queue(state: dict[str, str], approved: bool) -> None:
+    """After a permission prompt resolves, drive the next yesno step (or finish).
+    No-op when there is no active yesno sequence (a plain single prompt)."""
+    if "yesno_total" not in state:
+        return
+    total = int(state.get("yesno_total", "1"))
+    idx = int(state.get("yesno_idx", "1"))
+    queue_raw = state.get("yesno_queue", "")
+    remaining = [line for line in queue_raw.split("\n") if line] if queue_raw else []
+    if not approved:
+        skipped = total - idx
+        plural = "s" if skipped != 1 else ""
+        print(f"● Build script aborted at step {idx}/{total} ({skipped} step{plural} skipped).")
+        print()
+        clear_yesno(state)
+        return
+    if not remaining:
+        print(f"● Build script complete — {total}/{total} steps approved.")
+        print()
+        clear_yesno(state)
+        return
+    cmd, _, desc = remaining[0].partition("\t")
+    state["yesno_idx"] = str(idx + 1)
+    state["yesno_queue"] = "\n".join(remaining[1:])
+    start_yesno_step(state, cmd, desc)
 
 
 def reusable_command_prefix(command: str) -> str:
@@ -773,6 +871,7 @@ def approve_pending_permission(state: dict[str, str]) -> None:
         print(f"{prefix}{line}")
     print()
     print_done_summary(seconds=elapsed)
+    advance_yesno_queue(state, approved=True)
 
 
 def cancel_pending_permission(state: dict[str, str]) -> None:
@@ -780,6 +879,7 @@ def cancel_pending_permission(state: dict[str, str]) -> None:
     clear_pending(state)
     print("● Cancelled.")
     print()
+    advance_yesno_queue(state, approved=False)
 
 
 def _has_more(timeout: float = 0.05) -> bool:
@@ -853,52 +953,6 @@ def handle_pending_permission_tty(state: dict[str, str]) -> None:
             cancel_pending_permission(state)
 
 
-def set_pending_guess(state: dict[str, str], target: int, tries: int) -> None:
-    state["pending"] = "guess"
-    state["guess_target"] = str(target)
-    state["guess_tries_left"] = str(tries)
-    state["guess_tries_total"] = str(tries)
-
-
-def handle_pending_guess(user_input: str, state: dict[str, str]) -> bool:
-    value = user_input.strip().lower()
-    if value in {"quit", "stop", "cancel", "exit", "/quit", "/exit"}:
-        target = state.get("guess_target", "?")
-        clear_pending(state)
-        print(f"● Stopped. The number was {target}.")
-        print()
-        return True
-    try:
-        guess = int(value)
-    except ValueError:
-        print("● Enter a number between 0 and 100, or 'quit' to stop.")
-        print()
-        return True
-    if not 0 <= guess <= 100:
-        print("● Out of range — pick a number between 0 and 100.")
-        print()
-        return True
-    target = int(state.get("guess_target", "-1"))
-    tries_left = int(state.get("guess_tries_left", "0")) - 1
-    total = int(state.get("guess_tries_total", "7"))
-    if guess == target:
-        used = total - tries_left
-        clear_pending(state)
-        print(f"● You got it! {target} in {used} {'try' if used == 1 else 'tries'}.")
-        print()
-        return True
-    if tries_left <= 0:
-        clear_pending(state)
-        print(f"● Out of tries. The number was {target}.")
-        print()
-        return True
-    hint = "higher" if guess < target else "lower"
-    state["guess_tries_left"] = str(tries_left)
-    print(f"● {hint}. {tries_left} {'try' if tries_left == 1 else 'tries'} left.")
-    print()
-    return True
-
-
 def handle_pending_input(user_input: str, state: dict[str, str]) -> bool:
     pending = state.get("pending")
     if pending == "permission":
@@ -914,8 +968,6 @@ def handle_pending_input(user_input: str, state: dict[str, str]) -> bool:
             cancel_pending_permission(state)
             return True
         return False
-    if pending == "guess":
-        return handle_pending_guess(user_input, state)
     return False
 
 
@@ -970,28 +1022,17 @@ def cmd_help() -> None:
     print("● Slash commands")
     print("  ⎿  /help             Show this help")
     print("     /clear            Clear screen and reset session")
-    print("     /exit, /quit      Exit")
-    print("     /model            Current model")
     print("     /status           Session status")
-    print("     /cost             Tokens & cost so far")
-    print("     /compact          Summarize and compact context")
-    print("     /init             Initialize agent instructions")
-    print("     /agents           Pick agent")
-    print("     /doctor           Diagnostics")
+    print("     /exit, /quit      Exit")
     print()
     print(f"● Mock-only triggers (not real {AGENT_DISPLAY_NAME})")
-    print('  ⎿  exec <cmd>        Permission prompt, then REAL shell exec')
-    print('     !<cmd>            Bash mode — REAL shell exec, no permission')
-    print('     sleep N           Real sleep + permission prompt')
-    print('     read <path>       Mock Read tool (cosmetic)')
-    print('     grep <pattern>    Mock Grep tool (cosmetic)')
-    print('     edit <path>       Mock Edit tool (cosmetic)')
-    print('     write <path>      Mock Write tool (cosmetic)')
-    print('     todos             Mock TodoWrite tool (cosmetic)')
-    print('     permission/bash   Permission prompt with canned "ok" result')
-    print('     project rename     Multi-step tool flow demo')
-    print('     ask, question     AskUserQuestion demo')
-    print('     guess             20-questions demo')
+    print('  ⎿  <shell cmd>       Permission prompt, then REAL shell exec on Yes')
+    print('     exec <cmd>        Same, for an arbitrary command')
+    print('     !<cmd>            Bash mode — REAL shell exec, NO permission prompt')
+    print('     sleep N           Real sleep behind a permission prompt (working state)')
+    print('     yesno [N]         Mock build script — N Yes/No prompts in a row (default 3)')
+    print('     ask, question     AskUserQuestion demo (arrow-key choice)')
+    print('     todos             Ctrl-T style task-list overlay')
     print()
 
 
@@ -1000,13 +1041,6 @@ def cmd_clear(state: dict[str, str]) -> None:
     sys.stdout.flush()
     state.clear()
     print_startup()
-
-
-def cmd_model() -> None:
-    print(f"● Current model: {MODEL}")
-    print(f"  Effort: {EFFORT}")
-    print(f"  Billing: API Usage")
-    print()
 
 
 def cmd_status(state: dict[str, str]) -> None:
@@ -1020,49 +1054,6 @@ def cmd_status(state: dict[str, str]) -> None:
     print()
 
 
-def cmd_cost(state: dict[str, str]) -> None:
-    tokens_in = int(state.get("tokens_in", "0"))
-    tokens_out = int(state.get("tokens_out", "0"))
-    cost = (tokens_in * 15 + tokens_out * 75) / 1_000_000
-    print("● Session cost")
-    print(f"  ⎿  Input tokens:  {tokens_in:>8}")
-    print(f"     Output tokens: {tokens_out:>8}")
-    print(f"     Estimated:     ${cost:.4f}")
-    print()
-
-
-def cmd_compact(state: dict[str, str]) -> None:
-    print_thinking(seconds=2, tokens=128)
-    print("● Compacted context. Earlier turns summarized.")
-    state["tokens_in"] = "0"
-    state["tokens_out"] = "0"
-    print()
-
-
-def cmd_init() -> None:
-    print_thinking(seconds=2)
-    print(f"● No AGENTS.md found. Would scan the codebase and propose one — mock {AGENT_NAME}, no file written.")
-    print()
-
-
-def cmd_doctor() -> None:
-    print("● Diagnostics")
-    print("  ⎿  ✔ MCP server: ok")
-    print("     ✔ Auth: ok")
-    print("     ⚠ 1 setting issue: outdated agent instructions format")
-    print("     ✔ Git repo: ok")
-    print()
-
-
-def cmd_agents() -> None:
-    print("● Available agents")
-    print(f"  ⎿  {SELECTOR_GLYPH} 1. {AGENT_NAME:<15} — default")
-    print("       2. Explore         — read-only search")
-    print("       3. Plan            — design implementation plan")
-    print("       4. general-purpose — multi-step research")
-    print()
-
-
 def cmd_bang_bash(command: str) -> None:
     print_thinking(seconds=1, tokens=12)
     print(f"● Bash({command})  (bash mode)")
@@ -1071,41 +1062,6 @@ def cmd_bang_bash(command: str) -> None:
     for i, line in enumerate(lines):
         prefix = "  ⎿  " if i == 0 else "     "
         print(f"{prefix}{line}")
-    print()
-
-
-def cmd_read(path: str) -> None:
-    print_thinking(seconds=2)
-    n = random.randint(50, 800)
-    print(f"● Read({path})")
-    print(f"  ⎿  Read {n} lines (ctrl+o to expand)")
-    print()
-
-
-def cmd_grep(pattern: str, path: str = ".") -> None:
-    print_thinking(seconds=2)
-    matches = random.randint(0, 50)
-    files = random.randint(0, min(matches, 12)) if matches else 0
-    print(f'● Grep(pattern: "{pattern}", path: "{path}")')
-    if matches == 0:
-        print("  ⎿  No matches")
-    else:
-        print(f"  ⎿  Found {matches} matches in {files} files")
-    print()
-
-
-def cmd_edit(path: str) -> None:
-    print_thinking(seconds=2)
-    print(f"● Edit({path})")
-    print(f"  ⎿  Applied 1 edit to {path}")
-    print()
-
-
-def cmd_write(path: str) -> None:
-    print_thinking(seconds=2)
-    n = random.randint(20, 200)
-    print(f"● Write({path})")
-    print(f"  ⎿  Wrote {n} lines to {path}")
     print()
 
 
@@ -1136,19 +1092,16 @@ def print_capabilities() -> None:
     print("    !<any-cmd>         ← bash mode, no permission prompt")
     print()
     print("  Built-in actions:")
-    print("    sleep N            ← real time.sleep with permission prompt")
-    print("    guess              ← number-guessing game (0-100, 7 tries)")
+    print("    sleep N            ← real time.sleep behind a permission prompt")
+    print("    yesno [N]          ← N Yes/No permission prompts in a row (default 3)")
     print("    ask                ← AskUserQuestion demo with arrow-key nav")
+    print("    todos              ← Ctrl-T style task-list overlay")
     print()
     print("  Slash commands:")
     print("    /help              ← shortcut and slash-command reference")
-    print("    /status /cost      ← session + token info")
+    print("    /status            ← session + token info")
     print("    /clear             ← clear screen")
     print("    /quit /exit        ← exit")
-    print()
-    print("  Cosmetic demos (no real action):")
-    print("    read <path>, grep <pat>, edit <path>, write <path>, todos")
-    print("    project rename, 20 questions")
     print()
 
 
@@ -1183,66 +1136,37 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
     if lower in {"/clear", "clear"}:
         cmd_clear(state)
         return
-    if lower == "/model":
-        cmd_model()
-        return
     if lower == "/status":
         cmd_status(state)
         return
-    if lower == "/cost":
-        cmd_cost(state)
-        return
-    if lower == "/compact":
-        cmd_compact(state)
-        return
-    if lower == "/init":
-        cmd_init()
-        return
-    if lower == "/doctor":
-        cmd_doctor()
-        return
-    if lower == "/agents":
-        cmd_agents()
-        return
 
+    # !<cmd> — bash mode, runs for real with NO permission prompt.
     if value.startswith("!"):
         cmd_bang_bash(value[1:].strip() or "echo ok")
         return
 
-    m = re.match(r"^read\s+(.+)$", value, re.IGNORECASE)
+    # yesno / confirm / script [N] — a mock build script of N steps, each a Yes/No
+    # permission prompt. Approve advances to the next; decline aborts the rest.
+    m = re.match(r"^(?:yesno|confirm|script)(?:\s+(\d+))?$", lower)
     if m:
-        cmd_read(m.group(1).strip())
+        cmd_yesno(state, int(m.group(1)) if m.group(1) else 3)
         return
-    m = re.match(r"^grep\s+(\S+)(?:\s+(.+))?$", value, re.IGNORECASE)
-    if m:
-        cmd_grep(m.group(1), (m.group(2) or ".").strip())
-        return
-    m = re.match(r"^edit\s+(.+)$", value, re.IGNORECASE)
-    if m:
-        cmd_edit(m.group(1).strip())
-        return
-    m = re.match(r"^write\s+(.+)$", value, re.IGNORECASE)
-    if m:
-        cmd_write(m.group(1).strip())
-        return
+
+    # todos / plan — Ctrl-T style task list (the overlay that renders below a prompt).
     if lower in {"todos", "todo", "plan", "make a plan"}:
         cmd_todos()
         return
 
-    if lower.startswith("permission ") or lower.startswith("approve ") or lower.startswith("bash "):
-        command = re.sub(r"^(permission|approve|bash)\s+", "", value, flags=re.IGNORECASE).strip() or "sleep 2 && echo ok"
-        description = "Mock command requiring approval"
-        n = print_bash_prompt(command, description)
-        set_pending_permission(state, command, description, lines=n)
+    # ask / question / choose — AskUserQuestion-style choice prompt (arrow-key nav).
+    if len(value) <= 60 and re.search(r"\b(question|ask|choose)\b", lower):
+        print_thinking()
+        question = "Who is the greatest tennis player of all time?"
+        options = ["Novak Djokovic", "Roger Federer", "Rafael Nadal"]
+        print_question(question, options)
+        set_pending_question(state, question, options)
         return
 
-    if (len(value) <= 60
-            and re.search(r"\bproject\b", lower)
-            and re.search(r"\brename\b", lower)):
-        command, description, n = print_project_rename_flow()
-        set_pending_permission(state, command, description, lines=n)
-        return
-
+    # sleep / wait N — real time.sleep behind a permission prompt (drives the working state).
     m = re.match(r"^(sleep|wait)\s+(\d+(?:\.\d+)?)", value, re.IGNORECASE)
     if m:
         secs = m.group(2)
@@ -1252,6 +1176,7 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
         set_pending_permission(state, value, description, lines=n)
         return
 
+    # exec / execute <cmd> — arbitrary command via a real shell, behind a permission prompt.
     m = re.match(r"^(exec|execute)\s+(.+)$", value, re.IGNORECASE)
     if m:
         command = m.group(2).strip() or "echo ok"
@@ -1261,40 +1186,7 @@ def handle_command(user_input: str, state: dict[str, str]) -> None:
         state["real_exec"] = "1"
         return
 
-    if len(value) <= 60 and re.search(r"\b(question|ask|choose)\b", lower):
-        print_thinking()
-        question = "Who is the greatest tennis player of all time?"
-        options = ["Novak Djokovic", "Roger Federer", "Rafael Nadal"]
-        print_question(question, options)
-        set_pending_question(state, question, options)
-        return
-
-    if lower in {"guess", "guess number", "guess the number", "play guess", "number game", "play number"}:
-        target = random.randint(0, 100)
-        tries = 7
-        set_pending_guess(state, target, tries)
-        print(f"● I'm thinking of a number between 0 and 100. You have {tries} tries. What's your guess?")
-        print()
-        return
-
-    if "20 questions" in lower:
-        print_thinking()
-        print_assistant("Think of something. I'll ask up to 20 yes/no questions to guess it. Tell me when you're ready.")
-        print("● Q1/20: Is it a living thing?")
-        print()
-        return
-
-    if lower in {"what can you do", "what do you do", "what can this do", "capabilities",
-                 "what can you actually do", "what's possible", "what can i do",
-                 "help me", "what now"}:
-        print_capabilities()
-        return
-
-    if lower in {"hello", "hi", "hey", "yo"}:
-        print_thinking(seconds=1, tokens=12)
-        print_assistant(f"Hi. This is the {AGENT_PRODUCT_NAME} mock — try /help to see what I can do.")
-        return
-
+    # A recognized shell command — permission prompt, runs for real on Yes.
     if looks_like_shell_command(value):
         description = describe_shell_command(value)
         n = print_bash_prompt(value, description)

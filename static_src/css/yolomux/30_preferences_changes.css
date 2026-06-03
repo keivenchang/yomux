@@ -1115,6 +1115,73 @@ body.theme-light .keyboard-shortcut-row kbd {
 .agent-icon.claude {
   color: #ffffff;
 }
+/* ============================================================================
+   Light mode (DOIT.12 B5): dialogs and warning chrome hardcode dark fills + light
+   text. The dialogs combine a dark bg with theme-aware `var(--text)` (dark in light)
+   → dark-on-dark. Repaint as light cards with dark/readable text. The white agent
+   glyphs are invisible on the white Changes panel → darken.
+   ============================================================================ */
+body.theme-light .command-palette-dialog,
+body.theme-light .keyboard-shortcuts-dialog {
+  background: #ffffff;
+  border-color: #cdd5e0;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+}
+body.theme-light .command-palette-input {
+  background: #f3f6fa;
+}
+body.theme-light .command-palette-row {
+  color: #1f2937;
+}
+body.theme-light .command-palette-row.active,
+body.theme-light .command-palette-row:hover {
+  color: #1f2937;
+  background: #e6f1dd;
+  border-color: rgba(118, 185, 0, 0.55);
+}
+body.theme-light .command-palette-group,
+body.theme-light .command-palette-detail,
+body.theme-light .command-palette-keybinding {
+  color: #586072;
+}
+body.theme-light .keyboard-shortcuts-section h3 {
+  color: #5f9800;
+}
+body.theme-light .keyboard-shortcuts-close:hover,
+body.theme-light .keyboard-shortcuts-close:focus-visible {
+  background: rgba(15, 23, 42, 0.06);
+}
+body.theme-light .keyboard-shortcut-row {
+  border-bottom-color: rgba(15, 23, 42, 0.08);
+}
+body.theme-light .keyboard-shortcut-row kbd {
+  color: #1f2937;
+  background: #eef1f5;
+  border-color: rgba(15, 23, 42, 0.18);
+}
+body.theme-light .preferences-global-reset {
+  color: #7a4a00;
+  background: rgba(255, 177, 66, 0.16);
+  border-color: rgba(214, 140, 30, 0.6);
+}
+body.theme-light .preferences-global-reset.confirming {
+  background: rgba(220, 40, 30, 0.10);
+  border-color: #d9534f;
+}
+body.theme-light .preferences-global-reset-title {
+  color: #9a5b00;
+}
+body.theme-light .preferences-global-reset-warning {
+  color: #7a4a00;
+}
+body.theme-light .preferences-reset-cancel {
+  background: rgba(15, 23, 42, 0.05);
+  border-color: rgba(15, 23, 42, 0.18);
+}
+body.theme-light .agent-icon.codex,
+body.theme-light .agent-icon.claude {
+  color: #1f2937;
+}
 button {
   min-width: 34px;
   border: 1px solid var(--line);

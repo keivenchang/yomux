@@ -91,6 +91,29 @@ def check_asset(asset: str) -> bool:
     return read_text(output_path) == build_asset(asset)
 
 
+def check_css_braces() -> None:
+    """Fail the build if any CSS partial has unbalanced { } braces.
+
+    A truncated/incomplete rule (open brace, no close) is invisible in isolation but, once the partials
+    are concatenated, silently swallows the start of the NEXT partial's CSS until a stray } rebalances
+    it (this exact bug shipped once — DOIT.12 B1). Strips /* */ comments and quoted strings first so
+    braces inside content/url() values don't false-positive.
+    """
+    for asset, parts in ASSETS.items():
+        if not asset.endswith(".css"):
+            continue
+        for part in parts:
+            text = read_text(repo_path(part))
+            stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+            stripped = re.sub(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'", "", stripped)
+            opens, closes = stripped.count("{"), stripped.count("}")
+            if opens != closes:
+                raise BuildError(
+                    f"{part}: unbalanced CSS braces ({opens} '{{' vs {closes} '}}') — a truncated or "
+                    f"incomplete rule? An open rule swallows the next partial's CSS in the bundle."
+                )
+
+
 class BuildError(Exception):
     """Raised when the build cannot proceed (e.g. i18n key-parity failure)."""
 
@@ -195,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
     assets = args.assets or sorted(ASSETS)
     try:
+        check_css_braces()
         if args.check:
             stale = [asset for asset in assets if not check_asset(asset)]
             stale += check_locales()

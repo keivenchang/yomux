@@ -1543,6 +1543,40 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
   background: var(--accent-gold);
   box-shadow: 0 0 0 1px rgba(12, 15, 20, 0.9), 0 0 7px rgba(245, 197, 66, 0.75);
 }
+/* ============================================================================
+   Light mode (DOIT.12 B5): the update banner is a dark navy slab, and the file-tree
+   "current"/"repo-non-main"/"indexed" rows hardcode near-white-green or washed-amber
+   text that vanishes on the white tree. Darken the text; strengthen the selection
+   ring (the --file-selection-* fill/border tokens are already theme-aware).
+   ============================================================================ */
+body.theme-light .server-update-banner {
+  background: #ffffff;
+  color: #1f2937;
+  border-color: #d68c1e;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.18);
+}
+body.theme-light .server-update-banner-dismiss {
+  color: #586072;
+}
+body.theme-light .file-tree-row.selected {
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
+}
+body.theme-light .file-tree-row.current-file:not(.selected),
+body.theme-light .file-tree-row.current-directory:not(.selected) {
+  color: #1f2937;
+}
+body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
+  color: #b06a00;
+  text-decoration-color: rgba(176, 106, 0, 0.6);
+}
+body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-name,
+body.theme-light .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
+  color: #3f6312;
+}
+body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
+  color: #5f9800;
+  text-shadow: none;
+}
 .file-tree-name {
   overflow: hidden;
   text-overflow: ellipsis;

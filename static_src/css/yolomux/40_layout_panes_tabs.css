@@ -156,6 +156,11 @@ body.layout-resizing {
   border-color: var(--drop-outline);
   background: #1a2230;
 }
+/* Light mode: the dark drop-target fill is a black box on the white grid; the dashed
+   border already uses the theme-aware --drop-outline token (DOIT.12 B5). */
+body.theme-light .drop-slot.drag-over {
+  background: rgba(15, 23, 42, 0.06);
+}
 .drop-slot.drop-preview::before,
 .grid.drop-preview::before {
   content: attr(data-drop-label);
@@ -226,6 +231,20 @@ body.layout-resizing {
   min-width: 0;
   min-height: 0;
   height: 100%;
+  /* SHARED PANE-CHROME THEMING (one source of truth — no per-button/per-bar one-offs):
+     • --pane-bar-bg  : every chrome BAR (tab strip, info/detail row, editor toolbar, find panel) reads
+       this. Default = neutral gray (--panel2) for an UNFOCUSED pane; the focused override below sets it
+       to the bright tab-strip green. So all bars track focus together.
+     • --pane-ctl-*   : every chrome BUTTON reads these. Rest state = white (light) / near-black (dark);
+       the .active / [aria-pressed=true] state = green. Buttons never hardcode their own colors.
+     Raw values come from theme tokens, so everything flips light/dark automatically. */
+  --pane-bar-bg: var(--panel2);
+  --pane-ctl-bg: var(--pane-tab-control-bg);
+  --pane-ctl-fg: var(--pc-control-fg);
+  --pane-ctl-border: var(--pane-tab-control-border);
+  --pane-ctl-pressed-bg: var(--pane-tab-active-bg);
+  --pane-ctl-pressed-fg: var(--pane-tab-active-text);
+  --pane-ctl-pressed-border: var(--pane-tab-active-border);
   /* Every pane has a "natural border" = the pane spacing (--pane-split-gap), transparent by default so
      it just shows the background gutter. The ACTIVE pane colors it green (below). Because it's a real
      border (box-sizing: border-box) it is part of the pane's box — it sits flush against the resizer
@@ -308,7 +327,7 @@ body.layout-resizing {
   padding: 2px 5px 0 6px;
   border-bottom: 0;
   color: var(--pane-tab-text);
-  background: var(--pane-tab-strip-bg);
+  background: var(--pane-bar-bg);
   overflow: hidden;
 }
 .panel-head:not(.file-explorer-head)::after {
@@ -328,7 +347,7 @@ body.layout-resizing {
   max-width: 100%;
   padding: 1px 2px 1px 8px;
   color: var(--pane-meta-path);
-  background: var(--pane-detail-bg);
+  background: var(--pane-bar-bg);
   border-bottom: 1px solid var(--line);
   overflow: hidden;
 }
@@ -408,6 +427,8 @@ body.layout-resizing {
 .panel.active-pane,
 .panel.typing-ready-pane {
   border-color: var(--pane-tab-panel-ring);
+  /* focused pane: all chrome bars switch from neutral gray to the bright tab-strip green together. */
+  --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 .panel.typing-ready-pane {
   --panel-ring-color: var(--active-ring);
@@ -420,6 +441,18 @@ body.layout-resizing {
 .panel.needs-blocked-pane {
   --panel-ring-color: #ff3347;
 }
+/* image 20260603-001: when a needs-attention pane is ALSO focused, carry the red on the BORDER (where the
+   green focus border already is) instead of a separate nested inset ::after — so red sits ON the green
+   edge, not one border-width inside it. Higher specificity (0,3,0) than the green focus rules, so it wins.
+   Inactive needs panes (transparent border) keep the inset red ring below. */
+.panel.active-pane.needs-input-pane,
+.panel.active-pane.needs-exec-pane,
+.panel.active-pane.needs-blocked-pane,
+.panel.typing-ready-pane.needs-input-pane,
+.panel.typing-ready-pane.needs-exec-pane,
+.panel.typing-ready-pane.needs-blocked-pane {
+  border-color: var(--panel-ring-color);
+}
 .panel.preview-linked:not(.active-pane):not(.typing-ready-pane):not(.needs-input-pane):not(.needs-exec-pane):not(.needs-blocked-pane)::after {
   content: "";
   position: absolute;
@@ -431,9 +464,9 @@ body.layout-resizing {
 }
 /* The red attention states keep an INSET ::after ring (it carries the pulsing animation). The
    active/typing-ready focus ring is the outset box-shadow above instead. */
-.panel.needs-input-pane::after,
-.panel.needs-exec-pane::after,
-.panel.needs-blocked-pane::after {
+.panel.needs-input-pane:not(.active-pane):not(.typing-ready-pane)::after,
+.panel.needs-exec-pane:not(.active-pane):not(.typing-ready-pane)::after,
+.panel.needs-blocked-pane:not(.active-pane):not(.typing-ready-pane)::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -442,20 +475,17 @@ body.layout-resizing {
   border-radius: inherit;
   pointer-events: none;
 }
-.panel.needs-input-pane::after,
-.panel.needs-exec-pane::after,
-.panel.needs-blocked-pane::after {
+.panel.needs-input-pane:not(.active-pane):not(.typing-ready-pane)::after,
+.panel.needs-exec-pane:not(.active-pane):not(.typing-ready-pane)::after,
+.panel.needs-blocked-pane:not(.active-pane):not(.typing-ready-pane)::after {
   --attention-ring-border: 1px;
   animation: attention-ring-fade var(--red-reminder-duration) var(--red-reminder-easing) infinite;
   animation-delay: var(--attention-animation-delay, 0s);
 }
 .panel.active-pane .panel-head {
-  background: var(--pane-tab-strip-bg);
+  /* bg comes from --pane-bar-bg (focused = bright strip); no per-state override here. */
   color: var(--pane-tab-text);
   box-shadow: none;
-}
-.panel.active-pane .panel-detail-row {
-  background: var(--pane-tab-panel-detail-bg);
 }
 .panel.active-pane .panel-detail-row .meta,
 .panel.active-pane .panel-detail-row .meta-branch,
@@ -672,10 +702,24 @@ body.layout-resizing {
 .panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active {
   opacity: 1;
 }
+/* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
+   when the pane is unfocused). The bars themselves (strip, detail row, editor toolbar, find) already read
+   --pane-bar-bg, so only the tabs need this; the active tab stays green. */
+.panel:not(.active-pane):not(.typing-ready-pane) .pane-tab:not(.active) {
+  background: var(--pane-bar-bg);
+}
 .pane-tab.active .session-button-name,
 .pane-tab.active .session-button-dir,
 .pane-tab.active .session-button-detail {
   color: var(--pane-tab-unfocused-active-text);
+}
+/* image 008: the inactive-tab name/dir/detail hardcode near-white colors (tuned for the dark tab bg),
+   so on the light-green/gray inactive tabs in LIGHT mode they were white-on-white. Give them dark text
+   (active tabs keep their own white-on-green via the rules above; dark mode keeps the near-white). */
+body.theme-light .pane-tab:not(.active) .session-button-name,
+body.theme-light .pane-tab:not(.active) .session-button-dir,
+body.theme-light .pane-tab:not(.active) .session-button-detail {
+  color: #1f2937;
 }
 .panel.active-pane .pane-tab.active .session-button-name,
 .panel.active-pane .pane-tab.active .session-button-dir,
@@ -720,6 +764,33 @@ body.layout-resizing {
 }
 .pane-tab.file-missing.active .file-tab-missing-badge {
   color: #ffe0e5;
+}
+/* Light mode (DOIT.12 B5): the file-missing tab is a dark-maroon box and the inactive
+   YO marker inside an active tab is a dark-slate box — both unreadable on the white head.
+   Repaint as a light error tint (dark-red text) / light neutral chip. */
+body.theme-light .pane-tab.file-missing {
+  color: #9b2c3a;
+  background: #fdecee;
+  border-color: #e8a9b2;
+}
+body.theme-light .pane-tab.file-missing:hover {
+  background: #fbe0e4;
+  border-color: #d56b7a;
+}
+body.theme-light .pane-tab.file-missing.active {
+  color: #7a1f2c;
+  background: #f7d2d8;
+  border-color: #cf5566;
+  border-bottom-color: #f7d2d8;
+}
+body.theme-light .pane-tab.file-missing .file-tab-missing-badge,
+body.theme-light .pane-tab.file-missing.active .file-tab-missing-badge {
+  color: #b3263a;
+}
+body.theme-light .pane-tab.active .session-yolo-marker.inactive {
+  color: #52617a;
+  background: #e2e6ec;
+  border-color: #c2cad6;
 }
 .pane-tab-close {
   position: relative;
@@ -1081,12 +1152,8 @@ body.layout-resizing {
 .tabs .pane-minimize::after {
   display: none;
 }
-.tabs .pane-detail-toggle.active,
-.panel.active-pane .panel-head .tabs .pane-detail-toggle.active {
-  color: var(--pc-control-fg);
-  background: var(--pc-control-bg);
-  border-color: var(--pc-control-border);
-}
+/* (the detail/info toggle's pressed = green now comes from the shared .tab[aria-pressed=true] rule — no
+   per-button white override here.) */
 .tabs .pane-detail-toggle::before {
   width: 10px;
   height: 8px;
@@ -1107,41 +1174,39 @@ body.layout-resizing {
 .tabs .pane-expand::after {
   transform: translate(-50%, -50%) rotate(90deg);
 }
-.tabs .pc-window-control {
-  color: var(--pc-control-fg);
-  background: var(--pane-tab-control-bg);
-  border-color: var(--pane-tab-control-border);
+/* ── SHARED pane-head control buttons (single source of truth) ──────────────────────────────────────
+   Every control button (terminal/agent pill, window-step < >, actions …, detail/info toggle, minimize,
+   expand +, close ×) shares ONE color treatment — they only add their own glyph/layout, never their own
+   colors. Rest = white (light) / near-black (dark) via --pane-ctl-*; the PRESSED/ACTIVE state (active
+   terminal/agent tab, a toggled-on info toggle, etc.) = green. The .auto-toggle (YO/YOLO) keeps its own
+   green-glow below. This replaces the old per-button one-offs (navy active tab, always-green zoom). */
+.tabs .tab:not(.auto-toggle) {
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  border-color: var(--pane-ctl-border, var(--pane-tab-control-border));
 }
-.tabs .pc-window-control:hover {
+.tabs .tab:not(.auto-toggle):hover {
   color: var(--pc-control-hover-fg);
   background: var(--pane-tab-control-hover-bg);
   border-color: var(--pane-tab-control-hover-border);
 }
-.tabs .pc-zoom {
-  color: #eef9ea;
-  background: var(--pane-tab-zoom-bg);
-  border-color: var(--pane-tab-zoom-border);
+.tabs .tab.active:not(.auto-toggle),
+.tabs .tab[aria-pressed="true"]:not(.auto-toggle) {
+  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
+  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
+  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
+  font-weight: 700;
 }
-.tabs .pc-zoom:hover {
-  color: var(--pane-tab-active-text);
-  background: var(--pane-tab-zoom-hover-bg);
-  border-color: var(--pane-tab-zoom-hover-border);
-}
+/* Fallback for any .tab.active OUTSIDE a pane head (e.g. detached/menu contexts). */
 .tab.active {
   color: var(--text);
   background: #263044;
   border-color: #566176;
   font-weight: 700;
 }
-.panel-head .tab.active:not(.auto-toggle) {
-  color: #ffffff;
-  background: #263044;
-  border-color: #93c5fd;
-}
-.panel.active-pane .panel-head .tab.active:not(.auto-toggle) {
-  color: #ffffff;
-  background: #14385f;
-  border-color: #bfdbfe;
+body.theme-light .tab.active {
+  background: #dce3ec;
+  border-color: #b3bdcb;
 }
 .tab.auto-toggle.active {
   color: var(--pane-tab-yolo-text);
@@ -1149,18 +1214,6 @@ body.layout-resizing {
   border-color: var(--pane-tab-yolo-border);
   font-weight: 700;
   box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.28), 0 0 14px var(--auto-glow);
-}
-.panel-head .tabs .pane-detail-toggle.active,
-.panel.active-pane .panel-head .tabs .pane-detail-toggle.active {
-  color: var(--pc-control-fg);
-  background: var(--pane-tab-control-bg);
-  border-color: var(--pane-tab-control-border);
-}
-.panel-head .tabs .pane-detail-toggle.active:hover,
-.panel.active-pane .panel-head .tabs .pane-detail-toggle.active:hover {
-  color: var(--pc-control-hover-fg);
-  background: var(--pane-tab-control-hover-bg);
-  border-color: var(--pane-tab-control-hover-border);
 }
 body.theme-light .panel.empty-pane-panel {
   background: #edf2f8;
@@ -1173,8 +1226,8 @@ body.theme-light .empty-pane-fill {
     rgba(15, 23, 42, 0.018);
 }
 body.theme-light .panel-detail-row {
+  /* bg comes from the shared --pane-bar-bg (bright when focused, gray when not) — no light override. */
   color: var(--text);
-  background: #eef3f9;
 }
 /* DOIT.6 #35: the detail-row header LABEL (.session-button-name, e.g. "YO!info") is the one header
    element NOT covered by the active-pane color rule (which lists .meta*/.session-button-dir/detail),
@@ -1209,6 +1262,6 @@ body.theme-light .tabs .panel-tab-overflow:hover,
 body.theme-light .tabs .panel-tab-overflow:focus-visible {
   color: #0f172a;
 }
-body.theme-light .panel.typing-ready-pane {
-  border-color: #9aa6b6;
-}
+/* (removed) a light-mode gray #9aa6b6 border on focused terminals — the light twin of the dark #465267
+   gray focus bug. Focused terminals now fall through to the shared green focus border (var(--pane-tab-
+   panel-ring)) like every other focused pane, in both light and dark. */

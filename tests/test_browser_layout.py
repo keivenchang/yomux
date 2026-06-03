@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import re
 import shutil
 
 import pytest
@@ -817,7 +818,7 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
           const inactiveTab = panel.querySelector('.pane-tab:not(.active)');
           const panelHead = panel.querySelector('.panel-head');
           const toolbarActive = panel.querySelector('.panel-head .tab.active:not(.auto-toggle)');
-          const paneControl = panel.querySelector('.tabs .pc-window-control');
+          const paneControl = panel.querySelector('.tabs .pane-minimize');
           const zoomControl = panel.querySelector('.tabs .pc-zoom');
           return {
             panelBorder: getComputedStyle(panel).borderTopColor,
@@ -830,6 +831,7 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
             inactiveActiveTabShadow: getComputedStyle(inactiveActiveTab).boxShadow,
             inactiveTabBg: getComputedStyle(inactiveTab).backgroundColor,
             inactiveTabBorder: getComputedStyle(inactiveTab).borderTopColor,
+            inactiveDirColor: getComputedStyle(inactiveTab.querySelector('.session-button-dir') || inactiveTab).color,
             toolbarActiveBg: getComputedStyle(toolbarActive).backgroundColor,
             toolbarActiveBorder: getComputedStyle(toolbarActive).borderTopColor,
             paneControlBg: getComputedStyle(paneControl).backgroundColor,
@@ -844,16 +846,25 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     )
     assert theme_metrics["dark"]["panelHeadBg"] == "rgb(31, 48, 38)"
     assert theme_metrics["light"]["panelHeadBg"] == "rgb(220, 232, 210)"
-    # Pane frame controls (image 043): in light mode the minimize button gets a light fill and the zoom
-    # button is green (both were dark "black" squares before, with no light token values).
+    # Shared pane-chrome buttons (image 009): every UNPRESSED control is white (light) / near-black (dark)
+    # via --pane-ctl-bg — including the expand "+" (formerly always-green). Only PRESSED/ACTIVE buttons go
+    # green (asserted via toolbarActiveBg below). No per-button one-off colors.
     assert theme_metrics["dark"]["paneControlBg"] == "rgb(27, 36, 50)"
     assert theme_metrics["light"]["paneControlBg"] == "rgb(247, 249, 252)"
-    assert theme_metrics["dark"]["zoomControlBg"] == "rgb(47, 95, 58)"
-    assert theme_metrics["light"]["zoomControlBg"] == "rgb(79, 158, 58)"
+    assert theme_metrics["dark"]["zoomControlBg"] == "rgb(27, 36, 50)"      # "+" is NOT green when unpressed
+    assert theme_metrics["light"]["zoomControlBg"] == "rgb(247, 249, 252)"
+    assert theme_metrics["dark"]["zoomControlBg"] == theme_metrics["dark"]["paneControlBg"]  # all unpressed controls share one bg
+    # The active control tab (the agent/"claude" pill) is PRESSED -> green, in both themes (shared rule).
+    assert theme_metrics["dark"]["toolbarActiveBg"] == "rgb(134, 214, 0)"
+    assert theme_metrics["light"]["toolbarActiveBg"] == "rgb(79, 158, 58)"
     # DOIT.6 #31: the active-tab greens are tuned PER THEME so a theme switch visibly repaints the active
     # pane tab; the frame controls are also theme-specific now (image 043). Every OTHER surface stays
     # token-equal across themes.
-    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "paneControlBg", "paneControlBorder", "zoomControlBg"}
+    # inactiveTabBg is theme-specific now (images 003/004): light gets a very-light-green #e6f1dd while
+    # dark keeps #285a2f, so it must NOT be required equal across themes.
+    # toolbarActiveBg/Border are the PRESSED control tab's green, which is theme-specific (light #4f9e3a /
+    # dark #86d600); detail-row bg now follows --pane-bar-bg so it is theme-specific too.
+    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder"}
     for key, value in theme_metrics["dark"].items():
         if key not in theme_specific:
             assert theme_metrics["light"][key] == value
@@ -864,10 +875,25 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     # Active-tab text stays legible against its (theme-specific) green in light mode.
     assert theme_metrics["light"]["activeTabColor"] != theme_metrics["light"]["activeTabBg"]
     assert theme_metrics["dark"]["activeTabShadow"] == "none"
-    # DOIT.6 #6: unfocused panes keep a clearly-visible green active tab (brightened from #285a2f).
-    assert theme_metrics["dark"]["inactiveActiveTabBg"] == "rgb(79, 158, 58)"
-    assert theme_metrics["dark"]["inactiveActiveTabBg"] != theme_metrics["dark"]["activeTabBg"]
+    # images 003/004: an unfocused pane's active tab now uses the SAME full green as the focused pane's
+    # active tab (no lightening) — the unfocused-active tokens are aliased to the focused ones.
+    assert theme_metrics["dark"]["inactiveActiveTabBg"] == "rgb(134, 214, 0)"
+    assert theme_metrics["dark"]["inactiveActiveTabBg"] == theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["dark"]["inactiveActiveTabShadow"] == "none"
+    # REGRESSION GUARD (image 008): the inactive-tab branch/dir TEXT must contrast with the tab bg in BOTH
+    # themes — i.e. NOT white-on-white. This is the check that was missing before: the prior browser test
+    # measured tab BACKGROUNDS but never the nested .session-button-* TEXT color, so a near-white dir text
+    # on a near-white light tab went uncaught. Compare relative luminance of text vs bg.
+    def _lum(css_rgb):
+        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
+        return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
+    for th in ("light", "dark"):
+        text_lum = _lum(theme_metrics[th]["inactiveDirColor"])
+        bg_lum = _lum(theme_metrics[th]["inactiveTabBg"])
+        assert abs(text_lum - bg_lum) > 80, (
+            f"{th}: inactive-tab dir text ({theme_metrics[th]['inactiveDirColor']}) must contrast with the "
+            f"tab bg ({theme_metrics[th]['inactiveTabBg']}) — not white-on-white"
+        )
 
 
 def test_split_pane_seam_is_a_compact_tile_divider(browser, tmp_path):
@@ -1024,7 +1050,9 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert dots_center_delta["y"] <= 1
     assert dots_center_delta["background"] != "rgba(0, 0, 0, 0)"
     assert dots_center_delta["borderColor"] != "rgba(0, 0, 0, 0)"
-    assert dots_center_delta["dotsColor"] != dots_center_delta["hashColor"]
+    # Shared pane-chrome treatment: the "..." actions dots and the "#" control share ONE foreground color
+    # (--pane-ctl-fg) now — consistent, not per-button (image 009).
+    assert dots_center_delta["dotsColor"] == dots_center_delta["hashColor"]
     light_control = browser.execute_script(
         """
         document.body.classList.add('theme-light');
@@ -1376,3 +1404,194 @@ def test_clicking_finder_does_not_change_terminal_pane_toolbar(browser, tmp_path
         """
     )
     assert after == before
+
+
+# DOIT.12 B5 — light-mode surface regression guard. The recurring light-mode bug class is a
+# component rule that hardcodes a DARK color literal with no body.theme-light / body.editor-theme-light
+# counterpart, so it renders as a dark box (or invisible pale text) on the white surface. The earlier
+# white-on-white miss slipped through because the test measured BACKGROUNDS but never the nested TEXT
+# color. This builds each fixed surface in light mode and asserts (a) container backgrounds are LIGHT
+# and (b) text vs its surface meets a real contrast ratio — the same thing a human reading it needs.
+LIGHT_MODE_SURFACES = """
+<div class="command-palette-dialog" id="cp-dlg">
+  <input class="command-palette-input" id="cp-inp" value="x">
+  <button class="command-palette-row active" id="cp-row">
+    <span class="command-palette-group" id="cp-grp">FILES</span>
+    <span class="command-palette-detail" id="cp-det">detail</span>
+    <span class="command-palette-keybinding" id="cp-kb">^P</span>
+  </button>
+</div>
+<div class="keyboard-shortcuts-dialog" id="ks-dlg">
+  <div class="keyboard-shortcut-row"><span>act</span><kbd id="ks-kbd">Ctrl</kbd></div>
+</div>
+<div class="preferences-global-reset" id="gr">
+  <div class="preferences-global-reset-title" id="gr-title">Reset</div>
+  <div class="preferences-global-reset-warning" id="gr-warn">warn</div>
+</div>
+<span class="agent-icon codex" id="agent-ico">A</span>
+<span class="session-state-badge" id="badge-neutral">run</span>
+<span class="session-state-badge session-state-done" id="badge-done">done</span>
+<span class="session-yolo-marker inactive" id="ym-inactive">YO</span>
+<button class="pane-tab file-missing" id="fm-tab">
+  <span class="session-button-dir" id="fm-dir">gone</span>
+  <span class="file-tab-missing-badge" id="fm-badge">!</span>
+</button>
+<div class="server-update-banner" id="sub">
+  update <button class="server-update-banner-dismiss" id="sub-dismiss">x</button>
+</div>
+<div class="file-tree-row repo-non-main"><span class="file-tree-name" id="rnm-name">repo</span></div>
+<div class="file-tree-row indexed-directory">
+  <span class="file-tree-name" id="idx-name">dir</span>
+  <span class="file-tree-git-status" id="idx-status">INDEXED</span>
+</div>
+<input class="file-tree-rename-input" id="rename-inp" value="name">
+<div class="yoagent-message-body markdown-body"><pre id="md-pre"><code>code</code></pre></div>
+"""
+
+
+def light_mode_surfaces_fixture_html(body_class):
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html><html><head><meta charset="utf-8"><style>{css}</style></head>
+    <body class="{body_class}" style="background:#fff">{LIGHT_MODE_SURFACES}</body></html>
+    """
+
+
+def _contrast_ratio(rgb_a, rgb_b):
+    def rel_lum(css_rgb):
+        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
+
+        def chan(c):
+            c = c / 255.0
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+        return 0.2126 * chan(nums[0]) + 0.7152 * chan(nums[1]) + 0.0722 * chan(nums[2])
+
+    la, lb = rel_lum(rgb_a), rel_lum(rgb_b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_light_mode_surfaces_are_readable_not_dark_boxes(browser, tmp_path):
+    page = tmp_path / "light-surfaces.html"
+    page.write_text(light_mode_surfaces_fixture_html("theme-light"), encoding="utf-8")
+    browser.get(page.as_uri())
+    style = browser.execute_script(
+        """
+        const out = {};
+        for (const el of document.querySelectorAll('[id]')) {
+          const s = getComputedStyle(el);
+          out[el.id] = {color: s.color, bg: s.backgroundColor};
+        }
+        return out;
+        """
+    )
+
+    # (a) Surfaces that were dark boxes must now have LIGHT backgrounds (luminance high).
+    def _lum(css_rgb):
+        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
+        return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
+
+    for box in ("cp-dlg", "ks-dlg", "sub", "rename-inp", "md-pre"):
+        assert _lum(style[box]["bg"]) > 180, f"{box} background must be light in light mode, got {style[box]['bg']}"
+
+    # (b) Text must contrast with its surface. Where the element bg is transparent, it sits on the white page.
+    page_white = "rgb(255, 255, 255)"
+    text_checks = {
+        "cp-row": "cp-dlg", "cp-grp": "cp-dlg", "cp-det": "cp-dlg", "cp-kb": "cp-dlg",
+        "ks-kbd": "ks-kbd", "gr-title": "gr", "gr-warn": "gr", "agent-ico": None,
+        "badge-neutral": "badge-neutral", "badge-done": "badge-done", "ym-inactive": "ym-inactive",
+        "fm-dir": "fm-tab", "fm-badge": "fm-tab", "sub": "sub", "sub-dismiss": "sub",
+        "rnm-name": None, "idx-name": None, "idx-status": None, "rename-inp": "rename-inp", "md-pre": "md-pre",
+    }
+    for eid, bg_id in text_checks.items():
+        bg = style[bg_id]["bg"] if bg_id else page_white
+        if "rgba(0, 0, 0, 0)" in bg or bg == "transparent":
+            bg = page_white
+        ratio = _contrast_ratio(style[eid]["color"], bg)
+        assert ratio >= 3.0, f"{eid}: text {style[eid]['color']} on {bg} contrast {ratio:.1f} < 3.0 (dark-box/invisible)"
+
+
+def test_light_editor_image_backdrop_is_light(browser, tmp_path):
+    page = tmp_path / "light-editor-image.html"
+    page.write_text(
+        light_mode_surfaces_fixture_html("editor-theme-light").replace(
+            LIGHT_MODE_SURFACES,
+            '<div class="file-editor-image-panel" id="imgp"><img class="file-editor-image" id="img" src="#"></div>',
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    style = browser.execute_script(
+        "return {panel: getComputedStyle(document.getElementById('imgp')).backgroundColor,"
+        " img: getComputedStyle(document.getElementById('img')).backgroundColor};"
+    )
+
+    def _lum(css_rgb):
+        nums = [int(n) for n in re.findall(r"\d+", css_rgb)[:3]]
+        return 0.2126 * nums[0] + 0.7152 * nums[1] + 0.0722 * nums[2]
+
+    assert _lum(style["panel"]) > 180, f"editor-light image panel must be light, got {style['panel']}"
+    assert _lum(style["img"]) > 180, f"editor-light image backdrop must be light, got {style['img']}"
+
+
+def codemirror_search_panel_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <script src="{bundle_uri}"></script>
+        <style>.file-editor-codemirror {{ width: 680px; height: 220px; }}</style>
+      </head>
+      <body class="editor-theme-light">
+        <div class="panel file-editor-panel active-pane">
+          <div class="file-editor-content file-editor-codemirror" id="cm-host"></div>
+        </div>
+        <script>
+          (function() {{
+            const CM = window.YOLOmuxCodeMirror;
+            const exts = CM.search ? [CM.search()] : [];
+            const view = new CM.EditorView({{
+              state: CM.EditorState.create({{doc: "hello world\\nfind me\\n", extensions: exts}}),
+              parent: document.getElementById('cm-host'),
+            }});
+            CM.openSearchPanel(view);
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+
+
+def load_codemirror_search_panel_fixture(browser, tmp_path):
+    page = tmp_path / "cm-search-panel.html"
+    page.write_text(codemirror_search_panel_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def test_codemirror_search_toggle_labels_collapse_to_glyph_not_overflow(browser, tmp_path):
+    # CodeMirror's baseTheme injects `.cm-panel.cm-search label { font-size: 80% }` at RUNTIME, a
+    # specificity TIE with our label rule that wins on source order — un-hiding the native toggle
+    # text ("match case"/"regexp"/"by word") so it overflows the 24px box and collides with our
+    # compact ::after glyph (images 019/021). The +1-class override must keep the label font-size 0.
+    load_codemirror_search_panel_fixture(browser, tmp_path)
+    labels = browser.execute_script(
+        """
+        const panel = document.querySelector('.cm-search');
+        if (!panel) return null;
+        return [...panel.querySelectorAll('label')].map(l => ({
+          fontSize: getComputedStyle(l).fontSize,
+          boxWidth: Math.round(l.getBoundingClientRect().width),
+          scrollWidth: l.scrollWidth,
+        }));
+        """
+    )
+    assert labels, "search panel did not open (CodeMirror bundle missing search export?)"
+    assert len(labels) == 3
+    for lb in labels:
+        assert lb["fontSize"] == "0px", f"toggle label native text must be hidden (font-size 0), got {lb['fontSize']}"
+        assert lb["scrollWidth"] <= lb["boxWidth"] + 1, f"toggle label overflows its 24px box: {lb}"

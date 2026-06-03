@@ -13,6 +13,9 @@
   --brand-green: #76b900;
   --brand-green-dark: #3f6f00;
   --accent-gold: #f5c542;
+  /* DOIT.12 A4: --accent was UNDEFINED, so topbar search/language/activity hover borders fell back to a
+     literal light-blue (#6ea8fe) in BOTH themes. Define it per theme (light gets a darker, readable blue). */
+  --accent: #6ea8fe;
   --drop-outline: #ffffff;
   --drop-outline-text: #2b2100;
   --drop-outline-bg: rgba(245, 197, 66, 0.18);
@@ -31,7 +34,7 @@
   --bad: #ff6673;
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
-  --inactive-pane-overlay: rgba(178, 190, 210, 0.20);
+  --inactive-pane-overlay: rgba(178, 190, 210, 0.14);
   --inactive-tab-bg: #293240;
   --inactive-tab-bg-hover: #354052;
   --inactive-tab-border: #667286;
@@ -43,9 +46,11 @@
   --pane-tab-active-bg: #86d600;
   --pane-tab-active-border: #9be33d;
   --pane-tab-active-accent: #86d600;
-  --pane-tab-unfocused-active-text: #f1f9e8;
-  --pane-tab-unfocused-active-bg: #4f9e3a;
-  --pane-tab-unfocused-active-border: #8fd069;
+  /* image 003/004: an inactive pane's ACTIVE tab keeps the SAME full green as the focused pane's active
+     tab (no lightening) — alias the unfocused-active tokens to the focused ones (light + dark). */
+  --pane-tab-unfocused-active-text: var(--pane-tab-active-text);
+  --pane-tab-unfocused-active-bg: var(--pane-tab-active-bg);
+  --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
   --pane-tab-strip-bg: #1f3026;
   --pane-tab-yolo-text: #071000;
   --pane-tab-yolo-bg: #76b900;
@@ -230,6 +235,14 @@ body.theme-light {
   color-scheme: light;
   /* The pane tab-strip container reads greenish-light (matching the detail row), not the old cool gray. */
   --pane-tab-strip-bg: #dce8d2;
+  /* image 003/004: light-mode inactive/minimized tabs were white; tint them a very-light green a hair
+     lighter than the strip so a tab still reads as a tab (dark mode keeps its own #285a2f). */
+  --pane-inactive-tab-bg: #e6f1dd;
+  --pane-inactive-tab-bg-hover: #d8ebcb;
+  /* image 008: the inactive-tab text token (#dfe6ef, tuned for the DARK tab bg) was near-white on the
+     new light-green tabs/strip — white-on-white. Light mode needs DARK tab text. (Active tabs keep
+     their own --pane-tab-active-text white-on-green.) */
+  --pane-tab-text: #1f2937;
   /* Pane frame controls (minimize / zoom) had NO light values, so they rendered as dark "black"
      squares on the light header. Give the minimize button a light fill (dark glyph via --pc-control-fg)
      and keep the zoom button green so its built-in light glyph stays readable. */
@@ -247,9 +260,12 @@ body.theme-light {
   --pane-tab-active-text: #ffffff;
   --pane-tab-active-border: #3f8f2d;
   --pane-tab-active-accent: #4f9e3a;
-  --pane-tab-unfocused-active-bg: #d2ecc2;
-  --pane-tab-unfocused-active-text: #16320c;
-  --pane-tab-unfocused-active-border: #7bbf5a;
+  /* image 003/004: an inactive pane's active tab is full green here too. MUST re-alias in this theme
+     block — `--unfocused: var(--focused)` set only in :root captures the DARK focused value and inherits
+     it, so the light override of --pane-tab-active-* would otherwise be ignored. */
+  --pane-tab-unfocused-active-text: var(--pane-tab-active-text);
+  --pane-tab-unfocused-active-bg: var(--pane-tab-active-bg);
+  --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
   --pane-tab-panel-head-text: #1f2937;
   --pane-tab-panel-detail-bg: #dce8d2;
   --pane-detail-bg: #e7edf5;
@@ -273,6 +289,7 @@ body.theme-light {
   --brand-green: #5f9800;
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
+  --accent: #2563eb;
   --drop-outline: #1d4ed8;
   --drop-outline-text: #071327;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
@@ -294,7 +311,7 @@ body.theme-light {
   /* #254/#259: in light mode dim inactive panes more (was a faint cool rgba(91,101,115,0.14)) — a
      NEUTRAL gray at that darkness, no red cast (user superseded the earlier warm value). Dark-mode
      token (top of file) is left as-is. */
-  --inactive-pane-overlay: rgba(90, 96, 105, 0.24);
+  --inactive-pane-overlay: rgba(90, 96, 105, 0.16);
   --inactive-tab-bg: #e3e8f0;
   --inactive-tab-bg-hover: #d7deea;
   --inactive-tab-border: #9aa6b6;

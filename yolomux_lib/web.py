@@ -377,11 +377,25 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 
 
 def setup_auth_html() -> str:
+    # Localize the pre-auth setup chrome via the SAVED locale (the JS i18n runtime is not loaded here),
+    # the same way login_html() does. The HTTPS recommendation + agent-login notice carry shell commands,
+    # so — matching login_html — they stay English. The auth.yaml example block is literal config, not UI.
+    locale = current_language_pref()
     auth_path = html.escape(AUTH_CONFIG_DISPLAY_PATH)
     login = html.escape(login_username())
     agent_notice_html = agent_login_notice_html("setup-login-notice")
+    set_up = html.escape(server_string(locale, "setup.setUp"))
+    edit_label = html.escape(server_string(locale, "setup.edit"))
+    # The status line is also rewritten client-side on each poll, so the same localized strings are
+    # handed to setup-auth.js via window.__setupStrings (with English fallbacks baked into the script).
+    setup_strings = json.dumps({
+        "waiting": server_string(locale, "setup.waiting"),
+        "waitingServer": server_string(locale, "setup.waitingServer"),
+        "authUpdated": server_string(locale, "setup.authUpdated"),
+    })
+    waiting = html.escape(server_string(locale, "setup.waiting"))
     return f"""<!doctype html>
-<html lang="en">
+<html {html_lang_dir_attrs(locale)}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -391,9 +405,9 @@ def setup_auth_html() -> str:
 </head>
 <body>
 <main>
-  <h1>Set up {brand_html("brand-title setup-brand setup-brand-waiting")}</h1>
+  <h1>{set_up} {brand_html("brand-title setup-brand setup-brand-waiting")}</h1>
   <p id="setupSecurity" class="setup-security">Highly recommend that you restart with HTTPS: <code>python3 yolomux.py --port 9998 --self-signed</code></p>
-  <p>Edit <code>{auth_path}</code></p>
+  <p>{edit_label} <code>{auth_path}</code></p>
   <pre>users:
   - username: "{login}"
     password: "your-admin-password"
@@ -402,8 +416,9 @@ def setup_auth_html() -> str:
     password: "guest"
     role: "readonly"</pre>
   {agent_notice_html}
-  <p id="setupStatus" class="setup-status">Waiting for auth.yaml changes<span class="setup-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></p>
+  <p id="setupStatus" class="setup-status">{waiting}<span class="setup-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></p>
 </main>
+<script>window.__setupStrings = {setup_strings};</script>
 <script src="{static_asset_url("setup-auth.js")}"></script>
 </body>
 </html>
