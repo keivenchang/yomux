@@ -2655,9 +2655,22 @@ function renderEditorPreviewPane(container, path, text) {
   container.classList.toggle('markdown-body', isMarkdownPath(path));
   container.classList.toggle('html-preview-body', isHtmlPath(path));
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
-  if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text, path);
-  else if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
-  else renderEditorCodePreviewInto(container, path, text);
+  if (isMarkdownPath(path)) {
+    // DOIT.9 fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
+    // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
+    // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
+    // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
+    if (container._previewPath !== path || container._previewText !== text) {
+      container._previewPath = path;
+      container._previewText = text;
+      renderMarkdownPreviewInto(container, text, path);
+    }
+  } else {
+    container._previewPath = null;
+    container._previewText = null;
+    if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
+    else renderEditorCodePreviewInto(container, path, text);
+  }
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }
 

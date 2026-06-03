@@ -35,6 +35,52 @@ function movePanelsToPool() {
   }
 }
 
+// DOIT.9 S2: the registered item for a mounted panel node (reverse lookup of panelNodes).
+function panelItemForNode(node) {
+  if (!node) return null;
+  for (const [item, panel] of panelNodes.entries()) {
+    if (panel === node) return item;
+  }
+  return null;
+}
+
+// DOIT.9 S2: move ONE displaced panel back to the pool (preserving editor state), like movePanelsToPool
+// does for all. An empty-pane placeholder (not in panelNodes) is just dropped.
+function poolDisplacedPanel(node) {
+  const item = panelItemForNode(node);
+  if (item == null) return;
+  if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, node);
+  node.classList.remove('active-pane');
+  node.dataset.slot = '';
+  panelPool.appendChild(node);
+}
+
+// DOIT.9 S2: for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
+// grid.innerHTML='' / topbar teardown, no detach/reattach of unrelated panes. A pure reorder touches
+// zero panels (active unchanged) and only reconciles the tab strip via updatePanelSlot.
+function syncActivePanelsInPlace() {
+  for (const dropSlot of grid.querySelectorAll('.drop-slot[data-slot]')) {
+    const slot = dropSlot.dataset.slot;
+    const item = activeItemForSide(slot);
+    const mounted = dropSlot.querySelector(':scope > .panel');
+    if (!item) {
+      if (!mounted || !mounted.classList.contains('empty-pane-panel')) {
+        poolDisplacedPanel(mounted);
+        dropSlot.replaceChildren(renderEmptyPane(slot));
+      }
+      continue;
+    }
+    const desired = getOrCreatePanel(item);
+    if (mounted === desired) {
+      updatePanelSlot(desired, item, slot);
+      continue;
+    }
+    poolDisplacedPanel(mounted);
+    dropSlot.replaceChildren(desired);
+    updatePanelSlot(desired, item, slot);
+  }
+}
+
 function bindDropTargets() {
   grid.ondragover = handleDropDragOver;
   grid.ondragleave = handleDropDragLeave;

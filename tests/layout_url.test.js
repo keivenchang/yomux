@@ -433,6 +433,7 @@ globalThis.__layoutTestApi = {
   showSessionContextMenu,
   bodyChildren() { return document.body.children; },
   defaultLayoutSlots,
+  layoutShapeSignature,
   dedentSelectionText,
   dropIntentForEvent,
   dropIntentAllowsSession,
@@ -4128,6 +4129,38 @@ function makeFileTree(paths) {
   const src = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/new Intl\.RelativeTimeFormat\(i18nActiveLocale/.test(src), 'Phase 3: relativeTimeFormat uses Intl.RelativeTimeFormat with the active locale');
   assert.ok(/t\('yoagent\.updated\.wrap', \{rel: relativeTimeFormat\(seconds\)\}\)/.test(src), 'Phase 3: the activity "last updated" line wraps the Intl relative time');
+}
+
+{
+  // DOIT.9: tab-move latency. The shape signature ignores tabs order / active item, so a reorder or
+  // activate is a "same shape" change that takes the cheap in-place branch (no grid/topbar teardown,
+  // no server re-poll).
+  const api = loadYolomux('', ['1', '2']);
+  const slots = api.defaultLayoutSlots();
+  const sigA = api.layoutShapeSignature(slots);
+  // Mutating a pane's active item / tabs order does NOT change the shape signature.
+  const clone = JSON.parse(JSON.stringify(slots));
+  for (const key of Object.keys(clone)) {
+    if (key !== '__tree' && clone[key] && Array.isArray(clone[key].tabs)) {
+      clone[key].tabs = clone[key].tabs.slice().reverse();
+      clone[key].active = clone[key].tabs[0];
+    }
+  }
+  assert.equal(api.layoutShapeSignature(clone), sigA, '#DOIT.9: reorder/activate keeps the same shape signature');
+  // A different tree TOPOLOGY (a split) yields a different signature -> full rebuild path.
+  const split = {'__tree': {split: 'row', pct: 50, children: [{slot: 'slot1'}, {slot: 'slot2'}]}, slot1: {tabs: ['1'], active: '1'}, slot2: {tabs: ['2'], active: '2'}};
+  assert.notEqual(api.layoutShapeSignature(split), sigA, '#DOIT.9: a split changes the shape signature');
+
+  // S1: applyLayoutSlots no longer re-polls the server (refreshTranscripts removed from its body).
+  const layoutSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+  const applyBody = layoutSrc.slice(layoutSrc.indexOf('function applyLayoutSlots'), layoutSrc.indexOf('function updateActiveSessionParam'));
+  assert.equal(/refreshTranscripts\(\);/.test(applyBody), false, '#DOIT.9 S1: applyLayoutSlots does not call refreshTranscripts() (no server re-poll on a local layout change)');
+  // S2: applyLayoutSlots shape-gates the expensive rebuilds and uses the in-place swap on same shape.
+  assert.ok(/layoutShapeSignature\(layoutSlots\)[\s\S]*?syncActivePanelsInPlace\(\)/.test(applyBody), '#DOIT.9 S2: same-shape changes take the in-place branch');
+  assert.ok(/renderSessionButtons\(\);\s*renderPanels\(previousActive/.test(applyBody), '#DOIT.9 S2: shape changes still fall through to the full rebuild');
+  assert.ok(layoutSrc.includes('function syncActivePanelsInPlace'), '#DOIT.9 S2: the in-place panel swap exists');
+  // fix 6: the markdown preview render is guarded by a path+content signature.
+  assert.ok(/container\._previewPath !== path \|\| container\._previewText !== text/.test(layoutSrc), '#DOIT.9 fix 6: renderEditorPreviewPane skips re-rendering unchanged markdown');
 }
 
 {

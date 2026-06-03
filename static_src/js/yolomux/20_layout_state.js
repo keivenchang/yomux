@@ -43,6 +43,19 @@ function layoutLeafSlots(node) {
   return (node.children || []).flatMap(layoutLeafSlots);
 }
 
+// DOIT.9 S2: a signature of the layout TREE SHAPE — topology + slot ids + split dirs/pcts — that
+// EXCLUDES each pane's tabs order and active item (those live in the per-slot pane state, not the
+// tree). Equal signatures mean a same-shape change (reorder / activate / move-within-or-between
+// existing panes / replace-in-place / close-a-non-last tab) that needs no grid/topbar teardown.
+function layoutShapeSignature(slots = layoutSlots) {
+  const sig = node => {
+    if (!node) return '';
+    if (node.slot) return `S:${node.slot}`;
+    return `${node.split}:${splitPercent(node.pct)}:[${(node.children || []).map(sig).join(',')}]`;
+  };
+  return sig(slots?.[layoutTreeKey]);
+}
+
 function layoutSlotKeys(slots = layoutSlots) {
   const treeSlots = layoutLeafSlots(slots?.[layoutTreeKey]);
   if (treeSlots.length) return treeSlots;
@@ -2096,14 +2109,29 @@ function updateSessionList(nextSessions) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
+  // DOIT.9 S2: detect a same-shape change (reorder/activate/move/replace) so we can skip the full
+  // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
+  const prevShape = layoutShapeSignature(layoutSlots);
   layoutSlots = normalizeLayoutSlots(nextSlots);
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
-  renderSessionButtons();
-  renderPanels(previousActive, {prune: options.prune});
+  if (prevShape === layoutShapeSignature(layoutSlots) && dragSession == null && grid.querySelector('.drop-slot[data-slot]')) {
+    // Cheap path: the tree shape is unchanged. Swap only the slots whose active item changed and
+    // reconcile the (already keyed) tab strips — no innerHTML='', no topbar rebuild.
+    syncActivePanelsInPlace();
+    renderPaneTabStrips();
+    syncPanelVisibility(previousActive);
+  } else {
+    renderSessionButtons();
+    renderPanels(previousActive, {prune: options.prune});
+  }
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
-  refreshTranscripts();
+  // DOIT.9 S1: do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
+  // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
+  // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
+  // metadata interval (50_editor_settings_runtime.js), and the session-changing mutations
+  // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
   renderAutoApproveButtons();
   if (autoFocusEnabled && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);

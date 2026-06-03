@@ -1914,6 +1914,19 @@ function layoutLeafSlots(node) {
   return (node.children || []).flatMap(layoutLeafSlots);
 }
 
+// DOIT.9 S2: a signature of the layout TREE SHAPE — topology + slot ids + split dirs/pcts — that
+// EXCLUDES each pane's tabs order and active item (those live in the per-slot pane state, not the
+// tree). Equal signatures mean a same-shape change (reorder / activate / move-within-or-between
+// existing panes / replace-in-place / close-a-non-last tab) that needs no grid/topbar teardown.
+function layoutShapeSignature(slots = layoutSlots) {
+  const sig = node => {
+    if (!node) return '';
+    if (node.slot) return `S:${node.slot}`;
+    return `${node.split}:${splitPercent(node.pct)}:[${(node.children || []).map(sig).join(',')}]`;
+  };
+  return sig(slots?.[layoutTreeKey]);
+}
+
 function layoutSlotKeys(slots = layoutSlots) {
   const treeSlots = layoutLeafSlots(slots?.[layoutTreeKey]);
   if (treeSlots.length) return treeSlots;
@@ -3967,14 +3980,29 @@ function updateSessionList(nextSessions) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
+  // DOIT.9 S2: detect a same-shape change (reorder/activate/move/replace) so we can skip the full
+  // topbar + grid teardown. Compute the shape signature before and after the slot reassignment.
+  const prevShape = layoutShapeSignature(layoutSlots);
   layoutSlots = normalizeLayoutSlots(nextSlots);
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
-  renderSessionButtons();
-  renderPanels(previousActive, {prune: options.prune});
+  if (prevShape === layoutShapeSignature(layoutSlots) && dragSession == null && grid.querySelector('.drop-slot[data-slot]')) {
+    // Cheap path: the tree shape is unchanged. Swap only the slots whose active item changed and
+    // reconcile the (already keyed) tab strips — no innerHTML='', no topbar rebuild.
+    syncActivePanelsInPlace();
+    renderPaneTabStrips();
+    syncPanelVisibility(previousActive);
+  } else {
+    renderSessionButtons();
+    renderPanels(previousActive, {prune: options.prune});
+  }
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
-  refreshTranscripts();
+  // DOIT.9 S1: do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
+  // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
+  // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
+  // metadata interval (50_editor_settings_runtime.js), and the session-changing mutations
+  // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
   renderAutoApproveButtons();
   if (autoFocusEnabled && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
@@ -12093,6 +12121,52 @@ function movePanelsToPool() {
   }
 }
 
+// DOIT.9 S2: the registered item for a mounted panel node (reverse lookup of panelNodes).
+function panelItemForNode(node) {
+  if (!node) return null;
+  for (const [item, panel] of panelNodes.entries()) {
+    if (panel === node) return item;
+  }
+  return null;
+}
+
+// DOIT.9 S2: move ONE displaced panel back to the pool (preserving editor state), like movePanelsToPool
+// does for all. An empty-pane placeholder (not in panelNodes) is just dropped.
+function poolDisplacedPanel(node) {
+  const item = panelItemForNode(node);
+  if (item == null) return;
+  if (isFileEditorItem(item)) captureFileEditorPanelViewState(item, node);
+  node.classList.remove('active-pane');
+  node.dataset.slot = '';
+  panelPool.appendChild(node);
+}
+
+// DOIT.9 S2: for a SAME-SHAPE layout change, swap only the slots whose ACTIVE item changed — no
+// grid.innerHTML='' / topbar teardown, no detach/reattach of unrelated panes. A pure reorder touches
+// zero panels (active unchanged) and only reconciles the tab strip via updatePanelSlot.
+function syncActivePanelsInPlace() {
+  for (const dropSlot of grid.querySelectorAll('.drop-slot[data-slot]')) {
+    const slot = dropSlot.dataset.slot;
+    const item = activeItemForSide(slot);
+    const mounted = dropSlot.querySelector(':scope > .panel');
+    if (!item) {
+      if (!mounted || !mounted.classList.contains('empty-pane-panel')) {
+        poolDisplacedPanel(mounted);
+        dropSlot.replaceChildren(renderEmptyPane(slot));
+      }
+      continue;
+    }
+    const desired = getOrCreatePanel(item);
+    if (mounted === desired) {
+      updatePanelSlot(desired, item, slot);
+      continue;
+    }
+    poolDisplacedPanel(mounted);
+    dropSlot.replaceChildren(desired);
+    updatePanelSlot(desired, item, slot);
+  }
+}
+
 function bindDropTargets() {
   grid.ondragover = handleDropDragOver;
   grid.ondragleave = handleDropDragLeave;
@@ -16863,9 +16937,22 @@ function renderEditorPreviewPane(container, path, text) {
   container.classList.toggle('markdown-body', isMarkdownPath(path));
   container.classList.toggle('html-preview-body', isHtmlPath(path));
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
-  if (isMarkdownPath(path)) renderMarkdownPreviewInto(container, text, path);
-  else if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
-  else renderEditorCodePreviewInto(container, path, text);
+  if (isMarkdownPath(path)) {
+    // DOIT.9 fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
+    // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
+    // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
+    // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
+    if (container._previewPath !== path || container._previewText !== text) {
+      container._previewPath = path;
+      container._previewText = text;
+      renderMarkdownPreviewInto(container, text, path);
+    }
+  } else {
+    container._previewPath = null;
+    container._previewText = null;
+    if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
+    else renderEditorCodePreviewInto(container, path, text);
+  }
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }
 
