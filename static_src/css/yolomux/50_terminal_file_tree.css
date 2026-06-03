@@ -22,6 +22,9 @@
   border: 0;
   border-radius: 0;
 }
+/* A .panel-overlay-root must NOT be the scroll container — put `overflow:auto` on an INNER child.
+   The inactive-pane dim below is a full-bleed ::after (inset 0) on this element; if this element
+   scrolls, the dim scrolls away with the content and only covers the top viewport (DOIT.16 C3). */
 .panel-overlay-root {
   position: relative;
 }

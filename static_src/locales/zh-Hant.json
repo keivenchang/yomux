@@ -504,6 +504,8 @@
   "setup.waiting": "正在等待 auth.yaml 變更",
   "setup.waitingServer": "正在等待伺服器",
   "setup.authUpdated": "驗證已更新。正在重新載入…",
+  "contextmenu.copyUrl": "複製網址",
+  "contextmenu.openUrl": "開啟網址",
   "yoagent.updated.wrap": "最後更新 {rel}",
   "det.noBackend": "沒有 AI 後端在回應；正在顯示活動摘要。請在偏好設定中設定或登入 Claude/Codex 後端以聊天。",
   "det.noActivity": "目前尚無可用的 AI 代理活動。",

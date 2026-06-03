@@ -504,6 +504,8 @@
   "setup.waiting": "Esperando cambios en auth.yaml",
   "setup.waitingServer": "Esperando al servidor",
   "setup.authUpdated": "Autenticación actualizada. Recargando…",
+  "contextmenu.copyUrl": "Copiar URL",
+  "contextmenu.openUrl": "Abrir URL",
   "yoagent.updated.wrap": "última actualización {rel}",
   "det.noBackend": "Ningún backend de IA está respondiendo; mostrando el resumen de actividad. Configura o inicia sesión en un backend de Claude/Codex en Preferencias para chatear.",
   "det.noActivity": "Aún no hay actividad del agente de IA disponible.",

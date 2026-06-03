@@ -16,6 +16,17 @@ if (setupSecurity && location.protocol === 'https:') {
   setupSecurity.hidden = true;
 }
 
+// DOIT.13: the setup-screen language picker carries the choice in a short-lived cookie (NOT a settings
+// write — the setup screen is pre-auth/pre-users) and reloads; request_locale_pref reads the cookie,
+// and the post-sign-in save_login_locale makes it permanent. Max-Age caps a stale value.
+const setupLocaleSelect = document.querySelector('.setup-locale select');
+if (setupLocaleSelect) {
+  setupLocaleSelect.addEventListener('change', () => {
+    document.cookie = `yolomux_locale=${encodeURIComponent(setupLocaleSelect.value)}; Path=/; Max-Age=600; SameSite=Lax`;
+    location.reload();
+  });
+}
+
 function setWaitingStatus(text) {
   if (!setupStatus) return;
   const label = String(text || SETUP_STRINGS.waiting).replace(/[.…]+$/, '');

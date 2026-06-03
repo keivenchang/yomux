@@ -1614,6 +1614,7 @@ function preferenceSections() {
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
       {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
+      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
       {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
       {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'select', choices: [
@@ -1624,7 +1625,6 @@ function preferenceSections() {
         {value: 'yellow', label: t('pref.appearance.editor_cursor_color.yellow')},
         {value: 'theme', label: t('pref.appearance.editor_cursor_color.theme')},
       ], help: t('pref.appearance.editor_cursor_color.help')},
-      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
       {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
       {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
@@ -2011,7 +2011,7 @@ function createPreferencesPanel() {
       </div>
       <div class="preferences-body panel-overlay-root">
         <div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>
-        ${preferencesPanelHtml()}
+        <div class="preferences-scroll">${preferencesPanelHtml()}</div>
       </div>`;
   bindPanelShell(panel, prefsItemId);
   bindPreferencesPanel(panel);
@@ -2061,8 +2061,11 @@ function renderPreferencesPanels(options = {}) {
     if (body) {
       const activeControl = activePreferenceControl(panel);
       const shouldKeepDom = activeControl && options.force !== true;
-      const scrollTop = body.scrollTop;
-      const scrollLeft = body.scrollLeft;
+      // DOIT.16 C3: the scroller is the inner .preferences-scroll, not the overlay-root body.
+      const scroller = () => body.querySelector('.preferences-scroll') || body;
+      const prevScroll = scroller();
+      const scrollTop = prevScroll.scrollTop;
+      const scrollLeft = prevScroll.scrollLeft;
       if (shouldKeepDom) {
         const status = body.querySelector('.preferences-status');
         if (status) {
@@ -2072,15 +2075,12 @@ function renderPreferencesPanels(options = {}) {
         const pathRows = body.querySelector('.preferences-path-rows');
         if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : ''}`;
       } else {
-        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>${preferencesPanelHtml()}`;
+        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
       }
       if (options.focusSearch !== true) {
-        body.scrollTop = scrollTop;
-        body.scrollLeft = scrollLeft;
-        requestAnimationFrame(() => {
-          body.scrollTop = scrollTop;
-          body.scrollLeft = scrollLeft;
-        });
+        const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
+        restore();
+        requestAnimationFrame(restore);
       }
     }
     bindPreferencesPanel(panel);

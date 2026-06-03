@@ -504,6 +504,8 @@
   "setup.waiting": "في انتظار تغييرات auth.yaml",
   "setup.waitingServer": "في انتظار الخادم",
   "setup.authUpdated": "تم تحديث المصادقة. جارٍ إعادة التحميل…",
+  "contextmenu.copyUrl": "نسخ الرابط",
+  "contextmenu.openUrl": "فتح الرابط",
   "yoagent.updated.wrap": "آخر تحديث {rel}",
   "det.noBackend": "لا يوجد خادم ذكاء اصطناعي يستجيب؛ يتم عرض ملخص النشاط. عيّن أو سجّل الدخول إلى خادم Claude/Codex في التفضيلات للدردشة.",
   "det.noActivity": "لا يوجد نشاط لوكيل الذكاء الاصطناعي متاح بعد.",

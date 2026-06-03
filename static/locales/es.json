@@ -33,6 +33,8 @@
   "common.loading": "cargando...",
   "conflict.onDisk": "En disco",
   "conflict.unsaved": "Editor sin guardar",
+  "contextmenu.copyUrl": "Copiar URL",
+  "contextmenu.openUrl": "Abrir URL",
   "det.noActivity": "Aún no hay actividad del agente de IA disponible.",
   "det.noBackend": "Ningún backend de IA está respondiendo; mostrando el resumen de actividad. Configura o inicia sesión en un backend de Claude/Codex en Preferencias para chatear.",
   "det.openPending": "Abierto / pendiente:",

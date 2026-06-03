@@ -504,6 +504,8 @@
   "setup.waiting": "Warte auf Änderungen an auth.yaml",
   "setup.waitingServer": "Warte auf Server",
   "setup.authUpdated": "Authentifizierung aktualisiert. Wird neu geladen…",
+  "contextmenu.copyUrl": "URL kopieren",
+  "contextmenu.openUrl": "URL öffnen",
   "yoagent.updated.wrap": "zuletzt aktualisiert {rel}",
   "det.noBackend": "Kein KI-Backend antwortet; die Aktivitätsübersicht wird angezeigt. Lege in den Einstellungen ein Claude-/Codex-Backend fest oder melde dich an, um zu chatten.",
   "det.noActivity": "Noch keine KI-Agentenaktivität verfügbar.",

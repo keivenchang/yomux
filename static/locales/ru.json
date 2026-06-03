@@ -33,6 +33,8 @@
   "common.loading": "загрузка...",
   "conflict.onDisk": "На диске",
   "conflict.unsaved": "Несохранённый редактор",
+  "contextmenu.copyUrl": "Копировать URL",
+  "contextmenu.openUrl": "Открыть URL",
   "det.noActivity": "Активность ИИ-агента пока недоступна.",
   "det.noBackend": "Ни один ИИ-бэкенд не отвечает; показывается сводка активности. Настройте или войдите в бэкенд Claude/Codex в Настройках, чтобы общаться.",
   "det.openPending": "Открыто / в ожидании:",

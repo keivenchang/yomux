@@ -33,6 +33,8 @@
   "common.loading": "جارٍ التحميل...",
   "conflict.onDisk": "على القرص",
   "conflict.unsaved": "محرر غير محفوظ",
+  "contextmenu.copyUrl": "نسخ الرابط",
+  "contextmenu.openUrl": "فتح الرابط",
   "det.noActivity": "لا يوجد نشاط لوكيل الذكاء الاصطناعي متاح بعد.",
   "det.noBackend": "لا يوجد خادم ذكاء اصطناعي يستجيب؛ يتم عرض ملخص النشاط. عيّن أو سجّل الدخول إلى خادم Claude/Codex في التفضيلات للدردشة.",
   "det.openPending": "مفتوح / معلّق:",

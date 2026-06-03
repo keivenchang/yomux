@@ -656,7 +656,7 @@ function createChangesPanel() {
       </div>
       <div class="changes-body panel-overlay-root">
         <div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>
-        ${changesPanelHtml()}
+        <div class="changes-scroll">${changesPanelHtml()}</div>
       </div>`;
   bindPanelShell(panel, changesItemId);
   bindChangesPanel(panel);
@@ -678,7 +678,13 @@ function renderChangesPanels(options = {}) {
     const meta = panel.querySelector(`#meta-${cssEscape(changesItemId)}`);
     if (meta) meta.textContent = changesTabDetail();
     if (body && (options.force === true || !activeChangesControl(panel))) {
-      replaceHtmlPreservingScroll(body, `<div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>${changesPanelHtml()}`);
+      // DOIT.16 C3: preserve scroll on the inner .changes-scroll (the overlay-root body no longer scrolls).
+      const prevScroll = body.querySelector('.changes-scroll');
+      const scrollTop = prevScroll ? prevScroll.scrollTop : 0;
+      const scrollLeft = prevScroll ? prevScroll.scrollLeft : 0;
+      body.innerHTML = `<div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div><div class="changes-scroll">${changesPanelHtml()}</div>`;
+      const newScroll = body.querySelector('.changes-scroll');
+      if (newScroll) restoreElementScrollPosition(newScroll, scrollTop, scrollLeft);
     }
     bindChangesPanel(panel);
   }
@@ -2538,14 +2544,63 @@ function sanitizeMarkdownPreviewHtml(html) {
   return template.content;
 }
 
+// DOIT.15: turn bare http(s) URLs in rendered markdown into real <a> links — version-proof against
+// marked's GFM autolink missing them (e.g. when per-line source anchors are interleaved). Skips text
+// already inside <a>/<code>/<pre> so existing links and code samples are untouched. Reuses
+// markdownPreviewUrlAllowed so only safe schemes link; mirrors the app's safe-link attributes.
+function linkifyBareUrls(root) {
+  if (!root || typeof document.createTreeWalker !== 'function') return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      for (let el = node.parentElement; el; el = el.parentElement) {
+        const tag = el.tagName ? el.tagName.toLowerCase() : '';
+        if (tag === 'a' || tag === 'code' || tag === 'pre') return NodeFilter.FILTER_REJECT;
+      }
+      return /\bhttps?:\/\/\S/.test(node.nodeValue || '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+    },
+  });
+  const targets = [];
+  while (walker.nextNode()) targets.push(walker.currentNode);
+  const urlRe = /\bhttps?:\/\/[^\s<>"')\]}]+/g;
+  for (const textNode of targets) {
+    const text = textNode.nodeValue;
+    let last = 0;
+    let match;
+    const frag = document.createDocumentFragment();
+    urlRe.lastIndex = 0;
+    while ((match = urlRe.exec(text))) {
+      const url = match[0].replace(/[.,;:!?]+$/, '');   // drop trailing sentence punctuation
+      const start = match.index;
+      const end = start + url.length;
+      if (start > last) frag.appendChild(document.createTextNode(text.slice(last, start)));
+      if (markdownPreviewUrlAllowed(url, 'a')) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.textContent = url;
+        a.target = '_blank';
+        a.rel = 'noreferrer noopener';
+        frag.appendChild(a);
+      } else {
+        frag.appendChild(document.createTextNode(url));
+      }
+      last = end;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    textNode.replaceWith(frag);
+  }
+}
+
 function renderMarkdownPreviewInto(container, text, markdownPath) {
   if (typeof window.marked === 'undefined') {
     container.textContent = 'marked.js not loaded (offline CDN?)';
     return;
   }
   const html = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
-  container.replaceChildren(sanitizeMarkdownPreviewHtml(html));
+  const frag = sanitizeMarkdownPreviewHtml(html);
+  linkifyBareUrls(frag);
+  container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
+  installLinkContextMenu(container);   // DOIT.15: right-click Copy URL / Open URL on rendered links
   // DOIT.6 #133: when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
   // remember the owning file's dir so relative links resolve, and bind the in-pane link handler once.
   if (markdownPath) {

@@ -33,6 +33,8 @@
   "common.loading": "lädt...",
   "conflict.onDisk": "Auf Festplatte",
   "conflict.unsaved": "Ungespeicherter Editor",
+  "contextmenu.copyUrl": "URL kopieren",
+  "contextmenu.openUrl": "URL öffnen",
   "det.noActivity": "Noch keine KI-Agentenaktivität verfügbar.",
   "det.noBackend": "Kein KI-Backend antwortet; die Aktivitätsübersicht wird angezeigt. Lege in den Einstellungen ein Claude-/Codex-Backend fest oder melde dich an, um zu chatten.",
   "det.openPending": "Offen / ausstehend:",

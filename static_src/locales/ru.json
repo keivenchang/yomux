@@ -504,6 +504,8 @@
   "setup.waiting": "Ожидание изменений в auth.yaml",
   "setup.waitingServer": "Ожидание сервера",
   "setup.authUpdated": "Аутентификация обновлена. Перезагрузка…",
+  "contextmenu.copyUrl": "Копировать URL",
+  "contextmenu.openUrl": "Открыть URL",
   "yoagent.updated.wrap": "обновлено {rel}",
   "det.noBackend": "Ни один ИИ-бэкенд не отвечает; показывается сводка активности. Настройте или войдите в бэкенд Claude/Codex в Настройках, чтобы общаться.",
   "det.noActivity": "Активность ИИ-агента пока недоступна.",

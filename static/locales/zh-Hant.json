@@ -33,6 +33,8 @@
   "common.loading": "載入中…",
   "conflict.onDisk": "磁碟上的版本",
   "conflict.unsaved": "未儲存的編輯器",
+  "contextmenu.copyUrl": "複製網址",
+  "contextmenu.openUrl": "開啟網址",
   "det.noActivity": "目前尚無可用的 AI 代理活動。",
   "det.noBackend": "沒有 AI 後端在回應；正在顯示活動摘要。請在偏好設定中設定或登入 Claude/Codex 後端以聊天。",
   "det.openPending": "開啟／待處理：",

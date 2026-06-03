@@ -1595,3 +1595,33 @@ def test_codemirror_search_toggle_labels_collapse_to_glyph_not_overflow(browser,
     for lb in labels:
         assert lb["fontSize"] == "0px", f"toggle label native text must be hidden (font-size 0), got {lb['fontSize']}"
         assert lb["scrollWidth"] <= lb["boxWidth"] + 1, f"toggle label overflows its 24px box: {lb}"
+
+
+def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp_path):
+    # image 20260603-028: focusing/hovering a needs-attention (red) pane on a --dangerously-yolo server
+    # made it `typing-ready-pane yolo-ready-pane needs-input-pane`; the yolo-ready green --panel-ring-color
+    # (0,3,0) out-specified the needs red (0,2,0), so the alert went GREEN. The red must always win.
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    combos = [
+        "needs-input-pane",                                       # unfocused alert -> red (ring)
+        "active-pane needs-input-pane",                           # focused alert -> red
+        "typing-ready-pane yolo-ready-pane needs-input-pane",     # the bug: hovered + yolo + alert -> red
+        "active-pane yolo-ready-pane needs-blocked-pane",
+    ]
+    panels = "".join(f'<div class="panel {c}" id="p{i}" style="width:160px;height:60px"></div>' for i, c in enumerate(combos))
+    page = tmp_path / "needs-ring.html"
+    page.write_text(f"<!doctype html><html><head><meta charset=utf-8><style>{css}</style></head>"
+                    f'<body class="theme-dark">{panels}</body></html>', encoding="utf-8")
+    browser.get(page.as_uri())
+    rings = browser.execute_script(
+        """
+        const out = {};
+        document.querySelectorAll('.panel').forEach(p => {
+          out[p.id] = getComputedStyle(p).getPropertyValue('--panel-ring-color').trim();
+        });
+        return out;
+        """
+    )
+    # Every needs-attention pane resolves the red ring color, regardless of focus/yolo-ready state.
+    for pid, ring in rings.items():
+        assert ring.lower() == "#ff3347", f"{pid}: needs-attention pane must keep the red ring (#ff3347), got {ring}"

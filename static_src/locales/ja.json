@@ -504,6 +504,8 @@
   "setup.waiting": "auth.yaml の変更を待機中",
   "setup.waitingServer": "サーバーを待機中",
   "setup.authUpdated": "認証を更新しました。再読み込み中…",
+  "contextmenu.copyUrl": "URLをコピー",
+  "contextmenu.openUrl": "URLを開く",
   "yoagent.updated.wrap": "最終更新 {rel}",
   "det.noBackend": "応答する AI バックエンドがありません。アクティビティの概要を表示しています。チャットするには設定で Claude/Codex バックエンドを設定するかログインしてください。",
   "det.noActivity": "利用可能な AI エージェントのアクティビティはまだありません。",

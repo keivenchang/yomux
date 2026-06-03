@@ -504,6 +504,8 @@
   "setup.waiting": "ממתין לשינויים ב-auth.yaml",
   "setup.waitingServer": "ממתין לשרת",
   "setup.authUpdated": "האימות עודכן. טוען מחדש…",
+  "contextmenu.copyUrl": "העתק כתובת",
+  "contextmenu.openUrl": "פתח כתובת",
   "yoagent.updated.wrap": "עודכן לאחרונה {rel}",
   "det.noBackend": "אף מנגנון בינה מלאכותית אינו עונה; מוצג סיכום הפעילות. הגדר או התחבר למנגנון Claude/Codex בהעדפות כדי לשוחח.",
   "det.noActivity": "אין עדיין פעילות זמינה של סוכן בינה מלאכותית.",

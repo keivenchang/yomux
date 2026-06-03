@@ -504,6 +504,8 @@
   "setup.waiting": "auth.yaml में बदलाव की प्रतीक्षा है",
   "setup.waitingServer": "सर्वर की प्रतीक्षा है",
   "setup.authUpdated": "प्रमाणीकरण अपडेट हुआ। पुनः लोड हो रहा है…",
+  "contextmenu.copyUrl": "URL कॉपी करें",
+  "contextmenu.openUrl": "URL खोलें",
   "yoagent.updated.wrap": "अंतिम बार अपडेट {rel}",
   "det.noBackend": "कोई AI बैकएंड जवाब नहीं दे रहा; गतिविधि सारांश दिखाया जा रहा है। चैट करने के लिए Preferences में Claude/Codex बैकएंड सेट करें या लॉग इन करें।",
   "det.noActivity": "अभी तक कोई AI एजेंट गतिविधि उपलब्ध नहीं है।",

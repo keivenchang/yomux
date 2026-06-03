@@ -1183,7 +1183,12 @@ function makeFileTree(paths) {
   assert.ok(source.includes('function sanitizeMarkdownPreviewHtml'), 'Markdown previews pass through a sanitizer');
   assert.ok(source.includes('MARKDOWN_PREVIEW_BLOCKED_TAGS'), 'Markdown sanitizer blocks executable/embedded HTML tags');
   assert.equal(source.includes('container.innerHTML = window.marked.parse'), false, 'Markdown previews are not inserted with unsanitized marked HTML');
-  assert.ok(source.includes('container.replaceChildren(sanitizeMarkdownPreviewHtml(html));'), 'Markdown previews replace DOM with sanitized nodes');
+  // DOIT.15: previews still insert ONLY sanitized nodes — sanitize into a fragment, linkify bare URLs
+  // on that already-sanitized fragment (so linkify can't reintroduce unsafe markup), then replaceChildren.
+  assert.ok(source.includes('const frag = sanitizeMarkdownPreviewHtml(html);'), 'Markdown previews sanitize into a fragment');
+  assert.ok(source.includes('linkifyBareUrls(frag);'), 'Markdown previews linkify bare URLs on the sanitized fragment');
+  assert.ok(source.includes('container.replaceChildren(frag);'), 'Markdown previews replace DOM with the sanitized (+linkified) nodes');
+  assert.ok(/function linkifyBareUrls[\s\S]*markdownPreviewUrlAllowed\(url, 'a'\)/.test(source), 'linkifyBareUrls only links URLs that pass markdownPreviewUrlAllowed (safe schemes)');
   const htmlPreview = new TestElement('html-preview');
   htmlPreview.scrollTop = 37;
   htmlPreview.scrollLeft = 6;
@@ -2215,6 +2220,13 @@ function makeFileTree(paths) {
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#d2f0d6/.test(preferencesCss), 'light diff added lines use the pleasant soft green (image 025)');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#fbe5e5/.test(preferencesCss), 'light diff removed lines use the pleasant soft pink (image 025)');
   assert.ok(/--diff-remove-line-bg:\s*color-mix\(in srgb, var\(--code-diff-remove\) 32%/.test(preferencesCss), '#250: diff removed lines use a muted red fill (soft tint over the dark bg)');
+  // DOIT.16 C3: a .panel-overlay-root must NOT be the scroll container (else the inactive-pane dim
+  // scrolls away). The overlay-root bodies are overflow:hidden; the scrolling lives on inner wrappers.
+  assert.ok(/\.preferences-body\s*\{[^}]*overflow:\s*hidden/.test(preferencesCss), 'C3: .preferences-body (overlay-root) must not scroll (overflow:hidden)');
+  assert.ok(!/\.preferences-body\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .preferences-body must NOT be overflow:auto');
+  assert.ok(/\.preferences-scroll\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .preferences-scroll is the scroll container');
+  assert.ok(/\.changes-body\s*\{[^}]*overflow:\s*hidden/.test(preferencesCss), 'C3: .changes-body (overlay-root) must not scroll (overflow:hidden)');
+  assert.ok(/\.changes-scroll\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .changes-scroll is the scroll container');
   assert.ok(/body\.theme-light \.app-menu-ui-icon\.active\s*\{[\s\S]*background:\s*#5f9800/.test(preferencesCss), '#251: light mode gives the active app-menu icon button a light-tuned green fill (no dark square)');
   assert.ok(/body\.theme-light \.app-menu-tab-command[\s\S]*\{[\s\S]*color:\s*var\(--text\)/.test(preferencesCss), '#252: light mode forces dark text on the rich Tabs/Changes dropdown rows so they are not washed out');
   assert.ok(/body\.theme-light \.file-explorer-changes-panel \.changes-comparison-head\s*\{[\s\S]*background:\s*transparent/.test(preferencesCss), '#253: the Finder "Comparing…" caption has no box chrome in light mode (blends as text)');

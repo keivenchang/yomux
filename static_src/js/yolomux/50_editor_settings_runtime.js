@@ -281,7 +281,9 @@ function applyEditorWrapPreference() {
     const state = openFiles.get(path);
     if (path && state?.kind === 'text') {
       renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
-      renderFileEditorPanel(panel, fileEditorItemFor(path));
+      // Re-render each panel with its OWN layout item (DOIT.16 C1): passing the editor item flipped
+      // a preview/diff pane into an editor on any appearance change (e.g. font-size).
+      renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
     }
   });
 }
@@ -304,7 +306,7 @@ function setDiffExpandUnchanged(enabled) {
   storageSet('yolomux.diffExpandUnchanged', diffExpandUnchanged ? '1' : '0');
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const path = panel.dataset.filePath;
-    if (path) renderFileEditorPanel(panel, fileEditorItemFor(path));
+    if (path) renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
   });
 }
 

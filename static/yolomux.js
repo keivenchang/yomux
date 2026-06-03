@@ -706,6 +706,7 @@ let dragTabRectCache = null;
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
+const linkContextMenu = createContextMenuController();
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
@@ -1712,7 +1713,7 @@ function appendContextMenuSeparator(menu) {
 }
 
 function contextMenuIsOpen() {
-  return terminalContextMenu.isOpen() || fileContextMenu.isOpen() || sessionContextMenu.isOpen();
+  return terminalContextMenu.isOpen() || fileContextMenu.isOpen() || sessionContextMenu.isOpen() || linkContextMenu.isOpen();
 }
 
 function rootCssLengthPx(name) {
@@ -1756,10 +1757,44 @@ function closeSessionContextMenu() {
   sessionContextMenu.close();
 }
 
+function closeLinkContextMenu() {
+  linkContextMenu.close();
+}
+
 function closeContextMenus() {
   closeTerminalContextMenu();
   closeFileContextMenu();
   closeSessionContextMenu();
+  closeLinkContextMenu();
+}
+
+// DOIT.15: right-click menu for links in AI/markdown content — Copy URL / Open URL. Bound on the
+// YO!agent body and markdown previews via installLinkContextMenu(container).
+function showLinkContextMenu(anchor, x, y) {
+  closeTerminalContextMenu();
+  closeFileContextMenu();
+  closeSessionContextMenu();
+  closeOtherSessionPopovers(null);
+  const href = anchor?.href || '';
+  if (!href) return;
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu link-context-menu';
+  menu.setAttribute('role', 'menu');
+  appendContextMenuButton(menu, t('contextmenu.copyUrl'), () => copyTextToClipboard(href), closeLinkContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.openUrl'), () => window.open(href, '_blank', 'noopener,noreferrer'), closeLinkContextMenu);
+  linkContextMenu.open(menu, x, y);
+}
+
+function installLinkContextMenu(container) {
+  if (!container || container.dataset.linkContextMenuBound === '1') return;
+  container.dataset.linkContextMenuBound = '1';
+  container.addEventListener('contextmenu', event => {
+    const anchor = event.target?.closest?.('a[href]');
+    if (!anchor || !container.contains(anchor)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showLinkContextMenu(anchor, event.clientX, event.clientY);
+  });
 }
 
 async function copyTerminalSelection(session, term, options = {}) {
@@ -9001,7 +9036,9 @@ function applyEditorWrapPreference() {
     const state = openFiles.get(path);
     if (path && state?.kind === 'text') {
       renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
-      renderFileEditorPanel(panel, fileEditorItemFor(path));
+      // Re-render each panel with its OWN layout item (DOIT.16 C1): passing the editor item flipped
+      // a preview/diff pane into an editor on any appearance change (e.g. font-size).
+      renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
     }
   });
 }
@@ -9024,7 +9061,7 @@ function setDiffExpandUnchanged(enabled) {
   storageSet('yolomux.diffExpandUnchanged', diffExpandUnchanged ? '1' : '0');
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const path = panel.dataset.filePath;
-    if (path) renderFileEditorPanel(panel, fileEditorItemFor(path));
+    if (path) renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
   });
 }
 
@@ -13702,6 +13739,7 @@ function preferenceSections() {
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
       {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
+      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
       {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
       {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'select', choices: [
@@ -13712,7 +13750,6 @@ function preferenceSections() {
         {value: 'yellow', label: t('pref.appearance.editor_cursor_color.yellow')},
         {value: 'theme', label: t('pref.appearance.editor_cursor_color.theme')},
       ], help: t('pref.appearance.editor_cursor_color.help')},
-      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
       {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
       {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
@@ -14099,7 +14136,7 @@ function createPreferencesPanel() {
       </div>
       <div class="preferences-body panel-overlay-root">
         <div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>
-        ${preferencesPanelHtml()}
+        <div class="preferences-scroll">${preferencesPanelHtml()}</div>
       </div>`;
   bindPanelShell(panel, prefsItemId);
   bindPreferencesPanel(panel);
@@ -14149,8 +14186,11 @@ function renderPreferencesPanels(options = {}) {
     if (body) {
       const activeControl = activePreferenceControl(panel);
       const shouldKeepDom = activeControl && options.force !== true;
-      const scrollTop = body.scrollTop;
-      const scrollLeft = body.scrollLeft;
+      // DOIT.16 C3: the scroller is the inner .preferences-scroll, not the overlay-root body.
+      const scroller = () => body.querySelector('.preferences-scroll') || body;
+      const prevScroll = scroller();
+      const scrollTop = prevScroll.scrollTop;
+      const scrollLeft = prevScroll.scrollLeft;
       if (shouldKeepDom) {
         const status = body.querySelector('.preferences-status');
         if (status) {
@@ -14160,15 +14200,12 @@ function renderPreferencesPanels(options = {}) {
         const pathRows = body.querySelector('.preferences-path-rows');
         if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : ''}`;
       } else {
-        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div>${preferencesPanelHtml()}`;
+        body.innerHTML = `<div id="panel-toasts-${prefsItemId}" class="panel-toast-stack"></div><div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
       }
       if (options.focusSearch !== true) {
-        body.scrollTop = scrollTop;
-        body.scrollLeft = scrollLeft;
-        requestAnimationFrame(() => {
-          body.scrollTop = scrollTop;
-          body.scrollLeft = scrollLeft;
-        });
+        const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
+        restore();
+        requestAnimationFrame(restore);
       }
     }
     bindPreferencesPanel(panel);
@@ -14946,7 +14983,7 @@ function createChangesPanel() {
       </div>
       <div class="changes-body panel-overlay-root">
         <div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>
-        ${changesPanelHtml()}
+        <div class="changes-scroll">${changesPanelHtml()}</div>
       </div>`;
   bindPanelShell(panel, changesItemId);
   bindChangesPanel(panel);
@@ -14968,7 +15005,13 @@ function renderChangesPanels(options = {}) {
     const meta = panel.querySelector(`#meta-${cssEscape(changesItemId)}`);
     if (meta) meta.textContent = changesTabDetail();
     if (body && (options.force === true || !activeChangesControl(panel))) {
-      replaceHtmlPreservingScroll(body, `<div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>${changesPanelHtml()}`);
+      // DOIT.16 C3: preserve scroll on the inner .changes-scroll (the overlay-root body no longer scrolls).
+      const prevScroll = body.querySelector('.changes-scroll');
+      const scrollTop = prevScroll ? prevScroll.scrollTop : 0;
+      const scrollLeft = prevScroll ? prevScroll.scrollLeft : 0;
+      body.innerHTML = `<div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div><div class="changes-scroll">${changesPanelHtml()}</div>`;
+      const newScroll = body.querySelector('.changes-scroll');
+      if (newScroll) restoreElementScrollPosition(newScroll, scrollTop, scrollLeft);
     }
     bindChangesPanel(panel);
   }
@@ -16828,14 +16871,63 @@ function sanitizeMarkdownPreviewHtml(html) {
   return template.content;
 }
 
+// DOIT.15: turn bare http(s) URLs in rendered markdown into real <a> links — version-proof against
+// marked's GFM autolink missing them (e.g. when per-line source anchors are interleaved). Skips text
+// already inside <a>/<code>/<pre> so existing links and code samples are untouched. Reuses
+// markdownPreviewUrlAllowed so only safe schemes link; mirrors the app's safe-link attributes.
+function linkifyBareUrls(root) {
+  if (!root || typeof document.createTreeWalker !== 'function') return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      for (let el = node.parentElement; el; el = el.parentElement) {
+        const tag = el.tagName ? el.tagName.toLowerCase() : '';
+        if (tag === 'a' || tag === 'code' || tag === 'pre') return NodeFilter.FILTER_REJECT;
+      }
+      return /\bhttps?:\/\/\S/.test(node.nodeValue || '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+    },
+  });
+  const targets = [];
+  while (walker.nextNode()) targets.push(walker.currentNode);
+  const urlRe = /\bhttps?:\/\/[^\s<>"')\]}]+/g;
+  for (const textNode of targets) {
+    const text = textNode.nodeValue;
+    let last = 0;
+    let match;
+    const frag = document.createDocumentFragment();
+    urlRe.lastIndex = 0;
+    while ((match = urlRe.exec(text))) {
+      const url = match[0].replace(/[.,;:!?]+$/, '');   // drop trailing sentence punctuation
+      const start = match.index;
+      const end = start + url.length;
+      if (start > last) frag.appendChild(document.createTextNode(text.slice(last, start)));
+      if (markdownPreviewUrlAllowed(url, 'a')) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.textContent = url;
+        a.target = '_blank';
+        a.rel = 'noreferrer noopener';
+        frag.appendChild(a);
+      } else {
+        frag.appendChild(document.createTextNode(url));
+      }
+      last = end;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    textNode.replaceWith(frag);
+  }
+}
+
 function renderMarkdownPreviewInto(container, text, markdownPath) {
   if (typeof window.marked === 'undefined') {
     container.textContent = 'marked.js not loaded (offline CDN?)';
     return;
   }
   const html = window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
-  container.replaceChildren(sanitizeMarkdownPreviewHtml(html));
+  const frag = sanitizeMarkdownPreviewHtml(html);
+  linkifyBareUrls(frag);
+  container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
+  installLinkContextMenu(container);   // DOIT.15: right-click Copy URL / Open URL on rendered links
   // DOIT.6 #133: when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
   // remember the owning file's dir so relative links resolve, and bind the in-pane link handler once.
   if (markdownPath) {

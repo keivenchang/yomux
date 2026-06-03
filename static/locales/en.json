@@ -33,6 +33,8 @@
   "common.loading": "loading...",
   "conflict.onDisk": "On disk",
   "conflict.unsaved": "Unsaved editor",
+  "contextmenu.copyUrl": "Copy URL",
+  "contextmenu.openUrl": "Open URL",
   "det.noActivity": "No AI agent activity is available yet.",
   "det.noBackend": "No AI backend is answering; showing the activity summary. Set or log in a Claude/Codex backend in Preferences to chat.",
   "det.openPending": "Open / pending:",

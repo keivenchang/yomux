@@ -33,6 +33,8 @@
   "common.loading": "טוען...",
   "conflict.onDisk": "בדיסק",
   "conflict.unsaved": "עורך לא שמור",
+  "contextmenu.copyUrl": "העתק כתובת",
+  "contextmenu.openUrl": "פתח כתובת",
   "det.noActivity": "אין עדיין פעילות זמינה של סוכן בינה מלאכותית.",
   "det.noBackend": "אף מנגנון בינה מלאכותית אינו עונה; מוצג סיכום הפעילות. הגדר או התחבר למנגנון Claude/Codex בהעדפות כדי לשוחח.",
   "det.openPending": "פתוח / ממתין:",

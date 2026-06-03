@@ -281,18 +281,23 @@ def current_language_pref() -> str:
     return language if isinstance(language, str) and language in _LOGIN_LOCALE_VALUES else "system"
 
 
-def login_locale_field_html(current: str = "system") -> str:
+def locale_field_html(current: str = "system", css_class: str = "login-locale") -> str:
+    """The endonym-labeled language <select>, shared by the login and setup screens (DOIT.13)."""
     options = "".join(
         f'<option value="{html.escape(value, quote=True)}"{" selected" if value == current else ""}>{html.escape(label)}</option>'
         for value, label in LOGIN_LOCALE_CHOICES
     )
     language_label = html.escape(server_string(current, "login.language"))
     return (
-        '<label class="login-locale">'
+        f'<label class="{html.escape(css_class, quote=True)}">'
         f"<span>{language_label}</span>"
         f'<select name="locale" aria-label="{language_label}">{options}</select>'
         "</label>"
     )
+
+
+def login_locale_field_html(current: str = "system") -> str:
+    return locale_field_html(current, "login-locale")
 
 
 def save_login_locale(value: str) -> None:
@@ -376,11 +381,14 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 """
 
 
-def setup_auth_html() -> str:
-    # Localize the pre-auth setup chrome via the SAVED locale (the JS i18n runtime is not loaded here),
-    # the same way login_html() does. The HTTPS recommendation + agent-login notice carry shell commands,
-    # so — matching login_html — they stay English. The auth.yaml example block is literal config, not UI.
-    locale = current_language_pref()
+def setup_auth_html(current_locale: str = "system") -> str:
+    # Localize the pre-auth setup chrome via the resolved locale (the JS i18n runtime is not loaded
+    # here), the same way login_html() does. The HTTPS recommendation + agent-login notice carry shell
+    # commands, so — matching login_html — they stay English. The auth.yaml example block is literal
+    # config, not UI. The locale is carried pre-auth by request_locale_pref (query/cookie), so the
+    # setup-screen picker can switch language WITHOUT writing settings (DOIT.13).
+    locale = current_locale if current_locale in _LOGIN_LOCALE_VALUES else "system"
+    locale_picker = locale_field_html(locale, "setup-locale")
     auth_path = html.escape(AUTH_CONFIG_DISPLAY_PATH)
     login = html.escape(login_username())
     agent_notice_html = agent_login_notice_html("setup-login-notice")
@@ -405,6 +413,7 @@ def setup_auth_html() -> str:
 </head>
 <body>
 <main>
+  {locale_picker}
   <h1>{set_up} {brand_html("brand-title setup-brand setup-brand-waiting")}</h1>
   <p id="setupSecurity" class="setup-security">Highly recommend that you restart with HTTPS: <code>python3 yolomux.py --port 9998 --self-signed</code></p>
   <p>{edit_label} <code>{auth_path}</code></p>

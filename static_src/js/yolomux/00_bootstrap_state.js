@@ -705,6 +705,7 @@ let dragTabRectCache = null;
 const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
+const linkContextMenu = createContextMenuController();
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;

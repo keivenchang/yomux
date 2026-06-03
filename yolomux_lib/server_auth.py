@@ -10,6 +10,7 @@ from http import HTTPStatus
 from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import parse_qsl
+from urllib.parse import unquote
 from urllib.parse import urlencode
 from urllib.parse import urlparse
 
@@ -21,6 +22,7 @@ from .common import auth_cookie_value
 from .common import auth_identity_for_credentials
 from .common import auth_setup_required
 from .common import current_auth_users
+from .web import _LOGIN_LOCALE_VALUES
 from .web import current_language_pref
 from .web import login_html
 from .web import save_login_locale
@@ -61,6 +63,19 @@ class AuthMixin:
             if separator and name == AUTH_LOGOUT_COOKIE_NAME and value == "1":
                 return True
         return False
+
+    def request_locale_pref(self) -> str:
+        """Resolve the pre-auth UI locale for the setup/login screens (DOIT.13): the short-lived
+        `yolomux_locale` cookie (set by the setup/login language picker, which must NOT write settings
+        pre-auth) wins, else the saved general.language. The permanent write happens post-auth via
+        save_login_locale; the cookie is a carrier with a Max-Age backstop."""
+        for item in self.headers.get("Cookie", "").split(";"):
+            name, separator, value = item.strip().partition("=")
+            if separator and name == "yolomux_locale":
+                candidate = unquote(value.strip())
+                if candidate in _LOGIN_LOCALE_VALUES:
+                    return candidate
+        return current_language_pref()
 
     def auth_cookie_name(self) -> str:
         return f"{AUTH_COOKIE_NAME}_{self.server.server_address[1]}"
@@ -167,7 +182,7 @@ class AuthMixin:
 
     def require_auth(self, required_role: str = "readonly") -> bool:
         if auth_setup_required():
-            self.write_html(setup_auth_html())
+            self.write_html(setup_auth_html(self.request_locale_pref()))
             return False
         self._auth_cookie_identity = None
         identity = self.cookie_auth_identity()
@@ -211,18 +226,18 @@ class AuthMixin:
 
     def handle_login_page(self, parsed: Any) -> None:
         if auth_setup_required():
-            self.write_html(setup_auth_html())
+            self.write_html(setup_auth_html(self.request_locale_pref()))
             return
         qs = parse_qs(parsed.query)
         next_path = self.safe_next_path(qs.get("next", ["/"])[0])
         if not self.has_logout_marker() and self.cookie_auth_identity() is not None:
             self.write_redirect(self.login_success_path(next_path))
             return
-        self.write_html(login_html(next_path=next_path, secure=self.request_is_https(), current_locale=current_language_pref()))
+        self.write_html(login_html(next_path=next_path, secure=self.request_is_https(), current_locale=self.request_locale_pref()))
 
     def handle_login_submit(self, parsed: Any) -> None:
         if auth_setup_required():
-            self.write_html(setup_auth_html())
+            self.write_html(setup_auth_html(self.request_locale_pref()))
             return
         form = self.read_urlencoded_form()
         next_path = self.safe_next_path(form.get("next", ["/"])[0])
@@ -231,7 +246,7 @@ class AuthMixin:
         identity = auth_identity_for_credentials(username, password)
         if identity is None:
             self.close_after_unread_body()
-            locale = current_language_pref()
+            locale = self.request_locale_pref()
             self.write_html(
                 login_html(
                     next_path=next_path,

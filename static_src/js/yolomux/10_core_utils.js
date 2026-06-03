@@ -807,7 +807,7 @@ function appendContextMenuSeparator(menu) {
 }
 
 function contextMenuIsOpen() {
-  return terminalContextMenu.isOpen() || fileContextMenu.isOpen() || sessionContextMenu.isOpen();
+  return terminalContextMenu.isOpen() || fileContextMenu.isOpen() || sessionContextMenu.isOpen() || linkContextMenu.isOpen();
 }
 
 function rootCssLengthPx(name) {
@@ -851,10 +851,44 @@ function closeSessionContextMenu() {
   sessionContextMenu.close();
 }
 
+function closeLinkContextMenu() {
+  linkContextMenu.close();
+}
+
 function closeContextMenus() {
   closeTerminalContextMenu();
   closeFileContextMenu();
   closeSessionContextMenu();
+  closeLinkContextMenu();
+}
+
+// DOIT.15: right-click menu for links in AI/markdown content — Copy URL / Open URL. Bound on the
+// YO!agent body and markdown previews via installLinkContextMenu(container).
+function showLinkContextMenu(anchor, x, y) {
+  closeTerminalContextMenu();
+  closeFileContextMenu();
+  closeSessionContextMenu();
+  closeOtherSessionPopovers(null);
+  const href = anchor?.href || '';
+  if (!href) return;
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu link-context-menu';
+  menu.setAttribute('role', 'menu');
+  appendContextMenuButton(menu, t('contextmenu.copyUrl'), () => copyTextToClipboard(href), closeLinkContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.openUrl'), () => window.open(href, '_blank', 'noopener,noreferrer'), closeLinkContextMenu);
+  linkContextMenu.open(menu, x, y);
+}
+
+function installLinkContextMenu(container) {
+  if (!container || container.dataset.linkContextMenuBound === '1') return;
+  container.dataset.linkContextMenuBound = '1';
+  container.addEventListener('contextmenu', event => {
+    const anchor = event.target?.closest?.('a[href]');
+    if (!anchor || !container.contains(anchor)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showLinkContextMenu(anchor, event.clientX, event.clientY);
+  });
 }
 
 async function copyTerminalSelection(session, term, options = {}) {
