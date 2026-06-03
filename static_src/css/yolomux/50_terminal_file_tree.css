@@ -235,11 +235,13 @@
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .toast-line {
+  /* #258: WRAP the message instead of clipping it. An actionable toast (Keep/x) must be read in full
+     to decide, and the old single-line clip (nowrap + ellipsis) truncated it ("…as a fenced A…"). The
+     ::after countdown bar is absolutely positioned, so wrapping does not disturb it. */
   position: relative;
   padding-bottom: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .toast-line::after,
 .toast-countdown::after {
@@ -300,7 +302,9 @@
   position: absolute;
   left: 8px;
   top: 8px;
-  z-index: 8;
+  /* #258: above the topbar (z-index:180) so a top-row pane's toast is never painted UNDER it and
+     clipped — the whole toast incl. the Keep/x buttons stays visible. */
+  z-index: 200;
   width: calc(100% - 16px);
   display: flex;
   flex-direction: column;

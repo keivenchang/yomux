@@ -937,6 +937,12 @@ function savePreferenceControl(control) {
   // #50: switch the UI language OPTIMISTICALLY on the select change — don't wait for the settings-poll
   // round-trip (same lesson as the theme toggle). applyLocale is async + re-renders every surface.
   if (path === 'general.language') applyLocale(resolveLocalePref(value));
+  // #260: apply the global theme live the moment the radio changes (the old theme-cards relied on a
+  // re-render; the radio routes through here, so flip body.theme-* + the editor/terminal palettes now).
+  if (path === 'appearance.theme') {
+    globalThemeMode = normalizeGlobalThemeMode(value);
+    applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  }
   saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })

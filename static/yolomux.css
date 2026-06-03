@@ -279,7 +279,10 @@ body.theme-light {
   --bad: #b91c1c;
   --inactive-gray: rgba(91, 101, 115, 0.42);
   --inactive-gray-hover: rgba(91, 101, 115, 0.54);
-  --inactive-pane-overlay: rgba(91, 101, 115, 0.14);
+  /* #254/#259: in light mode dim inactive panes more (was a faint cool rgba(91,101,115,0.14)) — a
+     NEUTRAL gray at that darkness, no red cast (user superseded the earlier warm value). Dark-mode
+     token (top of file) is left as-is. */
+  --inactive-pane-overlay: rgba(90, 96, 105, 0.24);
   --inactive-tab-bg: #e3e8f0;
   --inactive-tab-bg-hover: #d7deea;
   --inactive-tab-border: #9aa6b6;
@@ -2229,41 +2232,29 @@ body.theme-light .ci-indicator.branch-indicator {
   border-top: 1px solid rgba(48, 57, 72, 0.45);
 }
 
-/* DOIT.6 #123: macOS-style theme-preview cards. Each card is a mini YOLOmux window drawn from the
-   theme's OWN palette (the same hex values as the dark/light tokens in 00_tokens_base.css), so the
-   thumbnails actually reflect YOLOmux's colors. System is a diagonal light/dark split. */
-.theme-cards { display: flex; flex-wrap: wrap; gap: 12px; }
-.theme-card {
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
-  background: none; border: 0; padding: 0; cursor: pointer; color: var(--text);
+/* #260: plain radio-button group for the Global color theme (replaced the macOS-style theme-cards). */
+.preferences-radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  justify-content: end;
 }
-.theme-card[disabled] { cursor: default; opacity: 0.6; }
-.theme-card-preview {
-  width: 88px; height: 58px; border-radius: 8px; overflow: hidden;
-  border: 2px solid transparent; box-shadow: 0 0 0 1px var(--line); display: block;
+.preferences-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  color: var(--text);
 }
-.theme-card.selected .theme-card-preview { border-color: var(--brand-green); box-shadow: 0 0 0 2px var(--brand-green); }
-.theme-card:not([disabled]):hover .theme-card-preview { box-shadow: 0 0 0 1px var(--brand-green); }
-.theme-card-titlebar { display: flex; align-items: center; gap: 3px; height: 13px; padding: 0 6px; }
-.theme-card-dot { width: 5px; height: 5px; border-radius: 50%; }
-.theme-card-dot.r { background: #ff5f57; } .theme-card-dot.y { background: #febc2e; } .theme-card-dot.g { background: #28c840; }
-.theme-card-window { display: flex; height: calc(100% - 13px); }
-.theme-card-pane { flex: 1; }
-.theme-card-accent { width: 20px; }
-.theme-card-caption { font-size: 12px; line-height: 1; }
-.theme-card.selected .theme-card-caption { color: var(--brand-green); font-weight: 600; }
-/* Dark palette (matches :root tokens). */
-.theme-card-dark .theme-card-titlebar { background: #151922; }
-.theme-card-dark .theme-card-pane { background: #0f1115; }
-.theme-card-dark .theme-card-accent { background: #76b900; }
-/* Light palette (matches body.theme-light tokens). */
-.theme-card-light .theme-card-titlebar { background: #e7edf5; }
-.theme-card-light .theme-card-pane { background: #f6f8fb; }
-.theme-card-light .theme-card-accent { background: #4f9e3a; }
-/* System: diagonal split, light upper-left -> dark lower-right. */
-.theme-card-system .theme-card-titlebar { background: linear-gradient(135deg, #e7edf5 0 50%, #151922 50% 100%); }
-.theme-card-system .theme-card-pane { background: linear-gradient(135deg, #f6f8fb 0 50%, #0f1115 50% 100%); }
-.theme-card-system .theme-card-accent { background: linear-gradient(135deg, #4f9e3a 0 50%, #76b900 50% 100%); }
+.preferences-radio input[type="radio"] {
+  cursor: pointer;
+  accent-color: var(--brand-green);
+}
+.preferences-radio input[type="radio"]:disabled,
+.preferences-radio:has(input:disabled) {
+  cursor: default;
+  opacity: 0.6;
+}
 .preferences-setting-row:first-child {
   border-top: 0;
 }
@@ -2704,6 +2695,12 @@ body.theme-light .keyboard-shortcut-row kbd {
 }
 .preferences-setting-control.setting-type-number {
   grid-template-columns: minmax(6ch, 8ch) auto auto;
+  justify-content: end;
+}
+/* #257: right-align select + text controls the same way the number controls are, so the dropdowns
+   line up under the number inputs at the right edge (the reset button still trails at the far edge). */
+.preferences-setting-control.setting-type-select,
+.preferences-setting-control.setting-type-text {
   justify-content: end;
 }
 .preferences-setting-control.setting-type-number input[type="number"] {
@@ -4288,11 +4285,13 @@ body.theme-light .panel.typing-ready-pane {
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .toast-line {
+  /* #258: WRAP the message instead of clipping it. An actionable toast (Keep/x) must be read in full
+     to decide, and the old single-line clip (nowrap + ellipsis) truncated it ("…as a fenced A…"). The
+     ::after countdown bar is absolutely positioned, so wrapping does not disturb it. */
   position: relative;
   padding-bottom: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .toast-line::after,
 .toast-countdown::after {
@@ -4353,7 +4352,9 @@ body.theme-light .panel.typing-ready-pane {
   position: absolute;
   left: 8px;
   top: 8px;
-  z-index: 8;
+  /* #258: above the topbar (z-index:180) so a top-row pane's toast is never painted UNDER it and
+     clipped — the whole toast incl. the Keep/x buttons stays visible. */
+  z-index: 200;
   width: calc(100% - 16px);
   display: flex;
   flex-direction: column;
@@ -6866,6 +6867,11 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
   display: none;
 }
 .file-editor-diff-ref-panel {
+  /* FROM/TO sits at the LEFT of the editor info bar (image 040); `order:-1` moves it ahead of the
+     toggle/action button groups in the flex row, and `margin-inline-end:auto` pushes ALL of those
+     buttons to the RIGHT. (Supersedes the earlier FROM/TO-right placement.) */
+  order: -1;
+  margin-inline-end: auto;
   display: inline-flex;
   align-items: center;
   min-width: 0;

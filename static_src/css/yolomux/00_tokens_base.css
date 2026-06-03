@@ -278,7 +278,10 @@ body.theme-light {
   --bad: #b91c1c;
   --inactive-gray: rgba(91, 101, 115, 0.42);
   --inactive-gray-hover: rgba(91, 101, 115, 0.54);
-  --inactive-pane-overlay: rgba(91, 101, 115, 0.14);
+  /* #254/#259: in light mode dim inactive panes more (was a faint cool rgba(91,101,115,0.14)) — a
+     NEUTRAL gray at that darkness, no red cast (user superseded the earlier warm value). Dark-mode
+     token (top of file) is left as-is. */
+  --inactive-pane-overlay: rgba(90, 96, 105, 0.24);
   --inactive-tab-bg: #e3e8f0;
   --inactive-tab-bg-hover: #d7deea;
   --inactive-tab-border: #9aa6b6;

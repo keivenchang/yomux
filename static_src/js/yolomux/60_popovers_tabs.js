@@ -782,6 +782,17 @@ async function openDraggedFilesInEditor(payload, options = {}) {
           renderFileEditorPanel(draggedPanel, draggedPanel.dataset.layoutItem || fileEditorItemFor(path));
         }
       }
+      // #260: a drag-drop open is a FRESH open at the current disk state, not a "changed on disk"
+      // conflict. If the just-opened file is NOT dirty, clear any external-change flags so it never
+      // pops a spurious reload prompt (this matches double-click's openChangedFileInDiff, which opens
+      // with a clean baseline). A dirty file keeps its conflict state so real unsaved-edit warnings stay.
+      if (draggedState && !draggedState.dirty) {
+        delete draggedState.externalChanged;
+        delete draggedState.externalMissing;
+        delete draggedState.externalError;
+        delete draggedState.externalChangeEditPrompted;
+        renderOpenFilePath(path);
+      }
       opened += 1;
     } catch (error) {
       showFileOpenError(path, error);

@@ -1161,6 +1161,11 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
   display: none;
 }
 .file-editor-diff-ref-panel {
+  /* FROM/TO sits at the LEFT of the editor info bar (image 040); `order:-1` moves it ahead of the
+     toggle/action button groups in the flex row, and `margin-inline-end:auto` pushes ALL of those
+     buttons to the RIGHT. (Supersedes the earlier FROM/TO-right placement.) */
+  order: -1;
+  margin-inline-end: auto;
   display: inline-flex;
   align-items: center;
   min-width: 0;

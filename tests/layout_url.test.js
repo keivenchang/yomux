@@ -3951,8 +3951,11 @@ function makeFileTree(paths) {
   const themeLabels = themeSubmenu.items.filter(item => item.type === 'command').map(item => item.label);
   assert.deepStrictEqual([...themeLabels], ['System', 'Dark', 'Light'], '#24: Theme submenu offers System/Dark/Light as discrete one-click items');
   assert.ok(themeSubmenu.items.some(item => item.label === 'Dark' && item.checked !== undefined), '#24: Theme items carry a checked state for the current mode');
-  // Picking a theme moves the terminal palette in lockstep (symmetric for dark and light).
-  assert.ok(/function setGlobalThemeMode[\s\S]*?patch\.appearance\.terminal_theme = terminalThemeSettingForGlobalMode\(next\)/.test(source), '#24: setGlobalThemeMode sets the terminal palette alongside the global theme');
+  // #258: picking a theme APPLIES it live (the menu used to only save the patch).
+  assert.ok(/function setGlobalThemeMode[\s\S]*?globalThemeMode = next;\s*applyGlobalThemeMode\(\{updateEditor: true, updateTerminals: true\}\)/.test(source), '#258: setGlobalThemeMode applies the theme live (applyGlobalThemeMode)');
+  // #261: the View menu no longer PINS the terminal palette — it just follows the app (follow-app stays).
+  assert.equal(/function setGlobalThemeMode[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: setGlobalThemeMode no longer pins appearance.terminal_theme');
+  assert.equal(/function cycleGlobalThemeSetting[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: cycleGlobalThemeSetting no longer pins appearance.terminal_theme');
 }
 
 {
@@ -4018,23 +4021,24 @@ function makeFileTree(paths) {
 }
 
 {
-  // DOIT.6 #123: the Global color theme field renders macOS-style preview cards; the active is ringed.
+  // #260: the Global color theme field renders plain RADIO buttons (replaced the macOS-style cards).
   const api = loadYolomux('', ['1']);
   api.setActiveLocaleForTest('en');
   api.setClientSettingsPatchForTest({appearance: {theme: 'light'}});
   const html = api.preferencesPanelHtmlForTest('');
   for (const v of ['system', 'dark', 'light']) {
-    assert.ok(html.includes(`data-theme-card="${v}"`), `#123: a ${v} theme card renders`);
+    assert.ok(new RegExp(`<input type="radio"[^>]*value="${v}"[^>]*data-setting-path="appearance\\.theme"`).test(html), `#260: a ${v} theme radio renders`);
   }
-  assert.ok(/class="theme-cards" role="radiogroup"/.test(html), '#123: the cards render as a radiogroup');
-  assert.ok(html.includes('theme-card selected theme-card-light'), '#123: the active theme (light) card is selected/ringed');
-  assert.equal((html.match(/class="theme-card selected/g) || []).length, 1, '#123: exactly one card is selected');
-  assert.equal(/<select[^>]*data-setting-path="appearance\.theme"/.test(html), false, '#123: the theme field is cards, not a <select>');
+  assert.ok(/role="radiogroup"/.test(html), '#260: the theme radios render as a radiogroup');
+  assert.ok(/value="light"[^>]*data-setting-path="appearance\.theme"[^>]*checked/.test(html), '#260: the active theme (light) radio is checked');
+  assert.equal((html.match(/type="radio"[^>]*data-setting-path="appearance\.theme"[^>]*checked/g) || []).length, 1, '#260: exactly one theme radio is checked');
+  assert.equal(html.includes('data-theme-card'), false, '#260: no macOS-style theme-card markup remains');
+  assert.equal(/<select[^>]*data-setting-path="appearance\.theme"/.test(html), false, '#260: the theme field is radios, not a <select>');
   const themeSrc = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.ok(/saveSettingsPatch\(settingPatch\('appearance\.theme', themeCard\.dataset\.themeCard\)\)/.test(themeSrc), '#123: clicking a card saves appearance.theme via the discrete patch');
+  assert.ok(/if \(path === 'appearance\.theme'\) \{\s*globalThemeMode = normalizeGlobalThemeMode\(value\);\s*applyGlobalThemeMode/.test(themeSrc), '#260: changing the theme radio applies the theme live (via savePreferenceControl)');
   const themeCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.theme-card-system \.theme-card-pane\s*\{[^}]*linear-gradient/.test(themeCss), '#123: the System card uses a diagonal light/dark split');
-  assert.ok(/\.theme-card\.selected \.theme-card-preview\s*\{[^}]*var\(--brand-green\)/.test(themeCss), '#123: the selected card is ringed with the accent');
+  assert.ok(/\.preferences-radio-group\s*\{/.test(themeCss), '#260: the radio group has styling');
+  assert.equal(/\.theme-card-system/.test(themeCss), false, '#260: the old theme-card CSS is gone');
 }
 
 {
@@ -4075,6 +4079,34 @@ function makeFileTree(paths) {
   // The zh fallback mapping (zh-TW/HK/Hant -> Hant, other zh -> Hans).
   assert.ok(/nav\.startsWith\('zh'\)\) return \/hant\|/.test(src), 'Phase 1: system maps Chinese browser locales to Hant/Hans');
   assert.ok(/\.topbar-language\s*\{/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'Phase 1: the language switcher has topbar styling');
+  // #256: topbar theme switcher (auto/dark/light) mirrors the language switcher and sits right of it;
+  // order ends Language, Theme, Activity (activity pinned far-right).
+  // #257: the topbar theme switcher was REMOVED (redundant). Order is Language, then Activity (far right).
+  assert.ok(/sessionButtons\.appendChild\(createTopbarLanguageSwitcher\(\)\);\s*sessionButtons\.appendChild\(createTopbarActivityStatus\(\)\)/.test(src), '#257: topbar order is Language then Activity (no theme switcher between them)');
+  assert.equal(/createTopbarThemeSwitcher/.test(src), false, '#257: createTopbarThemeSwitcher is gone (no redundant topbar theme select)');
+  {
+    const css = fs.readFileSync('static/yolomux.css', 'utf8');
+    assert.equal(/\.topbar-theme\s*\{/.test(css), false, '#257: the .topbar-theme CSS is removed with the switcher');
+    // #254: light-mode inactive-pane dim is darker + warm (not the old faint cool 0.14 overlay).
+    assert.ok(css.includes('--inactive-pane-overlay: rgba(90, 96, 105, 0.24)'), '#259: light-mode inactive panes dim a neutral gray (no red cast)');
+    assert.equal(css.includes('--inactive-pane-overlay: rgba(124, 82, 88, 0.24)'), false, '#259: the earlier warm/red tint is gone (superseded by gray)');
+    assert.equal(css.includes('--inactive-pane-overlay: rgba(91, 101, 115, 0.14)'), false, '#254: the old faint cool light overlay is gone');
+    // #258: the editor diff FROM/TO group is pushed to the right edge of the toolbar.
+    assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*order:\s*-1[^}]*margin-inline-end:\s*auto/.test(css), 'editor info bar: FROM/TO sits left (order:-1) and pushes all buttons right (margin-inline-end:auto)');
+    // #257: Preferences select + text controls right-align like the number controls above them.
+    assert.ok(/\.preferences-setting-control\.setting-type-select,\s*\.preferences-setting-control\.setting-type-text\s*\{[^}]*justify-content:\s*end/.test(css), '#257: Preferences selects/text inputs right-align (justify-content:end) like the number controls');
+    // #258 (toast): the toast stack clears the topbar (z-index above 180) and messages wrap, not clip.
+    assert.ok(/\.panel-toast-stack\s*\{[^}]*z-index:\s*200/.test(css), '#258: the toast stack renders above the topbar (z-index 200) so it is not clipped under it');
+    assert.ok(/\.toast-line\s*\{[^}]*white-space:\s*normal/.test(css), '#258: toast messages wrap (white-space:normal) instead of ellipsis-clipping');
+    assert.equal(/\.toast-line\s*\{[^}]*white-space:\s*nowrap/.test(css), false, '#258: the old nowrap/ellipsis clipping of the toast message line is gone');
+  }
+  // #255: virtual panes (Finder/Modified-files, Preferences, Info, Changes) now dim when inactive —
+  // installPanelInactiveOverlays no longer early-returns + strips the overlay for isVirtualItem.
+  assert.equal(/function installPanelInactiveOverlays[\s\S]*?if \(isVirtualItem\(session\)\) \{\s*panel\.querySelectorAll\('\.panel-inactive-overlay'\)\.forEach\(node => node\.remove\(\)\);\s*return;/.test(src), false, '#255: installPanelInactiveOverlays no longer skips virtual panes');
+  assert.ok(/function installPanelInactiveOverlays[\s\S]*?for \(const root of panel\.querySelectorAll\('\.panel-overlay-root'\)\)/.test(src), '#255: installPanelInactiveOverlays still installs the inactive overlay (now for virtual panes too)');
+  // #260: a drag-drop open establishes a clean baseline (clears external-change flags on a fresh,
+  // non-dirty open) so it never pops a spurious reload prompt — matching double-click.
+  assert.ok(/function openDraggedFilesInEditor[\s\S]*?if \(draggedState && !draggedState\.dirty\) \{[\s\S]*?delete draggedState\.externalChanged/.test(src), '#260: drag-drop open clears externalChanged on a non-dirty fresh open (no spurious reload prompt)');
   // boot() resolves the raw general.language pref (so a system pref localizes client-side).
   assert.ok(/await applyLocale\(resolveLocalePref\(initialSetting\('general\.language', 'system'\)\)\)/.test(src), 'Phase 1: boot resolves the raw language pref (system -> navigator)');
   // The Spanish locale ships with full key-parity and real (non-English) translations.
@@ -4359,11 +4391,12 @@ function makeFileTree(paths) {
   // #9: File -> Finder toggles via toggleFinderPane (hide when in layout, else open).
   assert.ok(source.includes('menuCommand(fileExplorerLabel(), () => toggleFinderPane()'), '#9: File -> Finder uses the toggle');
   assert.ok(/function toggleFinderPane\(\)\s*\{[^}]*itemInLayout\(fileExplorerItemId\)[^}]*removeSessionFromLayout\(fileExplorerItemId\)/.test(source), '#9: toggle hides the Finder when it is already in the layout');
-  // #11: View -> Theme writes terminal_theme alongside appearance.theme, mapped.
-  assert.equal(api.terminalThemeSettingForGlobalMode('system'), 'follow-app', '#11: system maps to follow-app');
-  assert.equal(api.terminalThemeSettingForGlobalMode('dark'), 'dark', '#11: dark maps to dark');
-  assert.equal(api.terminalThemeSettingForGlobalMode('light'), 'light', '#11: light maps to light');
-  assert.ok(source.includes('patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next)'), '#11: the View theme toggle moves the terminal palette in lockstep');
+  // terminalThemeSettingForGlobalMode still maps modes correctly (pure helper), but #261 stopped the
+  // View -> Theme toggle from PINNING the terminal palette — the terminal follows the app on its own.
+  assert.equal(api.terminalThemeSettingForGlobalMode('system'), 'follow-app', 'system maps to follow-app');
+  assert.equal(api.terminalThemeSettingForGlobalMode('dark'), 'dark', 'dark maps to dark');
+  assert.equal(api.terminalThemeSettingForGlobalMode('light'), 'light', 'light maps to light');
+  assert.equal(source.includes('patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next)'), false, '#261: the View theme toggle no longer pins the terminal palette (terminal follows the app)');
   // #10: a global-theme change re-themes live editors via the compartment swap.
   assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme change re-themes open editors');
   // #12: Preferences field renamed. (DOIT.8 Phase 0: the label is now i18n-keyed; en.json holds the text.)

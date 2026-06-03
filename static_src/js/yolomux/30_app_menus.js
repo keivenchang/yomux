@@ -169,9 +169,12 @@ function terminalThemeSettingForGlobalMode(mode) {
 // palette in lockstep. Any target (system/dark/light) applies in one click and in both directions.
 function setGlobalThemeMode(mode) {
   const next = normalizeGlobalThemeMode(mode);
-  const patch = settingPatch('appearance.theme', next);
-  patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
-  return saveSettingsPatch(patch)
+  // #258: APPLY the theme live (the menu used to only save the patch, so body.theme-* never flipped).
+  // #261: do NOT pin appearance.terminal_theme — the terminal keeps its own setting (default
+  // follow-app/System) and follows the app automatically via applyGlobalThemeMode's terminal update.
+  globalThemeMode = next;
+  applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  return saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
@@ -183,11 +186,11 @@ function setGlobalThemeMode(mode) {
 
 function cycleGlobalThemeSetting() {
   const next = nextGlobalThemeMode();
-  // The app chrome AND the terminal palette move together (the two Preferences fields stay
-  // independently settable; only this menu toggle moves them in lockstep).
-  const patch = settingPatch('appearance.theme', next);
-  patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
-  saveSettingsPatch(patch)
+  // #258/#261: apply live and leave the terminal theme alone (it follows the app when set to
+  // follow-app/System; only the Terminal Preferences field pins it to a concrete palette).
+  globalThemeMode = next;
+  applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
@@ -604,8 +607,10 @@ function renderSessionButtons(options = {}) {
   sessionButtons.classList.remove('drag-over');
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarSearch());
-  sessionButtons.appendChild(createTopbarActivityStatus());
+  // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
+  // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarLanguageSwitcher());
+  sessionButtons.appendChild(createTopbarActivityStatus());
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
 }

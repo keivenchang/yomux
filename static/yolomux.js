@@ -4215,9 +4215,12 @@ function terminalThemeSettingForGlobalMode(mode) {
 // palette in lockstep. Any target (system/dark/light) applies in one click and in both directions.
 function setGlobalThemeMode(mode) {
   const next = normalizeGlobalThemeMode(mode);
-  const patch = settingPatch('appearance.theme', next);
-  patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
-  return saveSettingsPatch(patch)
+  // #258: APPLY the theme live (the menu used to only save the patch, so body.theme-* never flipped).
+  // #261: do NOT pin appearance.terminal_theme — the terminal keeps its own setting (default
+  // follow-app/System) and follows the app automatically via applyGlobalThemeMode's terminal update.
+  globalThemeMode = next;
+  applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  return saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
@@ -4229,11 +4232,11 @@ function setGlobalThemeMode(mode) {
 
 function cycleGlobalThemeSetting() {
   const next = nextGlobalThemeMode();
-  // The app chrome AND the terminal palette move together (the two Preferences fields stay
-  // independently settable; only this menu toggle moves them in lockstep).
-  const patch = settingPatch('appearance.theme', next);
-  patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next);
-  saveSettingsPatch(patch)
+  // #258/#261: apply live and leave the terminal theme alone (it follows the app when set to
+  // follow-app/System; only the Terminal Preferences field pins it to a concrete palette).
+  globalThemeMode = next;
+  applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  saveSettingsPatch(settingPatch('appearance.theme', next))
     .then(() => {
       statusEl.textContent = `theme: ${globalThemeLabel(next)}`;
     })
@@ -4650,8 +4653,10 @@ function renderSessionButtons(options = {}) {
   sessionButtons.classList.remove('drag-over');
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarSearch());
-  sessionButtons.appendChild(createTopbarActivityStatus());
+  // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
+  // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarLanguageSwitcher());
+  sessionButtons.appendChild(createTopbarActivityStatus());
   updateTopbarActivityStatus();
   scheduleTopbarMetricsUpdate();
 }
@@ -10035,6 +10040,17 @@ async function openDraggedFilesInEditor(payload, options = {}) {
           renderFileEditorPanel(draggedPanel, draggedPanel.dataset.layoutItem || fileEditorItemFor(path));
         }
       }
+      // #260: a drag-drop open is a FRESH open at the current disk state, not a "changed on disk"
+      // conflict. If the just-opened file is NOT dirty, clear any external-change flags so it never
+      // pops a spurious reload prompt (this matches double-click's openChangedFileInDiff, which opens
+      // with a clean baseline). A dirty file keeps its conflict state so real unsaved-edit warnings stay.
+      if (draggedState && !draggedState.dirty) {
+        delete draggedState.externalChanged;
+        delete draggedState.externalMissing;
+        delete draggedState.externalError;
+        delete draggedState.externalChangeEditPrompted;
+        renderOpenFilePath(path);
+      }
       opened += 1;
     } catch (error) {
       showFileOpenError(path, error);
@@ -13182,10 +13198,12 @@ function updatePanelControlLabels(session, info) {
 }
 
 function installPanelInactiveOverlays(panel, session) {
-  if (isVirtualItem(session)) {
-    panel.querySelectorAll('.panel-inactive-overlay').forEach(node => node.remove());
-    return;
-  }
+  // #255: virtual panes (Finder/Modified-files, Preferences, Info, Changes) used to be skipped here, so
+  // they never dimmed when inactive while every terminal pane did. Install the overlay for them too so
+  // dimming is consistent. `updatePanelInactiveOverlays` already adds `.focused-pane` to the focused
+  // pane (virtual ones included), and `.panel.focused-pane .panel-inactive-overlay { display:none }`
+  // un-dims it — so hovering/focusing the pane (auto-focus ON by default) clears the dim and lets
+  // clicks through; only with auto-focus OFF does the overlay swallow the first click to focus.
   for (const root of panel.querySelectorAll('.panel-overlay-root')) {
     if (root.querySelector(':scope > .panel-inactive-overlay')) continue;
     const overlay = document.createElement('div');
@@ -13621,7 +13639,7 @@ function preferenceSections() {
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
     ]},
     {title: t('pref.section.appearance'), items: [
-      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'theme-cards', choices: [
+      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: [
         {value: 'system', label: t('pref.appearance.theme.system')},
         {value: 'dark', label: t('pref.appearance.theme.dark')},
         {value: 'light', label: t('pref.appearance.theme.light')},
@@ -13904,21 +13922,19 @@ function preferenceControlHtml(item, query = '') {
     control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
   } else if (item.type === 'select') {
     control = `<select ${baseAttrs}>${preferenceSelectOptionsHtml(item, value)}</select>`;
-  } else if (item.type === 'theme-cards') {
-    // DOIT.6 #123: macOS-style theme picker — clickable cards, each a mini YOLOmux-window preview drawn
-    // from the theme's OWN palette (titlebar + traffic-light dots + a pane + the green accent). The
-    // active card is ringed; clicking saves appearance.theme via the discrete settings patch.
-    const cards = (item.choices || []).map(choice => {
+  } else if (item.type === 'radio') {
+    // #260: plain radio-button group (replaced the macOS-style theme-cards). One input + label per
+    // choice; each input carries data-setting-path so the shared change handler -> savePreferenceControl
+    // persists it (and live-applies appearance.theme). The current value is checked.
+    const radios = (item.choices || []).map(choice => {
       const selected = String(value) === String(choice.value);
-      return `<button type="button" class="theme-card${selected ? ' selected' : ''} theme-card-${esc(choice.value)}" role="radio" aria-checked="${selected ? 'true' : 'false'}" data-theme-card="${esc(choice.value)}" aria-label="${esc(choice.label)}"${readOnlyMode ? ' disabled' : ''}>
-        <span class="theme-card-preview" aria-hidden="true">
-          <span class="theme-card-titlebar"><span class="theme-card-dot r"></span><span class="theme-card-dot y"></span><span class="theme-card-dot g"></span></span>
-          <span class="theme-card-window"><span class="theme-card-pane"></span><span class="theme-card-accent"></span></span>
-        </span>
-        <span class="theme-card-caption">${esc(choice.label)}</span>
-      </button>`;
+      const radioId = `${controlId}-${String(choice.value).replace(/[^A-Za-z0-9_-]+/g, '-')}`;
+      return `<label class="preferences-radio" for="${esc(radioId)}">
+        <input type="radio" id="${esc(radioId)}" name="${esc(controlId)}" value="${esc(choice.value)}" data-setting-path="${esc(item.path)}" data-setting-type="radio"${selected ? ' checked' : ''}${disabled}>
+        <span>${esc(choice.label)}</span>
+      </label>`;
     }).join('');
-    control = `<div class="theme-cards" role="radiogroup" data-setting-path="${esc(item.path)}" aria-label="${esc(item.label)}">${cards}</div>`;
+    control = `<div class="preferences-radio-group" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
     control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
@@ -14139,16 +14155,6 @@ function bindPreferencesPanel(panel) {
       event.preventDefault();
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true, focusSearch: true});
-      return;
-    }
-    // DOIT.6 #123: a theme-preview card saves appearance.theme (same discrete patch as the old select).
-    const themeCard = event.target.closest('[data-theme-card]');
-    if (themeCard && panel.contains(themeCard) && !themeCard.disabled) {
-      event.preventDefault();
-      markPreferencesInteracted();
-      saveSettingsPatch(settingPatch('appearance.theme', themeCard.dataset.themeCard))
-        .then(() => { statusEl.textContent = 'saved appearance.theme'; renderPreferencesPanels(); })
-        .catch(error => { statusEl.innerHTML = `<span class="err">settings save failed: ${esc(error)}</span>`; refreshSettings({force: true}); });
       return;
     }
     const resetAll = event.target.closest('[data-preferences-reset-all]');
@@ -15167,6 +15173,12 @@ function savePreferenceControl(control) {
   // #50: switch the UI language OPTIMISTICALLY on the select change — don't wait for the settings-poll
   // round-trip (same lesson as the theme toggle). applyLocale is async + re-renders every surface.
   if (path === 'general.language') applyLocale(resolveLocalePref(value));
+  // #260: apply the global theme live the moment the radio changes (the old theme-cards relied on a
+  // re-render; the radio routes through here, so flip body.theme-* + the editor/terminal palettes now).
+  if (path === 'appearance.theme') {
+    globalThemeMode = normalizeGlobalThemeMode(value);
+    applyGlobalThemeMode({updateEditor: true, updateTerminals: true});
+  }
   saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
