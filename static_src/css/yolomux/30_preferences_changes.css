@@ -355,7 +355,10 @@
   background: #76b900;
 }
 .changes-status-m {
-  background: var(--accent-gold);
+  /* Clarity (image 046): use the BRIGHT amber as a fixed badge fill (like the other vibrant status
+     badges) so the near-black "M" pops. The theme-aware --accent-gold flips to a dark brown (#b7791f)
+     in light mode → near-black-on-dark = muddy/illegible. */
+  background: #f5c542;
 }
 .changes-status-d {
   background: #ff5d5d;

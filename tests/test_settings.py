@@ -202,3 +202,38 @@ def test_deterministic_yoagent_reply_localizes_framing():
 
     ja_reply = deterministic_yoagent_reply("status?", {}, {}, "ja")
     assert "応答する AI バックエンドがありません" in ja_reply
+
+
+def test_watched_prs_and_watched_pr_refresh_defaults():
+    # DOIT.29: the watched-PR settings ship with safe empty/longer-interval defaults.
+    d = default_settings()
+    assert d["github"]["watched_prs"] == []
+    assert d["performance"]["watched_pr_refresh_ms"] == 60000
+
+
+def test_notify_transitions_accepts_pr_keys_and_drops_unknown():
+    # DOIT.29: the notify_transitions allowlist now accepts the watched-PR transition keys alongside
+    # session-state keys; unknown keys are still dropped.
+    settings = sanitize_settings(
+        {"notifications": {"notify_transitions": ["needs-input", "pr-merged", "pr-ci-failing", "pr-review", "bogus"]}}
+    )
+    assert settings["notifications"]["notify_transitions"] == ["needs-input", "pr-merged", "pr-ci-failing", "pr-review"]
+
+
+def test_watched_pr_refresh_ms_is_clamped_to_range():
+    # DOIT.29: below the 15000ms floor / above the 600000ms ceiling clamp to the bounds.
+    low = sanitize_settings({"performance": {"watched_pr_refresh_ms": 100}})
+    high = sanitize_settings({"performance": {"watched_pr_refresh_ms": 10_000_000}})
+    assert low["performance"]["watched_pr_refresh_ms"] == 15000
+    assert high["performance"]["watched_pr_refresh_ms"] == 600000
+
+
+def test_watched_prs_setting_round_trips_in_template(tmp_path):
+    # DOIT.29: a watchlist persists through the YAML template round-trip.
+    path = tmp_path / "settings.yaml"
+    save_settings(default_settings(), path)
+    updated = save_settings({"github": {"watched_prs": ["ai-dynamo/frontend-crates#18", "owner/repo#7"]}}, path)
+    assert updated["settings"]["github"]["watched_prs"] == ["ai-dynamo/frontend-crates#18", "owner/repo#7"]
+    loaded, error = read_settings_file(path)
+    assert error == ""
+    assert loaded["github"]["watched_prs"] == ["ai-dynamo/frontend-crates#18", "owner/repo#7"]

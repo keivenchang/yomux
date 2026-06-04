@@ -65,11 +65,19 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "tab_popover_follow_delay_ms": 120,
         "remote_resize_delay_ms": 220,
         "auto_approve_interval_seconds": 0.5,
+        # DOIT.29: watched PRs poll on their OWN, longer interval so a big watchlist doesn't burn the
+        # GitHub rate limit at the (15s) session-metadata cadence.
+        "watched_pr_refresh_ms": 60000,
     },
     "notifications": {
         "toast_duration_ms": 10000,
         "notify_transitions": ["needs-input", "needs-approval", "blocked"],
         "throttle_seconds": 60,
+    },
+    # DOIT.29: PRs to watch independently of any open session's branch. Each entry is "owner/repo#N" or
+    # a full https://github.com/owner/repo/pull/N URL (normalized when polled).
+    "github": {
+        "watched_prs": [],
     },
     "terminal_editor": {
         "scrollback": 5000,
@@ -120,6 +128,16 @@ SESSION_STATE_KEYS = {
     "done",
 }
 
+# DOIT.29: notifiable watched-PR transitions, opt-in alongside the session-state keys above.
+PR_TRANSITION_KEYS = {
+    "pr-merged",
+    "pr-ci-failing",
+    "pr-review",
+}
+
+# The full allowlist accepted in notifications.notify_transitions (session states + PR transitions).
+NOTIFY_TRANSITION_KEYS = SESSION_STATE_KEYS | PR_TRANSITION_KEYS
+
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("appearance", "ui_font_size"): (8, 20),
     ("appearance", "terminal_font_size"): (8, 28),
@@ -143,6 +161,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("performance", "tab_popover_follow_delay_ms"): (0, 1000),
     ("performance", "remote_resize_delay_ms"): (50, 2000),
     ("performance", "auto_approve_interval_seconds"): (0.1, 10),
+    ("performance", "watched_pr_refresh_ms"): (15000, 600000),
     ("notifications", "toast_duration_ms"): (1000, 60000),
     ("notifications", "throttle_seconds"): (0, 600),
     ("terminal_editor", "scrollback"): (1000, 50000),
@@ -205,6 +224,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "reload_on_update"): "true/false. Default false. When true, an open client shows a 'New version available' banner once the server ships a newer YOLOMUX_VERSION.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).",
     ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",
+    ("github", "watched_prs"): "Pull requests to watch independently of any open session, one per line. Each is 'owner/repo#N' or a full https://github.com/owner/repo/pull/N URL. They show in YO!info and can notify on merge / CI / review changes (see notifications.notify_transitions).",
     ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and editor defaults.",
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
     ("appearance", "ui_font_size"): "Pixels, 8-20. Drives tab and compact UI text.",
@@ -234,8 +254,9 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("performance", "tab_popover_follow_delay_ms"): "Milliseconds, 0-1000. Delay when moving between tab details after one is already open.",
     ("performance", "remote_resize_delay_ms"): "Milliseconds, 50-2000. Debounce for tmux remote resize.",
     ("performance", "auto_approve_interval_seconds"): "Seconds, 0.1-10. Poll loop interval for newly enabled YOLO workers.",
+    ("performance", "watched_pr_refresh_ms"): "Milliseconds, 15000-600000. How often watched PRs (github.watched_prs) are polled — a longer interval than session metadata so a big watchlist does not exhaust the GitHub rate limit.",
     ("notifications", "toast_duration_ms"): "Milliseconds, 1000-60000. How long in-page notification popups stay visible.",
-    ("notifications", "notify_transitions"): "State keys that may show notifications. Unknown keys are ignored.",
+    ("notifications", "notify_transitions"): "Event keys that may show notifications. Session states (needs-input, needs-approval, blocked, …) plus watched-PR transitions (pr-merged, pr-ci-failing, pr-review). Unknown keys are ignored.",
     ("notifications", "throttle_seconds"): "Seconds, 0-600. Minimum time before repeating a notification signature.",
     ("terminal_editor", "scrollback"): "Lines, 1000-50000. xterm.js scrollback.",
     ("terminal_editor", "word_wrap"): "true/false. Default editor soft-wrap state.",
@@ -320,7 +341,7 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
             elif isinstance(default, list):
                 items = coerce_string_list(value, default)
                 if (section, key) == ("notifications", "notify_transitions"):
-                    items = [item for item in items if item in SESSION_STATE_KEYS]
+                    items = [item for item in items if item in NOTIFY_TRANSITION_KEYS]
                 sanitized[section][key] = items
             elif (section, key) in SETTING_CHOICES:
                 sanitized[section][key] = value if isinstance(value, str) and value in SETTING_CHOICES[(section, key)] else default

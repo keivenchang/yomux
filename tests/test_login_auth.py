@@ -152,6 +152,12 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         status, headers, body = request(port, "GET", f"/api/fs/list?{urlencode({'path': str(tmp_path)})}", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.FORBIDDEN
         assert json.loads(body)["error"] == "admin access required"
+
+        # DOIT.34 #1: blame reads repository file history, so a readonly identity is forbidden — same as
+        # the rest of the file/repo API (it must NOT bypass the readonly guard at /api/blame).
+        status, headers, body = request(port, "GET", f"/api/blame?{urlencode({'path': str(tmp_path)})}", headers=auth_header("guest", "guest"))
+        assert status == HTTPStatus.FORBIDDEN
+        assert json.loads(body)["error"] == "admin access required"
     finally:
         stop_server(server, thread)
 

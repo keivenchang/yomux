@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -265,6 +267,12 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
         "mtime_ns": int(st.st_mtime_ns),
         "is_symlink": stat.S_ISLNK(mode),
     }
+    if stat.S_ISLNK(mode):
+        # DOIT.31: surface where the link points so the Finder row can show "name → target".
+        try:
+            info["symlink_target"] = os.readlink(path)
+        except OSError:
+            pass
     if kind == "dir":
         info["is_repo"] = _directory_is_repo(path)
         if info["is_repo"]:
@@ -818,6 +826,92 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
         "to_ref": diff_to,
         "untracked": untracked,
     }
+
+
+# DOIT.26: inline git blame for the editor. PR number is extracted from the commit summary the same
+# way the metadata code does (`(#1234)`). Cached per (path, HEAD sha, file mtime, ref) — blame is the
+# expensive call, and it only changes when the file or HEAD moves.
+_BLAME_PR_RE = re.compile(r"\(#(\d+)\)")
+_BLAME_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_blame_cache: dict[tuple[str, str, int, str], dict[str, Any]] = {}
+
+
+def _parse_blame_porcelain(text: str) -> dict[str, dict[str, Any]]:
+    """Parse `git blame --line-porcelain` → {final_line(str): {sha, author, time, summary, pr}}.
+    Commit headers (author/summary/author-time) appear once per commit (first line), so they are
+    accumulated per-sha and reused for that commit's subsequent lines."""
+    lines: dict[str, dict[str, Any]] = {}
+    meta: dict[str, dict[str, Any]] = {}
+    cur_sha = ""
+    final_line: int | None = None
+    for raw in text.split("\n"):
+        if not raw:
+            continue
+        if raw[0] == "\t":  # the content line closes the current line's blame block
+            if final_line is not None:
+                info = meta.get(cur_sha, {})
+                uncommitted = cur_sha == "0" * 40
+                summary = info.get("summary", "")
+                pr = _BLAME_PR_RE.search(summary)
+                lines[str(final_line)] = {
+                    "sha": cur_sha,
+                    "author": "You" if uncommitted else info.get("author", ""),
+                    "time": int(time.time()) if uncommitted else info.get("author_time", 0),
+                    "summary": "Uncommitted changes" if uncommitted else summary,
+                    "pr": int(pr.group(1)) if pr else None,
+                }
+            continue
+        parts = raw.split(" ", 3)
+        if parts and _BLAME_SHA_RE.fullmatch(parts[0]) and len(parts) >= 3:
+            cur_sha = parts[0]
+            final_line = int(parts[2])
+            meta.setdefault(cur_sha, {})
+        elif raw.startswith("author "):
+            meta.setdefault(cur_sha, {})["author"] = raw[len("author "):]
+        elif raw.startswith("author-time "):
+            with contextlib.suppress(ValueError):
+                meta.setdefault(cur_sha, {})["author_time"] = int(raw[len("author-time "):])
+        elif raw.startswith("summary "):
+            meta.setdefault(cur_sha, {})["summary"] = raw[len("summary "):]
+    return lines
+
+
+def blame_file(raw_path: str, ref: str | None = None) -> dict[str, Any]:
+    path = _validated_path(raw_path)
+    repo_root = git_root_for_path(path)
+    if not repo_root:
+        return {"path": str(path), "repo": "", "relative_path": "", "in_repo": False, "lines": {}}
+    repo = Path(repo_root)
+    try:
+        rel_path = path.relative_to(repo).as_posix()
+    except ValueError:
+        raise FilesystemError(f"path is outside repo: {path}", status=400)
+    head = git(["rev-parse", "HEAD"], cwd=str(repo), timeout=1.0)
+    head_sha = (head.stdout or "").strip() if head.returncode == 0 else ""
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    use_ref = ref if (ref and ref not in {"current", "working", "HEAD", ""}) else ""
+    cache_key = (str(path), head_sha, mtime_ns, use_ref)
+    cached = _blame_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    args = ["blame", "--line-porcelain"]
+    if use_ref:
+        args.append(use_ref)
+    args += ["--", rel_path]
+    result = git(args, cwd=str(repo), timeout=3.0)
+    if result.returncode != 0:
+        # File not committed yet (or blame failed) → no annotation; surface a hint, don't error the page.
+        return {"path": str(path), "repo": str(repo), "relative_path": rel_path, "in_repo": True,
+                "lines": {}, "error": (result.stderr or "not committed yet").strip()}
+    payload = {"path": str(path), "repo": str(repo), "relative_path": rel_path, "head": head_sha,
+               "in_repo": True, "lines": _parse_blame_porcelain(result.stdout or "")}
+    if len(_blame_cache) > 64:
+        _blame_cache.clear()
+    _blame_cache[cache_key] = payload
+    return payload
 
 
 def git_root_for_path(path: Path) -> str:

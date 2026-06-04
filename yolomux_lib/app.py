@@ -62,6 +62,7 @@ from .metadata import pull_request_number_from_subject
 from .metadata import session_git_inventory
 from .metadata import session_project_metadata
 from .metadata import session_to_json
+from .metadata import watched_pr_metadata
 from .sessions import discover_sessions
 from .settings import save_settings
 from .settings import settings_payload
@@ -196,6 +197,8 @@ class TmuxWebtermApp:
         self.auto_workers: dict[str, AutoApproveWorker] = {}
         self.auto_workers_lock = threading.RLock()
         self.metadata_cache = MetadataCache()
+        # DOIT.34 #4: last-logged watched-PR truncation state, so the cap is logged only when it changes.
+        self._watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = None
         self.metadata_warm_lock = threading.Lock()
         self.metadata_warm_running = False
         self.metadata_badge_lock = threading.Lock()
@@ -252,6 +255,34 @@ class TmuxWebtermApp:
 
     def settings_payload(self) -> dict[str, Any]:
         return settings_payload()
+
+    def watched_prs_payload(self, allow_network: bool = True) -> dict[str, Any]:
+        # DOIT.29: resolve the github.watched_prs watchlist to live PR metadata, independent of any open
+        # session's branch. Shares the session-metadata cache (same per-PR TTL) but is polled on its own
+        # (longer) interval client-side so a big watchlist does not exhaust the GitHub rate limit.
+        settings = settings_payload().get("settings", {})
+        refs = settings.get("github", {}).get("watched_prs", [])
+        refresh_ms = settings.get("performance", {}).get("watched_pr_refresh_ms", 60000)
+        result = watched_pr_metadata(refs, self.metadata_cache, allow_network=allow_network)
+        # DOIT.34 #4: log the truncation only when the capped state CHANGES (count or watchlist), not on
+        # every poll — otherwise the event log fills with one identical entry per refresh.
+        truncated = result["truncated"]
+        signature = (truncated, tuple(str(ref) for ref in refs)) if truncated else None
+        if signature != self._watched_pr_truncated_signature:
+            self._watched_pr_truncated_signature = signature
+            if truncated:
+                self.log_event(
+                    None,
+                    "watched_pr_truncated",
+                    f"watched PR list capped: {truncated} entries beyond the limit are not polled",
+                    {"truncated": truncated},
+                )
+        return {
+            "watched_prs": result["watched_prs"],
+            "truncated": result["truncated"],
+            "invalid": result["invalid"],
+            "refresh_ms": refresh_ms,
+        }
 
     def activity_summary_payload(self, force: bool = False) -> dict[str, Any]:
         sessions, errors = discover_sessions(self.sessions)

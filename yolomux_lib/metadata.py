@@ -240,6 +240,87 @@ def parse_github_remote(remote_url: str) -> dict[str, str] | None:
         "url": f"https://github.com/{quote(owner)}/{quote(name)}",
     }
 
+# DOIT.29: a watched-PR entry is either "owner/repo#N" (or "owner/repo/N") or a full GitHub PR URL.
+# An owner/repo segment is a conservative `[A-Za-z0-9._-]+` (GitHub's own allowed set).
+_PR_REF_SHORT = re.compile(r"^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)(?:#|/(?:pull/)?)(\d+)$")
+
+def parse_pull_request_ref(ref: str) -> dict[str, Any] | None:
+    """Normalize a watched-PR ref to {owner, name, number, url, ref}.
+
+    Accepts 'owner/repo#N', 'owner/repo/N', and a full 'https://github.com/owner/repo/pull/N' URL.
+    Returns None for anything that is not a well-formed GitHub PR reference.
+    """
+    if not isinstance(ref, str):
+        return None
+    text = ref.strip()
+    if not text:
+        return None
+    owner = name = None
+    number = None
+    if "github.com" in text.lower() and "://" in text:
+        parsed = urlparse(text)
+        if (parsed.hostname or "").lower() != "github.com":
+            return None
+        parts = [part for part in parsed.path.split("/") if part]
+        # /owner/repo/pull/N (also tolerate /pulls/N)
+        if len(parts) >= 4 and parts[2] in {"pull", "pulls"} and parts[3].isdigit():
+            owner, name, number = parts[0], parts[1], int(parts[3])
+    else:
+        match = _PR_REF_SHORT.match(text)
+        if match:
+            owner, name, number = match.group(1), match.group(2), int(match.group(3))
+    if not owner or not name or not isinstance(number, int) or number <= 0:
+        return None
+    return {
+        "owner": owner,
+        "name": name,
+        "number": number,
+        "url": f"https://github.com/{quote(owner)}/{quote(name)}/pull/{number}",
+        # Canonical short form used as the per-PR identity (dedupe, notification key, display).
+        "ref": f"{owner}/{name}#{number}",
+    }
+
+# Cap the watchlist so a long list cannot fan out into an unbounded number of GitHub API calls per poll.
+WATCHED_PR_LIMIT = 20
+
+def watched_pr_metadata(
+    refs: list[str],
+    cache: MetadataCache,
+    allow_network: bool = True,
+) -> dict[str, Any]:
+    """Resolve watched-PR refs to live PR metadata (independent of any local git checkout).
+
+    Returns {"watched_prs": [...], "truncated": <int dropped>, "invalid": [...]}. Each watched_prs
+    item is the github_pull_request_by_number dict plus the canonical {ref, url}. Deduped by ref,
+    capped at WATCHED_PR_LIMIT.
+    """
+    seen: set[str] = set()
+    parsed_refs: list[dict[str, Any]] = []
+    invalid: list[str] = []
+    for raw in refs if isinstance(refs, list) else []:
+        parsed = parse_pull_request_ref(raw)
+        if parsed is None:
+            invalid.append(str(raw))
+            continue
+        if parsed["ref"] in seen:
+            continue
+        seen.add(parsed["ref"])
+        parsed_refs.append(parsed)
+    truncated = max(0, len(parsed_refs) - WATCHED_PR_LIMIT)
+    results: list[dict[str, Any]] = []
+    for parsed in parsed_refs[:WATCHED_PR_LIMIT]:
+        repo = {
+            "owner": parsed["owner"],
+            "name": parsed["name"],
+            "url": f"https://github.com/{quote(parsed['owner'])}/{quote(parsed['name'])}",
+        }
+        pr = github_pull_request_by_number(repo, parsed["number"], cache, allow_network=allow_network)
+        if pr is None:
+            pr = fallback_pull_request(repo, parsed["number"], "watched")
+        pr = {**pr, "ref": parsed["ref"], "url": parsed["url"]}
+        results.append(pr)
+    return {"watched_prs": results, "truncated": truncated, "invalid": invalid}
+
 class MetadataCache:
     # DOIT.6 #83: bound the cache so dead branch/sha keys (e.g. github-checks:<old_sha> after a push)
     # don't live for the whole process lifetime. Expired entries are swept on write, and a hard cap
@@ -332,15 +413,18 @@ def session_git_inventory(info: SessionInfo) -> dict[str, Any] | None:
     return None
 
 def candidate_session_cwds(info: SessionInfo) -> list[str]:
+    # DOIT.32: the LIVE pane cwd wins. The session-number default workdir (session "1" -> dynamo1) is
+    # only a fallback for a fresh shell sitting in home / a non-repo — it must NOT out-rank a pane that
+    # has `cd`'d into a different repo (which previously kept the project pinned to dynamo1 forever).
     paths: list[str] = []
-    default_workdir = session_workdir(info.session)
+    if info.selected_pane:
+        paths.append(info.selected_pane.current_path)        # focused pane's live cwd (follows `cd`)
+    paths.extend(agent.cwd for agent in info.agents if agent.cwd)   # agent launch dirs
+    paths.extend(pane.current_path for pane in info.panes if pane.current_path)  # other panes
+    default_workdir = session_workdir(info.session)          # fallback: session-number default workspace
     if default_workdir.is_dir():
         paths.append(str(default_workdir))
-    if info.selected_pane:
-        paths.append(info.selected_pane.current_path)
-    paths.extend(agent.cwd for agent in info.agents if agent.cwd)
-    paths.extend(pane.current_path for pane in info.panes if pane.current_path)
-    numbered_workdir = numbered_session_workdir(info.session)
+    numbered_workdir = numbered_session_workdir(info.session)   # fallback: numbered workdir
     if numbered_workdir and numbered_workdir.is_dir():
         paths.append(str(numbered_workdir))
     return unique_existing_paths(paths)

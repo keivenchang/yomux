@@ -354,10 +354,20 @@ function tabCommandsForItems(items, options) {
   return items.map(item => menuTabCommand(item, options));
 }
 
+// DOIT.33: a PR number in any of the forms a user types (#N, PR#N, PR N, N).
+function prNumberSearchForms(number) {
+  if (!number) return [];
+  return [`#${number}`, `PR#${number}`, `PR ${number}`, String(number)];
+}
+
 function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
   const pr = displayPullRequest(info);
+  // DOIT.33: also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
+  // so a session is findable by ANY PR (e.g. #10289 on a non-current branch), branch name, or Linear ID
+  // — not just its current-branch PR. Already in the metadata payload, so no extra fetch.
+  const otherBranches = info.project?.git?.other_branches?.branches || [];
   return [
     item,
     itemLabel(item),
@@ -373,11 +383,14 @@ function tabSearchFields(item) {
     pr?.title,
     pr?.url,
     pr?.number ? 'PR' : '',
-    pr?.number ? `PR ${pr.number}` : '',
-    pr?.number ? `PR#${pr.number}` : '',
-    pr?.number ? `#${pr.number}` : '',
-    pr?.number ? String(pr.number) : '',
+    ...prNumberSearchForms(pr?.number),
     ...(Array.isArray(info.linear) ? info.linear : []),
+    ...otherBranches.flatMap(branch => [
+      branch.name,
+      branch.pull_request?.title,
+      ...prNumberSearchForms(branch.pull_request?.number),
+      ...(Array.isArray(branch.linear_ids) ? branch.linear_ids : []),
+    ]),
   ].filter(Boolean);
 }
 
@@ -598,7 +611,9 @@ function renderSessionButtons(options = {}) {
   };
   sessionButtons.classList.remove('drag-over');
   sessionButtons.appendChild(createAppMenuBar());
+  sessionButtons.appendChild(createTopbarNav());
   sessionButtons.appendChild(createTopbarSearch());
+  updateEditorNavButtons();   // sync ←/→ disabled state to the global editorNav stack after (re)assembly
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarLanguageSwitcher());
@@ -622,6 +637,36 @@ function createAppMenuBar() {
   bar.setAttribute('role', 'menubar');
   for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
   return bar;
+}
+
+// DOIT.21: the editor back/forward history control lives in the GLOBAL topbar (left of the search
+// box), not per editor pane — it's one file-history control for the whole window, like a browser's.
+// Buttons are always visible; updateEditorNavButtons() toggles their disabled state from editorNav.
+function createTopbarNav() {
+  const group = document.createElement('div');
+  group.className = 'topbar-nav';
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', t('editor.nav.aria'));
+  const back = document.createElement('button');
+  back.type = 'button';
+  back.id = 'topbarNavBack';
+  back.className = 'topbar-nav-button';
+  back.title = t('editor.nav.back');
+  back.setAttribute('aria-label', t('editor.nav.back'));
+  back.disabled = true;
+  back.textContent = '←';
+  back.addEventListener('click', event => { event.preventDefault(); editorNavBack(); });
+  const forward = document.createElement('button');
+  forward.type = 'button';
+  forward.id = 'topbarNavForward';
+  forward.className = 'topbar-nav-button';
+  forward.title = t('editor.nav.forward');
+  forward.setAttribute('aria-label', t('editor.nav.forward'));
+  forward.disabled = true;
+  forward.textContent = '→';
+  forward.addEventListener('click', event => { event.preventDefault(); editorNavForward(); });
+  group.append(back, forward);
+  return group;
 }
 
 // Universal search affordance in the topbar's empty middle gap: a launcher that

@@ -530,8 +530,44 @@ body {
   min-height: var(--compact-control-height);
   overflow: visible;
 }
+/* DOIT.21: editor back/forward history, immediately before the search box. An auto inline-start margin
+   on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
+.topbar-nav {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.topbar-nav-button {
+  flex: 0 0 auto;
+  width: var(--compact-control-height);
+  height: var(--compact-control-height);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--input-bg, #11151c);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--ui-font-size-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+body.theme-light .topbar-nav-button {
+  background: rgba(15, 23, 42, 0.05);
+}
+.topbar-nav-button:hover:not(:disabled) {
+  border-color: var(--accent, #6ea8fe);
+}
+.topbar-nav-button:disabled {
+  opacity: 0.34;
+  cursor: default;
+}
 .topbar-search {
-  margin: 0 auto;
+  margin-block: 0;
+  margin-inline: 6px auto;
   flex: 0 1 auto;
   display: inline-flex;
   align-items: center;
@@ -2180,7 +2216,10 @@ body.theme-light .branch-link {
   background: #76b900;
 }
 .changes-status-m {
-  background: var(--accent-gold);
+  /* Clarity (image 046): use the BRIGHT amber as a fixed badge fill (like the other vibrant status
+     badges) so the near-black "M" pops. The theme-aware --accent-gold flips to a dark brown (#b7791f)
+     in light mode → near-black-on-dark = muddy/illegible. */
+  background: #f5c542;
 }
 .changes-status-d {
   background: #ff5d5d;
@@ -4901,7 +4940,9 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   display: flex;
   gap: 0;
   padding: 6px 10px 4px;
-  background: #11151d;
+  /* DOIT.28 C1: route through a theme token so it flips light/dark — the hardcoded near-black slab
+     was a black band on the light pane. */
+  background: var(--panel2);
 }
 .info-subtab {
   flex: 0 0 auto;
@@ -4920,13 +4961,14 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border-inline-start: 0;
 }
 .info-subtab.active {
-  color: #f4fff0;
+  color: var(--pane-tab-active-text);
   background: var(--brand-green);
   border-color: var(--brand-green);
 }
 .info-subtab:not(.active):hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.05);
+  /* DOIT.28 C1: a token-based hover tint (the white tint was invisible on a light band). */
+  background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 .info-list {
   min-height: 0;
@@ -5331,8 +5373,13 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
   color: var(--accent-gold);
   font-size: var(--ui-font-size-2xs);
 }
+/* DOIT.28 C2: the current-branch row reuses the shared selection tokens (they flip light/dark) plus a
+   left accent bar, mirroring the Finder's selected-file treatment — the old dim navy barely stood out
+   on the dark table. The separate body.theme-light override below is now redundant (tokens carry it). */
 .info-row.current {
-  background: #161f2c;
+  color: var(--file-selection-text);
+  background: var(--file-selection-bg);
+  box-shadow: inset 3px 0 0 var(--file-selection-border);
 }
 .info-cell {
   min-width: 0;
@@ -5392,10 +5439,6 @@ body.theme-light .info-row.header {
   color: var(--muted);
   background: var(--panel2);
 }
-body.theme-light .info-row.current {
-  color: var(--text);
-  background: var(--file-selection-bg);
-}
 body.theme-light .info-cell a {
   color: #1d4ed8;
 }
@@ -5426,6 +5469,56 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   padding: 14px;
   color: var(--muted);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+/* DOIT.29: the Watched PRs section of YO!info (PRs tracked independent of any open session). Its own
+   container below the branch table, separated by a rule; rows reuse .info-cell but a tighter 4-col grid. */
+.info-watched {
+  border-block-start: 1px solid var(--line);
+  margin-block-start: 6px;
+  padding-block-start: 6px;
+}
+.info-watched-head {
+  padding: 6px 10px 4px;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-sm)/1.3 var(--mono-font);
+  letter-spacing: 0.02em;
+}
+.info-row.info-watched-row {
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr) 132px 28px;
+  align-items: center;
+}
+.info-watched-ref {
+  font-weight: 700;
+}
+.info-watched-status {
+  text-align: end;
+}
+.info-watched-actions {
+  display: grid;
+  place-items: center;
+}
+.info-watched-remove {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-font-size-md);
+  line-height: 1;
+  cursor: pointer;
+}
+.info-watched-remove:hover {
+  color: var(--bad);
+  border-color: var(--line);
+}
+.info-watched-note {
+  padding: 4px 10px 8px;
+  color: var(--accent-gold);
+  font: var(--ui-font-size-xs)/1.3 var(--mono-font);
 }
 .ok { color: var(--good); }
 .err { color: var(--bad); }
@@ -5899,6 +5992,34 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   font-size: var(--ui-font-size-xs);
   flex: 0 0 20px;
   border-radius: 3px;
+}
+/* DOIT.31: symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
+   and get a small arrow badge overlaid — macOS-Finder / VS Code style. Broken links go red + struck. */
+.file-tree-row.is-symlink > .file-tree-icon {
+  position: relative;
+}
+.file-tree-row.is-symlink > .file-tree-icon::after {
+  content: "↪";
+  position: absolute;
+  right: -2px;
+  bottom: -3px;
+  font-size: var(--ui-font-size-2xs);
+  line-height: 1;
+  color: var(--muted);
+}
+.file-tree-row.symlink-broken > .file-tree-icon::after {
+  color: var(--bad);
+}
+.file-tree-row.symlink-broken:not(.selected) > .file-tree-name {
+  color: var(--bad);
+  text-decoration: line-through;
+}
+/* DOIT.31: the inline "→ target" reads as secondary to the name; broken links tint it red too. */
+.file-tree-symlink-target {
+  color: var(--muted);
+}
+.file-tree-row.symlink-broken:not(.selected) > .file-tree-name .file-tree-symlink-target {
+  color: var(--bad);
 }
 .file-tree-icon.file-icon-code {
   color: #7dd3fc;
@@ -7462,8 +7583,7 @@ body.editor-theme-light .file-editor-content {
 .file-editor-theme-panel,
 .file-editor-reload-panel,
 .file-editor-cross-split-panel,
-.file-editor-nav-back,
-.file-editor-nav-forward,
+.file-editor-blame-panel,
 .file-editor-save-panel {
   height: 20px;
   flex: 0 0 auto;
@@ -7475,17 +7595,6 @@ body.editor-theme-light .file-editor-content {
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   cursor: pointer;
-}
-/* DOIT.21: back/forward history buttons (left of the toolbar). Disabled at the ends of the stack. */
-.file-editor-nav-control {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-}
-.file-editor-nav-back:disabled,
-.file-editor-nav-forward:disabled {
-  opacity: 0.32;
-  cursor: default;
 }
 .file-editor-save-panel {
   min-width: 20px;
@@ -7500,14 +7609,31 @@ body.editor-theme-light .file-editor-content {
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
-.file-editor-nav-back,
-.file-editor-nav-forward,
+.file-editor-blame-panel,
 .file-editor-theme-panel {
   min-width: 20px;
   width: 20px;
   display: grid;
   place-items: center;
   padding: 0;
+}
+/* DOIT.26: blame toggle goes green when ON (like the other pressed toggles), and the inline annotation
+   is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token
+   (theme-aware, the same gray Cursor uses), never selectable/copied as code. */
+.file-editor-blame-panel[aria-pressed="true"] {
+  color: #061207;
+  background: var(--brand-green);
+  border-color: var(--brand-green);
+}
+.cm-line[data-blame]::after {
+  content: " " attr(data-blame);
+  color: var(--code-comment);
+  padding-inline-start: 2ch;
+  font-style: italic;
+  opacity: 0.85;
+  white-space: pre;
+  user-select: none;
+  pointer-events: none;
 }
 /* B4: the diff expand/collapse-all toggle goes green when ON (showing all context), like a pressed control. */
 .file-editor-diff-expand-panel[aria-pressed="true"] {

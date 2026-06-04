@@ -1241,8 +1241,7 @@ body.editor-theme-light .file-editor-content {
 .file-editor-theme-panel,
 .file-editor-reload-panel,
 .file-editor-cross-split-panel,
-.file-editor-nav-back,
-.file-editor-nav-forward,
+.file-editor-blame-panel,
 .file-editor-save-panel {
   height: 20px;
   flex: 0 0 auto;
@@ -1254,17 +1253,6 @@ body.editor-theme-light .file-editor-content {
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   cursor: pointer;
-}
-/* DOIT.21: back/forward history buttons (left of the toolbar). Disabled at the ends of the stack. */
-.file-editor-nav-control {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-}
-.file-editor-nav-back:disabled,
-.file-editor-nav-forward:disabled {
-  opacity: 0.32;
-  cursor: default;
 }
 .file-editor-save-panel {
   min-width: 20px;
@@ -1279,14 +1267,31 @@ body.editor-theme-light .file-editor-content {
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
-.file-editor-nav-back,
-.file-editor-nav-forward,
+.file-editor-blame-panel,
 .file-editor-theme-panel {
   min-width: 20px;
   width: 20px;
   display: grid;
   place-items: center;
   padding: 0;
+}
+/* DOIT.26: blame toggle goes green when ON (like the other pressed toggles), and the inline annotation
+   is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token
+   (theme-aware, the same gray Cursor uses), never selectable/copied as code. */
+.file-editor-blame-panel[aria-pressed="true"] {
+  color: #061207;
+  background: var(--brand-green);
+  border-color: var(--brand-green);
+}
+.cm-line[data-blame]::after {
+  content: " " attr(data-blame);
+  color: var(--code-comment);
+  padding-inline-start: 2ch;
+  font-style: italic;
+  opacity: 0.85;
+  white-space: pre;
+  user-select: none;
+  pointer-events: none;
 }
 /* B4: the diff expand/collapse-all toggle goes green when ON (showing all context), like a pressed control. */
 .file-editor-diff-expand-panel[aria-pressed="true"] {

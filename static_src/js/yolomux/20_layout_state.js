@@ -1770,10 +1770,14 @@ async function refreshFileQuickOpenCandidates(query = '') {
   }
 }
 
-function shouldNotifyState(state) {
+function shouldNotifyTransitionKey(key) {
   const configured = initialSetting('notifications.notify_transitions', ['needs-input', 'needs-approval', 'blocked']);
   const transitions = Array.isArray(configured) ? configured : ['needs-input', 'needs-approval', 'blocked'];
-  return transitions.includes(state.key);
+  return transitions.includes(key);
+}
+
+function shouldNotifyState(state) {
+  return shouldNotifyTransitionKey(state.key);
 }
 
 function sendBrowserNotification(title, options = {}) {
@@ -1781,6 +1785,10 @@ function sendBrowserNotification(title, options = {}) {
   notification.onclick = () => {
     window.focus();
     if (options.session) selectSession(options.session);
+    // DOIT.29: a watched-PR notification opens the PR (no session to focus); safe blank-target open.
+    else if (options.url) {
+      try { window.open(options.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
+    }
   };
   return notification;
 }
@@ -2063,6 +2071,75 @@ function maybeNotifyState(session, state, options = {}) {
     postEvent(session, 'notification_error', `notification failed: ${error}`, {
       state: state.key,
     });
+  }
+}
+
+// DOIT.29: a stable snapshot of the watched-PR status dimensions we diff for notifications.
+function watchedPrStatusSnapshot(pr) {
+  return {
+    merged: pr?.merged === true || pullRequestStatusLabel(pr).toLowerCase() === 'merged',
+    ci: String(pr?.checks?.state || '').toLowerCase(),
+    review: String(pr?.review_decision || '').toUpperCase(),
+  };
+}
+
+// Pure transition detector: which notifiable transitions fired between two status snapshots. Merged
+// (→ merged), CI flipped into failing, review decision changed. No previous snapshot → no transition
+// (first sighting only records a baseline, so a load with already-merged/failing PRs does not storm).
+function watchedPrTransitionKeys(prev, next) {
+  const keys = [];
+  if (!prev || !next) return keys;
+  if (!prev.merged && next.merged) keys.push('pr-merged');
+  if (prev.ci !== 'failing' && next.ci === 'failing') keys.push('pr-ci-failing');
+  if (prev.review !== next.review && next.review) keys.push('pr-review');
+  return keys;
+}
+
+// Diff each watched PR's new status against the last-seen one and notify on a transition.
+function notifyWatchedPrTransitions(prs) {
+  for (const pr of Array.isArray(prs) ? prs : []) {
+    const ref = String(pr?.ref || (pr?.number ? `#${pr.number}` : ''));
+    if (!ref) continue;
+    const next = watchedPrStatusSnapshot(pr);
+    const prev = watchedPrLastStatus.get(ref);
+    watchedPrLastStatus.set(ref, next);
+    for (const key of watchedPrTransitionKeys(prev, next)) {
+      let message;
+      if (key === 'pr-merged') message = t('notify.pr.merged', {ref});
+      else if (key === 'pr-ci-failing') message = t('notify.pr.ciFailing', {ref});
+      else message = t('notify.pr.review', {ref, decision: pullRequestApprovalLabel(next.review) || next.review});
+      maybeNotifyWatchedPr(ref, key, message, pr.url);
+    }
+  }
+}
+
+// Fire a watched-PR transition through the shared notification channel: an in-page toast (clicks open
+// the PR) + a browser Notification, gated by notificationsEnabled + notify_transitions, deduped and
+// throttled by notifications.throttle_seconds via the shared notificationLastSent map.
+function maybeNotifyWatchedPr(ref, key, message, url) {
+  if (!notificationsEnabled) return;
+  if (!shouldNotifyTransitionKey(key)) return;
+  const signature = `watched-pr:${ref}:${key}`;
+  const now = Date.now();
+  const throttleMs = Math.max(0, (Number(initialSetting('notifications.throttle_seconds', 60)) || 0) * 1000);
+  const lastSent = notificationLastSent.get(signature) || 0;
+  if (now - lastSent < throttleMs) return;
+  setLimitedMapEntry(notificationLastSent, signature, now, notificationLastSentLimit);
+  showToast(message, [ref], {
+    onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} },
+  });
+  postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    sendBrowserNotification(`YOLOmux - ${serverHostname}: ${message}`, {
+      body: ref,
+      tag: signature,
+      renotify: true,
+      url,
+    });
+    postEvent(null, 'watched_pr_notification', message, {ref, transition: key});
+  } catch (error) {
+    postEvent(null, 'watched_pr_notification_error', `notification failed: ${error}`, {ref, transition: key});
   }
 }
 

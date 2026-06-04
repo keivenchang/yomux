@@ -519,3 +519,39 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
     # the resume call must NOT pass them — passing them raised "unexpected argument '--sandbox'".
     assert "--sandbox" not in calls[1]
     assert "--cd" not in calls[1]
+
+
+def test_watched_prs_payload_shapes_result_and_logs_truncation_once(monkeypatch):
+    # DOIT.29: watched_prs_payload returns {watched_prs, truncated, invalid, refresh_ms}.
+    # DOIT.34 #4: the cap is logged only when the capped state CHANGES — not on every poll.
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp([])
+    truncated_box = {"n": 3}
+    monkeypatch.setattr(
+        app_module,
+        "watched_pr_metadata",
+        lambda refs, cache, allow_network=True: {
+            "watched_prs": [{"ref": "o/r#1", "url": "u", "number": 1, "status_label": "open"}],
+            "truncated": truncated_box["n"],
+            "invalid": ["bad"],
+        },
+    )
+    events = []
+    monkeypatch.setattr(webapp, "log_event", lambda *a, **k: events.append(a))
+
+    payload = webapp.watched_prs_payload(allow_network=False)
+    assert payload["watched_prs"][0]["ref"] == "o/r#1"
+    assert payload["truncated"] == 3
+    assert payload["invalid"] == ["bad"]
+    assert isinstance(payload["refresh_ms"], (int, float))
+    truncation_events = lambda: [a for a in events if "watched_pr_truncated" in str(a)]
+    assert len(truncation_events()) == 1, "logs the truncation on first cap"
+
+    # A second poll with the SAME capped state does NOT log again.
+    webapp.watched_prs_payload(allow_network=False)
+    assert len(truncation_events()) == 1, "does not re-log an unchanged capped state every poll"
+
+    # A changed truncation count logs a new event.
+    truncated_box["n"] = 5
+    webapp.watched_prs_payload(allow_network=False)
+    assert len(truncation_events()) == 2, "a changed capped state logs again"

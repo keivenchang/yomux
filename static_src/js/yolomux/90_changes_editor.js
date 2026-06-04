@@ -1238,11 +1238,6 @@ function createFileEditorPanel(item) {
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
-        <div class="file-editor-nav-control" role="group" aria-label="${esc(t('editor.nav.aria'))}" hidden>
-          <button type="button" class="file-editor-nav-back" title="${esc(t('editor.nav.back'))}" aria-label="${esc(t('editor.nav.back'))}" disabled><span class="file-editor-icon file-editor-icon-nav-back" aria-hidden="true">←</span></button>
-          <button type="button" class="file-editor-nav-forward" title="${esc(t('editor.nav.forward'))}" aria-label="${esc(t('editor.nav.forward'))}" disabled><span class="file-editor-icon file-editor-icon-nav-forward" aria-hidden="true">→</span></button>
-        </div>
-        <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="nav" aria-hidden="true" hidden></span>
         <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="${esc(t('editor.mode.aria'))}" hidden>
           <button type="button" data-editor-mode="edit" title="${esc(t('editor.mode.edit'))}" aria-label="${esc(t('editor.mode.edit'))}"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
           <button type="button" data-editor-mode="preview" title="${esc(t('editor.mode.preview'))}" aria-label="${esc(t('editor.mode.preview'))}"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
@@ -1253,6 +1248,7 @@ function createFileEditorPanel(item) {
         <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
         <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden>⊙</button>
         <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${diffExpandUnchanged ? 'true' : 'false'}" hidden>↕</button>
         <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
@@ -1286,16 +1282,6 @@ function createFileEditorPanel(item) {
     event.stopPropagation();
     reloadOpenFileFromDisk(path);
   });
-  panel.querySelector('.file-editor-nav-back')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    editorNavBack();
-  });
-  panel.querySelector('.file-editor-nav-forward')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    editorNavForward();
-  });
   panel.querySelector('.file-editor-mode-control-panel')?.addEventListener('click', event => {
     const mode = event.target?.closest?.('[data-editor-mode]')?.dataset?.editorMode;
     if (!editorViewModes.has(mode)) return;
@@ -1318,6 +1304,11 @@ function createFileEditorPanel(item) {
     event.preventDefault();
     event.stopPropagation();
     openEditorFind(panel);
+  });
+  panel.querySelector('.file-editor-blame-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleFileEditorBlame();  // DOIT.26: inline git blame on/off (persisted, fetches + re-renders editors)
   });
   panel.querySelector('.file-editor-diff-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -1611,6 +1602,10 @@ function codeMirrorConfigSignature(path, options = {}) {
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
     readOnly: readOnlyMode,
+    // DOIT.26 fix: the blame ViewPlugin is added/removed only at editor build time, so blame state must
+    // be in the signature — otherwise toggling blame OFF reuses the existing view and the annotations
+    // linger (and toggling ON wouldn't add them without an unrelated rebuild).
+    blame: fileEditorBlameEnabled,
   });
 }
 
@@ -2143,6 +2138,9 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
     }
     restoreFileEditorPanelViewState(item, panel);
     focusFileEditorPanelIfReady(panel, item);
+    // DOIT.34 #3: if blame is on but this path isn't cached yet (file opened after the toggle), fetch it
+    // and nudge the editor so the annotation appears without a manual toggle. Deduped; no-op otherwise.
+    ensureEditorBlameForPath(path);
     return true;
   } catch (error) {
     if (panel._cmGeneration !== generation) return null;
@@ -2189,8 +2187,9 @@ function renderFileEditorPanel(panel, item) {
   const crossSplitButton = panel.querySelector('.file-editor-cross-split-panel');
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   const themeButton = panel.querySelector('.file-editor-theme-panel');
+  const blameButton = panel.querySelector('.file-editor-blame-panel');
   const content = panel.querySelector('.file-editor-content');
-  const textControls = [modeControl, gutterButton, wrapButton, findButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
+  const textControls = [modeControl, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
   updateEditorThemeButton(themeButton);
   if (!state) {
     setElementsHidden(textControls, true);
@@ -2251,6 +2250,11 @@ function renderFileEditorPanel(panel, item) {
   }
   updateEditorFindButton(findButton, state);
   if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
+  if (blameButton) {
+    // DOIT.26: blame is edit-mode only (not preview/diff/image/non-text).
+    blameButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || editorViewModeFor(path, item) !== 'edit';
+    blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
+  }
   updateFileEditorDiffButton(diffButton, path, state, item);
   if (crossSplitButton) {
     crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
@@ -2404,27 +2408,62 @@ function setFileEditorToolbarSeparator(panel, key, visible) {
   if (separator) separator.hidden = !visible;
 }
 
-// DOIT.21 — editor back/forward navigation history (Cursor-style file stack).
-// recordEditorNav pushes a user-initiated open; back/forward replay the stack via the normal open path.
-function recordEditorNav(path) {
-  if (editorNav.navigating || !path) return;
-  if (editorNav.stack[editorNav.index] === path) return;   // dedupe consecutive same-file opens
-  editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new open after Back drops the forward tail
-  editorNav.stack.push(path);
+// DOIT.21 — back/forward navigation history. The stack holds the layout ITEM ids of visited tabs (any
+// kind: file editors/previews, terminals, Finder, Prefs, …), so Back returns to the previous tab worked
+// on — not just files. recordEditorNav pushes a user-initiated activation; back/forward re-activate the
+// item (re-opening a since-closed file from its path-encoded id). Bounded so the history can't grow
+// without limit — the oldest entries drop past the cap.
+const NAV_STACK_LIMIT = 50;
+function recordEditorNav(item) {
+  if (editorNav.navigating || !item) return;
+  if (editorNav.stack[editorNav.index] === item) return;   // dedupe consecutive same-tab activations
+  editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new activation after Back drops the forward tail
+  editorNav.stack.push(item);
+  if (editorNav.stack.length > NAV_STACK_LIMIT) {
+    editorNav.stack = editorNav.stack.slice(editorNav.stack.length - NAV_STACK_LIMIT);
+  }
   editorNav.index = editorNav.stack.length - 1;
   updateEditorNavButtons();
 }
 
+// Re-activate a history item: focus its tab if still open; if it's a closed file editor/preview, re-open
+// it from the path encoded in its id. Returns false when the item is gone and can't be restored (a
+// closed terminal/Finder/etc.) so the caller can skip it.
+async function activateNavItem(item) {
+  const side = slotForItem(item);
+  if (side) {
+    activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
+    return true;
+  }
+  if (isFileEditorItem(item) || isFilePreviewItem(item)) {
+    const path = fileItemPath(item);
+    if (path) {
+      await openFileInEditor(path, basenameOf(path), {item, viewMode: isFilePreviewItem(item) ? 'preview' : undefined});
+      return true;
+    }
+  }
+  return false;
+}
+
 async function editorNavGo(delta) {
-  const next = editorNav.index + delta;
-  if (next < 0 || next >= editorNav.stack.length) return;
-  editorNav.index = next;
-  const path = editorNav.stack[next];
-  editorNav.navigating = true;   // re-opening must NOT record a new entry
-  try {
-    await openFileInEditor(path, basenameOf(path), {item: fileEditorItemFor(path)});
-  } finally {
-    editorNav.navigating = false;
+  // Walk in `delta` direction, skipping entries that can't be re-activated (closed non-file tabs), so a
+  // stale entry never dead-ends the history. The first activatable entry becomes the new position.
+  let idx = editorNav.index + delta;
+  while (idx >= 0 && idx < editorNav.stack.length) {
+    const item = editorNav.stack[idx];
+    editorNav.navigating = true;   // re-activation must NOT record a new entry
+    let activated = false;
+    try {
+      activated = await activateNavItem(item);
+    } finally {
+      editorNav.navigating = false;
+    }
+    if (activated) {
+      editorNav.index = idx;
+      updateEditorNavButtons();
+      return;
+    }
+    idx += delta;
   }
   updateEditorNavButtons();
 }
@@ -2432,32 +2471,22 @@ async function editorNavGo(delta) {
 function editorNavBack() { return editorNavGo(-1); }
 function editorNavForward() { return editorNavGo(1); }
 
-// Derive the nav group's visibility + button disabled state from editorNav (called on every toolbar
-// refresh, so the buttons stay in sync without bespoke per-call wiring).
-function applyEditorNavButtonsToPanel(panel) {
-  const group = panel?.querySelector?.('.file-editor-nav-control');
-  if (!group) return;
-  group.hidden = editorNav.stack.length <= 1;   // show only once there's somewhere to go
-  const back = panel.querySelector('.file-editor-nav-back');
-  const forward = panel.querySelector('.file-editor-nav-forward');
+// The back/forward control lives in the GLOBAL TOPBAR (left of the search bar), not per editor pane —
+// it's one global file-history control, like a browser's. Always visible; disabled at the ends.
+function updateEditorNavButtons() {
+  const back = document.getElementById('topbarNavBack');
+  const forward = document.getElementById('topbarNavForward');
   if (back) back.disabled = editorNav.index <= 0;
   if (forward) forward.disabled = editorNav.index >= editorNav.stack.length - 1;
 }
 
-function updateEditorNavButtons() {
-  for (const panel of document.querySelectorAll('.file-editor-panel')) {
-    updateFileEditorToolbarSeparators(panel);   // re-applies nav state + recomputes toolbar/separator visibility
-  }
-}
-
 function updateFileEditorToolbarSeparators(panel) {
-  applyEditorNavButtonsToPanel(panel);   // DOIT.21: sync the nav group hidden/disabled from editorNav first
-  const nav = fileEditorToolbarControlVisible(panel, '.file-editor-nav-control');
   const mode = fileEditorToolbarControlVisible(panel, '.file-editor-mode-control-panel');
   const tools = [
     '.file-editor-gutter-panel',
     '.file-editor-wrap-panel',
     '.file-editor-find-panel',
+    '.file-editor-blame-panel',
     '.file-editor-diff-panel',
     '.file-editor-diff-ref-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
@@ -2466,12 +2495,11 @@ function updateFileEditorToolbarSeparators(panel) {
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
   // #42: the editor controls now live on their own toolbar row below the tab strip (no frame
   // controls sit beside them), so separators only sit between adjacent visible control groups.
-  setFileEditorToolbarSeparator(panel, 'nav', nav && (mode || tools || theme || save));
   setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || theme || save));
   setFileEditorToolbarSeparator(panel, 'tools', tools && (theme || save));
   setFileEditorToolbarSeparator(panel, 'theme', theme && save);
   const toolbar = panel?.querySelector?.('.file-editor-toolbar');
-  if (toolbar) toolbar.hidden = !(nav || mode || tools || theme || save);
+  if (toolbar) toolbar.hidden = !(mode || tools || theme || save);
 }
 
 function setFileEditorPanelStatus(panel, message, level) {

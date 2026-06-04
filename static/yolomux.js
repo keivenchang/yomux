@@ -242,6 +242,10 @@ const fileEditorViewMode = new Map();  // layout item or path -> "edit" | "previ
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
+// DOIT.26: inline git blame (Cursor-style). Persisted toggle + a per-path cache of the /api/blame payload.
+let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
+const editorBlameByPath = new Map();  // path -> {lines: {lineNo: {sha, author, time, summary, pr}}, in_repo}
+const editorBlameFetches = new Map();  // DOIT.34 #3: in-flight /api/blame fetch per path (dedup concurrent panels)
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 // B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
 let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
@@ -354,6 +358,11 @@ const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
 let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
 let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15000);
+// DOIT.29: watched PRs poll on their own (longer) cadence; the latest payload + last-seen status per
+// PR ref (for notify-on-transition diffing) live here.
+let watchedPrRefreshMs = initialSetting('performance.watched_pr_refresh_ms', 60000);
+let watchedPrsData = {watched_prs: [], truncated: 0, invalid: [], refresh_ms: watchedPrRefreshMs};
+const watchedPrLastStatus = new Map();
 let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1250);
 let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
@@ -722,6 +731,7 @@ const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
+const watchedPrContextMenu = createContextMenuController();   // DOIT.29: "Watch this PR" on YO!info PR cells
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
@@ -1183,9 +1193,14 @@ function terminalThemeForGlobalTheme(mode = globalThemeMode) {
 
 // DOIT.6 #32: on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
 // terminal that render faint on white. xterm's minimumContrastRatio auto-darkens ANY text color
-// (including app 24-bit colors) against the bg. Dark terminals keep 1 (no adjustment).
+// (including app 24-bit colors) against the bg.
+// DOIT.30: the DARK terminal used to keep 1 (no adjustment), which left low-contrast cells alone — so
+// an agent composer that draws light text on an ANSI-white box (Codex's input, ~contrast 1) was
+// white-on-white. Use a moderate 3 for dark: enough to force that composer to a readable foreground,
+// low enough that intentionally-dim dark-palette text (already at/above 3:1) is mostly untouched. Light
+// stays at the stricter WCAG-AA 4.5 (faint colors on white need more help).
 function terminalMinimumContrastRatio(mode = globalThemeMode) {
-  return resolvedTerminalThemeMode(terminalThemeMode, mode) === 'light' ? 4.5 : 1;
+  return resolvedTerminalThemeMode(terminalThemeMode, mode) === 'light' ? 4.5 : 3;
 }
 
 function normalizeEditorThemeMode(value) {
@@ -1575,30 +1590,92 @@ function terminalBufferLineText(line) {
   return line?.translateToString?.(true) || '';
 }
 
+// DOIT.27: does the joined group text end mid-URL? True when the LAST url token reaches the very end of
+// the string (no trailing whitespace/terminator). Used to decide whether to stitch a hanging-indent
+// continuation row onto the group — only EXTEND a url token that runs off the row's right edge.
+function terminalTailIsUnterminatedUrl(text) {
+  if (!text) return false;
+  terminalLinkPattern.lastIndex = 0;
+  let last = null;
+  for (const match of text.matchAll(terminalLinkPattern)) last = match;
+  if (!last) return false;
+  return last.index + last[0].length === text.length;
+}
+
+// DOIT.27: a row shaped like a hanging-indent continuation — leading whitespace, then a URL-valid char
+// (not a quote/bracket). Returns {indent, text} with the indent stripped, or null. isWrapped rows are
+// not hanging continuations (they are real terminal soft-wraps and are handled by the isWrapped sweep).
+function terminalRowHangingShape(buffer, index) {
+  const line = buffer.getLine(index);
+  if (!line || line.isWrapped === true) return null;
+  const raw = terminalBufferLineText(line);
+  const match = /^(\s+)([^\s<>"'`])/.exec(raw);
+  if (!match) return null;
+  return {indent: match[1].length, text: raw.slice(match[1].length)};
+}
+
+// DOIT.27: row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
+// indent AND the previous row's tail is an unterminated url token. Gates tightly so ordinary indented
+// prose under a line that merely happens to end at a URL is not merged.
+function terminalRowIsHangingUrlContinuation(buffer, index) {
+  if (!terminalRowHangingShape(buffer, index)) return false;
+  const prev = buffer.getLine(index - 1);
+  if (!prev) return false;
+  return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev));
+}
+
 function terminalWrappedLineGroup(term, y) {
   const buffer = term.buffer?.active;
   if (!buffer?.getLine) return null;
   const requested = Math.max(0, y - 1);
   if (!buffer.getLine(requested)) return null;
+  // Walk back to the logical line's first row: over terminal soft-wraps (isWrapped) AND over
+  // hanging-indent URL continuations (DOIT.27 — agent-hard-wrapped URLs whose continuation is its own
+  // non-wrapped, indented row). So querying ANY row of the wrapped URL yields the same full group.
   let start = requested;
-  while (start > 0 && buffer.getLine(start)?.isWrapped === true) start -= 1;
-  let end = requested;
-  while (buffer.getLine(end + 1)?.isWrapped === true) end += 1;
+  for (;;) {
+    if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
+    if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start)) { start -= 1; continue; }
+    break;
+  }
+  // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
+  // mid-URL, hanging-indent continuation rows (indent stripped for link matching, but recorded so the
+  // underline maps back to the row's REAL columns). Stop at the first row that is neither.
   const rows = [];
   let offset = 0;
-  for (let index = start; index <= end; index += 1) {
-    const text = terminalBufferLineText(buffer.getLine(index));
-    rows.push({y: index + 1, text, start: offset, end: offset + text.length});
+  let joined = '';
+  let index = start;
+  for (;;) {
+    let text;
+    let indent = 0;
+    if (index === start) {
+      text = terminalBufferLineText(buffer.getLine(index));
+    } else if (buffer.getLine(index)?.isWrapped === true) {
+      text = terminalBufferLineText(buffer.getLine(index));
+    } else if (terminalTailIsUnterminatedUrl(joined)) {
+      const shape = terminalRowHangingShape(buffer, index);
+      if (!shape) break;
+      indent = shape.indent;
+      text = shape.text;
+    } else {
+      break;
+    }
+    rows.push({y: index + 1, text, indent, start: offset, end: offset + text.length});
     offset += text.length;
+    joined += text;
+    index += 1;
+    if (!buffer.getLine(index)) break;
   }
-  return {text: rows.map(row => row.text).join(''), rows};
+  return {text: joined, rows};
 }
 
 function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
   const target = endPosition ? Math.max(0, offset - 1) : offset;
   const row = group.rows.find(candidate => target >= candidate.start && target < candidate.end) || group.rows[group.rows.length - 1];
   if (!row) return null;
-  return {x: Math.max(1, target - row.start + 1), y: row.y};
+  // A stitched continuation row had `indent` leading spaces stripped before joining, so its real
+  // terminal column is shifted right by that indent (DOIT.27).
+  return {x: Math.max(1, target - row.start + 1 + (row.indent || 0)), y: row.y};
 }
 
 function terminalWrappedRange(group, startIndex, endIndex) {
@@ -3673,10 +3750,14 @@ async function refreshFileQuickOpenCandidates(query = '') {
   }
 }
 
-function shouldNotifyState(state) {
+function shouldNotifyTransitionKey(key) {
   const configured = initialSetting('notifications.notify_transitions', ['needs-input', 'needs-approval', 'blocked']);
   const transitions = Array.isArray(configured) ? configured : ['needs-input', 'needs-approval', 'blocked'];
-  return transitions.includes(state.key);
+  return transitions.includes(key);
+}
+
+function shouldNotifyState(state) {
+  return shouldNotifyTransitionKey(state.key);
 }
 
 function sendBrowserNotification(title, options = {}) {
@@ -3684,6 +3765,10 @@ function sendBrowserNotification(title, options = {}) {
   notification.onclick = () => {
     window.focus();
     if (options.session) selectSession(options.session);
+    // DOIT.29: a watched-PR notification opens the PR (no session to focus); safe blank-target open.
+    else if (options.url) {
+      try { window.open(options.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
+    }
   };
   return notification;
 }
@@ -3966,6 +4051,75 @@ function maybeNotifyState(session, state, options = {}) {
     postEvent(session, 'notification_error', `notification failed: ${error}`, {
       state: state.key,
     });
+  }
+}
+
+// DOIT.29: a stable snapshot of the watched-PR status dimensions we diff for notifications.
+function watchedPrStatusSnapshot(pr) {
+  return {
+    merged: pr?.merged === true || pullRequestStatusLabel(pr).toLowerCase() === 'merged',
+    ci: String(pr?.checks?.state || '').toLowerCase(),
+    review: String(pr?.review_decision || '').toUpperCase(),
+  };
+}
+
+// Pure transition detector: which notifiable transitions fired between two status snapshots. Merged
+// (→ merged), CI flipped into failing, review decision changed. No previous snapshot → no transition
+// (first sighting only records a baseline, so a load with already-merged/failing PRs does not storm).
+function watchedPrTransitionKeys(prev, next) {
+  const keys = [];
+  if (!prev || !next) return keys;
+  if (!prev.merged && next.merged) keys.push('pr-merged');
+  if (prev.ci !== 'failing' && next.ci === 'failing') keys.push('pr-ci-failing');
+  if (prev.review !== next.review && next.review) keys.push('pr-review');
+  return keys;
+}
+
+// Diff each watched PR's new status against the last-seen one and notify on a transition.
+function notifyWatchedPrTransitions(prs) {
+  for (const pr of Array.isArray(prs) ? prs : []) {
+    const ref = String(pr?.ref || (pr?.number ? `#${pr.number}` : ''));
+    if (!ref) continue;
+    const next = watchedPrStatusSnapshot(pr);
+    const prev = watchedPrLastStatus.get(ref);
+    watchedPrLastStatus.set(ref, next);
+    for (const key of watchedPrTransitionKeys(prev, next)) {
+      let message;
+      if (key === 'pr-merged') message = t('notify.pr.merged', {ref});
+      else if (key === 'pr-ci-failing') message = t('notify.pr.ciFailing', {ref});
+      else message = t('notify.pr.review', {ref, decision: pullRequestApprovalLabel(next.review) || next.review});
+      maybeNotifyWatchedPr(ref, key, message, pr.url);
+    }
+  }
+}
+
+// Fire a watched-PR transition through the shared notification channel: an in-page toast (clicks open
+// the PR) + a browser Notification, gated by notificationsEnabled + notify_transitions, deduped and
+// throttled by notifications.throttle_seconds via the shared notificationLastSent map.
+function maybeNotifyWatchedPr(ref, key, message, url) {
+  if (!notificationsEnabled) return;
+  if (!shouldNotifyTransitionKey(key)) return;
+  const signature = `watched-pr:${ref}:${key}`;
+  const now = Date.now();
+  const throttleMs = Math.max(0, (Number(initialSetting('notifications.throttle_seconds', 60)) || 0) * 1000);
+  const lastSent = notificationLastSent.get(signature) || 0;
+  if (now - lastSent < throttleMs) return;
+  setLimitedMapEntry(notificationLastSent, signature, now, notificationLastSentLimit);
+  showToast(message, [ref], {
+    onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} },
+  });
+  postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    sendBrowserNotification(`YOLOmux - ${serverHostname}: ${message}`, {
+      body: ref,
+      tag: signature,
+      renotify: true,
+      url,
+    });
+    postEvent(null, 'watched_pr_notification', message, {ref, transition: key});
+  } catch (error) {
+    postEvent(null, 'watched_pr_notification_error', `notification failed: ${error}`, {ref, transition: key});
   }
 }
 
@@ -4454,10 +4608,20 @@ function tabCommandsForItems(items, options) {
   return items.map(item => menuTabCommand(item, options));
 }
 
+// DOIT.33: a PR number in any of the forms a user types (#N, PR#N, PR N, N).
+function prNumberSearchForms(number) {
+  if (!number) return [];
+  return [`#${number}`, `PR#${number}`, `PR ${number}`, String(number)];
+}
+
 function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
   const pr = displayPullRequest(info);
+  // DOIT.33: also index the repo's OTHER-branch PRs/branches/Linear IDs (the same data YO!info shows),
+  // so a session is findable by ANY PR (e.g. #10289 on a non-current branch), branch name, or Linear ID
+  // — not just its current-branch PR. Already in the metadata payload, so no extra fetch.
+  const otherBranches = info.project?.git?.other_branches?.branches || [];
   return [
     item,
     itemLabel(item),
@@ -4473,11 +4637,14 @@ function tabSearchFields(item) {
     pr?.title,
     pr?.url,
     pr?.number ? 'PR' : '',
-    pr?.number ? `PR ${pr.number}` : '',
-    pr?.number ? `PR#${pr.number}` : '',
-    pr?.number ? `#${pr.number}` : '',
-    pr?.number ? String(pr.number) : '',
+    ...prNumberSearchForms(pr?.number),
     ...(Array.isArray(info.linear) ? info.linear : []),
+    ...otherBranches.flatMap(branch => [
+      branch.name,
+      branch.pull_request?.title,
+      ...prNumberSearchForms(branch.pull_request?.number),
+      ...(Array.isArray(branch.linear_ids) ? branch.linear_ids : []),
+    ]),
   ].filter(Boolean);
 }
 
@@ -4698,7 +4865,9 @@ function renderSessionButtons(options = {}) {
   };
   sessionButtons.classList.remove('drag-over');
   sessionButtons.appendChild(createAppMenuBar());
+  sessionButtons.appendChild(createTopbarNav());
   sessionButtons.appendChild(createTopbarSearch());
+  updateEditorNavButtons();   // sync ←/→ disabled state to the global editorNav stack after (re)assembly
   // Topbar right group: Language | Activity (activity pinned far-right). #257: the theme switcher was
   // removed as redundant — theme is set via View -> Theme and the Preferences Global color theme.
   sessionButtons.appendChild(createTopbarLanguageSwitcher());
@@ -4722,6 +4891,36 @@ function createAppMenuBar() {
   bar.setAttribute('role', 'menubar');
   for (const menu of appMenuTree()) bar.appendChild(createAppMenu(menu));
   return bar;
+}
+
+// DOIT.21: the editor back/forward history control lives in the GLOBAL topbar (left of the search
+// box), not per editor pane — it's one file-history control for the whole window, like a browser's.
+// Buttons are always visible; updateEditorNavButtons() toggles their disabled state from editorNav.
+function createTopbarNav() {
+  const group = document.createElement('div');
+  group.className = 'topbar-nav';
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', t('editor.nav.aria'));
+  const back = document.createElement('button');
+  back.type = 'button';
+  back.id = 'topbarNavBack';
+  back.className = 'topbar-nav-button';
+  back.title = t('editor.nav.back');
+  back.setAttribute('aria-label', t('editor.nav.back'));
+  back.disabled = true;
+  back.textContent = '←';
+  back.addEventListener('click', event => { event.preventDefault(); editorNavBack(); });
+  const forward = document.createElement('button');
+  forward.type = 'button';
+  forward.id = 'topbarNavForward';
+  forward.className = 'topbar-nav-button';
+  forward.title = t('editor.nav.forward');
+  forward.setAttribute('aria-label', t('editor.nav.forward'));
+  forward.disabled = true;
+  forward.textContent = '→';
+  forward.addEventListener('click', event => { event.preventDefault(); editorNavForward(); });
+  group.append(back, forward);
+  return group;
 }
 
 // Universal search affordance in the topbar's empty middle gap: a launcher that
@@ -5982,6 +6181,10 @@ function fileTreeRepoBranchIsNonMain(path) {
 }
 
 function fileTreeDisplayParts(path, entry) {
+  // DOIT.31: a symlink shows where it points inline — "name → target" (the raw link text, rel or abs).
+  const linkTarget = entry.is_symlink === true && entry.symlink_target ? String(entry.symlink_target) : '';
+  const linkSuffixText = linkTarget ? ` → ${linkTarget}` : '';
+  const linkSuffixHtml = linkTarget ? ` <span class="file-tree-symlink-target">→ ${esc(linkTarget)}</span>` : '';
   if (entry.kind === 'dir' && entry.is_repo === true) {
     const branch = fileTreeRepoBranch(path);
     const numstat = fileTreeRepoNumstat(path);
@@ -5992,14 +6195,15 @@ function fileTreeDisplayParts(path, entry) {
     for (const part of sync) htmlParts.push(`<span class="${part.cls}">${esc(part.text)}</span>`);
     if (numstat) htmlParts.push(`<span class="file-tree-repo-delta">${esc(numstat)}</span>`);
     return {
-      text: textParts.length ? `${entry.name} [${textParts.join(' ')}]` : entry.name,
-      html: htmlParts.length
+      text: (textParts.length ? `${entry.name} [${textParts.join(' ')}]` : entry.name) + linkSuffixText,
+      html: (htmlParts.length
         ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${htmlParts.join(' ')}]</span>`
-        : esc(entry.name),
+        : esc(entry.name)) + linkSuffixHtml,
     };
   }
-  const text = entry.kind === 'file' ? `${entry.name}${fileTreeNumstatText(path)}` : entry.name;
-  return {text, html: ''};
+  const baseText = entry.kind === 'file' ? `${entry.name}${fileTreeNumstatText(path)}` : entry.name;
+  if (linkTarget) return {text: baseText + linkSuffixText, html: esc(baseText) + linkSuffixHtml};
+  return {text: baseText, html: ''};
 }
 
 function fileTreeMtimeText(entry) {
@@ -6123,6 +6327,10 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
+  // DOIT.31: flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
+  // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
+  row.classList.toggle('is-symlink', entry.is_symlink === true);
+  row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
   const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : fileExplorerIndexBadgeText(fullPath);
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
@@ -6137,7 +6345,13 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
     row.onmouseenter = null;
     row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
-    row.removeAttribute('title');
+    // DOIT.31: a symlink's native title shows where it points ("name → target", broken flagged).
+    if (entry.is_symlink === true && entry.symlink_target) {
+      const broken = entry.kind === 'symlink-broken';
+      row.title = `${entry.name} → ${entry.symlink_target}${broken ? ` ${t('finder.symlink.broken')}` : ''}`;
+    } else {
+      row.removeAttribute('title');
+    }
   }
   const newEntry = fileExplorerEntryIsNew(fullPath);
   row.classList.toggle('new-entry', newEntry);
@@ -6697,8 +6911,11 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
   const multiple = selectedPaths.length > 1;
   return {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
-    openInNewTabDisabled: multiple || !entryIsImageFile(entry),
-    downloadDisabled: multiple || entry?.kind !== 'file',
+    // DOIT.34 #2: readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
+    // so the file-read affordances (open image in a tab via /api/fs/raw, Download via /api/fs/raw) are
+    // disabled in readonly to match the server, instead of offering a command that 403s.
+    openInNewTabDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
+    downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
@@ -7733,7 +7950,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   };
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
   else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
-  recordEditorNav(fullPath);   // DOIT.21: push to the back/forward history (no-op while navigating)
+  recordEditorNav(item);   // DOIT.21: push this tab to the back/forward history (no-op while navigating)
   if (openFiles.has(fullPath)) {
     await showFileEditorPaneForPath(fullPath, openOptions);
     if (options.viewMode) renderOpenFilePath(fullPath);
@@ -8373,6 +8590,79 @@ function codeMirrorWrapMarkerExtension(api) {
   });
 }
 
+// DOIT.26: inline git blame. Lazily fetch the /api/blame payload for a path into editorBlameByPath.
+// DOIT.34 #3: dedup concurrent fetches (multiple open panels for one path share a single request).
+async function fetchEditorBlame(path) {
+  if (editorBlameFetches.has(path)) return editorBlameFetches.get(path);
+  const promise = (async () => {
+    try {
+      const response = await apiFetch(`/api/blame?path=${encodeURIComponent(path)}`);
+      if (!response.ok) return null;
+      const data = await response.json();
+      editorBlameByPath.set(path, data);
+      return data;
+    } catch (_error) {
+      return null;
+    } finally {
+      editorBlameFetches.delete(path);
+    }
+  })();
+  editorBlameFetches.set(path, promise);
+  return promise;
+}
+
+// DOIT.34 #3: when a text editor opens/renders with blame already ON but its blame isn't cached yet
+// (the common case: enable blame, THEN open a new file), fetch it and nudge the open editors so the
+// blame ViewPlugin recomputes its decoration against the now-populated cache — no manual toggle needed.
+async function ensureEditorBlameForPath(path) {
+  if (!fileEditorBlameEnabled || !path || editorBlameByPath.has(path)) return;
+  await fetchEditorBlame(path);
+  if (!fileEditorBlameEnabled || !editorBlameByPath.has(path)) return;
+  for (const panel of fileEditorPanelsForPath(path)) {
+    const view = panel?._cmView;
+    if (!view) continue;
+    // A selection-preserving transaction has selectionSet=true, which is what the blame ViewPlugin
+    // listens for — so it rebuilds the current-line annotation now that the data is present.
+    try { view.dispatch({selection: view.state.selection}); } catch (_) {}
+  }
+}
+
+function blameAnnotationText(info) {
+  const author = info.author || '';
+  const rel = info.time ? relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - info.time)) : '';
+  const pr = info.pr ? ` (#${info.pr})` : '';
+  return `${author}, ${rel} • ${info.summary || ''}${pr}`.trim();
+}
+
+function blameHoverText(info) {
+  const author = info.author || '';
+  const abs = info.time ? new Date(info.time * 1000).toLocaleString() : '';
+  const sha = info.sha && !/^0+$/.test(info.sha) ? ` [${info.sha.slice(0, 8)}]` : '';
+  return `${author} • ${abs}${sha}\n${info.summary || ''}`.trim();
+}
+
+// Decorate the CURSOR's current line with the dim blame annotation (rendered via a CSS ::after that
+// flows after the line text — the bundle exposes no WidgetType). The dim color comes from the editor
+// scheme's --code-comment token (theme-aware), and the full commit is the line's native title tooltip.
+function codeMirrorBlameExtension(api, path) {
+  if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
+  const build = view => {
+    const blame = editorBlameByPath.get(path);
+    if (!blame || !blame.lines) return api.Decoration.none;
+    const line = view.state.doc.lineAt(view.state.selection.main.head);
+    const info = blame.lines[String(line.number)];
+    if (!info) return api.Decoration.none;
+    const deco = api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
+    return api.Decoration.set([deco.range(line.from)]);
+  };
+  return api.ViewPlugin.fromClass(class {
+    constructor(view) { this.decorations = build(view); }
+    update(update) {
+      if (update.docChanged || update.selectionSet || update.viewportChanged) this.decorations = build(update.view);
+    }
+  }, {decorations: plugin => plugin.decorations});
+}
+
 function codeMirrorHtmlSemanticEmphasisExtension(api, path) {
   if (codeMirrorLanguageName(path) !== 'html' || !api.ViewPlugin || !api.Decoration) return [];
   const palette = activeEditorScheme().syntax;
@@ -8515,6 +8805,27 @@ function codeMirrorSearchMatchSummary(text, query, selection = {}, options = {})
   }
   if (index < 0) index = matches.length - 1;
   return {current: index + 1, total: matches.length, text: `${index + 1}/${matches.length}`};
+}
+
+// When you navigate search matches, CodeMirror's default scrollIntoView lands on a far-right horizontal
+// position if the document has any long line (e.g. a padded locale JSON, 276-char line): a match on a
+// SHORT line then sits off-screen left and the editor looks "scrolled all the way to the right" (blank).
+// Re-center the match horizontally on every search-driven selection change — for a short line that
+// reveals the line start; for a long line it keeps the match comfortably in view. (Deferred to a rAF
+// because dispatch() is not allowed inside an update listener.)
+function codeMirrorSearchScrollFix(api) {
+  if (!api.EditorView?.updateListener || !api.EditorView?.scrollIntoView) return [];
+  return api.EditorView.updateListener.of(update => {
+    if (!update.selectionSet) return;
+    if (!update.transactions.some(tr => tr.isUserEvent?.('select.search'))) return;
+    const head = update.state.selection.main.head;
+    const view = update.view;
+    requestAnimationFrame(() => {
+      try {
+        view.dispatch({effects: api.EditorView.scrollIntoView(head, {x: 'center', y: 'nearest'})});
+      } catch (_) {}
+    });
+  });
 }
 
 function codeMirrorSearchPanelEnhancementExtension(api) {
@@ -8672,12 +8983,14 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
+    codeMirrorSearchScrollFix(api),
     api.highlightSelectionMatches(),
     saveKeymap,
     findKeymap,
     powerKeymap,
     api.keymap.of([api.indentWithTab, ...api.defaultKeymap, ...api.historyKeymap, ...api.searchKeymap]),
     ...(wrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+    codeMirrorBlameExtension(api, path),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
     codeMirrorLanguageExtension(api, path),
@@ -9093,6 +9406,30 @@ function setEditorWrapEnabled(enabled) {
   applyEditorWrapPreference();
 }
 
+// DOIT.26: toggle inline git blame. Fetch the blame payload for each open text file first (so the
+// re-rendered editor's blame ViewPlugin has data), then re-render with each panel's OWN item.
+async function applyEditorBlamePreference() {
+  for (const panel of document.querySelectorAll('.file-editor-panel')) {
+    const blameButton = panel.querySelector('.file-editor-blame-panel');
+    if (blameButton) blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
+    const path = panel.dataset.filePath;
+    const state = openFiles.get(path);
+    if (!path || state?.kind !== 'text') continue;
+    if (fileEditorBlameEnabled && !editorBlameByPath.has(path)) await fetchEditorBlame(path);
+    renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+  }
+}
+
+function setFileEditorBlameEnabled(enabled) {
+  fileEditorBlameEnabled = enabled === true;
+  storageSet('yolomux.editorBlame', fileEditorBlameEnabled ? '1' : '0');
+  applyEditorBlamePreference();
+}
+
+function toggleFileEditorBlame() {
+  setFileEditorBlameEnabled(!fileEditorBlameEnabled);
+}
+
 function toggleEditorWrap() {
   const enabled = !fileEditorWrapEnabled;
   setEditorWrapEnabled(enabled);
@@ -9263,6 +9600,7 @@ function applySettingsPayload(payload, options = {}) {
   clientSettingsMtimeNs = nextMtime;
   remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 220);
   metadataRefreshMs = numberSetting('performance.metadata_refresh_ms', 15000);
+  watchedPrRefreshMs = numberSetting('performance.watched_pr_refresh_ms', 60000);
   paneStateRefreshMs = numberSetting('performance.pane_state_refresh_ms', 1250);
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3000);
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5000);
@@ -9374,6 +9712,7 @@ function resetRuntimeInterval(name, callback, delay) {
 function installRuntimeIntervals() {
   resetRuntimeInterval('auto', refreshAutoStatuses, paneStateRefreshMs);
   resetRuntimeInterval('metadata', refreshTranscripts, metadataRefreshMs);
+  resetRuntimeInterval('watched-prs', refreshWatchedPrs, watchedPrRefreshMs);
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('filesystem', refreshWatchedFilesystem, fileExplorerRefreshMs);
@@ -10942,6 +11281,9 @@ function activatePaneTab(side, session, options = {}) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
+  // DOIT.21: a user-initiated tab switch IS navigation — record EVERY tab kind (file, terminal, Finder,
+  // Prefs, …) so Back returns to the previous tab worked on, not just files. (No-op while navigating.)
+  if (options.userInitiated === true) recordEditorNav(session);
   setFocusedPanelItem(session);
   if (activeItemForSide(side) === session) {
     focusPanel(session, {userInitiated: options.userInitiated === true});
@@ -13353,6 +13695,7 @@ function createInfoPanel() {
             <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
           </div>
           <div id="info-content" class="info-list"></div>
+          <div id="info-watched" class="info-watched"></div>
         </div>
         <div class="info-subview yoagent-subview" data-info-subview="yoagent">
           <div class="transcript-head info-head">
@@ -13840,6 +14183,7 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.performance'), items: [
       {path: 'performance.metadata_refresh_ms', label: t('pref.performance.metadata_refresh_ms.label'), type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: t('pref.performance.metadata_refresh_ms.help')},
+      {path: 'performance.watched_pr_refresh_ms', label: t('pref.performance.watched_pr_refresh_ms.label'), type: 'number', min: 15000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.watched_pr_refresh_ms.help')},
       {path: 'performance.pane_state_refresh_ms', label: t('pref.performance.pane_state_refresh_ms.label'), type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.pane_state_refresh_ms.help')},
       {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1000, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.latency_refresh_ms.help')},
       {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.event_log_refresh_ms.help')},
@@ -13850,6 +14194,9 @@ function preferenceSections() {
       {path: 'performance.tab_popover_follow_delay_ms', label: t('pref.performance.tab_popover_follow_delay_ms.label'), type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: t('pref.performance.tab_popover_follow_delay_ms.help')},
       {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: t('pref.performance.remote_resize_delay_ms.help')},
       {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
+    ]},
+    {title: t('pref.section.github'), items: [
+      {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
     ]},
     {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'select', choices: [
@@ -15613,11 +15960,6 @@ function createFileEditorPanel(item) {
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="file-editor-toolbar" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}" hidden>
-        <div class="file-editor-nav-control" role="group" aria-label="${esc(t('editor.nav.aria'))}" hidden>
-          <button type="button" class="file-editor-nav-back" title="${esc(t('editor.nav.back'))}" aria-label="${esc(t('editor.nav.back'))}" disabled><span class="file-editor-icon file-editor-icon-nav-back" aria-hidden="true">←</span></button>
-          <button type="button" class="file-editor-nav-forward" title="${esc(t('editor.nav.forward'))}" aria-label="${esc(t('editor.nav.forward'))}" disabled><span class="file-editor-icon file-editor-icon-nav-forward" aria-hidden="true">→</span></button>
-        </div>
-        <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="nav" aria-hidden="true" hidden></span>
         <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="${esc(t('editor.mode.aria'))}" hidden>
           <button type="button" data-editor-mode="edit" title="${esc(t('editor.mode.edit'))}" aria-label="${esc(t('editor.mode.edit'))}"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
           <button type="button" data-editor-mode="preview" title="${esc(t('editor.mode.preview'))}" aria-label="${esc(t('editor.mode.preview'))}"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
@@ -15628,6 +15970,7 @@ function createFileEditorPanel(item) {
         <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
         <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden>⊙</button>
         <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${diffExpandUnchanged ? 'true' : 'false'}" hidden>↕</button>
         <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
@@ -15661,16 +16004,6 @@ function createFileEditorPanel(item) {
     event.stopPropagation();
     reloadOpenFileFromDisk(path);
   });
-  panel.querySelector('.file-editor-nav-back')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    editorNavBack();
-  });
-  panel.querySelector('.file-editor-nav-forward')?.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    editorNavForward();
-  });
   panel.querySelector('.file-editor-mode-control-panel')?.addEventListener('click', event => {
     const mode = event.target?.closest?.('[data-editor-mode]')?.dataset?.editorMode;
     if (!editorViewModes.has(mode)) return;
@@ -15693,6 +16026,11 @@ function createFileEditorPanel(item) {
     event.preventDefault();
     event.stopPropagation();
     openEditorFind(panel);
+  });
+  panel.querySelector('.file-editor-blame-panel')?.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleFileEditorBlame();  // DOIT.26: inline git blame on/off (persisted, fetches + re-renders editors)
   });
   panel.querySelector('.file-editor-diff-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -15986,6 +16324,10 @@ function codeMirrorConfigSignature(path, options = {}) {
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
     readOnly: readOnlyMode,
+    // DOIT.26 fix: the blame ViewPlugin is added/removed only at editor build time, so blame state must
+    // be in the signature — otherwise toggling blame OFF reuses the existing view and the annotations
+    // linger (and toggling ON wouldn't add them without an unrelated rebuild).
+    blame: fileEditorBlameEnabled,
   });
 }
 
@@ -16518,6 +16860,9 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
     }
     restoreFileEditorPanelViewState(item, panel);
     focusFileEditorPanelIfReady(panel, item);
+    // DOIT.34 #3: if blame is on but this path isn't cached yet (file opened after the toggle), fetch it
+    // and nudge the editor so the annotation appears without a manual toggle. Deduped; no-op otherwise.
+    ensureEditorBlameForPath(path);
     return true;
   } catch (error) {
     if (panel._cmGeneration !== generation) return null;
@@ -16564,8 +16909,9 @@ function renderFileEditorPanel(panel, item) {
   const crossSplitButton = panel.querySelector('.file-editor-cross-split-panel');
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   const themeButton = panel.querySelector('.file-editor-theme-panel');
+  const blameButton = panel.querySelector('.file-editor-blame-panel');
   const content = panel.querySelector('.file-editor-content');
-  const textControls = [modeControl, gutterButton, wrapButton, findButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
+  const textControls = [modeControl, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
   updateEditorThemeButton(themeButton);
   if (!state) {
     setElementsHidden(textControls, true);
@@ -16626,6 +16972,11 @@ function renderFileEditorPanel(panel, item) {
   }
   updateEditorFindButton(findButton, state);
   if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
+  if (blameButton) {
+    // DOIT.26: blame is edit-mode only (not preview/diff/image/non-text).
+    blameButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || editorViewModeFor(path, item) !== 'edit';
+    blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
+  }
   updateFileEditorDiffButton(diffButton, path, state, item);
   if (crossSplitButton) {
     crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
@@ -16779,27 +17130,62 @@ function setFileEditorToolbarSeparator(panel, key, visible) {
   if (separator) separator.hidden = !visible;
 }
 
-// DOIT.21 — editor back/forward navigation history (Cursor-style file stack).
-// recordEditorNav pushes a user-initiated open; back/forward replay the stack via the normal open path.
-function recordEditorNav(path) {
-  if (editorNav.navigating || !path) return;
-  if (editorNav.stack[editorNav.index] === path) return;   // dedupe consecutive same-file opens
-  editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new open after Back drops the forward tail
-  editorNav.stack.push(path);
+// DOIT.21 — back/forward navigation history. The stack holds the layout ITEM ids of visited tabs (any
+// kind: file editors/previews, terminals, Finder, Prefs, …), so Back returns to the previous tab worked
+// on — not just files. recordEditorNav pushes a user-initiated activation; back/forward re-activate the
+// item (re-opening a since-closed file from its path-encoded id). Bounded so the history can't grow
+// without limit — the oldest entries drop past the cap.
+const NAV_STACK_LIMIT = 50;
+function recordEditorNav(item) {
+  if (editorNav.navigating || !item) return;
+  if (editorNav.stack[editorNav.index] === item) return;   // dedupe consecutive same-tab activations
+  editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new activation after Back drops the forward tail
+  editorNav.stack.push(item);
+  if (editorNav.stack.length > NAV_STACK_LIMIT) {
+    editorNav.stack = editorNav.stack.slice(editorNav.stack.length - NAV_STACK_LIMIT);
+  }
   editorNav.index = editorNav.stack.length - 1;
   updateEditorNavButtons();
 }
 
+// Re-activate a history item: focus its tab if still open; if it's a closed file editor/preview, re-open
+// it from the path encoded in its id. Returns false when the item is gone and can't be restored (a
+// closed terminal/Finder/etc.) so the caller can skip it.
+async function activateNavItem(item) {
+  const side = slotForItem(item);
+  if (side) {
+    activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
+    return true;
+  }
+  if (isFileEditorItem(item) || isFilePreviewItem(item)) {
+    const path = fileItemPath(item);
+    if (path) {
+      await openFileInEditor(path, basenameOf(path), {item, viewMode: isFilePreviewItem(item) ? 'preview' : undefined});
+      return true;
+    }
+  }
+  return false;
+}
+
 async function editorNavGo(delta) {
-  const next = editorNav.index + delta;
-  if (next < 0 || next >= editorNav.stack.length) return;
-  editorNav.index = next;
-  const path = editorNav.stack[next];
-  editorNav.navigating = true;   // re-opening must NOT record a new entry
-  try {
-    await openFileInEditor(path, basenameOf(path), {item: fileEditorItemFor(path)});
-  } finally {
-    editorNav.navigating = false;
+  // Walk in `delta` direction, skipping entries that can't be re-activated (closed non-file tabs), so a
+  // stale entry never dead-ends the history. The first activatable entry becomes the new position.
+  let idx = editorNav.index + delta;
+  while (idx >= 0 && idx < editorNav.stack.length) {
+    const item = editorNav.stack[idx];
+    editorNav.navigating = true;   // re-activation must NOT record a new entry
+    let activated = false;
+    try {
+      activated = await activateNavItem(item);
+    } finally {
+      editorNav.navigating = false;
+    }
+    if (activated) {
+      editorNav.index = idx;
+      updateEditorNavButtons();
+      return;
+    }
+    idx += delta;
   }
   updateEditorNavButtons();
 }
@@ -16807,32 +17193,22 @@ async function editorNavGo(delta) {
 function editorNavBack() { return editorNavGo(-1); }
 function editorNavForward() { return editorNavGo(1); }
 
-// Derive the nav group's visibility + button disabled state from editorNav (called on every toolbar
-// refresh, so the buttons stay in sync without bespoke per-call wiring).
-function applyEditorNavButtonsToPanel(panel) {
-  const group = panel?.querySelector?.('.file-editor-nav-control');
-  if (!group) return;
-  group.hidden = editorNav.stack.length <= 1;   // show only once there's somewhere to go
-  const back = panel.querySelector('.file-editor-nav-back');
-  const forward = panel.querySelector('.file-editor-nav-forward');
+// The back/forward control lives in the GLOBAL TOPBAR (left of the search bar), not per editor pane —
+// it's one global file-history control, like a browser's. Always visible; disabled at the ends.
+function updateEditorNavButtons() {
+  const back = document.getElementById('topbarNavBack');
+  const forward = document.getElementById('topbarNavForward');
   if (back) back.disabled = editorNav.index <= 0;
   if (forward) forward.disabled = editorNav.index >= editorNav.stack.length - 1;
 }
 
-function updateEditorNavButtons() {
-  for (const panel of document.querySelectorAll('.file-editor-panel')) {
-    updateFileEditorToolbarSeparators(panel);   // re-applies nav state + recomputes toolbar/separator visibility
-  }
-}
-
 function updateFileEditorToolbarSeparators(panel) {
-  applyEditorNavButtonsToPanel(panel);   // DOIT.21: sync the nav group hidden/disabled from editorNav first
-  const nav = fileEditorToolbarControlVisible(panel, '.file-editor-nav-control');
   const mode = fileEditorToolbarControlVisible(panel, '.file-editor-mode-control-panel');
   const tools = [
     '.file-editor-gutter-panel',
     '.file-editor-wrap-panel',
     '.file-editor-find-panel',
+    '.file-editor-blame-panel',
     '.file-editor-diff-panel',
     '.file-editor-diff-ref-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
@@ -16841,12 +17217,11 @@ function updateFileEditorToolbarSeparators(panel) {
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
   // #42: the editor controls now live on their own toolbar row below the tab strip (no frame
   // controls sit beside them), so separators only sit between adjacent visible control groups.
-  setFileEditorToolbarSeparator(panel, 'nav', nav && (mode || tools || theme || save));
   setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || theme || save));
   setFileEditorToolbarSeparator(panel, 'tools', tools && (theme || save));
   setFileEditorToolbarSeparator(panel, 'theme', theme && save);
   const toolbar = panel?.querySelector?.('.file-editor-toolbar');
-  if (toolbar) toolbar.hidden = !(nav || mode || tools || theme || save);
+  if (toolbar) toolbar.hidden = !(mode || tools || theme || save);
 }
 
 function setFileEditorPanelStatus(panel, message, level) {
@@ -17852,6 +18227,8 @@ function createPanel(session) {
 function renderInfoPanel() {
   const node = document.getElementById('info-content');
   if (!node) return;
+  bindInfoPrContextMenu(node);   // DOIT.29: idempotent — "Watch this PR" on the PR column
+  renderWatchedPrs();   // DOIT.29: the Watched PRs section repaints alongside the branch table
   const rows = infoBranchRows();
   if (!rows.length) {
     node.innerHTML = '<div class="info-empty">No branch metadata loaded yet.</div>';
@@ -17888,6 +18265,142 @@ function renderInfoPanel() {
       renderInfoPanel();
     });
   });
+}
+
+// DOIT.29: client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
+// ("owner/repo#N", "owner/repo/N", or a github.com PR URL) to the canonical "owner/repo#N", else ''.
+// Used to dedupe and to match a stored entry (which may be a URL) against a PR's canonical ref.
+function normalizeWatchedPrRef(entry) {
+  const text = String(entry || '').trim();
+  if (!text) return '';
+  const seg = '[A-Za-z0-9._-]+';
+  if (/github\.com/i.test(text) && /:\/\//.test(text)) {
+    const match = text.match(new RegExp(`github\\.com/(${seg})/(${seg})/(?:pull|pulls)/(\\d+)`, 'i'));
+    if (match) return `${match[1]}/${match[2]}#${Number(match[3])}`;
+    return '';
+  }
+  const short = text.match(new RegExp(`^(${seg})/(${seg})(?:#|/(?:pull/)?)(\\d+)$`));
+  if (short && Number(short[3]) > 0) return `${short[1]}/${short[2]}#${Number(short[3])}`;
+  return '';
+}
+
+function watchedPrStatusText(pr) {
+  return pullRequestStatusDisplay(pr) || (pr?.state ? String(pr.state).toUpperCase() : 'UNKNOWN');
+}
+
+// The Watched PRs section of YO!info — PRs tracked independent of any open session's branch. Reuses
+// the pr-status-* badge classes; renders into its own #info-watched container so it can repaint on the
+// (longer) watched-PR poll cadence without re-rendering the branch table.
+function renderWatchedPrs() {
+  const node = document.getElementById('info-watched');
+  if (!node) return;
+  const prs = Array.isArray(watchedPrsData.watched_prs) ? watchedPrsData.watched_prs : [];
+  const heading = `<div class="info-watched-head">${esc(t('info.watched.heading'))}</div>`;
+  if (!prs.length) {
+    node.innerHTML = `${heading}<div class="info-empty info-watched-empty">${esc(t('info.watched.empty'))}</div>`;
+    return;
+  }
+  const rows = prs.map(pr => {
+    const ref = String(pr.ref || `#${pr.number}`);
+    const statusCls = pullRequestStatusClass(pr);
+    const statusText = watchedPrStatusText(pr);
+    const link = linkHtml(pr.url, ref, pr.title || pr.description || '', 'info-watched-ref');
+    return `<div class="info-row info-watched-row" data-watched-ref="${esc(ref)}">
+      <div class="info-cell info-watched-ref-cell">${link}</div>
+      <div class="info-cell info-watched-title" title="${esc(pr.title || '')}">${esc(pr.title || '')}</div>
+      <div class="info-cell info-watched-status"><span class="meta-pr-status ${esc(statusCls)}">${esc(statusText)}</span></div>
+      <div class="info-cell info-watched-actions"><button type="button" class="info-watched-remove" data-watched-remove="${esc(ref)}" title="${esc(t('info.watched.remove'))}" aria-label="${esc(t('info.watched.remove'))}">×</button></div>
+    </div>`;
+  }).join('');
+  const truncated = watchedPrsData.truncated > 0
+    ? `<div class="info-watched-note">${esc(t('info.watched.truncated', {count: String(watchedPrsData.truncated)}))}</div>`
+    : '';
+  node.innerHTML = heading + rows + truncated;
+  node.querySelectorAll('[data-watched-remove]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      removeWatchedPr(button.dataset.watchedRemove);
+    });
+  });
+}
+
+async function refreshWatchedPrs() {
+  try {
+    const response = await apiFetch('/api/watched-prs');
+    const data = await response.json();
+    if (!data || typeof data !== 'object') return;
+    watchedPrsData = {
+      watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
+      truncated: Number(data.truncated) || 0,
+      invalid: Array.isArray(data.invalid) ? data.invalid : [],
+      refresh_ms: Number(data.refresh_ms) || watchedPrRefreshMs,
+    };
+    notifyWatchedPrTransitions(watchedPrsData.watched_prs);
+    renderWatchedPrs();
+  } catch (error) {
+    // Non-fatal: keep the last good render; the next poll retries.
+  }
+}
+
+// Append a PR ref to github.watched_prs (dedup by canonical ref); accepts owner/repo#N or a PR URL.
+function addWatchedPr(entry) {
+  const ref = normalizeWatchedPrRef(entry);
+  if (!ref) {
+    statusErr(t('info.watched.invalid', {entry: String(entry || '')}));
+    return;
+  }
+  const current = initialSetting('github.watched_prs', []);
+  const list = Array.isArray(current) ? current.slice() : [];
+  if (list.some(item => normalizeWatchedPrRef(item) === ref)) {
+    statusOk(t('info.watched.already', {ref}));
+    return;
+  }
+  list.push(ref);
+  saveSettingsPatch(settingPatch('github.watched_prs', list))
+    .then(() => { statusOk(t('info.watched.added', {ref})); refreshWatchedPrs(); })
+    .catch(error => statusErr(`settings save failed: ${esc(error)}`));
+}
+
+function removeWatchedPr(ref) {
+  const target = normalizeWatchedPrRef(ref) || String(ref || '');
+  const current = initialSetting('github.watched_prs', []);
+  const list = (Array.isArray(current) ? current : []).filter(item => normalizeWatchedPrRef(item) !== target && String(item).trim() !== target);
+  saveSettingsPatch(settingPatch('github.watched_prs', list))
+    .then(() => { statusOk(t('info.watched.removed', {ref: target})); refreshWatchedPrs(); })
+    .catch(error => statusErr(`settings save failed: ${esc(error)}`));
+}
+
+// DOIT.29: right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
+// Delegated on #info-content so it covers both the branch-table PR column and any future PR cells.
+function bindInfoPrContextMenu(node) {
+  if (!node || node.dataset.watchedPrMenuBound === '1') return;
+  node.dataset.watchedPrMenuBound = '1';
+  node.addEventListener('contextmenu', event => {
+    const cell = event.target.closest('.info-cell');
+    const link = cell?.querySelector?.('a[href*="github.com/"][href*="/pull/"]');
+    if (!link) return;
+    const ref = normalizeWatchedPrRef(link.getAttribute('href') || '');
+    if (!ref) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showWatchPrContextMenu(ref, event.clientX, event.clientY);
+  });
+}
+
+function showWatchPrContextMenu(ref, x, y) {
+  const already = (Array.isArray(initialSetting('github.watched_prs', [])) ? initialSetting('github.watched_prs', []) : [])
+    .some(item => normalizeWatchedPrRef(item) === ref);
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu watched-pr-context-menu';
+  menu.setAttribute('role', 'menu');
+  appendContextMenuButton(
+    menu,
+    already ? t('info.watched.unwatchThis', {ref}) : t('info.watched.watchThis', {ref}),
+    () => (already ? removeWatchedPr(ref) : addWatchedPr(ref)),
+    () => watchedPrContextMenu.close(),
+  );
+  watchedPrContextMenu.open(menu, x, y);
 }
 
 function scrollYoagentChatToBottom(node = document.getElementById('yoagent-content')) {
@@ -19465,6 +19978,7 @@ async function boot() {
   renderPanels([], {prune: false});
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
   refreshTranscripts();
+  refreshWatchedPrs();   // DOIT.29: first watched-PR fetch at boot; thereafter on its own interval
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();

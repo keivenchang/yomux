@@ -229,3 +229,88 @@ def test_metadata_cache_is_bounded_and_sweeps_expired_on_write():
     for i in range(MetadataCache.MAX_ENTRIES + 100):
         cache2.set(f"k{i}", i)
     assert len(cache2.values) <= MetadataCache.MAX_ENTRIES
+
+
+def test_parse_pull_request_ref_accepts_short_and_url_forms():
+    # DOIT.29: owner/repo#N, owner/repo/N, and full PR URLs normalize to the canonical owner/repo#N.
+    from yolomux_lib.metadata import parse_pull_request_ref
+
+    for text in ("ai-dynamo/frontend-crates#18", "ai-dynamo/frontend-crates/18",
+                 "https://github.com/ai-dynamo/frontend-crates/pull/18",
+                 "  ai-dynamo/frontend-crates#18  ",
+                 "https://github.com/ai-dynamo/frontend-crates/pull/18/files"):
+        parsed = parse_pull_request_ref(text)
+        assert parsed is not None, text
+        assert parsed["owner"] == "ai-dynamo"
+        assert parsed["name"] == "frontend-crates"
+        assert parsed["number"] == 18
+        assert parsed["ref"] == "ai-dynamo/frontend-crates#18"
+        assert parsed["url"] == "https://github.com/ai-dynamo/frontend-crates/pull/18"
+
+
+def test_parse_pull_request_ref_rejects_invalid():
+    # DOIT.29: non-github hosts, missing/zero PR numbers, repo-only refs, and issue URLs are rejected.
+    from yolomux_lib.metadata import parse_pull_request_ref
+
+    for text in ("https://gitlab.com/owner/repo/pull/7", "owner/repo", "owner/repo#0",
+                 "not a ref", "https://github.com/owner/repo/issues/3", "", None):
+        assert parse_pull_request_ref(text) is None, text
+
+
+def test_watched_pr_metadata_dedupes_caps_and_flags_invalid():
+    # DOIT.29: dedupe by canonical ref, cap at WATCHED_PR_LIMIT, collect invalid entries, and (offline)
+    # return the fallback PR shape carrying {ref, url}.
+    from yolomux_lib.metadata import watched_pr_metadata, WATCHED_PR_LIMIT
+
+    refs = ["owner/repo#1", "owner/repo#1", "bad ref", "owner/repo#2"]
+    result = watched_pr_metadata(refs, MetadataCache(), allow_network=False)
+    assert [pr["ref"] for pr in result["watched_prs"]] == ["owner/repo#1", "owner/repo#2"]
+    assert result["invalid"] == ["bad ref"]
+    assert result["truncated"] == 0
+    first = result["watched_prs"][0]
+    assert first["url"] == "https://github.com/owner/repo/pull/1"
+    assert first["number"] == 1 and "status_label" in first
+
+    big = [f"o/r#{i}" for i in range(1, WATCHED_PR_LIMIT + 6)]
+    capped = watched_pr_metadata(big, MetadataCache(), allow_network=False)
+    assert len(capped["watched_prs"]) == WATCHED_PR_LIMIT
+    assert capped["truncated"] == 5
+
+
+def test_candidate_session_cwds_prefers_live_pane_cwd_over_default(monkeypatch, tmp_path):
+    # DOIT.32: the focused pane's live cwd (after `cd`) outranks the session-number default workdir, so
+    # the project follows the pane instead of staying pinned to dynamoN.
+    from yolomux_lib.common import PaneInfo, SessionInfo
+
+    default_dir = tmp_path / "dynamo1"
+    live_dir = tmp_path / "frontend-crates"
+    default_dir.mkdir()
+    live_dir.mkdir()
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: default_dir)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+
+    pane = PaneInfo(
+        session="1", window="0", pane="0", pane_id="%1", target="%1",
+        current_path=str(live_dir), command="bash", active=True, window_active=True,
+        title="", pid=1, process_label="bash",
+    )
+    info = SessionInfo(session="1", panes=[pane], selected_pane=pane, agents=[])
+
+    candidates = metadata.candidate_session_cwds(info)
+    live_resolved = str(live_dir.resolve())
+    default_resolved = str(default_dir.resolve())
+    assert candidates[0] == live_resolved, "the live pane cwd is the first candidate"
+    assert default_resolved in candidates, "the session-number default remains a fallback"
+    assert candidates.index(live_resolved) < candidates.index(default_resolved)
+
+
+def test_candidate_session_cwds_falls_back_to_default_without_live_cwd(monkeypatch, tmp_path):
+    # A session with no pane/agent cwd still falls back to the session-number default workspace.
+    from yolomux_lib.common import SessionInfo
+
+    default_dir = tmp_path / "dynamo1"
+    default_dir.mkdir()
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: default_dir)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    assert metadata.candidate_session_cwds(info) == [str(default_dir.resolve())]

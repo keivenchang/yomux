@@ -180,8 +180,44 @@
   min-height: var(--compact-control-height);
   overflow: visible;
 }
+/* DOIT.21: editor back/forward history, immediately before the search box. An auto inline-start margin
+   on the group + an auto inline-end margin on the search centers the nav+search PAIR as one unit. */
+.topbar-nav {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.topbar-nav-button {
+  flex: 0 0 auto;
+  width: var(--compact-control-height);
+  height: var(--compact-control-height);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--input-bg, #11151c);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--ui-font-size-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+body.theme-light .topbar-nav-button {
+  background: rgba(15, 23, 42, 0.05);
+}
+.topbar-nav-button:hover:not(:disabled) {
+  border-color: var(--accent, #6ea8fe);
+}
+.topbar-nav-button:disabled {
+  opacity: 0.34;
+  cursor: default;
+}
 .topbar-search {
-  margin: 0 auto;
+  margin-block: 0;
+  margin-inline: 6px auto;
   flex: 0 1 auto;
   display: inline-flex;
   align-items: center;

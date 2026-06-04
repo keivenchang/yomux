@@ -150,7 +150,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         required_role = "admin" if parsed.path == "/api/summary-stream" else "readonly"
         if not self.require_auth(required_role):
             return
-        if parsed.path.startswith("/api/fs/") and self.auth_readonly():
+        # DOIT.34 #1: blame reads repository file history, so it is admin-only like the rest of the
+        # file/repo API (the /api/fs/* reads) — a readonly identity must not read file content/history.
+        if (parsed.path.startswith("/api/fs/") or parsed.path == "/api/blame") and self.auth_readonly():
             self.reject_forbidden(self.auth_identity(), "admin")
             return
         if parsed.path == "/api/ping":
@@ -224,6 +226,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/settings":
             self.write_json(self.server.app.settings_payload())
             return
+        if parsed.path == "/api/watched-prs":
+            self.write_json(self.server.app.watched_prs_payload())
+            return
         if parsed.path == "/api/yolo-rules":
             self.write_json(self.server.app.yolo_rules_payload())
             return
@@ -290,6 +295,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/fs/diff":
             self.handle_fs_diff(parsed)
             return
+        if parsed.path == "/api/blame":
+            self.handle_blame(parsed)
+            return
         if parsed.path == "/api/fs/raw":
             self.handle_fs_raw(parsed)
             return
@@ -335,6 +343,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         from_ref = qs.get("from", [None])[0]
         to_ref = qs.get("to", [None])[0]
         self.write_filesystem_json(raw_path, lambda: filesystem.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref))
+
+    def handle_blame(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", [""])[0]
+        ref = qs.get("ref", [None])[0]
+        self.write_filesystem_json(raw_path, lambda: filesystem.blame_file(raw_path, ref=ref))
 
     def write_filesystem_json(self, raw_path: str, build_payload: Any) -> None:
         try:

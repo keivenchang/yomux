@@ -262,9 +262,14 @@ function terminalThemeForGlobalTheme(mode = globalThemeMode) {
 
 // DOIT.6 #32: on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
 // terminal that render faint on white. xterm's minimumContrastRatio auto-darkens ANY text color
-// (including app 24-bit colors) against the bg. Dark terminals keep 1 (no adjustment).
+// (including app 24-bit colors) against the bg.
+// DOIT.30: the DARK terminal used to keep 1 (no adjustment), which left low-contrast cells alone — so
+// an agent composer that draws light text on an ANSI-white box (Codex's input, ~contrast 1) was
+// white-on-white. Use a moderate 3 for dark: enough to force that composer to a readable foreground,
+// low enough that intentionally-dim dark-palette text (already at/above 3:1) is mostly untouched. Light
+// stays at the stricter WCAG-AA 4.5 (faint colors on white need more help).
 function terminalMinimumContrastRatio(mode = globalThemeMode) {
-  return resolvedTerminalThemeMode(terminalThemeMode, mode) === 'light' ? 4.5 : 1;
+  return resolvedTerminalThemeMode(terminalThemeMode, mode) === 'light' ? 4.5 : 3;
 }
 
 function normalizeEditorThemeMode(value) {
@@ -654,30 +659,92 @@ function terminalBufferLineText(line) {
   return line?.translateToString?.(true) || '';
 }
 
+// DOIT.27: does the joined group text end mid-URL? True when the LAST url token reaches the very end of
+// the string (no trailing whitespace/terminator). Used to decide whether to stitch a hanging-indent
+// continuation row onto the group — only EXTEND a url token that runs off the row's right edge.
+function terminalTailIsUnterminatedUrl(text) {
+  if (!text) return false;
+  terminalLinkPattern.lastIndex = 0;
+  let last = null;
+  for (const match of text.matchAll(terminalLinkPattern)) last = match;
+  if (!last) return false;
+  return last.index + last[0].length === text.length;
+}
+
+// DOIT.27: a row shaped like a hanging-indent continuation — leading whitespace, then a URL-valid char
+// (not a quote/bracket). Returns {indent, text} with the indent stripped, or null. isWrapped rows are
+// not hanging continuations (they are real terminal soft-wraps and are handled by the isWrapped sweep).
+function terminalRowHangingShape(buffer, index) {
+  const line = buffer.getLine(index);
+  if (!line || line.isWrapped === true) return null;
+  const raw = terminalBufferLineText(line);
+  const match = /^(\s+)([^\s<>"'`])/.exec(raw);
+  if (!match) return null;
+  return {indent: match[1].length, text: raw.slice(match[1].length)};
+}
+
+// DOIT.27: row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
+// indent AND the previous row's tail is an unterminated url token. Gates tightly so ordinary indented
+// prose under a line that merely happens to end at a URL is not merged.
+function terminalRowIsHangingUrlContinuation(buffer, index) {
+  if (!terminalRowHangingShape(buffer, index)) return false;
+  const prev = buffer.getLine(index - 1);
+  if (!prev) return false;
+  return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev));
+}
+
 function terminalWrappedLineGroup(term, y) {
   const buffer = term.buffer?.active;
   if (!buffer?.getLine) return null;
   const requested = Math.max(0, y - 1);
   if (!buffer.getLine(requested)) return null;
+  // Walk back to the logical line's first row: over terminal soft-wraps (isWrapped) AND over
+  // hanging-indent URL continuations (DOIT.27 — agent-hard-wrapped URLs whose continuation is its own
+  // non-wrapped, indented row). So querying ANY row of the wrapped URL yields the same full group.
   let start = requested;
-  while (start > 0 && buffer.getLine(start)?.isWrapped === true) start -= 1;
-  let end = requested;
-  while (buffer.getLine(end + 1)?.isWrapped === true) end += 1;
+  for (;;) {
+    if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
+    if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start)) { start -= 1; continue; }
+    break;
+  }
+  // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
+  // mid-URL, hanging-indent continuation rows (indent stripped for link matching, but recorded so the
+  // underline maps back to the row's REAL columns). Stop at the first row that is neither.
   const rows = [];
   let offset = 0;
-  for (let index = start; index <= end; index += 1) {
-    const text = terminalBufferLineText(buffer.getLine(index));
-    rows.push({y: index + 1, text, start: offset, end: offset + text.length});
+  let joined = '';
+  let index = start;
+  for (;;) {
+    let text;
+    let indent = 0;
+    if (index === start) {
+      text = terminalBufferLineText(buffer.getLine(index));
+    } else if (buffer.getLine(index)?.isWrapped === true) {
+      text = terminalBufferLineText(buffer.getLine(index));
+    } else if (terminalTailIsUnterminatedUrl(joined)) {
+      const shape = terminalRowHangingShape(buffer, index);
+      if (!shape) break;
+      indent = shape.indent;
+      text = shape.text;
+    } else {
+      break;
+    }
+    rows.push({y: index + 1, text, indent, start: offset, end: offset + text.length});
     offset += text.length;
+    joined += text;
+    index += 1;
+    if (!buffer.getLine(index)) break;
   }
-  return {text: rows.map(row => row.text).join(''), rows};
+  return {text: joined, rows};
 }
 
 function terminalWrappedOffsetPosition(group, offset, endPosition = false) {
   const target = endPosition ? Math.max(0, offset - 1) : offset;
   const row = group.rows.find(candidate => target >= candidate.start && target < candidate.end) || group.rows[group.rows.length - 1];
   if (!row) return null;
-  return {x: Math.max(1, target - row.start + 1), y: row.y};
+  // A stitched continuation row had `indent` leading spaces stripped before joining, so its real
+  // terminal column is shifted right by that indent (DOIT.27).
+  return {x: Math.max(1, target - row.start + 1 + (row.indent || 0)), y: row.y};
 }
 
 function terminalWrappedRange(group, startIndex, endIndex) {

@@ -564,3 +564,72 @@ def test_is_text_path_recognizes_known_extensions():
     assert not filesystem.is_text_path("/tmp/foo.png")
     assert not filesystem.is_text_path("/tmp/foo.PNG")
     assert not filesystem.is_text_path("/tmp/foo.exe")
+
+
+def test_parse_blame_porcelain_extracts_author_pr_and_uncommitted():
+    sha = "a" * 40
+    sample = (
+        f"{sha} 1 1 1\n"
+        "author Jane Doe\n"
+        "author-time 1700000000\n"
+        "summary Fix the thing (#42)\n"
+        "\tcode line one\n"
+        f"{sha} 2 2\n"
+        "\tcode line two\n"
+        "0000000000000000000000000000000000000000 3 3 1\n"
+        "author Not Committed Yet\n"
+        "author-time 1700000001\n"
+        "summary uncommitted\n"
+        "\tuncommitted line\n"
+    )
+    lines = filesystem._parse_blame_porcelain(sample)
+    assert lines["1"]["author"] == "Jane Doe"
+    assert lines["1"]["pr"] == 42
+    assert lines["1"]["summary"] == "Fix the thing (#42)"
+    assert lines["1"]["time"] == 1700000000
+    # commit headers appear once; line 2 of the same commit reuses them
+    assert lines["2"]["author"] == "Jane Doe"
+    assert lines["2"]["summary"] == "Fix the thing (#42)"
+    # an all-zero sha is the uncommitted sentinel → "You" / "Uncommitted changes"
+    assert lines["3"]["author"] == "You"
+    assert lines["3"]["summary"] == "Uncommitted changes"
+    assert lines["3"]["pr"] is None
+
+
+def test_blame_file_on_a_tracked_repo_file():
+    # AGENTS.md is committed in this repo; blame should return per-line commit info.
+    repo_file = str(Path(__file__).resolve().parents[1] / "AGENTS.md")
+    result = filesystem.blame_file(repo_file)
+    assert result["in_repo"] is True
+    assert result["lines"], "expected per-line blame for a tracked file"
+    first = result["lines"]["1"]
+    assert len(first["sha"]) == 40
+    assert first["author"]
+
+
+def test_list_directory_flags_symlinks_with_target(tmp_path):
+    # DOIT.31: symlink entries carry is_symlink + symlink_target; a symlink to a dir resolves kind=dir,
+    # to a file kind=file, and a dangling link is kind=symlink-broken. Plain entries are not flagged.
+    (tmp_path / "real_dir").mkdir()
+    (tmp_path / "real_file.txt").write_text("hi", encoding="utf-8")
+    os.symlink(tmp_path / "real_dir", tmp_path / "link_dir")
+    os.symlink(tmp_path / "real_file.txt", tmp_path / "link_file")
+    os.symlink(tmp_path / "nope", tmp_path / "link_broken")
+
+    payload = filesystem.list_directory(str(tmp_path))
+    by_name = {entry["name"]: entry for entry in payload["entries"]}
+
+    assert by_name["link_dir"]["is_symlink"] is True
+    assert by_name["link_dir"]["kind"] == "dir"
+    assert by_name["link_dir"]["symlink_target"] == str(tmp_path / "real_dir")
+
+    assert by_name["link_file"]["is_symlink"] is True
+    assert by_name["link_file"]["kind"] == "file"
+    assert by_name["link_file"]["symlink_target"] == str(tmp_path / "real_file.txt")
+
+    assert by_name["link_broken"]["is_symlink"] is True
+    assert by_name["link_broken"]["kind"] == "symlink-broken"
+    assert by_name["link_broken"]["symlink_target"] == str(tmp_path / "nope")
+
+    assert by_name["real_file.txt"]["is_symlink"] is False
+    assert "symlink_target" not in by_name["real_file.txt"]

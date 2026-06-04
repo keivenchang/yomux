@@ -167,6 +167,8 @@ function createPanel(session) {
 function renderInfoPanel() {
   const node = document.getElementById('info-content');
   if (!node) return;
+  bindInfoPrContextMenu(node);   // DOIT.29: idempotent — "Watch this PR" on the PR column
+  renderWatchedPrs();   // DOIT.29: the Watched PRs section repaints alongside the branch table
   const rows = infoBranchRows();
   if (!rows.length) {
     node.innerHTML = '<div class="info-empty">No branch metadata loaded yet.</div>';
@@ -203,6 +205,142 @@ function renderInfoPanel() {
       renderInfoPanel();
     });
   });
+}
+
+// DOIT.29: client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
+// ("owner/repo#N", "owner/repo/N", or a github.com PR URL) to the canonical "owner/repo#N", else ''.
+// Used to dedupe and to match a stored entry (which may be a URL) against a PR's canonical ref.
+function normalizeWatchedPrRef(entry) {
+  const text = String(entry || '').trim();
+  if (!text) return '';
+  const seg = '[A-Za-z0-9._-]+';
+  if (/github\.com/i.test(text) && /:\/\//.test(text)) {
+    const match = text.match(new RegExp(`github\\.com/(${seg})/(${seg})/(?:pull|pulls)/(\\d+)`, 'i'));
+    if (match) return `${match[1]}/${match[2]}#${Number(match[3])}`;
+    return '';
+  }
+  const short = text.match(new RegExp(`^(${seg})/(${seg})(?:#|/(?:pull/)?)(\\d+)$`));
+  if (short && Number(short[3]) > 0) return `${short[1]}/${short[2]}#${Number(short[3])}`;
+  return '';
+}
+
+function watchedPrStatusText(pr) {
+  return pullRequestStatusDisplay(pr) || (pr?.state ? String(pr.state).toUpperCase() : 'UNKNOWN');
+}
+
+// The Watched PRs section of YO!info — PRs tracked independent of any open session's branch. Reuses
+// the pr-status-* badge classes; renders into its own #info-watched container so it can repaint on the
+// (longer) watched-PR poll cadence without re-rendering the branch table.
+function renderWatchedPrs() {
+  const node = document.getElementById('info-watched');
+  if (!node) return;
+  const prs = Array.isArray(watchedPrsData.watched_prs) ? watchedPrsData.watched_prs : [];
+  const heading = `<div class="info-watched-head">${esc(t('info.watched.heading'))}</div>`;
+  if (!prs.length) {
+    node.innerHTML = `${heading}<div class="info-empty info-watched-empty">${esc(t('info.watched.empty'))}</div>`;
+    return;
+  }
+  const rows = prs.map(pr => {
+    const ref = String(pr.ref || `#${pr.number}`);
+    const statusCls = pullRequestStatusClass(pr);
+    const statusText = watchedPrStatusText(pr);
+    const link = linkHtml(pr.url, ref, pr.title || pr.description || '', 'info-watched-ref');
+    return `<div class="info-row info-watched-row" data-watched-ref="${esc(ref)}">
+      <div class="info-cell info-watched-ref-cell">${link}</div>
+      <div class="info-cell info-watched-title" title="${esc(pr.title || '')}">${esc(pr.title || '')}</div>
+      <div class="info-cell info-watched-status"><span class="meta-pr-status ${esc(statusCls)}">${esc(statusText)}</span></div>
+      <div class="info-cell info-watched-actions"><button type="button" class="info-watched-remove" data-watched-remove="${esc(ref)}" title="${esc(t('info.watched.remove'))}" aria-label="${esc(t('info.watched.remove'))}">×</button></div>
+    </div>`;
+  }).join('');
+  const truncated = watchedPrsData.truncated > 0
+    ? `<div class="info-watched-note">${esc(t('info.watched.truncated', {count: String(watchedPrsData.truncated)}))}</div>`
+    : '';
+  node.innerHTML = heading + rows + truncated;
+  node.querySelectorAll('[data-watched-remove]').forEach(button => {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      removeWatchedPr(button.dataset.watchedRemove);
+    });
+  });
+}
+
+async function refreshWatchedPrs() {
+  try {
+    const response = await apiFetch('/api/watched-prs');
+    const data = await response.json();
+    if (!data || typeof data !== 'object') return;
+    watchedPrsData = {
+      watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
+      truncated: Number(data.truncated) || 0,
+      invalid: Array.isArray(data.invalid) ? data.invalid : [],
+      refresh_ms: Number(data.refresh_ms) || watchedPrRefreshMs,
+    };
+    notifyWatchedPrTransitions(watchedPrsData.watched_prs);
+    renderWatchedPrs();
+  } catch (error) {
+    // Non-fatal: keep the last good render; the next poll retries.
+  }
+}
+
+// Append a PR ref to github.watched_prs (dedup by canonical ref); accepts owner/repo#N or a PR URL.
+function addWatchedPr(entry) {
+  const ref = normalizeWatchedPrRef(entry);
+  if (!ref) {
+    statusErr(t('info.watched.invalid', {entry: String(entry || '')}));
+    return;
+  }
+  const current = initialSetting('github.watched_prs', []);
+  const list = Array.isArray(current) ? current.slice() : [];
+  if (list.some(item => normalizeWatchedPrRef(item) === ref)) {
+    statusOk(t('info.watched.already', {ref}));
+    return;
+  }
+  list.push(ref);
+  saveSettingsPatch(settingPatch('github.watched_prs', list))
+    .then(() => { statusOk(t('info.watched.added', {ref})); refreshWatchedPrs(); })
+    .catch(error => statusErr(`settings save failed: ${esc(error)}`));
+}
+
+function removeWatchedPr(ref) {
+  const target = normalizeWatchedPrRef(ref) || String(ref || '');
+  const current = initialSetting('github.watched_prs', []);
+  const list = (Array.isArray(current) ? current : []).filter(item => normalizeWatchedPrRef(item) !== target && String(item).trim() !== target);
+  saveSettingsPatch(settingPatch('github.watched_prs', list))
+    .then(() => { statusOk(t('info.watched.removed', {ref: target})); refreshWatchedPrs(); })
+    .catch(error => statusErr(`settings save failed: ${esc(error)}`));
+}
+
+// DOIT.29: right-clicking a PR link in YO!info offers "Watch this PR" (adds it to github.watched_prs).
+// Delegated on #info-content so it covers both the branch-table PR column and any future PR cells.
+function bindInfoPrContextMenu(node) {
+  if (!node || node.dataset.watchedPrMenuBound === '1') return;
+  node.dataset.watchedPrMenuBound = '1';
+  node.addEventListener('contextmenu', event => {
+    const cell = event.target.closest('.info-cell');
+    const link = cell?.querySelector?.('a[href*="github.com/"][href*="/pull/"]');
+    if (!link) return;
+    const ref = normalizeWatchedPrRef(link.getAttribute('href') || '');
+    if (!ref) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showWatchPrContextMenu(ref, event.clientX, event.clientY);
+  });
+}
+
+function showWatchPrContextMenu(ref, x, y) {
+  const already = (Array.isArray(initialSetting('github.watched_prs', [])) ? initialSetting('github.watched_prs', []) : [])
+    .some(item => normalizeWatchedPrRef(item) === ref);
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu watched-pr-context-menu';
+  menu.setAttribute('role', 'menu');
+  appendContextMenuButton(
+    menu,
+    already ? t('info.watched.unwatchThis', {ref}) : t('info.watched.watchThis', {ref}),
+    () => (already ? removeWatchedPr(ref) : addWatchedPr(ref)),
+    () => watchedPrContextMenu.close(),
+  );
+  watchedPrContextMenu.open(menu, x, y);
 }
 
 function scrollYoagentChatToBottom(node = document.getElementById('yoagent-content')) {
@@ -1780,6 +1918,7 @@ async function boot() {
   renderPanels([], {prune: false});
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
   refreshTranscripts();
+  refreshWatchedPrs();   // DOIT.29: first watched-PR fetch at boot; thereafter on its own interval
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();

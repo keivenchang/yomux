@@ -616,6 +616,9 @@ function activatePaneTab(side, session, options = {}) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
+  // DOIT.21: a user-initiated tab switch IS navigation — record EVERY tab kind (file, terminal, Finder,
+  // Prefs, …) so Back returns to the previous tab worked on, not just files. (No-op while navigating.)
+  if (options.userInitiated === true) recordEditorNav(session);
   setFocusedPanelItem(session);
   if (activeItemForSide(side) === session) {
     focusPanel(session, {userInitiated: options.userInitiated === true});

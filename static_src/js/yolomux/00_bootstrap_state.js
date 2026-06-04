@@ -241,6 +241,10 @@ const fileEditorViewMode = new Map();  // layout item or path -> "edit" | "previ
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
+// DOIT.26: inline git blame (Cursor-style). Persisted toggle + a per-path cache of the /api/blame payload.
+let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
+const editorBlameByPath = new Map();  // path -> {lines: {lineNo: {sha, author, time, summary, pr}}, in_repo}
+const editorBlameFetches = new Map();  // DOIT.34 #3: in-flight /api/blame fetch per path (dedup concurrent panels)
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 // B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
 let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
@@ -353,6 +357,11 @@ const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
 let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
 let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15000);
+// DOIT.29: watched PRs poll on their own (longer) cadence; the latest payload + last-seen status per
+// PR ref (for notify-on-transition diffing) live here.
+let watchedPrRefreshMs = initialSetting('performance.watched_pr_refresh_ms', 60000);
+let watchedPrsData = {watched_prs: [], truncated: 0, invalid: [], refresh_ms: watchedPrRefreshMs};
+const watchedPrLastStatus = new Map();
 let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1250);
 let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
@@ -721,6 +730,7 @@ const terminalContextMenu = createContextMenuController();
 const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
+const watchedPrContextMenu = createContextMenuController();   // DOIT.29: "Watch this PR" on YO!info PR cells
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;

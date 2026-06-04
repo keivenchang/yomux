@@ -294,6 +294,30 @@ function setEditorWrapEnabled(enabled) {
   applyEditorWrapPreference();
 }
 
+// DOIT.26: toggle inline git blame. Fetch the blame payload for each open text file first (so the
+// re-rendered editor's blame ViewPlugin has data), then re-render with each panel's OWN item.
+async function applyEditorBlamePreference() {
+  for (const panel of document.querySelectorAll('.file-editor-panel')) {
+    const blameButton = panel.querySelector('.file-editor-blame-panel');
+    if (blameButton) blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
+    const path = panel.dataset.filePath;
+    const state = openFiles.get(path);
+    if (!path || state?.kind !== 'text') continue;
+    if (fileEditorBlameEnabled && !editorBlameByPath.has(path)) await fetchEditorBlame(path);
+    renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+  }
+}
+
+function setFileEditorBlameEnabled(enabled) {
+  fileEditorBlameEnabled = enabled === true;
+  storageSet('yolomux.editorBlame', fileEditorBlameEnabled ? '1' : '0');
+  applyEditorBlamePreference();
+}
+
+function toggleFileEditorBlame() {
+  setFileEditorBlameEnabled(!fileEditorBlameEnabled);
+}
+
 function toggleEditorWrap() {
   const enabled = !fileEditorWrapEnabled;
   setEditorWrapEnabled(enabled);
@@ -464,6 +488,7 @@ function applySettingsPayload(payload, options = {}) {
   clientSettingsMtimeNs = nextMtime;
   remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 220);
   metadataRefreshMs = numberSetting('performance.metadata_refresh_ms', 15000);
+  watchedPrRefreshMs = numberSetting('performance.watched_pr_refresh_ms', 60000);
   paneStateRefreshMs = numberSetting('performance.pane_state_refresh_ms', 1250);
   latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3000);
   eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5000);
@@ -575,6 +600,7 @@ function resetRuntimeInterval(name, callback, delay) {
 function installRuntimeIntervals() {
   resetRuntimeInterval('auto', refreshAutoStatuses, paneStateRefreshMs);
   resetRuntimeInterval('metadata', refreshTranscripts, metadataRefreshMs);
+  resetRuntimeInterval('watched-prs', refreshWatchedPrs, watchedPrRefreshMs);
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('filesystem', refreshWatchedFilesystem, fileExplorerRefreshMs);

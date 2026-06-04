@@ -858,6 +858,10 @@ function fileTreeRepoBranchIsNonMain(path) {
 }
 
 function fileTreeDisplayParts(path, entry) {
+  // DOIT.31: a symlink shows where it points inline — "name → target" (the raw link text, rel or abs).
+  const linkTarget = entry.is_symlink === true && entry.symlink_target ? String(entry.symlink_target) : '';
+  const linkSuffixText = linkTarget ? ` → ${linkTarget}` : '';
+  const linkSuffixHtml = linkTarget ? ` <span class="file-tree-symlink-target">→ ${esc(linkTarget)}</span>` : '';
   if (entry.kind === 'dir' && entry.is_repo === true) {
     const branch = fileTreeRepoBranch(path);
     const numstat = fileTreeRepoNumstat(path);
@@ -868,14 +872,15 @@ function fileTreeDisplayParts(path, entry) {
     for (const part of sync) htmlParts.push(`<span class="${part.cls}">${esc(part.text)}</span>`);
     if (numstat) htmlParts.push(`<span class="file-tree-repo-delta">${esc(numstat)}</span>`);
     return {
-      text: textParts.length ? `${entry.name} [${textParts.join(' ')}]` : entry.name,
-      html: htmlParts.length
+      text: (textParts.length ? `${entry.name} [${textParts.join(' ')}]` : entry.name) + linkSuffixText,
+      html: (htmlParts.length
         ? `${esc(entry.name)} <span class="file-tree-repo-meta">[${htmlParts.join(' ')}]</span>`
-        : esc(entry.name),
+        : esc(entry.name)) + linkSuffixHtml,
     };
   }
-  const text = entry.kind === 'file' ? `${entry.name}${fileTreeNumstatText(path)}` : entry.name;
-  return {text, html: ''};
+  const baseText = entry.kind === 'file' ? `${entry.name}${fileTreeNumstatText(path)}` : entry.name;
+  if (linkTarget) return {text: baseText + linkSuffixText, html: esc(baseText) + linkSuffixHtml};
+  return {text: baseText, html: ''};
 }
 
 function fileTreeMtimeText(entry) {
@@ -999,6 +1004,10 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
+  // DOIT.31: flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
+  // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
+  row.classList.toggle('is-symlink', entry.is_symlink === true);
+  row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
   const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : fileExplorerIndexBadgeText(fullPath);
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
@@ -1013,7 +1022,13 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
     row.onmouseenter = null;
     row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
-    row.removeAttribute('title');
+    // DOIT.31: a symlink's native title shows where it points ("name → target", broken flagged).
+    if (entry.is_symlink === true && entry.symlink_target) {
+      const broken = entry.kind === 'symlink-broken';
+      row.title = `${entry.name} → ${entry.symlink_target}${broken ? ` ${t('finder.symlink.broken')}` : ''}`;
+    } else {
+      row.removeAttribute('title');
+    }
   }
   const newEntry = fileExplorerEntryIsNew(fullPath);
   row.classList.toggle('new-entry', newEntry);
@@ -1573,8 +1588,11 @@ function fileContextMenuState(entry, selectedPaths, relativePaths) {
   const multiple = selectedPaths.length > 1;
   return {
     copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
-    openInNewTabDisabled: multiple || !entryIsImageFile(entry),
-    downloadDisabled: multiple || entry?.kind !== 'file',
+    // DOIT.34 #2: readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
+    // so the file-read affordances (open image in a tab via /api/fs/raw, Download via /api/fs/raw) are
+    // disabled in readonly to match the server, instead of offering a command that 403s.
+    openInNewTabDisabled: multiple || !entryIsImageFile(entry) || readOnlyMode,
+    downloadDisabled: multiple || entry?.kind !== 'file' || readOnlyMode,
     indexToggleDisabled: multiple || entry?.kind !== 'dir' || (!fileExplorerDirectoryIsIndexed(selectedPaths[0]) && Boolean(fileExplorerIndexedAncestor(selectedPaths[0]))),
     renameDisabled: readOnlyMode || multiple,
     deleteDisabled: readOnlyMode,
@@ -2609,7 +2627,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   };
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
   else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
-  recordEditorNav(fullPath);   // DOIT.21: push to the back/forward history (no-op while navigating)
+  recordEditorNav(item);   // DOIT.21: push this tab to the back/forward history (no-op while navigating)
   if (openFiles.has(fullPath)) {
     await showFileEditorPaneForPath(fullPath, openOptions);
     if (options.viewMode) renderOpenFilePath(fullPath);
@@ -3249,6 +3267,79 @@ function codeMirrorWrapMarkerExtension(api) {
   });
 }
 
+// DOIT.26: inline git blame. Lazily fetch the /api/blame payload for a path into editorBlameByPath.
+// DOIT.34 #3: dedup concurrent fetches (multiple open panels for one path share a single request).
+async function fetchEditorBlame(path) {
+  if (editorBlameFetches.has(path)) return editorBlameFetches.get(path);
+  const promise = (async () => {
+    try {
+      const response = await apiFetch(`/api/blame?path=${encodeURIComponent(path)}`);
+      if (!response.ok) return null;
+      const data = await response.json();
+      editorBlameByPath.set(path, data);
+      return data;
+    } catch (_error) {
+      return null;
+    } finally {
+      editorBlameFetches.delete(path);
+    }
+  })();
+  editorBlameFetches.set(path, promise);
+  return promise;
+}
+
+// DOIT.34 #3: when a text editor opens/renders with blame already ON but its blame isn't cached yet
+// (the common case: enable blame, THEN open a new file), fetch it and nudge the open editors so the
+// blame ViewPlugin recomputes its decoration against the now-populated cache — no manual toggle needed.
+async function ensureEditorBlameForPath(path) {
+  if (!fileEditorBlameEnabled || !path || editorBlameByPath.has(path)) return;
+  await fetchEditorBlame(path);
+  if (!fileEditorBlameEnabled || !editorBlameByPath.has(path)) return;
+  for (const panel of fileEditorPanelsForPath(path)) {
+    const view = panel?._cmView;
+    if (!view) continue;
+    // A selection-preserving transaction has selectionSet=true, which is what the blame ViewPlugin
+    // listens for — so it rebuilds the current-line annotation now that the data is present.
+    try { view.dispatch({selection: view.state.selection}); } catch (_) {}
+  }
+}
+
+function blameAnnotationText(info) {
+  const author = info.author || '';
+  const rel = info.time ? relativeTimeFormat(Math.max(0, Math.floor(Date.now() / 1000) - info.time)) : '';
+  const pr = info.pr ? ` (#${info.pr})` : '';
+  return `${author}, ${rel} • ${info.summary || ''}${pr}`.trim();
+}
+
+function blameHoverText(info) {
+  const author = info.author || '';
+  const abs = info.time ? new Date(info.time * 1000).toLocaleString() : '';
+  const sha = info.sha && !/^0+$/.test(info.sha) ? ` [${info.sha.slice(0, 8)}]` : '';
+  return `${author} • ${abs}${sha}\n${info.summary || ''}`.trim();
+}
+
+// Decorate the CURSOR's current line with the dim blame annotation (rendered via a CSS ::after that
+// flows after the line text — the bundle exposes no WidgetType). The dim color comes from the editor
+// scheme's --code-comment token (theme-aware), and the full commit is the line's native title tooltip.
+function codeMirrorBlameExtension(api, path) {
+  if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
+  const build = view => {
+    const blame = editorBlameByPath.get(path);
+    if (!blame || !blame.lines) return api.Decoration.none;
+    const line = view.state.doc.lineAt(view.state.selection.main.head);
+    const info = blame.lines[String(line.number)];
+    if (!info) return api.Decoration.none;
+    const deco = api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
+    return api.Decoration.set([deco.range(line.from)]);
+  };
+  return api.ViewPlugin.fromClass(class {
+    constructor(view) { this.decorations = build(view); }
+    update(update) {
+      if (update.docChanged || update.selectionSet || update.viewportChanged) this.decorations = build(update.view);
+    }
+  }, {decorations: plugin => plugin.decorations});
+}
+
 function codeMirrorHtmlSemanticEmphasisExtension(api, path) {
   if (codeMirrorLanguageName(path) !== 'html' || !api.ViewPlugin || !api.Decoration) return [];
   const palette = activeEditorScheme().syntax;
@@ -3391,6 +3482,27 @@ function codeMirrorSearchMatchSummary(text, query, selection = {}, options = {})
   }
   if (index < 0) index = matches.length - 1;
   return {current: index + 1, total: matches.length, text: `${index + 1}/${matches.length}`};
+}
+
+// When you navigate search matches, CodeMirror's default scrollIntoView lands on a far-right horizontal
+// position if the document has any long line (e.g. a padded locale JSON, 276-char line): a match on a
+// SHORT line then sits off-screen left and the editor looks "scrolled all the way to the right" (blank).
+// Re-center the match horizontally on every search-driven selection change — for a short line that
+// reveals the line start; for a long line it keeps the match comfortably in view. (Deferred to a rAF
+// because dispatch() is not allowed inside an update listener.)
+function codeMirrorSearchScrollFix(api) {
+  if (!api.EditorView?.updateListener || !api.EditorView?.scrollIntoView) return [];
+  return api.EditorView.updateListener.of(update => {
+    if (!update.selectionSet) return;
+    if (!update.transactions.some(tr => tr.isUserEvent?.('select.search'))) return;
+    const head = update.state.selection.main.head;
+    const view = update.view;
+    requestAnimationFrame(() => {
+      try {
+        view.dispatch({effects: api.EditorView.scrollIntoView(head, {x: 'center', y: 'nearest'})});
+      } catch (_) {}
+    });
+  });
 }
 
 function codeMirrorSearchPanelEnhancementExtension(api) {
@@ -3548,12 +3660,14 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
+    codeMirrorSearchScrollFix(api),
     api.highlightSelectionMatches(),
     saveKeymap,
     findKeymap,
     powerKeymap,
     api.keymap.of([api.indentWithTab, ...api.defaultKeymap, ...api.historyKeymap, ...api.searchKeymap]),
     ...(wrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+    codeMirrorBlameExtension(api, path),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
     codeMirrorLanguageExtension(api, path),

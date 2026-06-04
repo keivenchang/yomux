@@ -322,6 +322,12 @@ globalThis.__layoutTestApi = {
   setFileExplorerIndexedDirsForTest(paths) { setFileExplorerIndexedDirs(paths); },
   setFileExplorerIndexStatusForTest(root, status) { fileExplorerIndexStatus.set(normalizeStoredFileExplorerIndexedDir(root), status); },
   createTopbarSearch,
+  createTopbarNav,
+  normalizeWatchedPrRef,
+  watchedPrStatusSnapshot,
+  watchedPrStatusText,
+  watchedPrTransitionKeys,
+  shouldNotifyTransitionKey,
   codeMirrorDiffLayout,
   changesPaneTabHtml,
   changesPanelHtml,
@@ -2131,7 +2137,11 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(220, 38, 38, 0.80)'), 'light pane splitter is red at rest');
   assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 1.5px'), 'pane splitter hover thickens only modestly (1.5px) over the 1px resting line');
   assert.ok(preferencesCss.includes('--pane-tile-radius: 0'), 'adjacent panes meet flush with square corners (no rounded-corner seam wedges)');
-  assert.ok(/\.topbar-search\s*\{[^}]*margin:\s*0 auto/.test(preferencesCss), '#29: topbar universal search is centered (auto margins both sides) between the menubar and the right-side actions, not right-aligned');
+  // #29 + DOIT.21: the nav (←/→) and search are centered as a PAIR — the nav absorbs the left free
+  // space (margin-inline-start:auto) and the search absorbs the right (margin-inline: 6px auto), so the
+  // cluster sits centered between the menubar and the right-side actions, not right-aligned.
+  assert.ok(/\.topbar-nav\s*\{[^}]*margin-inline-start:\s*auto/.test(preferencesCss), '#29: the topbar nav group absorbs the left free space so the nav+search pair centers');
+  assert.ok(/\.topbar-search\s*\{[^}]*margin-inline:\s*6px auto/.test(preferencesCss), '#29: topbar universal search is centered (auto inline-end) between the menubar and the right-side actions, not right-aligned');
   assert.ok(/\.resizer-row::after\s*\{[^}]*inset-inline: -5px/.test(preferencesCss), '#34: the resizer has a wide invisible grab zone (~5px past the line) so it is easy to grab');
   assert.equal(/\.panel \{[^}]*border: 1px solid var\(--line\)/.test(preferencesCss), false, '#35: panes drop the per-pane border so the only divider is the 1px separator');
   // The active/focus outline is the pane's "natural border" (a --pane-split-gap-wide real border, never
@@ -2335,7 +2345,7 @@ function makeFileTree(paths) {
   // DOIT.6 #32: a white terminal auto-darkens faint 24-bit agent text via minimumContrastRatio.
   assert.equal(api.terminalMinimumContrastRatio('dark'), 4.5, '#32: light terminal raises the minimum contrast ratio');
   api.setTerminalThemeModeForTest('dark');
-  assert.equal(api.terminalMinimumContrastRatio('dark'), 1, '#32: dark terminal does not adjust contrast (agents assume dark)');
+  assert.equal(api.terminalMinimumContrastRatio('dark'), 3, 'DOIT.30: dark terminal uses a moderate 3:1 floor so a light-on-white agent composer (Codex input) is forced readable');
   api.setTerminalThemeModeForTest('light');
   api.setTerminalThemeModeForTest('follow-app');
   assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app maps to the resolved app theme');
@@ -3628,7 +3638,11 @@ function makeFileTree(paths) {
 
   const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
   const readonlyState = readonlyApi.fileContextMenuState({kind: 'file'}, ['/repo/app/a.txt'], ['a.txt']);
-  assert.equal(readonlyState.downloadDisabled, false);
+  // DOIT.34 #2: readonly is terminal-only — the server 403s every /api/fs/* read, so Download (and image
+  // open) are disabled in readonly to match, rather than offering a command that fails.
+  assert.equal(readonlyState.downloadDisabled, true, 'readonly cannot download (server forbids /api/fs/raw)');
+  const readonlyImage = readonlyApi.fileContextMenuState({kind: 'file', name: 'screen.png'}, ['/repo/app/screen.png'], ['screen.png']);
+  assert.equal(readonlyImage.openInNewTabDisabled, true, 'readonly cannot open an image in a tab (server forbids the read)');
   assert.equal(readonlyState.renameDisabled, true);
   assert.equal(readonlyState.deleteDisabled, true);
 }
@@ -3905,6 +3919,41 @@ function makeFileTree(paths) {
   assert.ok(popover.indexOf('popover-label">Linear') < popover.indexOf('popover-label">PR'), 'tab popover lists Linear before PR');
 }
 
+// DOIT.33: a session is findable by an OTHER-branch PR / branch name / Linear ID — the same
+// project.git.other_branches data YO!info shows — not only its current-branch PR.
+{
+  const api = loadYolomux();
+  const info = {
+    selected_pane: {current_path: '/home/test/dynamo4'},
+    project: {
+      git: {
+        branch: 'main',
+        root: '/home/test/dynamo4',
+        other_branches: {
+          branches: [
+            {
+              name: 'keivenc/DIS-2193__other-work',
+              current: false,
+              pull_request: {number: 10289, title: 'feat: other branch work'},
+              linear_ids: ['DIS-2193'],
+            },
+          ],
+        },
+      },
+    },
+  };
+  api.setTranscriptInfoForTest('4', info);
+  const fields = api.tabSearchFields('4');
+  assert.ok(fields.includes('#10289'), 'DOIT.33: an other-branch PR is indexed as #N');
+  assert.ok(fields.includes('PR#10289'), 'DOIT.33: ...and as PR#N');
+  assert.ok(fields.includes('10289'), 'DOIT.33: ...and as a bare number');
+  assert.ok(fields.includes('keivenc/DIS-2193__other-work'), 'DOIT.33: the other branch name is indexed');
+  assert.ok(fields.includes('DIS-2193'), 'DOIT.33: the other-branch Linear ID is indexed');
+  assert.ok(fields.includes('feat: other branch work'), 'DOIT.33: the other-branch PR title is indexed');
+  assert.ok(api.tabSearchScore('4', '#10289') >= 0, 'DOIT.33: searching #10289 matches the session');
+  assert.ok(api.tabSearchScore('4', 'DIS-2193') >= 0, 'DOIT.33: searching the Linear ID matches the session');
+}
+
 {
   const api = loadYolomux('', ['alpha', 'beta']);
   api.setActivitySummaryPayloadForTest({
@@ -4035,6 +4084,130 @@ function makeFileTree(paths) {
   const lastLinks = api.terminalWrappedLineLinks(term, 3);
   assert.equal(lastLinks.length, 1);
   assert.equal(lastLinks[0].text, 'https://example.com/abcdef');
+}
+
+// DOIT.27: an agent HARD-wraps a long URL with a HANGING INDENT — the continuation is its own logical
+// line (isWrapped === false), indented under the URL column. Stitch it onto the link so the whole URL
+// is one clickable link, underlined across both rows at their real columns.
+{
+  const api = loadYolomux();
+  const lines = [
+    terminalLine('https://github.com/ai-dynamo/frontend-crates/actions/runs/26'),
+    terminalLine('    919558600/job', false),  // hanging indent (4 spaces), NOT a soft-wrap
+    terminalLine('$ ', false),                 // a plain prompt row — must NOT be merged
+  ];
+  const term = {buffer: {active: {getLine: index => lines[index] || null}}};
+
+  const full = 'https://github.com/ai-dynamo/frontend-crates/actions/runs/26919558600/job';
+  // Query from the FIRST row.
+  const firstRow = api.terminalWrappedLineLinks(term, 1);
+  assert.equal(firstRow.length, 1, 'DOIT.27: the hard-wrapped URL is one link when hovering row 1');
+  assert.equal(firstRow[0].text, full, 'DOIT.27: the link text is the full stitched URL');
+  assert.equal(firstRow[0].range.start.y, 1);
+  assert.equal(firstRow[0].range.start.x, 1);
+  assert.equal(firstRow[0].range.end.y, 2, 'DOIT.27: the underline extends onto the continuation row');
+  // continuation '919558600/job' is 13 chars after a 4-space indent → last char at column 4 + 13 = 17.
+  assert.equal(firstRow[0].range.end.x, 17, 'DOIT.27: the continuation underline lands at its REAL (indented) columns');
+
+  // Query from the CONTINUATION row — same link (backward sweep finds the URL start).
+  const contRow = api.terminalWrappedLineLinks(term, 2);
+  assert.equal(contRow.length, 1, 'DOIT.27: the link is also active when hovering the continuation row');
+  assert.equal(contRow[0].text, full);
+  assert.equal(contRow[0].range.start.y, 1);
+  assert.equal(contRow[0].range.end.y, 2);
+
+  // A plain prompt row below is NOT part of the link.
+  const promptRow = api.terminalWrappedLineLinks(term, 3);
+  assert.equal(promptRow.length, 0, 'DOIT.27: the prompt row after the URL is not merged into the link');
+}
+
+// DOIT.27 (no false merge): an indented line under a row that ends in PROSE (not an unterminated URL)
+// is left alone — only a url token that runs off the right edge gets a continuation stitched on.
+{
+  const api = loadYolomux();
+  const lines = [
+    terminalLine('Here are the steps to run:'),  // ends in prose, no trailing URL
+    terminalLine('    https://example.com/guide', false),
+  ];
+  const term = {buffer: {active: {getLine: index => lines[index] || null}}};
+  const row1 = api.terminalWrappedLineLinks(term, 1);
+  assert.equal(row1.length, 0, 'DOIT.27: a prose line is not merged with the indented URL below it');
+  const row2 = api.terminalWrappedLineLinks(term, 2);
+  assert.equal(row2.length, 1, 'DOIT.27: the indented URL on its own row still links');
+  assert.equal(row2[0].text, 'https://example.com/guide');
+  // It links at its own indented columns (4-space indent → starts at column 5).
+  assert.equal(row2[0].range.start.x, 5, 'DOIT.27: a standalone indented URL underlines at its real column');
+  assert.equal(row2[0].range.start.y, 2);
+}
+
+// DOIT.29: watched-PR ref normalization (client mirror of the backend parse_pull_request_ref).
+{
+  const api = loadYolomux();
+  assert.equal(api.normalizeWatchedPrRef('ai-dynamo/frontend-crates#18'), 'ai-dynamo/frontend-crates#18');
+  assert.equal(api.normalizeWatchedPrRef('ai-dynamo/frontend-crates/18'), 'ai-dynamo/frontend-crates#18');
+  assert.equal(api.normalizeWatchedPrRef('https://github.com/ai-dynamo/frontend-crates/pull/18'), 'ai-dynamo/frontend-crates#18');
+  assert.equal(api.normalizeWatchedPrRef('https://github.com/owner/repo/pull/7/files'), 'owner/repo#7');
+  assert.equal(api.normalizeWatchedPrRef('  owner/repo#7  '), 'owner/repo#7');
+  assert.equal(api.normalizeWatchedPrRef('https://gitlab.com/owner/repo/pull/7'), '', 'DOIT.29: non-github URL is rejected');
+  assert.equal(api.normalizeWatchedPrRef('owner/repo'), '', 'DOIT.29: a repo without a PR number is rejected');
+  assert.equal(api.normalizeWatchedPrRef('owner/repo#0'), '', 'DOIT.29: PR #0 is rejected');
+  assert.equal(api.normalizeWatchedPrRef('not a ref'), '');
+  assert.equal(api.normalizeWatchedPrRef('https://github.com/owner/repo/issues/3'), '', 'DOIT.29: an issue URL is not a PR');
+}
+
+// DOIT.29: watched-PR status snapshot + the pure transition detector (merge / CI→failing / review).
+{
+  const api = loadYolomux();
+  const open = {state: 'open', checks: {state: 'passing'}, review_decision: 'REVIEW_REQUIRED'};
+  assert.deepStrictEqual(canonical(api.watchedPrStatusSnapshot(open)), {merged: false, ci: 'passing', review: 'REVIEW_REQUIRED'});
+  assert.equal(api.watchedPrStatusSnapshot({merged: true}).merged, true, 'DOIT.29: merged flag → merged snapshot');
+  assert.equal(api.watchedPrStatusSnapshot({status_label: 'merged'}).merged, true, 'DOIT.29: merged status_label → merged snapshot');
+  // First sighting (no prev) records a baseline → no transition (avoids a load-time storm).
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys(null, api.watchedPrStatusSnapshot(open))), []);
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'passing', review: ''}, {merged: true, ci: 'passing', review: ''})), ['pr-merged'], 'DOIT.29: → merged fires pr-merged');
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'passing', review: ''}, {merged: false, ci: 'failing', review: ''})), ['pr-ci-failing'], 'DOIT.29: CI → failing fires pr-ci-failing');
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'failing', review: ''}, {merged: false, ci: 'passing', review: ''})), [], 'DOIT.29: CI failing → passing is not a pr-ci-failing transition');
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys({merged: false, ci: 'passing', review: 'REVIEW_REQUIRED'}, {merged: false, ci: 'passing', review: 'APPROVED'})), ['pr-review'], 'DOIT.29: a review-decision change fires pr-review');
+  const same = api.watchedPrStatusSnapshot(open);
+  assert.deepStrictEqual(canonical(api.watchedPrTransitionKeys(same, same)), [], 'DOIT.29: an unchanged snapshot fires nothing');
+}
+
+// DOIT.29: notify_transitions gates the new PR keys — they are opt-in (NOT in the default allowlist).
+{
+  const api = loadYolomux();
+  assert.equal(api.shouldNotifyTransitionKey('needs-input'), true, 'DOIT.29: a default session-state key still notifies');
+  assert.equal(api.shouldNotifyTransitionKey('pr-merged'), false, 'DOIT.29: pr-merged is opt-in, off by default');
+}
+
+// DOIT.29: the watched-PR poll, endpoint, container, and topbar nav are wired into the bundle.
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes("resetRuntimeInterval('watched-prs', refreshWatchedPrs"), 'DOIT.29: watched PRs poll on their own runtime interval');
+  assert.ok(source.includes("apiFetch('/api/watched-prs')"), 'DOIT.29: refreshWatchedPrs fetches the watched-PRs endpoint');
+  assert.ok(source.includes('id="info-watched"'), 'DOIT.29: YO!info renders a watched-PRs container');
+  assert.ok(source.includes('notifyWatchedPrTransitions(watchedPrsData.watched_prs)'), 'DOIT.29: each poll diffs statuses to fire transition notifications');
+}
+
+// DOIT.31: Finder symlink badge — the row toggles is-symlink/symlink-broken, shows a name→target
+// title, and the CSS overlays an arrow badge (red + struck-through for broken).
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes("row.classList.toggle('is-symlink', entry.is_symlink === true)"), 'DOIT.31: rows flag symlinks');
+  assert.ok(source.includes("row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken')"), 'DOIT.31: rows flag broken symlinks');
+  assert.ok(/entry\.is_symlink === true && entry\.symlink_target[\s\S]{0,160}→ \$\{entry\.symlink_target\}/.test(source), 'DOIT.31: a symlink row title shows name → target');
+  // The target renders INLINE in the row name ("name → target"), rel or abs as stored.
+  const api = loadYolomux();
+  const linkFile = api.fileTreeDisplayParts('/repo/link', {kind: 'file', name: 'link', is_symlink: true, symlink_target: '../real/path.txt'});
+  assert.equal(linkFile.text, 'link → ../real/path.txt', 'DOIT.31: inline text shows name → target');
+  assert.ok(linkFile.html.includes('file-tree-symlink-target') && linkFile.html.includes('→ ../real/path.txt'), 'DOIT.31: inline target is its own dimmed span');
+  const linkDir = api.fileTreeDisplayParts('/repo/ld', {kind: 'dir', name: 'ld', is_symlink: true, symlink_target: '/abs/target'});
+  assert.ok(linkDir.text.includes('ld → /abs/target'), 'DOIT.31: a symlinked dir shows its absolute target inline');
+  const plain = api.fileTreeDisplayParts('/repo/f.txt', {kind: 'file', name: 'f.txt'});
+  assert.ok(!plain.text.includes('→'), 'DOIT.31: a non-symlink has no target suffix');
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.file-tree-row\.is-symlink > \.file-tree-icon::after\s*\{[^}]*content:\s*"↪"/.test(css), 'DOIT.31: the symlink icon gets an arrow-badge overlay');
+  assert.ok(/\.file-tree-row\.symlink-broken[^{]*\.file-tree-icon::after\s*\{[^}]*color:\s*var\(--bad\)/.test(css), 'DOIT.31: a broken symlink badge is red (token)');
+  assert.ok(/\.file-tree-row\.symlink-broken[^{]*\.file-tree-name\s*\{[^}]*line-through/.test(css), 'DOIT.31: a broken symlink name is struck through');
 }
 
 {
@@ -4489,18 +4662,23 @@ function makeFileTree(paths) {
 }
 
 {
-  // DOIT.6 #124: the Performance section sits immediately before the YO!agent section.
+  // DOIT.6 #124 + DOIT.29: Performance → GitHub → YO!agent (the GitHub watched-PRs section was inserted
+  // between Performance and the trailing YO!agent section).
   const api = loadYolomux('', ['1']);
   api.setActiveLocaleForTest('en');
   const html = api.preferencesPanelHtmlForTest('');
   const perfTitle = api.t('pref.section.performance');
+  const githubTitle = api.t('pref.section.github');
   const yoagentTitle = api.t('pref.section.yoagent');
   const perfIdx = html.indexOf(`data-preference-section="${perfTitle}"`);
+  const githubIdx = html.indexOf(`data-preference-section="${githubTitle}"`);
   const yoagentIdx = html.indexOf(`data-preference-section="${yoagentTitle}"`);
-  assert.ok(perfIdx >= 0 && yoagentIdx >= 0, '#124: both Performance and YO!agent sections render');
-  assert.ok(perfIdx < yoagentIdx, '#124: the Performance section appears above the YO!agent section');
-  // Adjacent: no other section starts between Performance and YO!agent.
-  assert.equal(html.slice(perfIdx, yoagentIdx).match(/data-preference-section="/g).length, 1, '#124: Performance is the section immediately before YO!agent');
+  assert.ok(perfIdx >= 0 && githubIdx >= 0 && yoagentIdx >= 0, '#124: Performance, GitHub, and YO!agent sections render');
+  assert.ok(perfIdx < githubIdx && githubIdx < yoagentIdx, '#124: section order is Performance → GitHub → YO!agent');
+  // Adjacent: GitHub is the only section between Performance and YO!agent.
+  assert.equal(html.slice(perfIdx, yoagentIdx).match(/data-preference-section="/g).length, 2, '#124: GitHub is the section immediately before YO!agent');
+  // DOIT.29: the GitHub section carries the watched-PRs list field.
+  assert.ok(html.includes('data-setting-path="github.watched_prs"'), 'DOIT.29: the GitHub section has the watched_prs list field');
 }
 
 {
@@ -4888,6 +5066,22 @@ function makeFileTree(paths) {
   api.recordEditorNav('/repo/d.txt');
   assert.deepEqual(api.editorNav.stack, ['/repo/a.txt', '/repo/c.txt'], 'DOIT.21: recording is suppressed while navigating');
   api.editorNav.navigating = false;
+  // The stack holds arbitrary tab ITEM ids now (not only file paths), so any tab kind is recorded.
+  api.recordEditorNav('5');                 // a terminal session tab
+  api.recordEditorNav('file-explorer');     // the Finder dock
+  assert.deepEqual(api.editorNav.stack.slice(-2), ['5', 'file-explorer'], 'tab back/forward records any tab kind, not just files');
+}
+
+// Tab history is bounded — the oldest entries drop past the cap so it can't grow without limit.
+{
+  const api = loadYolomux();
+  api.editorNav.stack = [];
+  api.editorNav.index = -1;
+  for (let i = 0; i < 80; i += 1) api.recordEditorNav(`tab-${i}`);
+  assert.equal(api.editorNav.stack.length, 50, 'the nav history is capped at 50 entries');
+  assert.equal(api.editorNav.stack[0], 'tab-30', 'the oldest entries past the cap are dropped');
+  assert.equal(api.editorNav.stack[api.editorNav.stack.length - 1], 'tab-79', 'the newest entry is retained');
+  assert.equal(api.editorNav.index, 49, 'the index tracks the capped stack tail');
 }
 
 // DOIT.22: the quick-open palette collapses a file's editor-tab + preview-tab into ONE row with
@@ -4905,4 +5099,42 @@ function makeFileTree(paths) {
   assert.ok(source.includes('data-changes-repo-toggle="${esc(repo)}"'), 'DOIT.23: the repo header is a collapse toggle keyed by repo path');
   assert.ok(source.includes('changesRepoCollapsed.has(repo)'), 'DOIT.23: the repo head reads per-repo collapse state');
   assert.ok(source.includes('changes-repo-caret'), 'DOIT.23: the repo head shows a collapse caret');
+}
+
+// DOIT.21 (button completion): the back/forward buttons live in the GLOBAL topbar (left of the search
+// box), are wired to editorNavBack/Forward, and tab-switches record as nav.
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes("createTopbarNav())"), 'the topbar assembles the nav group');
+  assert.ok(source.indexOf('createTopbarNav())') < source.indexOf('createTopbarSearch())'), 'the nav (back/forward) group is appended before the topbar search box');
+  assert.ok(source.includes("back.id = 'topbarNavBack'") && source.includes("forward.id = 'topbarNavForward'"), 'the topbar nav builds #topbarNavBack / #topbarNavForward');
+  assert.ok(/topbarNavBack[\s\S]{0,400}?editorNavBack\(\)/.test(source), 'the back button is wired to editorNavBack()');
+  assert.ok(/topbarNavForward[\s\S]{0,400}?editorNavForward\(\)/.test(source), 'the forward button is wired to editorNavForward()');
+  assert.ok(/getElementById\('topbarNavBack'\)[\s\S]{0,200}?editorNav\.index <= 0/.test(source), 'updateEditorNavButtons disables Back at the start of the stack');
+  assert.ok(source.includes('if (options.userInitiated === true) recordEditorNav(session);'), 'a user-initiated tab switch of ANY tab kind records as navigation (back/forward walks all visited tabs)');
+  assert.ok(!source.includes('file-editor-nav-control'), 'the per-pane editor nav group is fully removed (relocated to the topbar)');
+}
+
+// DOIT.26: inline git blame — toolbar toggle + a CodeMirror line decoration (::after annotation).
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('file-editor-blame-panel'), 'DOIT.26: the editor toolbar has a blame toggle button');
+  assert.ok(source.includes('function codeMirrorBlameExtension(api, path)'), 'DOIT.26: a CodeMirror blame extension decorates the cursor line');
+  assert.ok(source.includes("'data-blame': blameAnnotationText(info)"), 'DOIT.26: the cursor line gets the dim blame annotation via data-blame (CSS ::after)');
+  assert.ok(source.includes('codeMirrorBlameExtension(api, path)'), 'DOIT.26: the blame extension is wired into the editable editor extensions');
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.cm-line\[data-blame\]::after\s*\{[^}]*var\(--code-comment\)/.test(css), 'DOIT.26: the blame annotation uses the theme-aware --code-comment token');
+  // Fix: blame state is in the editor config signature, so toggling blame OFF rebuilds the editor and
+  // the annotations are removed (the plugin is added/removed only at build time).
+  assert.ok(source.includes('blame: fileEditorBlameEnabled'), 'blame is part of the editor config signature so a toggle rebuilds (annotations clear on OFF)');
+}
+
+// Search scroll fix: navigating matches re-centers the match horizontally, so a short-line match in a
+// doc with a long line elsewhere is no longer left scrolled fully right (off-screen / blank).
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('function codeMirrorSearchScrollFix(api)'), 'search-scroll fix extension exists');
+  assert.ok(source.includes('codeMirrorSearchScrollFix(api)'), 'search-scroll fix is wired into the editable editor extensions');
+  assert.ok(/isUserEvent\?\.\('select\.search'\)/.test(source), 'the fix triggers only on search-driven selection changes');
+  assert.ok(/scrollIntoView\(head,\s*\{x:\s*'center'/.test(source), 'the fix re-centers the match horizontally');
 }
