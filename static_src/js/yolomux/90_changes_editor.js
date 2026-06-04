@@ -3554,6 +3554,7 @@ async function saveFileEditor(path, panel, options = {}) {
   if (!state || state.kind !== 'text') return false;
   syncOpenFileContentFromPanels(path, panel);
   if (!options.force && (state.externalChanged || state.externalMissing)) {
+    if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
     clearFileAutosaveTimer(path);
     return showFileSaveConflictDialog(path, panel);
   }
