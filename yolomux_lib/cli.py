@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -21,7 +22,7 @@ from .server import TmuxWebtermHTTPServer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Attach local tmux sessions in a browser.")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=9998)
     parser.add_argument(
         "--sessions",
@@ -97,6 +98,14 @@ def self_signed_san() -> str:
     if SERVER_HOSTNAME and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", SERVER_HOSTNAME):
         if SERVER_HOSTNAME != "localhost":
             names.append(f"DNS:{SERVER_HOSTNAME}")
+    try:
+        for iface_addrs in socket.getaddrinfo(socket.gethostname(), None):
+            ip = iface_addrs[4][0]
+            entry = f"IP:{ip}"
+            if entry not in names:
+                names.append(entry)
+    except OSError:
+        pass
     return ",".join(names)
 
 
