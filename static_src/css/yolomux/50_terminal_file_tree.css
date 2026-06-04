@@ -1665,6 +1665,14 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   letter-spacing: 0;
   text-transform: uppercase;
 }
+/* C11 #1: a directory covered by an indexed ancestor — a quiet muted marker (not the bright indexed
+   green), so it reads as "already handled, don't index separately". Token-based: flips with the theme. */
+.file-tree-row.covered-directory:not(.selected) .file-tree-git-status {
+  color: var(--muted);
+  font-style: italic;
+  letter-spacing: 0;
+  text-transform: none;
+}
 .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
   position: relative;
   color: #c4f970;

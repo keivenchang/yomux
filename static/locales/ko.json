@@ -240,6 +240,7 @@
   "palette.group.recent": "최근",
   "palette.group.settings": "설정",
   "palette.group.tabs": "탭",
+  "palette.openFolder": "{name}에서 폴더 열기",
   "palette.openView": "{view} 보기 열기",
   "palette.placeholder": "탭, 명령, 설정 찾기",
   "pane.actions": "세션 동작",

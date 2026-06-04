@@ -1330,7 +1330,10 @@ function makeFileTree(paths) {
   assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');
   assert.ok(source.includes('setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);'), 'notification signatures use the shared bounded-map helper');
   assert.ok(source.includes('existing?.delay === normalizedDelay'), 'runtime intervals keep their timer phase when refresh delays are unchanged');
-  assert.ok(source.includes('item.fitFinalTimer'), 'terminal fit scheduling debounces resize bursts per terminal');
+  // C12 F3: terminal fit scheduling collapsed from rAF + 80ms + 250ms (three fits) to one rAF + a single
+  // trailing fit; the redundant middle timer (fitFinalTimer) is gone.
+  assert.equal(source.includes('item.fitFinalTimer'), false, 'C12 F3: the redundant third fit timer is removed');
+  assert.ok(/function scheduleFit[\s\S]*?requestAnimationFrame\([\s\S]*?item\.fitTimer = setTimeout/.test(source), 'C12 F3: fit scheduling is one rAF plus a single trailing timeout');
   assert.equal(source.includes('esm.sh'), false, 'CodeMirror loading never falls back to a third-party CDN');
   assert.ok(source.includes('CodeMirror local bundle is unavailable or incomplete'), 'CodeMirror loading reports local bundle failures clearly');
   assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMeta.server_version)'), 'the metadata poll checks the live server version');
@@ -1420,6 +1423,10 @@ function makeFileTree(paths) {
   // overwriting it with this page's set, so two browser origins don't clobber each other's indexed dirs.
   assert.ok(/persistIndexedDirsSetting\(indexed \? \{add: normalized\} : \{remove: normalized\}\)/.test(source), 'C11: indexed-dir save passes the single add/remove op (merge, not overwrite)');
   assert.ok(/function persistIndexedDirsSetting\(op = \{\}\)[\s\S]*?if \(op\.add\) set\.add\(op\.add\)[\s\S]*?if \(op\.remove\) set\.delete\(op\.remove\)/.test(source), 'C11: persistIndexedDirsSetting merges the op into the current shared setting');
+  // C11 #3: the localStorage->setting migration is one-time (marker), so a stale per-origin cache can't
+  // re-seed the durable shared setting after migration — the setting is the sole desired-root source.
+  assert.ok(source.includes("storageSet(fileExplorerIndexedDirsMigratedKey, '1')"), 'C11 #3: indexed-dirs migration from localStorage is recorded as one-time');
+  assert.ok(/if \(options\.initial && !migrated\)/.test(source), 'C11 #3: migration runs once, guarded by the marker');
   assert.ok(source.slice(source.indexOf('function focusPreferencesSearch('), source.indexOf('function focusPreferencesSearchSoon(')).includes('panel && panel.isConnected !== false'), 'Preferences focus falls back to the rendered panel when called without a panel');
   const focusedPanelStart = source.indexOf('function setFocusedPanelItem(');
   const focusedPanelEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusedPanelStart);
@@ -1945,14 +1952,32 @@ function makeFileTree(paths) {
   assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified files'), 'Finder embeds a modified-files panel');
   // C7: the embedded title names the session ("Modified files for session '1'").
   assert.ok(/class="changes-title">Modified files for session &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Modified-files title names the session');
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('1 file changed in &#39;1&#39;'), 'Finder modified-files summary names the session explicitly');
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('Ahead 1 commit'), 'Finder modified-files panel shows repo ahead counts');
+  // C15 (compact header): the redundant "N files changed in '1'" summary is gone (session is in the title);
+  // the compact comparison line shows the +A −R totals instead.
+  const compactFinderPanel = api.fileExplorerChangesPanelHtml();
+  assert.equal(compactFinderPanel.includes('files changed in'), false, 'C15: the compact header drops the redundant file-count/session summary');
+  assert.ok(/changes-comparison-head compact[\s\S]*?changes-diff-add[^>]*>\+2<[\s\S]*?changes-diff-remove[^>]*>-1</.test(compactFinderPanel), 'C15: the compact header shows the +A −R totals on one line');
+  // C15 follow-up: for a SINGLE git repo the FROM/TO SHA pulldowns are inline ON the comparison line
+  // (not in the popover), inside the "Comparing … with …" sentence.
+  assert.ok(/changes-comparison-head compact[\s\S]*?diff-ref-inline[\s\S]*?data-diff-ref-from[\s\S]*?data-diff-ref-to/.test(compactFinderPanel), 'C15: single-repo FROM/TO pulldowns are inline on the comparison line');
+  assert.ok(/changes-comparison-head compact[\s\S]*?data-diff-ref-repo="\/repo\/app"/.test(compactFinderPanel), 'C15: the inline comparison pulldowns are scoped to the repo');
+  // The repo-row popover keeps path + ahead/behind, but NOT a second copy of the FROM/TO pickers.
+  assert.ok(compactFinderPanel.includes('changes-repo-head-wrap'), 'C15: the compact repo row is wrapped for a hover popover');
+  assert.ok(/changes-repo-popover[\s\S]*?Ahead 1 commit/.test(compactFinderPanel), 'C15: ahead/behind lives in the repo-row popover');
+  assert.equal(/changes-repo-popover[\s\S]*?diff-ref-controls compact/.test(compactFinderPanel), false, 'C15: single-repo does not duplicate the FROM/TO pickers in the popover');
+  // C15: ahead/behind is hidden when 0 (the popover shows only the non-zero ahead, not "Behind 0 commits").
+  assert.equal(compactFinderPanel.includes('Behind 0 commit'), false, 'C15: 0-commit ahead/behind is not printed');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
-  // C8: the Finder header exposes a Date/Name sort control, defaulting to date/recent (mtime selected).
+  // C8/C13: the Finder header exposes an inline Recent|name sort TOGGLE (no "Sort" label, no <select>),
+  // defaulting to date/recent (the mtime segment active).
   const finderSortPanel = api.fileExplorerChangesPanelHtml();
-  assert.ok(/changes-sort-compact[\s\S]*data-session-files-sort/.test(finderSortPanel), 'C8: Finder modified-files header has a compact sort control');
-  assert.ok(/data-session-files-sort[\s\S]*?<option value="mtime" selected/.test(finderSortPanel), 'C8: the Finder sort defaults to date/recent');
+  assert.ok(finderSortPanel.includes('changes-sort-toggle'), 'C13: Finder modified-files header has an inline segmented sort toggle');
+  assert.ok(/changes-sort-seg active[^>]*data-sort-value="mtime"|data-sort-value="mtime"[^>]*aria-pressed="true"/.test(finderSortPanel), 'C8/C13: the Finder sort defaults to date/recent (mtime segment active)');
+  assert.ok(finderSortPanel.includes('data-sort-value="name"'), 'C13: the toggle offers a Name segment');
+  assert.equal(/changes-sort-compact|<select data-session-files-sort/.test(finderSortPanel), false, 'C13: the labeled Sort dropdown is gone from the Finder header');
+  assert.ok(finderSortPanel.includes('changes-sort-divider'), 'C13: the toggle segments are separated by a | divider');
+  assert.ok(/class="changes-refresh"[^>]*>Reload<\/button>/.test(finderSortPanel), 'C13: the Reload button reads "Reload" (via i18n, not hardcoded)');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-from-select'), 'Finder compact modified-files header exposes the FROM commit picker');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-to-select'), 'Finder compact modified-files header exposes the TO picker');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), false, '#41: the modified-files density toggle is removed');
@@ -2204,6 +2229,13 @@ function makeFileTree(paths) {
   assert.ok(/\.file-explorer-changes-panel \.changes-comparison-head\s*\{[^}]*flex-wrap: nowrap/.test(preferencesCss), '#44(d): the Finder comparison header is compacted to one tight line (header chrome takes less height)');
   assert.ok(/\.grid\.drop-preview::before/.test(preferencesCss), 'root layout drops have a full-layout preview overlay');
   assert.ok(/\.grid\.drop-preview-gutter::before\s*\{[\s\S]*--drop-preview-left/.test(preferencesCss), 'split-bar drops use explicit full-span preview geometry');
+  // C15: the Finder↔Modified-files resizer reuses the shared --pane-resizer-* tokens (thin yellow line at
+  // rest, hover brightens) instead of its old special-cased hardcoded-green strip.
+  const resizerBlock = preferencesCss.slice(preferencesCss.indexOf('.file-explorer-changes-resizer {'), preferencesCss.indexOf('.file-explorer-changes-panel {'));
+  assert.ok(resizerBlock.includes('var(--pane-resizer-bg)'), 'C15: the Finder resizer draws the shared thin yellow line at rest');
+  assert.ok(resizerBlock.includes('var(--pane-resizer-hover-bg)'), 'C15: the Finder resizer brightens via the shared hover token');
+  assert.ok(resizerBlock.includes('var(--drop-outline-shadow)'), 'C15: the Finder resizer hover uses the shared outline-shadow token');
+  assert.equal(/118,\s*185,\s*0|255,\s*255,\s*255,\s*0\.04/.test(resizerBlock), false, 'C15: the hardcoded green gradient + white border are gone from the Finder resizer');
   // Light theme drives the BASE pane-tab/ring styling via tokens, not rule overrides; but DOIT.6 #28
   // adds targeted hover/link contrast overrides (expected), so guard only the base tab + ring.
   assert.equal(/body\.theme-light\s+\.pane-tab\s*\{/.test(preferencesCss), false, 'light theme does not restyle the base pane tab (tokens drive it)');
@@ -2640,6 +2672,14 @@ function makeFileTree(paths) {
   api.fitAppMenuPopover(appMenuPopover);
   assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-width'), '480px');
   assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-offset'), '-180px');
+  // C14: the menu-width measurer must un-clip the command label + detail spans (they were omitted, so the
+  // menu measured to the LABELS and the longer detail sub-lines ellipsized with "…").
+  const appMenuMeasureSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+  const measureBody = appMenuMeasureSrc.slice(appMenuMeasureSrc.indexOf('function measureAppMenuContentWidth('), appMenuMeasureSrc.indexOf('function fitAppMenuPopover('));
+  assert.ok(measureBody.includes(".app-menu-label'"), 'C14: the measurer neutralizes .app-menu-label truncation');
+  assert.ok(measureBody.includes(".app-menu-detail'"), 'C14: the measurer neutralizes .app-menu-detail truncation');
+  assert.ok(measureBody.includes("clone.classList?.contains('app-submenu-popover')"), 'C14: a standalone submenu clone is forced visible for measurement');
+  assert.ok(appMenuMeasureSrc.includes('_appMenuFontsRefit'), 'C14: a one-time fonts.ready re-fit corrects a cold first measurement');
   const tabMenuCommand = api.menuTabCommand('1', {detail: 'Minimized'});
   assert.equal(tabMenuCommand.title, undefined);
   assert.equal(tabMenuCommand.detail, '');
@@ -2859,6 +2899,28 @@ function makeFileTree(paths) {
   const quickItem = api.fileQuickOpenItems().find(item => item.label === 'helloXandYyy.py');
   assert.ok(quickItem, 'file quick-open uses the same command-palette item shell');
   assert.equal(api.commandPaletteMatches(quickItem, 'xy'), true, 'file quick-open uses fuzzy matching');
+  // C15 follow-up: cmd-P path mode offers a pinned "Open folder in Finder" row (Enter opens the typed
+  // directory), while a subfolder entry descends and a file entry opens.
+  api.setFileQuickOpenCandidatesForTest('/repo/app', [
+    {name: 'dynamo', path: '/repo/app/dynamo', relative_path: 'dynamo', kind: 'dir'},
+    {name: 'build.sh', path: '/repo/app/build.sh', relative_path: 'build.sh', kind: 'file'},
+  ]);
+  api.setCommandPaletteStateForTest('files', '/repo/app/');
+  const pathItems = api.fileQuickOpenItems();
+  const openFolder = pathItems.find(item => item.pinTop);
+  assert.ok(openFolder, 'C15: path mode offers a pinned Open-folder row');
+  assert.equal(openFolder.detail, '/repo/app', 'C15: the Open-folder row targets the listed directory');
+  assert.equal(typeof openFolder.run, 'function', 'C15: the Open-folder row opens the directory');
+  const dirEntry = pathItems.find(item => item.label === 'dynamo/');
+  assert.ok(dirEntry && !dirEntry.pinTop, 'C15: a subfolder entry is a normal (descend) row, not pinned');
+  // Bug fix: path-mode list entries (no indexed_root) must group under "Files", NOT "Indexed /" — the
+  // empty indexed_root used to normalize to '/' and mislabel every directory row as indexed.
+  assert.equal(dirEntry.group, 'Files', 'path-mode directory rows are grouped under Files, not mislabeled Indexed');
+  assert.equal(pathItems.find(item => item.label === 'build.sh')?.group, 'Files', 'path-mode file rows are grouped under Files');
+  // Typing an exact subdir name targets that subfolder for opening.
+  api.setCommandPaletteStateForTest('files', '/repo/app/dynamo');
+  assert.equal(api.fileQuickOpenItems().find(item => item.pinTop).detail, '/repo/app/dynamo', 'C15: an exact subdir name targets that subfolder');
+  api.setCommandPaletteStateForTest('files', '');
   assert.equal(api.fileQuickOpenRootForSearch(), '/home/test/yolomux.dev', 'file quick-open defaults to the active repo root when no session cwd is known');
   api.setTranscriptInfoForTest('1', {project: {git: {root: '/repo/workspace'}}, selected_pane: {current_path: '/repo/workspace/src'}});
   api.setFocusedPanelItem('1');
@@ -2876,6 +2938,10 @@ function makeFileTree(paths) {
   api.setFileExplorerIndexStatusForTest('/home/test/dynamo', 'ready');
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), 'indexed', '#31: a ready index renders a steady "indexed" badge');
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/not-indexed'), '', '#31: a non-indexed directory renders no badge');
+  // C11 #1: a directory INSIDE an indexed root reads "covered" (not blank, so it no longer looks un-indexed);
+  // an unrelated directory stays blank.
+  assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/lib'), 'covered', 'C11: a descendant of an indexed root shows "covered"');
+  assert.equal(api.fileExplorerIndexBadgeText('/home/test/elsewhere'), '', 'C11: an unrelated directory shows no badge');
   // #23: the topbar universal search renders a launcher button (opens the unified palette on click).
   const topbarSearch = api.createTopbarSearch();
   assert.ok(String(topbarSearch.className || '').includes('topbar-search'), '#23: topbar search renders a .topbar-search launcher');
@@ -4884,8 +4950,12 @@ function makeFileTree(paths) {
   const titleStems = zhHant['changes.titleForSession'].split('{session}');
   assert.ok(titleStems.every(stem => !stem || panel.includes(stem)), '#121/C7: the Modified-files title is localized and names the session');
   assert.ok(panel.includes(`>${zhHant['changes.refresh']}</button>`), '#121: the Modified-files Refresh button is localized');
-  assert.ok(panel.includes(`>${zhHant['diff.ref.from']} <select`), '#121: the diff-ref FROM label is localized');
-  assert.ok(panel.includes(`>${zhHant['diff.ref.to']} <select`), '#121: the diff-ref TO label is localized');
+  // C15 follow-up: the FROM/TO pulldowns are inline in the localized "Comparing {from} with {to}" sentence
+  // (no separate FROM/TO labels); assert the sentence's localized text stems surround the selects.
+  for (const stem of zhHant['diff.comparing'].split(/\{from\}|\{to\}/).map(s => s.trim()).filter(Boolean)) {
+    assert.ok(panel.includes(stem), `#121/C15: the inline comparison sentence is localized ("${stem}")`);
+  }
+  assert.ok(panel.includes('data-diff-ref-from') && panel.includes('data-diff-ref-to'), '#121/C15: the FROM/TO pulldowns are present inline on the comparison line');
   assert.ok(panel.includes(`aria-label="${zhHant['diff.ref.from.aria']}"`), '#121: the FROM picker aria-label is localized');
   assert.ok(panel.includes(zhHant['changes.ahead.one'].replace('{count}', '1')), '#121: the Ahead-N-commit meta is localized (tPlural)');
   // No bare English leaks in the localized Modified-files panel.

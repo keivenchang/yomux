@@ -791,6 +791,9 @@ function measureAppMenuContentWidth(popover) {
   clone.style.maxHeight = 'none';
   clone.style.removeProperty('--app-menu-fit-width');
   clone.style.removeProperty('--app-menu-fit-offset');
+  // C14: a standalone submenu popover (measured on its own, with no .open parent) matches the base
+  // `.app-submenu-popover { display:none }` rule and would measure 0 — force it visible for measurement.
+  if (clone.classList?.contains('app-submenu-popover')) clone.style.display = 'block';
   clone.querySelectorAll('.app-menu-command').forEach(command => {
     command.style.width = 'max-content';
     command.style.minWidth = '0';
@@ -798,6 +801,23 @@ function measureAppMenuContentWidth(popover) {
   });
   clone.querySelectorAll('.app-menu-rich, .pane-tab-core, .session-button-text, .session-button-name, .session-button-dir, .session-button-detail, .tab-inline-detail, .pane-tab-info-label').forEach(node => {
     node.style.maxWidth = 'none';
+    node.style.overflow = 'visible';
+    node.style.textOverflow = 'clip';
+    node.style.whiteSpace = 'nowrap';
+  });
+  // C14: the command label + detail spans were OMITTED above, so their truncation CSS (overflow:hidden,
+  // nowrap, min-width:0 / max-width:42ch) collapsed them in max-content sizing and the menu was measured
+  // to the LABELS — ellipsizing the longer detail sub-lines. Un-clip them so each command's full one-line
+  // width is counted. Keep the detail's 42ch cap so a genuinely longer detail still ellipsizes by design.
+  clone.querySelectorAll('.app-menu-label').forEach(node => {
+    node.style.maxWidth = 'none';
+    node.style.minWidth = 'auto';
+    node.style.overflow = 'visible';
+    node.style.textOverflow = 'clip';
+    node.style.whiteSpace = 'nowrap';
+  });
+  clone.querySelectorAll('.app-menu-detail').forEach(node => {
+    node.style.minWidth = 'auto';
     node.style.overflow = 'visible';
     node.style.textOverflow = 'clip';
     node.style.whiteSpace = 'nowrap';
@@ -824,6 +844,13 @@ function fitAppMenuPopover(popover) {
   if (!overflow) return;
   const maxShift = Math.max(0, rect.width - anchorWidth);
   popover.style.setProperty('--app-menu-fit-offset', `${-Math.min(overflow, maxShift)}px`);
+  // C14: a cold first measurement taken before web fonts settle sizes with fallback-font metrics and can
+  // come out too narrow. Re-fit ONCE when fonts are ready (guarded so it schedules a single time) so the
+  // very first menu open is corrected without waiting for a reopen.
+  if (document.fonts?.ready && !popover._appMenuFontsRefit) {
+    popover._appMenuFontsRefit = true;
+    document.fonts.ready.then(() => { if (popover.isConnected) fitAppMenuPopover(popover); }).catch(() => {});
+  }
 }
 
 function createAppMenu(menu) {

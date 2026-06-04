@@ -1391,17 +1391,15 @@ function scheduleFit(session) {
   if (item) {
     if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
     if (item.fitTimer) clearTimeout(item.fitTimer);
-    if (item.fitFinalTimer) clearTimeout(item.fitFinalTimer);
+    // C12 F3: one rAF fit for the common fast case + a SINGLE trailing fit to catch a late layout settle
+    // (was rAF + 80ms + 250ms = three fits per resize). fitTerminal already skips the remote resize when
+    // cols/rows are unchanged, so the trailing fit is a cheap no-op when nothing actually moved.
     item.fitFrame = requestAnimationFrame(() => {
       item.fitFrame = 0;
       fitTerminal(session);
     });
     item.fitTimer = setTimeout(() => {
       item.fitTimer = 0;
-      fitTerminal(session);
-    }, 80);
-    item.fitFinalTimer = setTimeout(() => {
-      item.fitFinalTimer = 0;
       fitTerminal(session);
     }, 250);
     return;

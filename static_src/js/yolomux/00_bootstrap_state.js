@@ -60,6 +60,7 @@ const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
+const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
 const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';

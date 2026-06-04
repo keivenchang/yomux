@@ -61,6 +61,7 @@ const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
+const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
 const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';
@@ -3479,6 +3480,33 @@ function recentFileQuickOpenItems() {
   }));
 }
 
+// C15 follow-up: while a directory PATH is typed in cmd-P, offer "Open <dir> in Finder" as the pinned
+// top row, so Enter (the default highlight) opens that directory in the Finder/File Explorer — while
+// arrowing down to a listed entry opens a file or descends into a subfolder. The target is the directory
+// the input points at: the listed dir, or its `filter` subfolder when the typed name is an exact subdir.
+function fileQuickOpenOpenFolderItem() {
+  const pathQuery = fileQuickOpenPathQuery();
+  if (!pathQuery.active) return null;
+  let target = fileQuickOpenRoot || normalizeDirectoryPath(pathQuery.directory);
+  if (pathQuery.filter) {
+    const filter = String(pathQuery.filter).toLowerCase();
+    const match = fileQuickOpenCandidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
+    if (match?.path) target = match.path;
+  }
+  if (!target) return null;
+  return {
+    group: t('palette.group.files'),
+    label: t('palette.openFolder', {name: fileExplorerLabel()}),
+    detail: compactHomePath(target),
+    key: `open-folder:${target}`,
+    iconText: '▸',
+    keybinding: appShortcutText('Enter'),
+    pinTop: true,
+    searchFields: ['open folder', target],
+    run: async () => { await openFileExplorerPane(); await openFileExplorerAt(target); },
+  };
+}
+
 function fileQuickOpenItems() {
   const seen = new Set();
   const items = [];
@@ -3488,11 +3516,16 @@ function fileQuickOpenItems() {
     seen.add(path);
     items.push(item);
   };
+  const openFolder = fileQuickOpenOpenFolderItem();
+  if (openFolder) items.push(openFolder);
   recentFileQuickOpenItems().forEach(add);
   for (const file of fileQuickOpenCandidates) {
     const path = file.path || '';
     if (!path) continue;
-    const indexedRoot = normalizeStoredFileExplorerIndexedDir(file.indexed_root || '');
+    // Only an entry that ACTUALLY came from an indexed-root search carries an indexed_root; path-mode
+    // listing entries have none. Guard the empty case — normalizeStoredFileExplorerIndexedDir('') returns
+    // '/' (empty -> root), which used to mislabel every path-mode directory row as "Indexed /".
+    const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
     const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
     add(fileQuickOpenItem(path, {
       group: indexedRoot && indexedRoot !== baseRoot ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
@@ -3542,6 +3575,9 @@ function commandPaletteMatches(item, query) {
 
 function commandPaletteItemScore(item, query) {
   if (item.disabled) return 0;
+  // C15 follow-up: the path-mode "Open this folder in Finder" row always sorts to the top (and survives
+  // any filter text) so it is the default Enter action while a directory path is typed.
+  if (item.pinTop) return 1e9;
   const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item);
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
@@ -5132,6 +5168,9 @@ function measureAppMenuContentWidth(popover) {
   clone.style.maxHeight = 'none';
   clone.style.removeProperty('--app-menu-fit-width');
   clone.style.removeProperty('--app-menu-fit-offset');
+  // C14: a standalone submenu popover (measured on its own, with no .open parent) matches the base
+  // `.app-submenu-popover { display:none }` rule and would measure 0 — force it visible for measurement.
+  if (clone.classList?.contains('app-submenu-popover')) clone.style.display = 'block';
   clone.querySelectorAll('.app-menu-command').forEach(command => {
     command.style.width = 'max-content';
     command.style.minWidth = '0';
@@ -5139,6 +5178,23 @@ function measureAppMenuContentWidth(popover) {
   });
   clone.querySelectorAll('.app-menu-rich, .pane-tab-core, .session-button-text, .session-button-name, .session-button-dir, .session-button-detail, .tab-inline-detail, .pane-tab-info-label').forEach(node => {
     node.style.maxWidth = 'none';
+    node.style.overflow = 'visible';
+    node.style.textOverflow = 'clip';
+    node.style.whiteSpace = 'nowrap';
+  });
+  // C14: the command label + detail spans were OMITTED above, so their truncation CSS (overflow:hidden,
+  // nowrap, min-width:0 / max-width:42ch) collapsed them in max-content sizing and the menu was measured
+  // to the LABELS — ellipsizing the longer detail sub-lines. Un-clip them so each command's full one-line
+  // width is counted. Keep the detail's 42ch cap so a genuinely longer detail still ellipsizes by design.
+  clone.querySelectorAll('.app-menu-label').forEach(node => {
+    node.style.maxWidth = 'none';
+    node.style.minWidth = 'auto';
+    node.style.overflow = 'visible';
+    node.style.textOverflow = 'clip';
+    node.style.whiteSpace = 'nowrap';
+  });
+  clone.querySelectorAll('.app-menu-detail').forEach(node => {
+    node.style.minWidth = 'auto';
     node.style.overflow = 'visible';
     node.style.textOverflow = 'clip';
     node.style.whiteSpace = 'nowrap';
@@ -5165,6 +5221,13 @@ function fitAppMenuPopover(popover) {
   if (!overflow) return;
   const maxShift = Math.max(0, rect.width - anchorWidth);
   popover.style.setProperty('--app-menu-fit-offset', `${-Math.min(overflow, maxShift)}px`);
+  // C14: a cold first measurement taken before web fonts settle sizes with fallback-font metrics and can
+  // come out too narrow. Re-fit ONCE when fonts are ready (guarded so it schedules a single time) so the
+  // very first menu open is corrected without waiting for a reopen.
+  if (document.fonts?.ready && !popover._appMenuFontsRefit) {
+    popover._appMenuFontsRefit = true;
+    document.fonts.ready.then(() => { if (popover.isConnected) fitAppMenuPopover(popover); }).catch(() => {});
+  }
 }
 
 function createAppMenu(menu) {
@@ -6803,9 +6866,14 @@ function fileExplorerDirectoryIsIndexed(path) {
 // across fs-poll re-renders (and a background TTL rebuild keeps the backend `ready`, so it never
 // flips back to "indexing").
 function fileExplorerIndexBadgeText(path) {
-  if (!fileExplorerDirectoryIsIndexed(path)) return '';
-  const normalized = normalizeStoredFileExplorerIndexedDir(path);
-  return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+  if (fileExplorerDirectoryIsIndexed(path)) {
+    const normalized = normalizeStoredFileExplorerIndexedDir(path);
+    return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+  }
+  // C11 #1: a directory INSIDE an indexed root is already covered by that root's index — label it
+  // "covered" so it doesn't read as un-indexed (and so the user knows not to index it separately).
+  if (fileExplorerIndexedAncestor(path)) return 'covered';
+  return '';
 }
 
 // Warm the backend index for a root (kicks the build) and track building/ready; polls while
@@ -6923,17 +6991,25 @@ function persistIndexedDirsSetting(op = {}) {
   saveSettingsPatch({file_explorer: {indexed_dirs: dirs}}, {silent: true}).catch(() => {});
 }
 
-// Reconcile the localStorage indexed-dir set FROM the file_explorer.indexed_dirs setting (so editing
-// the Preferences list adds/removes indexed dirs). Idempotent + guarded so it never loops with the
-// set->setting mirror in setFileExplorerDirectoryIndexed.
+// C11 #3: the shared file_explorer.indexed_dirs SETTING is the durable source of truth for which dirs are
+// indexed; per-origin localStorage is only a cache + a ONE-TIME migration seed. This reconciles the
+// in-memory set FROM the setting (so the setting is authoritative — local-only dirs not in the setting are
+// dropped), and on the very first load migrates any pre-existing localStorage dirs INTO the setting exactly
+// once (guarded by a migration marker so a stale per-origin cache can never re-seed the setting later).
 function reconcileIndexedDirsFromSetting(options = {}) {
   const raw = initialSetting('file_explorer.indexed_dirs', []);
   const list = Array.isArray(raw) ? raw : [];
-  if (options.initial && !list.length && fileExplorerIndexedDirs.size) {
-    // First load: the setting has not been populated yet but localStorage already has indexed dirs —
-    // migrate the set INTO the setting rather than wiping the user's existing indexed directories.
-    persistIndexedDirsSetting();
-    return;
+  const migrated = storageGet(fileExplorerIndexedDirsMigratedKey) === '1';
+  if (options.initial && !migrated) {
+    // One-time migration: if the setting is empty but this origin's localStorage already has indexed dirs,
+    // seed the durable setting from them (don't wipe the user's existing indexed directories). Either way,
+    // record that migration is done so localStorage is never treated as a desired-root peer again.
+    if (!list.length && fileExplorerIndexedDirs.size) {
+      persistIndexedDirsSetting();
+      storageSet(fileExplorerIndexedDirsMigratedKey, '1');
+      return;
+    }
+    storageSet(fileExplorerIndexedDirsMigratedKey, '1');
   }
   const desired = new Set(compactNestedPaths(list.map(normalizeStoredFileExplorerIndexedDir).filter(Boolean)));
   const current = new Set(fileExplorerIndexedDirs);
@@ -6962,8 +7038,10 @@ function updateFileExplorerIndexedDirectoryRows() {
   document.querySelectorAll('.file-tree-row.kind-dir[data-path]').forEach(row => {
     const path = row.dataset.path || '';
     const indexed = fileExplorerDirectoryIsIndexed(path);
+    const covered = !indexed && Boolean(fileExplorerIndexedAncestor(path));  // C11 #1
     row.dataset.indexed = indexed ? 'true' : 'false';
     row.classList.toggle('indexed-directory', indexed);
+    row.classList.toggle('covered-directory', covered);
     if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
     const icon = row.querySelector(':scope > .file-tree-icon');
     if (icon) {
@@ -12266,17 +12344,15 @@ function scheduleFit(session) {
   if (item) {
     if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
     if (item.fitTimer) clearTimeout(item.fitTimer);
-    if (item.fitFinalTimer) clearTimeout(item.fitFinalTimer);
+    // C12 F3: one rAF fit for the common fast case + a SINGLE trailing fit to catch a late layout settle
+    // (was rAF + 80ms + 250ms = three fits per resize). fitTerminal already skips the remote resize when
+    // cols/rows are unchanged, so the trailing fit is a cheap no-op when nothing actually moved.
     item.fitFrame = requestAnimationFrame(() => {
       item.fitFrame = 0;
       fitTerminal(session);
     });
     item.fitTimer = setTimeout(() => {
       item.fitTimer = 0;
-      fitTerminal(session);
-    }, 80);
-    item.fitFinalTimer = setTimeout(() => {
-      item.fitFinalTimer = 0;
       fitTerminal(session);
     }, 250);
     return;
@@ -15481,6 +15557,23 @@ function comparisonTitleHtml(payload) {
   return t('diff.comparing', {from: esc(from), to: esc(to)});
 }
 
+// C15 follow-up: the compact comparison line IS the FROM/TO control — render the localized
+// "Comparing {from} with {to}" sentence with the actual SHA <select> pulldowns injected in place of
+// {from}/{to}. Splitting on placeholders (not hardcoding "Comparing"/"with") preserves each locale's word
+// order. The selects carry the same data attrs as diffRefControlsHtml, so the panel's delegated
+// change/keydown handler commits them per repo.
+function diffRefComparisonLineHtml(repo) {
+  const refs = repoDiffRefs(repo);
+  const fromSelect = `<select class="diff-ref-select" data-diff-ref-from data-diff-ref-from-select aria-label="${esc(t('diff.ref.from.aria'))}">${diffRefSelectOptionsHtml(refs.from, {compact: true, suggestions: diffRefFromSuggestions(repo)})}</select>`;
+  const toSelect = `<select class="diff-ref-select" data-diff-ref-to data-diff-ref-to-select aria-label="${esc(t('diff.ref.to.aria'))}">${diffRefSelectOptionsHtml(refs.to, {compact: true, suggestions: diffRefToSuggestions(refs.from, repo)})}</select>`;
+  // esc() leaves the {{FROM}}/{{TO}} placeholders intact (no HTML-special chars), then we swap in the
+  // raw select markup — so the surrounding localized text stays escaped.
+  const body = esc(t('diff.comparing', {from: '{{FROM}}', to: '{{TO}}'}))
+    .replace('{{FROM}}', fromSelect)
+    .replace('{{TO}}', toSelect);
+  return `<span class="diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}</span>`;
+}
+
 // C6: per-repo comparison title (from the repo payload's own effective refs), shown beside that repo's
 // FROM/TO controls. Surfaces any per-repo ref fallback so the user sees why a repo defaulted.
 function repoComparisonTitleHtml(repoInfo) {
@@ -15500,10 +15593,15 @@ function changesSummaryHtml(files, session, loading, loaded) {
   return `${esc(count)}${esc(scope)} <span class="changes-summary-separator">·</span> <span class="changes-diff-add">+${added}</span> <span class="changes-diff-remove">-${removed}</span>`;
 }
 
-function changesRepoMetaHtml(repoInfo) {
+function changesRepoMetaHtml(repoInfo, options = {}) {
+  // C15 (compact header): when hideZero is set (the embedded popover), omit 0-commit ahead/behind so a
+  // clean repo prints nothing instead of the redundant "Behind 0 / Ahead 0".
+  const hideZero = options.hideZero === true;
   const pieces = [];
-  if (Number.isFinite(Number(repoInfo?.behind))) pieces.push(`<span>${esc(tPlural('changes.behind', Number(repoInfo.behind)))}</span>`);
-  if (Number.isFinite(Number(repoInfo?.ahead))) pieces.push(`<span>${esc(tPlural('changes.ahead', Number(repoInfo.ahead)))}</span>`);
+  const behind = Number(repoInfo?.behind);
+  const ahead = Number(repoInfo?.ahead);
+  if (Number.isFinite(behind) && (!hideZero || behind > 0)) pieces.push(`<span>${esc(tPlural('changes.behind', behind))}</span>`);
+  if (Number.isFinite(ahead) && (!hideZero || ahead > 0)) pieces.push(`<span>${esc(tPlural('changes.ahead', ahead))}</span>`);
   return pieces.length ? `<span class="changes-repo-compare-meta">${pieces.join('')}</span>` : '';
 }
 
@@ -15516,6 +15614,24 @@ function repoPayloadByPath(payload) {
 function changesComparisonHeaderHtml(payload, files, options = {}) {
   const loaded = payload?.loaded === true;
   const loading = options.loading === true;
+  if (options.compact) {
+    // C15: the embedded Finder header is one compact line — "Comparing <FROM> with <TO>  +A −R" — with
+    // no "N files changed in '<session>'" (the session is already in the title, the count is on the repo
+    // row). When the session touches a SINGLE git repo, the FROM/TO are interactive SHA pulldowns right
+    // on this line; with multiple repos there is no single pair, so it stays static text and each repo's
+    // pulldowns live in its row popover (C6 per-repo refs).
+    if (loading) return `<section class="changes-comparison-head compact">${esc(t('changes.loading'))}</section>`;
+    if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
+    const {added, removed} = changeFileTotals(files);
+    const gitRepos = Array.isArray(payload?.repos) ? payload.repos : [];
+    const titleHtml = gitRepos.length === 1 && gitRepos[0]?.repo
+      ? diffRefComparisonLineHtml(gitRepos[0].repo)
+      : comparisonTitleHtml(payload || {});
+    return `<section class="changes-comparison-head compact">
+      <span class="changes-comparison-title">${titleHtml}</span>
+      <span class="changes-comparison-totals"><span class="changes-diff-add">+${added}</span> <span class="changes-diff-remove">-${removed}</span></span>
+    </section>`;
+  }
   const summary = changesSummaryHtml(files, payload?.session || '', loading, loaded);
   return `<section class="changes-comparison-head">
     <div class="changes-comparison-title">${comparisonTitleHtml(payload || {})}</div>
@@ -15643,6 +15759,9 @@ function changesRepoGroupsHtml(files, options = {}) {
   const {regular, uploaded} = splitUploadedSessionFiles(files);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
+  // C15 follow-up: with a SINGLE git repo the FROM/TO pulldowns live on the compact comparison line, so
+  // the repo-row popover omits them (avoids two copies). With multiple repos, each row keeps its own.
+  const refsOnComparisonLine = options.compact === true && (Array.isArray(payload?.repos) ? payload.repos.length === 1 : false);
   const repoHtml = groupedSessionFiles(regular).map(([repo, entries]) => {
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
     const repoInfo = repoMap.get(repo) || {};
@@ -15651,13 +15770,30 @@ function changesRepoGroupsHtml(files, options = {}) {
     const collapsed = changesRepoCollapsed.has(repo);
     const rows = collapsed ? '' : changesTreeChildrenHtml(tree, {session: payload.session || '', repo, compact: options.compact === true}, 0);
     // C6: each real repo gets its OWN FROM/TO controls (scoped to its commit graph) plus its own
-    // comparison title, beside its header. 'Outside repo' has no git graph, so no controls there.
+    // comparison title. 'Outside repo' has no git graph, so no controls there.
     const hasGit = repo && repo !== 'Outside repo';
+    const head = `<button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${options.compact ? '' : changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></button>`;
+    if (options.compact === true) {
+      // C15 (compact header): the repo row is BARE (caret · path · count). The per-repo comparison,
+      // ahead/behind, and FROM/TO pickers move into a hover popover (kept open while hovered because it
+      // is a descendant of the wrap), so the always-visible chrome is just one row per repo.
+      const popover = hasGit
+        ? `<div class="changes-repo-popover" role="group" aria-label="${esc(repoLabel)}">
+            <div class="changes-repo-popover-path">${esc(repoLabel)}</div>
+            ${changesRepoMetaHtml(repoInfo, {hideZero: true})}
+            ${refsOnComparisonLine ? '' : `<div class="changes-repo-popover-compare">${repoComparisonTitleHtml(repoInfo)}</div>${diffRefControlsHtml({repo, compact: true})}`}
+          </div>`
+        : '';
+      return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
+        <div class="changes-repo-head-wrap">${head}${popover}</div>
+        ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
+      </section>`;
+    }
     const refsRow = hasGit && !collapsed
       ? `<div class="changes-repo-refs">${repoComparisonTitleHtml(repoInfo)}${diffRefControlsHtml({repo, compact: true})}</div>`
       : '';
     return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
-      <button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></button>
+      ${head}
       ${refsRow}
       ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
     </section>`;
@@ -15710,14 +15846,15 @@ function fileExplorerChangesPanelHtml() {
   return `
     <div class="file-explorer-changes-head">
       <span class="changes-title">${esc(titleText)}</span>
-      <label class="changes-control changes-sort-compact">${esc(t('changes.sort'))} <select data-session-files-sort aria-label="${esc(t('changes.sort'))}">
-        <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>${esc(t('changes.sort.recent'))}</option>
-        <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>${esc(t('changes.sort.name'))}</option>
-      </select></label>
+      <span class="changes-sort-toggle" role="group" aria-label="${esc(t('changes.sort'))}">
+        <button type="button" class="changes-sort-seg${sessionFilesSortMode === 'mtime' ? ' active' : ''}" data-session-files-sort data-sort-value="mtime" aria-pressed="${sessionFilesSortMode === 'mtime' ? 'true' : 'false'}">${esc(t('changes.sort.recent'))}</button>
+        <span class="changes-sort-divider" aria-hidden="true">|</span>
+        <button type="button" class="changes-sort-seg${sessionFilesSortMode === 'name' ? ' active' : ''}" data-session-files-sort data-sort-value="name" aria-pressed="${sessionFilesSortMode === 'name' ? 'true' : 'false'}">${esc(t('changes.sort.name'))}</button>
+      </span>
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
-    ${changesComparisonHeaderHtml(payload, files, {loading})}
+    ${changesComparisonHeaderHtml(payload, files, {loading, compact: true})}
     ${errorHtml}
     ${empty || changesRepoGroupsHtml(files, {compact: true, payload})}`;
 }
@@ -15856,6 +15993,16 @@ function bindChangesPanel(panel) {
     }
   });
   panel.addEventListener('click', async event => {
+    // C13: the embedded Finder header sort is a segmented Recent|name toggle (buttons), not a <select>;
+    // a clicked segment carries data-sort-value. (The standalone Changes <select> still fires `change`.)
+    const sortSeg = event.target.closest('[data-session-files-sort][data-sort-value]');
+    if (sortSeg && panel.contains(sortSeg)) {
+      event.preventDefault();
+      sessionFilesSortMode = sortSeg.dataset.sortValue === 'name' ? 'name' : 'mtime';
+      renderChangesPanels({force: true});
+      renderFileExplorerChangesPanels({force: true});
+      return;
+    }
     const uploadedToggle = event.target.closest('[data-uploaded-files-toggle]');
     if (uploadedToggle && panel.contains(uploadedToggle)) {
       event.preventDefault();

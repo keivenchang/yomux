@@ -701,6 +701,11 @@ body.resizing-file-explorer-changes {
   overflow: auto;
   padding: 4px 0;
 }
+/* C15: route this inner Finder↔Modified-files split through the SHARED --pane-resizer-* tokens instead
+   of the old special-cased hardcoded-green strip. At rest a thin yellow line (--pane-resizer-bg, the same
+   one every other pane boundary shows); on hover/resize it brightens + thickens (--pane-resizer-hover-bg
+   + --drop-outline-shadow). The 6px element stays as the comfortable grab zone; the visible line is the
+   centered ::before. Light/dark flip automatically via the tokens (no hardcoded hex). */
 .file-explorer-changes-resizer {
   position: relative;
   z-index: 2;
@@ -709,19 +714,24 @@ body.resizing-file-explorer-changes {
   cursor: row-resize;
   touch-action: none;
   user-select: none;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-  background: linear-gradient(180deg, transparent, rgba(118, 185, 0, 0.16), transparent);
+  background: transparent;
 }
 .file-explorer-changes-resizer::before {
   content: "";
   position: absolute;
-  inset-block: -3px;
   inset-inline: 0;
+  top: calc(50% - (var(--pane-resizer-line-size) / 2));
+  height: var(--pane-resizer-line-size);
+  background: var(--pane-resizer-bg);
+  transition: background 90ms ease, box-shadow 90ms ease, height 90ms ease, top 90ms ease;
 }
-.file-explorer-changes-resizer:hover,
-.file-explorer-pane.resizing-changes .file-explorer-changes-resizer {
-  background: rgba(118, 185, 0, 0.28);
+.file-explorer-changes-resizer:hover::before,
+.file-explorer-changes-resizer:focus-visible::before,
+.file-explorer-pane.resizing-changes .file-explorer-changes-resizer::before {
+  top: calc(50% - (var(--pane-resizer-hover-line-size) / 2));
+  height: var(--pane-resizer-hover-line-size);
+  background: var(--pane-resizer-hover-bg);
+  box-shadow: 0 0 0 1px var(--drop-outline-shadow);
 }
 .file-explorer-changes-panel {
   flex: 0 0 var(--file-explorer-changes-size);
@@ -795,17 +805,36 @@ body.theme-light .file-explorer-changes-head {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* C8: compact Date/Name sort control in the Finder Modified-files header (reuses the shared handler). */
-.file-explorer-changes-head .changes-sort-compact {
+/* C8/C13: inline Recent|name sort toggle in the Finder Modified-files header (no "Sort" label). The
+   active segment uses the accent green, the inactive is muted, and the divider uses the line token — all
+   flip with the theme. Reuses the shared sort handler/state. */
+.file-explorer-changes-head .changes-sort-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
   white-space: nowrap;
-  font-weight: 600;
-}
-.file-explorer-changes-head .changes-sort-compact select {
   font-size: var(--ui-font-size-xs);
+}
+.file-explorer-changes-head .changes-sort-seg {
+  border: 0;
+  background: transparent;
+  padding: 0 2px;
+  font: inherit;
+  cursor: pointer;
+  color: var(--muted);
+}
+.file-explorer-changes-head .changes-sort-seg.active {
+  color: var(--brand-green);
+  font-weight: 700;
+}
+.file-explorer-changes-head .changes-sort-seg:hover,
+.file-explorer-changes-head .changes-sort-seg:focus-visible {
+  color: var(--brand-green);
+  outline: none;
+}
+.file-explorer-changes-head .changes-sort-divider {
+  color: var(--line);
 }
 /* FROM hugs the left edge of the refs area, TO hugs the right (user: "FROM left, TO right indented").
    The controls span the full width of their cell/row and push apart instead of bunching together. */
@@ -844,6 +873,79 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 .file-explorer-changes-panel .changes-comparison-summary {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+/* C15 (compact header): one line — "Comparing FROM with TO" on the left (muted, ellipsized), the +A −R
+   totals pinned right. No file-count / session (already in the title + repo-row count). */
+.file-explorer-changes-panel .changes-comparison-head.compact {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.file-explorer-changes-panel .changes-comparison-head.compact .changes-comparison-title {
+  min-width: 0;
+  font-weight: 600;
+  color: var(--muted);
+}
+.file-explorer-changes-panel .changes-comparison-head.compact .changes-comparison-totals {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* C15 follow-up: the FROM/TO SHA pulldowns sit inline in the "Comparing <FROM> with <TO>" sentence on the
+   compact line — keep the selects compact so the line fits, and don't clip them with an ellipsis. */
+.file-explorer-changes-panel .changes-comparison-head.compact .diff-ref-inline {
+  display: inline;
+}
+.file-explorer-changes-panel .changes-comparison-head.compact .diff-ref-inline .diff-ref-select {
+  max-width: 16ch;
+  margin: 0 2px;
+  vertical-align: baseline;
+  font-size: var(--ui-font-size-xs);
+}
+/* C15: the repo row is bare; its per-repo comparison, ahead/behind, and FROM/TO pickers live in a hover
+   popover. The popover is a DESCENDANT of the wrap, so hovering it keeps the wrap :hover -> it stays open
+   and its FROM/TO <select>s are reachable. All tokens flip with the theme. */
+.changes-repo-head-wrap {
+  position: relative;
+}
+.changes-repo-popover {
+  display: none;
+  position: absolute;
+  inset-inline-start: 0;
+  top: 100%;
+  z-index: 6;
+  min-width: max(240px, 100%);
+  max-width: 380px;
+  margin-top: 2px;
+  padding: 8px 10px;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: var(--shadow-elevated);
+  font-size: var(--ui-font-size-xs);
+  color: var(--text);
+  text-align: start;
+}
+.changes-repo-head-wrap:hover .changes-repo-popover {
+  display: flex;
+}
+.changes-repo-popover-path {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.changes-repo-popover-compare {
+  color: var(--muted);
+}
+.changes-repo-popover .changes-repo-compare-meta {
+  color: var(--muted);
+}
+.changes-repo-popover .diff-ref-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
 }
 .file-explorer-changes-head .changes-close {
   height: 20px;

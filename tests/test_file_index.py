@@ -120,6 +120,50 @@ def test_empty_query_returns_warming_when_index_not_ready(tmp_path, monkeypatch)
     assert payload["files"] == []
 
 
+def test_index_status_reports_rich_state(tmp_path, monkeypatch):
+    # C11 #1: the status endpoint reports the real state (ready/building/missing) + built_at/age/truncated
+    # so the Finder badge shows the truth instead of guessing.
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    status = filesystem.index_status(str(tmp_path))
+    assert status["state"] == "ready"
+    assert status["ready"] is True
+    assert status["built_at"] > 0
+    assert status["age"] is not None and status["age"] >= 0
+    assert status["truncated"] is False
+
+
+def test_unindex_writes_tombstone_then_rebuild_clears_it(tmp_path, monkeypatch):
+    # C11 #2: unindex leaves a tombstone; a later fresh build supersedes it and clears it.
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    file_index.unindex(tmp_path)
+    assert file_index._tombstone_path(tmp_path).exists()
+    assert file_index._tombstone_time(tmp_path) > 0
+    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    assert not file_index._tombstone_path(tmp_path).exists()
+
+
+def test_tombstone_evicts_stale_inmemory_copy(tmp_path, monkeypatch):
+    # C11 #2: a tombstone newer than an in-memory copy (another process unindexed) drops that copy so the
+    # process stops serving deleted-file results.
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+    ri = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    assert ri.ready and ri.entries
+    file_index.INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    file_index._tombstone_path(tmp_path).write_text(str(ri.built_at + 100), encoding="utf-8")
+    monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: None)  # don't mask eviction
+    refreshed = file_index.ensure_index(tmp_path, SEARCH_SKIP_DIRS)
+    assert refreshed.ready is False
+    assert refreshed.entries == []
+
+
 def test_unindex_drops_registry_and_disk(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")

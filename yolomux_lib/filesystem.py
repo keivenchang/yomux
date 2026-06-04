@@ -583,12 +583,24 @@ def index_status(raw_root: str) -> dict[str, Any]:
         raise FilesystemError(f"not a directory: {root}", status=400)
     index = file_index.ensure_index(root, SEARCH_SKIP_DIRS)
     with index.lock:
-        return {
-            "root": str(root),
-            "building": bool(index.building),
-            "ready": bool(index.ready),
-            "count": len(index.entries),
-        }
+        ready = bool(index.ready)
+        building = bool(index.building)
+        built_at = float(index.built_at or 0.0)
+        count = len(index.entries)
+        truncated = bool(index.truncated)
+    # C11: report the real state so the Finder badge shows indexing/indexed honestly instead of guessing
+    # (which made the badge flicker). `state` is the single field the UI keys on.
+    state = "ready" if ready else ("building" if building else "missing")
+    return {
+        "root": str(root),
+        "building": building,
+        "ready": ready,
+        "count": count,
+        "built_at": built_at,
+        "age": (time.time() - built_at) if built_at else None,
+        "truncated": truncated,
+        "state": state,
+    }
 
 
 def unindex_root(raw_root: str) -> dict[str, Any]:

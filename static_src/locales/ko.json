@@ -481,6 +481,7 @@
   "palette.group.settings": "설정",
   "palette.group.recent": "최근",
   "palette.group.files": "파일",
+  "palette.openFolder": "{name}에서 폴더 열기",
   "common.loading": "불러오는 중...",
   "language.switcher": "언어",
   "popover.path": "경로",

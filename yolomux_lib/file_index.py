@@ -73,6 +73,30 @@ def _build_lock_path(root: Path) -> Path:
     return INDEX_DIR / f"{digest}.lock"
 
 
+def _tombstone_path(root: Path) -> Path:
+    # C11: written on unindex so a SECOND server process (sharing STATE_DIR) that still holds a ready
+    # in-memory copy drops it instead of serving deleted-file results indefinitely.
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+    return INDEX_DIR / f"{digest}.tomb"
+
+
+def _tombstone_time(root: Path) -> float:
+    # The unindex timestamp recorded on disk (0.0 if none). An index built before this is stale.
+    try:
+        return float(_tombstone_path(root).read_text(encoding="utf-8").strip() or 0.0)
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _clear_tombstone(root: Path) -> None:
+    try:
+        _tombstone_path(root).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
 def walk_root(root: Path, skip_dirs: set[str], stop_event: threading.Event | None = None) -> tuple[list[IndexEntry], bool]:
     """Collect every regular file under root, skipping skip_dirs. Cancellable."""
     entries: list[IndexEntry] = []
@@ -169,6 +193,8 @@ def _run_build(ri: RootIndex, skip_dirs: set[str]) -> None:
             ri.ready = True
             ri.building = False
         _persist(ri, skip_dirs)
+        # C11: a fresh build supersedes any prior unindex, so clear the tombstone.
+        _clear_tombstone(ri.root)
     finally:
         if lock_fd is not None:
             try:
@@ -202,6 +228,14 @@ def ensure_index(root: Path, skip_dirs: set[str]) -> RootIndex:
             if disk is not None:
                 ri.entries, ri.built_at, ri.truncated = disk
                 ri.ready = True
+    # C11: if another process unindexed this root after our copy was built, drop the stale in-memory
+    # index so we stop serving deleted-file results (a later explicit access rebuilds and clears the tomb).
+    tomb = _tombstone_time(root)
+    if ri.ready and tomb and tomb > ri.built_at:
+        with ri.lock:
+            ri.entries = []
+            ri.ready = False
+            ri.built_at = 0.0
     if not ri.ready or (time.time() - ri.built_at) > INDEX_TTL_SECONDS:
         _start_build(ri, skip_dirs)
     return ri
@@ -260,7 +294,8 @@ def recent_entries(ri: RootIndex, max_results: int, make_entry: Callable[[str, s
 
 
 def unindex(root: Path) -> None:
-    """Cancel any build and drop the index for root (in memory + on disk)."""
+    """Cancel any build and drop the index for root (in memory + on disk). Leaves a tombstone so other
+    server processes sharing STATE_DIR drop their stale in-memory copy on next access (C11)."""
     key = str(root)
     with _REGISTRY_LOCK:
         ri = _REGISTRY.pop(key, None)
@@ -270,5 +305,10 @@ def unindex(root: Path) -> None:
         _index_disk_path(root).unlink()
     except FileNotFoundError:
         pass
+    except OSError:
+        pass
+    try:
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        _tombstone_path(root).write_text(str(time.time()), encoding="utf-8")
     except OSError:
         pass

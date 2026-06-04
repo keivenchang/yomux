@@ -1431,6 +1431,33 @@ function recentFileQuickOpenItems() {
   }));
 }
 
+// C15 follow-up: while a directory PATH is typed in cmd-P, offer "Open <dir> in Finder" as the pinned
+// top row, so Enter (the default highlight) opens that directory in the Finder/File Explorer — while
+// arrowing down to a listed entry opens a file or descends into a subfolder. The target is the directory
+// the input points at: the listed dir, or its `filter` subfolder when the typed name is an exact subdir.
+function fileQuickOpenOpenFolderItem() {
+  const pathQuery = fileQuickOpenPathQuery();
+  if (!pathQuery.active) return null;
+  let target = fileQuickOpenRoot || normalizeDirectoryPath(pathQuery.directory);
+  if (pathQuery.filter) {
+    const filter = String(pathQuery.filter).toLowerCase();
+    const match = fileQuickOpenCandidates.find(entry => entry.kind === 'dir' && String(entry.name || '').toLowerCase() === filter);
+    if (match?.path) target = match.path;
+  }
+  if (!target) return null;
+  return {
+    group: t('palette.group.files'),
+    label: t('palette.openFolder', {name: fileExplorerLabel()}),
+    detail: compactHomePath(target),
+    key: `open-folder:${target}`,
+    iconText: '▸',
+    keybinding: appShortcutText('Enter'),
+    pinTop: true,
+    searchFields: ['open folder', target],
+    run: async () => { await openFileExplorerPane(); await openFileExplorerAt(target); },
+  };
+}
+
 function fileQuickOpenItems() {
   const seen = new Set();
   const items = [];
@@ -1440,11 +1467,16 @@ function fileQuickOpenItems() {
     seen.add(path);
     items.push(item);
   };
+  const openFolder = fileQuickOpenOpenFolderItem();
+  if (openFolder) items.push(openFolder);
   recentFileQuickOpenItems().forEach(add);
   for (const file of fileQuickOpenCandidates) {
     const path = file.path || '';
     if (!path) continue;
-    const indexedRoot = normalizeStoredFileExplorerIndexedDir(file.indexed_root || '');
+    // Only an entry that ACTUALLY came from an indexed-root search carries an indexed_root; path-mode
+    // listing entries have none. Guard the empty case — normalizeStoredFileExplorerIndexedDir('') returns
+    // '/' (empty -> root), which used to mislabel every path-mode directory row as "Indexed /".
+    const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
     const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
     add(fileQuickOpenItem(path, {
       group: indexedRoot && indexedRoot !== baseRoot ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
@@ -1494,6 +1526,9 @@ function commandPaletteMatches(item, query) {
 
 function commandPaletteItemScore(item, query) {
   if (item.disabled) return 0;
+  // C15 follow-up: the path-mode "Open this folder in Finder" row always sorts to the top (and survives
+  // any filter text) so it is the default Enter action while a directory path is typed.
+  if (item.pinTop) return 1e9;
   const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item);
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);

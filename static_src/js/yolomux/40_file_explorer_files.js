@@ -1345,9 +1345,14 @@ function fileExplorerDirectoryIsIndexed(path) {
 // across fs-poll re-renders (and a background TTL rebuild keeps the backend `ready`, so it never
 // flips back to "indexing").
 function fileExplorerIndexBadgeText(path) {
-  if (!fileExplorerDirectoryIsIndexed(path)) return '';
-  const normalized = normalizeStoredFileExplorerIndexedDir(path);
-  return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+  if (fileExplorerDirectoryIsIndexed(path)) {
+    const normalized = normalizeStoredFileExplorerIndexedDir(path);
+    return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+  }
+  // C11 #1: a directory INSIDE an indexed root is already covered by that root's index — label it
+  // "covered" so it doesn't read as un-indexed (and so the user knows not to index it separately).
+  if (fileExplorerIndexedAncestor(path)) return 'covered';
+  return '';
 }
 
 // Warm the backend index for a root (kicks the build) and track building/ready; polls while
@@ -1465,17 +1470,25 @@ function persistIndexedDirsSetting(op = {}) {
   saveSettingsPatch({file_explorer: {indexed_dirs: dirs}}, {silent: true}).catch(() => {});
 }
 
-// Reconcile the localStorage indexed-dir set FROM the file_explorer.indexed_dirs setting (so editing
-// the Preferences list adds/removes indexed dirs). Idempotent + guarded so it never loops with the
-// set->setting mirror in setFileExplorerDirectoryIndexed.
+// C11 #3: the shared file_explorer.indexed_dirs SETTING is the durable source of truth for which dirs are
+// indexed; per-origin localStorage is only a cache + a ONE-TIME migration seed. This reconciles the
+// in-memory set FROM the setting (so the setting is authoritative — local-only dirs not in the setting are
+// dropped), and on the very first load migrates any pre-existing localStorage dirs INTO the setting exactly
+// once (guarded by a migration marker so a stale per-origin cache can never re-seed the setting later).
 function reconcileIndexedDirsFromSetting(options = {}) {
   const raw = initialSetting('file_explorer.indexed_dirs', []);
   const list = Array.isArray(raw) ? raw : [];
-  if (options.initial && !list.length && fileExplorerIndexedDirs.size) {
-    // First load: the setting has not been populated yet but localStorage already has indexed dirs —
-    // migrate the set INTO the setting rather than wiping the user's existing indexed directories.
-    persistIndexedDirsSetting();
-    return;
+  const migrated = storageGet(fileExplorerIndexedDirsMigratedKey) === '1';
+  if (options.initial && !migrated) {
+    // One-time migration: if the setting is empty but this origin's localStorage already has indexed dirs,
+    // seed the durable setting from them (don't wipe the user's existing indexed directories). Either way,
+    // record that migration is done so localStorage is never treated as a desired-root peer again.
+    if (!list.length && fileExplorerIndexedDirs.size) {
+      persistIndexedDirsSetting();
+      storageSet(fileExplorerIndexedDirsMigratedKey, '1');
+      return;
+    }
+    storageSet(fileExplorerIndexedDirsMigratedKey, '1');
   }
   const desired = new Set(compactNestedPaths(list.map(normalizeStoredFileExplorerIndexedDir).filter(Boolean)));
   const current = new Set(fileExplorerIndexedDirs);
@@ -1504,8 +1517,10 @@ function updateFileExplorerIndexedDirectoryRows() {
   document.querySelectorAll('.file-tree-row.kind-dir[data-path]').forEach(row => {
     const path = row.dataset.path || '';
     const indexed = fileExplorerDirectoryIsIndexed(path);
+    const covered = !indexed && Boolean(fileExplorerIndexedAncestor(path));  // C11 #1
     row.dataset.indexed = indexed ? 'true' : 'false';
     row.classList.toggle('indexed-directory', indexed);
+    row.classList.toggle('covered-directory', covered);
     if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
     const icon = row.querySelector(':scope > .file-tree-icon');
     if (icon) {

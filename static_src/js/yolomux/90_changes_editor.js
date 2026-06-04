@@ -496,6 +496,23 @@ function comparisonTitleHtml(payload) {
   return t('diff.comparing', {from: esc(from), to: esc(to)});
 }
 
+// C15 follow-up: the compact comparison line IS the FROM/TO control — render the localized
+// "Comparing {from} with {to}" sentence with the actual SHA <select> pulldowns injected in place of
+// {from}/{to}. Splitting on placeholders (not hardcoding "Comparing"/"with") preserves each locale's word
+// order. The selects carry the same data attrs as diffRefControlsHtml, so the panel's delegated
+// change/keydown handler commits them per repo.
+function diffRefComparisonLineHtml(repo) {
+  const refs = repoDiffRefs(repo);
+  const fromSelect = `<select class="diff-ref-select" data-diff-ref-from data-diff-ref-from-select aria-label="${esc(t('diff.ref.from.aria'))}">${diffRefSelectOptionsHtml(refs.from, {compact: true, suggestions: diffRefFromSuggestions(repo)})}</select>`;
+  const toSelect = `<select class="diff-ref-select" data-diff-ref-to data-diff-ref-to-select aria-label="${esc(t('diff.ref.to.aria'))}">${diffRefSelectOptionsHtml(refs.to, {compact: true, suggestions: diffRefToSuggestions(refs.from, repo)})}</select>`;
+  // esc() leaves the {{FROM}}/{{TO}} placeholders intact (no HTML-special chars), then we swap in the
+  // raw select markup — so the surrounding localized text stays escaped.
+  const body = esc(t('diff.comparing', {from: '{{FROM}}', to: '{{TO}}'}))
+    .replace('{{FROM}}', fromSelect)
+    .replace('{{TO}}', toSelect);
+  return `<span class="diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}</span>`;
+}
+
 // C6: per-repo comparison title (from the repo payload's own effective refs), shown beside that repo's
 // FROM/TO controls. Surfaces any per-repo ref fallback so the user sees why a repo defaulted.
 function repoComparisonTitleHtml(repoInfo) {
@@ -515,10 +532,15 @@ function changesSummaryHtml(files, session, loading, loaded) {
   return `${esc(count)}${esc(scope)} <span class="changes-summary-separator">·</span> <span class="changes-diff-add">+${added}</span> <span class="changes-diff-remove">-${removed}</span>`;
 }
 
-function changesRepoMetaHtml(repoInfo) {
+function changesRepoMetaHtml(repoInfo, options = {}) {
+  // C15 (compact header): when hideZero is set (the embedded popover), omit 0-commit ahead/behind so a
+  // clean repo prints nothing instead of the redundant "Behind 0 / Ahead 0".
+  const hideZero = options.hideZero === true;
   const pieces = [];
-  if (Number.isFinite(Number(repoInfo?.behind))) pieces.push(`<span>${esc(tPlural('changes.behind', Number(repoInfo.behind)))}</span>`);
-  if (Number.isFinite(Number(repoInfo?.ahead))) pieces.push(`<span>${esc(tPlural('changes.ahead', Number(repoInfo.ahead)))}</span>`);
+  const behind = Number(repoInfo?.behind);
+  const ahead = Number(repoInfo?.ahead);
+  if (Number.isFinite(behind) && (!hideZero || behind > 0)) pieces.push(`<span>${esc(tPlural('changes.behind', behind))}</span>`);
+  if (Number.isFinite(ahead) && (!hideZero || ahead > 0)) pieces.push(`<span>${esc(tPlural('changes.ahead', ahead))}</span>`);
   return pieces.length ? `<span class="changes-repo-compare-meta">${pieces.join('')}</span>` : '';
 }
 
@@ -531,6 +553,24 @@ function repoPayloadByPath(payload) {
 function changesComparisonHeaderHtml(payload, files, options = {}) {
   const loaded = payload?.loaded === true;
   const loading = options.loading === true;
+  if (options.compact) {
+    // C15: the embedded Finder header is one compact line — "Comparing <FROM> with <TO>  +A −R" — with
+    // no "N files changed in '<session>'" (the session is already in the title, the count is on the repo
+    // row). When the session touches a SINGLE git repo, the FROM/TO are interactive SHA pulldowns right
+    // on this line; with multiple repos there is no single pair, so it stays static text and each repo's
+    // pulldowns live in its row popover (C6 per-repo refs).
+    if (loading) return `<section class="changes-comparison-head compact">${esc(t('changes.loading'))}</section>`;
+    if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
+    const {added, removed} = changeFileTotals(files);
+    const gitRepos = Array.isArray(payload?.repos) ? payload.repos : [];
+    const titleHtml = gitRepos.length === 1 && gitRepos[0]?.repo
+      ? diffRefComparisonLineHtml(gitRepos[0].repo)
+      : comparisonTitleHtml(payload || {});
+    return `<section class="changes-comparison-head compact">
+      <span class="changes-comparison-title">${titleHtml}</span>
+      <span class="changes-comparison-totals"><span class="changes-diff-add">+${added}</span> <span class="changes-diff-remove">-${removed}</span></span>
+    </section>`;
+  }
   const summary = changesSummaryHtml(files, payload?.session || '', loading, loaded);
   return `<section class="changes-comparison-head">
     <div class="changes-comparison-title">${comparisonTitleHtml(payload || {})}</div>
@@ -658,6 +698,9 @@ function changesRepoGroupsHtml(files, options = {}) {
   const {regular, uploaded} = splitUploadedSessionFiles(files);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
+  // C15 follow-up: with a SINGLE git repo the FROM/TO pulldowns live on the compact comparison line, so
+  // the repo-row popover omits them (avoids two copies). With multiple repos, each row keeps its own.
+  const refsOnComparisonLine = options.compact === true && (Array.isArray(payload?.repos) ? payload.repos.length === 1 : false);
   const repoHtml = groupedSessionFiles(regular).map(([repo, entries]) => {
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
     const repoInfo = repoMap.get(repo) || {};
@@ -666,13 +709,30 @@ function changesRepoGroupsHtml(files, options = {}) {
     const collapsed = changesRepoCollapsed.has(repo);
     const rows = collapsed ? '' : changesTreeChildrenHtml(tree, {session: payload.session || '', repo, compact: options.compact === true}, 0);
     // C6: each real repo gets its OWN FROM/TO controls (scoped to its commit graph) plus its own
-    // comparison title, beside its header. 'Outside repo' has no git graph, so no controls there.
+    // comparison title. 'Outside repo' has no git graph, so no controls there.
     const hasGit = repo && repo !== 'Outside repo';
+    const head = `<button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${options.compact ? '' : changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></button>`;
+    if (options.compact === true) {
+      // C15 (compact header): the repo row is BARE (caret · path · count). The per-repo comparison,
+      // ahead/behind, and FROM/TO pickers move into a hover popover (kept open while hovered because it
+      // is a descendant of the wrap), so the always-visible chrome is just one row per repo.
+      const popover = hasGit
+        ? `<div class="changes-repo-popover" role="group" aria-label="${esc(repoLabel)}">
+            <div class="changes-repo-popover-path">${esc(repoLabel)}</div>
+            ${changesRepoMetaHtml(repoInfo, {hideZero: true})}
+            ${refsOnComparisonLine ? '' : `<div class="changes-repo-popover-compare">${repoComparisonTitleHtml(repoInfo)}</div>${diffRefControlsHtml({repo, compact: true})}`}
+          </div>`
+        : '';
+      return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
+        <div class="changes-repo-head-wrap">${head}${popover}</div>
+        ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
+      </section>`;
+    }
     const refsRow = hasGit && !collapsed
       ? `<div class="changes-repo-refs">${repoComparisonTitleHtml(repoInfo)}${diffRefControlsHtml({repo, compact: true})}</div>`
       : '';
     return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
-      <button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></button>
+      ${head}
       ${refsRow}
       ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
     </section>`;
@@ -725,14 +785,15 @@ function fileExplorerChangesPanelHtml() {
   return `
     <div class="file-explorer-changes-head">
       <span class="changes-title">${esc(titleText)}</span>
-      <label class="changes-control changes-sort-compact">${esc(t('changes.sort'))} <select data-session-files-sort aria-label="${esc(t('changes.sort'))}">
-        <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>${esc(t('changes.sort.recent'))}</option>
-        <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>${esc(t('changes.sort.name'))}</option>
-      </select></label>
+      <span class="changes-sort-toggle" role="group" aria-label="${esc(t('changes.sort'))}">
+        <button type="button" class="changes-sort-seg${sessionFilesSortMode === 'mtime' ? ' active' : ''}" data-session-files-sort data-sort-value="mtime" aria-pressed="${sessionFilesSortMode === 'mtime' ? 'true' : 'false'}">${esc(t('changes.sort.recent'))}</button>
+        <span class="changes-sort-divider" aria-hidden="true">|</span>
+        <button type="button" class="changes-sort-seg${sessionFilesSortMode === 'name' ? ' active' : ''}" data-session-files-sort data-sort-value="name" aria-pressed="${sessionFilesSortMode === 'name' ? 'true' : 'false'}">${esc(t('changes.sort.name'))}</button>
+      </span>
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
-    ${changesComparisonHeaderHtml(payload, files, {loading})}
+    ${changesComparisonHeaderHtml(payload, files, {loading, compact: true})}
     ${errorHtml}
     ${empty || changesRepoGroupsHtml(files, {compact: true, payload})}`;
 }
@@ -871,6 +932,16 @@ function bindChangesPanel(panel) {
     }
   });
   panel.addEventListener('click', async event => {
+    // C13: the embedded Finder header sort is a segmented Recent|name toggle (buttons), not a <select>;
+    // a clicked segment carries data-sort-value. (The standalone Changes <select> still fires `change`.)
+    const sortSeg = event.target.closest('[data-session-files-sort][data-sort-value]');
+    if (sortSeg && panel.contains(sortSeg)) {
+      event.preventDefault();
+      sessionFilesSortMode = sortSeg.dataset.sortValue === 'name' ? 'name' : 'mtime';
+      renderChangesPanels({force: true});
+      renderFileExplorerChangesPanels({force: true});
+      return;
+    }
     const uploadedToggle = event.target.closest('[data-uploaded-files-toggle]');
     if (uploadedToggle && panel.contains(uploadedToggle)) {
       event.preventDefault();
