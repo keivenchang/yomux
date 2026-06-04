@@ -293,6 +293,29 @@ def test_read_file_returns_text(tmp_path):
     assert payload["mtime_ns"] == file_path.stat().st_mtime_ns
 
 
+def test_read_file_reports_git_tracked(tmp_path):
+    # A committed file is tracked; an untracked sibling and a file outside any repo are not.
+    # The editor uses this flag to hide its blame/diff buttons for files with no git history.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("committed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(tmp_path), "commit", "-q", "-m", "add"],
+        check=True,
+    )
+    untracked = tmp_path / "untracked.txt"
+    untracked.write_text("new\n", encoding="utf-8")
+    assert filesystem.read_file(str(tracked))["git_tracked"] is True
+    assert filesystem.read_file(str(untracked))["git_tracked"] is False
+
+
+def test_read_file_outside_repo_is_not_tracked(tmp_path):
+    file_path = tmp_path / "loose.txt"
+    file_path.write_text("loose\n", encoding="utf-8")
+    assert filesystem.read_file(str(file_path))["git_tracked"] is False
+
+
 def test_read_file_rejects_binary(tmp_path):
     file_path = tmp_path / "binary.bin"
     file_path.write_bytes(b"abc\x00def")

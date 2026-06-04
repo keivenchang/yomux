@@ -569,6 +569,18 @@ def _looks_binary(data: bytes) -> bool:
     return b"\x00" in data[:BINARY_SNIFF_BYTES]
 
 
+def git_tracks_path(path: Path) -> bool:
+    """True when `path` is a file tracked by git (committed or staged). Untracked
+    working-tree files and files outside any repo both return False. The editor's
+    blame and diff buttons use this to stay hidden for files with no git history."""
+    if path.is_dir():
+        return False
+    # ls-files pathspec is resolved relative to cwd (the file's parent), so `name`
+    # is enough; returncode is non-zero both when untracked AND when not in a repo.
+    result = git(["ls-files", "--error-unmatch", "--", path.name], cwd=str(path.parent), timeout=1.5)
+    return result.returncode == 0
+
+
 def read_file(raw_path: str) -> dict[str, Any]:
     path = _validated_path(raw_path)
     if not path.exists():
@@ -599,6 +611,7 @@ def read_file(raw_path: str) -> dict[str, Any]:
         "content": content,
         "extension": path.suffix.lower(),
         "is_text_extension": path.suffix.lower() in TEXT_EXTENSIONS,
+        "git_tracked": git_tracks_path(path),
     }
 
 

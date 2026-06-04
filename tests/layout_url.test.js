@@ -1239,27 +1239,35 @@ function makeFileTree(paths) {
   assert.equal(api.openFileDiffAvailable(unavailableDiffState), false);
   const diffButton = new TestElement('diff-button');
   api.setFileEditorViewMode(changedPath, 'edit', changedItem);
-  api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', diffLoaded: true, diff: ''}, changedItem);
+  api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', gitTracked: true, diffLoaded: true, diff: ''}, changedItem);
   assert.equal(diffButton.hidden, true, 'unchanged files do not show a Diff button');
-  api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', diffLoaded: true, diff: 'diff --git a/a b/a'}, changedItem);
+  api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', gitTracked: true, diffLoaded: true, diff: 'diff --git a/a b/a'}, changedItem);
   assert.equal(diffButton.hidden, false, 'changed repo files show a Diff button');
   assert.equal(diffButton.disabled, false, 'changed repo Diff button is clickable');
   api.setFileEditorViewMode(changedPath, 'diff', changedItem);
-  api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', diffLoading: true}, changedItem);
+  api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', gitTracked: true, diffLoading: true}, changedItem);
   assert.equal(diffButton.hidden, false, 'active diff view keeps a loading Diff button while refs load');
   assert.equal(diffButton.disabled, false, 'active diff view keeps Exit diff clickable while refs load');
   const codePath = '/repo/app/app.py';
   const codeItem = api.fileEditorItemFor(codePath);
   api.setFileEditorViewMode(codePath, 'diff', codeItem);
-  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', diffLoaded: true, diff: ''}, codeItem);
+  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: true, diffLoaded: true, diff: ''}, codeItem);
   assert.equal(diffButton.hidden, false, 'code files stuck in diff still show an Exit diff button');
   assert.equal(diffButton.disabled, false, 'Exit diff stays clickable even when no code-file diff is available');
   // #25: a .py (non-md/html) in NORMAL mode with no diff loaded yet still offers a clickable Diff
   // toggle, which lazily loads the diff on click (it only hides once a load confirms there is none).
   api.setFileEditorViewMode(codePath, 'edit', codeItem);
-  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text'}, codeItem);
+  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: true}, codeItem);
   assert.equal(diffButton.hidden, false, '#25: a code file with no diff loaded yet still offers a Diff toggle');
   assert.equal(diffButton.disabled, false, '#25: the Diff toggle is clickable so it can lazily load the diff');
+  // A file git does not track (untracked / outside any repo) has no committed version to diff against,
+  // so the Diff button stays hidden regardless of view mode (gitTracked falsey).
+  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: false}, codeItem);
+  assert.equal(diffButton.hidden, true, 'untracked files never show a Diff button');
+  api.setFileEditorViewMode(codePath, 'diff', codeItem);
+  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: false, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem);
+  assert.equal(diffButton.hidden, true, 'untracked files stay diff-button-free even in diff mode');
+  api.setFileEditorViewMode(codePath, 'edit', codeItem);
 }
 
 {
@@ -5178,6 +5186,10 @@ function makeFileTree(paths) {
   assert.ok(source.includes('blameAllLines: fileEditorBlameAllLines'), 'DOIT.26: blame-all-lines is in the editor config signature');
   assert.ok(/if \(fileEditorBlameAllLines\)[\s\S]{0,260}view\.visibleRanges/.test(source), 'DOIT.26: all-lines blame decorates every visible line');
   assert.ok(source.includes('data-setting-path="editor.blame_all_lines"') || source.includes("path: 'editor.blame_all_lines'"), 'DOIT.26: Preferences exposes the all-lines blame toggle');
+  // Blame + Diff buttons hide for files git doesn't track (untracked / outside any repo) — no history.
+  assert.ok(/blameButton\.hidden =[^;]*state\.gitTracked !== true/.test(source), 'blame button hides for non-git-tracked files');
+  assert.ok(/button\.hidden =[^;]*state\?\.gitTracked !== true/.test(source), 'diff button hides for non-git-tracked files');
+  assert.ok(source.includes('gitTracked: payload.git_tracked === true'), 'editor state carries the git_tracked flag from /api/fs/read');
 }
 
 // Search scroll fix: navigating matches re-centers the match horizontally, so a short-line match in a

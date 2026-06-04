@@ -246,7 +246,9 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   // The diff loads lazily on click (refreshOpenFileDiff); only hide the button once a load has
   // confirmed there is nothing to diff (diffLoaded && !available), and never while in diff mode.
   const confirmedNoDiff = state?.diffLoaded === true && !available;
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || (confirmedNoDiff && !active);
+  // Hide the diff toggle for files git doesn't track (untracked / outside any repo): there is no
+  // committed version to diff against. A deleted tracked file keeps gitTracked=true so it still shows.
+  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || state?.gitTracked !== true || (confirmedNoDiff && !active);
   button.disabled = !active && loading;
   const label = !active && loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
   syncPressedButton(button, active, {labelOn: label, labelOff: label});

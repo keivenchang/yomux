@@ -2664,6 +2664,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
       original: payload.content,
       content: payload.content,
       dirty: false,
+      gitTracked: payload.git_tracked === true,
     }, openOptions);
     return item;
   } catch (err) {
@@ -2753,6 +2754,7 @@ async function openFileStateFromDisk(path, entry = null) {
       original: payload.content,
       content: payload.content,
       dirty: false,
+      gitTracked: payload.git_tracked === true,
     }};
   } catch (error) {
     return {state: fileErrorState(error)};

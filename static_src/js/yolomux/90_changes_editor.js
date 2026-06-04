@@ -710,6 +710,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '') {
       content: '',
       dirty: false,
       deleted: true,
+      gitTracked: true,
     }, {item, ownerSession});
   } else {
     await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: isAddedChange ? 'edit' : 'diff'});
@@ -2252,8 +2253,9 @@ function renderFileEditorPanel(panel, item) {
   updateEditorFindButton(findButton, state);
   if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
   if (blameButton) {
-    // DOIT.26: blame is edit-mode only (not preview/diff/image/non-text).
-    blameButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || editorViewModeFor(path, item) !== 'edit';
+    // DOIT.26: blame is edit-mode only (not preview/diff/image/non-text). Also hide it for files
+    // git doesn't track (untracked / outside any repo) — they have no history to blame.
+    blameButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || state.gitTracked !== true || editorViewModeFor(path, item) !== 'edit';
     blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
   }
   updateFileEditorDiffButton(diffButton, path, state, item);
@@ -2363,6 +2365,7 @@ function loadFileEditorState(path, panel, item) {
           original: payload.content,
           content: payload.content,
           dirty: false,
+          gitTracked: payload.git_tracked === true,
         });
       }
     } catch (err) {
