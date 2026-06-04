@@ -550,5 +550,7 @@
   "menu.view.sortTabs.default.detail": "端末→エディタ→その他",
   "menu.view.sortTabs.attention": "要対応を先頭に",
   "menu.view.sortTabs.attention.detail": "要対応のセッションを上に",
-  "menu.view.sortTabs.name": "名前順"
+  "menu.view.sortTabs.name": "名前順",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search."
 }

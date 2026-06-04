@@ -328,6 +328,8 @@
   "pref.file_explorer.image_open_mode.label": "이미지 열기 모드",
   "pref.file_explorer.image_preview_max_px.help": "Finder/파일 탐색기의 호버 미리보기 최대 너비 및 높이입니다.",
   "pref.file_explorer.image_preview_max_px.label": "이미지 미리보기 최대 크기",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
   "pref.file_explorer.indexed_dirs.help": "빠른 열기 인덱스가 미리 구축된 디렉터리입니다. 한 줄에 경로 하나씩 입력하세요. 경로를 추가하면 인덱싱(Finder 우클릭과 동일), 줄을 삭제하면 인덱스가 해제됩니다.",
   "pref.file_explorer.indexed_dirs.label": "인덱싱된 디렉터리",
   "pref.file_explorer.new_entry_highlight_ms.help": "새로 감지된 파일이나 디렉터리가 Finder/파일 탐색기에서 색상으로 강조되는 시간입니다.",

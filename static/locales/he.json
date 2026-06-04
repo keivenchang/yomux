@@ -328,6 +328,8 @@
   "pref.file_explorer.image_open_mode.label": "מצב פתיחת תמונה",
   "pref.file_explorer.image_preview_max_px.help": "הרוחב והגובה המקסימליים לתצוגות מקדימות בריחוף ב-Finder/סייר הקבצים.",
   "pref.file_explorer.image_preview_max_px.label": "גודל מקסימלי לתצוגה מקדימה של תמונה",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
   "pref.file_explorer.indexed_dirs.help": "ספריות עם אינדקס פתיחה מהירה שנבנה מראש, נתיב אחד בכל שורה. הוסף נתיב כדי לאנדקס אותו (בדומה ללחיצה ימנית ב-Finder); הסר שורה כדי לבטל את האינדקס.",
   "pref.file_explorer.indexed_dirs.label": "ספריות מאונדקסות",
   "pref.file_explorer.new_entry_highlight_ms.help": "כמה זמן קבצים או ספריות שזוהו לאחרונה נשארים צבועים ב-Finder/סייר הקבצים.",

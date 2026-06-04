@@ -328,6 +328,8 @@
   "pref.file_explorer.image_open_mode.label": "图像打开模式",
   "pref.file_explorer.image_preview_max_px.help": "文件浏览器中悬停预览的最大宽度和高度。",
   "pref.file_explorer.image_preview_max_px.label": "图像预览最大尺寸",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
   "pref.file_explorer.indexed_dirs.help": "具有预先建立的快速打开索引的目录，每行一个路径。添加路径即可为其建立索引（与文件浏览器右键相同）；移除一行即可取消其索引。",
   "pref.file_explorer.indexed_dirs.label": "已建立索引的目录",
   "pref.file_explorer.new_entry_highlight_ms.help": "新检测到的文件或目录在文件浏览器中保持着色的时间。",

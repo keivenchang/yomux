@@ -550,5 +550,7 @@
   "menu.view.sortTabs.default.detail": "Terminales, luego editores, luego otras",
   "menu.view.sortTabs.attention": "Lo que me necesita primero",
   "menu.view.sortTabs.attention.detail": "Sesiones que requieren atención arriba",
-  "menu.view.sortTabs.name": "Por nombre"
+  "menu.view.sortTabs.name": "Por nombre",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search."
 }

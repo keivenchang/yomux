@@ -550,5 +550,7 @@
   "menu.view.sortTabs.default.detail": "終端機、編輯器、再其他分頁",
   "menu.view.sortTabs.attention": "需要我的優先",
   "menu.view.sortTabs.attention.detail": "需要關注的工作階段置頂",
-  "menu.view.sortTabs.name": "依名稱"
+  "menu.view.sortTabs.name": "依名稱",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search."
 }

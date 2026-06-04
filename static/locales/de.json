@@ -328,6 +328,8 @@
   "pref.file_explorer.image_open_mode.label": "Modus zum Öffnen von Bildern",
   "pref.file_explorer.image_preview_max_px.help": "Maximale Breite und Höhe für Hover-Vorschauen im Finder/Datei-Explorer.",
   "pref.file_explorer.image_preview_max_px.label": "Maximale Größe der Bildvorschau",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
   "pref.file_explorer.indexed_dirs.help": "Verzeichnisse mit einem vorgefertigten Schnellöffnungs-Index, ein Pfad pro Zeile. Füge einen Pfad hinzu, um ihn zu indizieren (wie der Rechtsklick im Finder); entferne eine Zeile, um ihn zu deindizieren.",
   "pref.file_explorer.indexed_dirs.label": "Indizierte Verzeichnisse",
   "pref.file_explorer.new_entry_highlight_ms.help": "Wie lange neu erkannte Dateien oder Verzeichnisse im Finder/Datei-Explorer farbig bleiben.",

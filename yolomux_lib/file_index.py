@@ -30,7 +30,7 @@ INDEX_DIR = STATE_DIR / "search_index"
 MAX_INDEX_FILES = 400_000
 # Serve from the index immediately; rebuild in the background once it is older
 # than this (stale-while-revalidate), which also prunes deleted files.
-INDEX_TTL_SECONDS = 300.0
+INDEX_TTL_SECONDS = 120.0
 # C11: bump when the on-disk JSON shape changes so old/incompatible indexes rebuild for a clear reason.
 INDEX_FORMAT_VERSION = 1
 

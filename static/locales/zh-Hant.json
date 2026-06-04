@@ -328,6 +328,8 @@
   "pref.file_explorer.image_open_mode.label": "影像開啟模式",
   "pref.file_explorer.image_preview_max_px.help": "檔案總管中停留預覽的最大寬度與高度。",
   "pref.file_explorer.image_preview_max_px.label": "影像預覽最大尺寸",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
   "pref.file_explorer.indexed_dirs.help": "具有預先建立的快速開啟索引的目錄，每行一個路徑。新增路徑即可為其建立索引（與檔案總管右鍵相同）；移除一行即可取消其索引。",
   "pref.file_explorer.indexed_dirs.label": "已建立索引的目錄",
   "pref.file_explorer.new_entry_highlight_ms.help": "新偵測到的檔案或目錄在檔案總管中保持著色的時間。",

@@ -550,5 +550,7 @@
   "menu.view.sortTabs.default.detail": "टर्मिनल, फिर एडिटर, फिर अन्य",
   "menu.view.sortTabs.attention": "मेरी ज़रूरत वाले पहले",
   "menu.view.sortTabs.attention.detail": "ध्यान चाहने वाले सत्र ऊपर",
-  "menu.view.sortTabs.name": "नाम से"
+  "menu.view.sortTabs.name": "नाम से",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search."
 }

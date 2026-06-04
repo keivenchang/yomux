@@ -505,6 +505,7 @@ function applySettingsPayload(payload, options = {}) {
   tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
   fileExplorerRefreshMs = numberSetting('file_explorer.refresh_ms', 3000);
+  fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
@@ -613,4 +614,14 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('filesystem', refreshWatchedFilesystem, fileExplorerRefreshMs);
   resetRuntimeInterval('settings', () => refreshSettings({silent: true}), Math.max(1000, Math.min(10000, eventLogRefreshMs)));
+  if (fileExplorerIndexRefreshSeconds > 0) {
+    resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
+  } else {
+    const existing = runtimeIntervals.get('file-index-refresh');
+    if (existing) {
+      existing.active = false;
+      clearTimeout(existing.timer);
+      runtimeIntervals.delete('file-index-refresh');
+    }
+  }
 }

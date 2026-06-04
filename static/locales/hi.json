@@ -328,6 +328,8 @@
   "pref.file_explorer.image_open_mode.label": "Image open मोड",
   "pref.file_explorer.image_preview_max_px.help": "Finder/File Explorer में hover previews की अधिकतम चौड़ाई और ऊंचाई।",
   "pref.file_explorer.image_preview_max_px.label": "Image preview अधिकतम साइज़",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
   "pref.file_explorer.indexed_dirs.help": "Pre-built quick-open index वाली डायरेक्टरी, प्रति पंक्ति एक path। index करने के लिए path जोड़ें (Finder right-click जैसा); un-index करने के लिए लाइन हटाएं।",
   "pref.file_explorer.indexed_dirs.label": "Indexed डायरेक्टरी",
   "pref.file_explorer.new_entry_highlight_ms.help": "नई पहचानी गई फ़ाइलें या डायरेक्टरी Finder/File Explorer में कितनी देर रंगीन रहती हैं।",

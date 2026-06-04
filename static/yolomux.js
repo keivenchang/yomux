@@ -394,6 +394,7 @@ let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_del
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
 let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3000);
+let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');
@@ -6917,6 +6918,14 @@ function clearFileIndexStatus(root) {
   fileIndexStatusTimers.delete(normalized);
 }
 
+// Proactive periodic re-check: re-fetches index-status for every indexed root even if already
+// 'ready', so stale indexes (TTL expired server-side) get rebuilt without waiting for a search.
+function refreshAllIndexedDirsStatus() {
+  for (const root of fileExplorerIndexedDirs) {
+    refreshFileIndexStatus(root);
+  }
+}
+
 function fileExplorerIndexedRootList() {
   return compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
     .map(normalizeStoredFileExplorerIndexedDir)
@@ -9895,6 +9904,7 @@ function applySettingsPayload(payload, options = {}) {
   tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
   fileExplorerRefreshMs = numberSetting('file_explorer.refresh_ms', 3000);
+  fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
   fileExplorerImageOpenMode = normalizedImageOpenMode(initialSetting('file_explorer.image_open_mode', 'same-tab'));
@@ -10003,6 +10013,16 @@ function installRuntimeIntervals() {
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
   resetRuntimeInterval('filesystem', refreshWatchedFilesystem, fileExplorerRefreshMs);
   resetRuntimeInterval('settings', () => refreshSettings({silent: true}), Math.max(1000, Math.min(10000, eventLogRefreshMs)));
+  if (fileExplorerIndexRefreshSeconds > 0) {
+    resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
+  } else {
+    const existing = runtimeIntervals.get('file-index-refresh');
+    if (existing) {
+      existing.active = false;
+      clearTimeout(existing.timer);
+      runtimeIntervals.delete('file-index-refresh');
+    }
+  }
 }
 function toggleHiddenFiles() {
   fileExplorerShowHidden = !fileExplorerShowHidden;
@@ -14513,6 +14533,7 @@ function preferenceSections() {
       {path: 'file_explorer.image_preview_max_px', label: t('pref.file_explorer.image_preview_max_px.label'), type: 'number', min: 120, max: 1200, step: 20, suffix: 'px', help: t('pref.file_explorer.image_preview_max_px.help')},
       {path: 'file_explorer.quick_access_paths', label: t('pref.file_explorer.quick_access_paths.label'), type: 'list', help: t('pref.file_explorer.quick_access_paths.help')},
       {path: 'file_explorer.indexed_dirs', label: t('pref.file_explorer.indexed_dirs.label'), type: 'list', help: t('pref.file_explorer.indexed_dirs.help')},
+      {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
       {path: 'file_explorer.refresh_ms', label: t('pref.file_explorer.refresh_ms.label', {name: fileExplorerLabel()}), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.file_explorer.refresh_ms.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
@@ -14650,6 +14671,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.quick_access_paths') add(['shortcuts', 'bookmarks', 'favorites', 'pinned', 'jump']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
+  if (path === 'file_explorer.index_refresh_seconds') add(['index', 'refresh', 'auto', 'rebuild', 'background', 'quick-open', 'interval', 'stale']);
   if (path === 'file_explorer.image_preview_max_px') add(['image', 'picture', 'photo', 'preview', 'thumbnail', 'hover', 'popup', 'large', 'small', 'size']);
   if (path === 'file_explorer.new_entry_highlight_ms') add(['new file', 'recent']);
   if (path.startsWith('yolo.')) add(['auto approve', 'approve', 'approval', 'permission', 'accept', 'confirm', 'rules', 'policy', 'safe', 'danger']);

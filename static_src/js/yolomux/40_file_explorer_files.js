@@ -1396,6 +1396,14 @@ function clearFileIndexStatus(root) {
   fileIndexStatusTimers.delete(normalized);
 }
 
+// Proactive periodic re-check: re-fetches index-status for every indexed root even if already
+// 'ready', so stale indexes (TTL expired server-side) get rebuilt without waiting for a search.
+function refreshAllIndexedDirsStatus() {
+  for (const root of fileExplorerIndexedDirs) {
+    refreshFileIndexStatus(root);
+  }
+}
+
 function fileExplorerIndexedRootList() {
   return compactNestedPaths(Array.from(fileExplorerIndexedDirs || [])
     .map(normalizeStoredFileExplorerIndexedDir)

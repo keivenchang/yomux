@@ -550,5 +550,7 @@
   "menu.view.sortTabs.default.detail": "Терминалы, затем редакторы, затем остальные",
   "menu.view.sortTabs.attention": "Требующие внимания сверху",
   "menu.view.sortTabs.attention.detail": "Сессии, требующие внимания, сверху",
-  "menu.view.sortTabs.name": "По имени"
+  "menu.view.sortTabs.name": "По имени",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search."
 }

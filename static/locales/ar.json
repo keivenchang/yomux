@@ -328,6 +328,8 @@
   "pref.file_explorer.image_open_mode.label": "وضع فتح الصور",
   "pref.file_explorer.image_preview_max_px.help": "الحد الأقصى للعرض والارتفاع لمعاينات التحويم في Finder/مستعرض الملفات.",
   "pref.file_explorer.image_preview_max_px.label": "الحجم الأقصى لمعاينة الصور",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
   "pref.file_explorer.indexed_dirs.help": "دلائل تحتوي على فهرس فتح سريع مُنشأ مسبقاً، مسار واحد في كل سطر. أضف مساراً لفهرسته (مثل النقر بالزر الأيمن في Finder)؛ احذف سطراً لإلغاء الفهرسة.",
   "pref.file_explorer.indexed_dirs.label": "الدلائل المفهرسة",
   "pref.file_explorer.new_entry_highlight_ms.help": "المدة التي تبقى فيها الملفات أو الدلائل المكتشفة حديثاً ملوّنة في Finder/مستعرض الملفات.",

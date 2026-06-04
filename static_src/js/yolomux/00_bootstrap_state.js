@@ -393,6 +393,7 @@ let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_del
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
 let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3000);
+let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
 let fileExplorerImageOpenMode = initialSetting('file_explorer.image_open_mode', 'same-tab');

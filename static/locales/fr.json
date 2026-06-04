@@ -328,6 +328,8 @@
   "pref.file_explorer.image_open_mode.label": "Mode d'ouverture des images",
   "pref.file_explorer.image_preview_max_px.help": "Largeur et hauteur maximales pour les aperçus au survol dans le Finder/Explorateur de fichiers.",
   "pref.file_explorer.image_preview_max_px.label": "Taille max. de l'aperçu d'image",
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
   "pref.file_explorer.indexed_dirs.help": "Répertoires avec un index d'ouverture rapide pré-construit, un chemin par ligne. Ajoutez un chemin pour l'indexer (comme le clic droit du Finder) ; retirez une ligne pour le désindexer.",
   "pref.file_explorer.indexed_dirs.label": "Répertoires indexés",
   "pref.file_explorer.new_entry_highlight_ms.help": "Durée pendant laquelle les fichiers ou répertoires nouvellement détectés restent colorés dans le Finder/Explorateur de fichiers.",
