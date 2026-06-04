@@ -53,7 +53,9 @@ def agent_command(agent: str, dangerously_yolo: bool = False) -> str:
 
 def available_agent_commands() -> list[str]:
     agents = [agent for agent in ("claude", "codex") if shutil.which(agent)]
-    return agents or ["term"]
+    # A plain terminal (a shell) is always launchable, so always offer Term — even when Claude/Codex
+    # are installed (it used to be a no-agent fallback only, which left Term greyed "unavailable").
+    return agents + ["term"]
 
 # DOIT.6 #39: surface claude/codex login status. The CLIs have purpose-built non-interactive status
 # commands; logout (or a missing binary) must NOT silently fall back to a deterministic agent without

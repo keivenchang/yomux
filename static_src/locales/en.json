@@ -545,6 +545,7 @@
   "menu.view.sortTabs.default": "Default",
   "menu.view.sortTabs.default.detail": "Terminals, then editors, then other tabs",
   "menu.view.sortTabs.attention": "Needs me first",
-  "menu.view.sortTabs.attention.detail": "Sessions needing input / approval / blocked / disconnected on top",
-  "menu.view.sortTabs.name": "By name"
+  "menu.view.sortTabs.attention.detail": "Attention-needing sessions on top",
+  "menu.view.sortTabs.name": "By name",
+  "pane.tabs.menu": "This pane's tabs"
 }

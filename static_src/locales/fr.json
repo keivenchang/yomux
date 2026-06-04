@@ -545,6 +545,7 @@
   "menu.view.sortTabs.default": "Par défaut",
   "menu.view.sortTabs.default.detail": "Terminaux, puis éditeurs, puis autres",
   "menu.view.sortTabs.attention": "À traiter en premier",
-  "menu.view.sortTabs.attention.detail": "Sessions en attente d'entrée / d'approbation / bloquées / déconnectées en tête",
-  "menu.view.sortTabs.name": "Par nom"
+  "menu.view.sortTabs.attention.detail": "Sessions à traiter en tête",
+  "menu.view.sortTabs.name": "Par nom",
+  "pane.tabs.menu": "Onglets de ce volet"
 }

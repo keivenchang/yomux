@@ -967,9 +967,14 @@ body.theme-light .topbar-language {
   font-weight: 600;
 }
 .app-menu-detail {
-  overflow: visible;
-  overflow-wrap: anywhere;
-  white-space: normal;
+  /* Single line + ellipsis: a wrapping detail made each item 3-4 lines tall AND kept the menu narrow
+     (a wrapping block's max-content is ~one word, so fitAppMenuPopover computed a tiny width). On one
+     line the fit-width grows to the longest detail (capped at max-width), so the menu is wider + shorter.
+     Full text stays available via the item's title/aria-label. */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 42ch;
   color: #aeb8c7;
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
@@ -2230,7 +2235,10 @@ body.theme-light .branch-link {
 }
 .changes-status-u,
 .changes-status-unknown {
-  background: #a78bfa;
+  /* Untracked/unknown = teal (a vibrant "new content" color). Purple is RESERVED for MERGED PR status
+     (pr-status-merged) across the app, so this badge must not be purple — it used to be violet, which
+     read as a merged indicator next to the PR badges. */
+  background: #2dd4bf;
 }
 .changes-file-icon {
   display: inline-flex;
@@ -3726,6 +3734,30 @@ body.theme-light .drop-slot.drag-over {
 }
 .meta-sep {
   color: #5e6878;
+}
+/* P0 menu-bar: the per-pane left dropdown caret — a compact chevron just before the pane's tab strip
+   that opens a popover of this pane's tabs. Sits in .panel-head next to the pane controls. */
+.pane-tabs-menu-caret {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 16px;
+  height: var(--pane-tab-height, 24px);
+  margin-inline-end: 2px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+  line-height: 1;
+  cursor: pointer;
+}
+.pane-tabs-menu-caret:hover {
+  color: var(--text);
+}
+.pane-tabs-menu-caret[hidden] {
+  display: none;
 }
 .pane-tabs {
   position: relative;

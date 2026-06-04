@@ -545,6 +545,7 @@
   "menu.view.sortTabs.default": "افتراضي",
   "menu.view.sortTabs.default.detail": "الطرفيات ثم المحررات ثم الباقي",
   "menu.view.sortTabs.attention": "ما يحتاجني أولًا",
-  "menu.view.sortTabs.attention.detail": "الجلسات التي تحتاج إدخالًا/موافقة أو المحظورة/المنقطعة في الأعلى",
-  "menu.view.sortTabs.name": "حسب الاسم"
+  "menu.view.sortTabs.attention.detail": "الجلسات التي تحتاج انتباهًا في الأعلى",
+  "menu.view.sortTabs.name": "حسب الاسم",
+  "pane.tabs.menu": "علامات تبويب هذا اللوح"
 }

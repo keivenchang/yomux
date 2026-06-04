@@ -369,7 +369,10 @@
 }
 .changes-status-u,
 .changes-status-unknown {
-  background: #a78bfa;
+  /* Untracked/unknown = teal (a vibrant "new content" color). Purple is RESERVED for MERGED PR status
+     (pr-status-merged) across the app, so this badge must not be purple — it used to be violet, which
+     read as a merged indicator next to the PR badges. */
+  background: #2dd4bf;
 }
 .changes-file-icon {
   display: inline-flex;

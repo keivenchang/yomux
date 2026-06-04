@@ -617,9 +617,14 @@ body.theme-light .topbar-language {
   font-weight: 600;
 }
 .app-menu-detail {
-  overflow: visible;
-  overflow-wrap: anywhere;
-  white-space: normal;
+  /* Single line + ellipsis: a wrapping detail made each item 3-4 lines tall AND kept the menu narrow
+     (a wrapping block's max-content is ~one word, so fitAppMenuPopover computed a tiny width). On one
+     line the fit-width grows to the longest detail (capped at max-width), so the menu is wider + shorter.
+     Full text stays available via the item's title/aria-label. */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 42ch;
   color: #aeb8c7;
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }

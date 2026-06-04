@@ -17,6 +17,7 @@ from .settings import save_settings
 from .settings import settings_payload
 from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
+from .workdir import agent_command
 from .workdir import available_agent_commands
 from .yolo_rules import rules_status
 
@@ -136,13 +137,16 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
     )
 
 
-def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False) -> str:
+def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False, dangerously_yolo: bool = False) -> str:
     settings_data = settings_payload()
     bootstrap = {
         "sessions": sessions,
         # Dev-velocity #1b: when true the page subscribes to /api/dev-reload and reloads on bundle change.
         "dev": dev,
         "availableAgents": available_agent_commands(),
+        # The exact launch command per agent (incl. the --dangerously-* flags when in YOLO mode), so the
+        # new-session menu can show "Claude — <params>" instead of just "+ Claude".
+        "agentLaunchCommands": {agent: agent_command(agent, dangerously_yolo) for agent in ("claude", "codex", "term")},
         # DOIT.6 #39: per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
         # agent in the new-session picker (cached server-side; not probed per request).
         "agentAuth": agent_auth_status(),

@@ -168,7 +168,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.stream_dev_reload()
             return
         if parsed.path == "/":
-            self.write_html(html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False)))
+            self.write_html(html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False), dangerously_yolo=self.server.app.dangerously_yolo))
             return
         if parsed.path == "/api/transcripts":
             self.write_json(self.server.app.transcripts_payload())
@@ -675,7 +675,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         if parsed.path == "/":
-            data = html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False)).encode("utf-8")
+            data = html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False), dangerously_yolo=self.server.app.dangerously_yolo).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))

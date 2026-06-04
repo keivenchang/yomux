@@ -2,6 +2,8 @@
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
 let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
+// The exact launch command per agent (with --dangerously-* flags in YOLO mode) for the new-session menu.
+const agentLaunchCommands = bootstrap.agentLaunchCommands || {};
 // DOIT.6 #39: per-agent {installed, logged_in} login status (probed + cached server-side). Used to
 // grey an installed-but-logged-out agent in the new-session picker. Refreshed by metadata polls.
 let agentAuth = bootstrap.agentAuth || {};
@@ -739,6 +741,7 @@ const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const watchedPrContextMenu = createContextMenuController();   // DOIT.29: "Watch this PR" on YO!info PR cells
+const paneTabsMenu = createContextMenuController();   // P0 menu-bar: per-pane left dropdown listing that pane's tabs
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
@@ -4625,6 +4628,16 @@ function tmuxSessionViewCommands(session) {
   ];
 }
 
+// The flags/params YOLOmux launches an agent with, shown as the new-session item's detail (e.g.
+// "--dangerously-skip-permissions"). Strips the binary name from the launch command; for a plain Term
+// it's just the shell ("bash"). Empty when the command carries no extra flags.
+function agentLaunchParams(agent) {
+  const command = String(agentLaunchCommands[agent] || '').trim();
+  if (!command) return '';
+  const space = command.indexOf(' ');
+  return space >= 0 ? command.slice(space + 1).trim() : command;
+}
+
 function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
@@ -4632,7 +4645,9 @@ function newTmuxSessionItems() {
     // #39: an installed agent that is not logged in is greyed with its login command, instead of
     // silently starting a session that the CLI will reject for auth.
     const loggedOut = available && !agentLoggedIn(agent);
-    return menuCommand(t('menu.tmux.newSession', {name: agentName(agent)}), () => createNextSession(agent), {
+    // Drop the "+" prefix (label is just the agent name); when launchable, the detail shows the params
+    // actually passed (the --dangerously-* flags in YOLO mode) so you can see what command will run.
+    return menuCommand(agentName(agent), () => createNextSession(agent), {
       iconHtml: agentIcon(agent),
       disabled: readOnlyMode || !available || loggedOut || capped,
       detail: readOnlyMode
@@ -4641,7 +4656,7 @@ function newTmuxSessionItems() {
           ? t('menu.tmux.agentUnavailable', {name: agentName(agent)})
           : (loggedOut
             ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
-            : (capped ? t('menu.tmux.limitReached') : ''))),
+            : (capped ? t('menu.tmux.limitReached') : agentLaunchParams(agent)))),
     });
   });
 }
@@ -5215,7 +5230,7 @@ function createAppMenuCommand(item, options = {}) {
   const contentHtml = richHtml
     ? `<span class="app-menu-rich">${richHtml}</span>`
     : `<span class="app-menu-line">${iconHtml ? `<span class="app-menu-icon">${iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
-  const detailHtml = item.detail ? `<span class="app-menu-detail">${esc(item.detail)}</span>` : '';
+  const detailHtml = item.detail ? `<span class="app-menu-detail" title="${esc(item.detail)}">${esc(item.detail)}</span>` : '';
   button.innerHTML = `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`;
   if (!options.asSubmenu) {
     button.addEventListener('click', event => {
@@ -12971,9 +12986,11 @@ function updatePaneTabStrip(panel, side) {
   if (isFileExplorerItem(activeItemForSide(side))) {
     strip.hidden = true;
     strip.replaceChildren();
+    ensurePaneTabsMenuCaret(strip, side, {hidden: true});
     return;
   }
   strip.hidden = false;
+  ensurePaneTabsMenuCaret(strip, side, {hidden: false});
   const restorePopoverItem = paneTabPopoverItemToRestore(strip);
   const activeItem = activeItemForSide(side);
   const items = stack.slice();
@@ -12982,6 +12999,64 @@ function updatePaneTabStrip(panel, side) {
   bindPaneTabStrip(strip, side);
   restorePaneTabPopover(strip, restorePopoverItem);
   scheduleTabStripOverflowCheck(strip);
+}
+
+// P0 menu-bar: a per-pane "left dropdown" — a caret immediately before the pane's tab strip that opens
+// a popover listing THAT pane's tabs (scoped to the one pane, unlike the global Tabs ▾ menu), with the
+// active tab checked; clicking a row activates it in this pane. Inserted once into the panel-head (a
+// single integration point, not per panel-head template); rebound to the current side on each render.
+function ensurePaneTabsMenuCaret(strip, side, options = {}) {
+  const head = strip.parentElement;
+  if (!head) return;
+  let caret = head.querySelector(':scope > .pane-tabs-menu-caret');
+  if (options.hidden) {
+    if (caret) caret.hidden = true;
+    return;
+  }
+  if (!caret) {
+    caret = document.createElement('button');
+    caret.type = 'button';
+    caret.className = 'pane-tabs-menu-caret';
+    caret.setAttribute('aria-haspopup', 'menu');
+    caret.textContent = '▾';
+    head.insertBefore(caret, strip);
+  }
+  caret.hidden = false;
+  caret.dataset.side = side;
+  caret.title = t('pane.tabs.menu');
+  caret.setAttribute('aria-label', t('pane.tabs.menu'));
+  if (!caret.dataset.bound) {
+    caret.dataset.bound = '1';
+    caret.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = caret.getBoundingClientRect();
+      showPaneTabsMenu(caret.dataset.side, rect.left, rect.bottom + 2);
+    });
+  }
+}
+
+function showPaneTabsMenu(side, x, y) {
+  if (!layoutSlotKeys().includes(side)) return;
+  const active = activeItemForSide(side);
+  const items = paneTabs(side).slice();
+  if (active && !items.includes(active)) items.push(active);
+  if (!items.length) return;
+  closeAppMenus();
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu pane-tabs-context-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', t('pane.tabs.menu'));
+  for (const item of items) {
+    appendContextMenuButton(
+      menu,
+      itemLabel(item),
+      () => activatePaneTab(side, item, {userInitiated: true}),
+      () => paneTabsMenu.close(),
+      {checked: item === active, title: menuTabDetail(item)},
+    );
+  }
+  paneTabsMenu.open(menu, x, y);
 }
 
 function reconcilePaneTabChildren(strip, side, items) {

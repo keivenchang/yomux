@@ -1,6 +1,8 @@
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
 let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
+// The exact launch command per agent (with --dangerously-* flags in YOLO mode) for the new-session menu.
+const agentLaunchCommands = bootstrap.agentLaunchCommands || {};
 // DOIT.6 #39: per-agent {installed, logged_in} login status (probed + cached server-side). Used to
 // grey an installed-but-logged-out agent in the new-session picker. Refreshed by metadata polls.
 let agentAuth = bootstrap.agentAuth || {};
@@ -738,6 +740,7 @@ const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const watchedPrContextMenu = createContextMenuController();   // DOIT.29: "Watch this PR" on YO!info PR cells
+const paneTabsMenu = createContextMenuController();   // P0 menu-bar: per-pane left dropdown listing that pane's tabs
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;

@@ -1438,6 +1438,15 @@ function makeFileTree(paths) {
   assert.equal(body.includes('replaceChildren(...'), false, 'routine pane-tab refresh must reconcile instead of rebuilding hovered tabs');
   assert.ok(source.includes('function reconcilePaneTabChildren('), 'pane-tab reconcile helper exists');
   assert.ok(source.includes('function paneTabShouldPreserve('), 'open pane-tab popovers keep their existing node');
+  // P0 menu-bar: the per-pane left dropdown — a caret before the tab strip opens a popover of THIS
+  // pane's tabs (scoped to one pane); click activates. Inserted once via updatePaneTabStrip.
+  assert.ok(source.includes('function ensurePaneTabsMenuCaret(') && source.includes('function showPaneTabsMenu('), 'per-pane tab dropdown helpers exist');
+  assert.ok(body.includes('ensurePaneTabsMenuCaret(strip, side'), 'updatePaneTabStrip inserts the per-pane dropdown caret');
+  const showMenuStart = source.indexOf('function showPaneTabsMenu(');
+  const showMenuBody = source.slice(showMenuStart, showMenuStart + 900);
+  assert.ok(showMenuBody.includes('paneTabs(side)'), 'the per-pane dropdown lists this pane\'s tabs');
+  assert.ok(showMenuBody.includes('activatePaneTab(side, item, {userInitiated: true})'), 'choosing a row activates that tab in this pane');
+  assert.ok(showMenuBody.includes('paneTabsMenu.open('), 'the per-pane dropdown opens via its own context-menu controller');
 }
 
 {
@@ -1904,6 +1913,10 @@ function makeFileTree(paths) {
   assert.equal(/\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
   assert.ok(/\.changes-tree-folder-row\s*\{[\s\S]*grid-template-columns:\s*12px 16px minmax\(0, 1fr\) auto/.test(changedFilesCss), 'modified-file folders use a compact GitLens-style tree row');
   assert.ok(changedFilesCss.includes('.changes-status-r,'), 'modified-file rename/copy statuses get distinct colors');
+  // Purple is RESERVED for MERGED PR status: the untracked/unknown change badge must NOT be purple
+  // (it was #a78bfa, reading as a merged indicator next to the PR badges); the merged PR status keeps it.
+  assert.ok(/\.changes-status-u,\s*\.changes-status-unknown\s*\{[^}]*background:\s*#2dd4bf/.test(changedFilesCss), 'untracked/unknown badge is teal, not purple (purple is reserved for MERGED PR status)');
+  assert.equal(changedFilesCss.includes('#a78bfa'), false, 'the old untracked purple is gone — no non-merged status uses purple');
   assert.ok(changedFilesCss.includes('body.theme-light .changes-comparison-head'), 'light theme explicitly restyles the Changes comparison header');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*overflow-y:\s*scroll/.test(changedFilesCss), 'Finder modified-files scrollbar stays visible');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*scrollbar-gutter:\s*stable/.test(changedFilesCss), 'Finder modified-files reserves scrollbar gutter');
@@ -2605,9 +2618,17 @@ function makeFileTree(paths) {
   assert.equal(tmuxMenu.items[0].label, 'YO off');
   assert.equal(tmuxMenu.items[0].keepOpen, true);
   assert.equal(tmuxMenuLabels.includes('New tmux session'), false);
-  assert.ok(tmuxMenuLabels.includes('+ Claude'));
-  assert.ok(tmuxMenuLabels.includes('+ Codex'));
-  assert.ok(tmuxMenu.items.find(item => item.label === '+ Codex')?.detail !== 'Create tmux session');
+  // New-session items: just the agent name (no "+" prefix); the detail shows the params passed.
+  assert.ok(tmuxMenuLabels.includes('Claude'));
+  assert.ok(tmuxMenuLabels.includes('Codex'));
+  assert.ok(tmuxMenuLabels.includes('Term'), 'Term is always offered (a plain shell), not greyed unavailable');
+  assert.equal(tmuxMenuLabels.includes('+ Claude'), false, 'the "+" prefix is dropped from new-session items');
+  {
+    const newSessionSrc = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(newSessionSrc.includes('function agentLaunchParams(agent)'), 'the launch-params helper exists');
+    assert.ok(/menuCommand\(agentName\(agent\), \(\) => createNextSession\(agent\)/.test(newSessionSrc), 'new-session label is the agent name (no "+"), action launches it');
+    assert.ok(/capped \? t\('menu\.tmux\.limitReached'\) : agentLaunchParams\(agent\)/.test(newSessionSrc), 'a launchable new-session item shows the params passed as its detail');
+  }
   assert.ok(tmuxMenuLabels.includes("Transcript for session '1'"));
   assert.ok(tmuxMenuLabels.includes("AI Transcript for session '1'"));
   assert.ok(tmuxMenuLabels.includes("Event log for session '1'"));

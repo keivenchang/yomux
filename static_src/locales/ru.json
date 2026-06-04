@@ -545,6 +545,7 @@
   "menu.view.sortTabs.default": "По умолчанию",
   "menu.view.sortTabs.default.detail": "Терминалы, затем редакторы, затем остальные",
   "menu.view.sortTabs.attention": "Требующие внимания сверху",
-  "menu.view.sortTabs.attention.detail": "Сессии, ожидающие ввода/одобрения, заблокированные или отключённые — сверху",
-  "menu.view.sortTabs.name": "По имени"
+  "menu.view.sortTabs.attention.detail": "Сессии, требующие внимания, сверху",
+  "menu.view.sortTabs.name": "По имени",
+  "pane.tabs.menu": "Вкладки этой панели"
 }

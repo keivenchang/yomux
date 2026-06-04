@@ -329,6 +329,16 @@ function tmuxSessionViewCommands(session) {
   ];
 }
 
+// The flags/params YOLOmux launches an agent with, shown as the new-session item's detail (e.g.
+// "--dangerously-skip-permissions"). Strips the binary name from the launch command; for a plain Term
+// it's just the shell ("bash"). Empty when the command carries no extra flags.
+function agentLaunchParams(agent) {
+  const command = String(agentLaunchCommands[agent] || '').trim();
+  if (!command) return '';
+  const space = command.indexOf(' ');
+  return space >= 0 ? command.slice(space + 1).trim() : command;
+}
+
 function newTmuxSessionItems() {
   return ['claude', 'codex', 'term'].map(agent => {
     const available = availableAgents.has(agent);
@@ -336,7 +346,9 @@ function newTmuxSessionItems() {
     // #39: an installed agent that is not logged in is greyed with its login command, instead of
     // silently starting a session that the CLI will reject for auth.
     const loggedOut = available && !agentLoggedIn(agent);
-    return menuCommand(t('menu.tmux.newSession', {name: agentName(agent)}), () => createNextSession(agent), {
+    // Drop the "+" prefix (label is just the agent name); when launchable, the detail shows the params
+    // actually passed (the --dangerously-* flags in YOLO mode) so you can see what command will run.
+    return menuCommand(agentName(agent), () => createNextSession(agent), {
       iconHtml: agentIcon(agent),
       disabled: readOnlyMode || !available || loggedOut || capped,
       detail: readOnlyMode
@@ -345,7 +357,7 @@ function newTmuxSessionItems() {
           ? t('menu.tmux.agentUnavailable', {name: agentName(agent)})
           : (loggedOut
             ? t('menu.tmux.runLogin', {command: agentLoginCommand(agent)})
-            : (capped ? t('menu.tmux.limitReached') : ''))),
+            : (capped ? t('menu.tmux.limitReached') : agentLaunchParams(agent)))),
     });
   });
 }
@@ -919,7 +931,7 @@ function createAppMenuCommand(item, options = {}) {
   const contentHtml = richHtml
     ? `<span class="app-menu-rich">${richHtml}</span>`
     : `<span class="app-menu-line">${iconHtml ? `<span class="app-menu-icon">${iconHtml}</span>` : ''}<span class="app-menu-label">${esc(item.label)}</span></span>`;
-  const detailHtml = item.detail ? `<span class="app-menu-detail">${esc(item.detail)}</span>` : '';
+  const detailHtml = item.detail ? `<span class="app-menu-detail" title="${esc(item.detail)}">${esc(item.detail)}</span>` : '';
   button.innerHTML = `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`;
   if (!options.asSubmenu) {
     button.addEventListener('click', event => {

@@ -130,12 +130,12 @@ ALSO MIRROR KEY DISPLAY CONTROLS IN THE SETTINGS MENU: `#` (tab metadata), `Noti
 
 Proposed menu tree (PROPOSAL — review before building):
 
-- [ ] [S] File ▾  (files / app actions)
+- [x] (DONE — live File ▾ satisfies the tree: Finder, YO!info, YO!agent, Open file…, Preferences, Log out) File ▾  (files / app actions)
   - File Explorer (open)
   - Open file…
   - --- (separator)
   - Log out
-- [ ] [S] Tmux ▾  (create / manage tmux sessions)
+- [x] (DONE — live tmux ▾ satisfies: +Claude/+Codex/+Term, per-session YO toggle, rename/kill, view commands, YOLO submenu; Resume is a disabled "coming soon") Tmux ▾  (create / manage tmux sessions)
   - `+ Claude`, `+ Codex`, `+ Term` (each opens the P4 launch dialog: cwd, model/profile, permission mode, initial prompt, optional name)
   - Rename tmux session
   - Kill tmux session
@@ -143,7 +143,7 @@ Proposed menu tree (PROPOSAL — review before building):
   - Open event log
   - Resume ▸ : recent Claude/Codex conversations scoped to cwd (P4)
   - NOTE: no Attach / Detach item. YOLOmux streams every pane over WebSocket and is always "attached"; switching sessions only changes which stream is shown. tmux attach/detach is a terminal-client concept that does not map to this UI, so it is intentionally omitted.
-- [ ] [S] View ▾  (display options)
+- [~] (PARTIAL) View ▾  (display options) — LIVE: Theme, Layout (Single/Split; Grid/Wall disabled), Tab metadata, Alert, Refresh, and Sort tab list (Default/Needs-me/Name, added 2026-06-03). STILL MISSING: a "Panel tabs ▸" per-pane-tab visibility toggle (Terminal/Tx/AI/Log/Info) and an Inactive-tabs show-all/tray control. (Branch Info lives in File ▾ as YO!info.)
   - Layout ▸ : Single / Grid / Wall
   - Filter / Sort ▸ : Needs me, by state, by repo, by PR status
   - Tab metadata: show / hide (the current `#` toggle)
@@ -157,13 +157,13 @@ Proposed menu tree (PROPOSAL — review before building):
   - then other open viewers : File Explorer, Branch Info, Transcript, AI Summary, Event Log (only the ones currently open)
   - Each row carries the SAME rich info already shown in the existing tab-metadata view, but packed more compactly so it reads like a real dropdown menu (one tight row per tab): agent badge (`YO`/`BL`/… + session number), state badge (`RUN`/`BLK`/…), PR number, commit-style title, branch, repo path (e.g. `dynamo2 -> dynamo3`), and dirty count. The active tab's row is highlighted (green) like the current selection.
   - This is a denser re-layout of the existing rich rows, not new data — reuse the metadata that already feeds the tab strip.
-- [ ] [M] Per-pane left dropdown (the caret on the LEFT of each panel's tab strip): looks IDENTICAL to the Tabs ▾ menu above (same compact rich-row format), but scoped to just THAT pane's tabs — i.e. only the tabs/views belonging to that one panel (its tmux sessions + Terminal / Tx / AI / Log / Info), not every pane in the app. Same row styling, same active-row highlight.
+- [x] (DONE 2026-06-03) Per-pane left dropdown — a `▾` caret before each pane's tab strip opens a popover listing THAT pane's tabs (scoped to the one pane, active tab checkmarked); clicking a row activates it in that pane (`ensurePaneTabsMenuCaret`/`showPaneTabsMenu`, single-point integration in `updatePaneTabStrip`, reuses the context-menu controller). v1 lists tabs as labeled rows (with the tab detail as the row title); an upgrade to the full rich-row format (badges, like the Tabs ▾ menu) is a follow-up.
 - [ ] [M] Add the remaining YOLO controls under Tmux instead of restoring a top-level YOLO menu: policy modes, Open rule file, Approval queue, Audit log, and Risk labels legend.
-- [ ] [S] Settings ▾
+- [x] (DECIDED AGAINST — consolidated into View ▾) Settings ▾ — the proposed Settings menu mirroring # / Notify / Refresh was folded into View ▾ (which already has Tab metadata, Alert, Refresh); no separate Settings menu. Log out stays in File ▾ + the top-right cluster.
   - `#` / Tab metadata (same icon + on/off state as the top-right button)
   - `Notify` (same icon + on/off state as the top-right button)
   - `Refresh` (same icon + behavior as the top-right button)
-- [ ] [S] Help ▾
+- [x] (DONE — live Help ▾ satisfies: Command palette, version + last-commit, Keyboard shortcuts, Open README) Help ▾
   - Keyboard shortcuts
   - About / version
   - Open README

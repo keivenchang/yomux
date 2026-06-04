@@ -223,6 +223,26 @@ def test_pre_auth_brand_wordmark_localizes_yo_lo_glyphs():
         assert ">YO<" in render("en"), f"{name} en wordmark stays YO/LO"
 
 
+def test_bootstrap_exposes_agent_launch_commands_and_term_always_available():
+    # Menu-bar: the new-session menu shows "Claude — <params>" using the launch commands, and Term is
+    # always offered (a plain shell), not greyed "unavailable".
+    from yolomux_lib.workdir import available_agent_commands
+
+    assert "term" in available_agent_commands(), "Term (a shell) is always launchable"
+
+    def boot(page):
+        match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+        return json.loads(match.group(1))
+    yolo = boot(web.html_page([], "admin", dangerously_yolo=True))
+    assert yolo["agentLaunchCommands"]["claude"] == "claude --dangerously-skip-permissions"
+    assert yolo["agentLaunchCommands"]["codex"] == "codex --dangerously-bypass-approvals-and-sandbox"
+    assert "term" in yolo["agentLaunchCommands"]
+    # Without --dangerously-yolo the commands carry no bypass flags.
+    plain = boot(web.html_page([], "admin"))
+    assert plain["agentLaunchCommands"]["claude"] == "claude"
+    assert plain["agentLaunchCommands"]["codex"] == "codex"
+
+
 def test_main_page_bootstrap_includes_resolved_locale():
     page = web.html_page([])
     match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
