@@ -15,6 +15,7 @@ function agentLoginCommand(agent) {
 }
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
+const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
@@ -245,6 +246,7 @@ let fileEditorWrapEnabled = readStoredEditorWrap();
 let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
 const editorBlameByPath = new Map();  // path -> {lines: {lineNo: {sha, author, time, summary, pr}}, in_repo}
 const editorBlameFetches = new Map();  // DOIT.34 #3: in-flight /api/blame fetch per path (dedup concurrent panels)
+let fileEditorBlameAllLines = false;  // DOIT.26: annotate every line vs current-line only (set from settings in applySettingsPayload)
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 // B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
 let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
@@ -632,7 +634,8 @@ function appShortcutModifierLabel() {
 }
 
 function appShortcutText(key, options = {}) {
-  return `${options.shift ? 'Shift+' : ''}${appShortcutModifierLabel()}+${key}`;
+  const alt = options.alt ? `${isMacPlatform() ? '⌥' : 'Alt'}+` : '';
+  return `${options.shift ? 'Shift+' : ''}${appShortcutModifierLabel()}+${alt}${key}`;
 }
 
 function platformWindowControlClass(kind) {

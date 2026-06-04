@@ -237,3 +237,10 @@ def test_watched_prs_setting_round_trips_in_template(tmp_path):
     loaded, error = read_settings_file(path)
     assert error == ""
     assert loaded["github"]["watched_prs"] == ["ai-dynamo/frontend-crates#18", "owner/repo#7"]
+
+
+def test_blame_all_lines_default_and_coercion():
+    # DOIT.26 follow-up: the all-lines blame toggle defaults off and coerces to bool.
+    assert default_settings()["editor"]["blame_all_lines"] is False
+    assert sanitize_settings({"editor": {"blame_all_lines": "yes"}})["editor"]["blame_all_lines"] is True
+    assert sanitize_settings({"editor": {"blame_all_lines": "no"}})["editor"]["blame_all_lines"] is False

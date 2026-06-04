@@ -62,6 +62,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         cert=None,
         key=None,
         print_transcripts=False,
+        dev=False,
     )
 
     class FakeApp:
@@ -76,10 +77,11 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
             captured["stopped"] = True
 
     class FakeServer:
-        def __init__(self, address, app, tls_context=None):
+        def __init__(self, address, app, tls_context=None, dev=False):
             captured["address"] = address
             captured["app"] = app
             captured["tls_context"] = tls_context
+            captured["dev"] = dev
 
         def serve_forever(self):
             captured["served"] = True
@@ -100,6 +102,7 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["dangerously_yolo"] is True
     assert captured["address"] == ("0.0.0.0", 7778)
     assert captured["tls_context"] is None
+    assert captured["dev"] is False  # dev mode off by default
     assert captured["served"] is True
     assert captured["stopped"] is True
     assert captured["closed"] is True

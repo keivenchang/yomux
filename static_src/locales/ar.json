@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "طلبات السحب التي تتم متابعتها بشكل مستقل عن أي جلسة مفتوحة، واحد في كل سطر — owner/repo#N أو عنوان URL كامل لطلب السحب. تظهر في YO!info ويمكن أن تُنبّه عند تغييرات الدمج / CI / المراجعة.",
   "pref.performance.watched_pr_refresh_ms.label": "تحديث طلبات السحب المتابَعة",
   "pref.performance.watched_pr_refresh_ms.help": "عدد مرات استطلاع طلبات السحب المتابَعة (15000-600000 مللي ثانية). أطول من بيانات الجلسة حتى لا تستنفد قائمة كبيرة حد معدل GitHub.",
-  "finder.symlink.broken": "(معطّل)"
+  "finder.symlink.broken": "(معطّل)",
+  "pref.editor.blame_all_lines.label": "عرض blame لكل الأسطر",
+  "pref.editor.blame_all_lines.help": "عند تفعيل git blame المضمّن، علّق على كل سطر بدلًا من السطر الحالي للمؤشر فقط.",
+  "shortcuts.editorNav": "المحرر: رجوع / تقدّم",
+  "palette.openView": "فتح عرض {view}"
 }

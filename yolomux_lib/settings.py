@@ -87,6 +87,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "editor": {
         "autosave": True,
         "autosave_delay_seconds": 2.5,
+        "blame_all_lines": False,
     },
     "file_explorer": {
         "root_mode": "fixed",
@@ -263,6 +264,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("terminal_editor", "line_numbers"): "true/false. Default editor line-number gutter state.",
     ("editor", "autosave"): "true/false. When true, dirty editor tabs save after the delay when the file has not changed on disk.",
     ("editor", "autosave_delay_seconds"): "Seconds, 0.5-60. Delay before dirty editor tabs auto-save.",
+    ("editor", "blame_all_lines"): "true/false. Default false. When inline git blame is on, annotate EVERY line (not just the cursor's current line, the Cursor default).",
     ("file_explorer", "root_mode"): "fixed | sync. fixed stays put; sync follows the focused tmux cwd.",
     ("file_explorer", "image_open_mode"): "same-tab | new-tab. same-tab reuses one image viewer while browsing; new-tab keeps one image tab per file.",
     ("file_explorer", "image_preview_max_px"): "Pixels, 120-1200. Maximum width and height for hover image previews.",

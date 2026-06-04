@@ -1922,6 +1922,24 @@ async function boot() {
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();
+  installDevAutoReload();
+}
+
+// Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring
+// "is the bundle stale?" misdiagnoses). Listens to the server's /api/dev-reload SSE 'reload' event;
+// no-op outside dev mode. The EventSource auto-reconnects across the backend re-exec (#1c).
+function installDevAutoReload() {
+  if (!devMode || typeof EventSource === 'undefined') return;
+  let source;
+  try {
+    source = new EventSource('/api/dev-reload');
+  } catch (_error) {
+    return;
+  }
+  source.addEventListener('reload', () => {
+    statusOk('dev: bundle changed — reloading');
+    location.reload();
+  });
 }
 
 async function showContext(session) {
@@ -1998,6 +2016,17 @@ function handleGlobalShortcutKeydown(event) {
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
+  // DOIT.21: editor back/forward history via the keyboard — Mod+Alt+[ / Mod+Alt+]. (appModifier() is
+  // false when Alt is held, so test the platform modifier directly.) Matched by event.code so a layout
+  // where Alt remaps the bracket char still works; plain Mod+[ / Mod+] stay with CodeMirror (indent).
+  const platformMod = isMacPlatform() ? (event.metaKey === true && event.ctrlKey !== true) : (event.ctrlKey === true && event.metaKey !== true);
+  if (platformMod && event.altKey && (event.code === 'BracketLeft' || event.code === 'BracketRight')) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.code === 'BracketLeft') editorNavBack();
+    else editorNavForward();
+    return;
+  }
   if (mod && key === 'w') {
     event.preventDefault();
     event.stopPropagation();

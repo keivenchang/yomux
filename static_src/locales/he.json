@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "בקשות משיכה למעקב ללא תלות בהפעלה פתוחה כלשהי, אחת בכל שורה — owner/repo#N או כתובת URL מלאה של PR. הן מוצגות ב-YO!info ויכולות להתריע על שינויי מיזוג / CI / סקירה.",
   "pref.performance.watched_pr_refresh_ms.label": "רענון PR במעקב",
   "pref.performance.watched_pr_refresh_ms.help": "באיזו תדירות נסקרות בקשות PR במעקב (15000-600000 מילישניות). ארוך יותר ממטא-נתוני ההפעלה כדי שרשימה גדולה לא תמצה את מגבלת הקצב של GitHub.",
-  "finder.symlink.broken": "(שבור)"
+  "finder.symlink.broken": "(שבור)",
+  "pref.editor.blame_all_lines.label": "Blame בכל השורות",
+  "pref.editor.blame_all_lines.help": "כאשר git blame משובץ פעיל, הוסף הערה לכל שורה ולא רק לשורה הנוכחית של הסמן.",
+  "shortcuts.editorNav": "עורך אחורה / קדימה",
+  "palette.openView": "פתח תצוגת {view}"
 }

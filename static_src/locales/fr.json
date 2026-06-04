@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "Pull requests à suivre indépendamment de toute session ouverte, une par ligne — owner/repo#N ou une URL de PR complète. Elles apparaissent dans YO!info et peuvent notifier les changements de fusion / CI / revue.",
   "pref.performance.watched_pr_refresh_ms.label": "Actualisation des PR suivies",
   "pref.performance.watched_pr_refresh_ms.help": "Fréquence d'interrogation des PR suivies (15000-600000 ms). Plus longue que les métadonnées de session pour qu'une grande liste n'épuise pas la limite de l'API GitHub.",
-  "finder.symlink.broken": "(cassé)"
+  "finder.symlink.broken": "(cassé)",
+  "pref.editor.blame_all_lines.label": "Blame sur toutes les lignes",
+  "pref.editor.blame_all_lines.help": "Quand le blame git en ligne est actif, annote chaque ligne au lieu de la seule ligne courante du curseur.",
+  "shortcuts.editorNav": "Éditeur précédent / suivant",
+  "palette.openView": "Ouvrir la vue {view}"
 }

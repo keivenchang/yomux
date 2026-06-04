@@ -1606,6 +1606,7 @@ function codeMirrorConfigSignature(path, options = {}) {
     // be in the signature — otherwise toggling blame OFF reuses the existing view and the annotations
     // linger (and toggling ON wouldn't add them without an unrelated rebuild).
     blame: fileEditorBlameEnabled,
+    blameAllLines: fileEditorBlameAllLines,
   });
 }
 

@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "Pull Requests, die unabhängig von einer offenen Sitzung beobachtet werden, eine pro Zeile – owner/repo#N oder eine vollständige PR-URL. Sie erscheinen in YO!info und können bei Merge-/CI-/Review-Änderungen benachrichtigen.",
   "pref.performance.watched_pr_refresh_ms.label": "Aktualisierung beobachteter PRs",
   "pref.performance.watched_pr_refresh_ms.help": "Wie oft beobachtete PRs abgefragt werden (15000–600000 ms). Länger als Sitzungsmetadaten, damit eine große Liste das GitHub-Ratelimit nicht erschöpft.",
-  "finder.symlink.broken": "(defekt)"
+  "finder.symlink.broken": "(defekt)",
+  "pref.editor.blame_all_lines.label": "Blame für alle Zeilen",
+  "pref.editor.blame_all_lines.help": "Wenn das Inline-Git-Blame aktiv ist, jede Zeile annotieren statt nur die aktuelle Cursorzeile.",
+  "shortcuts.editorNav": "Editor zurück / vor",
+  "palette.openView": "{view}-Ansicht öffnen"
 }

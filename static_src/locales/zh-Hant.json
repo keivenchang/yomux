@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "獨立於任何開啟工作階段而追蹤的 Pull Request，每行一個 — owner/repo#N 或完整的 PR 網址。它們會顯示在 YO!info，並可在合併／CI／審查變更時通知。",
   "pref.performance.watched_pr_refresh_ms.label": "追蹤 PR 重新整理",
   "pref.performance.watched_pr_refresh_ms.help": "追蹤 PR 的輪詢頻率（15000-600000 毫秒）。比工作階段中繼資料長，避免大型追蹤清單耗盡 GitHub 速率限制。",
-  "finder.symlink.broken": "（已損壞）"
+  "finder.symlink.broken": "（已損壞）",
+  "pref.editor.blame_all_lines.label": "標註所有行",
+  "pref.editor.blame_all_lines.help": "開啟內嵌 git blame 時，標註每一行，而非僅游標所在的目前行。",
+  "shortcuts.editorNav": "編輯器上一步／下一步",
+  "palette.openView": "開啟{view}檢視"
 }

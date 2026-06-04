@@ -2696,6 +2696,11 @@ body.theme-light .branch-link {
   background: rgba(118, 185, 0, 0.12);
   font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
   text-transform: lowercase;
+  cursor: pointer;   /* DOIT.22 follow-up: chips are clickable — jump to that view */
+}
+.command-palette-view-chip:hover {
+  border-color: var(--brand-green);
+  color: var(--text);
 }
 body.theme-light .command-palette-view-chip {
   border-color: rgba(95, 150, 42, 0.4);
@@ -2955,6 +2960,11 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-inline-action {
   border-color: rgba(118, 185, 0, 0.55);
   color: #d9f99d;
+}
+/* Light mode: the light-green #d9f99d is near-invisible on the light prefs panel — use a darker green
+   (caught by tools/static_build.py --lint-light). */
+body.theme-light .preferences-inline-action {
+  color: #3f6312;
 }
 .popover-value a:hover,
 .branch-link:hover {

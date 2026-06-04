@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "किसी भी खुले सत्र से स्वतंत्र रूप से देखे जाने वाले पुल रिक्वेस्ट, प्रति पंक्ति एक — owner/repo#N या पूरा PR URL। ये YO!info में दिखते हैं और मर्ज / CI / समीक्षा परिवर्तनों पर सूचित कर सकते हैं।",
   "pref.performance.watched_pr_refresh_ms.label": "देखे जा रहे PR का रिफ़्रेश",
   "pref.performance.watched_pr_refresh_ms.help": "देखे जा रहे PR कितनी बार पोल किए जाते हैं (15000-600000 मिलीसेकंड)। सत्र मेटाडेटा से लंबा ताकि बड़ी सूची GitHub दर सीमा समाप्त न करे।",
-  "finder.symlink.broken": "(टूटा हुआ)"
+  "finder.symlink.broken": "(टूटा हुआ)",
+  "pref.editor.blame_all_lines.label": "सभी पंक्तियों पर blame",
+  "pref.editor.blame_all_lines.help": "जब इनलाइन git blame चालू हो, तो केवल कर्सर की वर्तमान पंक्ति के बजाय हर पंक्ति पर टिप्पणी दिखाएं।",
+  "shortcuts.editorNav": "एडिटर पीछे / आगे",
+  "palette.openView": "{view} दृश्य खोलें"
 }

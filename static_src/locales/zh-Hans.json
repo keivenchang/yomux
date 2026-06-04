@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "独立于任何打开会话而关注的 Pull Request，每行一个 — owner/repo#N 或完整的 PR 网址。它们会显示在 YO!info，并可在合并/CI/审查变更时通知。",
   "pref.performance.watched_pr_refresh_ms.label": "关注 PR 刷新",
   "pref.performance.watched_pr_refresh_ms.help": "关注 PR 的轮询頻率（15000-600000 毫秒）。比会话元数据更长，避免大型关注列表耗尽 GitHub 速率限制。",
-  "finder.symlink.broken": "（已损坏）"
+  "finder.symlink.broken": "（已损坏）",
+  "pref.editor.blame_all_lines.label": "标注所有行",
+  "pref.editor.blame_all_lines.help": "开启内嵌 git blame 时，标注每一行，而非仅光标所在的当前行。",
+  "shortcuts.editorNav": "编辑器后退／前进",
+  "palette.openView": "打开{view}视图"
 }

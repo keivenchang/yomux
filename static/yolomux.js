@@ -16,6 +16,7 @@ function agentLoginCommand(agent) {
 }
 const accessRole = bootstrap.accessRole || 'admin';
 const readOnlyMode = accessRole !== 'admin';
+const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
@@ -246,6 +247,7 @@ let fileEditorWrapEnabled = readStoredEditorWrap();
 let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
 const editorBlameByPath = new Map();  // path -> {lines: {lineNo: {sha, author, time, summary, pr}}, in_repo}
 const editorBlameFetches = new Map();  // DOIT.34 #3: in-flight /api/blame fetch per path (dedup concurrent panels)
+let fileEditorBlameAllLines = false;  // DOIT.26: annotate every line vs current-line only (set from settings in applySettingsPayload)
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 // B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
 let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
@@ -633,7 +635,8 @@ function appShortcutModifierLabel() {
 }
 
 function appShortcutText(key, options = {}) {
-  return `${options.shift ? 'Shift+' : ''}${appShortcutModifierLabel()}+${key}`;
+  const alt = options.alt ? `${isMacPlatform() ? '⌥' : 'Alt'}+` : '';
+  return `${options.shift ? 'Shift+' : ''}${appShortcutModifierLabel()}+${alt}${key}`;
 }
 
 function platformWindowControlClass(kind) {
@@ -3118,6 +3121,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.toggleComment'), keys: appShortcutText('/')},
       {label: t('shortcuts.indentOutdent'), keys: 'Tab / Shift+Tab'},
       {label: t('shortcuts.undoRedo'), keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
+      {label: t('shortcuts.editorNav'), keys: `${appShortcutText('[', {alt: true})} / ${appShortcutText(']', {alt: true})}`},
     ]},
     {section: t('shortcuts.section.diff'), items: [
       {label: t('shortcuts.undoChunk'), keys: appShortcutText('Z')},
@@ -3256,7 +3260,16 @@ function commandPaletteCommandItems() {
     if (items.length === 1) { tabItems.push(tabRow(items[0])); continue; }
     // editor + preview of the same file → ONE row; focus the editor view, chip the open views' modes.
     const editorItem = items.find(it => !isFilePreviewItem(it)) || items[0];
-    const viewModes = [...new Set(items.map(it => editorViewModeFor(path, it)))].map(commandPaletteViewModeLabel);
+    // DOIT.22 follow-up: each chip is clickable to jump to that exact view — carry the mode + the layout
+    // item that view lives in (the editor item for edit/diff, the preview item for preview).
+    const viewModes = [];
+    const seenModes = new Set();
+    for (const it of items) {
+      const mode = editorViewModeFor(path, it);
+      if (seenModes.has(mode)) continue;
+      seenModes.add(mode);
+      viewModes.push({mode, label: commandPaletteViewModeLabel(mode), item: String(it)});
+    }
     tabItems.push(tabRow(editorItem, {key: `file:${path}`, viewModes}));
   }
   const tabItemIds = new Set(commandPaletteAllTabItems());
@@ -3552,6 +3565,15 @@ function ensureCommandPalette() {
     }
   });
   node.querySelector('.command-palette-results').addEventListener('click', event => {
+    // DOIT.22 follow-up: a click on a view chip jumps to THAT view (edit/preview/diff) and closes the
+    // palette, instead of the row's default (focus the editor view).
+    const chip = event.target.closest('[data-view-item]');
+    if (chip && node.contains(chip)) {
+      const viewItem = chip.dataset.viewItem;
+      closeCommandPalette();
+      if (viewItem) selectSession(viewItem);
+      return;
+    }
     const row = event.target.closest('[data-command-index]');
     if (!row || !node.contains(row)) return;
     commandPaletteIndex = Number(row.dataset.commandIndex || 0);
@@ -3588,7 +3610,7 @@ function renderCommandPaletteResults() {
   results.innerHTML = commandPaletteItemsCache.map((item, index) => `
     <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
-      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views" aria-hidden="true">${item.viewModes.map(v => `<span class="command-palette-view-chip">${esc(v)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
+      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
     </button>`).join('');
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});
@@ -8646,14 +8668,31 @@ function blameHoverText(info) {
 // scheme's --code-comment token (theme-aware), and the full commit is the line's native title tooltip.
 function codeMirrorBlameExtension(api, path) {
   if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
+  const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
   const build = view => {
     const blame = editorBlameByPath.get(path);
     if (!blame || !blame.lines) return api.Decoration.none;
+    // DOIT.26: annotate EVERY visible line when fileEditorBlameAllLines is on, else just the cursor line
+    // (the Cursor default). Viewport-scoped so a huge file only decorates what's on screen.
+    if (fileEditorBlameAllLines) {
+      const ranges = [];
+      const visible = view.visibleRanges?.length ? view.visibleRanges : [{from: 0, to: view.state.doc.length}];
+      for (const {from, to} of visible) {
+        let pos = from;
+        while (pos <= to) {
+          const line = view.state.doc.lineAt(pos);
+          const info = blame.lines[String(line.number)];
+          if (info) ranges.push(lineDeco(info).range(line.from));
+          if (line.to + 1 <= pos) break;   // guard against a zero-length advance
+          pos = line.to + 1;
+        }
+      }
+      return ranges.length ? api.Decoration.set(ranges, true) : api.Decoration.none;
+    }
     const line = view.state.doc.lineAt(view.state.selection.main.head);
     const info = blame.lines[String(line.number)];
     if (!info) return api.Decoration.none;
-    const deco = api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
-    return api.Decoration.set([deco.range(line.from)]);
+    return api.Decoration.set([lineDeco(info).range(line.from)]);
   };
   return api.ViewPlugin.fromClass(class {
     constructor(view) { this.decorations = build(view); }
@@ -9626,6 +9665,8 @@ function applySettingsPayload(payload, options = {}) {
   terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
   fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
+  const previousBlameAllLines = fileEditorBlameAllLines;
+  fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
   autoFocusEnabled = boolSetting('general.auto_focus', false);
   const previousEditorSchemeId = activeEditorScheme().id;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
@@ -9656,6 +9697,10 @@ function applySettingsPayload(payload, options = {}) {
     // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
     refreshOpenEditorThemePanels();
   }
+  // DOIT.26: the blame ViewPlugin decorates per fileEditorBlameAllLines at build time + the editor
+  // config signature carries it, so re-render open editors when the toggle changes (only matters while
+  // blame is on).
+  if (previousBlameAllLines !== fileEditorBlameAllLines && fileEditorBlameEnabled) applyEditorBlamePreference();
   // i18n (DOIT.8): when general.language changes, load the new catalog and re-render localized surfaces.
   const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));
   if (nextLocale !== previousLocale) applyLocale(nextLocale);
@@ -14167,6 +14212,7 @@ function preferenceSections() {
       {path: 'terminal_editor.line_numbers', label: t('pref.terminal_editor.line_numbers.label'), type: 'boolean', help: t('pref.terminal_editor.line_numbers.help')},
       {path: 'editor.autosave', label: t('pref.editor.autosave.label'), type: 'boolean', help: t('pref.editor.autosave.help')},
       {path: 'editor.autosave_delay_seconds', label: t('pref.editor.autosave_delay_seconds.label'), type: 'number', min: 0.5, max: 60, step: 0.5, suffix: 's', help: t('pref.editor.autosave_delay_seconds.help')},
+      {path: 'editor.blame_all_lines', label: t('pref.editor.blame_all_lines.label'), type: 'boolean', help: t('pref.editor.blame_all_lines.help')},
     ]},
     {title: fileExplorerLabel(), items: [
       {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'select', choices: ['fixed', 'sync'], help: t('pref.file_explorer.root_mode.help')},
@@ -16328,6 +16374,7 @@ function codeMirrorConfigSignature(path, options = {}) {
     // be in the signature — otherwise toggling blame OFF reuses the existing view and the annotations
     // linger (and toggling ON wouldn't add them without an unrelated rebuild).
     blame: fileEditorBlameEnabled,
+    blameAllLines: fileEditorBlameAllLines,
   });
 }
 
@@ -19982,6 +20029,24 @@ async function boot() {
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();
+  installDevAutoReload();
+}
+
+// Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring
+// "is the bundle stale?" misdiagnoses). Listens to the server's /api/dev-reload SSE 'reload' event;
+// no-op outside dev mode. The EventSource auto-reconnects across the backend re-exec (#1c).
+function installDevAutoReload() {
+  if (!devMode || typeof EventSource === 'undefined') return;
+  let source;
+  try {
+    source = new EventSource('/api/dev-reload');
+  } catch (_error) {
+    return;
+  }
+  source.addEventListener('reload', () => {
+    statusOk('dev: bundle changed — reloading');
+    location.reload();
+  });
 }
 
 async function showContext(session) {
@@ -20058,6 +20123,17 @@ function handleGlobalShortcutKeydown(event) {
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);
+  // DOIT.21: editor back/forward history via the keyboard — Mod+Alt+[ / Mod+Alt+]. (appModifier() is
+  // false when Alt is held, so test the platform modifier directly.) Matched by event.code so a layout
+  // where Alt remaps the bracket char still works; plain Mod+[ / Mod+] stay with CodeMirror (indent).
+  const platformMod = isMacPlatform() ? (event.metaKey === true && event.ctrlKey !== true) : (event.ctrlKey === true && event.metaKey !== true);
+  if (platformMod && event.altKey && (event.code === 'BracketLeft' || event.code === 'BracketRight')) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.code === 'BracketLeft') editorNavBack();
+    else editorNavForward();
+    return;
+  }
   if (mod && key === 'w') {
     event.preventDefault();
     event.stopPropagation();

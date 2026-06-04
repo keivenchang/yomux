@@ -1653,6 +1653,7 @@ function preferenceSections() {
       {path: 'terminal_editor.line_numbers', label: t('pref.terminal_editor.line_numbers.label'), type: 'boolean', help: t('pref.terminal_editor.line_numbers.help')},
       {path: 'editor.autosave', label: t('pref.editor.autosave.label'), type: 'boolean', help: t('pref.editor.autosave.help')},
       {path: 'editor.autosave_delay_seconds', label: t('pref.editor.autosave_delay_seconds.label'), type: 'number', min: 0.5, max: 60, step: 0.5, suffix: 's', help: t('pref.editor.autosave_delay_seconds.help')},
+      {path: 'editor.blame_all_lines', label: t('pref.editor.blame_all_lines.label'), type: 'boolean', help: t('pref.editor.blame_all_lines.help')},
     ]},
     {title: fileExplorerLabel(), items: [
       {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'select', choices: ['fixed', 'sync'], help: t('pref.file_explorer.root_mode.help')},

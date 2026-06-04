@@ -158,8 +158,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/ping":
             self.write_json({"ok": True, "time": time.time()})
             return
+        if parsed.path == "/api/dev-reload":
+            # Dev-velocity #1b: an SSE stream that emits the static-bundle signature whenever it changes,
+            # so a dev page reloads itself on rebuild (ends the "is the bundle stale?" misdiagnoses). Only
+            # active under --dev; a 404 otherwise so production never exposes it.
+            if not getattr(self.server, "dev", False):
+                self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self.stream_dev_reload()
+            return
         if parsed.path == "/":
-            self.write_html(html_page(self.server.app.sessions, self.auth_identity().role))
+            self.write_html(html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False)))
             return
         if parsed.path == "/api/transcripts":
             self.write_json(self.server.app.transcripts_payload())
@@ -666,7 +675,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if not self.require_auth():
             return
         if parsed.path == "/":
-            data = html_page(self.server.app.sessions, self.auth_identity().role).encode("utf-8")
+            data = html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False)).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
@@ -676,6 +685,39 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         self.send_response(HTTPStatus.NOT_FOUND)
         self.end_headers()
+
+    def dev_bundle_signature(self) -> str:
+        # mtime_ns of the served bundle + css; changes the instant static_build.py rewrites them.
+        from .web import static_asset_path
+
+        parts = []
+        for asset in ("yolomux.js", "yolomux.css"):
+            path = static_asset_path(asset)
+            try:
+                parts.append(str(path.stat().st_mtime_ns) if path else "0")
+            except OSError:
+                parts.append("0")
+        return ".".join(parts)
+
+    def stream_dev_reload(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+        last = self.dev_bundle_signature()
+        try:
+            self.write_sse_json("ready", {"signature": last})
+            while True:
+                time.sleep(0.5)
+                current = self.dev_bundle_signature()
+                if current != last:
+                    last = current
+                    self.write_sse_json("reload", {"signature": current})
+        except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
+            return
 
     def stream_context_items(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1193,10 +1235,11 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
     request_queue_size = 64
     tls_peek_timeout_seconds = 0.05
 
-    def __init__(self, server_address: tuple[str, int], app: TmuxWebtermApp, tls_context: ssl.SSLContext | None = None):
+    def __init__(self, server_address: tuple[str, int], app: TmuxWebtermApp, tls_context: ssl.SSLContext | None = None, dev: bool = False):
         super().__init__(server_address, Handler)
         self.app = app
         self.tls_context = tls_context
+        self.dev = dev  # dev-velocity #1b: enables the /api/dev-reload SSE channel + the bootstrap dev flag
 
     def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
         request, client_address = self.socket.accept()

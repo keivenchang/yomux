@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "Pull requests to watch independent of any open session, one per line — owner/repo#N or a full PR URL. They show in YO!info and can notify on merge / CI / review changes.",
   "pref.performance.watched_pr_refresh_ms.label": "Watched PR refresh",
   "pref.performance.watched_pr_refresh_ms.help": "How often watched PRs are polled (15000-600000 ms). Longer than session metadata so a large watchlist does not exhaust the GitHub rate limit.",
-  "finder.symlink.broken": "(broken)"
+  "finder.symlink.broken": "(broken)",
+  "pref.editor.blame_all_lines.label": "Blame all lines",
+  "pref.editor.blame_all_lines.help": "When inline git blame is on, annotate every line instead of only the cursor's current line.",
+  "shortcuts.editorNav": "Editor back / forward",
+  "palette.openView": "Open {view} view"
 }

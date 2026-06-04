@@ -4188,6 +4188,15 @@ function makeFileTree(paths) {
   assert.ok(source.includes('notifyWatchedPrTransitions(watchedPrsData.watched_prs)'), 'DOIT.29: each poll diffs statuses to fire transition notifications');
 }
 
+// Dev-velocity #1b: in --dev mode the page subscribes to /api/dev-reload and reloads on bundle change.
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('const devMode = bootstrap.dev === true'), 'the client reads the dev flag from the bootstrap');
+  assert.ok(source.includes("new EventSource('/api/dev-reload')"), 'dev mode subscribes to the dev-reload SSE channel');
+  assert.ok(/addEventListener\('reload',[\s\S]{0,120}location\.reload\(\)/.test(source), 'a reload event reloads the page');
+  assert.ok(source.includes('installDevAutoReload()'), 'the dev auto-reload is installed at boot');
+}
+
 // DOIT.31: Finder symlink badge — the row toggles is-symlink/symlink-broken, shows a name→target
 // title, and the CSS overlays an arrow badge (red + struck-through for broken).
 {
@@ -5091,6 +5100,9 @@ function makeFileTree(paths) {
   assert.ok(/const fileGroups = new Map\(\);[\s\S]{0,400}?fileItemPath\(item\)/.test(source), 'DOIT.22: the palette groups file tabs by path (fileItemPath)');
   assert.ok(source.includes('tabRow(editorItem, {key: `file:${path}`, viewModes})'), 'DOIT.22: editor+preview of one file collapse to a single `file:` row carrying view chips');
   assert.ok(source.includes('command-palette-view-chip'), 'DOIT.22: the deduped file row renders edit/preview view chips');
+  // DOIT.22 follow-up: the chips are clickable — each carries its view's layout item and jumps to it.
+  assert.ok(/data-view-item="\$\{esc\(v\.item\)\}" data-view-mode="\$\{esc\(v\.mode\)\}"/.test(source), 'DOIT.22: each view chip carries its layout item + mode');
+  assert.ok(/closest\('\[data-view-item\]'\)[\s\S]{0,160}selectSession\(viewItem\)/.test(source), 'DOIT.22: clicking a chip jumps to that view and closes the palette');
 }
 
 // DOIT.23: the Modified-files repo header is a collapse toggle (button + caret), per-repo state.
@@ -5112,6 +5124,9 @@ function makeFileTree(paths) {
   assert.ok(/topbarNavForward[\s\S]{0,400}?editorNavForward\(\)/.test(source), 'the forward button is wired to editorNavForward()');
   assert.ok(/getElementById\('topbarNavBack'\)[\s\S]{0,200}?editorNav\.index <= 0/.test(source), 'updateEditorNavButtons disables Back at the start of the stack');
   assert.ok(source.includes('if (options.userInitiated === true) recordEditorNav(session);'), 'a user-initiated tab switch of ANY tab kind records as navigation (back/forward walks all visited tabs)');
+  // DOIT.21: keyboard chords — Mod+Alt+[ / Mod+Alt+] drive editor back/forward (Mod+[ / ] stay with CM indent).
+  assert.ok(/event\.altKey && \(event\.code === 'BracketLeft' \|\| event\.code === 'BracketRight'\)/.test(source), 'editor nav has a Mod+Alt+bracket keyboard chord');
+  assert.ok(/BracketLeft'\) editorNavBack\(\)/.test(source) && source.includes('else editorNavForward()'), 'the bracket chord maps [ to back and ] to forward');
   assert.ok(!source.includes('file-editor-nav-control'), 'the per-pane editor nav group is fully removed (relocated to the topbar)');
 }
 
@@ -5127,6 +5142,11 @@ function makeFileTree(paths) {
   // Fix: blame state is in the editor config signature, so toggling blame OFF rebuilds the editor and
   // the annotations are removed (the plugin is added/removed only at build time).
   assert.ok(source.includes('blame: fileEditorBlameEnabled'), 'blame is part of the editor config signature so a toggle rebuilds (annotations clear on OFF)');
+  // DOIT.26 follow-up: an all-lines blame Preference — the extension branches on it and the signature
+  // carries it (so toggling the pref rebuilds the decorations).
+  assert.ok(source.includes('blameAllLines: fileEditorBlameAllLines'), 'DOIT.26: blame-all-lines is in the editor config signature');
+  assert.ok(/if \(fileEditorBlameAllLines\)[\s\S]{0,260}view\.visibleRanges/.test(source), 'DOIT.26: all-lines blame decorates every visible line');
+  assert.ok(source.includes('data-setting-path="editor.blame_all_lines"') || source.includes("path: 'editor.blame_all_lines'"), 'DOIT.26: Preferences exposes the all-lines blame toggle');
 }
 
 // Search scroll fix: navigating matches re-centers the match horizontally, so a short-line match in a

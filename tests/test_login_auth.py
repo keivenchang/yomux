@@ -158,6 +158,11 @@ def test_basic_auth_still_works_without_browser_challenge(monkeypatch, tmp_path)
         status, headers, body = request(port, "GET", f"/api/blame?{urlencode({'path': str(tmp_path)})}", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.FORBIDDEN
         assert json.loads(body)["error"] == "admin access required"
+
+        # Dev-velocity #1b: the /api/dev-reload SSE channel is 404 unless the server runs with --dev, so
+        # production never exposes it (the test server is constructed without dev).
+        status, headers, body = request(port, "GET", "/api/dev-reload", headers=auth_header("guest", "guest"))
+        assert status == HTTPStatus.NOT_FOUND
     finally:
         stop_server(server, thread)
 

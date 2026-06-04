@@ -46,7 +46,45 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cert", type=Path, default=None, help="TLS certificate PEM path")
     parser.add_argument("--key", type=Path, default=None, help="TLS private key PEM path")
     parser.add_argument("--print-transcripts", action="store_true")
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="dev mode: backend re-execs on yolomux_lib/*.py change and the page auto-reloads when the "
+        "static bundle changes (off by default; never enable for production)",
+    )
     return parser.parse_args()
+
+
+def start_dev_backend_watcher() -> None:
+    """Dev-velocity #1c: re-exec the server when a backend source file changes, so a Python edit takes
+    effect without the manual systemd-run restart dance. Daemon thread; only started under --dev."""
+    import os
+    import threading
+    import time as _time
+
+    repo_root = Path(__file__).resolve().parents[1]
+    watched = [repo_root / "yolomux.py", repo_root / "tmux_wall.py", *sorted((repo_root / "yolomux_lib").glob("*.py"))]
+
+    def snapshot() -> dict[str, int]:
+        stamps: dict[str, int] = {}
+        for path in watched:
+            try:
+                stamps[str(path)] = path.stat().st_mtime_ns
+            except OSError:
+                stamps[str(path)] = 0
+        return stamps
+
+    def loop() -> None:
+        last = snapshot()
+        while True:
+            _time.sleep(0.5)
+            now = snapshot()
+            if now != last:
+                changed = sorted(k for k in now if now.get(k) != last.get(k))
+                print(f"[dev] backend change ({len(changed)} file(s)) — re-execing", flush=True)
+                os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    threading.Thread(target=loop, name="dev-backend-watcher", daemon=True).start()
 
 
 def self_signed_cert_paths() -> tuple[Path, Path]:
@@ -185,8 +223,11 @@ def main() -> int:
         finally:
             app.stop_auto_approve_all()
 
-    server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context)
+    server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
     scheme = "https" if tls_context else "http"
+    if args.dev:
+        print("[dev] dev mode ON: backend re-execs on yolomux_lib/*.py change; page auto-reloads on bundle change")
+        start_dev_backend_watcher()
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
     session_text = ", ".join(sessions) if sessions else "no tmux sessions"
     print(f"Serving YOLOmux on {scheme}://{url_host}:{args.port}/ for {session_text}")

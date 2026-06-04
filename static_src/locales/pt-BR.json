@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "Pull requests para monitorar independentemente de qualquer sessão aberta, um por linha — owner/repo#N ou uma URL de PR completa. Eles aparecem no YO!info e podem notificar alterações de merge / CI / revisão.",
   "pref.performance.watched_pr_refresh_ms.label": "Atualização de PRs monitorados",
   "pref.performance.watched_pr_refresh_ms.help": "Com que frequência os PRs monitorados são consultados (15000-600000 ms). Mais longo que os metadados de sessão para que uma lista grande não esgote o limite da API do GitHub.",
-  "finder.symlink.broken": "(quebrado)"
+  "finder.symlink.broken": "(quebrado)",
+  "pref.editor.blame_all_lines.label": "Blame em todas as linhas",
+  "pref.editor.blame_all_lines.help": "Quando o git blame embutido está ativo, anota todas as linhas em vez de apenas a linha atual do cursor.",
+  "shortcuts.editorNav": "Editor voltar / avançar",
+  "palette.openView": "Abrir visualização {view}"
 }

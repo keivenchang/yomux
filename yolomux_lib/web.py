@@ -116,12 +116,18 @@ def static_asset_url(asset: str) -> str:
     return f"/static/{asset}?v={static_asset_version(asset)}"
 
 
-def brand_html(class_name: str = "brand-title", tag: str = "span") -> str:
+def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str | None = None) -> str:
     version_title = html.escape(f"Last commit: {yolomux_commit_time_pt()}", quote=True)
+    # DOIT.13 follow-up: the server-rendered pre-auth screens (login / auth-setup) are NOT localized by
+    # the JS renderBrandWordmark(), so localize the YO/LO glyphs here too — otherwise a Chinese locale
+    # showed "YO/LOmux" instead of 優樂mux / 优乐mux. Pass a locale on those pages; the main app leaves it
+    # None (English) and re-localizes client-side after bootstrap.
+    yo = html.escape(server_string(locale, "brand.wordmark.yo")) if locale else "YO"
+    lo = html.escape(server_string(locale, "brand.wordmark.lo")) if locale else "LO"
     return (
         f'<{tag} class="{html.escape(class_name, quote=True)}" aria-label="YOLOmux {html.escape(YOLOMUX_VERSION, quote=True)}">'
-        '<span class="brand-yolo brand-green">YO</span>'
-        '<span class="brand-lo brand-green">LO</span>'
+        f'<span class="brand-yolo brand-green">{yo}</span>'
+        f'<span class="brand-lo brand-green">{lo}</span>'
         '<span class="brand-blue">m</span>'
         '<span class="brand-red">u</span>'
         '<span class="brand-yellow">x</span>'
@@ -130,10 +136,12 @@ def brand_html(class_name: str = "brand-title", tag: str = "span") -> str:
     )
 
 
-def html_page(sessions: list[str], access_role: str = "admin") -> str:
+def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False) -> str:
     settings_data = settings_payload()
     bootstrap = {
         "sessions": sessions,
+        # Dev-velocity #1b: when true the page subscribes to /api/dev-reload and reloads on bundle change.
+        "dev": dev,
         "availableAgents": available_agent_commands(),
         # DOIT.6 #39: per-agent {installed, logged_in} so the GUI can grey an installed-but-logged-out
         # agent in the new-session picker (cached server-side; not probed per request).
@@ -337,7 +345,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 <body>
 <main class="login-shell">
   <section class="login-panel">
-    <div class="login-brand">{brand_html("brand-title login-brand-title", "div")}</div>
+    <div class="login-brand">{brand_html("brand-title login-brand-title", "div", locale=current_locale)}</div>
     <h1>{sign_in}</h1>
     {security_html}
     {agent_notice_html}
@@ -414,7 +422,7 @@ def setup_auth_html(current_locale: str = "system") -> str:
 <body>
 <main>
   {locale_picker}
-  <h1>{set_up} {brand_html("brand-title setup-brand setup-brand-waiting")}</h1>
+  <h1>{set_up} {brand_html("brand-title setup-brand setup-brand-waiting", locale=locale)}</h1>
   <p id="setupSecurity" class="setup-security">Highly recommend that you restart with HTTPS: <code>python3 yolomux.py --port 9998 --self-signed</code></p>
   <p>{edit_label} <code>{auth_path}</code></p>
   <pre>users:

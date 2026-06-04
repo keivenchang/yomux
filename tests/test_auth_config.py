@@ -200,11 +200,44 @@ def test_bootstrap_locale_resolves_language_and_serves_locale_catalogs():
     assert web.static_content_type("locales/sub/dir.json") is None
 
 
+def test_pre_auth_brand_wordmark_localizes_yo_lo_glyphs():
+    # DOIT.13 follow-up: the server-rendered login / auth-setup screens are NOT localized by the JS
+    # renderBrandWordmark(), so brand_html must localize YO/LO itself — a Chinese locale showed
+    # "YO/LOmux" instead of 優樂mux / 优乐mux.
+    assert "優" in web.brand_html(locale="zh-Hant") and "樂" in web.brand_html(locale="zh-Hant")
+    assert "优" in web.brand_html(locale="zh-Hans") and "乐" in web.brand_html(locale="zh-Hans")
+    # No locale (main app, which re-localizes client-side) and "system" stay English.
+    assert ">YO<" in web.brand_html() and ">LO<" in web.brand_html()
+    assert ">YO<" in web.brand_html(locale="system")
+    # The full pre-auth pages carry the localized wordmark (login_html takes the locale by keyword —
+    # its first positional is next_path).
+    renderers = [
+        ("setup", lambda loc: web.setup_auth_html(loc)),
+        ("login", lambda loc: web.login_html(current_locale=loc)),
+    ]
+    for name, render in renderers:
+        zh_hant = render("zh-Hant")
+        zh_hans = render("zh-Hans")
+        assert "優" in zh_hant and "樂" in zh_hant, f"{name} zh-Hant wordmark"
+        assert "优" in zh_hans and "乐" in zh_hans, f"{name} zh-Hans wordmark"
+        assert ">YO<" in render("en"), f"{name} en wordmark stays YO/LO"
+
+
 def test_main_page_bootstrap_includes_resolved_locale():
     page = web.html_page([])
     match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     parsed = json.loads(match.group(1))
     assert parsed["locale"] in {"en", "en-XA"}
+
+
+def test_bootstrap_dev_flag_is_off_by_default_and_set_under_dev():
+    # Dev-velocity #1b: the bootstrap carries a dev flag; the client only subscribes to /api/dev-reload
+    # when it is true. Off by default so production never auto-reloads.
+    def boot(page):
+        match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
+        return json.loads(match.group(1))
+    assert boot(web.html_page([]))["dev"] is False
+    assert boot(web.html_page([], "admin", dev=True))["dev"] is True
 
 
 def test_bootstrap_json_not_html_escaped_so_angle_brackets_round_trip():

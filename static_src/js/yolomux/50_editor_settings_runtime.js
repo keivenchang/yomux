@@ -514,6 +514,8 @@ function applySettingsPayload(payload, options = {}) {
   terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
   fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
+  const previousBlameAllLines = fileEditorBlameAllLines;
+  fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
   autoFocusEnabled = boolSetting('general.auto_focus', false);
   const previousEditorSchemeId = activeEditorScheme().id;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
@@ -544,6 +546,10 @@ function applySettingsPayload(payload, options = {}) {
     // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
     refreshOpenEditorThemePanels();
   }
+  // DOIT.26: the blame ViewPlugin decorates per fileEditorBlameAllLines at build time + the editor
+  // config signature carries it, so re-render open editors when the toggle changes (only matters while
+  // blame is on).
+  if (previousBlameAllLines !== fileEditorBlameAllLines && fileEditorBlameEnabled) applyEditorBlamePreference();
   // i18n (DOIT.8): when general.language changes, load the new catalog and re-render localized surfaces.
   const nextLocale = resolveLocalePref(initialSetting('general.language', 'system'));
   if (nextLocale !== previousLocale) applyLocale(nextLocale);

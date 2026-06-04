@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "Pull-запросы для отслеживания независимо от открытой сессии, по одному в строке — owner/repo#N или полный URL PR. Они отображаются в YO!info и могут уведомлять об изменениях слияния / CI / проверки.",
   "pref.performance.watched_pr_refresh_ms.label": "Обновление отслеживаемых PR",
   "pref.performance.watched_pr_refresh_ms.help": "Как часто опрашиваются отслеживаемые PR (15000–600000 мс). Длиннее, чем метаданные сессии, чтобы большой список не исчерпал лимит GitHub.",
-  "finder.symlink.broken": "(неработающая)"
+  "finder.symlink.broken": "(неработающая)",
+  "pref.editor.blame_all_lines.label": "Blame для всех строк",
+  "pref.editor.blame_all_lines.help": "Когда встроенный git blame включён, аннотировать каждую строку, а не только текущую строку курсора.",
+  "shortcuts.editorNav": "Редактор назад / вперёд",
+  "palette.openView": "Открыть представление «{view}»"
 }

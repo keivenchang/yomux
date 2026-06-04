@@ -3323,14 +3323,31 @@ function blameHoverText(info) {
 // scheme's --code-comment token (theme-aware), and the full commit is the line's native title tooltip.
 function codeMirrorBlameExtension(api, path) {
   if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
+  const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
   const build = view => {
     const blame = editorBlameByPath.get(path);
     if (!blame || !blame.lines) return api.Decoration.none;
+    // DOIT.26: annotate EVERY visible line when fileEditorBlameAllLines is on, else just the cursor line
+    // (the Cursor default). Viewport-scoped so a huge file only decorates what's on screen.
+    if (fileEditorBlameAllLines) {
+      const ranges = [];
+      const visible = view.visibleRanges?.length ? view.visibleRanges : [{from: 0, to: view.state.doc.length}];
+      for (const {from, to} of visible) {
+        let pos = from;
+        while (pos <= to) {
+          const line = view.state.doc.lineAt(pos);
+          const info = blame.lines[String(line.number)];
+          if (info) ranges.push(lineDeco(info).range(line.from));
+          if (line.to + 1 <= pos) break;   // guard against a zero-length advance
+          pos = line.to + 1;
+        }
+      }
+      return ranges.length ? api.Decoration.set(ranges, true) : api.Decoration.none;
+    }
     const line = view.state.doc.lineAt(view.state.selection.main.head);
     const info = blame.lines[String(line.number)];
     if (!info) return api.Decoration.none;
-    const deco = api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
-    return api.Decoration.set([deco.range(line.from)]);
+    return api.Decoration.set([lineDeco(info).range(line.from)]);
   };
   return api.ViewPlugin.fromClass(class {
     constructor(view) { this.decorations = build(view); }

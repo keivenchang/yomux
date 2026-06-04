@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "열린 세션과 무관하게 감시할 풀 리퀘스트, 한 줄에 하나씩 — owner/repo#N 또는 전체 PR URL. YO!info에 표시되며 병합/CI/리뷰 변경 시 알릴 수 있습니다.",
   "pref.performance.watched_pr_refresh_ms.label": "감시 PR 새로고침",
   "pref.performance.watched_pr_refresh_ms.help": "감시 중인 PR을 폴링하는 빈도(15000~600000ms). 큰 감시 목록이 GitHub 속도 제한을 소진하지 않도록 세션 메타데이터보다 깁니다.",
-  "finder.symlink.broken": "(끊김)"
+  "finder.symlink.broken": "(끊김)",
+  "pref.editor.blame_all_lines.label": "모든 줄에 blame 표시",
+  "pref.editor.blame_all_lines.help": "인라인 git blame이 켜져 있을 때 커서의 현재 줄뿐 아니라 모든 줄에 주석을 표시합니다.",
+  "shortcuts.editorNav": "편집기 뒤로 / 앞으로",
+  "palette.openView": "{view} 보기 열기"
 }

@@ -1138,6 +1138,7 @@ function keyboardShortcutCatalog() {
       {label: t('shortcuts.toggleComment'), keys: appShortcutText('/')},
       {label: t('shortcuts.indentOutdent'), keys: 'Tab / Shift+Tab'},
       {label: t('shortcuts.undoRedo'), keys: `${appShortcutText('Z')} / ${appShortcutText('Z', {shift: true})}`},
+      {label: t('shortcuts.editorNav'), keys: `${appShortcutText('[', {alt: true})} / ${appShortcutText(']', {alt: true})}`},
     ]},
     {section: t('shortcuts.section.diff'), items: [
       {label: t('shortcuts.undoChunk'), keys: appShortcutText('Z')},
@@ -1276,7 +1277,16 @@ function commandPaletteCommandItems() {
     if (items.length === 1) { tabItems.push(tabRow(items[0])); continue; }
     // editor + preview of the same file → ONE row; focus the editor view, chip the open views' modes.
     const editorItem = items.find(it => !isFilePreviewItem(it)) || items[0];
-    const viewModes = [...new Set(items.map(it => editorViewModeFor(path, it)))].map(commandPaletteViewModeLabel);
+    // DOIT.22 follow-up: each chip is clickable to jump to that exact view — carry the mode + the layout
+    // item that view lives in (the editor item for edit/diff, the preview item for preview).
+    const viewModes = [];
+    const seenModes = new Set();
+    for (const it of items) {
+      const mode = editorViewModeFor(path, it);
+      if (seenModes.has(mode)) continue;
+      seenModes.add(mode);
+      viewModes.push({mode, label: commandPaletteViewModeLabel(mode), item: String(it)});
+    }
     tabItems.push(tabRow(editorItem, {key: `file:${path}`, viewModes}));
   }
   const tabItemIds = new Set(commandPaletteAllTabItems());
@@ -1572,6 +1582,15 @@ function ensureCommandPalette() {
     }
   });
   node.querySelector('.command-palette-results').addEventListener('click', event => {
+    // DOIT.22 follow-up: a click on a view chip jumps to THAT view (edit/preview/diff) and closes the
+    // palette, instead of the row's default (focus the editor view).
+    const chip = event.target.closest('[data-view-item]');
+    if (chip && node.contains(chip)) {
+      const viewItem = chip.dataset.viewItem;
+      closeCommandPalette();
+      if (viewItem) selectSession(viewItem);
+      return;
+    }
     const row = event.target.closest('[data-command-index]');
     if (!row || !node.contains(row)) return;
     commandPaletteIndex = Number(row.dataset.commandIndex || 0);
@@ -1608,7 +1627,7 @@ function renderCommandPaletteResults() {
   results.innerHTML = commandPaletteItemsCache.map((item, index) => `
     <button type="button" class="command-palette-row${index === commandPaletteIndex ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteIndex ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
-      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views" aria-hidden="true">${item.viewModes.map(v => `<span class="command-palette-view-chip">${esc(v)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
+      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${fuzzyHighlightHtml(query, item.label)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
     </button>`).join('');
   results.querySelector('.command-palette-row.active')?.scrollIntoView?.({block: 'nearest'});

@@ -8,6 +8,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 
@@ -114,6 +115,208 @@ def check_css_braces() -> None:
                 )
 
 
+# Option-2 / "Durable Fix B": flag a DARK-default rule that hardcodes a theme-extreme literal color on a
+# theme-sensitive property with NO body.theme-light counterpart — the root cause of every recurring
+# light-mode dark-box / invisible-text bug (DOIT.18/19/25/28). Precision-first: only near-opaque,
+# near-extreme literals (very dark backgrounds / very light text) are flagged, so vibrant brand/status
+# colors that read in both themes don't false-positive. Selectors that are intentionally theme-
+# independent live in LIGHT_LINT_ALLOWLIST (vetted, with a reason).
+_THEME_LIGHT_SELECTORS = ("body.theme-light", "body.editor-theme-light")
+_THEME_PROPS = ("background", "background-color", "color")
+
+# Vetted intentional exceptions: a selector whose extreme literal is deliberate in BOTH themes (dark
+# popovers/dialogs, terminal surfaces, the dark editor-theme swatch, fixed state badges, white-on-accent
+# hovers). Reviewed 2026-06-03; AUDIT-LIGHTMODE left these dark-by-design. Anything NOT here is reported.
+LIGHT_LINT_ALLOWLIST: dict[str, str] = {
+    # Dark popovers / dialogs / overlays / drag ghost — intentionally dark in both themes.
+    ".file-drag-image.drag-image": "drag-ghost overlay, dark by design",
+    ".file-drag-icon": "drag-ghost overlay",
+    ".file-drag-title": "drag-ghost overlay",
+    ".terminal-context-menu": "dark popover by design (AUDIT-LIGHTMODE)",
+    ".terminal-context-menu-separator": "dark popover divider",
+    ".session-rename-dialog": "dark popover by design",
+    ".session-rename-input": "dark popover input by design",
+    ".session-rename-actions button": "dark popover button by design",
+    ".file-image-preview-popover": "dark hover popover by design",
+    ".modal": "dark modal by design",
+    ".file-editor-dialog": "dark modal by design (AUDIT-LIGHTMODE)",
+    ".file-editor-dialog-action": "dark modal button by design",
+    # Terminal surfaces follow the TERMINAL theme, not the app theme.
+    ".terminal-error": "terminal surface, follows the terminal theme",
+    ".tmux-snapshot": "terminal snapshot surface",
+    # Fixed state-badge / marker / warning colors — theme-independent (light text sits on the colored
+    # badge in both themes; red attention banners are red in both).
+    ".session-state-disconnected": "fixed state-badge color",
+    ".session-state-working": "fixed state-badge color",
+    ".session-state-needs-approval": "fixed red attention-badge color",
+    ".session-state-needs-input": "fixed red attention-badge color",
+    ".session-state-blocked": "fixed red attention-badge color",
+    ".session-yolo-marker.locked": "fixed marker color",
+    ".transport-warning": "fixed red warning-banner color",
+    # White text on the accent (green) hover/focus background — reads in both themes.
+    ".info-sort-button:hover": "white text on the accent hover bg",
+    ".info-sort-button:focus-visible": "white text on the accent focus bg",
+    ".file-explorer-close:hover": "white text on accent hover",
+    ".file-explorer-close:focus-visible": "white text on accent focus",
+    ".file-editor-close:hover": "white text on accent hover",
+    ".file-editor-close:focus-visible": "white text on accent focus",
+    ".file-explorer-panel-close:hover": "white text on accent hover",
+    ".file-explorer-panel-close:focus-visible": "white text on accent focus",
+    ".file-editor-panel-close:hover": "white text on accent hover",
+    ".file-editor-panel-close:focus-visible": "white text on accent focus",
+    # The DARK editor-theme swatch/panel is intentionally dark regardless of the app theme.
+    ".file-editor-theme.theme-dark": "dark editor-theme swatch (intentional in both app themes)",
+    ".file-editor-theme-panel.theme-dark": "dark editor-theme swatch",
+    # Diff/conflict code surfaces are dark code blocks by design.
+    ".file-editor-conflict-compare pre": "dark code/diff block by design",
+    ".file-compare-line.added": "diff added-line text on the dark diff surface",
+    # Covered by a MORE-SPECIFIC body.theme-light contextual rule that exact-selector pairing can't see
+    # (the lint's known limitation — it pairs by exact selector, not by specificity/context).
+    ".session-button-name": "light override on body.theme-light .pane-tab:not(.active) .session-button-name",
+    ".session-button-dir": "light override on body.theme-light .pane-tab/.panel-detail-row contexts",
+    ".markdown-body pre": "light override on the yoagent-chat / editor-theme-light .markdown-body pre contexts",
+}
+
+
+def _iter_css_rules(css: str):
+    """Yield (selector, declaration-body) for every style rule; descend @media/@supports; skip the
+    bodies of @keyframes/@font-face/@page (their inner blocks are not theme-sensitive style rules)."""
+    i, n = 0, len(css)
+    buf: list[str] = []
+    while i < n:
+        char = css[i]
+        if char == "{":
+            selector = "".join(buf).strip()
+            buf = []
+            depth, j = 1, i + 1
+            while j < n and depth:
+                if css[j] == "{":
+                    depth += 1
+                elif css[j] == "}":
+                    depth -= 1
+                j += 1
+            body = css[i + 1:j - 1]
+            if selector.startswith("@"):
+                if selector.split()[0].lower() in ("@media", "@supports"):
+                    yield from _iter_css_rules(body)
+            else:
+                yield selector, body
+            i = j
+            continue
+        buf.append(char)
+        i += 1
+
+
+def _color_luminance_alpha(color: str) -> tuple[float, float] | None:
+    """(relative luminance 0..1, alpha 0..1) for a #hex / rgb()/rgba() literal, else None."""
+    color = color.strip().lower()
+    rgb: list[int] = []
+    alpha = 1.0
+    hex_match = re.fullmatch(r"#([0-9a-f]{3,8})", color)
+    if hex_match:
+        digits = hex_match.group(1)
+        if len(digits) in (3, 4):
+            rgb = [int(digits[k] * 2, 16) for k in range(3)]
+            if len(digits) == 4:
+                alpha = int(digits[3] * 2, 16) / 255
+        elif len(digits) in (6, 8):
+            rgb = [int(digits[k:k + 2], 16) for k in (0, 2, 4)]
+            if len(digits) == 8:
+                alpha = int(digits[6:8], 16) / 255
+        else:
+            return None
+    else:
+        rgb_match = re.fullmatch(r"rgba?\(([^)]+)\)", color)
+        if not rgb_match:
+            return None
+        parts = [p for p in re.split(r"[,\s/]+", rgb_match.group(1)) if p]
+        if len(parts) < 3:
+            return None
+        try:
+            for part in parts[:3]:
+                rgb.append(int(round(float(part.rstrip("%")) * (2.55 if part.endswith("%") else 1))))
+            if len(parts) >= 4:
+                alpha = float(parts[3].rstrip("%")) / (100 if parts[3].endswith("%") else 1)
+        except ValueError:
+            return None
+
+    def linear(value: int) -> float:
+        v = max(0, min(255, value)) / 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    lum = 0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2])
+    return lum, alpha
+
+
+def _first_color_literal(value: str) -> str | None:
+    """The first opaque-ish literal color in a declaration value, or None if it is themed/adaptive
+    (var(), color-mix(), a gradient) or has no literal color."""
+    low = value.lower()
+    if "var(" in low or "color-mix(" in low or "gradient(" in low:
+        return None
+    hex_match = re.search(r"#[0-9a-fA-F]{3,8}\b", value)
+    if hex_match:
+        return hex_match.group(0)
+    rgb_match = re.search(r"rgba?\([^)]+\)", value)
+    if rgb_match:
+        return rgb_match.group(0)
+    return None
+
+
+def _prop_key(prop: str) -> str:
+    return "background" if prop in ("background", "background-color") else prop
+
+
+def lint_light_mode_pairs() -> list[str]:
+    css = "\n".join(read_text(repo_path(part)) for part in ASSETS["yolomux.css"])
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    light_pairs: set[tuple[str, str]] = set()
+    dark: list[tuple[str, str, str]] = []
+    for selector, body in _iter_css_rules(css):
+        decls = []
+        for chunk in body.split(";"):
+            if ":" not in chunk:
+                continue
+            name, _, val = chunk.partition(":")
+            name, val = name.strip().lower(), val.strip()
+            if name in _THEME_PROPS:
+                decls.append((name, val))
+        if not decls:
+            continue
+        for sel in (s.strip() for s in selector.split(",") if s.strip()):
+            is_light = any(token in sel for token in _THEME_LIGHT_SELECTORS)
+            base = sel
+            for token in _THEME_LIGHT_SELECTORS:
+                base = base.replace(token + " ", "").replace(token, "").strip()
+            for name, val in decls:
+                if is_light:
+                    light_pairs.add((base, _prop_key(name)))
+                else:
+                    dark.append((sel, name, val))
+    violations: list[str] = []
+    for sel, name, val in dark:
+        if sel in LIGHT_LINT_ALLOWLIST:
+            continue
+        color = _first_color_literal(val)
+        if not color:
+            continue
+        measured = _color_luminance_alpha(color)
+        if not measured:
+            continue
+        lum, alpha = measured
+        if alpha < 0.6:   # translucent overlays adapt to whatever shows through; not a dark box
+            continue
+        is_bg = name in ("background", "background-color")
+        extreme = (is_bg and lum < 0.18) or (name == "color" and lum > 0.82)
+        if not extreme:
+            continue
+        if (sel, _prop_key(name)) in light_pairs:
+            continue   # has a body.theme-light override
+        kind = "dark background" if is_bg else "near-white text"
+        violations.append(f"{sel} {{ {name}: {color} }} — {kind} with no body.theme-light override")
+    return violations
+
+
 class BuildError(Exception):
     """Raised when the build cannot proceed (e.g. i18n key-parity failure)."""
 
@@ -210,13 +413,81 @@ def check_locales() -> list[str]:
     return stale
 
 
+def watched_source_paths(assets: list[str]) -> list[Path]:
+    """Every source file whose change should trigger a rebuild: the asset partials + locale catalogs."""
+    paths: list[Path] = []
+    for asset in assets:
+        paths.extend(repo_path(part) for part in ASSETS[asset])
+    if LOCALES_SRC.is_dir():
+        paths.extend(sorted(LOCALES_SRC.glob("*.json")))
+    return paths
+
+
+def build_once(assets: list[str]) -> list[str]:
+    check_css_braces()
+    changed = [asset for asset in assets if write_asset(asset)]
+    if write_locales():
+        changed.append("locales")
+    return changed
+
+
+def watch_loop(assets: list[str], interval: float = 0.4) -> int:
+    """Dev-velocity #1: rebuild on source change so the edit->reload loop drops the manual build step.
+    A plain mtime poll (the build is ~36ms; no inotify dependency). A BuildError mid-edit (e.g. a
+    transient locale-parity gap while typing) is printed and the watch keeps running."""
+    sources = watched_source_paths(assets)
+    print(f"watching {len(sources)} source files (Ctrl-C to stop); building {', '.join(assets)}", flush=True)
+    try:
+        changed = build_once(assets)
+        print("rebuilt: " + (", ".join(changed) if changed else "(up to date)"), flush=True)
+    except BuildError as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+
+    def snapshot() -> dict[Path, float]:
+        stamps: dict[Path, float] = {}
+        for path in sources:
+            try:
+                stamps[path] = path.stat().st_mtime_ns
+            except OSError:
+                stamps[path] = 0
+        return stamps
+
+    last = snapshot()
+    try:
+        while True:
+            time.sleep(interval)
+            now = snapshot()
+            if now == last:
+                continue
+            last = now
+            try:
+                changed = build_once(assets)
+                if changed:
+                    print("rebuilt: " + ", ".join(changed), flush=True)
+            except BuildError as exc:
+                print(str(exc), file=sys.stderr, flush=True)
+    except KeyboardInterrupt:
+        print("\nwatch stopped")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("assets", nargs="*", choices=sorted(ASSETS), help="assets to build; defaults to all")
     parser.add_argument("--check", action="store_true", help="fail if generated static files are stale")
+    parser.add_argument("--watch", action="store_true", help="rebuild on source change (mtime poll) until interrupted")
+    parser.add_argument("--lint-light", action="store_true", help="report dark/extreme literal colors lacking a body.theme-light override")
     args = parser.parse_args(argv)
 
     assets = args.assets or sorted(ASSETS)
+    if args.lint_light:
+        violations = lint_light_mode_pairs()
+        for line in violations:
+            print(line, file=sys.stderr)
+        print(f"{len(violations)} light-mode pairing issue(s)", file=sys.stderr)
+        return 1 if violations else 0
+    if args.watch:
+        return watch_loop(assets)
     try:
         check_css_braces()
         if args.check:

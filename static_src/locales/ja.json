@@ -536,5 +536,9 @@
   "pref.github.watched_prs.help": "開いているセッションとは無関係に監視するプルリクエスト（1 行に 1 つ）。owner/repo#N または完全な PR URL。YO!info に表示され、マージ / CI / レビューの変更時に通知できます。",
   "pref.performance.watched_pr_refresh_ms.label": "監視 PR の更新間隔",
   "pref.performance.watched_pr_refresh_ms.help": "監視中の PR をポーリングする頻度（15000～600000 ミリ秒）。セッションメタデータより長くし、大きな監視リストが GitHub のレート制限を使い切らないようにします。",
-  "finder.symlink.broken": "（リンク切れ）"
+  "finder.symlink.broken": "（リンク切れ）",
+  "pref.editor.blame_all_lines.label": "全行に blame 表示",
+  "pref.editor.blame_all_lines.help": "インライン git blame が有効なとき、カーソルの現在行だけでなく全行に注釈を表示します。",
+  "shortcuts.editorNav": "エディタ 戻る／進む",
+  "palette.openView": "{view} ビューを開く"
 }
