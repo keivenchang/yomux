@@ -329,6 +329,10 @@ let fileQuickOpenRequestId = 0;
 let fileQuickOpenDebounce = null;
 let fileQuickOpenAbortController = null;
 let tabsMenuSearchText = '';
+// P0 menu-bar: how the Tabs ▾ navigator orders its list — 'default' (tmux/editors/other), 'attention'
+// (needs-* sessions first, the "Needs me" view), or 'name'. Persisted; set from View → Sort tab list.
+const tabsMenuSortModes = ['default', 'attention', 'name'];
+let tabsMenuSortMode = tabsMenuSortModes.includes(storageGet('yolomux.tabsMenuSort.v1')) ? storageGet('yolomux.tabsMenuSort.v1') : 'default';
 let fileExplorerShortcutRestoreSlots = null;
 let clientSettingsPayload = bootstrap.settingsPayload || {};
 let clientSettings = clientSettingsPayload.settings || {};

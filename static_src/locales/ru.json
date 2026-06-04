@@ -540,5 +540,11 @@
   "pref.editor.blame_all_lines.label": "Blame для всех строк",
   "pref.editor.blame_all_lines.help": "Когда встроенный git blame включён, аннотировать каждую строку, а не только текущую строку курсора.",
   "shortcuts.editorNav": "Редактор назад / вперёд",
-  "palette.openView": "Открыть представление «{view}»"
+  "palette.openView": "Открыть представление «{view}»",
+  "menu.view.sortTabs": "Сортировать список вкладок",
+  "menu.view.sortTabs.default": "По умолчанию",
+  "menu.view.sortTabs.default.detail": "Терминалы, затем редакторы, затем остальные",
+  "menu.view.sortTabs.attention": "Требующие внимания сверху",
+  "menu.view.sortTabs.attention.detail": "Сессии, ожидающие ввода/одобрения, заблокированные или отключённые — сверху",
+  "menu.view.sortTabs.name": "По имени"
 }

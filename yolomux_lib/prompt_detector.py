@@ -614,9 +614,12 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     # Ctrl-T task/todo list rows shown below an approval prompt (pending ☐, done ☑/☒/◼, active ◐),
     # optionally led by a tree/box connector. Defense-in-depth for a partial overlay (header scrolled
     # off): these are prompt-trailing UI, not new activity. The header break above is the durable fix.
-    if re.match(r"^[│├└╰⎿]?\s*[☐☑☒▢▣◻◼◐◓]\s+\S", stripped):
+    # DOIT.35 C1: include this Claude version's task glyphs — □ (U+25A1) pending, ✓/✔ done, ✗/✘ failed,
+    # ◯ (U+25EF) — alongside the U+2610 ballot-box family. Otherwise a working session with a Ctrl-T task
+    # list reads as new output (visible_agent_working -> False) and the YO ball stops spinning.
+    if re.match(r"^[│├└╰⎿]?\s*[☐☑☒▢▣◻◼◐◓□✓✔✗✘◯]\s+\S", stripped):
         return True
-    if stripped.startswith(("◼", "◻", "☑", "☒")):
+    if stripped.startswith(("◼", "◻", "☑", "☒", "□", "✓", "✔", "✗", "✘", "◯")):
         return True
     if re.fullmatch(r"[❯›>][\s█▉▊▋▌▍▎▏]*", stripped):
         return True

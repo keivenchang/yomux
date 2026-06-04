@@ -604,6 +604,8 @@ globalThis.__layoutTestApi = {
   paneTabDropIndex,
   paneTabDropPlacement,
   tabMenuItems,
+  sortTabItemsForMenu,
+  setTabsMenuSortMode,
   tmuxPaneTabHtml,
   paneTabs,
   paneStateWithTabs,
@@ -2561,6 +2563,17 @@ function makeFileTree(paths) {
   assert.equal(tabMenuLabels.includes('Minimized'), false);
   assert.equal(tabMenuLabels.some(label => label.startsWith('No ')), false);
   assert.equal(tabMenu.items.filter(item => item.type === 'separator').length, 1);
+  // P0 menu-bar: View → Sort tab list orders the Tabs navigator. 'name' sorts by label (deterministic
+  // without session state); 'default' is identity. The View menu exposes the submenu with all 3 modes.
+  api.setTabsMenuSortMode('default');
+  assert.deepEqual(api.sortTabItemsForMenu(['3', '1', '2']), ['3', '1', '2'], 'default sort keeps the incoming order');
+  api.setTabsMenuSortMode('name');
+  assert.deepEqual(api.sortTabItemsForMenu(['3', '1', '2']), ['1', '2', '3'], 'name sort orders the tab list by label');
+  api.setTabsMenuSortMode('default');
+  const sortViewMenu = api.appMenuTree().find(menu => menu.id === 'view');
+  const sortSubmenu = sortViewMenu.items.find(item => item.type === 'submenu' && item.label === api.t('menu.view.sortTabs'));
+  assert.ok(sortSubmenu, 'View menu has a Sort tab list submenu');
+  assert.deepEqual(sortSubmenu.items.map(item => item.label), [api.t('menu.view.sortTabs.default'), api.t('menu.view.sortTabs.attention'), api.t('menu.view.sortTabs.name')], 'the sort submenu offers default / needs-me / name');
   const menus = api.appMenuTree();
   assert.equal(menus.map(menu => menu.label).join(','), 'File,View,tmux,Tabs,Help');
   assert.equal(menus.some(menu => menu.id === 'yolo'), false);
@@ -5127,6 +5140,10 @@ function makeFileTree(paths) {
   // DOIT.21: keyboard chords — Mod+Alt+[ / Mod+Alt+] drive editor back/forward (Mod+[ / ] stay with CM indent).
   assert.ok(/event\.altKey && \(event\.code === 'BracketLeft' \|\| event\.code === 'BracketRight'\)/.test(source), 'editor nav has a Mod+Alt+bracket keyboard chord');
   assert.ok(/BracketLeft'\) editorNavBack\(\)/.test(source) && source.includes('else editorNavForward()'), 'the bracket chord maps [ to back and ] to forward');
+  // DOIT.35 C2: an auto-focus-driven focus change records nav history (debounced, gated on autoFocusEnabled).
+  assert.ok(source.includes('function recordAutoFocusNav(item)'), 'DOIT.35: auto-focus nav recorder exists');
+  assert.ok(source.includes('recordAutoFocusNav(item);'), 'DOIT.35: setFocusedPanelItem records auto-focus nav');
+  assert.ok(/recordAutoFocusNav[\s\S]{0,200}?if \(!autoFocusEnabled[\s\S]{0,200}?focusedPanelItem === item\) recordEditorNav\(item\)/.test(source), 'DOIT.35: it is gated on autoFocusEnabled and debounced to the landed focus');
   assert.ok(!source.includes('file-editor-nav-control'), 'the per-pane editor nav group is fully removed (relocated to the topbar)');
 }
 

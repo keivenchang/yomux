@@ -6,6 +6,10 @@ dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 
 ## 2026-06-03
 
+### YO ball spins on □/✓ task lists + auto-focus records nav history (DOIT.35)
+- C1: a session actively working with a Ctrl-T task list showed the YO ball NOT spinning. This Claude version renders task rows with `□` (U+25A1) / `✓` (U+2713) / `✗` / `◯`, but `prompt_detector._is_prompt_trailing_ui_line` only knew the U+2610 ballot-box family — so the task rows read as new output, `visible_agent_working` flipped to False, state went `idle`, and the spin stopped. Extended the task-row glyph class + `startswith` tuple to include `□✓✔✗✘◯`. Now the task list reads as prompt-trailing chrome and the ball spins while the agent works. Regression test covers the `□`/`✓` rows + the old `☐` form.
+- C2: auto-focus didn't record back/forward history (only `userInitiated` activations did), so an auto-focus jump was invisible to Back. Added a debounced `recordAutoFocusNav` in `setFocusedPanelItem` (gated on `autoFocusEnabled`): it records the focus that LANDS after a ~500ms dwell, so rapid auto-focus flapping doesn't flood the stack and a back/forward re-activation no-ops via the consecutive-dedupe. Node guard covers the wiring.
+
 ### Code-audit follow-ups: readonly policy, blame lifecycle, watch-list logging, TODO drift (DOIT.34)
 - #1 `/api/blame` bypassed the readonly guard (only `/api/fs/*` was blocked for readonly), so a readonly identity could read repo file history. Added `/api/blame` to the admin-only GET gate; `test_login_auth` now asserts readonly gets the same FORBIDDEN as `/api/fs/list`.
 - #2 The readonly file UI offered Download / open-image even though the server 403s every `/api/fs/*` read (readonly = terminal-only). Disabled `downloadDisabled`/`openInNewTabDisabled` in readonly so the UI matches the server; node guard updated (readonly download/image-open now disabled).

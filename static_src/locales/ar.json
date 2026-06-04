@@ -540,5 +540,11 @@
   "pref.editor.blame_all_lines.label": "عرض blame لكل الأسطر",
   "pref.editor.blame_all_lines.help": "عند تفعيل git blame المضمّن، علّق على كل سطر بدلًا من السطر الحالي للمؤشر فقط.",
   "shortcuts.editorNav": "المحرر: رجوع / تقدّم",
-  "palette.openView": "فتح عرض {view}"
+  "palette.openView": "فتح عرض {view}",
+  "menu.view.sortTabs": "ترتيب قائمة علامات التبويب",
+  "menu.view.sortTabs.default": "افتراضي",
+  "menu.view.sortTabs.default.detail": "الطرفيات ثم المحررات ثم الباقي",
+  "menu.view.sortTabs.attention": "ما يحتاجني أولًا",
+  "menu.view.sortTabs.attention.detail": "الجلسات التي تحتاج إدخالًا/موافقة أو المحظورة/المنقطعة في الأعلى",
+  "menu.view.sortTabs.name": "حسب الاسم"
 }

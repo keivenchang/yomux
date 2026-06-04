@@ -540,5 +540,11 @@
   "pref.editor.blame_all_lines.label": "标注所有行",
   "pref.editor.blame_all_lines.help": "开启内嵌 git blame 时，标注每一行，而非仅光标所在的当前行。",
   "shortcuts.editorNav": "编辑器后退／前进",
-  "palette.openView": "打开{view}视图"
+  "palette.openView": "打开{view}视图",
+  "menu.view.sortTabs": "标签列表排序",
+  "menu.view.sortTabs.default": "默认",
+  "menu.view.sortTabs.default.detail": "终端、编辑器、再其他标签",
+  "menu.view.sortTabs.attention": "需要我的优先",
+  "menu.view.sortTabs.attention.detail": "需要输入／批准／受阻／断开的会话置顶",
+  "menu.view.sortTabs.name": "按名称"
 }

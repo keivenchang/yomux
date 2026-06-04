@@ -170,11 +170,9 @@ LIGHT_LINT_ALLOWLIST: dict[str, str] = {
     # Diff/conflict code surfaces are dark code blocks by design.
     ".file-editor-conflict-compare pre": "dark code/diff block by design",
     ".file-compare-line.added": "diff added-line text on the dark diff surface",
-    # Covered by a MORE-SPECIFIC body.theme-light contextual rule that exact-selector pairing can't see
-    # (the lint's known limitation — it pairs by exact selector, not by specificity/context).
-    ".session-button-name": "light override on body.theme-light .pane-tab:not(.active) .session-button-name",
-    ".session-button-dir": "light override on body.theme-light .pane-tab/.panel-detail-row contexts",
-    ".markdown-body pre": "light override on the yoagent-chat / editor-theme-light .markdown-body pre contexts",
+    # NOTE: .session-button-name / .session-button-dir / .markdown-body pre USED to need allowlisting
+    # (their light overrides are on more-specific contextual selectors); the contextual pairing in
+    # _light_covers() now recognizes those, so they no longer need entries here.
 }
 
 
@@ -267,10 +265,22 @@ def _prop_key(prop: str) -> str:
     return "background" if prop in ("background", "background-color") else prop
 
 
+def _light_covers(dark_sel: str, light_bases: list[str]) -> bool:
+    """Contextual (specificity-aware) pairing: a dark rule for selector S is covered when a
+    body.theme-light rule targets S itself OR S in a MORE-SPECIFIC context — i.e. some light base
+    selector equals S or ends with " <S>" (a descendant suffix). Catches the common real pattern where
+    the light override is scoped (e.g. dark `.session-button-name` covered by
+    `body.theme-light .pane-tab:not(.active) .session-button-name`), which exact-selector pairing missed."""
+    for base in light_bases:
+        if base == dark_sel or base.endswith(" " + dark_sel):
+            return True
+    return False
+
+
 def lint_light_mode_pairs() -> list[str]:
     css = "\n".join(read_text(repo_path(part)) for part in ASSETS["yolomux.css"])
     css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
-    light_pairs: set[tuple[str, str]] = set()
+    light_by_prop: dict[str, list[str]] = {}
     dark: list[tuple[str, str, str]] = []
     for selector, body in _iter_css_rules(css):
         decls = []
@@ -290,7 +300,7 @@ def lint_light_mode_pairs() -> list[str]:
                 base = base.replace(token + " ", "").replace(token, "").strip()
             for name, val in decls:
                 if is_light:
-                    light_pairs.add((base, _prop_key(name)))
+                    light_by_prop.setdefault(_prop_key(name), []).append(base)
                 else:
                     dark.append((sel, name, val))
     violations: list[str] = []
@@ -310,8 +320,8 @@ def lint_light_mode_pairs() -> list[str]:
         extreme = (is_bg and lum < 0.18) or (name == "color" and lum > 0.82)
         if not extreme:
             continue
-        if (sel, _prop_key(name)) in light_pairs:
-            continue   # has a body.theme-light override
+        if _light_covers(sel, light_by_prop.get(_prop_key(name), [])):
+            continue   # has a body.theme-light override (exact or in a more-specific context)
         kind = "dark background" if is_bg else "near-white text"
         violations.append(f"{sel} {{ {name}: {color} }} — {kind} with no body.theme-light override")
     return violations

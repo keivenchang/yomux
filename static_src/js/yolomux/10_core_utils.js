@@ -393,6 +393,22 @@ function setFocusedPanelItem(item, options = {}) {
   if (isPreferencesItem(item) && options.focusPreferencesSearch !== false) {
     focusFreshPreferencesSearchSoon();
   }
+  recordAutoFocusNav(item);
+}
+
+let autoFocusNavTimer = null;
+// DOIT.35 C2: an AUTO-FOCUS-driven focus change records back/forward nav "as if clicked", so Back
+// returns to where you were. Debounced by a short dwell so rapid auto-focus flapping (focus chasing
+// needs-attention) records only the focus that LANDS, not every transient flip. User clicks already
+// record immediately (activatePaneTab userInitiated); a back/forward re-activation lands on the item
+// already at the stack head, so recordEditorNav's consecutive-dedupe makes this a no-op there.
+function recordAutoFocusNav(item) {
+  if (!autoFocusEnabled || !item) return;
+  if (autoFocusNavTimer) clearTimeout(autoFocusNavTimer);
+  autoFocusNavTimer = setTimeout(() => {
+    autoFocusNavTimer = null;
+    if (focusedPanelItem === item) recordEditorNav(item);
+  }, 500);
 }
 
 function clearPendingFileEditorFocusExcept(item) {

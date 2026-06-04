@@ -540,5 +540,11 @@
   "pref.editor.blame_all_lines.label": "Blame all lines",
   "pref.editor.blame_all_lines.help": "When inline git blame is on, annotate every line instead of only the cursor's current line.",
   "shortcuts.editorNav": "Editor back / forward",
-  "palette.openView": "Open {view} view"
+  "palette.openView": "Open {view} view",
+  "menu.view.sortTabs": "Sort tab list",
+  "menu.view.sortTabs.default": "Default",
+  "menu.view.sortTabs.default.detail": "Terminals, then editors, then other tabs",
+  "menu.view.sortTabs.attention": "Needs me first",
+  "menu.view.sortTabs.attention.detail": "Sessions needing input / approval / blocked / disconnected on top",
+  "menu.view.sortTabs.name": "By name"
 }

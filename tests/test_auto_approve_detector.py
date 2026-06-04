@@ -750,3 +750,22 @@ def test_tmux_exact_target_skips_resolution_for_unambiguous_targets(monkeypatch)
     monkeypatch.setattr(tmux_utils, "cached_session_names", fail_names)
     assert tmux_utils.tmux_exact_target("%3") == "%3"
     assert tmux_utils.tmux_exact_target("1:") == "1:"
+
+
+def test_visible_agent_working_survives_unicode_task_glyphs():
+    # DOIT.35 C1: a Ctrl-T task list using □/✓ (U+25A1/U+2713, this Claude version) below a working
+    # footer must read as prompt-trailing chrome, not new output — else visible_agent_working flips to
+    # False and the YO ball stops spinning while the agent works.
+    visible_text = (
+        "◦ Working (1m 21s • esc to interrupt)\n"
+        "  □ Pending task one\n"
+        "  ✓ Done task two\n"
+        "  ✗ Failed task three\n"
+        "  ◯ Another pending\n"
+    )
+    assert prompt_detector.visible_agent_working(visible_text) is True
+    # the new glyph rows are recognized as prompt-trailing UI; the ballot-box family still is too.
+    assert prompt_detector._is_prompt_trailing_ui_line("  □ Pending task") is True
+    assert prompt_detector._is_prompt_trailing_ui_line("  ✓ Done task") is True
+    assert prompt_detector._is_prompt_trailing_ui_line("✗ Failed task") is True
+    assert prompt_detector._is_prompt_trailing_ui_line("  ☐ Old-style pending") is True

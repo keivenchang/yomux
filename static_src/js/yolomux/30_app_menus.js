@@ -426,9 +426,40 @@ function inactiveTabMenuItems() {
   });
 }
 
+// P0 menu-bar: the Tabs navigator's order. 'attention' floats needs-* sessions to the top (the "Needs
+// me" view) using the shared state priority; 'name' sorts by label; 'default' keeps the
+// tmux/editors/other grouping. Stable (preserves the incoming order within equal keys).
+function tabMenuSortPriority(item) {
+  if (!isTmuxSession(item)) return 50;   // non-session tabs (editors/Finder/Prefs) sit after sessions
+  const priority = sessionState(item)?.priority;
+  return Number.isFinite(priority) ? priority : 50;
+}
+
+function sortTabItemsForMenu(items) {
+  if (tabsMenuSortMode === 'attention') {
+    return items
+      .map((item, index) => ({item, index}))
+      .sort((a, b) => tabMenuSortPriority(a.item) - tabMenuSortPriority(b.item) || a.index - b.index)
+      .map(entry => entry.item);
+  }
+  if (tabsMenuSortMode === 'name') {
+    return items
+      .map((item, index) => ({item, index}))
+      .sort((a, b) => String(itemLabel(a.item)).localeCompare(String(itemLabel(b.item))) || a.index - b.index)
+      .map(entry => entry.item);
+  }
+  return items;
+}
+
+function setTabsMenuSortMode(mode) {
+  tabsMenuSortMode = tabsMenuSortModes.includes(mode) ? mode : 'default';
+  storageSet('yolomux.tabsMenuSort.v1', tabsMenuSortMode);
+  renderSessionButtons({force: true});
+}
+
 function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   const query = tabsMenuSearchText.trim();
-  const filteredOpenItems = filterTabItemsForSearch(openItems, query);
+  const filteredOpenItems = sortTabItemsForMenu(filterTabItemsForSearch(openItems, query));
   const groupedItems = menuGroups(
     filteredOpenItems.map(item => menuTabCommand(item, {toggleYolo: true})),
     backgroundTabMenuItems(),
@@ -517,6 +548,11 @@ function appMenuTree() {
           menuCommand(t('menu.view.layout.split'), setLayoutToSplitPanes, {detail: t('menu.view.layout.split.detail', {name: fileExplorerLabel()})}),
           menuCommand(t('menu.view.layout.grid'), null, {disabled: true, detail: t('menu.view.layout.grid.detail')}),
           menuCommand(t('menu.view.layout.wall'), null, {disabled: true}),
+        ]),
+        menuSubmenu(t('menu.view.sortTabs'), [
+          menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
+          menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),
+          menuCommand(t('menu.view.sortTabs.name'), () => setTabsMenuSortMode('name'), {checked: tabsMenuSortMode === 'name'}),
         ]),
       ],
     },

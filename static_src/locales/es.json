@@ -540,5 +540,11 @@
   "pref.editor.blame_all_lines.label": "Blame en todas las líneas",
   "pref.editor.blame_all_lines.help": "Cuando el blame de git en línea está activo, anota cada línea en lugar de solo la línea actual del cursor.",
   "shortcuts.editorNav": "Editor atrás / adelante",
-  "palette.openView": "Abrir vista {view}"
+  "palette.openView": "Abrir vista {view}",
+  "menu.view.sortTabs": "Ordenar lista de pestañas",
+  "menu.view.sortTabs.default": "Predeterminado",
+  "menu.view.sortTabs.default.detail": "Terminales, luego editores, luego otras",
+  "menu.view.sortTabs.attention": "Lo que me necesita primero",
+  "menu.view.sortTabs.attention.detail": "Sesiones que necesitan entrada / aprobación / bloqueadas / desconectadas arriba",
+  "menu.view.sortTabs.name": "Por nombre"
 }

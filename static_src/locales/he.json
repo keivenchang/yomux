@@ -540,5 +540,11 @@
   "pref.editor.blame_all_lines.label": "Blame בכל השורות",
   "pref.editor.blame_all_lines.help": "כאשר git blame משובץ פעיל, הוסף הערה לכל שורה ולא רק לשורה הנוכחית של הסמן.",
   "shortcuts.editorNav": "עורך אחורה / קדימה",
-  "palette.openView": "פתח תצוגת {view}"
+  "palette.openView": "פתח תצוגת {view}",
+  "menu.view.sortTabs": "מיון רשימת הכרטיסיות",
+  "menu.view.sortTabs.default": "ברירת מחדל",
+  "menu.view.sortTabs.default.detail": "מסופים, אז עורכים, אז השאר",
+  "menu.view.sortTabs.attention": "דורש טיפול תחילה",
+  "menu.view.sortTabs.attention.detail": "הפעלות הזקוקות לקלט/אישור, חסומות או מנותקות בראש",
+  "menu.view.sortTabs.name": "לפי שם"
 }

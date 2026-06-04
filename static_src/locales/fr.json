@@ -540,5 +540,11 @@
   "pref.editor.blame_all_lines.label": "Blame sur toutes les lignes",
   "pref.editor.blame_all_lines.help": "Quand le blame git en ligne est actif, annote chaque ligne au lieu de la seule ligne courante du curseur.",
   "shortcuts.editorNav": "Éditeur précédent / suivant",
-  "palette.openView": "Ouvrir la vue {view}"
+  "palette.openView": "Ouvrir la vue {view}",
+  "menu.view.sortTabs": "Trier la liste des onglets",
+  "menu.view.sortTabs.default": "Par défaut",
+  "menu.view.sortTabs.default.detail": "Terminaux, puis éditeurs, puis autres",
+  "menu.view.sortTabs.attention": "À traiter en premier",
+  "menu.view.sortTabs.attention.detail": "Sessions en attente d'entrée / d'approbation / bloquées / déconnectées en tête",
+  "menu.view.sortTabs.name": "Par nom"
 }

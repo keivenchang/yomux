@@ -10,6 +10,7 @@ from tools.static_build import pseudo_value
 from tools.static_build import repo_path
 from tools.static_build import _color_luminance_alpha
 from tools.static_build import _first_color_literal
+from tools.static_build import _light_covers
 from tools.static_build import lint_light_mode_pairs
 
 
@@ -90,9 +91,21 @@ def test_light_mode_lint_helpers_classify_colors():
     assert _first_color_literal("#0b0e14") == "#0b0e14"
 
 
+def test_light_mode_lint_contextual_pairing():
+    # Durable Fix B: contextual (specificity-aware) pairing — a dark rule is covered by a body.theme-light
+    # override on the SAME selector OR a more-specific descendant context, not just the exact selector.
+    assert _light_covers(".session-button-name", [".pane-tab:not(.active) .session-button-name"]) is True
+    assert _light_covers(".markdown-body pre", [".yoagent-chat .markdown-body pre"]) is True
+    assert _light_covers(".foo", [".foo"]) is True
+    # not covered: an unrelated selector, or a mere substring that is not a descendant-suffix.
+    assert _light_covers(".foo", [".bar"]) is False
+    assert _light_covers(".button-name", [".session-button-name"]) is False
+
+
 def test_light_mode_lint_tree_is_clean():
-    # Durable Fix B (report-only): the shipped CSS has no dark/extreme literal lacking a body.theme-light
-    # override, except the vetted LIGHT_LINT_ALLOWLIST. A NEW unpaired dark-box/invisible-text rule fails
-    # here — review it, then either fix it (add the light override) or allowlist it with a reason.
+    # Durable Fix B: the shipped CSS has no dark/extreme literal lacking a body.theme-light override
+    # (exact or contextual), except the vetted LIGHT_LINT_ALLOWLIST. A NEW unpaired dark-box /
+    # invisible-text rule fails here — review it, then fix it (add the light override) or allowlist it
+    # with a reason. This is the enforceable "light-mode coverage is an invariant" gate.
     violations = lint_light_mode_pairs()
     assert violations == [], "light-mode pairing regressions:\n  " + "\n  ".join(violations)
