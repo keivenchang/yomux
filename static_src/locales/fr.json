@@ -546,6 +546,5 @@
   "menu.view.sortTabs.default.detail": "Terminaux, puis éditeurs, puis autres",
   "menu.view.sortTabs.attention": "À traiter en premier",
   "menu.view.sortTabs.attention.detail": "Sessions à traiter en tête",
-  "menu.view.sortTabs.name": "Par nom",
-  "pane.tabs.menu": "Onglets de ce volet"
+  "menu.view.sortTabs.name": "Par nom"
 }

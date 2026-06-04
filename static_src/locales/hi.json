@@ -546,6 +546,5 @@
   "menu.view.sortTabs.default.detail": "टर्मिनल, फिर एडिटर, फिर अन्य",
   "menu.view.sortTabs.attention": "मेरी ज़रूरत वाले पहले",
   "menu.view.sortTabs.attention.detail": "ध्यान चाहने वाले सत्र ऊपर",
-  "menu.view.sortTabs.name": "नाम से",
-  "pane.tabs.menu": "इस पेन के टैब"
+  "menu.view.sortTabs.name": "नाम से"
 }

@@ -741,7 +741,6 @@ const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const watchedPrContextMenu = createContextMenuController();   // DOIT.29: "Watch this PR" on YO!info PR cells
-const paneTabsMenu = createContextMenuController();   // P0 menu-bar: per-pane left dropdown listing that pane's tabs
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
@@ -12986,11 +12985,9 @@ function updatePaneTabStrip(panel, side) {
   if (isFileExplorerItem(activeItemForSide(side))) {
     strip.hidden = true;
     strip.replaceChildren();
-    ensurePaneTabsMenuCaret(strip, side, {hidden: true});
     return;
   }
   strip.hidden = false;
-  ensurePaneTabsMenuCaret(strip, side, {hidden: false});
   const restorePopoverItem = paneTabPopoverItemToRestore(strip);
   const activeItem = activeItemForSide(side);
   const items = stack.slice();
@@ -12999,64 +12996,6 @@ function updatePaneTabStrip(panel, side) {
   bindPaneTabStrip(strip, side);
   restorePaneTabPopover(strip, restorePopoverItem);
   scheduleTabStripOverflowCheck(strip);
-}
-
-// P0 menu-bar: a per-pane "left dropdown" — a caret immediately before the pane's tab strip that opens
-// a popover listing THAT pane's tabs (scoped to the one pane, unlike the global Tabs ▾ menu), with the
-// active tab checked; clicking a row activates it in this pane. Inserted once into the panel-head (a
-// single integration point, not per panel-head template); rebound to the current side on each render.
-function ensurePaneTabsMenuCaret(strip, side, options = {}) {
-  const head = strip.parentElement;
-  if (!head) return;
-  let caret = head.querySelector(':scope > .pane-tabs-menu-caret');
-  if (options.hidden) {
-    if (caret) caret.hidden = true;
-    return;
-  }
-  if (!caret) {
-    caret = document.createElement('button');
-    caret.type = 'button';
-    caret.className = 'pane-tabs-menu-caret';
-    caret.setAttribute('aria-haspopup', 'menu');
-    caret.textContent = '▾';
-    head.insertBefore(caret, strip);
-  }
-  caret.hidden = false;
-  caret.dataset.side = side;
-  caret.title = t('pane.tabs.menu');
-  caret.setAttribute('aria-label', t('pane.tabs.menu'));
-  if (!caret.dataset.bound) {
-    caret.dataset.bound = '1';
-    caret.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      const rect = caret.getBoundingClientRect();
-      showPaneTabsMenu(caret.dataset.side, rect.left, rect.bottom + 2);
-    });
-  }
-}
-
-function showPaneTabsMenu(side, x, y) {
-  if (!layoutSlotKeys().includes(side)) return;
-  const active = activeItemForSide(side);
-  const items = paneTabs(side).slice();
-  if (active && !items.includes(active)) items.push(active);
-  if (!items.length) return;
-  closeAppMenus();
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu pane-tabs-context-menu';
-  menu.setAttribute('role', 'menu');
-  menu.setAttribute('aria-label', t('pane.tabs.menu'));
-  for (const item of items) {
-    appendContextMenuButton(
-      menu,
-      itemLabel(item),
-      () => activatePaneTab(side, item, {userInitiated: true}),
-      () => paneTabsMenu.close(),
-      {checked: item === active, title: menuTabDetail(item)},
-    );
-  }
-  paneTabsMenu.open(menu, x, y);
 }
 
 function reconcilePaneTabChildren(strip, side, items) {

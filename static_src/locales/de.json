@@ -546,6 +546,5 @@
   "menu.view.sortTabs.default.detail": "Terminals, dann Editoren, dann andere",
   "menu.view.sortTabs.attention": "Aufmerksamkeit zuerst",
   "menu.view.sortTabs.attention.detail": "Sitzungen mit Handlungsbedarf zuerst",
-  "menu.view.sortTabs.name": "Nach Name",
-  "pane.tabs.menu": "Tabs dieses Bereichs"
+  "menu.view.sortTabs.name": "Nach Name"
 }

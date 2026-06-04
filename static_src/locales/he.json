@@ -546,6 +546,5 @@
   "menu.view.sortTabs.default.detail": "מסופים, אז עורכים, אז השאר",
   "menu.view.sortTabs.attention": "דורש טיפול תחילה",
   "menu.view.sortTabs.attention.detail": "הפעלות הדורשות טיפול בראש",
-  "menu.view.sortTabs.name": "לפי שם",
-  "pane.tabs.menu": "הכרטיסיות של חלונית זו"
+  "menu.view.sortTabs.name": "לפי שם"
 }

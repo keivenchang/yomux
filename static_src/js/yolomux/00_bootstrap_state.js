@@ -740,7 +740,6 @@ const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const watchedPrContextMenu = createContextMenuController();   // DOIT.29: "Watch this PR" on YO!info PR cells
-const paneTabsMenu = createContextMenuController();   // P0 menu-bar: per-pane left dropdown listing that pane's tabs
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;

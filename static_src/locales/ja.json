@@ -546,6 +546,5 @@
   "menu.view.sortTabs.default.detail": "端末→エディタ→その他",
   "menu.view.sortTabs.attention": "要対応を先頭に",
   "menu.view.sortTabs.attention.detail": "要対応のセッションを上に",
-  "menu.view.sortTabs.name": "名前順",
-  "pane.tabs.menu": "このペインのタブ"
+  "menu.view.sortTabs.name": "名前順"
 }

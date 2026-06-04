@@ -546,6 +546,5 @@
   "menu.view.sortTabs.default.detail": "Terminales, luego editores, luego otras",
   "menu.view.sortTabs.attention": "Lo que me necesita primero",
   "menu.view.sortTabs.attention.detail": "Sesiones que requieren atención arriba",
-  "menu.view.sortTabs.name": "Por nombre",
-  "pane.tabs.menu": "Pestañas de este panel"
+  "menu.view.sortTabs.name": "Por nombre"
 }

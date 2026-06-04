@@ -546,6 +546,5 @@
   "menu.view.sortTabs.default.detail": "終端機、編輯器、再其他分頁",
   "menu.view.sortTabs.attention": "需要我的優先",
   "menu.view.sortTabs.attention.detail": "需要關注的工作階段置頂",
-  "menu.view.sortTabs.name": "依名稱",
-  "pane.tabs.menu": "此窗格的分頁"
+  "menu.view.sortTabs.name": "依名稱"
 }

@@ -1438,15 +1438,8 @@ function makeFileTree(paths) {
   assert.equal(body.includes('replaceChildren(...'), false, 'routine pane-tab refresh must reconcile instead of rebuilding hovered tabs');
   assert.ok(source.includes('function reconcilePaneTabChildren('), 'pane-tab reconcile helper exists');
   assert.ok(source.includes('function paneTabShouldPreserve('), 'open pane-tab popovers keep their existing node');
-  // P0 menu-bar: the per-pane left dropdown — a caret before the tab strip opens a popover of THIS
-  // pane's tabs (scoped to one pane); click activates. Inserted once via updatePaneTabStrip.
-  assert.ok(source.includes('function ensurePaneTabsMenuCaret(') && source.includes('function showPaneTabsMenu('), 'per-pane tab dropdown helpers exist');
-  assert.ok(body.includes('ensurePaneTabsMenuCaret(strip, side'), 'updatePaneTabStrip inserts the per-pane dropdown caret');
-  const showMenuStart = source.indexOf('function showPaneTabsMenu(');
-  const showMenuBody = source.slice(showMenuStart, showMenuStart + 900);
-  assert.ok(showMenuBody.includes('paneTabs(side)'), 'the per-pane dropdown lists this pane\'s tabs');
-  assert.ok(showMenuBody.includes('activatePaneTab(side, item, {userInitiated: true})'), 'choosing a row activates that tab in this pane');
-  assert.ok(showMenuBody.includes('paneTabsMenu.open('), 'the per-pane dropdown opens via its own context-menu controller');
+  // The per-pane left-dropdown caret was removed (it wasted a line above the tab strip) — keep it gone.
+  assert.equal(source.includes('pane-tabs-menu-caret'), false, 'no per-pane dropdown caret (removed by request)');
 }
 
 {

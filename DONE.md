@@ -12,10 +12,10 @@ dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 - Term is now always offered (a plain shell is always launchable) instead of greyed "unavailable" — `available_agent_commands()` always includes `term`, so both the menu and the launch validation accept it.
 - pytest covers the launch-command bootstrap + Term-always-available; node guards the no-"+" label + params detail.
 
-### Menu-bar: per-pane left dropdown + View → Sort + [S]-item reconciliation (P0)
-- Per-pane left dropdown: a `▾` caret before each pane's tab strip opens a popover listing THAT pane's tabs (scoped to the one pane, active tab checkmarked); clicking a row activates it in that pane. `ensurePaneTabsMenuCaret` + `showPaneTabsMenu` integrate at a single point (`updatePaneTabStrip`), reusing the shared context-menu controller (`paneTabsMenu`) + `appendContextMenuButton` (no per-panel-head template edits; hidden on the Finder pane whose strip is hidden). Caret CSS + `pane.tabs.menu` in 13 locales; node guards the wiring. v1 is labeled rows (tab detail as the row title); the full rich-row format is a follow-up.
-- View → Sort tab list (shipped same day): Default / Needs me first / By name ordering for the Tabs ▾ navigator.
+### Menu-bar: View → Sort + [S]-item reconciliation (P0)
+- View → Sort tab list: Default / Needs me first / By name ordering for the Tabs ▾ navigator.
 - Reconciled the P0 menu-bar [S] items: File ▾ / Tmux ▾ / Help ▾ already satisfy the design tree (ticked); the proposed Settings ▾ was decided against (folded into View ▾). View ▾ remains partial (a Panel-tabs visibility toggle + an Inactive-tabs control are the last gaps).
+- NOTE: a per-pane left dropdown (a `▾` caret before each pane's tab strip) was built the same day then REVERTED at the user's request — the caret took its own line above the tab strip (wasted vertical space) and wasn't wanted; a node guard keeps `.pane-tabs-menu-caret` absent.
 
 ### YO ball spins on □/✓ task lists + auto-focus records nav history (DOIT.35)
 - C1: a session actively working with a Ctrl-T task list showed the YO ball NOT spinning. This Claude version renders task rows with `□` (U+25A1) / `✓` (U+2713) / `✗` / `◯`, but `prompt_detector._is_prompt_trailing_ui_line` only knew the U+2610 ballot-box family — so the task rows read as new output, `visible_agent_working` flipped to False, state went `idle`, and the spin stopped. Extended the task-row glyph class + `startswith` tuple to include `□✓✔✗✘◯`. Now the task list reads as prompt-trailing chrome and the ball spins while the agent works. Regression test covers the `□`/`✓` rows + the old `☐` form.

@@ -546,6 +546,5 @@
   "menu.view.sortTabs.default.detail": "Terminals, then editors, then other tabs",
   "menu.view.sortTabs.attention": "Needs me first",
   "menu.view.sortTabs.attention.detail": "Attention-needing sessions on top",
-  "menu.view.sortTabs.name": "By name",
-  "pane.tabs.menu": "This pane's tabs"
+  "menu.view.sortTabs.name": "By name"
 }
