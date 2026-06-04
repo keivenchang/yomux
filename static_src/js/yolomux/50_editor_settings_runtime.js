@@ -382,6 +382,7 @@ function applyCssSettings() {
   root.setProperty('--ui-font-size', `${uiFontSize}px`);
   root.setProperty('--tab-label-size', `${uiFontSize}px`);
   root.setProperty('--editor-font-size', `${editorFontSize}px`);
+  root.setProperty('--editor-preview-font-size', `${editorPreviewFontSize}px`);
   root.setProperty('--file-explorer-font-size', `${fileExplorerFontSize}px`);
   root.setProperty('--pane-tab-width', `${numberSetting('appearance.tab_width', 180)}px`);
   // #261: pane spacing (0-20px) = the gap on each side of the separator AND the width of the active
@@ -513,6 +514,7 @@ function applySettingsPayload(payload, options = {}) {
   uploadMaxBytes = numberSetting('uploads.max_bytes', 20 * 1024 * 1024);
   terminalFontSize = numberSetting('appearance.terminal_font_size', 13);
   editorFontSize = numberSetting('appearance.editor_font_size', 13);
+  editorPreviewFontSize = numberSetting('appearance.preview_font_size', editorFontSize + 1);
   fileExplorerFontSize = numberSetting('appearance.file_explorer_font_size', 13);
   terminalScrollback = numberSetting('terminal_editor.scrollback', 5000);
   fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
@@ -532,6 +534,7 @@ function applySettingsPayload(payload, options = {}) {
   }
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
   applyCssSettings();
+  if (typeof updateEditorPreviewFontControls === 'function') updateEditorPreviewFontControls();
   applyGlobalThemeMode({updateEditor: false, updateTerminals: false});
   applyEditorThemeMode({refreshEditors: false});
   applyEditorCursorStyle();

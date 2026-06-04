@@ -273,10 +273,10 @@ body.theme-light {
   --pane-meta-branch: #243245;
   --pane-meta-path: #111827;
   --pane-meta-desc: #4b5563;
-  /* Light mode uses a RED separator (dark mode keeps amber/yellow). */
-  --pane-resizer-bg: rgba(220, 38, 38, 0.80);
-  --pane-resizer-hover-bg: rgba(239, 68, 68, 0.96);
-  --pane-resizer-shadow: rgba(185, 28, 28, 0.62);
+  /* Light mode uses a blue separator (dark mode keeps amber/yellow). */
+  --pane-resizer-bg: rgba(37, 99, 235, 0.72);
+  --pane-resizer-hover-bg: rgba(37, 99, 235, 0.96);
+  --pane-resizer-shadow: rgba(29, 78, 216, 0.48);
   --bg: #f6f8fb;
   --panel: #ffffff;
   --panel-inactive: #eef2f7;
@@ -350,8 +350,8 @@ body {
 }
 .topbar {
   /* DOIT.12 A1/A2: the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
-     the shorter pills sit centered in a too-tall bar. Fix: paint the topbar the same green as the tab
-     strip (so it's one continuous green, no contrasting band) and tighten the height (+4px, not +8px). */
+     the shorter pills sit centered in a too-tall bar. Keep the tightened height (+4px, not +8px), but
+     leave the bar neutral at rest and use the shared tab-strip green only for hover/focus feedback. */
   min-height: calc(var(--compact-control-height) + 4px);
   position: relative;
   z-index: 180;
@@ -361,9 +361,14 @@ body {
   gap: 8px;
   padding: 3px 8px;
   border-bottom: 1px solid var(--line);
-  background: var(--pane-tab-strip-bg);
+  background: var(--panel2);
+  transition: background 100ms ease;
   overflow: visible;
   white-space: nowrap;
+}
+.topbar:hover,
+.topbar:focus-within {
+  background: var(--pane-tab-strip-bg);
 }
 /* cap the brand title's line-box so it doesn't make the bar tall (it drove most of the centering band). */
 .topbar .title,
@@ -1080,10 +1085,14 @@ body.theme-light .topbar-language {
   transform: rotate(90deg);
 }
 body.theme-light .topbar {
+  background: var(--panel2);
+}
+body.theme-light .topbar:hover,
+body.theme-light .topbar:focus-within {
   background: var(--pane-tab-strip-bg);
 }
 /* DOIT.12 A4: light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
-   on the light (now green) bar. */
+   on the light neutral/hover-green bar. */
 body.theme-light #tabMetaToggle.active {
   background: #5f9800;           /* match the .app-menu-ui-icon.active light tuning, not the garish #8cc63f */
   border-color: #5f9800;
@@ -1910,13 +1919,16 @@ body.theme-light .branch-link {
   border-color: var(--brand-green);
   color: #f2ffe8;
 }
-.changes-body {
+.changes-body,
+.file-explorer-changes-panel {
   --changes-row-hover-bg: rgba(118, 185, 0, 0.10);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
   --changes-indent-line: rgba(148, 163, 184, 0.18);
-  --changes-folder-text: var(--text);
+  --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
   --changes-icon-text: #a7c7ff;
+}
+.changes-body {
   /* DOIT.16 C3: overlay-root must not be the scroll container (see .preferences-body) — scrolling
      moves to the inner .changes-scroll so the inactive-pane dim covers the full pane at any scroll. */
   min-height: 0;
@@ -1952,8 +1964,8 @@ body.theme-light .branch-link {
 }
 .changes-control select,
 .changes-refresh,
-.diff-ref-control input,
-.diff-ref-select {
+.diff-ref-input,
+.diff-ref-control input {
   height: 24px;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -1976,26 +1988,18 @@ body.theme-light .branch-link {
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;
 }
+.diff-ref-input,
 .diff-ref-control input {
   width: clamp(64px, 10vw, 130px);
   padding: 0 5px;
   font-size: var(--ui-font-size-xs);
 }
-.diff-ref-select {
-  width: clamp(92px, 16vw, 220px);
-  min-width: 0;
-  padding: 0 5px;
-  font: var(--ui-font-size-xs) var(--mono-font);
-}
 .diff-ref-controls.compact {
   gap: 3px;
 }
+.diff-ref-controls.compact .diff-ref-input,
 .diff-ref-controls.compact .diff-ref-control input {
   width: clamp(46px, 7vw, 82px);
-  height: 20px;
-}
-.diff-ref-controls.compact .diff-ref-select {
-  width: clamp(54px, 10vw, 110px);
   height: 20px;
 }
 .changes-refresh {
@@ -2088,7 +2092,17 @@ body.theme-light .branch-link {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--accent-gold);
-  font-weight: 700;
+  font-weight: 800;
+}
+.changes-repo-totals {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-inline-start: auto;
+  white-space: nowrap;
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
 }
 .changes-repo-compare-meta {
   display: inline-flex;
@@ -2121,7 +2135,7 @@ body.theme-light .branch-link {
   font-weight: 600;
 }
 .changes-repo-refs .diff-ref-controls {
-  margin-inline-start: auto;
+  margin-inline-start: 0;
 }
 .changes-uploaded-toggle {
   width: 100%;
@@ -2169,7 +2183,7 @@ body.theme-light .branch-link {
   border-top: 1px solid var(--changes-indent-line);
   background: var(--changes-folder-bg);
   color: var(--changes-folder-text);
-  font: 500 var(--ui-font-size-sm)/1.15 var(--ui-font);
+  font: 400 var(--ui-font-size-sm)/1.15 var(--ui-font);
   text-align: start;
   cursor: pointer;
 }
@@ -2189,6 +2203,8 @@ body.theme-light .branch-link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--changes-folder-text);
+  font-weight: 400;
 }
 .changes-file-row {
   display: grid;
@@ -2460,7 +2476,8 @@ body.theme-light .branch-link {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 16px;
-  justify-content: end;
+  justify-content: start;
+  padding-inline-start: var(--preferences-control-left-indent);
 }
 .preferences-radio {
   display: inline-flex;
@@ -2858,6 +2875,8 @@ body.theme-light .command-palette-view-chip {
   white-space: nowrap;
 }
 .preferences-setting-control {
+  --preferences-control-left-indent: 14px;
+  --preferences-number-control-width: 11ch;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -2887,8 +2906,8 @@ body.theme-light .preferences-setting-control select,
 body.theme-light .preferences-setting-control textarea,
 body.theme-light .changes-control select,
 body.theme-light .changes-refresh,
-body.theme-light .diff-ref-control input,
-body.theme-light .diff-ref-select {
+body.theme-light .diff-ref-input,
+body.theme-light .diff-ref-control input {
   background: #ffffff;
   color: var(--text);
 }
@@ -2900,14 +2919,19 @@ body.theme-light .changes-error {
   color: #b91c1c;
 }
 body.theme-light .changes-body,
+body.theme-light .file-explorer-changes-panel,
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
   --changes-row-hover-bg: rgba(31, 111, 235, 0.08);
   --changes-folder-bg: #f6f8fa;
-  --changes-indent-line: rgba(100, 116, 139, 0.26);
-  --changes-folder-text: #1f2937;
+  --changes-indent-line: rgba(100, 116, 139, 0.12);
+  --changes-folder-text: var(--accent-gold);
   --changes-path-text: #59636e;
   --changes-icon-text: #1d4ed8;
+}
+body.theme-light .changes-body,
+body.theme-light .changes-toolbar,
+body.theme-light .changes-repo-group {
   color: var(--text);
   background: var(--panel);
   border-color: var(--line);
@@ -2926,7 +2950,7 @@ body.theme-light .changes-repo-title {
 }
 body.theme-light .changes-file-row {
   color: var(--text);
-  border-top-color: rgba(100, 116, 139, 0.24);
+  border-top-color: rgba(100, 116, 139, 0.13);
 }
 body.theme-light .changes-file-row:hover {
   background: rgba(95, 152, 0, 0.10);
@@ -2944,35 +2968,45 @@ body.theme-light .keyboard-shortcut-row kbd {
 }
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
 }
 .preferences-setting-control.setting-type-number {
-  grid-template-columns: minmax(6ch, 8ch) auto auto;
-  justify-content: end;
+  grid-template-columns: calc(var(--preferences-control-left-indent) + var(--preferences-number-control-width)) auto minmax(0, 1fr) auto;
 }
-/* #257: right-align select + text controls the same way the number controls are, so the dropdowns
-   line up under the number inputs at the right edge (the reset button still trails at the far edge). */
 .preferences-setting-control.setting-type-select,
 .preferences-setting-control.setting-type-text {
-  justify-content: end;
+  justify-content: start;
 }
 .preferences-setting-control.setting-type-number input[type="number"] {
-  width: 8ch;
+  width: var(--preferences-number-control-width);
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
+  padding-inline-end: 18px;
+}
+.preferences-setting-control.setting-type-number .preferences-setting-suffix {
+  grid-column: 2;
+  justify-self: start;
+}
+.preferences-setting-control.setting-type-number .preferences-reset {
+  grid-column: 4;
+  justify-self: end;
 }
 .preferences-setting-control.setting-type-text input[type="text"],
 .preferences-setting-control.setting-type-select select {
-  width: min(100%, 24ch);
-  /* C4: the first grid track is minmax(0, 1fr), so it absorbs all free space and justify-content on the
-     row has nothing to align. Right-align the control INSIDE its own track instead — its right edge then
-     lands 6px (the grid gap) left of Reset, matching where the number controls' px suffix ends. Wide
-     rows below force width:100%, so justify-self is a harmless no-op there. */
-  justify-self: end;
+  width: min(calc(100% - var(--preferences-control-left-indent)), 24ch);
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
 }
 .preferences-setting-control.setting-type-list textarea,
 .preferences-setting-control.setting-type-textarea textarea {
-  width: 100%;
+  width: calc(100% - var(--preferences-control-left-indent));
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
 }
 .preferences-setting-row--wide .preferences-setting-control textarea {
   grid-column: 1 / -1;
+  width: 100%;
+  margin-inline-start: 0;
   min-height: min(34vh, 15lh);
 }
 /* #38: long-value text/select fields (e.g. the upload filename template, the YOLO rule path) render
@@ -2980,6 +3014,7 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-setting-row--wide .preferences-setting-control.setting-type-text input[type="text"],
 .preferences-setting-row--wide .preferences-setting-control.setting-type-select select {
   width: 100%;
+  margin-inline-start: 0;
 }
 .preferences-setting-row--wide .preferences-reset {
   justify-self: end;
@@ -3613,6 +3648,18 @@ body.theme-light .drop-slot.drag-over {
 .panel.active-pane,
 .panel.typing-ready-pane {
   /* focused pane: all chrome bars switch from neutral gray to the bright tab-strip green together. */
+  --pane-bar-bg: var(--pane-tab-strip-bg);
+}
+.panel.changes-panel:hover,
+.panel.changes-panel:focus-within {
+  /* Standalone Modified Files chrome follows the same hover/focus cue as pane tab containers. */
+  --pane-bar-bg: var(--pane-tab-strip-bg);
+}
+.panel.file-explorer-panel > .file-explorer-head:hover,
+.panel.file-explorer-panel > .file-explorer-head:focus-within,
+.panel.file-explorer-panel:has(.file-explorer-tree-panel:hover) > .file-explorer-head,
+.panel.file-explorer-panel:has(.file-explorer-tree-panel:focus-within) > .file-explorer-head {
+  /* Finder hover/focus colors only the Finder header, not the embedded Modified Files header. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 .panel.typing-ready-pane {
@@ -5834,7 +5881,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   border-bottom: 1px solid var(--line);
   min-height: 26px;
 }
@@ -6268,7 +6315,7 @@ body.theme-light .file-explorer-tree-col {
 }
 body.theme-light .file-explorer-head {
   color: var(--text);
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   border-color: var(--line);
 }
 body.theme-light .file-explorer-path,
@@ -6930,7 +6977,7 @@ body.editor-theme-light .file-editor-image {
   background: var(--editor-preview-bg);
   color: var(--text);
   font-family: var(--ui-font);
-  font-size: var(--editor-font-size);
+  font-size: var(--editor-preview-font-size);
   line-height: 1.35;
 }
 .file-editor-preview-pane[hidden] { display: none; }
@@ -7011,6 +7058,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   grid-template-rows: auto minmax(0, 1fr);
 }
 .panel.file-explorer-panel .file-explorer-head {
+  --pane-bar-bg: var(--panel2);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
@@ -7030,7 +7078,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   grid-column: 1 / -1;
 }
 .panel.file-explorer-panel.active-pane .file-explorer-head {
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   color: var(--text);
 }
 .file-explorer-title {
@@ -7191,6 +7239,7 @@ body.resizing-file-explorer-changes {
   box-shadow: 0 0 0 1px var(--drop-outline-shadow);
 }
 .file-explorer-changes-panel {
+  --pane-bar-bg: var(--panel2);
   flex: 0 0 var(--file-explorer-changes-size);
   min-height: var(--file-explorer-changes-min-block-size);
   container-type: inline-size;
@@ -7200,6 +7249,10 @@ body.resizing-file-explorer-changes {
   scrollbar-color: rgba(118, 185, 0, 0.55) rgba(255, 255, 255, 0.06);
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
   padding: 5px;
+}
+.file-explorer-changes-panel:hover,
+.file-explorer-changes-panel:focus-within {
+  --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 body.theme-light .file-explorer-pane,
 body.theme-light .file-explorer-tree-panel {
@@ -7245,7 +7298,7 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
   padding: 4px 5px;
   margin: -5px -5px 5px;
   border-bottom: 1px solid var(--line);
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   color: var(--text);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-xs);
@@ -7253,7 +7306,7 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
 }
 body.theme-light .file-explorer-changes-head {
   color: var(--text);
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   border-color: var(--line);
 }
 .file-explorer-changes-head .changes-title {
@@ -7303,12 +7356,8 @@ body.theme-light .file-explorer-changes-head {
   align-items: center;
   gap: 4px;
 }
-/* #44(d): compact the Modified-files header chrome so the section spends its height on files. The
-   comparison box collapses to one tight, borderless line and the close X is a small square. */
+/* #44(d): compact the Modified-files status chrome so the section spends its height on files. */
 .file-explorer-changes-panel .changes-comparison-head {
-  /* #253 (image 034): this "Comparing … N files changed · +N −N" line is an informational caption, not
-     a control — strip the box chrome (border / panel background / radius / padding from the base rule)
-     so it blends as plain text. The bold title + green/red ±counts keep their own colors. */
   flex-wrap: nowrap;
   gap: 4px 8px;
   margin-bottom: 4px;
@@ -7331,8 +7380,6 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   flex: 0 0 auto;
   white-space: nowrap;
 }
-/* C15 (compact header): one line — "Comparing FROM with TO" on the left (muted, ellipsized), the +A −R
-   totals pinned right. No file-count / session (already in the title + repo-row count). */
 .file-explorer-changes-panel .changes-comparison-head.compact {
   display: flex;
   align-items: baseline;
@@ -7345,64 +7392,14 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   font-weight: 600;
   color: var(--muted);
 }
-.file-explorer-changes-panel .changes-comparison-head.compact .changes-comparison-totals {
-  flex: 0 0 auto;
-  white-space: nowrap;
+.file-explorer-changes-panel .changes-repo-refs.compact .diff-ref-inline {
+  min-width: 0;
 }
-/* C15 follow-up: the FROM/TO SHA pulldowns sit inline in the "Comparing <FROM> with <TO>" sentence on the
-   compact line — keep the selects compact so the line fits, and don't clip them with an ellipsis. */
-.file-explorer-changes-panel .changes-comparison-head.compact .diff-ref-inline {
-  display: inline;
-}
-.file-explorer-changes-panel .changes-comparison-head.compact .diff-ref-inline .diff-ref-select {
+.file-explorer-changes-panel .changes-repo-refs.compact .diff-ref-inline .diff-ref-input {
   max-width: 16ch;
   margin: 0 2px;
   vertical-align: baseline;
   font-size: var(--ui-font-size-xs);
-}
-/* C15: the repo row is bare; its per-repo comparison, ahead/behind, and FROM/TO pickers live in a hover
-   popover. The popover is a DESCENDANT of the wrap, so hovering it keeps the wrap :hover -> it stays open
-   and its FROM/TO <select>s are reachable. All tokens flip with the theme. */
-.changes-repo-head-wrap {
-  position: relative;
-}
-.changes-repo-popover {
-  display: none;
-  position: absolute;
-  inset-inline-start: 0;
-  top: 100%;
-  z-index: 6;
-  min-width: max(240px, 100%);
-  max-width: 380px;
-  margin-top: 2px;
-  padding: 8px 10px;
-  flex-direction: column;
-  gap: 6px;
-  background: var(--panel2);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  box-shadow: var(--shadow-elevated);
-  font-size: var(--ui-font-size-xs);
-  color: var(--text);
-  text-align: start;
-}
-.changes-repo-head-wrap:hover .changes-repo-popover {
-  display: flex;
-}
-.changes-repo-popover-path {
-  font-weight: 700;
-  overflow-wrap: anywhere;
-}
-.changes-repo-popover-compare {
-  color: var(--muted);
-}
-.changes-repo-popover .changes-repo-compare-meta {
-  color: var(--muted);
-}
-.changes-repo-popover .diff-ref-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 8px;
 }
 .file-explorer-changes-head .changes-close {
   height: 20px;
@@ -7457,11 +7454,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   .file-explorer-changes-head .diff-ref-control {
     min-width: 0;
   }
+  .file-explorer-changes-head .diff-ref-input,
   .file-explorer-changes-head .diff-ref-control input {
-    width: auto;
-    min-width: 0;
-  }
-  .file-explorer-changes-head .diff-ref-select {
     width: auto;
     min-width: 0;
   }
@@ -7792,6 +7786,7 @@ body.editor-theme-light .file-editor-content {
 .file-editor-diff-ref-panel[hidden] {
   display: none;
 }
+.file-editor-diff-ref-panel .diff-ref-input,
 .file-editor-diff-ref-panel .diff-ref-control input {
   width: clamp(42px, 6vw, 76px);
 }
@@ -7805,6 +7800,38 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-toolbar-separator[hidden] {
   display: none;
+}
+.file-editor-preview-font-panel {
+  height: 20px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--muted);
+}
+.file-editor-preview-font-panel[hidden] {
+  display: none;
+}
+.file-editor-preview-font-panel button {
+  height: 20px;
+  min-width: 24px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.file-editor-preview-font-panel button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+.file-editor-preview-font-value {
+  min-width: 2.2ch;
+  text-align: center;
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+  color: var(--text);
 }
 .file-editor-gutter-panel,
 .file-editor-wrap-panel,
@@ -7878,6 +7905,7 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-mode-control-panel button:hover,
 .file-editor-mode-control-panel button.active,
+.file-editor-preview-font-panel button:not(:disabled):hover,
 .file-editor-gutter-panel:hover,
 .file-editor-gutter-panel.active,
 .file-editor-wrap-panel:hover,
@@ -8634,14 +8662,14 @@ body.editor-theme-light .file-editor-code-preview .md-code {
   background: var(--editor-preview-bg);
   color: var(--text);
   font-family: var(--ui-font);
-  font-size: var(--ui-font-size);
+  font-size: var(--editor-preview-font-size);
   line-height: 1.35;
 }
 .file-editor-preview-pane.code-preview-body,
 .file-editor-preview-pane-panel.code-preview-body {
   padding: 8px 10px;
   font-family: var(--mono-font);
-  font-size: var(--editor-font-size);
+  font-size: var(--editor-preview-font-size);
   line-height: var(--editor-line-height);
 }
 .file-editor-image-panel {

@@ -437,6 +437,18 @@ body.theme-light .drop-slot.drag-over {
   /* focused pane: all chrome bars switch from neutral gray to the bright tab-strip green together. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
 }
+.panel.changes-panel:hover,
+.panel.changes-panel:focus-within {
+  /* Standalone Modified Files chrome follows the same hover/focus cue as pane tab containers. */
+  --pane-bar-bg: var(--pane-tab-strip-bg);
+}
+.panel.file-explorer-panel > .file-explorer-head:hover,
+.panel.file-explorer-panel > .file-explorer-head:focus-within,
+.panel.file-explorer-panel:has(.file-explorer-tree-panel:hover) > .file-explorer-head,
+.panel.file-explorer-panel:has(.file-explorer-tree-panel:focus-within) > .file-explorer-head {
+  /* Finder hover/focus colors only the Finder header, not the embedded Modified Files header. */
+  --pane-bar-bg: var(--pane-tab-strip-bg);
+}
 .panel.typing-ready-pane {
   /* a hover-selected/typing-ready pane shows the same green focus ring as the active pane (it did
      before this refactor, when both colored their real border green). */

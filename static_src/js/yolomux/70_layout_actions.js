@@ -617,6 +617,9 @@ function replaceLayoutNodeAtPath(node, path, replacement) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  if (options.userInitiated === true && isTmuxSession(session)) {
+    noteFileExplorerChangesSessionInteraction(session);
+  }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
   if (previous && previous !== session && typeof captureFileEditorPanelViewStateForItem === 'function') {
@@ -646,6 +649,9 @@ function activatePaneTab(side, session, options = {}) {
 }
 
 async function selectSession(session) {
+  if (isTmuxSession(session)) {
+    noteFileExplorerChangesSessionInteraction(session);
+  }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();

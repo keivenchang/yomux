@@ -1,7 +1,7 @@
 .topbar {
   /* DOIT.12 A1/A2: the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
-     the shorter pills sit centered in a too-tall bar. Fix: paint the topbar the same green as the tab
-     strip (so it's one continuous green, no contrasting band) and tighten the height (+4px, not +8px). */
+     the shorter pills sit centered in a too-tall bar. Keep the tightened height (+4px, not +8px), but
+     leave the bar neutral at rest and use the shared tab-strip green only for hover/focus feedback. */
   min-height: calc(var(--compact-control-height) + 4px);
   position: relative;
   z-index: 180;
@@ -11,9 +11,14 @@
   gap: 8px;
   padding: 3px 8px;
   border-bottom: 1px solid var(--line);
-  background: var(--pane-tab-strip-bg);
+  background: var(--panel2);
+  transition: background 100ms ease;
   overflow: visible;
   white-space: nowrap;
+}
+.topbar:hover,
+.topbar:focus-within {
+  background: var(--pane-tab-strip-bg);
 }
 /* cap the brand title's line-box so it doesn't make the bar tall (it drove most of the centering band). */
 .topbar .title,
@@ -730,10 +735,14 @@ body.theme-light .topbar-language {
   transform: rotate(90deg);
 }
 body.theme-light .topbar {
+  background: var(--panel2);
+}
+body.theme-light .topbar:hover,
+body.theme-light .topbar:focus-within {
   background: var(--pane-tab-strip-bg);
 }
 /* DOIT.12 A4: light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
-   on the light (now green) bar. */
+   on the light neutral/hover-green bar. */
 body.theme-light #tabMetaToggle.active {
   background: #5f9800;           /* match the .app-menu-ui-icon.active light tuning, not the garish #8cc63f */
   border-color: #5f9800;

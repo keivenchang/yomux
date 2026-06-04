@@ -46,6 +46,8 @@
   "pref.appearance.terminal_font_size.help": "xterm.js पेन में उपयोग किया जाने वाला फ़ॉन्ट साइज़। रेंज से बाहर के मान क्लैंप किए जाते हैं।",
   "pref.appearance.editor_font_size.label": "Editor फ़ॉन्ट साइज़",
   "pref.appearance.editor_font_size.help": "Editor टेक्स्ट, code highlighting और rendered previews में उपयोग किया जाने वाला फ़ॉन्ट साइज़।",
+  "pref.appearance.preview_font_size.label": "Preview font size",
+  "pref.appearance.preview_font_size.help": "Font size used by rendered Markdown, HTML, and code previews. Defaults one size larger than the editor font.",
   "pref.appearance.editor_dark_color_scheme.label": "Editor डार्क कलर स्कीम",
   "pref.appearance.editor_dark_color_scheme.help": "Editor के dark/light टॉगल द्वारा उपयोग किया जाने वाला डार्क पैलेट।",
   "pref.appearance.editor_light_color_scheme.label": "Editor लाइट कलर स्कीम",
@@ -250,7 +252,7 @@
   "changes.title": "बदली हुई फ़ाइलें",
   "detail.repos.label": "रिपॉज़",
   "detail.repos.more": "इस सत्र में {count} और रिपॉज़",
-  "changes.titleForSession": "सत्र '{session}' के लिए बदली हुई फ़ाइलें",
+  "changes.titleForSession": "बदली हुई फ़ाइलें '{session}'",
   "changes.refresh": "पुनः लोड करें",
   "changes.refresh.title": "बदली हुई फ़ाइलें रिफ्रेश करें",
   "changes.hide": "बदली हुई फ़ाइलें छिपाएं",
@@ -309,6 +311,9 @@
   "editor.mode.edit": "Edit",
   "editor.mode.preview": "Preview",
   "editor.mode.split": "Split view",
+  "editor.previewFont.aria": "Preview font size",
+  "editor.previewFont.decrease": "Decrease preview font size",
+  "editor.previewFont.increase": "Increase preview font size",
   "editor.sidePreview": "Side preview खोलें",
   "editor.toggleLineNumbers": "लाइन नंबर toggle करें",
   "editor.toggleWordWrap": "Word wrap toggle करें",
@@ -552,5 +557,7 @@
   "menu.view.sortTabs.attention.detail": "ध्यान चाहने वाले सत्र ऊपर",
   "menu.view.sortTabs.name": "नाम से",
   "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
-  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search."
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.companion_dirs.label": "Companion directories",
+  "pref.file_explorer.companion_dirs.help": "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Add repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates."
 }

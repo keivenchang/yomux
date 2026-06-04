@@ -46,6 +46,8 @@
   "pref.appearance.terminal_font_size.help": "Tamaño de fuente que usan los paneles de xterm.js. Los valores fuera del rango se ajustan.",
   "pref.appearance.editor_font_size.label": "Tamaño de fuente del editor",
   "pref.appearance.editor_font_size.help": "Tamaño de fuente del texto del editor, el resaltado de código y las vistas previas renderizadas.",
+  "pref.appearance.preview_font_size.label": "Preview font size",
+  "pref.appearance.preview_font_size.help": "Font size used by rendered Markdown, HTML, and code previews. Defaults one size larger than the editor font.",
   "pref.appearance.editor_dark_color_scheme.label": "Esquema de color oscuro del editor",
   "pref.appearance.editor_dark_color_scheme.help": "Paleta oscura que usa el conmutador claro/oscuro del editor.",
   "pref.appearance.editor_light_color_scheme.label": "Esquema de color claro del editor",
@@ -250,7 +252,7 @@
   "changes.title": "Archivos modificados",
   "detail.repos.label": "repos",
   "detail.repos.more": "{count} repos más en esta sesión",
-  "changes.titleForSession": "Archivos modificados de la sesión '{session}'",
+  "changes.titleForSession": "Archivos modificados '{session}'",
   "changes.refresh": "Recargar",
   "changes.refresh.title": "Actualizar archivos modificados",
   "changes.hide": "Ocultar archivos modificados",
@@ -309,6 +311,9 @@
   "editor.mode.edit": "Editar",
   "editor.mode.preview": "Vista previa",
   "editor.mode.split": "Vista dividida",
+  "editor.previewFont.aria": "Preview font size",
+  "editor.previewFont.decrease": "Decrease preview font size",
+  "editor.previewFont.increase": "Increase preview font size",
   "editor.sidePreview": "Abrir vista previa lateral",
   "editor.toggleLineNumbers": "Alternar números de línea",
   "editor.toggleWordWrap": "Alternar ajuste de línea",
@@ -552,5 +557,7 @@
   "menu.view.sortTabs.attention.detail": "Sesiones que requieren atención arriba",
   "menu.view.sortTabs.name": "Por nombre",
   "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
-  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search."
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.companion_dirs.label": "Companion directories",
+  "pref.file_explorer.companion_dirs.help": "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Add repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates."
 }

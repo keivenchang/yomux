@@ -1334,7 +1334,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   border-bottom: 1px solid var(--line);
   min-height: 26px;
 }
@@ -1768,7 +1768,7 @@ body.theme-light .file-explorer-tree-col {
 }
 body.theme-light .file-explorer-head {
   color: var(--text);
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   border-color: var(--line);
 }
 body.theme-light .file-explorer-path,

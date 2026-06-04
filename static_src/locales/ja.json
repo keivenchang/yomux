@@ -46,6 +46,8 @@
   "pref.appearance.terminal_font_size.help": "xterm.js ペインが使うフォントサイズ。範囲外の値は丸められます。",
   "pref.appearance.editor_font_size.label": "エディターのフォントサイズ",
   "pref.appearance.editor_font_size.help": "エディターのテキスト・コードのハイライト・レンダリングされたプレビューが使うフォントサイズ。",
+  "pref.appearance.preview_font_size.label": "Preview font size",
+  "pref.appearance.preview_font_size.help": "Font size used by rendered Markdown, HTML, and code previews. Defaults one size larger than the editor font.",
   "pref.appearance.editor_dark_color_scheme.label": "エディターのダークカラースキーム",
   "pref.appearance.editor_dark_color_scheme.help": "エディターのダーク/ライト切り替えで使うダークパレット。",
   "pref.appearance.editor_light_color_scheme.label": "エディターのライトカラースキーム",
@@ -250,7 +252,7 @@
   "changes.title": "変更されたファイル",
   "detail.repos.label": "リポジトリ",
   "detail.repos.more": "このセッションの他 {count} 件のリポジトリ",
-  "changes.titleForSession": "セッション '{session}' の変更されたファイル",
+  "changes.titleForSession": "変更されたファイル '{session}'",
   "changes.refresh": "再読み込み",
   "changes.refresh.title": "変更されたファイルを更新",
   "changes.hide": "変更されたファイルを隠す",
@@ -309,6 +311,9 @@
   "editor.mode.edit": "編集",
   "editor.mode.preview": "プレビュー",
   "editor.mode.split": "分割表示",
+  "editor.previewFont.aria": "Preview font size",
+  "editor.previewFont.decrease": "Decrease preview font size",
+  "editor.previewFont.increase": "Increase preview font size",
   "editor.sidePreview": "サイドプレビューを開く",
   "editor.toggleLineNumbers": "行番号を切り替え",
   "editor.toggleWordWrap": "折り返しを切り替え",
@@ -552,5 +557,7 @@
   "menu.view.sortTabs.attention.detail": "要対応のセッションを上に",
   "menu.view.sortTabs.name": "名前順",
   "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
-  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search."
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.companion_dirs.label": "Companion directories",
+  "pref.file_explorer.companion_dirs.help": "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Add repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates."
 }

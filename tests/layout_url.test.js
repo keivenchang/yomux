@@ -332,10 +332,14 @@ globalThis.__layoutTestApi = {
   changesPaneTabHtml,
   changesPanelHtml,
   fileExplorerChangesPanelHtml,
+  fileExplorerSessionFilesTargetSessionForTest: fileExplorerSessionFilesTargetSession,
+  noteFileExplorerChangesSessionInteractionForTest: noteFileExplorerChangesSessionInteraction,
+  setFileExplorerChangesSelectedSessionForTest(value) { fileExplorerChangesSelectedSession = String(value || ''); },
   changeFileRowHtml,
   projectMetaHtml,
   diffRefControlsHtml,
   diffRefSelectOptionsHtml,
+  diffRefDatalistOptionsHtml,
   diffRefParams,
   diffRefFromSuggestions,
   diffRefToSuggestions,
@@ -1843,8 +1847,12 @@ function makeFileTree(paths) {
   assert.ok(api.changesPaneTabHtml().includes('changes-count-badge'));
   const changesHtml = api.changesPanelHtml();
   assert.ok(changesHtml.includes('/repo/app'));
+  const repoHeadStart = changesHtml.indexOf('class="changes-repo-head"');
+  const repoHead = changesHtml.slice(repoHeadStart, changesHtml.indexOf('</button>', repoHeadStart));
+  assert.ok(/changes-repo-caret[\s\S]*changes-repo-title[^>]*>\/repo\/app<[\s\S]*changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+10<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>2<\/span>/.test(repoHead), 'repo disclosure header shows repo name, +added, -removed, and file count');
+  assert.equal(/Behind|Ahead/.test(repoHead), false, 'ahead/behind stays out of the repo disclosure header');
   assert.ok(changesHtml.includes('2 files changed in &#39;1&#39;'), 'Changes pane summary names the session explicitly');
-  assert.ok(changesHtml.includes('changes-comparison-title">Comparing HEAD with Working Tree'), 'Changes pane shows the comparison header');
+  assert.ok(/changes-repo-refs[\s\S]*changes-repo-compare-title[\s\S]*Comparing[\s\S]*data-diff-ref-from[\s\S]*to[\s\S]*data-diff-ref-to/.test(changesHtml), 'Changes pane shows a per-repo comparison row with inline FROM/TO controls');
   assert.equal((changesHtml.match(/files changed in &#39;1&#39;/g) || []).length, 1, '#24: the file-count/+/- summary appears exactly once (in the comparison card), not duplicated in the toolbar');
   assert.equal(changesHtml.includes('class="changes-summary"'), false, '#24: the standalone toolbar summary duplicate is removed');
   assert.ok(changesHtml.includes('class="changes-comparison-summary"'), '#24: the summary lives in the comparison card');
@@ -1864,8 +1872,9 @@ function makeFileTree(paths) {
   api.setChangesFolderCollapsedForTest([]);
   assert.ok(changesHtml.includes('data-diff-ref-from'), 'Changes pane exposes FROM ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-to'), 'Changes pane exposes TO ref picker');
-  assert.ok(changesHtml.includes('data-diff-ref-from-select'), 'Changes pane exposes a scrollable FROM commit picker');
-  assert.ok(changesHtml.includes('data-diff-ref-to-select'), 'Changes pane exposes a newer-target TO picker');
+  assert.ok(changesHtml.includes('data-diff-ref-input'), 'Changes pane exposes text ref pickers');
+  assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*list=")[^>]*>/.test(changesHtml), 'Changes pane FROM ref picker is a text input with a dropdown list');
+  assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*list=")[^>]*>/.test(changesHtml), 'Changes pane TO ref picker is a text input with a dropdown list');
   // C6: the FROM/TO controls are now scoped to each repo header (data-diff-ref-repo), not one global pair.
   assert.ok(changesHtml.includes('data-diff-ref-repo="/repo/app"'), 'C6: each repo header carries its own scoped FROM/TO controls');
   const toolbarSlice = changesHtml.slice(changesHtml.indexOf('changes-toolbar'), changesHtml.indexOf('</div>', changesHtml.indexOf('changes-toolbar')));
@@ -1873,14 +1882,17 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('changes-repo-compare-title'), 'C6: each repo header shows its own comparison title');
   // C6: per-repo suggestions — an unknown repo offers only HEAD as a FROM base (no cross-repo SHAs).
   assert.equal(api.diffRefFromSuggestions('/no/such/repo').length, 1, 'C6: an unknown repo offers only HEAD as a FROM base');
-  assert.equal(/<input[^>]*data-diff-ref-from/.test(changesHtml), false, 'FROM control is one select, not a duplicated input plus select');
-  assert.equal(/<input[^>]*data-diff-ref-to/.test(changesHtml), false, 'TO control is one select, not a duplicated input plus select');
+  assert.equal(/<select[^>]*data-diff-ref-from/.test(changesHtml), false, 'FROM control is a text input, not a select');
+  assert.equal(/<select[^>]*data-diff-ref-to/.test(changesHtml), false, 'TO control is a text input, not a select');
   assert.ok(changesHtml.includes('older base commit'), 'Changes pane FROM picker includes recent commit subjects');
   assert.equal(api.diffRefFromSuggestions().some(item => item.ref === 'current'), false, 'FROM picker does not suggest current as the older base');
   assert.equal(api.diffRefToSuggestions('HEAD').map(item => item.ref).join(','), 'current', 'TO picker only offers refs newer than the selected FROM base');
   const duplicateShaOptions = api.diffRefSelectOptionsHtml('abc123def4567890', {suggestions: [{ref: 'abc123d', short: 'abc123d', subject: 'same commit'}]});
   assert.equal((duplicateShaOptions.match(/<option/g) || []).length, 1, 'diff ref picker dedupes full SHA and short SHA for the same commit');
   assert.equal(duplicateShaOptions.includes('selected ref'), false, 'diff ref picker does not add a synthetic duplicate for a selected SHA already in suggestions');
+  const manyDiffRefs = Array.from({length: 120}, (_, index) => ({ref: `${String(index).padStart(7, 'a')}abcdef`, short: `r${index}`, subject: `commit ${index}`}));
+  assert.equal((api.diffRefDatalistOptionsHtml('', {compact: true, suggestions: manyDiffRefs}).match(/<option/g) || []).length, 40, 'compact diff-ref datalists are capped to avoid huge DOM menus');
+  assert.equal((api.diffRefDatalistOptionsHtml('', {compact: false, suggestions: manyDiffRefs}).match(/<option/g) || []).length, 80, 'full diff-ref datalists are capped to a reasonable menu size');
   const changedFilesSource = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), 'modified-file rows open from a double-click handler');
   const compactChangeHtml = api.changeFileRowHtml(
@@ -1949,22 +1961,27 @@ function makeFileTree(paths) {
       {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
     ],
   });
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified files'), 'Finder embeds a modified-files panel');
-  // C7: the embedded title names the session ("Modified files for session '1'").
-  assert.ok(/class="changes-title">Modified files for session &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Modified-files title names the session');
-  // C15 (compact header): the redundant "N files changed in '1'" summary is gone (session is in the title);
-  // the compact comparison line shows the +A −R totals instead.
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified Files'), 'Finder embeds a modified-files panel');
+  assert.ok(/class="changes-title">Modified Files &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Modified-files title uses the compact session title');
+  {
+    const stickyApi = loadYolomux('', ['1', '2']);
+    stickyApi.setFileExplorerChangesSelectedSessionForTest('1');
+    assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '1', 'Finder Modified-files target starts from the committed session');
+    stickyApi.noteFileExplorerChangesSessionInteractionForTest('2');
+    assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit session interaction updates the Finder Modified-files target');
+  }
+  // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
+  // each repo owns its own compact comparison line instead.
   const compactFinderPanel = api.fileExplorerChangesPanelHtml();
+  const compactHeadStart = compactFinderPanel.indexOf('class="changes-repo-head"');
+  const compactRepoHead = compactFinderPanel.slice(compactHeadStart, compactFinderPanel.indexOf('</button>', compactHeadStart));
+  assert.ok(/changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>2<\/span>/.test(compactRepoHead), 'Finder Modified-files repo header shows the repo aggregate totals');
   assert.equal(compactFinderPanel.includes('files changed in'), false, 'C15: the compact header drops the redundant file-count/session summary');
-  assert.ok(/changes-comparison-head compact[\s\S]*?changes-diff-add[^>]*>\+2<[\s\S]*?changes-diff-remove[^>]*>-1</.test(compactFinderPanel), 'C15: the compact header shows the +A −R totals on one line');
-  // C15 follow-up: for a SINGLE git repo the FROM/TO SHA pulldowns are inline ON the comparison line
-  // (not in the popover), inside the "Comparing … with …" sentence.
-  assert.ok(/changes-comparison-head compact[\s\S]*?diff-ref-inline[\s\S]*?data-diff-ref-from[\s\S]*?data-diff-ref-to/.test(compactFinderPanel), 'C15: single-repo FROM/TO pulldowns are inline on the comparison line');
-  assert.ok(/changes-comparison-head compact[\s\S]*?data-diff-ref-repo="\/repo\/app"/.test(compactFinderPanel), 'C15: the inline comparison pulldowns are scoped to the repo');
-  // The repo-row popover keeps path + ahead/behind, but NOT a second copy of the FROM/TO pickers.
-  assert.ok(compactFinderPanel.includes('changes-repo-head-wrap'), 'C15: the compact repo row is wrapped for a hover popover');
-  assert.ok(/changes-repo-popover[\s\S]*?Ahead 1 commit/.test(compactFinderPanel), 'C15: ahead/behind lives in the repo-row popover');
-  assert.equal(/changes-repo-popover[\s\S]*?diff-ref-controls compact/.test(compactFinderPanel), false, 'C15: single-repo does not duplicate the FROM/TO pickers in the popover');
+  assert.equal(/changes-comparison-head compact[\s\S]*?Comparing/.test(compactFinderPanel), false, 'C6: Finder Modified-files has no global comparison line');
+  assert.ok(/changes-repo-refs compact[\s\S]*?diff-ref-inline[\s\S]*?data-diff-ref-from[\s\S]*?data-diff-ref-to/.test(compactFinderPanel), 'C6: Finder Modified-files exposes per-repo inline FROM/TO controls');
+  assert.ok(/changes-repo-refs compact[\s\S]*?data-diff-ref-repo="\/repo\/app"/.test(compactFinderPanel), 'C6: the inline comparison inputs are scoped to the repo');
+  assert.ok(/changes-repo-refs compact[\s\S]*?Ahead 1 commit/.test(compactFinderPanel), 'C6: ahead/behind lives on the repo comparison row');
+  assert.equal(compactFinderPanel.includes('changes-repo-popover'), false, 'C6: repo comparison details are visible, not hidden in a hover popover');
   // C15: ahead/behind is hidden when 0 (the popover shows only the non-zero ahead, not "Behind 0 commits").
   assert.equal(compactFinderPanel.includes('Behind 0 commit'), false, 'C15: 0-commit ahead/behind is not printed');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
@@ -1978,8 +1995,8 @@ function makeFileTree(paths) {
   assert.equal(/changes-sort-compact|<select data-session-files-sort/.test(finderSortPanel), false, 'C13: the labeled Sort dropdown is gone from the Finder header');
   assert.ok(finderSortPanel.includes('changes-sort-divider'), 'C13: the toggle segments are separated by a | divider');
   assert.ok(/class="changes-refresh"[^>]*>Reload<\/button>/.test(finderSortPanel), 'C13: the Reload button reads "Reload" (via i18n, not hardcoded)');
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-from-select'), 'Finder compact modified-files header exposes the FROM commit picker');
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-to-select'), 'Finder compact modified-files header exposes the TO picker');
+  assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*list=")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the FROM text picker');
+  assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*list=")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the TO text picker');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), false, '#41: the modified-files density toggle is removed');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row compact'), '#41: the Finder modified-files panel is always compact');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-file-explorer-changes-close'), '#44: the Modified-files header has a close (X) button to hide the section');
@@ -2024,6 +2041,12 @@ function makeFileTree(paths) {
   assert.ok(/\.changes-file-row\s*\{[\s\S]*font-size:\s*var\(--file-explorer-font-size\)/.test(changedFilesCss), '#46: modified-file rows use the Finder file-tree font size');
   assert.equal(/\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
   assert.ok(/\.changes-tree-folder-row\s*\{[\s\S]*grid-template-columns:\s*12px 16px minmax\(0, 1fr\) auto/.test(changedFilesCss), 'modified-file folders use a compact GitLens-style tree row');
+  assert.ok(/\.changes-repo-title\s*\{[\s\S]*color:\s*var\(--accent-gold\)[\s\S]*font-weight:\s*800/.test(changedFilesCss), 'Modified-files repo names are gold and bold');
+  assert.ok(/\.changes-repo-totals\s*\{[\s\S]*margin-inline-start:\s*auto/.test(changedFilesCss), 'Modified-files repo totals are pinned to the right side of the disclosure header');
+  assert.ok(/\.changes-tree-folder-name\s*\{[\s\S]*color:\s*var\(--changes-folder-text\)[\s\S]*font-weight:\s*400/.test(changedFilesCss), 'Modified-files subdirectory names are gold but not bold');
+  assert.ok(/\.changes-body,\s*\n\.file-explorer-changes-panel\s*\{[\s\S]*--changes-folder-text:\s*var\(--accent-gold\)/.test(changedFilesCss), 'embedded Finder Modified-files inherits the same gold subdirectory token');
+  assert.ok(/body\.theme-light \.changes-body,[\s\S]*?--changes-indent-line:\s*rgba\(100,\s*116,\s*139,\s*0\.12\)/.test(changedFilesCss), 'light-mode Modified-files folder connector lines are subdued');
+  assert.ok(/body\.theme-light \.changes-file-row\s*\{[\s\S]*border-top-color:\s*rgba\(100,\s*116,\s*139,\s*0\.13\)/.test(changedFilesCss), 'light-mode Modified-files row dividers are subdued');
   assert.ok(changedFilesCss.includes('.changes-status-r,'), 'modified-file rename/copy statuses get distinct colors');
   // Purple is RESERVED for MERGED PR status: the untracked/unknown change badge must NOT be purple
   // (it was #a78bfa, reading as a merged indicator next to the PR badges); the merged PR status keeps it.
@@ -2097,8 +2120,12 @@ function makeFileTree(paths) {
   assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+x'}), false, '#43: an untracked/all-added file reports no diff, so it never enters diff view');
   assert.ok(/function openDraggedFilesInEditor[\s\S]*await refreshOpenFileDiff\(path[\s\S]*openFileDiffAvailable\(draggedState\)[\s\S]*setFileEditorViewMode\(path, 'diff'/.test(appSource), '#39: a dragged CHANGED file opens in the same unified diff view as double-click (routes through the shared refreshOpenFileDiff/diff path)');
   assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');
-  assert.ok(/switchFileExplorerChangesSession\(item\)/.test(appSource), 'tmux focus switches the Finder modified-files session immediately');
-  assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'tmux focus forces a fresh Finder modified-files fetch even if an older request is in flight');
+  const focusPanelBody = appSource.slice(appSource.indexOf('function setFocusedPanelItem('), appSource.indexOf('let autoFocusNavTimer'));
+  assert.equal(/switchFileExplorerChangesSession/.test(focusPanelBody), false, 'passive focus/hover no longer switches the Finder Modified-files session');
+  assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'explicit session interactions can commit the Finder Modified-files target');
+  assert.ok(/function activatePaneTab\([^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'clicking a tmux pane tab commits the Finder Modified-files target');
+  assert.ok(/term\.onData\(data => \{[^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'typing into a terminal commits the Finder Modified-files target');
+  assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'explicit session changes force a fresh Finder modified-files fetch even if an older request is in flight');
   assert.equal(appSource.includes("state.kind === 'text' && !fileEditorAutosaveEnabled"), false, 'clean external file changes auto-reload even when autosave is off');
   assert.equal(appSource.includes('data-file-editor-close'), false, 'pane frame close uses the pane-close path, not active file-tab close');
   assert.equal(filesTab.includes('agent-icon file'), false);
@@ -2231,7 +2258,9 @@ function makeFileTree(paths) {
   assert.ok(/\.grid\.drop-preview-gutter::before\s*\{[\s\S]*--drop-preview-left/.test(preferencesCss), 'split-bar drops use explicit full-span preview geometry');
   // C15: the Finder↔Modified-files resizer reuses the shared --pane-resizer-* tokens (thin yellow line at
   // rest, hover brightens) instead of its old special-cased hardcoded-green strip.
-  const resizerBlock = preferencesCss.slice(preferencesCss.indexOf('.file-explorer-changes-resizer {'), preferencesCss.indexOf('.file-explorer-changes-panel {'));
+  const resizerStart = preferencesCss.indexOf('.file-explorer-changes-resizer {');
+  const resizerEnd = preferencesCss.indexOf('.file-explorer-changes-panel {', resizerStart);
+  const resizerBlock = preferencesCss.slice(resizerStart, resizerEnd);
   assert.ok(resizerBlock.includes('var(--pane-resizer-bg)'), 'C15: the Finder resizer draws the shared thin yellow line at rest');
   assert.ok(resizerBlock.includes('var(--pane-resizer-hover-bg)'), 'C15: the Finder resizer brightens via the shared hover token');
   assert.ok(resizerBlock.includes('var(--drop-outline-shadow)'), 'C15: the Finder resizer hover uses the shared outline-shadow token');
@@ -2256,20 +2285,26 @@ function makeFileTree(paths) {
   assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (DOIT.6 #6 + images 003/004: undimmed, un-lightened per-pane highlight)');
   assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
   assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 4px'), 'the pane ring uses the 4px width token (DOIT.20)');
-  // Light mode uses a RED pane separator (dark mode keeps amber/yellow).
-  assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-resizer-bg:\s*rgba\(220, 38, 38/.test(preferencesCss), 'light mode uses a red pane separator');
+  // Light mode uses a BLUE pane separator (dark mode keeps amber/yellow).
+  assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-resizer-bg:\s*rgba\(37, 99, 235/.test(preferencesCss), 'light mode uses a blue pane separator');
   // Pane chrome bars (strip, detail row, editor toolbar, find) all read the shared --pane-bar-bg, which is
   // the bright tab-strip green when the pane is focused and neutral gray when not. Focus sets it on .panel.
   assert.ok(/\.panel\.active-pane,\s*\.panel\.typing-ready-pane\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'focused panes set --pane-bar-bg to the bright tab-strip green');
+  assert.ok(/\.panel\.changes-panel:hover,\s*\.panel\.changes-panel:focus-within\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'standalone Modified Files panes use the green pane bar on hover/focus');
+  assert.ok(/\.panel\.file-explorer-panel > \.file-explorer-head:hover,\s*\.panel\.file-explorer-panel > \.file-explorer-head:focus-within,\s*\.panel\.file-explorer-panel:has\(\.file-explorer-tree-panel:hover\) > \.file-explorer-head,\s*\.panel\.file-explorer-panel:has\(\.file-explorer-tree-panel:focus-within\) > \.file-explorer-head\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'Finder hover/focus colors only the Finder header');
   assert.ok(/\.panel-head\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the tab strip reads the shared --pane-bar-bg');
   assert.ok(/\.panel-detail-row\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'the info/detail bar reads the shared --pane-bar-bg (gray when unfocused, not green)');
+  assert.ok(/\.file-explorer-head\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder header reads the shared pane bar background when focused/hovered');
+  assert.ok(/\.file-explorer-changes-panel:hover,\s*\.file-explorer-changes-panel:focus-within\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'embedded Finder Modified-files section uses the green pane bar on hover/focus');
+  assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*--pane-bar-bg:\s*var\(--panel2\)/.test(preferencesCss), 'embedded Finder Modified-files header stays neutral unless its own section is hovered/focused');
+  assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files header reads the shared pane bar background when focused/hovered');
   assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
   assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder or Changes panes');
   assert.ok(preferencesCss.includes('--pane-split-gap: 0px'), 'pane split layout collapses gap through a shared token');
   assert.ok(preferencesCss.includes('--pane-resizer-size: 1px'), 'pane splitter reserves only the 1px separator line');
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(255, 225, 77, 0.72)'), 'dark pane splitter is a visible bright-yellow divider at rest');
   assert.ok(preferencesCss.includes('--pane-resizer-hover-bg: rgba(255, 225, 77, 0.96)'), 'dark pane splitter turns brighter on hover/resize');
-  assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(220, 38, 38, 0.80)'), 'light pane splitter is red at rest');
+  assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(37, 99, 235, 0.72)'), 'light pane splitter is blue at rest');
   assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 1.5px'), 'pane splitter hover thickens only modestly (1.5px) over the 1px resting line');
   assert.ok(preferencesCss.includes('--pane-tile-radius: 0'), 'adjacent panes meet flush with square corners (no rounded-corner seam wedges)');
   // #29 + DOIT.21: the nav (←/→) and search are centered as a PAIR — the nav absorbs the left free
@@ -2369,9 +2404,13 @@ function makeFileTree(paths) {
   assert.ok(/\.yoagent-chat\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent chat fits narrow panes');
   assert.ok(/\.yoagent-chat\.empty\s*\{[\s\S]*grid-template-rows:\s*auto auto/.test(preferencesCss), 'empty YO!agent chat does not stretch an empty history row');
   assert.ok(preferencesCss.includes('body.editor-cursor-block .file-editor-codemirror .cm-cursor'), 'block cursor styling is available for CodeMirror');
-  // C4: select/text preference controls right-align inside their own grid track so their right edge
-  // lines up with the number controls' px suffix (the 1fr track alone made justify-content a no-op).
-  assert.ok(/\.preferences-setting-control\.setting-type-text input\[type="text"\],\s*\n\.preferences-setting-control\.setting-type-select select\s*\{[^}]*justify-self:\s*end/.test(preferencesCss), 'C4: select/text controls right-align within their grid track');
+  assert.ok(/\.preferences-setting-control\s*\{[^}]*--preferences-control-left-indent:\s*14px/.test(preferencesCss), 'Preferences controls share the 14px left inset');
+  assert.ok(/\.preferences-setting-control\s*\{[^}]*--preferences-number-control-width:\s*11ch/.test(preferencesCss), 'Preferences number controls reserve room for the native spinner');
+  assert.ok(/\.preferences-radio-group\s*\{[^}]*justify-content:\s*start[^}]*padding-inline-start:\s*var\(--preferences-control-left-indent\)/.test(preferencesCss), 'theme radio choices start from the left inset');
+  assert.ok(/\.preferences-setting-control\.setting-type-text input\[type="text"\],\s*\n\.preferences-setting-control\.setting-type-select select\s*\{[^}]*justify-self:\s*start[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(preferencesCss), 'select/text controls use the same left inset');
+  assert.ok(/\.preferences-setting-control\.setting-type-number\s*\{[^}]*grid-template-columns:\s*calc\(var\(--preferences-control-left-indent\) \+ var\(--preferences-number-control-width\)\) auto minmax\(0, 1fr\) auto/.test(preferencesCss), 'number rows use the shared left inset with a flexible spacer before Reset');
+  assert.ok(/\.preferences-setting-control\.setting-type-number input\[type="number"\]\s*\{[^}]*width:\s*var\(--preferences-number-control-width\)[^}]*justify-self:\s*start[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)[^}]*padding-inline-end:\s*18px/.test(preferencesCss), 'number inputs start at the same left inset and leave room for the spinner');
+  assert.ok(/\.preferences-setting-control\.setting-type-list textarea,\s*\n\.preferences-setting-control\.setting-type-textarea textarea\s*\{[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(preferencesCss), 'list/textarea controls use the same left inset');
   assert.ok(preferencesCss.includes('.file-editor-dialog-backdrop'), 'editor conflict and close decisions use the shared editor dialog');
   assert.equal(preferencesCss.includes('.app-menu-search-input'), false, 'Tabs menu no longer renders a sticky search input');
   assert.ok(preferencesCss.includes('.command-palette-detail .fuzzy-match'), 'command palette highlights fuzzy matches in detail text');
@@ -2459,12 +2498,33 @@ function makeFileTree(paths) {
   assert.ok(/preferences-setting-row preferences-setting-row--wide"><label class="preferences-setting-label" for="preference-uploads-filename_template"/.test(preferencesHtml), '#38: the upload filename template is a full-width row so its long value is not clipped');
   assert.ok(/preferences-setting-row preferences-setting-row--wide"><label class="preferences-setting-label" for="preference-yolo-rule_file_path"/.test(preferencesHtml), '#38: the YOLO rule file path is a full-width row so the long path is not clipped');
   assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-text input\[type="text"\][\s\S]*?\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-select select\s*\{[\s\S]*?width:\s*100%/.test(preferencesCss), '#38: text/select inputs fill the full width inside wide rows');
+  const radioModePaths = new Map([
+    ['general.default_layout', ['single', 'grid', 'wall']],
+    ['appearance.theme', ['system', 'dark', 'light']],
+    ['appearance.terminal_theme', ['follow-app', 'dark', 'light']],
+    ['appearance.editor_cursor_style', ['line', 'block']],
+    ['appearance.editor_cursor_color', ['yellow', 'theme']],
+    ['yolo.prompt_source', ['hybrid', 'pane']],
+    ['file_explorer.root_mode', ['fixed', 'sync']],
+    ['file_explorer.image_open_mode', ['same-tab', 'new-tab']],
+    ['yoagent.backend', ['auto', 'codex', 'claude']],
+    ['yoagent.invocation', ['cli', 'api-key']],
+  ]);
+  for (const [path, values] of radioModePaths) {
+    const pathPattern = path.replace(/\./g, '\\.');
+    assert.equal(new RegExp(`<select[^>]*data-setting-path="${pathPattern}"`).test(preferencesHtml), false, `${path} is a compact mode and renders as radios, not a select`);
+    for (const value of values) {
+      assert.ok(new RegExp(`type="radio"[^>]*value="${value}"[^>]*data-setting-path="${pathPattern}"`).test(preferencesHtml), `${path} radio renders ${value}`);
+    }
+  }
+  assert.ok(preferencesHtml.includes('>Same Tab<'), 'string radio labels are humanized');
+  assert.ok(preferencesHtml.includes('>New Tab<'), 'hyphenated string radio labels are humanized');
   // "No agent" (deterministic) is no longer a selectable backend — Auto still falls back to it internally,
   // but it is never offered as a pick in Preferences or the composer pill.
-  assert.equal(/data-setting-path="yoagent\.backend"[\s\S]*?<option value="deterministic"/.test(preferencesHtml), false, 'Preferences no longer offer No agent (deterministic) as a backend option');
+  assert.equal(/data-setting-path="yoagent\.backend"[\s\S]*?value="deterministic"/.test(preferencesHtml), false, 'Preferences no longer offer No agent (deterministic) as a backend option');
   assert.equal(preferencesHtml.includes('Deterministic'), false, 'Preferences do not expose the internal deterministic backend label');
-  // #41: the YO!agent backend defaults to auto (codex -> claude -> No agent) and the select offers it.
-  assert.ok(/data-setting-path="yoagent\.backend"[\s\S]*?<option value="auto"[^>]*>Auto \(Codex → Claude\)<\/option>/.test(preferencesHtml), '#41: the YO!agent backend select offers the Auto option');
+  // #41: the YO!agent backend defaults to auto (codex -> claude -> No agent) and Preferences offers it.
+  assert.ok(/value="auto"[^>]*data-setting-path="yoagent\.backend"[\s\S]*?>\s*<span>Auto \(Codex → Claude\)<\/span>/.test(preferencesHtml), '#41: the YO!agent backend radios offer the Auto option');
   assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
   assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'dark editor schemes are grouped under Dark');
   assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'light editor schemes are grouped under Light');
@@ -4578,12 +4638,15 @@ function makeFileTree(paths) {
   assert.equal(api.joinAndNormalize('/a/b', '/abs/x.md'), '/abs/x.md', '#133: an absolute rel ignores the base');
   assert.equal(api.joinAndNormalize('/a/b/c', '../../top.md'), '/a/top.md', '#133: multiple ../ collapse');
   const src = fs.readFileSync('static/yolomux.js', 'utf8');
-  // The handler reads the RAW href, opens external/other-scheme links in a new tab, and routes relative
+  // The handler reads the RAW href, opens external links in a new tab, and routes file:// + relative
   // file links through openFileInEditor with a preview/edit mode + a failure toast.
   assert.ok(/function handleMarkdownPreviewLinkClick/.test(src), '#133: the markdown-preview link handler exists');
   assert.ok(/a\.getAttribute\('href'\)/.test(src), '#133: the handler reads the raw href attribute');
+  assert.ok(/function localPathFromFileHref/.test(src), '#133: file:// preview links are converted to server-side paths');
+  assert.ok(src.indexOf('localPathFromFileHref(href)') > -1, '#133: file:// links use the local-path helper');
+  assert.ok(src.indexOf('localPathFromFileHref(href)') < src.indexOf("window.open(a.href, '_blank', 'noopener,noreferrer')"), '#133: file:// links are handled before the external window.open branch');
   assert.ok(/window\.open\(a\.href, '_blank', 'noopener,noreferrer'\)/.test(src), '#133: external/other-scheme links open in a new tab');
-  assert.ok(/openFileInEditor\(resolved, basenameOf\(resolved\), \{[\s\S]*?viewMode: isMarkdownPath\(resolved\) \? 'preview' : 'edit'/.test(src), '#133: a relative file link opens in the editor (md -> preview, else edit)');
+  assert.ok(/openFileInEditor\(resolved, basenameOf\(resolved\), \{[\s\S]*?viewMode: editorPreviewModeAvailable\(resolved\) \? 'preview' : 'edit'/.test(src), '#133: preview-capable file links open in preview (md/html), else edit');
   assert.ok(/t\('preview\.openFailed'/.test(src), "#133: a failed open surfaces a toast");
   // The handler is wired ONLY to the file-editor preview (path provided), not to yoagent bodies.
   assert.ok(/renderMarkdownPreviewInto\(container, text, path\)/.test(src), '#133: the file-editor preview threads the owning path (basePath); yoagent bodies pass no path');
@@ -4608,6 +4671,30 @@ function makeFileTree(paths) {
   const themeCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.preferences-radio-group\s*\{/.test(themeCss), '#260: the radio group has styling');
   assert.equal(/\.theme-card-system/.test(themeCss), false, '#260: the old theme-card CSS is gone');
+}
+
+{
+  // Preview font size is independent from the editor font size and defaults one px larger.
+  const api = loadYolomux('', ['1']);
+  api.setActiveLocaleForTest('en');
+  const html = api.preferencesPanelHtmlForTest('');
+  assert.ok(/data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders as an Appearance preference');
+  assert.ok(html.includes('Preview font size'), 'preview font size preference has a label');
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes("let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);"), 'preview font size defaults one larger than editor font during bootstrap');
+  assert.ok(source.includes("root.setProperty('--editor-preview-font-size'"), 'preview font size writes its own CSS variable');
+  assert.ok(source.includes("numberSetting('appearance.preview_font_size', editorFontSize + 1)"), 'preview font size reload preserves the editor+1 fallback');
+  assert.ok(source.includes('class="file-editor-preview-font-panel"'), 'preview toolbar includes a font-size control group');
+  assert.ok(source.includes('data-editor-preview-font-step="-1"'), 'preview toolbar includes a decrease button');
+  assert.ok(source.includes('data-editor-preview-font-step="1"'), 'preview toolbar includes an increase button');
+  assert.ok(source.includes("saveSettingsPatch(settingPatch('appearance.preview_font_size', next))"), 'preview font toolbar persists the setting');
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.file-editor-preview-pane\s*\{[^}]*font-size:\s*var\(--editor-preview-font-size\)/.test(css), 'rendered preview pane uses the preview font variable');
+  assert.ok(/\.file-editor-preview-pane-panel\s*\{[^}]*font-size:\s*var\(--editor-preview-font-size\)/.test(css), 'split/side preview pane uses the preview font variable');
+  assert.ok(/\.file-editor-raw-panel\s*\{[^}]*font-size:\s*var\(--editor-font-size\)/.test(css), 'raw editor pane keeps the editor font variable');
+  const settingsSource = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
+  assert.ok(settingsSource.includes('"preview_font_size": 14'), 'preview font size default is 14');
+  assert.ok(settingsSource.includes('("appearance", "preview_font_size"): (8, 32)'), 'preview font size has server-side limits');
 }
 
 {
@@ -4673,8 +4760,8 @@ function makeFileTree(paths) {
     assert.equal(css.includes('--inactive-pane-overlay: rgba(91, 101, 115, 0.14)'), false, '#254: the old faint cool light overlay is gone');
     // #258: the editor diff FROM/TO group is pushed to the right edge of the toolbar.
     assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*order:\s*-1[^}]*margin-inline-end:\s*auto/.test(css), 'editor info bar: FROM/TO sits left (order:-1) and pushes all buttons right (margin-inline-end:auto)');
-    // #257: Preferences select + text controls right-align like the number controls above them.
-    assert.ok(/\.preferences-setting-control\.setting-type-select,\s*\.preferences-setting-control\.setting-type-text\s*\{[^}]*justify-content:\s*end/.test(css), '#257: Preferences selects/text inputs right-align (justify-content:end) like the number controls');
+    assert.ok(/\.preferences-setting-control\.setting-type-select,\s*\.preferences-setting-control\.setting-type-text\s*\{[^}]*justify-content:\s*start/.test(css), 'Preferences selects/text inputs are left-aligned from the shared inset');
+    assert.ok(/\.preferences-setting-control\.setting-type-number input\[type="number"\]\s*\{[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(css), 'Preferences number inputs are left-aligned from the shared inset');
     // #258 (toast): the toast stack clears the topbar (z-index above 180) and messages wrap, not clip.
     assert.ok(/\.panel-toast-stack\s*\{[^}]*z-index:\s*200/.test(css), '#258: the toast stack renders above the topbar (z-index 200) so it is not clipped under it');
     assert.ok(/\.toast-line\s*\{[^}]*white-space:\s*normal/.test(css), '#258: toast messages wrap (white-space:normal) instead of ellipsis-clipping');
@@ -4950,19 +5037,19 @@ function makeFileTree(paths) {
   const titleStems = zhHant['changes.titleForSession'].split('{session}');
   assert.ok(titleStems.every(stem => !stem || panel.includes(stem)), '#121/C7: the Modified-files title is localized and names the session');
   assert.ok(panel.includes(`>${zhHant['changes.refresh']}</button>`), '#121: the Modified-files Refresh button is localized');
-  // C15 follow-up: the FROM/TO pulldowns are inline in the localized "Comparing {from} with {to}" sentence
-  // (no separate FROM/TO labels); assert the sentence's localized text stems surround the selects.
+  // C6/C15 follow-up: the FROM/TO text pickers are inline in each repo's localized comparison sentence
+  // (no separate FROM/TO labels); assert the sentence's localized text stems surround the inputs.
   for (const stem of zhHant['diff.comparing'].split(/\{from\}|\{to\}/).map(s => s.trim()).filter(Boolean)) {
     assert.ok(panel.includes(stem), `#121/C15: the inline comparison sentence is localized ("${stem}")`);
   }
-  assert.ok(panel.includes('data-diff-ref-from') && panel.includes('data-diff-ref-to'), '#121/C15: the FROM/TO pulldowns are present inline on the comparison line');
+  assert.ok(/changes-repo-refs compact[\s\S]*data-diff-ref-from[\s\S]*data-diff-ref-to/.test(panel), '#121/C15: the FROM/TO text pickers are present inline on the repo comparison line');
   assert.ok(panel.includes(`aria-label="${zhHant['diff.ref.from.aria']}"`), '#121: the FROM picker aria-label is localized');
   assert.ok(panel.includes(zhHant['changes.ahead.one'].replace('{count}', '1')), '#121: the Ahead-N-commit meta is localized (tPlural)');
   // No bare English leaks in the localized Modified-files panel.
   assert.ok(!/>Modified files<|>Refresh<|>FROM <|>TO <|Ahead 1 commit|Comparing /.test(panel), '#121: no English leaks in the localized Modified-files panel');
   // Source guards: the menu/changes builders carry no bare English literals (all via t()).
   const appSrc = fs.readFileSync('static/yolomux.js', 'utf8');
-  for (const literal of ["menuCommand('Open file'", "menuCommand('Preferences'", "menuCommand('Log out'", "menuCommand('Refresh'", "menuSubmenu('Theme'", "menuCommand('Pane details'", "menuCommand('No matching tabs'", "'Kill tmux session", "class=\"changes-title\">Modified files<", '>FROM <select', '`Comparing ${esc(from)} with ${esc(to)}`']) {
+  for (const literal of ["menuCommand('Open file'", "menuCommand('Preferences'", "menuCommand('Log out'", "menuCommand('Refresh'", "menuSubmenu('Theme'", "menuCommand('Pane details'", "menuCommand('No matching tabs'", "'Kill tmux session", "class=\"changes-title\">Modified files<", '>FROM <select', '`Comparing ${esc(from)} to ${esc(to)}`']) {
     assert.equal(appSrc.includes(literal), false, `#121: bare English literal removed: ${literal}`);
   }
   // The pseudo-locale transforms a representative menu key (the completeness signal).
@@ -5053,10 +5140,11 @@ function makeFileTree(paths) {
   assert.ok(dragSrc.includes('item.term.options.minimumContrastRatio = minContrast'), '#32: live terminals re-apply minimumContrastRatio');
   assert.ok(/item\.container\.style\.background = theme\.background/.test(dragSrc), '#32: all terminal containers share one theme background');
   assert.ok(/body\.theme-light \.topbar-search\s*\{[^}]*background/.test(dragCss), '#33: the topbar search blends in light mode (no dark pill)');
-  // DOIT.12 A1/A2: the topbar paints the green tab-strip color (both themes) so there's no contrasting
-  // gray/black band above the tabs (the "big space"); its height is tightened.
-  assert.ok(/\.topbar\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'DOIT.12 A2: topbar bg matches the green tab strip (no band above the tabs)');
-  assert.ok(/body\.theme-light \.topbar\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'DOIT.12 A2: light-mode topbar also uses the green tab-strip bg (was #eef3f9)');
+  // The topbar is neutral at rest and switches to the green tab-strip color only on hover/focus.
+  assert.ok(/\.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), 'topbar bg is neutral at rest');
+  assert.ok(/\.topbar:hover,\s*\.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'topbar bg matches the green tab strip on hover/focus');
+  assert.ok(/body\.theme-light \.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), 'light-mode topbar is neutral at rest');
+  assert.ok(/body\.theme-light \.topbar:hover,\s*body\.theme-light \.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'light-mode topbar uses the green tab-strip bg on hover/focus');
   // DOIT.6 #114: the dragSession guard MUST precede movePanelsToPool()/grid.innerHTML in renderPanels,
   // and endSessionDrag MUST flush the deferred render after clearing dragSession.
   assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,400}?if \(dragSession != null\) \{ pendingPanelsRender = true; return; \}[\s\S]{0,40}movePanelsToPool\(\)/.test(dragSrc), '#114: renderPanels defers (sets pendingPanelsRender) before pooling panels / clearing the grid');

@@ -75,6 +75,11 @@ function sessionFilesRefsQuery() {
   return Object.keys(map).length ? `&refs=${encodeURIComponent(JSON.stringify(map))}` : '';
 }
 
+const diffRefSuggestionLimit = 60;
+const diffRefDatalistCompactLimit = 40;
+const diffRefDatalistFullLimit = 80;
+let diffRefDatalistIdCounter = 0;
+
 // C6: commit suggestions. With a `repo`, draw only from THAT repo's refs_by_repo so a picker never offers
 // a SHA from a sibling repo. With no repo (legacy/global callers), flatten every repo's refs as before.
 function diffRefSuggestions(repo) {
@@ -90,7 +95,7 @@ function diffRefSuggestions(repo) {
       if (!ref || seen.has(ref)) continue;
       suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || ''});
       seen.add(ref);
-      if (suggestions.length >= 60) return;
+      if (suggestions.length >= diffRefSuggestionLimit) return;
     }
   };
   for (const payload of [sessionFilesPayload, fileExplorerSessionFilesPayload]) {
@@ -100,16 +105,13 @@ function diffRefSuggestions(repo) {
     } else {
       for (const refs of Object.values(refsByRepo)) addRefs(refs);
     }
-    if (suggestions.length >= 60) break;
+    if (suggestions.length >= diffRefSuggestionLimit) break;
   }
   return suggestions;
 }
 
-function diffRefSuggestionsHtml(listId) {
-  return `<datalist id="${esc(listId)}">${diffRefSuggestions().map(item => {
-    const label = [item.short, item.subject].filter(Boolean).join(' ');
-    return `<option value="${esc(item.ref)}" label="${esc(label)}"></option>`;
-  }).join('')}</datalist>`;
+function diffRefOptionLabel(item, separator = ' - ') {
+  return [item?.short || '', item?.subject || ''].filter(Boolean).join(separator) || item?.ref || '';
 }
 
 function diffRefShaLike(value) {
@@ -125,7 +127,11 @@ function diffRefSameCommit(value, candidate) {
 }
 
 function diffRefOptionMatches(value, item) {
-  return diffRefSameCommit(value, item?.ref) || diffRefSameCommit(value, item?.short);
+  const normalized = cleanDiffRef(value, '');
+  return diffRefSameCommit(normalized, item?.ref)
+    || diffRefSameCommit(normalized, item?.short)
+    || normalized === diffRefOptionLabel(item)
+    || normalized === diffRefOptionLabel(item, ' ');
 }
 
 function canonicalDiffRefValue(value, suggestions) {
@@ -134,16 +140,30 @@ function canonicalDiffRefValue(value, suggestions) {
   return suggestions.find(item => diffRefOptionMatches(ref, item))?.ref || ref;
 }
 
-function diffRefSelectOptionsHtml(value, options = {}) {
-  const maxItems = options.compact ? 30 : 100;
+function diffRefOptionItems(value, options = {}) {
+  const rawLimit = Number(options.maxItems);
+  const defaultLimit = options.compact ? diffRefDatalistCompactLimit : diffRefDatalistFullLimit;
+  const maxItems = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : defaultLimit, diffRefDatalistFullLimit));
   const suggestions = Array.isArray(options.suggestions) ? options.suggestions : diffRefSuggestions();
   const items = suggestions.slice(0, maxItems);
   if (value && !items.some(item => diffRefOptionMatches(value, item))) {
     items.unshift({ref: value, short: value.slice(0, 9), subject: 'selected ref'});
   }
-  return items.map(item => {
-    const label = [item.short, item.subject].filter(Boolean).join(' - ') || item.ref;
+  return items;
+}
+
+function diffRefSelectOptionsHtml(value, options = {}) {
+  return diffRefOptionItems(value, options).map(item => {
+    const label = diffRefOptionLabel(item);
     return `<option value="${esc(item.ref)}"${diffRefOptionMatches(value, item) ? ' selected' : ''}>${esc(label)}</option>`;
+  }).join('');
+}
+
+function diffRefDatalistOptionsHtml(value, options = {}) {
+  return diffRefOptionItems(value, options).map(item => {
+    const label = diffRefOptionLabel(item);
+    const optionValue = diffRefOptionMatches(value, item) || !diffRefShaLike(item.ref) ? item.ref : (item.short || item.ref);
+    return `<option value="${esc(optionValue)}" label="${esc(label)}">${esc(label)}</option>`;
   }).join('');
 }
 
@@ -161,6 +181,51 @@ function diffRefToSuggestions(fromRef = diffRefFrom, repo) {
   return ordered.slice(0, Math.max(1, fromIndex));
 }
 
+function nextDiffRefDatalistId(repo, side) {
+  diffRefDatalistIdCounter += 1;
+  const normalized = String(repo || 'global').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 36) || 'repo';
+  return `diff-ref-${side}-${normalized}-${diffRefDatalistIdCounter}`;
+}
+
+function diffRefInputDisplayValue(value, suggestions) {
+  const ref = cleanDiffRef(value, '');
+  const match = (Array.isArray(suggestions) ? suggestions : []).find(item => diffRefOptionMatches(ref, item));
+  return match?.short || ref;
+}
+
+function diffRefInputHtml(options = {}) {
+  const repo = options.repo || '';
+  const side = options.side === 'to' ? 'to' : 'from';
+  const compact = options.compact === true;
+  const fallback = side === 'to' ? 'current' : 'HEAD';
+  const value = cleanDiffRef(options.value, fallback);
+  const suggestions = Array.isArray(options.suggestions) ? options.suggestions : (side === 'to' ? diffRefToSuggestions(diffRefFrom, repo) : diffRefFromSuggestions(repo));
+  const listId = nextDiffRefDatalistId(repo, side);
+  const dataAttr = side === 'to' ? 'data-diff-ref-to' : 'data-diff-ref-from';
+  const aria = options.aria || (side === 'to' ? t('diff.ref.to.aria') : t('diff.ref.from.aria'));
+  return `<input class="diff-ref-input" type="text" value="${esc(diffRefInputDisplayValue(value, suggestions))}" list="${esc(listId)}" ${dataAttr} data-diff-ref-input autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="${esc(aria)}"><datalist id="${esc(listId)}">${diffRefDatalistOptionsHtml(value, {compact, suggestions})}</datalist>`;
+}
+
+function showDiffRefPicker(input) {
+  if (!input?.matches?.('[data-diff-ref-input]') || typeof input.showPicker !== 'function') return;
+  try {
+    input.showPicker();
+  } catch (_) {}
+}
+
+function refreshDiffRefToDatalist(controls) {
+  if (!controls) return;
+  const repo = controls.dataset?.diffRefRepo || '';
+  const fromInput = controls.querySelector?.('[data-diff-ref-from]');
+  const toInput = controls.querySelector?.('[data-diff-ref-to]');
+  const toListId = toInput?.getAttribute?.('list') || '';
+  const toList = toListId ? controls.querySelector?.(`#${cssEscape(toListId)}`) : null;
+  if (!fromInput || !toInput || !toList) return;
+  const fromValue = canonicalDiffRefValue(fromInput.value, diffRefFromSuggestions(repo)) || fromInput.value;
+  const suggestions = diffRefToSuggestions(fromValue, repo);
+  toList.innerHTML = diffRefDatalistOptionsHtml(toInput.value, {compact: controls.classList?.contains('compact'), suggestions});
+}
+
 // C6: FROM/TO controls scoped to one repo (data-diff-ref-repo). Options/selection come from that repo's
 // own commit graph and override. With no repo it renders the global default (legacy single-pair shape).
 function diffRefControlsHtml(options = {}) {
@@ -169,9 +234,11 @@ function diffRefControlsHtml(options = {}) {
   const refs = repoDiffRefs(repo);
   const className = compact ? 'diff-ref-controls compact' : 'diff-ref-controls';
   const repoAttr = repo ? ` data-diff-ref-repo="${esc(repo)}"` : '';
+  const fromInput = diffRefInputHtml({repo, compact, side: 'from', value: refs.from, suggestions: diffRefFromSuggestions(repo), aria: t('diff.ref.from.aria')});
+  const toInput = diffRefInputHtml({repo, compact, side: 'to', value: refs.to, suggestions: diffRefToSuggestions(refs.from, repo), aria: t('diff.ref.to.aria')});
   return `<span class="${className}" data-diff-ref-controls${repoAttr}>
-    <label class="diff-ref-control">${esc(t('diff.ref.from'))} <select class="diff-ref-select" data-diff-ref-from data-diff-ref-from-select aria-label="${esc(t('diff.ref.from.aria'))}">${diffRefSelectOptionsHtml(refs.from, {compact, suggestions: diffRefFromSuggestions(repo)})}</select></label>
-    <label class="diff-ref-control">${esc(t('diff.ref.to'))} <select class="diff-ref-select" data-diff-ref-to data-diff-ref-to-select aria-label="${esc(t('diff.ref.to.aria'))}">${diffRefSelectOptionsHtml(refs.to, {compact, suggestions: diffRefToSuggestions(refs.from, repo)})}</select></label>
+    <label class="diff-ref-control">${esc(t('diff.ref.from'))} ${fromInput}</label>
+    <label class="diff-ref-control">${esc(t('diff.ref.to'))} ${toInput}</label>
   </span>`;
 }
 
@@ -222,16 +289,18 @@ function syncDiffRefControlValues(container) {
   const refs = repoDiffRefs(repo);
   const fromInput = container.querySelector?.('[data-diff-ref-from]');
   const toInput = container.querySelector?.('[data-diff-ref-to]');
-  const fromSelect = container.querySelector?.('[data-diff-ref-from-select]');
-  const toSelect = container.querySelector?.('[data-diff-ref-to-select]');
-  if (fromInput && fromInput !== active) fromInput.value = refs.from;
-  if (toInput && toInput !== active) toInput.value = refs.to;
-  if (fromSelect && fromSelect !== active) fromSelect.value = canonicalDiffRefValue(refs.from, diffRefFromSuggestions(repo)) || refs.from;
-  if (toSelect && toSelect !== active) toSelect.value = canonicalDiffRefValue(refs.to, diffRefToSuggestions(refs.from, repo)) || refs.to;
+  if (fromInput && fromInput !== active) fromInput.value = diffRefInputDisplayValue(refs.from, diffRefFromSuggestions(repo));
+  if (toInput && toInput !== active) toInput.value = diffRefInputDisplayValue(refs.to, diffRefToSuggestions(refs.from, repo));
+  refreshDiffRefToDatalist(controls);
 }
 
 function fileExplorerSessionFilesTargetSession() {
-  return sessionFilesTargetSession({followActive: true});
+  if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
+    return fileExplorerChangesSelectedSession;
+  }
+  const fallback = sessionFilesTargetSession({followActive: true});
+  fileExplorerChangesSelectedSession = fallback;
+  return fallback;
 }
 
 function emptySessionFilesPayload(session = '', loaded = true) {
@@ -240,6 +309,7 @@ function emptySessionFilesPayload(session = '', loaded = true) {
 
 function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
+  fileExplorerChangesSelectedSession = session;
   const cached = fileExplorerSessionFilesCache.get(session);
   if (cached?.payload) {
     fileExplorerSessionFilesPayload = cached.payload;
@@ -251,6 +321,16 @@ function switchFileExplorerChangesSession(session) {
   }
   renderFileExplorerChangesPanels();
   fetchSessionFiles({destination: 'finder', session, silent: true, force: true});
+}
+
+function noteFileExplorerChangesSessionInteraction(session) {
+  if (!isTmuxSession(session) || !sessions.includes(session)) return false;
+  if (fileExplorerChangesSelectedSession === session) return false;
+  fileExplorerChangesSelectedSession = session;
+  if (document.querySelector('.file-explorer-changes-panel')) {
+    switchFileExplorerChangesSession(session);
+  }
+  return true;
 }
 
 function sessionFilesPayloadForDestination(destination) {
@@ -482,6 +562,26 @@ function changeFileTotals(files) {
   return {added, removed};
 }
 
+function repoAggregateNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function changesRepoTotals(repoInfo, entries) {
+  const fallback = changeFileTotals(entries);
+  return {
+    added: repoAggregateNumber(repoInfo?.added, fallback.added),
+    removed: repoAggregateNumber(repoInfo?.removed, fallback.removed),
+    count: repoAggregateNumber(repoInfo?.count, Array.isArray(entries) ? entries.length : 0),
+  };
+}
+
+function changesRepoTotalsHtml(repoInfo, entries) {
+  const totals = changesRepoTotals(repoInfo, entries);
+  const title = `+${totals.added} -${totals.removed} ${tPlural('changes.fileCount', totals.count)}`;
+  return `<span class="changes-repo-totals" title="${esc(title)}"><span class="changes-diff-add">+${totals.added}</span><span class="changes-diff-remove">-${totals.removed}</span><span class="changes-repo-count">${totals.count}</span></span>`;
+}
+
 function diffRefDisplayText(ref) {
   const value = cleanDiffRef(ref, '');
   if (!value || value === 'default') return t('diff.ref.defaultBase');
@@ -497,20 +597,18 @@ function comparisonTitleHtml(payload) {
 }
 
 // C15 follow-up: the compact comparison line IS the FROM/TO control — render the localized
-// "Comparing {from} with {to}" sentence with the actual SHA <select> pulldowns injected in place of
-// {from}/{to}. Splitting on placeholders (not hardcoding "Comparing"/"with") preserves each locale's word
-// order. The selects carry the same data attrs as diffRefControlsHtml, so the panel's delegated
-// change/keydown handler commits them per repo.
+// "Comparing {from} to {to}" sentence with the actual SHA text inputs injected in place of {from}/{to}.
+// Splitting on placeholders (not hardcoding "Comparing"/"with") preserves each locale's word order.
 function diffRefComparisonLineHtml(repo) {
   const refs = repoDiffRefs(repo);
-  const fromSelect = `<select class="diff-ref-select" data-diff-ref-from data-diff-ref-from-select aria-label="${esc(t('diff.ref.from.aria'))}">${diffRefSelectOptionsHtml(refs.from, {compact: true, suggestions: diffRefFromSuggestions(repo)})}</select>`;
-  const toSelect = `<select class="diff-ref-select" data-diff-ref-to data-diff-ref-to-select aria-label="${esc(t('diff.ref.to.aria'))}">${diffRefSelectOptionsHtml(refs.to, {compact: true, suggestions: diffRefToSuggestions(refs.from, repo)})}</select>`;
+  const fromInput = diffRefInputHtml({repo, compact: true, side: 'from', value: refs.from, suggestions: diffRefFromSuggestions(repo), aria: t('diff.ref.from.aria')});
+  const toInput = diffRefInputHtml({repo, compact: true, side: 'to', value: refs.to, suggestions: diffRefToSuggestions(refs.from, repo), aria: t('diff.ref.to.aria')});
   // esc() leaves the {{FROM}}/{{TO}} placeholders intact (no HTML-special chars), then we swap in the
-  // raw select markup — so the surrounding localized text stays escaped.
+  // raw input markup — so the surrounding localized text stays escaped.
   const body = esc(t('diff.comparing', {from: '{{FROM}}', to: '{{TO}}'}))
-    .replace('{{FROM}}', fromSelect)
-    .replace('{{TO}}', toSelect);
-  return `<span class="diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}</span>`;
+    .replace('{{FROM}}', fromInput)
+    .replace('{{TO}}', toInput);
+  return `<span class="changes-repo-compare-title diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}</span>`;
 }
 
 // C6: per-repo comparison title (from the repo payload's own effective refs), shown beside that repo's
@@ -521,6 +619,10 @@ function repoComparisonTitleHtml(repoInfo) {
   const title = `<span class="changes-repo-compare-title">${t('diff.comparing', {from: esc(from), to: esc(to)})}</span>`;
   const error = repoInfo?.error ? `<span class="changes-repo-refs-error">${esc(repoInfo.error)}</span>` : '';
   return `${title}${error}`;
+}
+
+function repoComparisonErrorHtml(repoInfo) {
+  return repoInfo?.error ? `<span class="changes-repo-refs-error">${esc(repoInfo.error)}</span>` : '';
 }
 
 function changesSummaryHtml(files, session, loading, loaded) {
@@ -554,26 +656,12 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
   const loaded = payload?.loaded === true;
   const loading = options.loading === true;
   if (options.compact) {
-    // C15: the embedded Finder header is one compact line — "Comparing <FROM> with <TO>  +A −R" — with
-    // no "N files changed in '<session>'" (the session is already in the title, the count is on the repo
-    // row). When the session touches a SINGLE git repo, the FROM/TO are interactive SHA pulldowns right
-    // on this line; with multiple repos there is no single pair, so it stays static text and each repo's
-    // pulldowns live in its row popover (C6 per-repo refs).
     if (loading) return `<section class="changes-comparison-head compact">${esc(t('changes.loading'))}</section>`;
     if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
-    const {added, removed} = changeFileTotals(files);
-    const gitRepos = Array.isArray(payload?.repos) ? payload.repos : [];
-    const titleHtml = gitRepos.length === 1 && gitRepos[0]?.repo
-      ? diffRefComparisonLineHtml(gitRepos[0].repo)
-      : comparisonTitleHtml(payload || {});
-    return `<section class="changes-comparison-head compact">
-      <span class="changes-comparison-title">${titleHtml}</span>
-      <span class="changes-comparison-totals"><span class="changes-diff-add">+${added}</span> <span class="changes-diff-remove">-${removed}</span></span>
-    </section>`;
+    return '';
   }
   const summary = changesSummaryHtml(files, payload?.session || '', loading, loaded);
   return `<section class="changes-comparison-head">
-    <div class="changes-comparison-title">${comparisonTitleHtml(payload || {})}</div>
     <div class="changes-comparison-summary">${summary}</div>
   </section>`;
 }
@@ -698,9 +786,6 @@ function changesRepoGroupsHtml(files, options = {}) {
   const {regular, uploaded} = splitUploadedSessionFiles(files);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
-  // C15 follow-up: with a SINGLE git repo the FROM/TO pulldowns live on the compact comparison line, so
-  // the repo-row popover omits them (avoids two copies). With multiple repos, each row keeps its own.
-  const refsOnComparisonLine = options.compact === true && (Array.isArray(payload?.repos) ? payload.repos.length === 1 : false);
   const repoHtml = groupedSessionFiles(regular).map(([repo, entries]) => {
     const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
     const repoInfo = repoMap.get(repo) || {};
@@ -711,25 +796,19 @@ function changesRepoGroupsHtml(files, options = {}) {
     // C6: each real repo gets its OWN FROM/TO controls (scoped to its commit graph) plus its own
     // comparison title. 'Outside repo' has no git graph, so no controls there.
     const hasGit = repo && repo !== 'Outside repo';
-    const head = `<button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${options.compact ? '' : changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></button>`;
+    const head = `<button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoTotalsHtml(repoInfo, entries)}</button>`;
     if (options.compact === true) {
-      // C15 (compact header): the repo row is BARE (caret · path · count). The per-repo comparison,
-      // ahead/behind, and FROM/TO pickers move into a hover popover (kept open while hovered because it
-      // is a descendant of the wrap), so the always-visible chrome is just one row per repo.
-      const popover = hasGit
-        ? `<div class="changes-repo-popover" role="group" aria-label="${esc(repoLabel)}">
-            <div class="changes-repo-popover-path">${esc(repoLabel)}</div>
-            ${changesRepoMetaHtml(repoInfo, {hideZero: true})}
-            ${refsOnComparisonLine ? '' : `<div class="changes-repo-popover-compare">${repoComparisonTitleHtml(repoInfo)}</div>${diffRefControlsHtml({repo, compact: true})}`}
-          </div>`
+      const refsRow = hasGit && !collapsed
+        ? `<div class="changes-repo-refs compact">${diffRefComparisonLineHtml(repo)}${repoComparisonErrorHtml(repoInfo)}${changesRepoMetaHtml(repoInfo, {hideZero: true})}</div>`
         : '';
       return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
-        <div class="changes-repo-head-wrap">${head}${popover}</div>
+        ${head}
+        ${refsRow}
         ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
       </section>`;
     }
     const refsRow = hasGit && !collapsed
-      ? `<div class="changes-repo-refs">${repoComparisonTitleHtml(repoInfo)}${diffRefControlsHtml({repo, compact: true})}</div>`
+      ? `<div class="changes-repo-refs">${diffRefComparisonLineHtml(repo)}${repoComparisonErrorHtml(repoInfo)}${changesRepoMetaHtml(repoInfo)}</div>`
       : '';
     return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
       ${head}
@@ -779,7 +858,7 @@ function fileExplorerChangesPanelHtml() {
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
-  // C7: name the session in the embedded Finder title ("Modified files for session '1'"), falling back
+  // C7: name the session in the embedded Finder title, falling back
   // to the generic title when there is no target session.
   const titleText = session ? t('changes.titleForSession', {session: sessionLabel(session) || session}) : t('changes.title');
   return `
@@ -916,6 +995,23 @@ function bindChangesPanel(panel) {
       return;
     }
   });
+  panel.addEventListener('input', event => {
+    const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
+    if (!diffRefInput || !panel.contains(diffRefInput)) return;
+    refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
+  });
+  panel.addEventListener('focusin', event => {
+    const diffRefInput = event.target.closest('[data-diff-ref-input]');
+    if (!diffRefInput || !panel.contains(diffRefInput)) return;
+    refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
+    showDiffRefPicker(diffRefInput);
+  });
+  panel.addEventListener('pointerdown', event => {
+    const diffRefInput = event.target.closest('[data-diff-ref-input]');
+    if (!diffRefInput || !panel.contains(diffRefInput)) return;
+    refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
+    showDiffRefPicker(diffRefInput);
+  });
   panel.addEventListener('keydown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
@@ -927,7 +1023,9 @@ function bindChangesPanel(panel) {
       event.preventDefault();
       // C6: revert to THIS repo's current ref, not the global default.
       const escRefs = repoDiffRefs(diffRefInput.closest('[data-diff-ref-controls]')?.dataset?.diffRefRepo || '');
-      diffRefInput.value = diffRefInput.matches('[data-diff-ref-from]') ? escRefs.from : escRefs.to;
+      diffRefInput.value = diffRefInput.matches('[data-diff-ref-from]')
+        ? diffRefInputDisplayValue(escRefs.from, diffRefFromSuggestions(diffRefInput.closest('[data-diff-ref-controls]')?.dataset?.diffRefRepo || ''))
+        : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, diffRefInput.closest('[data-diff-ref-controls]')?.dataset?.diffRefRepo || ''));
       diffRefInput.blur?.();
     }
   });
@@ -1260,6 +1358,39 @@ function resetAllPreferences() {
     .catch(error => { statusErr(`settings reset failed: ${esc(error)}`); });
 }
 
+function clampEditorPreviewFontSize(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return Math.max(8, Math.min(32, editorFontSize + 1));
+  return Math.max(8, Math.min(32, Math.round(number)));
+}
+
+function updateEditorPreviewFontControls(scope = document) {
+  const value = clampEditorPreviewFontSize(editorPreviewFontSize);
+  scope.querySelectorAll?.('.file-editor-preview-font-value')?.forEach(node => {
+    node.textContent = `${value}`;
+  });
+  scope.querySelectorAll?.('[data-editor-preview-font-step]')?.forEach(button => {
+    const step = Number(button.dataset.editorPreviewFontStep || 0);
+    button.disabled = readOnlyMode || !step || (step < 0 && value <= 8) || (step > 0 && value >= 32);
+    button.setAttribute('aria-disabled', button.disabled ? 'true' : 'false');
+  });
+}
+
+function setEditorPreviewFontSize(value) {
+  if (readOnlyMode) return;
+  const next = clampEditorPreviewFontSize(value);
+  if (next === editorPreviewFontSize) {
+    updateEditorPreviewFontControls();
+    return;
+  }
+  editorPreviewFontSize = next;
+  applyCssSettings();
+  updateEditorPreviewFontControls();
+  saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
+    .then(() => { statusEl.textContent = 'saved appearance.preview_font_size'; })
+    .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+}
+
 // File Explorer pane content is self-contained so layout panes do not depend on
 // the older left-edge overlay tree.
 function createFileExplorerPanel() {
@@ -1499,6 +1630,11 @@ function createFileEditorPanel(item) {
           <button type="button" class="file-editor-cross-split-panel" title="${esc(t('editor.sidePreview'))}" aria-label="${esc(t('editor.sidePreview'))}" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
         </div>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
+        <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}" hidden>
+          <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
+          <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
+          <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
+        </span>
         <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
         <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
@@ -1549,6 +1685,13 @@ function createFileEditorPanel(item) {
     event.stopPropagation();
     toggleEditorLineNumbers();
   });
+  panel.querySelector('.file-editor-preview-font-panel')?.addEventListener('click', event => {
+    const button = event.target?.closest?.('[data-editor-preview-font-step]');
+    if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setEditorPreviewFontSize(editorPreviewFontSize + Number(button.dataset.editorPreviewFontStep || 0));
+  });
   panel.querySelector('.file-editor-wrap-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -1586,6 +1729,23 @@ function createFileEditorPanel(item) {
       commitDiffRefControls(diffRefPanel);
     }
   });
+  diffRefPanel?.addEventListener('input', event => {
+    const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
+    if (!input) return;
+    refreshDiffRefToDatalist(diffRefPanel);
+  });
+  diffRefPanel?.addEventListener('focusin', event => {
+    const input = event.target.closest('[data-diff-ref-input]');
+    if (!input) return;
+    refreshDiffRefToDatalist(diffRefPanel);
+    showDiffRefPicker(input);
+  });
+  diffRefPanel?.addEventListener('pointerdown', event => {
+    const input = event.target.closest('[data-diff-ref-input]');
+    if (!input) return;
+    refreshDiffRefToDatalist(diffRefPanel);
+    showDiffRefPicker(input);
+  });
   diffRefPanel?.addEventListener('keydown', event => {
     const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!input) return;
@@ -1597,8 +1757,11 @@ function createFileEditorPanel(item) {
     } else if (event.key === 'Escape') {
       event.preventDefault();
       // C6: revert to this file's repo refs, not the global default.
-      const escRefs = repoDiffRefs(diffRefPanel?.dataset?.diffRefRepoRendered || '');
-      input.value = input.matches('[data-diff-ref-from]') ? escRefs.from : escRefs.to;
+      const repo = diffRefPanel?.dataset?.diffRefRepoRendered || '';
+      const escRefs = repoDiffRefs(repo);
+      input.value = input.matches('[data-diff-ref-from]')
+        ? diffRefInputDisplayValue(escRefs.from, diffRefFromSuggestions(repo))
+        : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, repo));
       input.blur?.();
     }
   });
@@ -2435,6 +2598,7 @@ function renderFileEditorPanel(panel, item) {
   const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
   const imagePane = panel.querySelector('.file-editor-image-panel');
   const modeControl = panel.querySelector('.file-editor-mode-control-panel');
+  const previewFontPanel = panel.querySelector('.file-editor-preview-font-panel');
   const gutterButton = panel.querySelector('.file-editor-gutter-panel');
   const wrapButton = panel.querySelector('.file-editor-wrap-panel');
   const findButton = panel.querySelector('.file-editor-find-panel');
@@ -2446,7 +2610,7 @@ function renderFileEditorPanel(panel, item) {
   const themeButton = panel.querySelector('.file-editor-theme-panel');
   const blameButton = panel.querySelector('.file-editor-blame-panel');
   const content = panel.querySelector('.file-editor-content');
-  const textControls = [modeControl, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
+  const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
   updateEditorThemeButton(themeButton);
   if (!state) {
     setElementsHidden(textControls, true);
@@ -2497,6 +2661,10 @@ function renderFileEditorPanel(panel, item) {
   }
   const mode = editorViewModeFor(path, item);
   updateEditorModeControl(modeControl, path, state, item);
+  if (previewFontPanel) {
+    previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path) || (mode !== 'preview' && mode !== 'split');
+    updateEditorPreviewFontControls(previewFontPanel);
+  }
   if (gutterButton) {
     gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text';
     updateEditorGutterButton(gutterButton);
@@ -2749,6 +2917,7 @@ function updateEditorNavButtons() {
 function updateFileEditorToolbarSeparators(panel) {
   const mode = fileEditorToolbarControlVisible(panel, '.file-editor-mode-control-panel');
   const tools = [
+    '.file-editor-preview-font-panel',
     '.file-editor-gutter-panel',
     '.file-editor-wrap-panel',
     '.file-editor-find-panel',
@@ -2993,16 +3162,51 @@ function renderMarkdownPreviewInto(container, text, markdownPath) {
   }
 }
 
+function safeDecodePathComponent(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch (_) {
+    return String(value || '');
+  }
+}
+
+function localPathFromFileHref(href) {
+  const raw = String(href || '').trim();
+  if (!/^file:/i.test(raw)) return '';
+  try {
+    const base = globalThis.location?.href || 'http://localhost/';
+    const url = new URL(raw, base);
+    if (url.protocol !== 'file:') return '';
+    return safeDecodePathComponent(url.pathname || '');
+  } catch (_) {
+    const match = raw.match(/^file:\/\/(?:localhost)?(\/[^?#]*)/i);
+    return match ? safeDecodePathComponent(match[1]) : '';
+  }
+}
+
+function openMarkdownPreviewPathLink(container, resolved) {
+  const owner = openFileOwnerSessionsForPath(container?.dataset?.mdPath || '')[0] || undefined;
+  return Promise.resolve(openFileInEditor(resolved, basenameOf(resolved), {
+    viewMode: editorPreviewModeAvailable(resolved) ? 'preview' : 'edit',
+    ownerSession: owner,
+  })).catch(() => showToast(t('preview.openFailed', {path: resolved}), '', {level: 'error'}));
+}
+
 // DOIT.6 #133: in the file-editor markdown preview, route link clicks: in-page #anchors keep default;
-// external/other-scheme links open in a new tab (instead of blowing away the SPA); relative file links
-// resolve against the owning file's dir and open in the editor (markdown -> rendered preview, else code).
-// The server's read endpoint already rejects out-of-root paths, so a `../../etc/passwd` link just toasts.
+// file:// server paths and relative file links open through the YOLOmux editor, while external links
+// open in a new browser tab. The server's read endpoint still rejects paths outside allowed roots.
 function handleMarkdownPreviewLinkClick(event) {
   const a = event.target.closest?.('a');
   if (!a) return;
   const container = event.currentTarget;
   const href = a.getAttribute('href') || '';
   if (!href || href.startsWith('#')) return;
+  if (/^file:/i.test(href)) {
+    event.preventDefault();
+    const resolved = localPathFromFileHref(href);
+    if (resolved) openMarkdownPreviewPathLink(container, resolved);
+    return;
+  }
   if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//')) {
     event.preventDefault();
     window.open(a.href, '_blank', 'noopener,noreferrer');
@@ -3013,11 +3217,7 @@ function handleMarkdownPreviewLinkClick(event) {
   if (!clean) return;
   const basePath = container?.dataset?.basePath || '/';
   const resolved = joinAndNormalize(clean.startsWith('/') ? '/' : basePath, clean);
-  const owner = openFileOwnerSessionsForPath(container?.dataset?.mdPath || '')[0] || undefined;
-  Promise.resolve(openFileInEditor(resolved, basenameOf(resolved), {
-    viewMode: isMarkdownPath(resolved) ? 'preview' : 'edit',
-    ownerSession: owner,
-  })).catch(() => showToast(t('preview.openFailed', {path: resolved}), '', {level: 'error'}));
+  openMarkdownPreviewPathLink(container, resolved);
 }
 
 function isMarkdownPath(path) {

@@ -46,6 +46,8 @@
   "pref.appearance.terminal_font_size.help": "xterm.js 窗格使用的字型大小。超出範圍的值會被限制。",
   "pref.appearance.editor_font_size.label": "編輯器字型大小",
   "pref.appearance.editor_font_size.help": "編輯器文字、程式碼標示與算繪預覽使用的字型大小。",
+  "pref.appearance.preview_font_size.label": "Preview font size",
+  "pref.appearance.preview_font_size.help": "Font size used by rendered Markdown, HTML, and code previews. Defaults one size larger than the editor font.",
   "pref.appearance.editor_dark_color_scheme.label": "深色編輯器配色方案",
   "pref.appearance.editor_dark_color_scheme.help": "編輯器深色/淺色切換使用的深色調色盤。",
   "pref.appearance.editor_light_color_scheme.label": "淺色編輯器配色方案",
@@ -250,7 +252,7 @@
   "changes.title": "已修改檔案",
   "detail.repos.label": "儲存庫",
   "detail.repos.more": "此工作階段中另有 {count} 個儲存庫",
-  "changes.titleForSession": "工作階段「{session}」的已修改檔案",
+  "changes.titleForSession": "已修改檔案「{session}」",
   "changes.refresh": "重新載入",
   "changes.refresh.title": "重新整理已修改檔案",
   "changes.hide": "隱藏已修改檔案",
@@ -309,6 +311,9 @@
   "editor.mode.edit": "編輯",
   "editor.mode.preview": "預覽",
   "editor.mode.split": "分割檢視",
+  "editor.previewFont.aria": "Preview font size",
+  "editor.previewFont.decrease": "Decrease preview font size",
+  "editor.previewFont.increase": "Increase preview font size",
   "editor.sidePreview": "開啟側邊預覽",
   "editor.toggleLineNumbers": "切換行號",
   "editor.toggleWordWrap": "切換自動換行",
@@ -552,5 +557,7 @@
   "menu.view.sortTabs.attention.detail": "需要關注的工作階段置頂",
   "menu.view.sortTabs.name": "依名稱",
   "pref.file_explorer.index_refresh_seconds.label": "Index auto-refresh interval",
-  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search."
+  "pref.file_explorer.index_refresh_seconds.help": "How often the quick-open index is refreshed in the background (seconds). Set to 0 to only rebuild when you search.",
+  "pref.file_explorer.companion_dirs.label": "Companion directories",
+  "pref.file_explorer.companion_dirs.help": "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Add repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates."
 }

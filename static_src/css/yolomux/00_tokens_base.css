@@ -272,10 +272,10 @@ body.theme-light {
   --pane-meta-branch: #243245;
   --pane-meta-path: #111827;
   --pane-meta-desc: #4b5563;
-  /* Light mode uses a RED separator (dark mode keeps amber/yellow). */
-  --pane-resizer-bg: rgba(220, 38, 38, 0.80);
-  --pane-resizer-hover-bg: rgba(239, 68, 68, 0.96);
-  --pane-resizer-shadow: rgba(185, 28, 28, 0.62);
+  /* Light mode uses a blue separator (dark mode keeps amber/yellow). */
+  --pane-resizer-bg: rgba(37, 99, 235, 0.72);
+  --pane-resizer-hover-bg: rgba(37, 99, 235, 0.96);
+  --pane-resizer-shadow: rgba(29, 78, 216, 0.48);
   --bg: #f6f8fb;
   --panel: #ffffff;
   --panel-inactive: #eef2f7;

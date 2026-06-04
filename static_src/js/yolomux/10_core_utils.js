@@ -411,9 +411,6 @@ function setFocusedPanelItem(item, options = {}) {
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
   if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item);
-  if (isTmuxSession(item) && document.querySelector('.file-explorer-changes-panel')) {
-    switchFileExplorerChangesSession(item);
-  }
   if (isPreferencesItem(item) && options.focusPreferencesSearch !== false) {
     focusFreshPreferencesSearchSoon();
   }
@@ -447,6 +444,7 @@ function focusTerminalWhenAutoFocus(session, delay = 0) {
 }
 
 function focusTerminalFromUserAction(session, delay = 0) {
+  noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session);
   const run = () => terminals.get(session)?.term?.focus?.();
   if (delay > 0) setTimeout(run, delay);

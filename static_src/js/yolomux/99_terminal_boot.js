@@ -1276,7 +1276,10 @@ function startTerminal(session) {
     const socket = current?.socket;
     if (socket?.readyState === WebSocket.OPEN) {
       const filtered = stripTerminalQueryResponses(data);
-      if (filtered) socket.send(JSON.stringify({type: 'input', data: filtered}));
+      if (filtered) {
+        noteFileExplorerChangesSessionInteraction(session);
+        socket.send(JSON.stringify({type: 'input', data: filtered}));
+      }
     }
   });
   connectTerminalSocket(session, item);

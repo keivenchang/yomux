@@ -25,6 +25,7 @@ from .github_client import github_pull_request_url
 from .github_client import pull_request_status_label  # noqa: F401 - re-exported for existing metadata callers
 from .github_client import summarize_github_checks  # noqa: F401 - re-exported for existing metadata callers
 from .linear_client import linear_issue_metadata
+from .settings import settings_payload
 from .workdir import numbered_session_workdir
 from .workdir import session_workdir
 
@@ -469,6 +470,10 @@ def candidate_session_cwds(info: SessionInfo) -> list[str]:
     numbered_workdir = numbered_session_workdir(info.session)   # fallback: numbered workdir
     if numbered_workdir and numbered_workdir.is_dir():
         paths.append(str(numbered_workdir))
+    for raw in settings_payload().get("settings", {}).get("file_explorer", {}).get("companion_dirs", []):
+        expanded = str(Path(raw).expanduser()) if raw else ""
+        if expanded:
+            paths.append(expanded)
     return unique_existing_paths(paths)
 
 def unique_existing_paths(paths: list[str]) -> list[str]:

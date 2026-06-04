@@ -44,13 +44,16 @@
   border-color: var(--brand-green);
   color: #f2ffe8;
 }
-.changes-body {
+.changes-body,
+.file-explorer-changes-panel {
   --changes-row-hover-bg: rgba(118, 185, 0, 0.10);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
   --changes-indent-line: rgba(148, 163, 184, 0.18);
-  --changes-folder-text: var(--text);
+  --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
   --changes-icon-text: #a7c7ff;
+}
+.changes-body {
   /* DOIT.16 C3: overlay-root must not be the scroll container (see .preferences-body) — scrolling
      moves to the inner .changes-scroll so the inactive-pane dim covers the full pane at any scroll. */
   min-height: 0;
@@ -86,8 +89,8 @@
 }
 .changes-control select,
 .changes-refresh,
-.diff-ref-control input,
-.diff-ref-select {
+.diff-ref-input,
+.diff-ref-control input {
   height: 24px;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -110,26 +113,18 @@
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;
 }
+.diff-ref-input,
 .diff-ref-control input {
   width: clamp(64px, 10vw, 130px);
   padding: 0 5px;
   font-size: var(--ui-font-size-xs);
 }
-.diff-ref-select {
-  width: clamp(92px, 16vw, 220px);
-  min-width: 0;
-  padding: 0 5px;
-  font: var(--ui-font-size-xs) var(--mono-font);
-}
 .diff-ref-controls.compact {
   gap: 3px;
 }
+.diff-ref-controls.compact .diff-ref-input,
 .diff-ref-controls.compact .diff-ref-control input {
   width: clamp(46px, 7vw, 82px);
-  height: 20px;
-}
-.diff-ref-controls.compact .diff-ref-select {
-  width: clamp(54px, 10vw, 110px);
   height: 20px;
 }
 .changes-refresh {
@@ -222,7 +217,17 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--accent-gold);
-  font-weight: 700;
+  font-weight: 800;
+}
+.changes-repo-totals {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-inline-start: auto;
+  white-space: nowrap;
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
 }
 .changes-repo-compare-meta {
   display: inline-flex;
@@ -255,7 +260,7 @@
   font-weight: 600;
 }
 .changes-repo-refs .diff-ref-controls {
-  margin-inline-start: auto;
+  margin-inline-start: 0;
 }
 .changes-uploaded-toggle {
   width: 100%;
@@ -303,7 +308,7 @@
   border-top: 1px solid var(--changes-indent-line);
   background: var(--changes-folder-bg);
   color: var(--changes-folder-text);
-  font: 500 var(--ui-font-size-sm)/1.15 var(--ui-font);
+  font: 400 var(--ui-font-size-sm)/1.15 var(--ui-font);
   text-align: start;
   cursor: pointer;
 }
@@ -323,6 +328,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--changes-folder-text);
+  font-weight: 400;
 }
 .changes-file-row {
   display: grid;
@@ -594,7 +601,8 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px 16px;
-  justify-content: end;
+  justify-content: start;
+  padding-inline-start: var(--preferences-control-left-indent);
 }
 .preferences-radio {
   display: inline-flex;
@@ -992,6 +1000,8 @@ body.theme-light .command-palette-view-chip {
   white-space: nowrap;
 }
 .preferences-setting-control {
+  --preferences-control-left-indent: 14px;
+  --preferences-number-control-width: 11ch;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -1021,8 +1031,8 @@ body.theme-light .preferences-setting-control select,
 body.theme-light .preferences-setting-control textarea,
 body.theme-light .changes-control select,
 body.theme-light .changes-refresh,
-body.theme-light .diff-ref-control input,
-body.theme-light .diff-ref-select {
+body.theme-light .diff-ref-input,
+body.theme-light .diff-ref-control input {
   background: #ffffff;
   color: var(--text);
 }
@@ -1034,14 +1044,19 @@ body.theme-light .changes-error {
   color: #b91c1c;
 }
 body.theme-light .changes-body,
+body.theme-light .file-explorer-changes-panel,
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
   --changes-row-hover-bg: rgba(31, 111, 235, 0.08);
   --changes-folder-bg: #f6f8fa;
-  --changes-indent-line: rgba(100, 116, 139, 0.26);
-  --changes-folder-text: #1f2937;
+  --changes-indent-line: rgba(100, 116, 139, 0.12);
+  --changes-folder-text: var(--accent-gold);
   --changes-path-text: #59636e;
   --changes-icon-text: #1d4ed8;
+}
+body.theme-light .changes-body,
+body.theme-light .changes-toolbar,
+body.theme-light .changes-repo-group {
   color: var(--text);
   background: var(--panel);
   border-color: var(--line);
@@ -1060,7 +1075,7 @@ body.theme-light .changes-repo-title {
 }
 body.theme-light .changes-file-row {
   color: var(--text);
-  border-top-color: rgba(100, 116, 139, 0.24);
+  border-top-color: rgba(100, 116, 139, 0.13);
 }
 body.theme-light .changes-file-row:hover {
   background: rgba(95, 152, 0, 0.10);
@@ -1078,35 +1093,45 @@ body.theme-light .keyboard-shortcut-row kbd {
 }
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
 }
 .preferences-setting-control.setting-type-number {
-  grid-template-columns: minmax(6ch, 8ch) auto auto;
-  justify-content: end;
+  grid-template-columns: calc(var(--preferences-control-left-indent) + var(--preferences-number-control-width)) auto minmax(0, 1fr) auto;
 }
-/* #257: right-align select + text controls the same way the number controls are, so the dropdowns
-   line up under the number inputs at the right edge (the reset button still trails at the far edge). */
 .preferences-setting-control.setting-type-select,
 .preferences-setting-control.setting-type-text {
-  justify-content: end;
+  justify-content: start;
 }
 .preferences-setting-control.setting-type-number input[type="number"] {
-  width: 8ch;
+  width: var(--preferences-number-control-width);
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
+  padding-inline-end: 18px;
+}
+.preferences-setting-control.setting-type-number .preferences-setting-suffix {
+  grid-column: 2;
+  justify-self: start;
+}
+.preferences-setting-control.setting-type-number .preferences-reset {
+  grid-column: 4;
+  justify-self: end;
 }
 .preferences-setting-control.setting-type-text input[type="text"],
 .preferences-setting-control.setting-type-select select {
-  width: min(100%, 24ch);
-  /* C4: the first grid track is minmax(0, 1fr), so it absorbs all free space and justify-content on the
-     row has nothing to align. Right-align the control INSIDE its own track instead — its right edge then
-     lands 6px (the grid gap) left of Reset, matching where the number controls' px suffix ends. Wide
-     rows below force width:100%, so justify-self is a harmless no-op there. */
-  justify-self: end;
+  width: min(calc(100% - var(--preferences-control-left-indent)), 24ch);
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
 }
 .preferences-setting-control.setting-type-list textarea,
 .preferences-setting-control.setting-type-textarea textarea {
-  width: 100%;
+  width: calc(100% - var(--preferences-control-left-indent));
+  justify-self: start;
+  margin-inline-start: var(--preferences-control-left-indent);
 }
 .preferences-setting-row--wide .preferences-setting-control textarea {
   grid-column: 1 / -1;
+  width: 100%;
+  margin-inline-start: 0;
   min-height: min(34vh, 15lh);
 }
 /* #38: long-value text/select fields (e.g. the upload filename template, the YOLO rule path) render
@@ -1114,6 +1139,7 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-setting-row--wide .preferences-setting-control.setting-type-text input[type="text"],
 .preferences-setting-row--wide .preferences-setting-control.setting-type-select select {
   width: 100%;
+  margin-inline-start: 0;
 }
 .preferences-setting-row--wide .preferences-reset {
   justify-self: end;

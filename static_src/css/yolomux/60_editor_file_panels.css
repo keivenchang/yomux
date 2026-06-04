@@ -473,7 +473,7 @@ body.editor-theme-light .file-editor-image {
   background: var(--editor-preview-bg);
   color: var(--text);
   font-family: var(--ui-font);
-  font-size: var(--editor-font-size);
+  font-size: var(--editor-preview-font-size);
   line-height: 1.35;
 }
 .file-editor-preview-pane[hidden] { display: none; }
@@ -554,6 +554,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   grid-template-rows: auto minmax(0, 1fr);
 }
 .panel.file-explorer-panel .file-explorer-head {
+  --pane-bar-bg: var(--panel2);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
@@ -573,7 +574,7 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   grid-column: 1 / -1;
 }
 .panel.file-explorer-panel.active-pane .file-explorer-head {
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   color: var(--text);
 }
 .file-explorer-title {
@@ -734,6 +735,7 @@ body.resizing-file-explorer-changes {
   box-shadow: 0 0 0 1px var(--drop-outline-shadow);
 }
 .file-explorer-changes-panel {
+  --pane-bar-bg: var(--panel2);
   flex: 0 0 var(--file-explorer-changes-size);
   min-height: var(--file-explorer-changes-min-block-size);
   container-type: inline-size;
@@ -743,6 +745,10 @@ body.resizing-file-explorer-changes {
   scrollbar-color: rgba(118, 185, 0, 0.55) rgba(255, 255, 255, 0.06);
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
   padding: 5px;
+}
+.file-explorer-changes-panel:hover,
+.file-explorer-changes-panel:focus-within {
+  --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 body.theme-light .file-explorer-pane,
 body.theme-light .file-explorer-tree-panel {
@@ -788,7 +794,7 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
   padding: 4px 5px;
   margin: -5px -5px 5px;
   border-bottom: 1px solid var(--line);
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   color: var(--text);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-xs);
@@ -796,7 +802,7 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
 }
 body.theme-light .file-explorer-changes-head {
   color: var(--text);
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
   border-color: var(--line);
 }
 .file-explorer-changes-head .changes-title {
@@ -846,12 +852,8 @@ body.theme-light .file-explorer-changes-head {
   align-items: center;
   gap: 4px;
 }
-/* #44(d): compact the Modified-files header chrome so the section spends its height on files. The
-   comparison box collapses to one tight, borderless line and the close X is a small square. */
+/* #44(d): compact the Modified-files status chrome so the section spends its height on files. */
 .file-explorer-changes-panel .changes-comparison-head {
-  /* #253 (image 034): this "Comparing … N files changed · +N −N" line is an informational caption, not
-     a control — strip the box chrome (border / panel background / radius / padding from the base rule)
-     so it blends as plain text. The bold title + green/red ±counts keep their own colors. */
   flex-wrap: nowrap;
   gap: 4px 8px;
   margin-bottom: 4px;
@@ -874,8 +876,6 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   flex: 0 0 auto;
   white-space: nowrap;
 }
-/* C15 (compact header): one line — "Comparing FROM with TO" on the left (muted, ellipsized), the +A −R
-   totals pinned right. No file-count / session (already in the title + repo-row count). */
 .file-explorer-changes-panel .changes-comparison-head.compact {
   display: flex;
   align-items: baseline;
@@ -888,64 +888,14 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   font-weight: 600;
   color: var(--muted);
 }
-.file-explorer-changes-panel .changes-comparison-head.compact .changes-comparison-totals {
-  flex: 0 0 auto;
-  white-space: nowrap;
+.file-explorer-changes-panel .changes-repo-refs.compact .diff-ref-inline {
+  min-width: 0;
 }
-/* C15 follow-up: the FROM/TO SHA pulldowns sit inline in the "Comparing <FROM> with <TO>" sentence on the
-   compact line — keep the selects compact so the line fits, and don't clip them with an ellipsis. */
-.file-explorer-changes-panel .changes-comparison-head.compact .diff-ref-inline {
-  display: inline;
-}
-.file-explorer-changes-panel .changes-comparison-head.compact .diff-ref-inline .diff-ref-select {
+.file-explorer-changes-panel .changes-repo-refs.compact .diff-ref-inline .diff-ref-input {
   max-width: 16ch;
   margin: 0 2px;
   vertical-align: baseline;
   font-size: var(--ui-font-size-xs);
-}
-/* C15: the repo row is bare; its per-repo comparison, ahead/behind, and FROM/TO pickers live in a hover
-   popover. The popover is a DESCENDANT of the wrap, so hovering it keeps the wrap :hover -> it stays open
-   and its FROM/TO <select>s are reachable. All tokens flip with the theme. */
-.changes-repo-head-wrap {
-  position: relative;
-}
-.changes-repo-popover {
-  display: none;
-  position: absolute;
-  inset-inline-start: 0;
-  top: 100%;
-  z-index: 6;
-  min-width: max(240px, 100%);
-  max-width: 380px;
-  margin-top: 2px;
-  padding: 8px 10px;
-  flex-direction: column;
-  gap: 6px;
-  background: var(--panel2);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  box-shadow: var(--shadow-elevated);
-  font-size: var(--ui-font-size-xs);
-  color: var(--text);
-  text-align: start;
-}
-.changes-repo-head-wrap:hover .changes-repo-popover {
-  display: flex;
-}
-.changes-repo-popover-path {
-  font-weight: 700;
-  overflow-wrap: anywhere;
-}
-.changes-repo-popover-compare {
-  color: var(--muted);
-}
-.changes-repo-popover .changes-repo-compare-meta {
-  color: var(--muted);
-}
-.changes-repo-popover .diff-ref-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 8px;
 }
 .file-explorer-changes-head .changes-close {
   height: 20px;
@@ -1000,11 +950,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   .file-explorer-changes-head .diff-ref-control {
     min-width: 0;
   }
+  .file-explorer-changes-head .diff-ref-input,
   .file-explorer-changes-head .diff-ref-control input {
-    width: auto;
-    min-width: 0;
-  }
-  .file-explorer-changes-head .diff-ref-select {
     width: auto;
     min-width: 0;
   }
@@ -1335,6 +1282,7 @@ body.editor-theme-light .file-editor-content {
 .file-editor-diff-ref-panel[hidden] {
   display: none;
 }
+.file-editor-diff-ref-panel .diff-ref-input,
 .file-editor-diff-ref-panel .diff-ref-control input {
   width: clamp(42px, 6vw, 76px);
 }
@@ -1348,6 +1296,38 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-toolbar-separator[hidden] {
   display: none;
+}
+.file-editor-preview-font-panel {
+  height: 20px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--muted);
+}
+.file-editor-preview-font-panel[hidden] {
+  display: none;
+}
+.file-editor-preview-font-panel button {
+  height: 20px;
+  min-width: 24px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
+  cursor: pointer;
+}
+.file-editor-preview-font-panel button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+.file-editor-preview-font-value {
+  min-width: 2.2ch;
+  text-align: center;
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+  color: var(--text);
 }
 .file-editor-gutter-panel,
 .file-editor-wrap-panel,
@@ -1421,6 +1401,7 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-mode-control-panel button:hover,
 .file-editor-mode-control-panel button.active,
+.file-editor-preview-font-panel button:not(:disabled):hover,
 .file-editor-gutter-panel:hover,
 .file-editor-gutter-panel.active,
 .file-editor-wrap-panel:hover,
@@ -2177,14 +2158,14 @@ body.editor-theme-light .file-editor-code-preview .md-code {
   background: var(--editor-preview-bg);
   color: var(--text);
   font-family: var(--ui-font);
-  font-size: var(--ui-font-size);
+  font-size: var(--editor-preview-font-size);
   line-height: 1.35;
 }
 .file-editor-preview-pane.code-preview-body,
 .file-editor-preview-pane-panel.code-preview-body {
   padding: 8px 10px;
   font-family: var(--mono-font);
-  font-size: var(--editor-font-size);
+  font-size: var(--editor-preview-font-size);
   line-height: var(--editor-line-height);
 }
 .file-editor-image-panel {

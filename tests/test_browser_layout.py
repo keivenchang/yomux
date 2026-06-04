@@ -378,7 +378,7 @@ def finder_click_toolbar_fixture_html():
         </style>
       </head>
       <body>
-        <article id="finder-panel" class="panel file-explorer-panel">
+        <article id="finder-panel" class="panel file-explorer-panel active-pane">
           <div class="panel-head file-explorer-head">
             <div class="pane-tabs" hidden></div>
             <div class="file-explorer-toolbar">
@@ -389,7 +389,16 @@ def finder_click_toolbar_fixture_html():
               </div>
             </div>
           </div>
-          <div class="file-explorer-pane"></div>
+          <div class="file-explorer-pane">
+            <div class="file-explorer-tree-panel" tabindex="0"></div>
+            <div id="modified-files-panel" class="file-explorer-changes-panel" tabindex="0">
+              <div id="modified-files-head" class="file-explorer-changes-head">
+                <span class="changes-title">Modified Files '5'</span>
+                <button type="button" class="changes-refresh">Refresh</button>
+                <button type="button" class="changes-close">x</button>
+              </div>
+            </div>
+          </div>
         </article>
         <article id="terminal-panel" class="panel active-pane">
           <div class="panel-head">
@@ -994,6 +1003,58 @@ def test_topbar_uses_ui_font_size_and_compact_actions(browser, tmp_path):
     )
     assert tiny_metrics["actionHeight"] <= 18
     assert tiny_metrics["paneTabHeight"] <= 18
+
+
+def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(browser, tmp_path):
+    def theme_tokens():
+        return browser.execute_script(
+            """
+            document.body.classList.add('theme-light');
+            function tokenColor(name) {
+              const probe = document.createElement('div');
+              probe.style.background = `var(${name})`;
+              probe.style.position = 'absolute';
+              probe.style.left = '-1000px';
+              probe.style.top = '-1000px';
+              document.body.appendChild(probe);
+              const color = getComputedStyle(probe).backgroundColor;
+              probe.remove();
+              return color;
+            }
+            return {
+              neutral: tokenColor('--panel2'),
+              green: tokenColor('--pane-tab-strip-bg'),
+            };
+            """
+        )
+
+    def background(selector):
+        return browser.execute_script("return getComputedStyle(document.querySelector(arguments[0])).backgroundColor", selector)
+
+    def wait_background(selector, expected):
+        WebDriverWait(browser, 2).until(lambda _driver: background(selector) == expected)
+
+    load_topbar_font_fixture(browser, tmp_path)
+    tokens = theme_tokens()
+    wait_background("#topbar-fixture", tokens["neutral"])
+    ActionChains(browser).move_to_element(browser.find_element("id", "topbar-fixture")).perform()
+    wait_background("#topbar-fixture", tokens["green"])
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
+    wait_background("#topbar-fixture", tokens["neutral"])
+
+    load_finder_click_toolbar_fixture(browser, tmp_path)
+    tokens = theme_tokens()
+    wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
+    wait_background("#modified-files-head", tokens["neutral"])
+    ActionChains(browser).move_to_element(browser.find_element("css selector", "#finder-panel .file-explorer-head")).perform()
+    wait_background("#finder-panel .file-explorer-head", tokens["green"])
+    wait_background("#modified-files-head", tokens["neutral"])
+    ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
+    wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
+    wait_background("#modified-files-head", tokens["neutral"])
+    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
+    wait_background("#modified-files-head", tokens["green"])
 
 
 def test_platform_controls_use_pc_glyphs(browser, tmp_path):
