@@ -1436,18 +1436,31 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   }
   writeStoredFileExplorerIndexedDirs();
   // Mirror the set into the file_explorer.indexed_dirs setting so the Preferences list stays in sync
-  // (skip when this change WAS driven by the setting, to avoid a write-back loop).
-  if (!applyingIndexedDirsSetting) persistIndexedDirsSetting();
+  // (skip when this change WAS driven by the setting, to avoid a write-back loop). C11: pass the single
+  // add/remove so the save MERGES into the shared list instead of overwriting it with this page's set.
+  if (!applyingIndexedDirsSetting) persistIndexedDirsSetting(indexed ? {add: normalized} : {remove: normalized});
   updateFileExplorerIndexedDirectoryRows();
   if (statusEl) {
     statusEl.textContent = indexed ? `indexed ${compactHomePath(normalized)}` : `removed index ${compactHomePath(normalized)}`;
   }
 }
 
-function persistIndexedDirsSetting() {
-  const dirs = fileExplorerIndexedRootList();
+function persistIndexedDirsSetting(op = {}) {
+  // C11: MERGE the change into the current shared file_explorer.indexed_dirs rather than overwriting it
+  // with this page's whole set. Two browser origins (:7777 vs :7778) do NOT share localStorage, so a
+  // whole-list save from one would drop the other's dirs and make rows flip indexed/un-indexed on the
+  // next settings poll. An explicit {add}/{remove} applies just that one op to the shared list; a bare
+  // save (initial localStorage->setting migration) only UNIONS this page's dirs in, never removing.
   const current = initialSetting('file_explorer.indexed_dirs', []);
-  const currentList = Array.isArray(current) ? current : [];
+  const currentNorm = (Array.isArray(current) ? current : []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean);
+  const set = new Set(currentNorm);
+  if (op.add) set.add(op.add);
+  if (op.remove) set.delete(op.remove);
+  if (!op.add && !op.remove) {
+    for (const dir of fileExplorerIndexedRootList()) set.add(dir);
+  }
+  const dirs = compactNestedPaths(Array.from(set));
+  const currentList = compactNestedPaths(currentNorm);
   if (currentList.length === dirs.length && currentList.every((value, index) => value === dirs[index])) return;
   saveSettingsPatch({file_explorer: {indexed_dirs: dirs}}, {silent: true}).catch(() => {});
 }
@@ -1764,6 +1777,38 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   } catch (error) {
     statusErr(`delete failed: ${esc(error)}`);
   }
+}
+
+// C10: keyboard delete for the Finder tree. macOS Finder deletes the selection with Command-Delete (plain
+// Delete is a text-edit key on Mac), so on a Mac UI require metaKey+Backspace/Delete; on PC/File Explorer a
+// plain Delete works. Returns true once it has consumed the event so the global tab-close shortcut (which
+// also binds Mod+Delete) does NOT also fire. Guarded against text/rename inputs, readonly, and no selection.
+function handleFileExplorerDeleteShortcut(event) {
+  const key = String(event.key || '').toLowerCase();
+  if (key !== 'backspace' && key !== 'delete') return false;
+  if (isMacPlatform()) {
+    if (!(event.metaKey === true && event.ctrlKey !== true && event.altKey !== true)) return false;
+  } else if (key !== 'delete' || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+    return false;
+  }
+  // Only when the Finder is the active surface and not while editing text (rename input, etc.).
+  if (!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)) return false;
+  if (!globalShortcutTargetAllowsAppAction(event.target)) return false;
+  const paths = compactNestedPaths(Array.from(fileExplorerSelectedPaths));
+  if (!paths.length) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  if (readOnlyMode) {
+    statusErr('readonly access cannot delete files');
+    return true;
+  }
+  const primary = paths[0];
+  const row = document.querySelector(`.file-tree-row[data-path="${cssEscape(primary)}"]`);
+  const entry = row
+    ? {kind: row.dataset.kind, name: row.dataset.name || basenameOf(primary), is_repo: row.dataset.isRepo === 'true'}
+    : {kind: 'file', name: basenameOf(primary)};
+  deleteFileTreePath(primary, entry, paths);
+  return true;
 }
 
 function beginFileTreeRename(row, fullPath, entry) {
@@ -2587,7 +2632,8 @@ async function refreshOpenFileDiff(path, options = {}) {
   state.diffLoading = true;
   state._diffLoadingPromise = (async () => {
     try {
-      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}`);
+      // C6: diff the file against ITS repo's FROM/TO (not a global pair), so a per-repo selection applies.
+      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString(fileRepoForPath(path))}`);
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || response.status);
       applyOpenFileDiffPayload(state, payload);

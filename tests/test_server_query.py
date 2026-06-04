@@ -11,7 +11,24 @@ from yolomux_lib import server as server_module
 from yolomux_lib.server import Handler
 from yolomux_lib.server import parse_query_float
 from yolomux_lib.server import parse_query_int
+from yolomux_lib.server import parse_repo_refs_param
 from yolomux_lib.server import ws_resize_dimensions
+
+
+def test_parse_repo_refs_param_decodes_per_repo_overrides():
+    # C6: decode the per-repo FROM/TO JSON map; keep only well-formed string ref pairs.
+    raw = json.dumps({"/repo/a": {"from": "abc123", "to": "current"}, "/repo/b": {"from": "  ", "to": "HEAD"}})
+    parsed = parse_repo_refs_param(raw)
+    assert parsed == {"/repo/a": {"from": "abc123", "to": "current"}, "/repo/b": {"to": "HEAD"}}
+
+
+def test_parse_repo_refs_param_rejects_garbage():
+    assert parse_repo_refs_param(None) is None
+    assert parse_repo_refs_param("") is None
+    assert parse_repo_refs_param("not json") is None
+    assert parse_repo_refs_param(json.dumps([1, 2, 3])) is None
+    # an entry with no usable string refs is dropped; an all-empty map collapses to None
+    assert parse_repo_refs_param(json.dumps({"/repo/a": {"from": 5}})) is None
 
 
 def test_parse_query_int_defaults_and_valid_values():

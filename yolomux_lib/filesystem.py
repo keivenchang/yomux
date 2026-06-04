@@ -491,6 +491,39 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                 "truncated": indexed_truncated,
                 "files": indexed_results,
             }
+        if not tokens:
+            # C11: an EMPTY query on a full-tree root used to fall through to a cold recursive walk just to
+            # return the first N files. When the index is ready, serve a capped most-recent slice from it
+            # instantly; when it is still warming, return nothing (the client shows recent/open files)
+            # rather than paying that cold walk.
+            def _recent(path_str: str, name: str, rel: str) -> dict[str, Any]:
+                return {
+                    "name": name,
+                    "path": path_str,
+                    "relative_path": rel,
+                    "kind": "file",
+                    "uploaded": is_generated_upload_name(Path(path_str)),
+                }
+            if index.ready:
+                recent_results, recent_truncated = file_index.recent_entries(index, max_results, _recent)
+                for entry in recent_results:
+                    _annotate_search_dedupe_fields(entry)
+                return {
+                    "root": str(root),
+                    "query": "",
+                    "limit": max_results,
+                    "truncated": recent_truncated,
+                    "files": recent_results,
+                    "index_state": "ready",
+                }
+            return {
+                "root": str(root),
+                "query": "",
+                "limit": max_results,
+                "truncated": False,
+                "files": [],
+                "index_state": "warming",
+            }
     results: list[dict[str, Any]] = []
     visited_dirs = 0
     visited_files = 0

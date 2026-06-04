@@ -42,7 +42,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["editor_color_scheme"] == "dark"
     assert settings["appearance"]["editor_dark_color_scheme"] == "dark"
     assert settings["appearance"]["editor_light_color_scheme"] == "yolomux-light"
-    assert settings["appearance"]["editor_cursor_style"] == "line"
+    assert settings["appearance"]["editor_cursor_style"] == "block"  # C3: invalid choice clamps to the new block default
     assert settings["appearance"]["editor_cursor_color"] == "yellow"  # invalid choice clamps to the default
     assert settings["appearance"]["file_explorer_font_size"] == 8
     assert settings["appearance"]["tab_width"] == 120

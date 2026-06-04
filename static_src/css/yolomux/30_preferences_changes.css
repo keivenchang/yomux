@@ -233,6 +233,28 @@
 .changes-repo-count {
   color: var(--muted);
 }
+/* C6: per-repo FROM/TO controls + comparison title row, directly under each repo header. */
+.changes-repo-refs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  font-size: var(--ui-font-size-xs);
+  color: var(--muted);
+}
+.changes-repo-compare-title {
+  color: var(--muted);
+}
+.changes-repo-refs-error {
+  color: var(--accent-gold);
+  font-weight: 600;
+}
+.changes-repo-refs .diff-ref-controls {
+  margin-inline-start: auto;
+}
 .changes-uploaded-toggle {
   width: 100%;
   border: 0;
@@ -333,6 +355,12 @@
 .changes-file-row:hover {
   background: var(--changes-row-hover-bg);
 }
+/* C5: Finder-like single-click selection highlight — the hover tint plus a gold left bar (the same
+   --accent-gold marker the file tree uses for the current row). Both tokens flip with the theme. */
+.changes-file-row.selected {
+  background: var(--changes-row-hover-bg);
+  box-shadow: inset 3px 0 0 var(--accent-gold);
+}
 .changes-file-row:disabled {
   cursor: default;
   opacity: 0.65;
@@ -419,6 +447,7 @@
 .changes-file-agent {
   display: inline-flex;
   align-items: center;
+  gap: 2px;  /* C5: space multiple agent icons when a file was touched by both Claude and Codex */
   flex: 0 0 auto;
 }
 .changes-file-agent .agent-icon {
@@ -1061,6 +1090,11 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-setting-control.setting-type-text input[type="text"],
 .preferences-setting-control.setting-type-select select {
   width: min(100%, 24ch);
+  /* C4: the first grid track is minmax(0, 1fr), so it absorbs all free space and justify-content on the
+     row has nothing to align. Right-align the control INSIDE its own track instead — its right edge then
+     lands 6px (the grid gap) left of Reset, matching where the number controls' px suffix ends. Wide
+     rows below force width:100%, so justify-self is a harmless no-op there. */
+  justify-self: end;
 }
 .preferences-setting-control.setting-type-list textarea,
 .preferences-setting-control.setting-type-textarea textarea {

@@ -42,7 +42,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "editor_color_scheme": "dark",
         "editor_dark_color_scheme": "dark",
         "editor_light_color_scheme": "yolomux-light",
-        "editor_cursor_style": "line",
+        "editor_cursor_style": "block",
         "editor_cursor_color": "yellow",
         "file_explorer_font_size": 13,
         "tab_width": 180,

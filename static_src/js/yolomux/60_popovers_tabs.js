@@ -920,11 +920,13 @@ function startSessionDrag(event, session, sourceSlot = null) {
   // #47: use the NATIVE drag image — a one-time compositor snapshot of the tab itself — instead of the
   // JS clone-follow preview. That removes the per-move reposition, the two document capture listeners,
   // and the animated heavyweight clone that caused the "won't budge" first drag and the per-move jank.
+  // C12 F2: take the grab offset from event.offsetX/offsetY (already on the event) instead of
+  // getBoundingClientRect(), which forced a synchronous layout reflow inside the handler — coldest on the
+  // first drag after load — before the browser could start the drag.
   const source = event.currentTarget;
-  const rect = source?.getBoundingClientRect?.();
-  if (rect && event.dataTransfer?.setDragImage) {
-    const offsetX = Math.max(0, Math.min(rect.width || 0, (event.clientX || 0) - rect.left));
-    const offsetY = Math.max(0, Math.min(rect.height || 0, (event.clientY || 0) - rect.top));
+  if (source && event.dataTransfer?.setDragImage) {
+    const offsetX = Math.max(0, Number(event.offsetX) || 0);
+    const offsetY = Math.max(0, Number(event.offsetY) || 0);
     event.dataTransfer.setDragImage(source, offsetX, offsetY);
   }
   resetDragTabRectCache();

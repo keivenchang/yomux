@@ -415,9 +415,19 @@ async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = de
   applyLayoutSlots(next, {focusSession: session, prune: false});
 }
 
+// C12 F1: is this session's terminal already attached (socket open/connecting)? A live pane does not need
+// the blocking /api/ensure-session round-trip (two tmux subprocesses) on a move — it is already running.
+function sessionTerminalIsLive(session) {
+  const readyState = terminals.get(session)?.socket?.readyState;
+  return readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING;
+}
+
 async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0) {
   if (!isLayoutItem(session) || !targetSlot) return;
-  if (isTmuxSession(session)) {
+  // C12 F1: only pay the ensure-session round-trip when the pane is NOT already running. For a live pane
+  // (the common left<->right move) apply the layout optimistically; applyLayoutSlots -> ensureTerminalRunning
+  // still reconciles/recovers if the session turns out to be gone (its socket would no longer be live).
+  if (isTmuxSession(session) && !sessionTerminalIsLive(session)) {
     const ensured = await ensureSession(session);
     if (!ensured) return;
   }
@@ -965,7 +975,49 @@ function projectMetaHtml(session, info) {
   }
   const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
   if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
+  // C9: a session can touch several repos; the detail line shows the focused one. When there are more,
+  // append a "+N repos" chip that opens a popover listing every touched repo (keeps the line one row tall).
+  const repos = Array.isArray(project.repos) ? project.repos : [];
+  if (repos.length > 1) {
+    const extra = repos.length - 1;
+    parts.push(`<button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: extra}))}" aria-label="${esc(t('detail.repos.more', {count: extra}))}">+${extra} ${esc(t('detail.repos.label'))}</button>`);
+  }
   return parts.length ? metaJoin(parts) : '<span class="meta-muted">git checkout detected</span>';
+}
+
+// C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
+// ahead/behind. Clicking a row scopes the Finder to that repo. Reuses the shared context-menu controller.
+function repoChipMenuRowHtml(repo) {
+  const label = compactHomePath(repo.root || '');
+  const bits = [];
+  if (repo.branch) bits.push(`<span class="meta-branch">${esc(shortBranch(repo.branch))}</span>`);
+  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) bits.push(`<span class="meta-muted">dirty ${repo.dirty_count}</span>`);
+  if (Number.isFinite(repo.ahead) && repo.ahead > 0) bits.push(`<span class="meta-muted">ahead ${repo.ahead}</span>`);
+  if (Number.isFinite(repo.behind) && repo.behind > 0) bits.push(`<span class="meta-muted">behind ${repo.behind}</span>`);
+  const primary = repo.primary ? ' repo-chip-row-primary' : '';
+  return `<button type="button" class="repo-chip-row${primary}" data-repo-chip-open="${esc(repo.root || '')}">
+    <span class="repo-chip-path">${esc(label)}</span>
+    <span class="repo-chip-meta">${bits.join('')}</span>
+  </button>`;
+}
+
+function showRepoChipMenu(session, x, y) {
+  const info = transcriptMeta.sessions?.[session];
+  const repos = Array.isArray(info?.project?.repos) ? info.project.repos : [];
+  if (repos.length < 2) return;
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu repo-chip-menu';
+  menu.setAttribute('role', 'menu');
+  const ordered = [...repos].sort((a, b) => (b.primary === true) - (a.primary === true));
+  menu.innerHTML = ordered.map(repoChipMenuRowHtml).join('');
+  menu.querySelectorAll('[data-repo-chip-open]').forEach(row => {
+    row.addEventListener('click', () => {
+      const root = row.dataset.repoChipOpen || '';
+      repoChipContextMenu.close();
+      if (root) openFileExplorerAt(root);
+    });
+  });
+  repoChipContextMenu.open(menu, x, y);
 }
 
 function summaryContextHtml(session, info, agent) {

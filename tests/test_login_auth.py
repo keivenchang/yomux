@@ -8,6 +8,8 @@ from urllib.parse import urlencode
 from urllib.parse import urlparse
 
 from yolomux_lib import common
+from yolomux_lib import server_auth
+from yolomux_lib import web
 from yolomux_lib.server import Handler
 from yolomux_lib.server import TmuxWebtermHTTPServer
 
@@ -52,6 +54,11 @@ def start_server(monkeypatch, tmp_path):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(active_auth_yaml(), encoding="utf-8")
     monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
+    # C2: the pre-auth login/setup screens localize via the saved general.language (read at import time
+    # from the real ~/.config/yolomux). Force "system" (-> English) so English literal assertions don't
+    # depend on the developer's saved locale or on test import order. request_locale_pref resolves the
+    # name in server_auth's namespace, so patch it there; the yolomux_locale cookie branch stays live.
+    monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
     app = SimpleNamespace(sessions=[])
     server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -77,7 +84,11 @@ def test_login_page_sets_auth_cookie(monkeypatch, tmp_path):
         assert status == HTTPStatus.OK
         assert b'<form method="post" action="/login"' in body
         assert b'id="togglePassword"' in body
-        assert b'aria-label="Show password"' in body
+        # Derive the English label from the catalog (locale forced to system -> en by start_server) so
+        # the assertion tracks the catalog rather than a copy literal.
+        show_password = web.server_string("en", "login.showPassword")
+        assert show_password == "Show password"
+        assert f'aria-label="{show_password}"'.encode("utf-8") in body
 
         bad_body = urlencode({"username": "keivenc", "password": "wrong", "next": "/"})
         status, _headers, body = request(
@@ -131,6 +142,24 @@ def test_login_page_sets_auth_cookie(monkeypatch, tmp_path):
         )
         assert status == HTTPStatus.SEE_OTHER
         assert headers["Location"] == "/"
+    finally:
+        stop_server(server, thread)
+
+
+def test_login_page_localizes_via_locale_cookie(monkeypatch, tmp_path):
+    # C2: a yolomux_locale cookie localizes the pre-auth login screen regardless of the saved/forced
+    # default locale — proves the localization path works (request_locale_pref's cookie branch wins) and
+    # that the English-default test above is isolation, not a localization regression.
+    server, thread = start_server(monkeypatch, tmp_path)
+    port = server.server_address[1]
+    try:
+        status, _headers, body = request(port, "GET", "/login", headers={"Cookie": "yolomux_locale=zh-Hant"})
+        assert status == HTTPStatus.OK
+        localized = web.server_string("zh-Hant", "login.showPassword")
+        assert localized == "顯示密碼"
+        assert f'aria-label="{localized}"'.encode("utf-8") in body
+        # The English default must NOT appear when the cookie selects another locale.
+        assert b'aria-label="Show password"' not in body
     finally:
         stop_server(server, thread)
 

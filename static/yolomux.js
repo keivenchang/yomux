@@ -69,6 +69,7 @@ const fileEditorLineNumbersStorageKey = 'yolomux.editorLineNumbers';
 const preferencesCollapsedStorageKey = 'yolomux.preferences.collapsedSections.v1';
 const diffRefFromStorageKey = 'yolomux.diffRefFrom';
 const diffRefToStorageKey = 'yolomux.diffRefTo';
+const diffRefsByRepoStorageKey = 'yolomux.diffRefsByRepo.v1';  // C6: per-repo {repo: {from,to}} overrides
 const editorViewModes = new Set(['edit', 'preview', 'split', 'diff']);
 const defaultGlobalTheme = 'dark';
 const defaultTerminalTheme = 'follow-app';
@@ -254,7 +255,7 @@ let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 // B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
 let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
-let fileEditorCursorStyle = 'line';
+let fileEditorCursorStyle = 'block';  // C3: default caret is block; saved 'line' choices round-trip via settings
 let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cursor) | 'theme' (per-scheme caret)
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
@@ -305,6 +306,7 @@ let fileExplorerLastInteractionAt = 0;
 let fileExplorerRefreshDeferred = false;
 let sessionFilesSortMode = 'mtime';
 let sessionFilesSelectedSession = '';
+let changesSelectedPath = '';  // C5: the currently highlighted Modified-files row (persists across re-renders)
 let fileExplorerTreeShowDates = readStoredFileExplorerTreeShowDates();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
@@ -313,8 +315,9 @@ const fileIndexStatusTimers = new Map();  // normalized indexed root -> poll tim
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
 let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
-let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');
-let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');
+let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
+let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
+let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
 let fileExplorerChangesHidden = storageGet('yolomux.fileExplorerChangesHidden') === '1';
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
@@ -741,6 +744,7 @@ const fileContextMenu = createContextMenuController();
 const sessionContextMenu = createContextMenuController();
 const linkContextMenu = createContextMenuController();
 const watchedPrContextMenu = createContextMenuController();   // DOIT.29: "Watch this PR" on YO!info PR cells
+const repoChipContextMenu = createContextMenuController();     // C9: per-pane "+N repos" detail-bar popover
 let sessionRenameDialog = null;
 const fileExplorerSelectedPaths = new Set();
 let fileExplorerSelectionAnchor = null;
@@ -1060,6 +1064,30 @@ function readStoredDiffRef(key, fallback) {
 function writeStoredDiffRefs() {
   storageSet(diffRefFromStorageKey, diffRefFrom);
   storageSet(diffRefToStorageKey, diffRefTo);
+  // C6: persist the per-repo overrides alongside the global default.
+  try {
+    storageSet(diffRefsByRepoStorageKey, JSON.stringify(diffRefsByRepo || {}));
+  } catch (_error) {
+    storageSet(diffRefsByRepoStorageKey, '{}');
+  }
+}
+
+function readStoredDiffRefsByRepo() {
+  // C6: restore {repoPath: {from, to}}; tolerate corrupt/absent storage by returning an empty map.
+  try {
+    const parsed = JSON.parse(storageGet(diffRefsByRepoStorageKey) || '{}');
+    if (!parsed || typeof parsed !== 'object') return {};
+    const result = {};
+    for (const [repo, refs] of Object.entries(parsed)) {
+      if (typeof repo !== 'string' || !refs || typeof refs !== 'object') continue;
+      const from = cleanDiffRef(refs.from, '');
+      const to = cleanDiffRef(refs.to, '');
+      if (from || to) result[repo] = {from: from || 'HEAD', to: to || 'current'};
+    }
+    return result;
+  } catch (_error) {
+    return {};
+  }
 }
 
 function readStoredFileExplorerTreeShowDates() {
@@ -1615,6 +1643,16 @@ function terminalBufferLineText(line) {
   return line?.translateToString?.(true) || '';
 }
 
+// DOIT.36 C1: did `line` fill the terminal to its right edge? translateToString(true) trims trailing
+// blanks, so a row whose printed text reaches `cols` had a non-blank last cell — evidence the content
+// was CLIPPED at the edge and wrapped, not that it merely happened to end at the row. Used to gate the
+// hanging-URL stitch: a complete URL ending well short of the edge (e.g. `See https://x.com`) is NOT a
+// clipped URL and must not absorb the indented next row. cols<=0 (unknown width) → treat as not clipped.
+function terminalRowReachesRightEdge(line, cols) {
+  if (!Number.isFinite(cols) || cols <= 0) return false;
+  return terminalBufferLineText(line).length >= cols;
+}
+
 // DOIT.27: does the joined group text end mid-URL? True when the LAST url token reaches the very end of
 // the string (no trailing whitespace/terminator). Used to decide whether to stitch a hanging-indent
 // continuation row onto the group — only EXTEND a url token that runs off the row's right edge.
@@ -1642,16 +1680,21 @@ function terminalRowHangingShape(buffer, index) {
 // DOIT.27: row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
 // indent AND the previous row's tail is an unterminated url token. Gates tightly so ordinary indented
 // prose under a line that merely happens to end at a URL is not merged.
-function terminalRowIsHangingUrlContinuation(buffer, index) {
+// DOIT.36 C1: ALSO require the previous row to reach the terminal's right edge, proving the URL was
+// clipped/hard-wrapped. Without this, a complete URL at end-of-line falsely swallows the next row.
+function terminalRowIsHangingUrlContinuation(buffer, index, cols) {
   if (!terminalRowHangingShape(buffer, index)) return false;
   const prev = buffer.getLine(index - 1);
   if (!prev) return false;
+  if (!terminalRowReachesRightEdge(prev, cols)) return false;
   return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev));
 }
 
 function terminalWrappedLineGroup(term, y) {
   const buffer = term.buffer?.active;
   if (!buffer?.getLine) return null;
+  // DOIT.36 C1: terminal width gates the hanging-URL stitch (a clipped URL fills to the right edge).
+  const cols = Number(term.cols) || 0;
   const requested = Math.max(0, y - 1);
   if (!buffer.getLine(requested)) return null;
   // Walk back to the logical line's first row: over terminal soft-wraps (isWrapped) AND over
@@ -1660,7 +1703,7 @@ function terminalWrappedLineGroup(term, y) {
   let start = requested;
   for (;;) {
     if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
-    if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start)) { start -= 1; continue; }
+    if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
     break;
   }
   // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
@@ -1677,7 +1720,7 @@ function terminalWrappedLineGroup(term, y) {
       text = terminalBufferLineText(buffer.getLine(index));
     } else if (buffer.getLine(index)?.isWrapped === true) {
       text = terminalBufferLineText(buffer.getLine(index));
-    } else if (terminalTailIsUnterminatedUrl(joined)) {
+    } else if (terminalTailIsUnterminatedUrl(joined) && terminalRowReachesRightEdge(buffer.getLine(index - 1), cols)) {
       const shape = terminalRowHangingShape(buffer, index);
       if (!shape) break;
       indent = shape.indent;
@@ -6851,18 +6894,31 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   }
   writeStoredFileExplorerIndexedDirs();
   // Mirror the set into the file_explorer.indexed_dirs setting so the Preferences list stays in sync
-  // (skip when this change WAS driven by the setting, to avoid a write-back loop).
-  if (!applyingIndexedDirsSetting) persistIndexedDirsSetting();
+  // (skip when this change WAS driven by the setting, to avoid a write-back loop). C11: pass the single
+  // add/remove so the save MERGES into the shared list instead of overwriting it with this page's set.
+  if (!applyingIndexedDirsSetting) persistIndexedDirsSetting(indexed ? {add: normalized} : {remove: normalized});
   updateFileExplorerIndexedDirectoryRows();
   if (statusEl) {
     statusEl.textContent = indexed ? `indexed ${compactHomePath(normalized)}` : `removed index ${compactHomePath(normalized)}`;
   }
 }
 
-function persistIndexedDirsSetting() {
-  const dirs = fileExplorerIndexedRootList();
+function persistIndexedDirsSetting(op = {}) {
+  // C11: MERGE the change into the current shared file_explorer.indexed_dirs rather than overwriting it
+  // with this page's whole set. Two browser origins (:7777 vs :7778) do NOT share localStorage, so a
+  // whole-list save from one would drop the other's dirs and make rows flip indexed/un-indexed on the
+  // next settings poll. An explicit {add}/{remove} applies just that one op to the shared list; a bare
+  // save (initial localStorage->setting migration) only UNIONS this page's dirs in, never removing.
   const current = initialSetting('file_explorer.indexed_dirs', []);
-  const currentList = Array.isArray(current) ? current : [];
+  const currentNorm = (Array.isArray(current) ? current : []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean);
+  const set = new Set(currentNorm);
+  if (op.add) set.add(op.add);
+  if (op.remove) set.delete(op.remove);
+  if (!op.add && !op.remove) {
+    for (const dir of fileExplorerIndexedRootList()) set.add(dir);
+  }
+  const dirs = compactNestedPaths(Array.from(set));
+  const currentList = compactNestedPaths(currentNorm);
   if (currentList.length === dirs.length && currentList.every((value, index) => value === dirs[index])) return;
   saveSettingsPatch({file_explorer: {indexed_dirs: dirs}}, {silent: true}).catch(() => {});
 }
@@ -7179,6 +7235,38 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   } catch (error) {
     statusErr(`delete failed: ${esc(error)}`);
   }
+}
+
+// C10: keyboard delete for the Finder tree. macOS Finder deletes the selection with Command-Delete (plain
+// Delete is a text-edit key on Mac), so on a Mac UI require metaKey+Backspace/Delete; on PC/File Explorer a
+// plain Delete works. Returns true once it has consumed the event so the global tab-close shortcut (which
+// also binds Mod+Delete) does NOT also fire. Guarded against text/rename inputs, readonly, and no selection.
+function handleFileExplorerDeleteShortcut(event) {
+  const key = String(event.key || '').toLowerCase();
+  if (key !== 'backspace' && key !== 'delete') return false;
+  if (isMacPlatform()) {
+    if (!(event.metaKey === true && event.ctrlKey !== true && event.altKey !== true)) return false;
+  } else if (key !== 'delete' || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+    return false;
+  }
+  // Only when the Finder is the active surface and not while editing text (rename input, etc.).
+  if (!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)) return false;
+  if (!globalShortcutTargetAllowsAppAction(event.target)) return false;
+  const paths = compactNestedPaths(Array.from(fileExplorerSelectedPaths));
+  if (!paths.length) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  if (readOnlyMode) {
+    statusErr('readonly access cannot delete files');
+    return true;
+  }
+  const primary = paths[0];
+  const row = document.querySelector(`.file-tree-row[data-path="${cssEscape(primary)}"]`);
+  const entry = row
+    ? {kind: row.dataset.kind, name: row.dataset.name || basenameOf(primary), is_repo: row.dataset.isRepo === 'true'}
+    : {kind: 'file', name: basenameOf(primary)};
+  deleteFileTreePath(primary, entry, paths);
+  return true;
 }
 
 function beginFileTreeRename(row, fullPath, entry) {
@@ -8002,7 +8090,8 @@ async function refreshOpenFileDiff(path, options = {}) {
   state.diffLoading = true;
   state._diffLoadingPromise = (async () => {
     try {
-      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}`);
+      // C6: diff the file against ITS repo's FROM/TO (not a global pair), so a per-repo selection applies.
+      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString(fileRepoForPath(path))}`);
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || response.status);
       applyOpenFileDiffPayload(state, payload);
@@ -9745,7 +9834,7 @@ function applySettingsPayload(payload, options = {}) {
   const previousEditorSchemeId = activeEditorScheme().id;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
-  fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'line'));
+  fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'block'));
   fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', 'yellow'));
   fileEditorThemeMode = readConfiguredEditorScheme();
   if (options.initial || options.applyEditorDefaults) {
@@ -10759,11 +10848,13 @@ function startSessionDrag(event, session, sourceSlot = null) {
   // #47: use the NATIVE drag image — a one-time compositor snapshot of the tab itself — instead of the
   // JS clone-follow preview. That removes the per-move reposition, the two document capture listeners,
   // and the animated heavyweight clone that caused the "won't budge" first drag and the per-move jank.
+  // C12 F2: take the grab offset from event.offsetX/offsetY (already on the event) instead of
+  // getBoundingClientRect(), which forced a synchronous layout reflow inside the handler — coldest on the
+  // first drag after load — before the browser could start the drag.
   const source = event.currentTarget;
-  const rect = source?.getBoundingClientRect?.();
-  if (rect && event.dataTransfer?.setDragImage) {
-    const offsetX = Math.max(0, Math.min(rect.width || 0, (event.clientX || 0) - rect.left));
-    const offsetY = Math.max(0, Math.min(rect.height || 0, (event.clientY || 0) - rect.top));
+  if (source && event.dataTransfer?.setDragImage) {
+    const offsetX = Math.max(0, Number(event.offsetX) || 0);
+    const offsetY = Math.max(0, Number(event.offsetY) || 0);
     event.dataTransfer.setDragImage(source, offsetX, offsetY);
   }
   resetDragTabRectCache();
@@ -11199,9 +11290,19 @@ async function splitSessionBesidePlaceholder(session, targetSlot, zone, pct = de
   applyLayoutSlots(next, {focusSession: session, prune: false});
 }
 
+// C12 F1: is this session's terminal already attached (socket open/connecting)? A live pane does not need
+// the blocking /api/ensure-session round-trip (two tmux subprocesses) on a move — it is already running.
+function sessionTerminalIsLive(session) {
+  const readyState = terminals.get(session)?.socket?.readyState;
+  return readyState === WebSocket.OPEN || readyState === WebSocket.CONNECTING;
+}
+
 async function moveSessionToSlot(session, targetSlot, sourceSlot = null, insertIndex = 0) {
   if (!isLayoutItem(session) || !targetSlot) return;
-  if (isTmuxSession(session)) {
+  // C12 F1: only pay the ensure-session round-trip when the pane is NOT already running. For a live pane
+  // (the common left<->right move) apply the layout optimistically; applyLayoutSlots -> ensureTerminalRunning
+  // still reconciles/recovers if the session turns out to be gone (its socket would no longer be live).
+  if (isTmuxSession(session) && !sessionTerminalIsLive(session)) {
     const ensured = await ensureSession(session);
     if (!ensured) return;
   }
@@ -11749,7 +11850,49 @@ function projectMetaHtml(session, info) {
   }
   const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
   if (desc) parts.push(`<span class="meta-desc">${esc(shortText(desc, 160))}</span>`);
+  // C9: a session can touch several repos; the detail line shows the focused one. When there are more,
+  // append a "+N repos" chip that opens a popover listing every touched repo (keeps the line one row tall).
+  const repos = Array.isArray(project.repos) ? project.repos : [];
+  if (repos.length > 1) {
+    const extra = repos.length - 1;
+    parts.push(`<button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: extra}))}" aria-label="${esc(t('detail.repos.more', {count: extra}))}">+${extra} ${esc(t('detail.repos.label'))}</button>`);
+  }
   return parts.length ? metaJoin(parts) : '<span class="meta-muted">git checkout detected</span>';
+}
+
+// C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
+// ahead/behind. Clicking a row scopes the Finder to that repo. Reuses the shared context-menu controller.
+function repoChipMenuRowHtml(repo) {
+  const label = compactHomePath(repo.root || '');
+  const bits = [];
+  if (repo.branch) bits.push(`<span class="meta-branch">${esc(shortBranch(repo.branch))}</span>`);
+  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) bits.push(`<span class="meta-muted">dirty ${repo.dirty_count}</span>`);
+  if (Number.isFinite(repo.ahead) && repo.ahead > 0) bits.push(`<span class="meta-muted">ahead ${repo.ahead}</span>`);
+  if (Number.isFinite(repo.behind) && repo.behind > 0) bits.push(`<span class="meta-muted">behind ${repo.behind}</span>`);
+  const primary = repo.primary ? ' repo-chip-row-primary' : '';
+  return `<button type="button" class="repo-chip-row${primary}" data-repo-chip-open="${esc(repo.root || '')}">
+    <span class="repo-chip-path">${esc(label)}</span>
+    <span class="repo-chip-meta">${bits.join('')}</span>
+  </button>`;
+}
+
+function showRepoChipMenu(session, x, y) {
+  const info = transcriptMeta.sessions?.[session];
+  const repos = Array.isArray(info?.project?.repos) ? info.project.repos : [];
+  if (repos.length < 2) return;
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu repo-chip-menu';
+  menu.setAttribute('role', 'menu');
+  const ordered = [...repos].sort((a, b) => (b.primary === true) - (a.primary === true));
+  menu.innerHTML = ordered.map(repoChipMenuRowHtml).join('');
+  menu.querySelectorAll('[data-repo-chip-open]').forEach(row => {
+    row.addEventListener('click', () => {
+      const root = row.dataset.repoChipOpen || '';
+      repoChipContextMenu.close();
+      if (root) openFileExplorerAt(root);
+    });
+  });
+  repoChipContextMenu.open(menu, x, y);
 }
 
 function summaryContextHtml(session, info, agent) {
@@ -14869,36 +15012,80 @@ function sessionFilesTargetSession(options = {}) {
   return sessions[0] || '';
 }
 
-function diffRefParams() {
+// C6: the effective FROM/TO for one repo — its own override if set, else the global default. With no
+// repo (legacy/zero-arg callers and files outside any tracked repo) this is the global default pair.
+function repoDiffRefs(repo) {
+  const entry = repo ? diffRefsByRepo[repo] : null;
   return {
-    from: cleanDiffRef(diffRefFrom, 'HEAD'),
-    to: cleanDiffRef(diffRefTo, 'current'),
+    from: cleanDiffRef(entry?.from, diffRefFrom),
+    to: cleanDiffRef(entry?.to, diffRefTo),
   };
 }
 
-function diffRefQueryString() {
-  const refs = diffRefParams();
+// C6: which repo a given absolute file path belongs to, from the loaded Modified-files payloads, so a
+// file's diff uses ITS repo's FROM/TO. Empty when the file isn't in a known changed repo (-> global default).
+function fileRepoForPath(path) {
+  if (!path) return '';
+  for (const payload of [sessionFilesPayload, fileExplorerSessionFilesPayload]) {
+    for (const file of payload?.files || []) {
+      if (file?.abs_path === path) return file.repo || '';
+    }
+  }
+  return '';
+}
+
+function diffRefParams(repo) {
+  const refs = repoDiffRefs(repo);
+  return {
+    from: cleanDiffRef(refs.from, 'HEAD'),
+    to: cleanDiffRef(refs.to, 'current'),
+  };
+}
+
+function diffRefQueryString(repo) {
+  const refs = diffRefParams(repo);
   return `from=${encodeURIComponent(refs.from)}&to=${encodeURIComponent(refs.to)}`;
 }
 
-function diffRefSuggestions() {
+// C6: the per-repo override map encoded for /api/session-files (one request covers several repos). Only
+// repos with a non-default selection are sent; an empty map yields '' so the request stays unchanged.
+function sessionFilesRefsQuery() {
+  const map = {};
+  for (const [repo, refs] of Object.entries(diffRefsByRepo || {})) {
+    const from = cleanDiffRef(refs?.from, '');
+    const to = cleanDiffRef(refs?.to, '');
+    if (!from && !to) continue;
+    map[repo] = {from: from || 'HEAD', to: to || 'current'};
+  }
+  return Object.keys(map).length ? `&refs=${encodeURIComponent(JSON.stringify(map))}` : '';
+}
+
+// C6: commit suggestions. With a `repo`, draw only from THAT repo's refs_by_repo so a picker never offers
+// a SHA from a sibling repo. With no repo (legacy/global callers), flatten every repo's refs as before.
+function diffRefSuggestions(repo) {
   const suggestions = [
     {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
     {ref: 'current', short: 'current', subject: 'working tree'},
   ];
   const seen = new Set(suggestions.map(item => item.ref));
+  const addRefs = refs => {
+    if (!Array.isArray(refs)) return;
+    for (const item of refs) {
+      const ref = cleanDiffRef(item?.ref || '', '');
+      if (!ref || seen.has(ref)) continue;
+      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || ''});
+      seen.add(ref);
+      if (suggestions.length >= 60) return;
+    }
+  };
   for (const payload of [sessionFilesPayload, fileExplorerSessionFilesPayload]) {
     const refsByRepo = payload?.refs_by_repo && typeof payload.refs_by_repo === 'object' ? payload.refs_by_repo : {};
-    for (const refs of Object.values(refsByRepo)) {
-      if (!Array.isArray(refs)) continue;
-      for (const item of refs) {
-        const ref = cleanDiffRef(item?.ref || '', '');
-        if (!ref || seen.has(ref)) continue;
-        suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || ''});
-        seen.add(ref);
-        if (suggestions.length >= 60) return suggestions;
-      }
+    if (repo) {
+      addRefs(refsByRepo[repo]);
+    } else {
+      for (const refs of Object.values(refsByRepo)) addRefs(refs);
     }
+    if (suggestions.length >= 60) break;
   }
   return suggestions;
 }
@@ -14945,12 +15132,12 @@ function diffRefSelectOptionsHtml(value, options = {}) {
   }).join('');
 }
 
-function diffRefFromSuggestions() {
-  return diffRefSuggestions().filter(item => item.ref !== 'current');
+function diffRefFromSuggestions(repo) {
+  return diffRefSuggestions(repo).filter(item => item.ref !== 'current');
 }
 
-function diffRefToSuggestions(fromRef = diffRefFrom) {
-  const suggestions = diffRefSuggestions();
+function diffRefToSuggestions(fromRef = diffRefFrom, repo) {
+  const suggestions = diffRefSuggestions(repo);
   const current = suggestions.find(item => item.ref === 'current') || {ref: 'current', short: 'current', subject: 'working tree'};
   const ordered = [current, ...suggestions.filter(item => item.ref !== 'current')];
   const from = cleanDiffRef(fromRef, '');
@@ -14959,23 +15146,35 @@ function diffRefToSuggestions(fromRef = diffRefFrom) {
   return ordered.slice(0, Math.max(1, fromIndex));
 }
 
+// C6: FROM/TO controls scoped to one repo (data-diff-ref-repo). Options/selection come from that repo's
+// own commit graph and override. With no repo it renders the global default (legacy single-pair shape).
 function diffRefControlsHtml(options = {}) {
   const compact = options.compact === true;
+  const repo = options.repo || '';
+  const refs = repoDiffRefs(repo);
   const className = compact ? 'diff-ref-controls compact' : 'diff-ref-controls';
-  return `<span class="${className}" data-diff-ref-controls>
-    <label class="diff-ref-control">${esc(t('diff.ref.from'))} <select class="diff-ref-select" data-diff-ref-from data-diff-ref-from-select aria-label="${esc(t('diff.ref.from.aria'))}">${diffRefSelectOptionsHtml(diffRefFrom, {compact, suggestions: diffRefFromSuggestions()})}</select></label>
-    <label class="diff-ref-control">${esc(t('diff.ref.to'))} <select class="diff-ref-select" data-diff-ref-to data-diff-ref-to-select aria-label="${esc(t('diff.ref.to.aria'))}">${diffRefSelectOptionsHtml(diffRefTo, {compact, suggestions: diffRefToSuggestions(diffRefFrom)})}</select></label>
+  const repoAttr = repo ? ` data-diff-ref-repo="${esc(repo)}"` : '';
+  return `<span class="${className}" data-diff-ref-controls${repoAttr}>
+    <label class="diff-ref-control">${esc(t('diff.ref.from'))} <select class="diff-ref-select" data-diff-ref-from data-diff-ref-from-select aria-label="${esc(t('diff.ref.from.aria'))}">${diffRefSelectOptionsHtml(refs.from, {compact, suggestions: diffRefFromSuggestions(repo)})}</select></label>
+    <label class="diff-ref-control">${esc(t('diff.ref.to'))} <select class="diff-ref-select" data-diff-ref-to data-diff-ref-to-select aria-label="${esc(t('diff.ref.to.aria'))}">${diffRefSelectOptionsHtml(refs.to, {compact, suggestions: diffRefToSuggestions(refs.from, repo)})}</select></label>
   </span>`;
 }
 
-function setDiffRefs(fromRef, toRef, options = {}) {
-  const nextFrom = canonicalDiffRefValue(cleanDiffRef(fromRef, 'HEAD'), diffRefFromSuggestions()) || 'HEAD';
-  const toSuggestions = diffRefToSuggestions(nextFrom);
+// C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
+// state for other repos is untouched, so picking a SHA for repo A never disturbs repo B.
+function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
+  const nextFrom = canonicalDiffRefValue(cleanDiffRef(fromRef, 'HEAD'), diffRefFromSuggestions(repo)) || 'HEAD';
+  const toSuggestions = diffRefToSuggestions(nextFrom, repo);
   let nextTo = canonicalDiffRefValue(cleanDiffRef(toRef, 'current'), toSuggestions) || 'current';
   if (!toSuggestions.some(item => diffRefOptionMatches(nextTo, item))) nextTo = 'current';
-  if (nextFrom === diffRefFrom && nextTo === diffRefTo && options.force !== true) return false;
-  diffRefFrom = nextFrom;
-  diffRefTo = nextTo;
+  const current = repoDiffRefs(repo);
+  if (nextFrom === current.from && nextTo === current.to && options.force !== true) return false;
+  if (repo) {
+    diffRefsByRepo[repo] = {from: nextFrom, to: nextTo};
+  } else {
+    diffRefFrom = nextFrom;
+    diffRefTo = nextTo;
+  }
   writeStoredDiffRefs();
   fileExplorerSessionFilesCache.clear();
   for (const state of openFiles.values()) {
@@ -14993,22 +15192,27 @@ function setDiffRefs(fromRef, toRef, options = {}) {
 }
 
 function commitDiffRefControls(container) {
+  const controls = container?.matches?.('[data-diff-ref-controls]') ? container : container?.querySelector?.('[data-diff-ref-controls]');
+  const repo = controls?.dataset?.diffRefRepo || '';
   const fromInput = container?.querySelector?.('[data-diff-ref-from]');
   const toInput = container?.querySelector?.('[data-diff-ref-to]');
-  return setDiffRefs(fromInput?.value, toInput?.value);
+  return setRepoDiffRefs(repo, fromInput?.value, toInput?.value);
 }
 
 function syncDiffRefControlValues(container) {
   if (!container) return;
   const active = document.activeElement;
+  const controls = container.matches?.('[data-diff-ref-controls]') ? container : container.querySelector?.('[data-diff-ref-controls]');
+  const repo = controls?.dataset?.diffRefRepo || '';
+  const refs = repoDiffRefs(repo);
   const fromInput = container.querySelector?.('[data-diff-ref-from]');
   const toInput = container.querySelector?.('[data-diff-ref-to]');
   const fromSelect = container.querySelector?.('[data-diff-ref-from-select]');
   const toSelect = container.querySelector?.('[data-diff-ref-to-select]');
-  if (fromInput && fromInput !== active) fromInput.value = diffRefFrom;
-  if (toInput && toInput !== active) toInput.value = diffRefTo;
-  if (fromSelect && fromSelect !== active) fromSelect.value = canonicalDiffRefValue(diffRefFrom, diffRefFromSuggestions()) || diffRefFrom;
-  if (toSelect && toSelect !== active) toSelect.value = canonicalDiffRefValue(diffRefTo, diffRefToSuggestions(diffRefFrom)) || diffRefTo;
+  if (fromInput && fromInput !== active) fromInput.value = refs.from;
+  if (toInput && toInput !== active) toInput.value = refs.to;
+  if (fromSelect && fromSelect !== active) fromSelect.value = canonicalDiffRefValue(refs.from, diffRefFromSuggestions(repo)) || refs.from;
+  if (toSelect && toSelect !== active) toSelect.value = canonicalDiffRefValue(refs.to, diffRefToSuggestions(refs.from, repo)) || refs.to;
 }
 
 function fileExplorerSessionFilesTargetSession() {
@@ -15132,7 +15336,9 @@ async function fetchSessionFiles(options = {}) {
     renderPaneTabStrips();
   }
   try {
-    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${diffRefQueryString()}`);
+    // C6: scalar from/to is the global default; sessionFilesRefsQuery() adds per-repo overrides so each
+    // repo compares its own graph in one round-trip.
+    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${diffRefQueryString()}${sessionFilesRefsQuery()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     const nextPayload = {
@@ -15275,6 +15481,16 @@ function comparisonTitleHtml(payload) {
   return t('diff.comparing', {from: esc(from), to: esc(to)});
 }
 
+// C6: per-repo comparison title (from the repo payload's own effective refs), shown beside that repo's
+// FROM/TO controls. Surfaces any per-repo ref fallback so the user sees why a repo defaulted.
+function repoComparisonTitleHtml(repoInfo) {
+  const from = diffRefDisplayText(repoInfo?.from_ref || diffRefFrom);
+  const to = diffRefDisplayText(repoInfo?.to_ref || diffRefTo);
+  const title = `<span class="changes-repo-compare-title">${t('diff.comparing', {from: esc(from), to: esc(to)})}</span>`;
+  const error = repoInfo?.error ? `<span class="changes-repo-refs-error">${esc(repoInfo.error)}</span>` : '';
+  return `${title}${error}`;
+}
+
 function changesSummaryHtml(files, session, loading, loaded) {
   if (loading) return t('changes.loading');
   if (!loaded) return t('changes.notLoaded');
@@ -15373,6 +15589,24 @@ function changesFolderHtml(node, context, depth) {
   </div>`;
 }
 
+// C5: a changed file can be touched by 0, 1, or several agents. Render an icon per agent from item.agents
+// (Claude, then Codex, then any others alphabetically), falling back to the legacy scalar item.agent. When
+// more than one agent appears, label the slot so screen readers announce all of them.
+function changeFileAgentsHtml(item) {
+  const raw = Array.isArray(item.agents) ? item.agents : (item.agent ? [item.agent] : []);
+  const order = {claude: 0, codex: 1};
+  const seen = new Set();
+  const ordered = raw
+    .map(value => String(value || '').toLowerCase())
+    .filter(value => value && !seen.has(value) && seen.add(value))
+    .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
+  const icons = ordered.map(kind => agentIcon(kind)).filter(Boolean);
+  if (!icons.length) return '';
+  const label = ordered.map(kind => kind.charAt(0).toUpperCase() + kind.slice(1)).join(', ');
+  const labelAttr = icons.length > 1 ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
+  return `<span class="changes-file-agent"${labelAttr}>${icons.join('')}</span>`;
+}
+
 function changeFileRowHtml(item, options = {}) {
   const statusKey = String(item.status || 'M').toUpperCase();
   const statusClass = changeStatusClassKey(statusKey);
@@ -15382,16 +15616,20 @@ function changeFileRowHtml(item, options = {}) {
   const parentLabel = changeFileParentLabel(rel);
   const timeText = sessionFileTimeText(item.mtime);
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
-  const agentHtml = agentIcon(String(item.agent || '').toLowerCase());
-  const agentSlotHtml = agentHtml ? `<span class="changes-file-agent">${agentHtml}</span>` : '';
+  const agentSlotHtml = changeFileAgentsHtml(item);
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
   const metaHtml = [diffHtml, dateHtml].filter(Boolean).join('');
   const compactClass = options.compact ? ' compact' : ' detailed';
   const depth = Math.max(0, Number(options.depth) || 0);
   const icon = fileIconFor(name);
   const iconClass = fileIconClassFor(name, 'file');
+  // C5: image rows get a rich Finder-style hover preview (bound in bindChangedFileRowBehaviors), so drop
+  // the native title there to avoid a duplicate tooltip; non-image rows keep the full-path title.
+  const isImage = IMAGE_EXTENSIONS.has(fileExtensionOf(name));
+  const titleAttr = isImage ? '' : ` title="${esc(absPath)}"`;
+  const sizeAttr = item.size === null || item.size === undefined ? '' : ` data-change-size="${esc(String(item.size))}"`;
   const actionAttr = absPath
-    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" title="${esc(absPath)}"`
+    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" data-change-rel="${esc(rel || '')}"${sizeAttr}${titleAttr}`
     : ' disabled';
   return `<button type="button" class="changes-file-row${compactClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
     <span class="changes-status changes-status-${esc(statusClass)}">${esc(statusKey)}</span>
@@ -15412,8 +15650,15 @@ function changesRepoGroupsHtml(files, options = {}) {
     // DOIT.23: the repo header is a collapse toggle (per-repo, keyed by path), mirroring the uploaded group.
     const collapsed = changesRepoCollapsed.has(repo);
     const rows = collapsed ? '' : changesTreeChildrenHtml(tree, {session: payload.session || '', repo, compact: options.compact === true}, 0);
+    // C6: each real repo gets its OWN FROM/TO controls (scoped to its commit graph) plus its own
+    // comparison title, beside its header. 'Outside repo' has no git graph, so no controls there.
+    const hasGit = repo && repo !== 'Outside repo';
+    const refsRow = hasGit && !collapsed
+      ? `<div class="changes-repo-refs">${repoComparisonTitleHtml(repoInfo)}${diffRefControlsHtml({repo, compact: true})}</div>`
+      : '';
     return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
       <button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoMetaHtml(repoInfo)}<span class="changes-repo-count">${entries.length}</span></button>
+      ${refsRow}
       ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
     </section>`;
   }).join('');
@@ -15444,7 +15689,6 @@ function changesPanelHtml() {
         <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>${esc(t('changes.sort.recent'))}</option>
         <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>${esc(t('changes.sort.name'))}</option>
       </select></label>
-      ${diffRefControlsHtml()}
       <button type="button" class="changes-refresh" data-session-files-refresh>${esc(t('changes.refresh'))}</button>
     </div>
     ${comparison}
@@ -15460,10 +15704,16 @@ function fileExplorerChangesPanelHtml() {
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
+  // C7: name the session in the embedded Finder title ("Modified files for session '1'"), falling back
+  // to the generic title when there is no target session.
+  const titleText = session ? t('changes.titleForSession', {session: sessionLabel(session) || session}) : t('changes.title');
   return `
     <div class="file-explorer-changes-head">
-      <span class="changes-title">${esc(t('changes.title'))}</span>
-      ${diffRefControlsHtml({compact: true})}
+      <span class="changes-title">${esc(titleText)}</span>
+      <label class="changes-control changes-sort-compact">${esc(t('changes.sort'))} <select data-session-files-sort aria-label="${esc(t('changes.sort'))}">
+        <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>${esc(t('changes.sort.recent'))}</option>
+        <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>${esc(t('changes.sort.name'))}</option>
+      </select></label>
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
@@ -15508,6 +15758,7 @@ function createChangesPanel() {
       </div>`;
   bindPanelShell(panel, changesItemId);
   bindChangesPanel(panel);
+  bindChangedFileRowBehaviors(panel);
   if (!sessionFilesPayload.loaded || sessionFilesPayload.session !== sessionFilesTargetSession()) {
     fetchSessionFiles({destination: 'changes', silent: true});
   }
@@ -15535,6 +15786,7 @@ function renderChangesPanels(options = {}) {
       if (newScroll) restoreElementScrollPosition(newScroll, scrollTop, scrollLeft);
     }
     bindChangesPanel(panel);
+    bindChangedFileRowBehaviors(panel);
   }
 }
 
@@ -15597,7 +15849,9 @@ function bindChangesPanel(panel) {
       diffRefInput.blur?.();
     } else if (event.key === 'Escape') {
       event.preventDefault();
-      diffRefInput.value = diffRefInput.matches('[data-diff-ref-from]') ? diffRefFrom : diffRefTo;
+      // C6: revert to THIS repo's current ref, not the global default.
+      const escRefs = repoDiffRefs(diffRefInput.closest('[data-diff-ref-controls]')?.dataset?.diffRefRepo || '');
+      diffRefInput.value = diffRefInput.matches('[data-diff-ref-from]') ? escRefs.from : escRefs.to;
       diffRefInput.blur?.();
     }
   });
@@ -15672,6 +15926,76 @@ function bindChangesPanel(panel) {
       const ownerSession = fileRow.dataset.openChangeSession || '';
       await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '');
     }
+  });
+  // C5: single-click selects/highlights a Modified-files row (Finder-like), without opening it — the
+  // toggle/refresh handler above runs first and returns on its own targets, so this only fires for rows.
+  panel.addEventListener('click', event => {
+    const fileRow = event.target.closest('[data-open-change-file]');
+    if (!fileRow || !panel.contains(fileRow)) return;
+    selectChangedFileRow(fileRow.dataset.openChangeFile || '');
+  });
+  // C5: Finder-like right-click menu with the SAFE read actions only (no Rename/Delete on Modified files).
+  panel.addEventListener('contextmenu', event => {
+    const fileRow = event.target.closest('[data-open-change-file]');
+    if (!fileRow || !panel.contains(fileRow)) return;
+    event.preventDefault();
+    selectChangedFileRow(fileRow.dataset.openChangeFile || '');
+    showChangedFileContextMenu(fileRow, event.clientX, event.clientY);
+  });
+}
+
+// C5: highlight one Modified-files row across every Changes/Finder surface, persisting the choice so a
+// background poll re-render keeps the highlight (bindChangedFileRowBehaviors re-applies it).
+function selectChangedFileRow(path) {
+  changesSelectedPath = path || '';
+  document.querySelectorAll('.changes-file-row.selected').forEach(row => {
+    if (row.dataset.openChangeFile !== changesSelectedPath) row.classList.remove('selected');
+  });
+  if (!changesSelectedPath) return;
+  document.querySelectorAll(`.changes-file-row[data-open-change-file="${cssEscape(changesSelectedPath)}"]`)
+    .forEach(row => row.classList.add('selected'));
+}
+
+// C5: open the safe Finder-style context menu for a Modified-files row — Copy full/raw/relative path,
+// Open image in new tab (images only), Download. Reuses the shared file context-menu controller and the
+// Finder action helpers; deliberately omits Rename/Delete (Modified files is a read surface).
+function showChangedFileContextMenu(row, x, y) {
+  closeFileContextMenu();
+  closeFileImagePreview();
+  const path = row.dataset.openChangeFile || '';
+  if (!path) return;
+  const name = basenameOf(path);
+  const rel = row.dataset.changeRel || '';
+  const isImage = IMAGE_EXTENSIONS.has(fileExtensionOf(name));
+  const entry = {kind: 'file', name, path};
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu file-context-menu';
+  menu.setAttribute('role', 'menu');
+  appendContextMenuButton(menu, 'Copy full path', () => copyFilePath(path, 'full'), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Copy raw path', () => copyFilePath(path, 'full', {raw: true}), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Copy relative path', () => copyFilePath(rel, 'relative'), closeFileContextMenu, {disabled: !rel});
+  appendContextMenuButton(menu, 'Open image in new tab', () => openFileInEditor(path, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: !isImage || readOnlyMode});
+  appendContextMenuButton(menu, 'Download', () => triggerFileDownload(path), closeFileContextMenu, {disabled: readOnlyMode});
+  fileContextMenu.open(menu, x, y);
+}
+
+// C5: per-render binding for Modified-files rows (rows are recreated each render). Binds the Finder image
+// hover preview on image rows under the preview cap (unknown size -> bind and let /api/fs/raw fail
+// gracefully, like Finder) and re-applies the persisted row highlight.
+function bindChangedFileRowBehaviors(panel) {
+  if (!panel) return;
+  panel.querySelectorAll('[data-open-change-file]').forEach(row => {
+    const path = row.dataset.openChangeFile || '';
+    if (!path) return;
+    const name = basenameOf(path);
+    if (IMAGE_EXTENSIONS.has(fileExtensionOf(name))) {
+      const sizeText = row.dataset.changeSize;
+      const size = sizeText === undefined || sizeText === '' ? null : Number(sizeText);
+      if (size === null || !Number.isFinite(size) || size <= MAX_FILE_PREVIEW_BYTES) {
+        bindFileImagePreview(row, path, {kind: 'file', name, size});
+      }
+    }
+    if (changesSelectedPath && path === changesSelectedPath) row.classList.add('selected');
   });
 }
 
@@ -15990,6 +16314,7 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
     replaceHtmlPreservingScroll(changes, fileExplorerChangesPanelHtml());
   }
   bindChangesPanel(panel);
+  bindChangedFileRowBehaviors(panel);
 }
 
 function renderFileExplorerChangesPanels(options = {}) {
@@ -16185,7 +16510,9 @@ function createFileEditorPanel(item) {
       input.blur?.();
     } else if (event.key === 'Escape') {
       event.preventDefault();
-      input.value = input.matches('[data-diff-ref-from]') ? diffRefFrom : diffRefTo;
+      // C6: revert to this file's repo refs, not the global default.
+      const escRefs = repoDiffRefs(diffRefPanel?.dataset?.diffRefRepoRendered || '');
+      input.value = input.matches('[data-diff-ref-from]') ? escRefs.from : escRefs.to;
       input.blur?.();
     }
   });
@@ -17106,6 +17433,13 @@ function renderFileEditorPanel(panel, item) {
   }
   if (diffRefPanel) {
     diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+    // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
+    // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
+    const diffRepo = fileRepoForPath(path);
+    if (!diffRefPanel.hidden && diffRefPanel.dataset.diffRefRepoRendered !== diffRepo && !diffRefPanel.contains(document.activeElement)) {
+      diffRefPanel.innerHTML = diffRefControlsHtml({compact: true, repo: diffRepo});
+      diffRefPanel.dataset.diffRefRepoRendered = diffRepo;
+    }
     syncDiffRefControlValues(diffRefPanel);
   }
   if (diffExpandButton) {
@@ -18787,7 +19121,15 @@ function bindPanelControls(panel, session) {
       .then(() => { statusEl.textContent = 'copied transcript path'; })
       .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
   });
-  panel.querySelector('.meta')?.addEventListener('click', event => event.stopPropagation());
+  panel.querySelector('.meta')?.addEventListener('click', event => {
+    event.stopPropagation();
+    // C9: the "+N repos" chip opens the per-session multi-repo popover (delegated, since .meta re-renders).
+    const chip = event.target.closest('[data-repo-chip]');
+    if (chip) {
+      event.preventDefault();
+      showRepoChipMenu(chip.dataset.repoChip || session, event.clientX, event.clientY);
+    }
+  });
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
   bindFileUpload(panel, session);
 }
@@ -20197,6 +20539,9 @@ topbar?.addEventListener('pointerenter', () => {
   closeFileImagePreview();
 });
 function handleGlobalShortcutKeydown(event) {
+  // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
+  // the global Mod+Delete tab-close fallback can fire.
+  if (handleFileExplorerDeleteShortcut(event)) return;
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);

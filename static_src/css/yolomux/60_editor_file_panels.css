@@ -770,7 +770,9 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
   top: 0;
   z-index: 1;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto minmax(0, 1fr);
+  /* C6 moved the diff-ref controls into each repo header; C8 added a compact sort. Children are now
+     title (flex), sort, refresh, close. */
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 6px;
   padding: 4px 5px;
@@ -792,6 +794,18 @@ body.theme-light .file-explorer-changes-head {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* C8: compact Date/Name sort control in the Finder Modified-files header (reuses the shared handler). */
+.file-explorer-changes-head .changes-sort-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.file-explorer-changes-head .changes-sort-compact select {
+  font-size: var(--ui-font-size-xs);
 }
 /* FROM hugs the left edge of the refs area, TO hugs the right (user: "FROM left, TO right indented").
    The controls span the full width of their cell/row and push apart instead of bunching together. */

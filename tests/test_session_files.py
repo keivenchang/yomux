@@ -91,13 +91,50 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert by_path["tracked.txt"]["status"] == "M"
     assert by_path["tracked.txt"]["repo"] == str(repo)
     assert by_path["tracked.txt"]["agent"] == "codex"
+    assert by_path["tracked.txt"]["agents"] == ["codex"]  # C5: full agent list, scalar `agent` is an alias
+    assert by_path["tracked.txt"]["size"] == (repo / "tracked.txt").stat().st_size  # C5: size for image-preview gating
     assert by_path["tracked.txt"]["added"] == 1
     assert by_path["tracked.txt"]["removed"] == 1
     # new.txt is untracked (never `git add`ed) -> "?", distinct from a staged/committed add "A".
     assert by_path["new.txt"]["status"] == "?"
     assert by_path["new.txt"]["added"] == 1
     assert by_path["new.txt"]["removed"] == 0
-    assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2, "added": 2, "removed": 1}]
+    assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2, "added": 2, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
+
+
+def test_session_files_payload_collects_multiple_agents_for_one_file(tmp_path):
+    # C5: when both Claude and Codex touch the same file, the entry lists BOTH (no overwrite), so the UI
+    # can render two agent icons.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    tracked.write_text("two\n", encoding="utf-8")
+
+    claude_path = tmp_path / "claude.jsonl"
+    claude_path.write_text(
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": str(tracked)}},
+        ]}}) + "\n",
+        encoding="utf-8",
+    )
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text('{"msg":"*** Begin Patch\\n*** Update File: tracked.txt\\n"}\n', encoding="utf-8")
+    info = SessionInfo(
+        session="s1", panes=[], selected_pane=None,
+        agents=[agent("claude", claude_path, repo), agent("codex", rollout, repo)],
+    )
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+    by_path = {item["path"]: item for item in payload["files"]}
+
+    assert sorted(by_path["tracked.txt"]["agents"]) == ["claude", "codex"]
+    assert by_path["tracked.txt"]["agent"] in {"claude", "codex"}  # scalar alias is just the first
 
 
 def test_session_files_payload_excludes_non_repo_transcript_artifacts(tmp_path):
@@ -242,7 +279,7 @@ def test_session_files_payload_counts_branch_commits_since_main(tmp_path):
     assert by_path["tracked.txt"]["status"] == "M"
     assert by_path["tracked.txt"]["added"] == 1
     assert by_path["tracked.txt"]["removed"] == 1
-    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 1, "added": 1, "removed": 1}]
+    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 1, "added": 1, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
 
 
 def test_session_files_payload_accepts_explicit_commit_refs(tmp_path):
@@ -323,6 +360,51 @@ def test_session_files_payload_falls_back_when_requested_ref_is_unknown_in_repo(
     assert payload["errors"] == []
     assert {item["repo"] for item in payload["files"]} == {str(repo1), str(repo2)}
     assert all(item["path"] == "tracked.txt" for item in payload["files"])
+
+
+def test_session_files_payload_applies_per_repo_refs_independently(tmp_path):
+    # C6: a FROM/TO override scoped to repo1 must NOT change repo2's comparison — each repo reports its
+    # own effective refs.
+    repo1 = tmp_path / "repo1"
+    repo2 = tmp_path / "repo2"
+    for repo in (repo1, repo2):
+        repo.mkdir()
+        git(repo, "init")
+        git(repo, "config", "user.email", "test@example.com")
+        git(repo, "config", "user.name", "Test User")
+        tracked = repo / "tracked.txt"
+        tracked.write_text("one\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "one")
+        tracked.write_text("two\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "two")
+        tracked.write_text("three\n", encoding="utf-8")
+    repo1_from = git(repo1, "rev-parse", "HEAD~1").stdout.strip()
+    panes = []
+    for index, repo in enumerate((repo1, repo2)):
+        panes.append(
+            PaneInfo(
+                session="s1", window="0", pane=str(index), pane_id=f"%{index}",
+                target=f"s1:0.{index}", current_path=str(repo), command="zsh",
+                active=index == 0, window_active=True, title="", pid=11 + index,
+            )
+        )
+    info = SessionInfo(session="s1", panes=panes, selected_pane=panes[0], agents=[])
+
+    payload = session_files.session_files_payload_for_info(
+        info, hours=24, now=time.time(),
+        repo_refs={str(repo1): {"from": repo1_from, "to": "current"}},
+    )
+    by_repo = {item["repo"]: item for item in payload["repos"]}
+
+    assert by_repo[str(repo1)]["from_ref"] == repo1_from
+    assert by_repo[str(repo1)]["to_ref"] == "current"
+    assert by_repo[str(repo1)]["error"] == ""
+    # repo2 had no override, so it stays on the default comparison and is not affected by repo1's SHA.
+    assert by_repo[str(repo2)]["from_ref"] == "default"
+    assert by_repo[str(repo2)]["to_ref"] == "base"
+    assert payload["errors"] == []
 
 
 def test_git_recent_refs_exposes_more_than_twenty_commits(tmp_path):
@@ -410,10 +492,13 @@ def test_session_files_payload_uses_session_repo_without_ai_attribution(tmp_path
 
     assert payload["files"][0]["path"] == "tracked.txt"
     assert payload["files"][0]["source"] == "git"
-    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 0, "added": 1, "removed": 1}]
+    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 0, "added": 1, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
 
 
-def test_session_files_payload_attributes_git_fallback_to_session_agent(tmp_path):
+def test_session_files_payload_does_not_invent_agent_for_repo_only_change(tmp_path):
+    # C5: a git change with NO transcript attribution (the rollout never mentions this file) must render
+    # zero agent icons — earlier the code invented a fallback to the session's agent, falsely implying
+    # the agent touched a file the user changed by hand.
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init")
@@ -431,5 +516,6 @@ def test_session_files_payload_attributes_git_fallback_to_session_agent(tmp_path
     payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
 
     assert payload["files"][0]["path"] == "tracked.txt"
-    assert payload["files"][0]["agent"] == "codex"
+    assert payload["files"][0]["agents"] == []
+    assert payload["files"][0]["agent"] == ""
     assert payload["files"][0]["source"] == "git"

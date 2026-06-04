@@ -596,6 +596,56 @@ body.theme-light .drop-slot.drag-over {
 .meta-sep {
   color: #5e6878;
 }
+/* C9: the "+N repos" chip on the detail bar and its multi-repo popover rows. Tokens only (light/dark). */
+.meta-repo-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 6px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--pane-meta-branch);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  cursor: pointer;
+}
+.meta-repo-chip:hover,
+.meta-repo-chip:focus-visible {
+  background: color-mix(in srgb, var(--accent-gold) 22%, transparent);
+  outline: none;
+}
+.repo-chip-menu .repo-chip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: start;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.repo-chip-menu .repo-chip-row:hover,
+.repo-chip-menu .repo-chip-row:focus-visible {
+  background: color-mix(in srgb, var(--accent-gold) 18%, transparent);
+  outline: none;
+}
+.repo-chip-menu .repo-chip-row-primary .repo-chip-path {
+  font-weight: 700;
+}
+.repo-chip-menu .repo-chip-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-chip-menu .repo-chip-meta {
+  display: inline-flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
 .pane-tabs {
   position: relative;
   min-height: var(--pane-tab-height);

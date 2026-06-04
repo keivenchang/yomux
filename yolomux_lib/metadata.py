@@ -378,6 +378,9 @@ def session_project_metadata(info: SessionInfo, cache: MetadataCache, allow_netw
         "git": git_data,
         "pull_request": pull_request,
         "linear": [linear_issue_metadata(identifier, cache, allow_network=allow_network) for identifier in linear_ids],
+        # C9: all repos this session touches (light local summaries; primary flagged) so the detail bar
+        # can show a "+N repos" chip when a session spans more than one repo.
+        "repos": session_repo_summaries(info, git_data.get("root")),
     }
 
 def enrich_branch_pull_requests(git_data: dict[str, Any], cache: MetadataCache, allow_network: bool = True) -> None:
@@ -411,6 +414,45 @@ def session_git_inventory(info: SessionInfo) -> dict[str, Any] | None:
             git_data["cwd"] = cwd
             return git_data
     return None
+
+
+def repo_summary(cwd: str | None) -> dict[str, Any] | None:
+    # C9: a LIGHT per-repo summary (branch + dirty + ahead/behind) using only cheap LOCAL git — no PR/CI
+    # network call and no branch inventory. Used to list every repo a session touches in the detail-bar
+    # popover without a per-poll GitHub fetch storm (only the primary repo's PR is fetched eagerly).
+    if not cwd:
+        return None
+    root = git(["rev-parse", "--show-toplevel"], cwd)
+    if root.returncode != 0:
+        return None
+    branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+    upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
+    status = git(["status", "--short"], cwd)
+    upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
+    ahead, behind = git_ahead_behind(cwd, upstream_name)
+    status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
+    return {
+        "root": root.stdout.strip(),
+        "branch": branch.stdout.strip() if branch.returncode == 0 else None,
+        "ahead": ahead,
+        "behind": behind,
+        "dirty_count": len(status_lines),
+    }
+
+
+def session_repo_summaries(info: SessionInfo, primary_root: str | None) -> list[dict[str, Any]]:
+    # C9: every git repo the session's panes/agents sit in (cwd -> git root), deduped, with the focused
+    # repo flagged. Cheap local git per repo; no transcript scan, no network.
+    summaries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for cwd in candidate_session_cwds(info):
+        summary = repo_summary(cwd)
+        if not summary or not summary["root"] or summary["root"] in seen:
+            continue
+        seen.add(summary["root"])
+        summary["primary"] = summary["root"] == primary_root
+        summaries.append(summary)
+    return summaries
 
 def candidate_session_cwds(info: SessionInfo) -> list[str]:
     # DOIT.32: the LIVE pane cwd wins. The session-number default workdir (session "1" -> dynamo1) is

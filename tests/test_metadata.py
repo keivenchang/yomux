@@ -1,14 +1,79 @@
+import subprocess
+from pathlib import Path
+
 from yolomux_lib import github_client
 from yolomux_lib import linear_client
 from yolomux_lib import metadata
 from yolomux_lib.common import _CACHE_MISS
+from yolomux_lib.common import PaneInfo
+from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import tail_file_lines
 from yolomux_lib.metadata import MetadataCache
 from yolomux_lib.metadata import extract_linear_ids
 from yolomux_lib.metadata import github_checks_unknown
 from yolomux_lib.metadata import linear_issue_metadata
 from yolomux_lib.metadata import project_pull_request
+from yolomux_lib.metadata import session_repo_summaries
 from yolomux_lib.metadata import summarize_github_checks
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True, text=True)
+
+
+def _pane(session, index, path):
+    return PaneInfo(
+        session=session, window="0", pane=str(index), pane_id=f"%{index}",
+        target=f"{session}:0.{index}", current_path=str(path), command="zsh",
+        active=index == 0, window_active=True, title="", pid=10 + index,
+    )
+
+
+def test_session_repo_summaries_lists_every_touched_repo(tmp_path):
+    # C9: a session whose panes sit in two repos surfaces BOTH (light local summaries), with the focused
+    # repo flagged primary and dirty state reported — the data the detail-bar "+N repos" chip needs.
+    made = []
+    for name in ("repoA", "repoB"):
+        repo = tmp_path / name
+        repo.mkdir()
+        _git(repo, "init")
+        _git(repo, "config", "user.email", "t@t")
+        _git(repo, "config", "user.name", "t")
+        (repo / "f.txt").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "f.txt")
+        _git(repo, "commit", "-m", "init")
+        made.append(repo)
+    (made[1] / "f.txt").write_text("changed\n", encoding="utf-8")  # leave repoB dirty
+    rootA = str(Path(made[0]).resolve())
+    rootB = str(Path(made[1]).resolve())
+    panes = [_pane("s1", 0, made[0]), _pane("s1", 1, made[1])]
+    info = SessionInfo(session="s1", panes=panes, selected_pane=panes[0], agents=[])
+
+    summaries = session_repo_summaries(info, rootA)
+    by_root = {s["root"]: s for s in summaries}
+
+    assert rootA in by_root and rootB in by_root
+    assert by_root[rootA]["primary"] is True
+    assert by_root[rootB]["primary"] is False
+    assert by_root[rootB]["dirty_count"] == 1
+
+
+def test_session_repo_summaries_single_repo_has_no_extra(tmp_path):
+    # C9: a single-repo session lists exactly that one repo (so the UI shows no chip).
+    repo = tmp_path / "solo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "init")
+    root = str(Path(repo).resolve())
+    panes = [_pane("s9", 0, repo)]
+    info = SessionInfo(session="s9", panes=panes, selected_pane=panes[0], agents=[])
+
+    roots = {s["root"] for s in session_repo_summaries(info, root)}
+    assert roots == {root}
 
 
 REPO = {

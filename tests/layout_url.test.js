@@ -333,6 +333,7 @@ globalThis.__layoutTestApi = {
   changesPanelHtml,
   fileExplorerChangesPanelHtml,
   changeFileRowHtml,
+  projectMetaHtml,
   diffRefControlsHtml,
   diffRefSelectOptionsHtml,
   diffRefParams,
@@ -1391,6 +1392,13 @@ function makeFileTree(paths) {
   // #47: tab drags use the native drag image (no JS clone-follow), and the drop-placement path reuses
   // cached tab rects during a drag instead of forcing sync layout (getBoundingClientRect) per move.
   assert.ok(/function startSessionDrag[\s\S]*?setDragImage\(source/.test(source), '#47: tab drags install the native drag image (the tab itself)');
+  // C12 F2: dragstart must NOT force a layout reflow with getBoundingClientRect (it stalled the cold first drag).
+  const startDragBody = source.slice(source.indexOf('function startSessionDrag'), source.indexOf('function endSessionDrag'));
+  assert.equal(/\.getBoundingClientRect\(/.test(startDragBody), false, 'C12 F2: dragstart computes the grab offset without a getBoundingClientRect reflow');
+  assert.ok(startDragBody.includes('event.offsetX') && startDragBody.includes('event.offsetY'), 'C12 F2: dragstart uses event.offsetX/offsetY for the drag-image offset');
+  // C12 F1: a move of an already-running pane skips the blocking ensure-session round-trip.
+  assert.ok(source.includes('function sessionTerminalIsLive('), 'C12 F1: a terminal-liveness helper exists');
+  assert.ok(/if \(isTmuxSession\(session\) && !sessionTerminalIsLive\(session\)\) \{\s*const ensured = await ensureSession/.test(source), 'C12 F1: moveSessionToSlot only awaits ensureSession when the pane is not already live');
   assert.equal(source.includes('function startCustomDragPreview'), false, '#47: the tab clone-follow preview is removed');
   assert.ok(/function paneTabDropPlacement[\s\S]*?dragMeasureStrip\(strip\)/.test(source), '#47: drop placement measures the strip via the per-drag cache');
   assert.ok(/function dragMeasureStrip\([\s\S]*?dragSession != null[\s\S]*?dragTabRectCache/.test(source), '#47: the rect cache is only active during a live drag');
@@ -1408,6 +1416,10 @@ function makeFileTree(paths) {
   assert.ok(source.includes("{path: 'file_explorer.indexed_dirs'"), '#32: Preferences exposes an editable indexed-directories list');
   assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*setFileExplorerDirectoryIndexed\(dir, true\)[\s\S]*setFileExplorerDirectoryIndexed\(dir, false\)/.test(source), '#32: editing the indexed-dirs setting adds/removes indexed dirs (bi-directional sync)');
   assert.ok(source.includes('/api/fs/unindex?root='), '#32: removing an indexed dir wires to the backend unindex');
+  // C11: the indexed-dirs setting save MERGES a single add/remove into the shared list instead of
+  // overwriting it with this page's set, so two browser origins don't clobber each other's indexed dirs.
+  assert.ok(/persistIndexedDirsSetting\(indexed \? \{add: normalized\} : \{remove: normalized\}\)/.test(source), 'C11: indexed-dir save passes the single add/remove op (merge, not overwrite)');
+  assert.ok(/function persistIndexedDirsSetting\(op = \{\}\)[\s\S]*?if \(op\.add\) set\.add\(op\.add\)[\s\S]*?if \(op\.remove\) set\.delete\(op\.remove\)/.test(source), 'C11: persistIndexedDirsSetting merges the op into the current shared setting');
   assert.ok(source.slice(source.indexOf('function focusPreferencesSearch('), source.indexOf('function focusPreferencesSearchSoon(')).includes('panel && panel.isConnected !== false'), 'Preferences focus falls back to the rendered panel when called without a panel');
   const focusedPanelStart = source.indexOf('function setFocusedPanelItem(');
   const focusedPanelEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusedPanelStart);
@@ -1847,6 +1859,13 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('data-diff-ref-to'), 'Changes pane exposes TO ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-from-select'), 'Changes pane exposes a scrollable FROM commit picker');
   assert.ok(changesHtml.includes('data-diff-ref-to-select'), 'Changes pane exposes a newer-target TO picker');
+  // C6: the FROM/TO controls are now scoped to each repo header (data-diff-ref-repo), not one global pair.
+  assert.ok(changesHtml.includes('data-diff-ref-repo="/repo/app"'), 'C6: each repo header carries its own scoped FROM/TO controls');
+  const toolbarSlice = changesHtml.slice(changesHtml.indexOf('changes-toolbar'), changesHtml.indexOf('</div>', changesHtml.indexOf('changes-toolbar')));
+  assert.equal(toolbarSlice.includes('data-diff-ref'), false, 'C6: the global FROM/TO pair is gone from the Changes toolbar (now per-repo)');
+  assert.ok(changesHtml.includes('changes-repo-compare-title'), 'C6: each repo header shows its own comparison title');
+  // C6: per-repo suggestions — an unknown repo offers only HEAD as a FROM base (no cross-repo SHAs).
+  assert.equal(api.diffRefFromSuggestions('/no/such/repo').length, 1, 'C6: an unknown repo offers only HEAD as a FROM base');
   assert.equal(/<input[^>]*data-diff-ref-from/.test(changesHtml), false, 'FROM control is one select, not a duplicated input plus select');
   assert.equal(/<input[^>]*data-diff-ref-to/.test(changesHtml), false, 'TO control is one select, not a duplicated input plus select');
   assert.ok(changesHtml.includes('older base commit'), 'Changes pane FROM picker includes recent commit subjects');
@@ -1867,6 +1886,36 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('data-open-change-status="A"'), 'changed-file clicks carry status for deleted-file diff opens');
   assert.ok(changedFilesSource.includes("const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';"), 'added/untracked changed files open through editable mode first');
   assert.ok(changedFilesSource.includes("viewMode: isAddedChange ? 'edit' : 'diff'"), 'added changed files fall back to normal editor mode instead of forcing diff');
+  // C5: agent attribution renders 0-to-N icons from item.agents (Claude before Codex), with a screen-
+  // reader label when more than one appears.
+  const zeroAgentRow = api.changeFileRowHtml({session: '1', agents: [], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
+  assert.equal(zeroAgentRow.includes('changes-file-agent'), false, 'C5: a file with no transcript attribution renders zero agent icons');
+  const oneAgentRow = api.changeFileRowHtml({session: '1', agents: ['codex'], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
+  assert.ok(oneAgentRow.includes('agent-icon codex') && !oneAgentRow.includes('agent-icon claude'), 'C5: one agent renders exactly one icon');
+  const twoAgentRow = api.changeFileRowHtml({session: '1', agents: ['codex', 'claude'], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
+  assert.ok(twoAgentRow.includes('agent-icon claude') && twoAgentRow.includes('agent-icon codex'), 'C5: a file touched by both agents renders both icons');
+  assert.ok(twoAgentRow.indexOf('agent-icon claude') < twoAgentRow.indexOf('agent-icon codex'), 'C5: agent icons order Claude before Codex');
+  assert.ok(/changes-file-agent[^>]*aria-label="Claude, Codex"/.test(twoAgentRow), 'C5: the multi-agent slot is labeled for screen readers');
+  const legacyAgentRow = api.changeFileRowHtml({session: '1', agent: 'codex', status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
+  assert.ok(legacyAgentRow.includes('agent-icon codex'), 'C5: legacy scalar agent payloads still render their icon');
+  // C5: image rows carry size + relative path and DROP the native title (the rich hover preview replaces it);
+  // non-image rows keep the full-path title.
+  const imageRow = api.changeFileRowHtml({session: '1', agents: [], status: 'A', repo: '/repo/app', path: 'pic.png', abs_path: '/repo/app/pic.png', mtime: 1, size: 4096}, {});
+  assert.ok(imageRow.includes('data-change-size="4096"'), 'C5: image rows carry the file size for preview gating');
+  assert.ok(imageRow.includes('data-change-rel="pic.png"'), 'C5: rows carry the relative path for Copy relative path');
+  assert.equal(/title="[^"]*pic\.png"/.test(imageRow), false, 'C5: image rows drop the native title so it does not duplicate the hover preview');
+  const textRow = api.changeFileRowHtml({session: '1', agents: [], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1, size: 10}, {});
+  assert.ok(textRow.includes('title="/repo/app/a.txt"'), 'C5: non-image rows keep the full-path title');
+  // C5: per-render row binder + safe Finder-style context menu (no destructive Rename/Delete on Modified files).
+  assert.ok(changedFilesSource.includes('function bindChangedFileRowBehaviors('), 'C5: a per-render binder hooks Modified-files rows');
+  assert.ok(/function bindChangedFileRowBehaviors\([\s\S]*?bindFileImagePreview\(row, path/.test(changedFilesSource), 'C5: image rows get the Finder hover preview');
+  assert.ok(changedFilesSource.includes('function showChangedFileContextMenu('), 'C5: Modified-files rows have a right-click menu');
+  const ctxStart = changedFilesSource.indexOf('function showChangedFileContextMenu(');
+  const ctxBody = changedFilesSource.slice(ctxStart, changedFilesSource.indexOf('\nfunction ', ctxStart + 1));
+  for (const action of ['Copy full path', 'Copy raw path', 'Copy relative path', 'Open image in new tab', 'Download']) {
+    assert.ok(ctxBody.includes(action), `C5: the changed-file menu offers "${action}"`);
+  }
+  assert.equal(/'Rename'|'Delete'|"Rename"|"Delete"/.test(ctxBody), false, 'C5: the Modified-files menu omits destructive Rename/Delete');
   api.setUploadedFilesCollapsedForTest(true);
   api.setSessionFilesPayloadForTest({
     session: '1',
@@ -1894,10 +1943,16 @@ function makeFileTree(paths) {
     ],
   });
   assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified files'), 'Finder embeds a modified-files panel');
+  // C7: the embedded title names the session ("Modified files for session '1'").
+  assert.ok(/class="changes-title">Modified files for session &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Modified-files title names the session');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('1 file changed in &#39;1&#39;'), 'Finder modified-files summary names the session explicitly');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('Ahead 1 commit'), 'Finder modified-files panel shows repo ahead counts');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
+  // C8: the Finder header exposes a Date/Name sort control, defaulting to date/recent (mtime selected).
+  const finderSortPanel = api.fileExplorerChangesPanelHtml();
+  assert.ok(/changes-sort-compact[\s\S]*data-session-files-sort/.test(finderSortPanel), 'C8: Finder modified-files header has a compact sort control');
+  assert.ok(/data-session-files-sort[\s\S]*?<option value="mtime" selected/.test(finderSortPanel), 'C8: the Finder sort defaults to date/recent');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-from-select'), 'Finder compact modified-files header exposes the FROM commit picker');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-diff-ref-to-select'), 'Finder compact modified-files header exposes the TO picker');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), false, '#41: the modified-files density toggle is removed');
@@ -1906,6 +1961,37 @@ function makeFileTree(paths) {
   assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-remove">-1</span>'), 'Finder modified-files panel shows red removed counts');
+  // C9: the per-session detail bar shows a "+N repos" chip when the session touches more than one repo,
+  // and no chip for a single-repo session. Clicking the chip opens a popover that scopes the Finder.
+  const multiRepoInfo = {
+    agents: [], selected_pane: {current_path: '/repo/app'},
+    project: {
+      git: {root: '/repo/app', branch: 'main', dirty_count: 0}, pull_request: null, linear: [],
+      repos: [
+        {root: '/repo/app', branch: 'main', dirty_count: 0, primary: true},
+        {root: '/repo/lib', branch: 'feature', dirty_count: 2, ahead: 1, primary: false},
+      ],
+    },
+  };
+  const multiMetaHtml = api.projectMetaHtml('1', multiRepoInfo);
+  assert.ok(/data-repo-chip="1"/.test(multiMetaHtml), 'C9: a multi-repo session shows a +N repos chip');
+  assert.ok(multiMetaHtml.includes('+1 '), 'C9: the chip counts the EXTRA repos (2 repos -> +1)');
+  const singleRepoInfo = {...multiRepoInfo, project: {...multiRepoInfo.project, repos: [multiRepoInfo.project.repos[0]]}};
+  assert.equal(api.projectMetaHtml('1', singleRepoInfo).includes('meta-repo-chip'), false, 'C9: a single-repo session shows no chip');
+  const c9Src = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the +N repos chip opens a popover');
+  assert.ok(/showRepoChipMenu\([\s\S]*?openFileExplorerAt\(root\)/.test(c9Src), 'C9: clicking a repo row scopes the Finder to that repo');
+  // C10: Finder delete shortcut — Command-Delete on Mac, plain Delete on PC, gated to the Finder surface
+  // and taking precedence over the global Mod+Delete tab-close.
+  assert.ok(c9Src.includes('function handleFileExplorerDeleteShortcut('), 'C10: a Finder delete-shortcut handler exists');
+  assert.ok(/handleGlobalShortcutKeydown\(event\)\s*\{[\s\S]{0,200}?handleFileExplorerDeleteShortcut\(event\)\)\s*return/.test(c9Src), 'C10: Finder delete runs before the global tab-close shortcut');
+  const c10Body = c9Src.slice(c9Src.indexOf('function handleFileExplorerDeleteShortcut('), c9Src.indexOf('function beginFileTreeRename('));
+  assert.ok(c10Body.includes('isMacPlatform()') && c10Body.includes('event.metaKey === true'), 'C10: Mac requires Command (metaKey)');
+  assert.ok(/key !== 'delete' \|\| event\.metaKey/.test(c10Body), 'C10: PC requires a plain Delete (no modifiers)');
+  assert.ok(c10Body.includes('eventTargetIsFileExplorerSurface(event.target)'), 'C10: the shortcut is scoped to the Finder surface');
+  assert.ok(c10Body.includes('globalShortcutTargetAllowsAppAction(event.target)'), 'C10: the shortcut is suppressed in text/rename inputs');
+  assert.ok(c10Body.includes('fileExplorerSelectedPaths') && c10Body.includes('deleteFileTreePath('), 'C10: it deletes the selected paths via the existing delete flow');
+  assert.ok(c10Body.includes('readOnlyMode'), 'C10: readonly is blocked through the existing delete guard');
   const changedFilesCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.changes-status\s*\{[\s\S]*width:\s*13px/.test(changedFilesCss), 'modified-file status chips are skinny');
   // #46: Modified-files rows match the Finder file tree — the row uses the file-explorer font size and
@@ -1959,7 +2045,8 @@ function makeFileTree(paths) {
   assert.ok(/api\.EditorState\.create\(\{\s*doc: currentText,\s*extensions: \[\s*api\.unifiedMergeView\(\{\s*original,/.test(appSource), 'unified diff edits the modified document and overlays the original via unifiedMergeView, so deleted rows are unnumbered read-only widgets');
   const diffGutterCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(diffGutterCss), false, '#17: deleted-line numbers are suppressed natively by unifiedMergeView, not by a transparent-text gutter hack');
-  assert.ok(appSource.includes('/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString()}'), 'editor diff requests carry FROM/TO refs');
+  // C6: editor diffs carry the FILE'S REPO refs (per-repo), not a single global pair.
+  assert.ok(appSource.includes('/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString(fileRepoForPath(path))}'), 'editor diff requests carry the per-repo FROM/TO refs');
   assert.ok(appSource.includes("const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';"), 'diff editor editability follows TO=current after the FROM/TO flip');
   assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent;'), 'diff editor allows edits on the new/current side');
   assert.ok(/function destroyCodeMirrorPanel[\s\S]*\.cm-diff-overview'\)\?\.remove\(\)/.test(appSource), '#26: tearing down the CodeMirror panel removes the diff scrollbar overview so its red/green ticks do not linger in edit/normal mode');
@@ -2250,6 +2337,9 @@ function makeFileTree(paths) {
   assert.ok(/\.yoagent-chat\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent chat fits narrow panes');
   assert.ok(/\.yoagent-chat\.empty\s*\{[\s\S]*grid-template-rows:\s*auto auto/.test(preferencesCss), 'empty YO!agent chat does not stretch an empty history row');
   assert.ok(preferencesCss.includes('body.editor-cursor-block .file-editor-codemirror .cm-cursor'), 'block cursor styling is available for CodeMirror');
+  // C4: select/text preference controls right-align inside their own grid track so their right edge
+  // lines up with the number controls' px suffix (the 1fr track alone made justify-content a no-op).
+  assert.ok(/\.preferences-setting-control\.setting-type-text input\[type="text"\],\s*\n\.preferences-setting-control\.setting-type-select select\s*\{[^}]*justify-self:\s*end/.test(preferencesCss), 'C4: select/text controls right-align within their grid track');
   assert.ok(preferencesCss.includes('.file-editor-dialog-backdrop'), 'editor conflict and close decisions use the shared editor dialog');
   assert.equal(preferencesCss.includes('.app-menu-search-input'), false, 'Tabs menu no longer renders a sticky search input');
   assert.ok(preferencesCss.includes('.command-palette-detail .fuzzy-match'), 'command palette highlights fuzzy matches in detail text');
@@ -4131,7 +4221,9 @@ function makeFileTree(paths) {
     terminalLine('    919558600/job', false),  // hanging indent (4 spaces), NOT a soft-wrap
     terminalLine('$ ', false),                 // a plain prompt row — must NOT be merged
   ];
-  const term = {buffer: {active: {getLine: index => lines[index] || null}}};
+  // DOIT.36 C1: the URL row fills the terminal to its right edge (cols == its length), proving it was
+  // CLIPPED and hard-wrapped — that is what licenses stitching the indented continuation onto it.
+  const term = {cols: lines[0].translateToString(true).length, buffer: {active: {getLine: index => lines[index] || null}}};
 
   const full = 'https://github.com/ai-dynamo/frontend-crates/actions/runs/26919558600/job';
   // Query from the FIRST row.
@@ -4154,6 +4246,24 @@ function makeFileTree(paths) {
   // A plain prompt row below is NOT part of the link.
   const promptRow = api.terminalWrappedLineLinks(term, 3);
   assert.equal(promptRow.length, 0, 'DOIT.27: the prompt row after the URL is not merged into the link');
+}
+
+// DOIT.36 C1 (no false JOIN): a COMPLETE url at end-of-line that ends well short of the terminal's
+// right edge was NOT clipped, so the indented next row must stay independent — earlier this merged into
+// one bogus link `https://example.comnext step`.
+{
+  const api = loadYolomux();
+  const lines = [
+    terminalLine('See https://example.com'),  // complete URL, ends at col 23 of an 80-col terminal
+    terminalLine('    next step', false),      // indented prose — NOT a clipped URL continuation
+  ];
+  const term = {cols: 80, buffer: {active: {getLine: index => lines[index] || null}}};
+  const row1 = api.terminalWrappedLineLinks(term, 1);
+  assert.equal(row1.length, 1, 'C1: a complete URL at EOL links only itself');
+  assert.equal(row1[0].text, 'https://example.com', 'C1: link text is the complete URL, not joined with the next row');
+  assert.equal(row1[0].range.end.y, 1, 'C1: the underline stays on the URL row (no false continuation onto row 2)');
+  const row2 = api.terminalWrappedLineLinks(term, 2);
+  assert.equal(row2.length, 0, 'C1: the indented prose continuation is not a link');
 }
 
 // DOIT.27 (no false merge): an indented line under a row that ends in PROSE (not an unterminated URL)
@@ -4769,7 +4879,10 @@ function makeFileTree(paths) {
     files: [{session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1}],
   });
   const panel = api.fileExplorerChangesPanelHtml();
-  assert.ok(panel.includes(`>${zhHant['changes.title']}</span>`), '#121: the Modified-files title is localized');
+  // C7: the embedded title now names the session via changes.titleForSession; assert its localized stems
+  // surround the session (independent of the session label value).
+  const titleStems = zhHant['changes.titleForSession'].split('{session}');
+  assert.ok(titleStems.every(stem => !stem || panel.includes(stem)), '#121/C7: the Modified-files title is localized and names the session');
   assert.ok(panel.includes(`>${zhHant['changes.refresh']}</button>`), '#121: the Modified-files Refresh button is localized');
   assert.ok(panel.includes(`>${zhHant['diff.ref.from']} <select`), '#121: the diff-ref FROM label is localized');
   assert.ok(panel.includes(`>${zhHant['diff.ref.to']} <select`), '#121: the diff-ref TO label is localized');
@@ -5038,6 +5151,9 @@ function makeFileTree(paths) {
   const event = dragEvent(125, '4');
   event.currentTarget = source;
   event.clientY = 31;
+  // C12 F2: the grab offset now comes from event.offsetX/offsetY (no getBoundingClientRect reflow).
+  event.offsetX = 25;
+  event.offsetY = 11;
 
   api.startSessionDrag(event, '4', 'left');
 
@@ -5049,8 +5165,9 @@ function makeFileTree(paths) {
   // the grab point — with NO transparent image, NO JS clone-follow preview, and NO document listeners.
   assert.ok(event.dataTransfer.dragImage, 'native drag image is installed');
   assert.equal(event.dataTransfer.dragImage.node, source, '#47: the drag image is the tab itself (compositor snapshot)');
-  assert.equal(event.dataTransfer.dragImage.x, 25, '#47: drag-image grab offset X follows the pointer');
-  assert.equal(event.dataTransfer.dragImage.y, 11, '#47: drag-image grab offset Y follows the pointer');
+  // C12 F2: grab offset is event.offsetX/offsetY (cursor position within the tab), no layout reflow.
+  assert.equal(event.dataTransfer.dragImage.x, 25, '#47/C12: drag-image grab offset X comes from event.offsetX');
+  assert.equal(event.dataTransfer.dragImage.y, 11, '#47/C12: drag-image grab offset Y comes from event.offsetY');
   assert.equal(api.customDragPreviewForTest(), null, '#47: tab drags install no JS clone-follow preview');
 }
 

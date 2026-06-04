@@ -111,6 +111,32 @@ def parse_query_float(
     return value, ""
 
 
+def parse_repo_refs_param(raw: str | None) -> dict[str, dict[str, str]] | None:
+    # C6: decode the optional per-repo FROM/TO override map sent as URL-encoded JSON
+    # ({repo_path: {"from": <ref>, "to": <ref>}}). Returns None for absent/malformed input so the caller
+    # falls back to the scalar from/to; only well-formed string ref pairs survive.
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    result: dict[str, dict[str, str]] = {}
+    for repo, refs in decoded.items():
+        if not isinstance(repo, str) or not isinstance(refs, dict):
+            continue
+        entry: dict[str, str] = {}
+        for key in ("from", "to"):
+            value = refs.get(key)
+            if isinstance(value, str) and value.strip():
+                entry[key] = value.strip()
+        if entry:
+            result[repo] = entry
+    return result or None
+
+
 def clamp_pty_dimension(value: int) -> int:
     return max(PTY_DIMENSION_MIN, min(value, PTY_DIMENSION_MAX))
 
@@ -277,7 +303,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 return
             from_ref = qs.get("from", [None])[0]
             to_ref = qs.get("to", [None])[0]
-            payload, status = self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref)
+            # C6: optional per-repo override map ({repo_path: {"from","to"}}) as URL-encoded JSON, so each
+            # repo can compare its own commit graph. Malformed JSON falls back to the scalar from/to.
+            repo_refs = parse_repo_refs_param(qs.get("refs", [None])[0])
+            payload, status = self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/summary":

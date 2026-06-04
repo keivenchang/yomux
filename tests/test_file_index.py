@@ -65,6 +65,61 @@ def test_index_status_warms_and_reports_state(tmp_path, monkeypatch):
     assert status["count"] >= 2  # deep_target.md + top.txt (node_modules skipped)
 
 
+def test_load_disk_rejects_stale_format_or_skip_signature(tmp_path, monkeypatch):
+    # C11: an index built with a different format version or skip-dir set must NOT be reused — it rebuilds.
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    # Same skip set + version -> loads.
+    assert file_index._load_disk(tmp_path, SEARCH_SKIP_DIRS) is not None
+    # Different skip set -> rejected (signature mismatch).
+    assert file_index._load_disk(tmp_path, SEARCH_SKIP_DIRS | {"some_other_dir"}) is None
+    # Bumped format version -> rejected.
+    monkeypatch.setattr(file_index, "INDEX_FORMAT_VERSION", file_index.INDEX_FORMAT_VERSION + 1)
+    assert file_index._load_disk(tmp_path, SEARCH_SKIP_DIRS) is None
+
+
+def test_empty_query_serves_recent_from_index_without_cold_walk(tmp_path, monkeypatch):
+    # C11: an empty query on a ready full-tree index returns a capped recent slice (state "ready") instead
+    # of cold-walking the tree.
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    payload = filesystem.search_files(str(tmp_path), query="", limit=50, recursive=True)
+    assert payload["index_state"] == "ready"
+    names = {entry["name"] for entry in payload["files"]}
+    assert "deep_target.md" in names and "top.txt" in names
+    assert "ignored.js" not in names
+
+    # Guard the cold-walk path is not taken for an empty query: force the walk to explode if reached.
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("empty-query search must not cold-walk a ready index")
+    monkeypatch.setattr(filesystem, "_search_full_tree", _boom)
+    payload2 = filesystem.search_files(str(tmp_path), query="", limit=50, recursive=True)
+    assert payload2["index_state"] == "ready"
+
+
+def test_empty_query_returns_warming_when_index_not_ready(tmp_path, monkeypatch):
+    # C11: empty query on a not-yet-ready index returns warming + no files (no cold walk).
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _make_tree(tmp_path)
+
+    class _NotReady:
+        ready = False
+        building = True
+    monkeypatch.setattr(file_index, "ensure_index", lambda root, skip: _NotReady())
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("warming index must not cold-walk")
+    monkeypatch.setattr(filesystem, "_search_full_tree", _boom)
+    payload = filesystem.search_files(str(tmp_path), query="", limit=50, recursive=True)
+    assert payload["index_state"] == "warming"
+    assert payload["files"] == []
+
+
 def test_unindex_drops_registry_and_disk(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")

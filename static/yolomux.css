@@ -2099,6 +2099,28 @@ body.theme-light .branch-link {
 .changes-repo-count {
   color: var(--muted);
 }
+/* C6: per-repo FROM/TO controls + comparison title row, directly under each repo header. */
+.changes-repo-refs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  font-size: var(--ui-font-size-xs);
+  color: var(--muted);
+}
+.changes-repo-compare-title {
+  color: var(--muted);
+}
+.changes-repo-refs-error {
+  color: var(--accent-gold);
+  font-weight: 600;
+}
+.changes-repo-refs .diff-ref-controls {
+  margin-inline-start: auto;
+}
 .changes-uploaded-toggle {
   width: 100%;
   border: 0;
@@ -2199,6 +2221,12 @@ body.theme-light .branch-link {
 .changes-file-row:hover {
   background: var(--changes-row-hover-bg);
 }
+/* C5: Finder-like single-click selection highlight — the hover tint plus a gold left bar (the same
+   --accent-gold marker the file tree uses for the current row). Both tokens flip with the theme. */
+.changes-file-row.selected {
+  background: var(--changes-row-hover-bg);
+  box-shadow: inset 3px 0 0 var(--accent-gold);
+}
 .changes-file-row:disabled {
   cursor: default;
   opacity: 0.65;
@@ -2285,6 +2313,7 @@ body.theme-light .branch-link {
 .changes-file-agent {
   display: inline-flex;
   align-items: center;
+  gap: 2px;  /* C5: space multiple agent icons when a file was touched by both Claude and Codex */
   flex: 0 0 auto;
 }
 .changes-file-agent .agent-icon {
@@ -2927,6 +2956,11 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-setting-control.setting-type-text input[type="text"],
 .preferences-setting-control.setting-type-select select {
   width: min(100%, 24ch);
+  /* C4: the first grid track is minmax(0, 1fr), so it absorbs all free space and justify-content on the
+     row has nothing to align. Right-align the control INSIDE its own track instead — its right edge then
+     lands 6px (the grid gap) left of Reset, matching where the number controls' px suffix ends. Wide
+     rows below force width:100%, so justify-self is a harmless no-op there. */
+  justify-self: end;
 }
 .preferences-setting-control.setting-type-list textarea,
 .preferences-setting-control.setting-type-textarea textarea {
@@ -3734,6 +3768,56 @@ body.theme-light .drop-slot.drag-over {
 }
 .meta-sep {
   color: #5e6878;
+}
+/* C9: the "+N repos" chip on the detail bar and its multi-repo popover rows. Tokens only (light/dark). */
+.meta-repo-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 6px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--pane-meta-branch);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  cursor: pointer;
+}
+.meta-repo-chip:hover,
+.meta-repo-chip:focus-visible {
+  background: color-mix(in srgb, var(--accent-gold) 22%, transparent);
+  outline: none;
+}
+.repo-chip-menu .repo-chip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: start;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.repo-chip-menu .repo-chip-row:hover,
+.repo-chip-menu .repo-chip-row:focus-visible {
+  background: color-mix(in srgb, var(--accent-gold) 18%, transparent);
+  outline: none;
+}
+.repo-chip-menu .repo-chip-row-primary .repo-chip-path {
+  font-weight: 700;
+}
+.repo-chip-menu .repo-chip-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-chip-menu .repo-chip-meta {
+  display: inline-flex;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 .pane-tabs {
   position: relative;
@@ -7130,7 +7214,9 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
   top: 0;
   z-index: 1;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto minmax(0, 1fr);
+  /* C6 moved the diff-ref controls into each repo header; C8 added a compact sort. Children are now
+     title (flex), sort, refresh, close. */
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 6px;
   padding: 4px 5px;
@@ -7152,6 +7238,18 @@ body.theme-light .file-explorer-changes-head {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* C8: compact Date/Name sort control in the Finder Modified-files header (reuses the shared handler). */
+.file-explorer-changes-head .changes-sort-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.file-explorer-changes-head .changes-sort-compact select {
+  font-size: var(--ui-font-size-xs);
 }
 /* FROM hugs the left edge of the refs area, TO hugs the right (user: "FROM left, TO right indented").
    The controls span the full width of their cell/row and push apart instead of bunching together. */

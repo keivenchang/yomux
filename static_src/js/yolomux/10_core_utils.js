@@ -120,6 +120,30 @@ function readStoredDiffRef(key, fallback) {
 function writeStoredDiffRefs() {
   storageSet(diffRefFromStorageKey, diffRefFrom);
   storageSet(diffRefToStorageKey, diffRefTo);
+  // C6: persist the per-repo overrides alongside the global default.
+  try {
+    storageSet(diffRefsByRepoStorageKey, JSON.stringify(diffRefsByRepo || {}));
+  } catch (_error) {
+    storageSet(diffRefsByRepoStorageKey, '{}');
+  }
+}
+
+function readStoredDiffRefsByRepo() {
+  // C6: restore {repoPath: {from, to}}; tolerate corrupt/absent storage by returning an empty map.
+  try {
+    const parsed = JSON.parse(storageGet(diffRefsByRepoStorageKey) || '{}');
+    if (!parsed || typeof parsed !== 'object') return {};
+    const result = {};
+    for (const [repo, refs] of Object.entries(parsed)) {
+      if (typeof repo !== 'string' || !refs || typeof refs !== 'object') continue;
+      const from = cleanDiffRef(refs.from, '');
+      const to = cleanDiffRef(refs.to, '');
+      if (from || to) result[repo] = {from: from || 'HEAD', to: to || 'current'};
+    }
+    return result;
+  } catch (_error) {
+    return {};
+  }
 }
 
 function readStoredFileExplorerTreeShowDates() {
@@ -675,6 +699,16 @@ function terminalBufferLineText(line) {
   return line?.translateToString?.(true) || '';
 }
 
+// DOIT.36 C1: did `line` fill the terminal to its right edge? translateToString(true) trims trailing
+// blanks, so a row whose printed text reaches `cols` had a non-blank last cell — evidence the content
+// was CLIPPED at the edge and wrapped, not that it merely happened to end at the row. Used to gate the
+// hanging-URL stitch: a complete URL ending well short of the edge (e.g. `See https://x.com`) is NOT a
+// clipped URL and must not absorb the indented next row. cols<=0 (unknown width) → treat as not clipped.
+function terminalRowReachesRightEdge(line, cols) {
+  if (!Number.isFinite(cols) || cols <= 0) return false;
+  return terminalBufferLineText(line).length >= cols;
+}
+
 // DOIT.27: does the joined group text end mid-URL? True when the LAST url token reaches the very end of
 // the string (no trailing whitespace/terminator). Used to decide whether to stitch a hanging-indent
 // continuation row onto the group — only EXTEND a url token that runs off the row's right edge.
@@ -702,16 +736,21 @@ function terminalRowHangingShape(buffer, index) {
 // DOIT.27: row `index` continues the URL printed on row `index - 1` — its own row shape is a hanging
 // indent AND the previous row's tail is an unterminated url token. Gates tightly so ordinary indented
 // prose under a line that merely happens to end at a URL is not merged.
-function terminalRowIsHangingUrlContinuation(buffer, index) {
+// DOIT.36 C1: ALSO require the previous row to reach the terminal's right edge, proving the URL was
+// clipped/hard-wrapped. Without this, a complete URL at end-of-line falsely swallows the next row.
+function terminalRowIsHangingUrlContinuation(buffer, index, cols) {
   if (!terminalRowHangingShape(buffer, index)) return false;
   const prev = buffer.getLine(index - 1);
   if (!prev) return false;
+  if (!terminalRowReachesRightEdge(prev, cols)) return false;
   return terminalTailIsUnterminatedUrl(terminalBufferLineText(prev));
 }
 
 function terminalWrappedLineGroup(term, y) {
   const buffer = term.buffer?.active;
   if (!buffer?.getLine) return null;
+  // DOIT.36 C1: terminal width gates the hanging-URL stitch (a clipped URL fills to the right edge).
+  const cols = Number(term.cols) || 0;
   const requested = Math.max(0, y - 1);
   if (!buffer.getLine(requested)) return null;
   // Walk back to the logical line's first row: over terminal soft-wraps (isWrapped) AND over
@@ -720,7 +759,7 @@ function terminalWrappedLineGroup(term, y) {
   let start = requested;
   for (;;) {
     if (start > 0 && buffer.getLine(start)?.isWrapped === true) { start -= 1; continue; }
-    if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start)) { start -= 1; continue; }
+    if (start > 0 && terminalRowIsHangingUrlContinuation(buffer, start, cols)) { start -= 1; continue; }
     break;
   }
   // Forward pass from start. Include soft-wrap rows (indent 0) and, while the joined text still ends
@@ -737,7 +776,7 @@ function terminalWrappedLineGroup(term, y) {
       text = terminalBufferLineText(buffer.getLine(index));
     } else if (buffer.getLine(index)?.isWrapped === true) {
       text = terminalBufferLineText(buffer.getLine(index));
-    } else if (terminalTailIsUnterminatedUrl(joined)) {
+    } else if (terminalTailIsUnterminatedUrl(joined) && terminalRowReachesRightEdge(buffer.getLine(index - 1), cols)) {
       const shape = terminalRowHangingShape(buffer, index);
       if (!shape) break;
       indent = shape.indent;

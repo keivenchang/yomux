@@ -603,7 +603,15 @@ function bindPanelControls(panel, session) {
       .then(() => { statusEl.textContent = 'copied transcript path'; })
       .catch(error => { statusErr(`copy failed: ${esc(error)}`); });
   });
-  panel.querySelector('.meta')?.addEventListener('click', event => event.stopPropagation());
+  panel.querySelector('.meta')?.addEventListener('click', event => {
+    event.stopPropagation();
+    // C9: the "+N repos" chip opens the per-session multi-repo popover (delegated, since .meta re-renders).
+    const chip = event.target.closest('[data-repo-chip]');
+    if (chip) {
+      event.preventDefault();
+      showRepoChipMenu(chip.dataset.repoChip || session, event.clientX, event.clientY);
+    }
+  });
   panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
   bindFileUpload(panel, session);
 }
@@ -2013,6 +2021,9 @@ topbar?.addEventListener('pointerenter', () => {
   closeFileImagePreview();
 });
 function handleGlobalShortcutKeydown(event) {
+  // C10: the Finder tree claims Command-Delete (Mac) / Delete (PC) to delete the selected file(s) before
+  // the global Mod+Delete tab-close fallback can fire.
+  if (handleFileExplorerDeleteShortcut(event)) return;
   const mod = appModifier(event);
   const key = String(event.key || '').toLowerCase();
   const platformActionAllowed = globalShortcutTargetAllowsPlatformAction(event.target);

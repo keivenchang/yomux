@@ -51,6 +51,15 @@ def file_mtime(path: Path) -> float:
         return 0.0
 
 
+def file_size(path: Path) -> int | None:
+    # C5: Modified-files rows need the same size Finder gets from /api/fs/list so the image hover preview
+    # can enforce the same "only preview images under the cap" rule. None when the file is gone (deleted).
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return None
+
+
 def scan_claude_transcript(path: Path, cwd: str | None = None) -> dict[str, set[str]]:
     changes: dict[str, set[str]] = {}
     try:
@@ -352,19 +361,9 @@ def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
     return roots
 
 
-def session_agent_fallback(info: SessionInfo) -> str:
-    for agent in info.agents:
-        if agent.kind in {"claude", "codex"} and agent.transcript:
-            return agent.kind
-    for agent in info.agents:
-        if agent.kind in {"claude", "codex"}:
-            return agent.kind
-    return ""
-
-
 def session_file_entry(
     session: str,
-    agent: str,
+    agents: list[str],
     status: str,
     path: Path,
     repo: Path | None,
@@ -373,14 +372,19 @@ def session_file_entry(
     removed: int | None = None,
 ) -> dict[str, Any]:
     rel_path = repo_relative_path(path, repo) if repo else None
+    agent_list = [a for a in agents if a]
     return {
         "session": session,
-        "agent": agent,
+        # C5: a changed file can be touched by 0, 1, or several agents, so carry the full list (the UI
+        # renders 0-to-N icons from it). `agent` stays as a scalar first-agent alias for legacy consumers.
+        "agents": agent_list,
+        "agent": agent_list[0] if agent_list else "",
         "status": status,
         "repo": str(repo) if repo else "",
         "path": rel_path or str(path),
         "abs_path": str(path),
         "mtime": file_mtime(path),
+        "size": file_size(path),
         "source": source,
         "added": added,
         "removed": removed,
@@ -403,7 +407,11 @@ def session_files_payload_for_info(
     now: float | None = None,
     from_ref: str | None = None,
     to_ref: str | None = None,
+    repo_refs: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    # C6: `repo_refs` carries per-repo FROM/TO overrides ({repo_path: {"from","to"}}); a SHA chosen for
+    # one repo no longer leaks into another. The scalar from_ref/to_ref stay as the global default applied
+    # to any repo without an override (and drive the top-level payload refs for legacy single-repo callers).
     cutoff = (now if now is not None else time.time()) - bounded_session_files_hours(hours) * 3600
     refs_active = refs_requested(from_ref, to_ref)
     selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
@@ -418,10 +426,12 @@ def session_files_payload_for_info(
         if file_mtime(transcript) < cutoff:
             continue
         for path_text, markers in scan_agent_changes(agent).items():
-            touched[path_text] = {
-                "agent": agent.kind,
-                "status": classify_change(markers),
-            }
+            # C5: accumulate every agent that touched this path instead of overwriting, so a file edited
+            # by both Claude and Codex keeps both attributions (rendered as two icons).
+            entry = touched.setdefault(path_text, {"agents": [], "status": ""})
+            if agent.kind and agent.kind not in entry["agents"]:
+                entry["agents"].append(agent.kind)
+            entry["status"] = classify_change(markers)
 
     repos: dict[str, set[str]] = {}
     for path_text, metadata in touched.items():
@@ -435,22 +445,33 @@ def session_files_payload_for_info(
     files: list[dict[str, Any]] = []
     repo_payloads: list[dict[str, Any]] = []
     refs_by_repo: dict[str, list[dict[str, str]]] = {}
-    fallback_agent = session_agent_fallback(info)
     for repo_text in sorted(repos):
         repo = Path(repo_text)
         refs_by_repo[str(repo)] = git_recent_refs(repo)
-        diff_base = "" if refs_active else git_diff_base(repo)
-        statuses, status_error = git_name_status(repo, diff_base or None, selected_from or None, selected_to or None)
-        if status_error and refs_active and diff_ref_resolution_error(status_error):
+        # C6: resolve this repo's effective FROM/TO — its own override if present, else the global scalar.
+        repo_override = (repo_refs or {}).get(repo_text) or (repo_refs or {}).get(str(repo)) or {}
+        repo_from = str(repo_override.get("from") or "").strip() or from_ref
+        repo_to = str(repo_override.get("to") or "").strip() or to_ref
+        repo_refs_active = refs_requested(repo_from, repo_to)
+        sel_from, sel_to = diff_refs(repo_from, repo_to) if repo_refs_active else ("", "")
+        repo_error = ""
+        diff_base = "" if repo_refs_active else git_diff_base(repo)
+        statuses, status_error = git_name_status(repo, diff_base or None, sel_from or None, sel_to or None)
+        if status_error and repo_refs_active and diff_ref_resolution_error(status_error):
+            # The requested ref is unknown in THIS repo (e.g. a SHA that only exists in another repo) —
+            # fall back to this repo's own default base instead of erroring the whole payload.
             fallback_base = git_diff_base(repo)
             statuses, status_error = git_name_status(repo, fallback_base)
             numstat = git_numstat(repo, fallback_base) if not status_error else {}
+            sel_from, sel_to = "", ""
+            repo_error = "requested refs not found in this repo; showing default"
         elif status_error:
             errors.append(f"{repo.name}: {status_error}")
+            repo_error = status_error
             statuses = {}
             numstat = {}
         else:
-            numstat = git_numstat(repo, diff_base or None, selected_from or None, selected_to or None)
+            numstat = git_numstat(repo, diff_base or None, sel_from or None, sel_to or None)
         repo_entries: list[dict[str, Any]] = []
         for rel_path, status in statuses.items():
             path = (repo / rel_path).resolve(strict=False)
@@ -460,11 +481,13 @@ def session_files_payload_for_info(
             if status in {"A", "?"} and rel_path not in numstat:
                 added = untracked_added_line_count(path)
                 removed = 0
-            agent = next(
-                (metadata["agent"] for touched_path, metadata in touched.items() if repo_relative_path(Path(touched_path), repo) == rel_path),
-                fallback_agent,
+            # C5: attribute the file to exactly the agents the transcripts say touched it — no fallback.
+            # A repo-only change with no transcript attribution gets an empty list (zero agent icons).
+            agents = next(
+                (metadata["agents"] for touched_path, metadata in touched.items() if repo_relative_path(Path(touched_path), repo) == rel_path),
+                [],
             )
-            repo_entries.append(session_file_entry(info.session, agent, status, path, repo, "git", added, removed))
+            repo_entries.append(session_file_entry(info.session, agents, status, path, repo, "git", added, removed))
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(repo_entries)
         repo_payload = {
@@ -473,8 +496,13 @@ def session_files_payload_for_info(
             "touched_count": len(repos[repo_text]),
             "added": line_total(repo_entries, "added"),
             "removed": line_total(repo_entries, "removed"),
+            # C6: report the refs THIS repo actually compared, plus any per-repo fallback, so each repo
+            # header can render its own comparison title independently of the others.
+            "from_ref": sel_from or "default",
+            "to_ref": sel_to or "base",
+            "error": repo_error,
         }
-        repo_payload.update(git_ahead_behind(repo, selected_from or None, selected_to or None))
+        repo_payload.update(git_ahead_behind(repo, sel_from or None, sel_to or None))
         repo_payloads.append(repo_payload)
 
     files.sort(key=lambda item: (-float(item.get("mtime") or 0), item["repo"], item["path"]))
@@ -498,12 +526,13 @@ def session_files_payload(
     hours: float = 24.0,
     from_ref: str | None = None,
     to_ref: str | None = None,
+    repo_refs: dict[str, dict[str, str]] | None = None,
 ) -> tuple[dict[str, Any], HTTPStatus]:
     if session:
         info = infos.get(session)
         if info is None:
             return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
-        payload = session_files_payload_for_info(info, hours, from_ref=from_ref, to_ref=to_ref)
+        payload = session_files_payload_for_info(info, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
         return payload, HTTPStatus.OK
 
     files: list[dict[str, Any]] = []
@@ -511,7 +540,7 @@ def session_files_payload(
     refs_by_repo: dict[str, list[dict[str, str]]] = {}
     errors: list[str] = []
     for info in infos.values():
-        payload = session_files_payload_for_info(info, hours, from_ref=from_ref, to_ref=to_ref)
+        payload = session_files_payload_for_info(info, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
         files.extend(payload["files"])
         errors.extend(payload["errors"])
         refs_by_repo.update(payload.get("refs_by_repo", {}))
@@ -522,6 +551,10 @@ def session_files_payload(
             existing["touched_count"] += repo["touched_count"]
             existing["added"] += repo.get("added", 0)
             existing["removed"] += repo.get("removed", 0)
+            # C6: carry the per-repo effective comparison refs/error from the first session that touched it.
+            existing.setdefault("from_ref", repo.get("from_ref", "default"))
+            existing.setdefault("to_ref", repo.get("to_ref", "base"))
+            existing.setdefault("error", repo.get("error", ""))
     files.sort(key=lambda item: (-float(item.get("mtime") or 0), item["session"], item["path"]))
     return {
         "session": "",

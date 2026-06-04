@@ -11,6 +11,7 @@ an index is still building or on any error, so search never depends on it.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -30,6 +31,14 @@ MAX_INDEX_FILES = 400_000
 # Serve from the index immediately; rebuild in the background once it is older
 # than this (stale-while-revalidate), which also prunes deleted files.
 INDEX_TTL_SECONDS = 300.0
+# C11: bump when the on-disk JSON shape changes so old/incompatible indexes rebuild for a clear reason.
+INDEX_FORMAT_VERSION = 1
+
+
+def _skip_signature(skip_dirs: set[str]) -> str:
+    # C11: the set of skipped directories is part of what an index means; if it changes, the cached
+    # index no longer matches the requested coverage and must rebuild.
+    return ",".join(sorted(skip_dirs))
 
 # (path, name, relative_path, size, mtime)
 IndexEntry = tuple[str, str, str, int, int]
@@ -55,6 +64,13 @@ _REGISTRY_LOCK = threading.Lock()
 def _index_disk_path(root: Path) -> Path:
     digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
     return INDEX_DIR / f"{digest}.json"
+
+
+def _build_lock_path(root: Path) -> Path:
+    # C11: a per-root file lock so two server processes (e.g. :7777 and :7778 sharing STATE_DIR) don't
+    # duplicate the same expensive walk or delete while another build is persisting.
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+    return INDEX_DIR / f"{digest}.lock"
 
 
 def walk_root(root: Path, skip_dirs: set[str], stop_event: threading.Event | None = None) -> tuple[list[IndexEntry], bool]:
@@ -84,10 +100,17 @@ def walk_root(root: Path, skip_dirs: set[str], stop_event: threading.Event | Non
     return entries, truncated
 
 
-def _persist(ri: RootIndex) -> None:
+def _persist(ri: RootIndex, skip_dirs: set[str]) -> None:
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {"root": str(ri.root), "built_at": ri.built_at, "truncated": ri.truncated, "entries": ri.entries}
+        payload = {
+            "version": INDEX_FORMAT_VERSION,
+            "skip_signature": _skip_signature(skip_dirs),
+            "root": str(ri.root),
+            "built_at": ri.built_at,
+            "truncated": ri.truncated,
+            "entries": ri.entries,
+        }
         tmp = _index_disk_path(ri.root).with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(_index_disk_path(ri.root))
@@ -95,12 +118,15 @@ def _persist(ri: RootIndex) -> None:
         pass
 
 
-def _load_disk(root: Path) -> tuple[list[IndexEntry], float, bool] | None:
+def _load_disk(root: Path, skip_dirs: set[str]) -> tuple[list[IndexEntry], float, bool] | None:
     try:
         raw = json.loads(_index_disk_path(root).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(raw, dict) or raw.get("root") != str(root):
+        return None
+    # C11: reject indexes from an older format or a different skip-dir set so they rebuild cleanly.
+    if raw.get("version") != INDEX_FORMAT_VERSION or raw.get("skip_signature") != _skip_signature(skip_dirs):
         return None
     entries_raw = raw.get("entries")
     if not isinstance(entries_raw, list):
@@ -110,18 +136,46 @@ def _load_disk(root: Path) -> tuple[list[IndexEntry], float, bool] | None:
 
 
 def _run_build(ri: RootIndex, skip_dirs: set[str]) -> None:
-    entries, truncated = walk_root(ri.root, skip_dirs, ri.stop_event)
-    if ri.stop_event.is_set():
+    # C11: take a cross-process lock so a second server process does not duplicate the walk. If another
+    # process holds it, leave whatever stale-but-ready disk copy we already loaded in place and bail.
+    lock_fd = None
+    try:
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        lock_fd = os.open(str(_build_lock_path(ri.root)), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            with ri.lock:
+                ri.building = False
+            return
+        # Another process may have just finished while we waited for the lock — adopt a fresh disk copy
+        # instead of re-walking.
+        disk = _load_disk(ri.root, skip_dirs)
+        if disk is not None and (time.time() - disk[1]) <= INDEX_TTL_SECONDS:
+            with ri.lock:
+                ri.entries, ri.built_at, ri.truncated = disk
+                ri.ready = True
+                ri.building = False
+            return
+        entries, truncated = walk_root(ri.root, skip_dirs, ri.stop_event)
+        if ri.stop_event.is_set():
+            with ri.lock:
+                ri.building = False
+            return
         with ri.lock:
+            ri.entries = entries
+            ri.truncated = truncated
+            ri.built_at = time.time()
+            ri.ready = True
             ri.building = False
-        return
-    with ri.lock:
-        ri.entries = entries
-        ri.truncated = truncated
-        ri.built_at = time.time()
-        ri.ready = True
-        ri.building = False
-    _persist(ri)
+        _persist(ri, skip_dirs)
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
 
 
 def _start_build(ri: RootIndex, skip_dirs: set[str]) -> None:
@@ -144,7 +198,7 @@ def ensure_index(root: Path, skip_dirs: set[str]) -> RootIndex:
         if ri is None:
             ri = RootIndex(root)
             _REGISTRY[key] = ri
-            disk = _load_disk(root)
+            disk = _load_disk(root, skip_dirs)
             if disk is not None:
                 ri.entries, ri.built_at, ri.truncated = disk
                 ri.ready = True
@@ -185,6 +239,23 @@ def search_index(ri: RootIndex, match: Callable[[str, str, str], Any], max_resul
     if len(results) > max_results:
         truncated = True
         results = results[:max_results]
+    return results, truncated
+
+
+def recent_entries(ri: RootIndex, max_results: int, make_entry: Callable[[str, str, str], dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    # C11: a capped most-recently-modified slice of a READY index, for the empty quick-open query — so an
+    # empty query is served instantly from the index instead of triggering a cold full-tree walk.
+    with ri.lock:
+        snapshot = ri.entries
+        index_truncated = ri.truncated
+    ordered = sorted(snapshot, key=lambda item: item[4], reverse=True)
+    truncated = index_truncated or len(ordered) > max_results
+    results = []
+    for path_str, name, rel, size, mtime in ordered[:max_results]:
+        entry = make_entry(path_str, name, rel)
+        entry["size"] = size
+        entry["mtime"] = mtime
+        results.append(entry)
     return results, truncated
 
 

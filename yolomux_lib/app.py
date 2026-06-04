@@ -622,13 +622,14 @@ class TmuxWebtermApp:
         hours: float = 24.0,
         from_ref: str | None = None,
         to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         refresh_errors = self.refresh_sessions()
         if session and session not in self.sessions:
             return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
         scope = [session] if session else self.sessions
         infos, errors = discover_sessions(scope)
-        payload, status = session_files.session_files_payload(session, infos, hours, from_ref=from_ref, to_ref=to_ref)
+        payload, status = session_files.session_files_payload(session, infos, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
         payload["errors"] = [*refresh_errors, *errors, *payload.get("errors", [])]
         return payload, status
 
