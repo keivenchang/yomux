@@ -1551,7 +1551,7 @@ async function clearYoagentConversation() {
   yoagentNotice = null;
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
-    await apiFetch('/api/yoagent/reset', {method: 'POST'});
+    await apiFetchJson('/api/yoagent/reset', {method: 'POST'});
     statusEl.textContent = t('yoagent.statusCleared');
   } catch (error) {
     statusErr(`${esc(t('yoagent.statusClearFailed', {error}))}`);
@@ -1568,14 +1568,12 @@ async function sendYoagentChatMessage(rawText) {
   yoagentNotice = null;
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
-    const response = await apiFetch('/api/yoagent/chat', {
+    const payload = await apiFetchJson('/api/yoagent/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       // DOIT.8 Phase 1: pass the active UI locale so the LLM backend replies in that language.
       body: JSON.stringify({message: text, history: yoagentMessages.slice(-10), locale: i18nActiveLocaleId()}),
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     if (payload.fallback && payload.fallback_reason) {
       yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
     }
@@ -1600,9 +1598,7 @@ async function refreshActivitySummary(options = {}) {
     const params = new URLSearchParams();
     if (options.force) params.set('force', '1');
     params.set('locale', i18nActiveLocaleId());
-    const response = await apiFetch(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.status);
+    const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
     activitySummaryPayload = payload;
   } catch (error) {

@@ -266,7 +266,7 @@
   "notify.pr.merged": "PR {ref} मर्ज हो गया",
   "notify.pr.review": "{ref} पर समीक्षा {decision}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
-  "notify.testTitle": "YOLOmux - {host}: notifications enabled",
+  "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "palette.aria": "Command palette",
   "palette.group.files": "फ़ाइलें",
   "palette.group.menu": "मेनू",

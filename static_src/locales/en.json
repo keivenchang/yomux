@@ -585,7 +585,7 @@
   "toast.keep": "Keep",
   "toast.keepAlert": "Keep alert visible",
   "toast.closeAlert": "Close alert",
-  "notify.testTitle": "YOLOmux - {host}: notifications enabled",
+  "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
   "notify.browserTestBody": "YOLOmux can send browser notifications from this server.",
   "tab.preferences.short": "Prefs",

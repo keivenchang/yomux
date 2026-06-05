@@ -4,7 +4,8 @@ function editorViewModeKey(path, item = null) {
 
 function editorViewModeFor(path, item = null) {
   if (isFilePreviewItem(item)) return 'preview';
-  const mode = fileEditorViewMode.get(editorViewModeKey(path, item)) || fileEditorViewMode.get(path);
+  const modes = fileEditorViewModesForPath(path);
+  const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
   if (!editorPreviewModeAvailable(path)) return 'edit';
   if (editorViewModes.has(mode)) return mode;
@@ -15,7 +16,7 @@ function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
   if (isFilePreviewItem(item)) mode = 'preview';
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
-  fileEditorViewMode.set(editorViewModeKey(path, item), mode);
+  fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
@@ -313,7 +314,7 @@ async function applyEditorBlamePreference() {
     const path = panel.dataset.filePath;
     const state = openFiles.get(path);
     if (!path || state?.kind !== 'text') continue;
-    if (fileEditorBlameEnabled && !editorBlameByPath.has(path)) await fetchEditorBlame(path);
+    if (fileEditorBlameEnabled && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
     renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
   }
 }

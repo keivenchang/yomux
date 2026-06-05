@@ -21,6 +21,7 @@ from .common import AUTO_APPROVE_LOCK_DIR
 from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import truncate_text
+from .types import AutoApproveState
 
 # DOIT.6 #70: stop() joins for at least this long so an in-flight capture + keystroke walk (~0.6s) and
 # the post-approval / max-interval sleep (interruptible via stop_event, but the send is not) can finish
@@ -181,7 +182,7 @@ class AutoApproveWorker:
     def alive(self) -> bool:
         return self.thread.is_alive() and not self.stop_event.is_set()
 
-    def status(self) -> dict[str, Any]:
+    def status(self) -> AutoApproveState:
         with self.lock:
             return {
                 "target": self.target,

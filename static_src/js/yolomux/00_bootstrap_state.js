@@ -57,6 +57,8 @@ const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
+const fileExplorerTreeDateModeStorageKey = 'yolomux.fileExplorer.treeDateMode.v1';
+const fileExplorerTreeDateModes = ['none', 'date', 'relative'];
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
@@ -222,10 +224,8 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.toml': 'ini', '.ini': 'ini', '.cfg': 'ini',
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
-const openFiles = new Map();  // path -> {mtime, size, kind, original, content, dirty}
-const fileEditorTabPaths = new Set();
-const filePreviewTabPaths = new Set();
-const openFileOwnerSessions = new Map();  // path -> Set<tmux session>
+const fileState = new Map();  // path -> open-file content plus editor tab/preview/owner/mode/blame state
+const openFiles = fileState;  // compatibility alias during the file-state migration
 const fileExplorerDirectorySignatures = new Map();
 const fileExplorerKnownEntryNames = new Map();
 const fileExplorerNewEntryUntil = new Map();
@@ -244,13 +244,10 @@ let filesystemRefreshInFlight = false;
 let fileExplorerRepoInfoCacheLoaded = false;
 let fileExplorerRootMode = readStoredFileExplorerRootMode();
 let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
-const fileEditorViewMode = new Map();  // layout item or path -> "edit" | "preview" | "split"
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
-const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
 // DOIT.26: inline git blame (Cursor-style). Persisted toggle + a per-path cache of the /api/blame payload.
 let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
-const editorBlameByPath = new Map();  // path -> {lines: {lineNo: {sha, author, time, summary, pr}}, in_repo}
 const editorBlameFetches = new Map();  // DOIT.34 #3: in-flight /api/blame fetch per path (dedup concurrent panels)
 let fileEditorBlameAllLines = false;  // DOIT.26: annotate every line vs current-line only (set from settings in applySettingsPayload)
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
@@ -262,7 +259,6 @@ let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cu
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
-const fileEditorConflictDialogs = new Set();
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
 let preferencesSearchText = '';
@@ -293,7 +289,7 @@ let fileExplorerRefreshDeferred = false;
 let sessionFilesSortMode = 'mtime';
 let sessionFilesSelectedSession = '';
 let changesSelectedPath = '';  // C5: the currently highlighted Modified-files row (persists across re-renders)
-let fileExplorerTreeShowDates = readStoredFileExplorerTreeShowDates();
+let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready'

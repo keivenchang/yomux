@@ -624,7 +624,7 @@
   "sort.descending": "降序",
   "sort.unsorted": "未排序",
   "sort.aria": "按 {label} 排序，{dir}",
-  "notify.testTitle": "优乐mux - {host}: 通知已启用",
+  "notify.testTitle": "优乐mux[{host}] 通知已启用",
   "notify.testBody": "优乐mux 页内通知已启用。",
   "notify.browserTestBody": "优乐mux 可以从此服务器发送浏览器通知。",
   "menu.help.about.version": "版本",

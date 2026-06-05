@@ -266,7 +266,7 @@
   "notify.pr.merged": "PR {ref} mesclado",
   "notify.pr.review": "Revisão {decision} em {ref}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
-  "notify.testTitle": "YOLOmux - {host}: notifications enabled",
+  "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "palette.aria": "Paleta de comandos",
   "palette.group.files": "Arquivos",
   "palette.group.menu": "Menu",

@@ -624,7 +624,7 @@
   "sort.descending": "descending",
   "sort.unsorted": "unsorted",
   "sort.aria": "sort {label} {dir}",
-  "notify.testTitle": "YOLOmux - {host}: notifications enabled",
+  "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
   "notify.browserTestBody": "YOLOmux can send browser notifications from this server.",
   "menu.help.about.version": "संस्करण",

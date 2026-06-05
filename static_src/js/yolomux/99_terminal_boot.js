@@ -317,8 +317,7 @@ function renderWatchedPrs() {
 
 async function refreshWatchedPrs() {
   try {
-    const response = await apiFetch('/api/watched-prs');
-    const data = await response.json();
+    const data = await apiFetchJson('/api/watched-prs');
     if (!data || typeof data !== 'object') return;
     watchedPrsData = {
       watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
@@ -922,16 +921,11 @@ async function uploadFiles(session, fileList, options = {}) {
     formData.append('files', file, file.name || 'upload.bin');
   }
   try {
-    const response = await apiFetch(`/api/upload?session=${encodeURIComponent(session)}`, {
+    const payload = await apiFetchJson(`/api/upload?session=${encodeURIComponent(session)}`, {
       method: 'POST',
       credentials: 'same-origin',
       body: formData,
     });
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`upload failed: ${esc(payload.error || response.statusText)}`);
-      return;
-    }
     const paths = (payload.files || []).map(file => file.path).filter(Boolean);
     if (options.source === 'paste') syncPasteCountersFromPayload(payload);
     activateTab(session, 'terminal');
@@ -942,7 +936,7 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts();
   } catch (error) {
-    statusErr(`upload failed: ${esc(error)}`);
+    statusErr(`upload failed: ${esc(error?.payload?.error || error)}`);
   }
 }
 
@@ -1394,9 +1388,17 @@ async function setAutoApprove(session, enabled) {
     return;
   }
   try {
-    const response = await apiFetch(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
+    const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
+    autoApproveStates.set(session, payload);
+    updateDocumentTitle();
+    updateSessionButtonStates();
+    renderAutoApproveButton(session, payload);
+    statusEl.innerHTML = payload.enabled
+      ? `<span class="ok">enabled YOLO for ${esc(sessionLabel(session))}</span>`
+      : `<span class="ok">disabled YOLO for ${esc(sessionLabel(session))}</span>`;
+  } catch (error) {
+    const payload = error?.payload || {};
+    if (error?.status) {
       if (payload?.target || payload?.session) {
         autoApproveStates.set(session, payload);
         updateDocumentTitle();
@@ -1406,14 +1408,6 @@ async function setAutoApprove(session, enabled) {
       statusErr(`${esc(payload.error || 'YOLO approval failed')}`);
       return;
     }
-    autoApproveStates.set(session, payload);
-    updateDocumentTitle();
-    updateSessionButtonStates();
-    renderAutoApproveButton(session, payload);
-    statusEl.innerHTML = payload.enabled
-      ? `<span class="ok">enabled YOLO for ${esc(sessionLabel(session))}</span>`
-      : `<span class="ok">disabled YOLO for ${esc(sessionLabel(session))}</span>`;
-  } catch (error) {
     statusErr(`YOLO request failed: ${esc(error)}`);
   }
 }
@@ -1430,8 +1424,7 @@ async function refreshAutoStatuses() {
 
 async function loadAutoStatuses() {
   try {
-    const response = await apiFetch('/api/auto-approve');
-    const payload = await response.json();
+    const payload = await apiFetchJson('/api/auto-approve');
     const previousActive = activeSessions.slice();
     const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
     if (payload.rules) {
@@ -1446,8 +1439,7 @@ async function loadAutoStatuses() {
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
-        const response = await apiFetch(`/api/auto-approve?session=${encodeURIComponent(session)}`);
-        const payload = await response.json();
+        const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}`);
         autoApproveStates.set(session, payload);
       } catch (_) {}
     }
@@ -1636,8 +1628,7 @@ async function refreshTranscripts() {
   renderInfoPanel();
   transcriptMetaRefreshPromise = (async () => {
     try {
-      const response = await apiFetch('/api/transcripts');
-      transcriptMeta = await response.json();
+      transcriptMeta = await apiFetchJson('/api/transcripts');
       transcriptMetaLoaded = true;
       transcriptMetaLoadError = '';
       maybeHandleServerVersionChange(transcriptMeta.server_version);
@@ -1759,8 +1750,7 @@ function updateTranscriptPathRow(session, path, fallback = 'no transcript path')
 
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
-    const response = await apiFetch(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-    const payload = await response.json();
+    const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
     if (payload.items) {
       updateTranscriptPathRow(session, payload.path);
       renderTranscriptItems(preview, payload.path, payload.items, options);
@@ -1885,17 +1875,16 @@ async function refreshEventLog(session) {
   const node = document.getElementById(`events-${session}`);
   if (!node) return;
   try {
-    const response = await apiFetch(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
-    const payload = await response.json();
-    if (!response.ok) {
-      node.innerHTML = `<div class="event-empty">${esc(payload.error || 'failed to load events')}</div>`;
-      return;
-    }
+    const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
     const events = Array.isArray(payload.events) ? payload.events : [];
     node.innerHTML = events.length
       ? events.slice().reverse().map(eventItemHtml).join('')
       : '<div class="event-empty">no events yet</div>';
   } catch (error) {
+    if (error?.status) {
+      node.innerHTML = `<div class="event-empty">${esc(error.payload?.error || 'failed to load events')}</div>`;
+      return;
+    }
     node.innerHTML = `<div class="event-empty">failed to load events: ${esc(error)}</div>`;
   }
 }
@@ -1964,9 +1953,7 @@ function renderLatency(latestMs) {
 async function updateLatency() {
   const startedAt = performance.now();
   try {
-    const response = await apiFetch(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
-    if (!response.ok) throw new Error(response.statusText || `HTTP ${response.status}`);
-    await response.json();
+    await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
     const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
     latencySamples = [...latencySamples, elapsedMs].slice(-latencySamplesMax);
     renderLatency(elapsedMs);
@@ -2034,8 +2021,7 @@ async function showContext(session) {
   body.innerHTML = '';
   body.textContent = t('common.loading');
   modal.classList.add('open');
-  const response = await apiFetch(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-  const payload = await response.json();
+  const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
   if (payload.text) {
     body.textContent = `${payload.path}\n\n${payload.text}`;
   } else {

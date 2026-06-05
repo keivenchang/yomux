@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
 import re
 import sys
@@ -412,9 +413,8 @@ def write_locales() -> bool:
 
 def lint_duplicate_functions() -> list[str]:
     """Return error lines for top-level function names declared in more than one JS source file."""
-    import collections
     js_sources = ASSETS.get("yolomux.js", [])
-    name_to_files: dict[str, list[str]] = collections.defaultdict(list)
+    name_to_files: dict[str, list[str]] = defaultdict(list)
     for part in js_sources:
         path = repo_path(part)
         try:

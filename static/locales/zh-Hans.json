@@ -266,7 +266,7 @@
   "notify.pr.merged": "PR {ref} 已合并",
   "notify.pr.review": "{ref} 的审查为 {decision}",
   "notify.testBody": "优乐mux 页内通知已启用。",
-  "notify.testTitle": "优乐mux - {host}: 通知已启用",
+  "notify.testTitle": "优乐mux[{host}] 通知已启用",
   "palette.aria": "命令面板",
   "palette.group.files": "文件",
   "palette.group.menu": "菜单",

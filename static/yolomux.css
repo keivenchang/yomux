@@ -365,6 +365,34 @@ body.theme-light {
   --panel-close-hover-bg: rgba(15, 23, 42, 0.08);
 }
 * { box-sizing: border-box; }
+.actions button,
+.info-refresh,
+.info-sort-button,
+.changes-repo-head,
+.file-explorer-changes-head .changes-sort-seg,
+.file-editor-mode-control button,
+.file-editor-preview-font-panel button,
+.file-editor-toolbar button,
+.file-editor-gutter-panel,
+.file-editor-wrap-panel,
+.file-editor-find-panel,
+.file-editor-diff-panel,
+.file-editor-diff-expand-panel,
+.file-editor-theme-panel,
+.file-editor-reload-panel,
+.file-editor-cross-split-panel,
+.file-editor-blame-panel,
+.file-editor-save-panel,
+.pane-tab-close,
+.repo-chip-menu .repo-chip-row,
+.path-copy-button,
+.popover-copy-button {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
 html {
   height: 100%;
 }
@@ -489,8 +517,6 @@ body {
   min-width: var(--compact-icon-button-size);
   max-width: var(--compact-icon-button-size);
   height: var(--compact-icon-button-size);
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
   padding: 0;
   overflow: hidden;
@@ -1957,8 +1983,6 @@ body.theme-light .branch-link {
 .info-refresh {
   margin-inline-start: auto;
   height: 22px;
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
   gap: 5px;
   padding: 0 8px;
@@ -1969,7 +1993,6 @@ body.theme-light .branch-link {
   font-size: var(--ui-font-size-xs);
   line-height: 1;
   white-space: nowrap;
-  cursor: pointer;
 }
 .info-refresh:hover,
 .info-refresh:focus-visible {
@@ -2179,6 +2202,9 @@ body.theme-light .branch-link {
   padding: 0 8px;
   cursor: pointer;
 }
+.changes-toolbar .changes-date-toggle {
+  height: 24px;
+}
 .changes-summary {
   margin-inline-start: auto;
   color: var(--muted);
@@ -2241,12 +2267,10 @@ body.theme-light .branch-link {
   padding: 6px 8px;
   background: var(--panel2);
   color: var(--text);
-  border: 0;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   text-align: start;
-  cursor: pointer;
 }
 .changes-repo-head:hover,
 .changes-repo-head:focus-visible {
@@ -4068,17 +4092,13 @@ body.theme-light .drop-slot.drag-over {
 }
 .repo-chip-menu .repo-chip-row {
   display: flex;
-  align-items: center;
   justify-content: space-between;
   gap: 10px;
   width: 100%;
-  border: 0;
-  background: transparent;
   color: var(--text);
   font: inherit;
   text-align: start;
   padding: 4px 8px;
-  cursor: pointer;
 }
 .repo-chip-menu .repo-chip-row:hover,
 .repo-chip-menu .repo-chip-row:focus-visible {
@@ -4292,17 +4312,12 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   width: 18px;
   min-width: 18px;
   height: 18px;
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
   margin-inline-start: 0;
   padding: 0;
   color: currentColor;
   opacity: 0.58;
-  background: transparent;
-  border: 0;
   border-radius: 50%;
-  cursor: pointer;
 }
 .pane-tab-close::before,
 .pane-tab-close::after {
@@ -5794,17 +5809,12 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
 .info-sort-button {
   width: 100%;
   min-width: 0;
-  display: inline-flex;
-  align-items: center;
   gap: 5px;
   padding: 0;
   color: inherit;
-  background: transparent;
-  border: 0;
   font: inherit;
   font-weight: 700;
   text-align: start;
-  cursor: pointer;
 }
 .info-sort-button span:first-child {
   min-width: 0;
@@ -6915,15 +6925,17 @@ body.theme-light .file-tree-children::before {
   min-width: 38px;
   flex: 0 0 auto;
 }
-.file-explorer-date-toggle {
-  width: 34px;
-  flex-basis: 34px;
-}
 .file-explorer-header-action {
   width: 20px;
   flex-basis: 20px;
   padding: 0;
   line-height: 1;
+}
+.file-explorer-header-action.file-explorer-date-toggle {
+  width: auto;
+  min-width: 42px;
+  flex-basis: auto;
+  padding: 0 5px;
 }
 .file-explorer-sort-select {
   width: 50px;
@@ -7442,15 +7454,12 @@ body.editor-theme-light .file-editor-image {
   min-width: 20px;
   width: 20px;
   padding: 0;
-  border: 0;
   border-inline-end: 1px solid var(--line);
   border-radius: 0;
-  background: transparent;
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   line-height: 1;
-  cursor: pointer;
 }
 .file-editor-mode-control button:last-child {
   border-inline-end: 0;
@@ -7633,7 +7642,6 @@ body.theme-light .file-tree-rename-input {
   border-radius: 4px;
   color: var(--muted);
   background: rgba(255, 255, 255, 0.03);
-  cursor: pointer;
 }
 .path-copy-button:hover {
   color: var(--text);
@@ -7793,8 +7801,8 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
   z-index: 6;
   display: grid;
   /* C6 moved the diff-ref controls into each repo header; C8 added a compact sort. Children are now
-     title (flex), sort, refresh, close. */
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+     title (flex), sort, date mode, refresh, close. */
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
   align-items: center;
   gap: 6px;
   padding: 3px 5px;
@@ -7831,11 +7839,8 @@ body.theme-light .file-explorer-changes-head {
   font-size: var(--ui-font-size-xs);
 }
 .file-explorer-changes-head .changes-sort-seg {
-  border: 0;
-  background: transparent;
   padding: 0 2px;
   font: inherit;
-  cursor: pointer;
   color: var(--muted);
 }
 .file-explorer-changes-head .changes-sort-seg.active {
@@ -7927,6 +7932,9 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   padding: 0 6px;
   font-size: var(--ui-font-size-2xs);
 }
+.file-explorer-changes-head .changes-date-toggle {
+  height: 20px;
+}
 .file-explorer-changes-panel .changes-summary {
   justify-self: end;
   min-width: 0;
@@ -7937,9 +7945,9 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 }
 @container (max-width: 520px) {
   .file-explorer-changes-head {
-    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto auto;
     grid-template-areas:
-      "title sort refresh close";
+      "title sort date refresh close";
     gap: 3px;
   }
   .file-explorer-changes-head .changes-title {
@@ -7947,6 +7955,9 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   }
   .file-explorer-changes-head .changes-sort-toggle {
     grid-area: sort;
+  }
+  .file-explorer-changes-head .changes-date-toggle {
+    grid-area: date;
   }
   .file-explorer-changes-head .changes-close {
     grid-area: close;
@@ -8343,10 +8354,8 @@ body.editor-theme-light .file-editor-content {
   padding: 0 4px;
   border: 1px solid transparent;
   border-radius: 3px;
-  background: transparent;
   color: inherit;
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
-  cursor: pointer;
 }
 .file-editor-preview-font-panel button:disabled {
   opacity: 0.42;
@@ -8373,11 +8382,9 @@ body.editor-theme-light .file-editor-content {
   padding: 0 3px;
   border: 1px solid transparent;
   border-radius: 3px;
-  background: transparent;
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
-  cursor: pointer;
 }
 .file-editor-save-panel {
   min-width: 20px;

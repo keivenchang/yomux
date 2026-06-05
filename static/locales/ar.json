@@ -266,7 +266,7 @@
   "notify.pr.merged": "تم دمج طلب السحب {ref}",
   "notify.pr.review": "المراجعة {decision} في {ref}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
-  "notify.testTitle": "YOLOmux - {host}: notifications enabled",
+  "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "palette.aria": "لوحة الأوامر",
   "palette.group.files": "الملفات",
   "palette.group.menu": "القائمة",

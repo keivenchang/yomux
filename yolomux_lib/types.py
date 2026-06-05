@@ -38,18 +38,44 @@ class SessionFilesPayload(TypedDict, total=False):
     refs_by_repo: dict[str, list[dict[str, str]]]
 
 
-class AutoApproveState(TypedDict):
-    enabled: bool
-    paths: list[str]
-    commands: list[str]
+class AutoApproveState(TypedDict, total=False):
+    target: str
     session: str
+    enabled: bool
+    enabled_elsewhere: bool
+    locked: bool
+    approved: int
+    blocked: int
+    last_action: str
+    error: str | None
+    started_at: float
+    lock_owner: dict[str, Any] | None
+    prompt_source: str
+    prompt: dict[str, Any]
+    screen: dict[str, Any]
+
+
+class AutoApproveStatusPayload(TypedDict, total=False):
+    session_order: list[str]
+    sessions: dict[str, AutoApproveState]
+    errors: list[str]
+    rules: dict[str, Any]
+    error: str
 
 
 class RunHistoryEntry(TypedDict, total=False):
     session: str
-    kind: str
-    start: float
-    end: float | None
-    exit_code: int | None
-    transcript: str | None
-    summary: str | None
+    agent: dict[str, Any] | None
+    cwd: str
+    tmux_target: str
+    tmux_command: str
+    transcript_mtime: float
+    project: dict[str, Any]
+    recent_events: list[dict[str, Any]]
+
+
+class RunHistoryPayload(TypedDict, total=False):
+    session: str
+    runs: list[RunHistoryEntry]
+    errors: list[str]
+    error: str

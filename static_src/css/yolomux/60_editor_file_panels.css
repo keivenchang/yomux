@@ -439,15 +439,12 @@ body.editor-theme-light .file-editor-image {
   min-width: 20px;
   width: 20px;
   padding: 0;
-  border: 0;
   border-inline-end: 1px solid var(--line);
   border-radius: 0;
-  background: transparent;
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   line-height: 1;
-  cursor: pointer;
 }
 .file-editor-mode-control button:last-child {
   border-inline-end: 0;
@@ -630,7 +627,6 @@ body.theme-light .file-tree-rename-input {
   border-radius: 4px;
   color: var(--muted);
   background: rgba(255, 255, 255, 0.03);
-  cursor: pointer;
 }
 .path-copy-button:hover {
   color: var(--text);
@@ -790,8 +786,8 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
   z-index: 6;
   display: grid;
   /* C6 moved the diff-ref controls into each repo header; C8 added a compact sort. Children are now
-     title (flex), sort, refresh, close. */
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+     title (flex), sort, date mode, refresh, close. */
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
   align-items: center;
   gap: 6px;
   padding: 3px 5px;
@@ -828,11 +824,8 @@ body.theme-light .file-explorer-changes-head {
   font-size: var(--ui-font-size-xs);
 }
 .file-explorer-changes-head .changes-sort-seg {
-  border: 0;
-  background: transparent;
   padding: 0 2px;
   font: inherit;
-  cursor: pointer;
   color: var(--muted);
 }
 .file-explorer-changes-head .changes-sort-seg.active {
@@ -924,6 +917,9 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   padding: 0 6px;
   font-size: var(--ui-font-size-2xs);
 }
+.file-explorer-changes-head .changes-date-toggle {
+  height: 20px;
+}
 .file-explorer-changes-panel .changes-summary {
   justify-self: end;
   min-width: 0;
@@ -934,9 +930,9 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 }
 @container (max-width: 520px) {
   .file-explorer-changes-head {
-    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto auto;
     grid-template-areas:
-      "title sort refresh close";
+      "title sort date refresh close";
     gap: 3px;
   }
   .file-explorer-changes-head .changes-title {
@@ -944,6 +940,9 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   }
   .file-explorer-changes-head .changes-sort-toggle {
     grid-area: sort;
+  }
+  .file-explorer-changes-head .changes-date-toggle {
+    grid-area: date;
   }
   .file-explorer-changes-head .changes-close {
     grid-area: close;
@@ -1340,10 +1339,8 @@ body.editor-theme-light .file-editor-content {
   padding: 0 4px;
   border: 1px solid transparent;
   border-radius: 3px;
-  background: transparent;
   color: inherit;
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
-  cursor: pointer;
 }
 .file-editor-preview-font-panel button:disabled {
   opacity: 0.42;
@@ -1370,11 +1367,9 @@ body.editor-theme-light .file-editor-content {
   padding: 0 3px;
   border: 1px solid transparent;
   border-radius: 3px;
-  background: transparent;
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
-  cursor: pointer;
 }
 .file-editor-save-panel {
   min-width: 20px;

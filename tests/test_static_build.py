@@ -6,6 +6,7 @@ from tools.static_build import build_asset
 from tools.static_build import build_pseudo_catalog
 from tools.static_build import check_css_braces
 from tools.static_build import locale_key_errors
+from tools.static_build import lint_duplicate_functions
 from tools.static_build import pseudo_value
 from tools.static_build import repo_path
 from tools.static_build import _color_luminance_alpha
@@ -57,6 +58,22 @@ def test_css_braces_are_balanced_in_every_partial():
     # The shipped CSS partials must each be brace-balanced (DOIT.12 B1: a truncated rule once split across
     # two partials and only rebalanced by accident in the bundle). This passes today; it guards regressions.
     check_css_braces()
+
+
+def test_duplicate_function_lint_tree_is_clean():
+    # K1: duplicate top-level function declarations silently shadow when partials are concatenated.
+    assert lint_duplicate_functions() == []
+
+
+def test_duplicate_function_lint_flags_cross_file_duplicates(monkeypatch, tmp_path):
+    import tools.static_build as sb
+    first = tmp_path / "first.js"
+    second = tmp_path / "second.js"
+    first.write_text("function shared() {}\nfunction uniqueOne() {}\n", encoding="utf-8")
+    second.write_text("  function indentedIsIgnored() {}\nfunction shared() {}\n", encoding="utf-8")
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["first.js", "second.js"])
+    monkeypatch.setattr(sb, "repo_path", lambda p: tmp_path / p)
+    assert sb.lint_duplicate_functions() == ["duplicate function 'shared' in: first.js, second.js"]
 
 
 def test_check_css_braces_flags_an_unbalanced_partial(monkeypatch, tmp_path):

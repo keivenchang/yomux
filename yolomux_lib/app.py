@@ -79,6 +79,10 @@ from .tmux_utils import list_tmux_session_names
 from .tmux_utils import tmux
 from .tmux_utils import tmux_has_exact_session
 from .tmux_utils import tmux_session_target
+from .types import AutoApproveState
+from .types import AutoApproveStatusPayload
+from .types import RunHistoryEntry
+from .types import RunHistoryPayload
 from .uploads import sanitize_upload_filename
 from .uploads import unique_upload_path
 from .workdir import agent_command
@@ -596,13 +600,13 @@ class TmuxWebtermApp:
             "summaries": summary_matches,
         }, HTTPStatus.OK
 
-    def run_history_payload(self, session: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
+    def run_history_payload(self, session: str | None = None) -> tuple[RunHistoryPayload, HTTPStatus]:
         refresh_errors = self.refresh_sessions()
         if session and session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         scope = [session] if session else self.sessions
         infos, errors = discover_sessions(scope)
-        runs: list[dict[str, Any]] = []
+        runs: list[RunHistoryEntry] = []
         for name in scope:
             info = infos.get(name)
             if info is None:
@@ -1319,7 +1323,7 @@ class TmuxWebtermApp:
                 return resolved, "pane_current_path"
         return None, "session_workdir"
 
-    def set_auto_approve(self, session: str, enabled: bool, persist: bool = True, takeover: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
+    def set_auto_approve(self, session: str, enabled: bool, persist: bool = True, takeover: bool = True) -> tuple[AutoApproveState, HTTPStatus]:
         if session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
 
@@ -1353,7 +1357,7 @@ class TmuxWebtermApp:
                 self.log_event(session, "yolo_disabled", "YOLO disabled", {"persist": persist})
         return self.auto_approve_session_status(session), HTTPStatus.OK
 
-    def start_auto_approve_worker(self, session: str, takeover: bool) -> tuple[AutoApproveWorker | None, dict[str, Any]]:
+    def start_auto_approve_worker(self, session: str, takeover: bool) -> tuple[AutoApproveWorker | None, AutoApproveState]:
         worker = AutoApproveWorker(
             session,
             interval=self.auto_approve_interval_seconds(),
@@ -1388,7 +1392,7 @@ class TmuxWebtermApp:
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.05)
-        payload = worker.status()
+        payload: AutoApproveState = worker.status()
         payload.update({
             "enabled": False,
             "enabled_elsewhere": True,
@@ -1471,11 +1475,11 @@ class TmuxWebtermApp:
         session: str,
         discovered_sessions: dict[str, SessionInfo] | None = None,
         include_live_prompt: bool = True,
-    ) -> dict[str, Any]:
+    ) -> AutoApproveState:
         with self.auto_workers_lock:
             worker = self.auto_workers.get(session)
         if worker:
-            payload = worker.status()
+            payload: AutoApproveState = worker.status()
             payload["enabled_elsewhere"] = False
             payload["locked"] = False
         else:
@@ -1502,7 +1506,7 @@ class TmuxWebtermApp:
         payload["screen"] = screen
         return payload
 
-    def auto_approve_status(self, session: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
+    def auto_approve_status(self, session: str | None = None) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
         if session is not None and session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         removed = False

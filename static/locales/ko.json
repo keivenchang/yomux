@@ -266,7 +266,7 @@
   "notify.pr.merged": "PR {ref}이(가) 병합됨",
   "notify.pr.review": "{ref}의 리뷰가 {decision}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
-  "notify.testTitle": "YOLOmux - {host}: notifications enabled",
+  "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "palette.aria": "명령 팔레트",
   "palette.group.files": "파일",
   "palette.group.menu": "메뉴",

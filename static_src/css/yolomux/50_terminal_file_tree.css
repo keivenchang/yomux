@@ -1017,17 +1017,12 @@ body.theme-light .yoagent-session-summary .markdown-body pre code {
 .info-sort-button {
   width: 100%;
   min-width: 0;
-  display: inline-flex;
-  align-items: center;
   gap: 5px;
   padding: 0;
   color: inherit;
-  background: transparent;
-  border: 0;
   font: inherit;
   font-weight: 700;
   text-align: start;
-  cursor: pointer;
 }
 .info-sort-button span:first-child {
   min-width: 0;
@@ -2138,15 +2133,17 @@ body.theme-light .file-tree-children::before {
   min-width: 38px;
   flex: 0 0 auto;
 }
-.file-explorer-date-toggle {
-  width: 34px;
-  flex-basis: 34px;
-}
 .file-explorer-header-action {
   width: 20px;
   flex-basis: 20px;
   padding: 0;
   line-height: 1;
+}
+.file-explorer-header-action.file-explorer-date-toggle {
+  width: auto;
+  min-width: 42px;
+  flex-basis: auto;
+  padding: 0 5px;
 }
 .file-explorer-sort-select {
   width: 50px;

@@ -486,6 +486,10 @@ globalThis.__layoutTestApi = {
   openFileDiffAvailable,
   localizedDateTimeFormat,
   sessionFileTimeText,
+  sessionFileRelativeTimeText,
+  sessionFileDisplayTimeText,
+  fileExplorerTreeDateModeForTest() { return fileExplorerTreeDateMode; },
+  setFileExplorerTreeDateModeForTest(value) { fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(value); },
   dateTimeHourCycleForTest() { return dateTimeHourCycle; },
   setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
   activeEditorSchemeForTest() { return activeEditorScheme(); },
@@ -1779,7 +1783,7 @@ function makeFileTree(paths) {
   assert.ok(source.includes("params.set('force', '1')"), 'YO!agent summary API supports a force refresh query');
   assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent summary API carries the active locale query');
   assert.ok(source.includes("data-yolo-rule-open"), 'Preferences exposes an Open button for the YOLO rule file');
-  assert.ok(source.includes("apiFetch('/api/yoagent/reset'"), 'YO!agent clear conversation resets the server-side CLI session');
+  assert.ok(source.includes("apiFetchJson('/api/yoagent/reset'"), 'YO!agent clear conversation resets the server-side CLI session');
   assert.ok(source.includes("renderYoagentPanel({preserveDraft: false, scrollBottom: true})"), 'YO!agent send/clear clears the draft and scrolls chat to the bottom');
   assert.ok(source.includes('draggable="true" data-open-change-file='), 'Modified-files rows are draggable as file payloads');
   assert.ok(source.includes("event.dataTransfer.setData('application/x-yolomux-file'"), 'Modified-files drag carries the same file payload as Finder drag');
@@ -1935,6 +1939,7 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux('', ['1', '2']);
+  api.setFileExplorerTreeDateModeForTest('date');
   assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,changes,image-viewer,file-editor,file-preview');
   // #40: YO!info and YO!agent are merged into the single info item; the legacy yoagent/yosup aliases
   // resolve to it so saved layouts and bookmarked ?…=yoagent URLs open the merged pane.
@@ -1985,6 +1990,8 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('file-tree-dir-count">1</span>'), 'changed-file folders show a recursive changed-file count from the shared row renderer');
   assert.ok(changesHtml.includes('file-tree-icon'), 'changed-file rows show a file-type icon slot');
   assert.ok(changesHtml.includes('file-tree-date'), 'changed-file rows wrap the date for skinny styling');
+  assert.ok(/class="file-tree-row kind-dir[^"]*"[^>]*data-path="\/repo\/app\/src"[\s\S]*<span class="file-tree-date"[^>]*>[^<]+<\/span>/.test(changesHtml), 'Differ directory rows show the same non-empty date slot as Finder');
+  assert.ok(/class="[^"]*changes-date-toggle[^"]*"[^>]*data-file-explorer-tree-dates[^>]*>Date<\/button>/.test(changesHtml), 'standalone Differ toolbar exposes the shared Finder date-mode button');
   api.setChangesFolderCollapsedForTest(['/repo/app/src']);
   const collapsedChangesHtml = api.changesPanelHtml();
   assert.ok(collapsedChangesHtml.includes('file-tree-row kind-dir collapsed'), 'collapsed changed-file folders keep their state');
@@ -2150,6 +2157,7 @@ function makeFileTree(paths) {
   assert.ok(finderSortPanel.includes('data-sort-value="name"'), 'C13: the toggle offers a Name segment');
   assert.equal(/changes-sort-compact|<select data-session-files-sort/.test(finderSortPanel), false, 'C13: the labeled Sort dropdown is gone from the Finder header');
   assert.ok(finderSortPanel.includes('changes-sort-divider'), 'C13: the toggle segments are separated by a | divider');
+  assert.ok(/class="[^"]*changes-date-toggle[^"]*"[^>]*data-file-explorer-tree-dates[^>]*>Date<\/button>/.test(finderSortPanel), 'Finder embedded Differ header exposes the shared date-mode button');
   assert.ok(/class="changes-refresh"[^>]*>Reload<\/button>/.test(finderSortPanel), 'C13: the Reload button reads "Reload" (via i18n, not hardcoded)');
   assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the FROM text picker with the compact popup');
   assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the TO text picker with the compact popup');
@@ -2442,6 +2450,7 @@ function makeFileTree(paths) {
     finderPanelBundle.indexOf('function bindFileExplorerPanel', finderPanelStart),
   );
   assert.ok(/<input class="file-explorer-path-inline"[\s\S]*file-explorer-path-copy-panel[\s\S]*file-explorer-hidden-toggle/.test(finderPanelSource), 'Finder panel toolbar renders path first, then copy, then action controls');
+  assert.ok(finderPanelSource.includes('fileExplorerTreeDateButtonHtml()'), 'Finder panel toolbar uses the shared date-mode button helper');
   assert.ok(preferencesCss.includes('--file-explorer-changes-size: 40%'), '#44: the Modified-files section defaults to 40% (2/5) of the Finder height');
   assert.ok(/body\.file-explorer-changes-hidden \.file-explorer-changes-panel/.test(preferencesCss), '#44: hiding the Modified-files section collapses both the panel and its resizer');
   assert.ok(/\.file-explorer-changes-panel \.changes-comparison-head\s*\{[^}]*flex-wrap: nowrap/.test(preferencesCss), '#44(d): the Finder comparison header is compacted to one tight line (header chrome takes less height)');
@@ -2755,6 +2764,14 @@ function makeFileTree(paths) {
     assert.ok(/[AP]\.?M\.?/i.test(hour12Text), '12-hour file dates show AM/PM');
     api.setDateTimeHourCycleForTest('bogus');
     assert.equal(api.dateTimeHourCycleForTest(), '24', 'invalid date/time clock values normalize to 24-hour');
+    api.setFileExplorerTreeDateModeForTest('none');
+    assert.equal(api.sessionFileDisplayTimeText(timestamp), '', 'file-tree date mode None hides Finder/Differ timestamps');
+    api.setFileExplorerTreeDateModeForTest('date');
+    assert.equal(api.sessionFileDisplayTimeText(timestamp), api.sessionFileTimeText(timestamp), 'file-tree date mode Date uses the localized absolute timestamp');
+    api.setFileExplorerTreeDateModeForTest('relative');
+    assert.equal(api.sessionFileRelativeTimeText(1000, 1060), '1 min ago', 'file-tree relative dates show minute age');
+    assert.equal(api.sessionFileRelativeTimeText(1000, 19720), '5.2 hrs ago', 'file-tree relative dates show decimal hour age');
+    assert.equal(api.sessionFileRelativeTimeText(1000, 217000), '2.5 days ago', 'file-tree relative dates show decimal day age');
   }
   api.setTerminalThemeModeForTest('light');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'terminal light theme is explicit opt-in');
@@ -4324,10 +4341,65 @@ function makeFileTree(paths) {
   const body = source.slice(start, end);
   assert.ok(body.includes('container: attentionAlerts'), 'attention notifications use the global fixed stack');
   assert.equal(body.includes('displayToastContainer(session)'), false, 'attention notifications do not use pane-local toast stacks');
+  assert.ok(source.includes('function compactNotificationTitle('), 'notification/toast titles use one compact title helper');
+  assert.ok(body.includes('sessionNotificationTitle(session, state)'), 'attention toasts use the compact session notification title');
+  assert.equal(source.includes('YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}'), false, 'attention notifications drop verbose host-prefixed titles');
+  assert.equal(source.includes('YOLOmux - ${serverHostname}: ${message}'), false, 'watched-PR browser notifications drop verbose host-prefixed titles');
+  assert.ok(source.includes("compactNotificationTitle(sessionLabel(session), 'terminal')"), 'terminal connection toasts use the compact session title');
+  assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['notify.testTitle'], 'YOLOmux[{host}] notifications enabled', 'test notification title uses compact host bracket format');
   const attentionCss = fs.readFileSync('static/yolomux.css', 'utf8');
   // The attention toast must clear the topbar (z-index:180): it sits below the topbar's height and above
   // it in z (200), so the amber Keep/x toast is never painted under the topbar and clipped.
   assert.ok(/\.attention-alerts\s*\{[\s\S]*top:\s*calc\(var\(--compact-control-height\) \+ 20px\)[\s\S]*right:\s*12px[\s\S]*left:\s*auto[\s\S]*z-index:\s*var\(--z-full-screen-overlay\)/.test(attentionCss), 'global attention stack is pinned top-right BELOW the topbar (clears its height) and above it in z (var(--z-full-screen-overlay))');
+}
+
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('async function apiFetchJson('), 'D1: shared JSON fetch helper is bundled');
+  assert.ok(source.includes('error.status = response.status'), 'D1: JSON fetch errors preserve HTTP status for callers');
+  assert.ok(source.includes('error.payload = payload || {}'), 'D1: JSON fetch errors preserve API payloads for callers');
+  const jsonFetchFiles = [
+    'static_src/js/yolomux/40_file_explorer_files.js',
+    'static_src/js/yolomux/70_layout_actions.js',
+    'static_src/js/yolomux/80_panes_preferences.js',
+    'static_src/js/yolomux/99_terminal_boot.js',
+  ];
+  for (const file of jsonFetchFiles) {
+    const src = fs.readFileSync(file, 'utf8');
+    assert.equal(/const response = await apiFetch\(/.test(src), false, `D1: ${file} should not hand-roll apiFetch response variables`);
+    assert.equal(/await response\.json\(\)/.test(src), false, `D1: ${file} should use apiFetchJson instead of manual response.json`);
+    assert.equal(/if \(!response\.ok\)/.test(src), false, `D1: ${file} should use apiFetchJson instead of manual response.ok checks`);
+  }
+  assert.ok(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8').includes('apiFetch(`/api/fs/unindex'), 'D1: Finder unindex remains fire-and-forget');
+  assert.ok(fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8').includes("apiFetch('/api/event'"), 'D1: event telemetry remains fire-and-forget');
+}
+
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('const fileState = new Map();'), 'F1: one fileState map owns per-path file/editor state');
+  assert.ok(source.includes('const openFiles = fileState;'), 'F1: openFiles is the compatibility alias for fileState');
+  for (const obsolete of [
+    'const fileEditorTabPaths = new Set()',
+    'const filePreviewTabPaths = new Set()',
+    'const openFileOwnerSessions = new Map()',
+    'const fileEditorViewMode = new Map()',
+    'const fileEditorImageMode = new Map()',
+    'const editorBlameByPath = new Map()',
+    'const fileEditorConflictDialogs = new Set()',
+  ]) {
+    assert.equal(source.includes(obsolete), false, `F1: removed obsolete path-keyed container ${obsolete}`);
+  }
+  assert.ok(/function setFileState[\s\S]*editorTabItems[\s\S]*previewTabItems[\s\S]*ownerSessions[\s\S]*viewMode[\s\S]*imageMode[\s\S]*blame[\s\S]*conflictDialogOpen/.test(source), 'F1: replacing file content preserves per-path side state on the fileState record');
+  assert.ok(/function removeOpenFile[\s\S]*deleteFileState\(path\)/.test(source), 'F1: closing the last owner deletes one fileState record');
+  assert.ok(/function renameOpenFilePath[\s\S]*deleteFileState\(oldPath\)[\s\S]*setFileState\(newPath, state\)/.test(source), 'F1: rename moves one fileState record');
+}
+
+{
+  const css = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.actions button,\s*\.info-refresh,\s*\.info-sort-button,\s*\.changes-repo-head,[\s\S]*\.file-editor-toolbar button,[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;/.test(css), 'I1: common button reset/flex base is centralized');
+  assert.equal(/\.actions button\s*\{[^}]*display:\s*inline-flex/.test(css), false, 'I1: topbar actions do not restate the shared inline-flex base');
+  assert.equal(/\.info-refresh\s*\{[^}]*cursor:\s*pointer/.test(css), false, 'I1: info refresh does not restate shared cursor behavior');
+  assert.equal(/\.file-editor-mode-control button\s*\{[^}]*background:\s*transparent/.test(css), false, 'I1: editor mode buttons do not restate shared transparent background');
 }
 
 {
@@ -4833,7 +4905,7 @@ function makeFileTree(paths) {
 {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes("resetRuntimeInterval('watched-prs', refreshWatchedPrs"), 'DOIT.29: watched PRs poll on their own runtime interval');
-  assert.ok(source.includes("apiFetch('/api/watched-prs')"), 'DOIT.29: refreshWatchedPrs fetches the watched-PRs endpoint');
+  assert.ok(source.includes("apiFetchJson('/api/watched-prs')"), 'DOIT.29: refreshWatchedPrs fetches the watched-PRs endpoint');
   assert.ok(source.includes('id="info-watched"'), 'DOIT.29: YO!info renders a watched-PRs container');
   assert.ok(source.includes('notifyWatchedPrTransitions(watchedPrsData.watched_prs)'), 'DOIT.29: each poll diffs statuses to fire transition notifications');
 }

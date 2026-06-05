@@ -266,7 +266,7 @@
   "notify.pr.merged": "ה-PR {ref} מוזג",
   "notify.pr.review": "סקירה {decision} ב-{ref}",
   "notify.testBody": "YOLOmux in-page alerts are enabled.",
-  "notify.testTitle": "YOLOmux - {host}: notifications enabled",
+  "notify.testTitle": "YOLOmux[{host}] notifications enabled",
   "palette.aria": "לוח פקודות",
   "palette.group.files": "קבצים",
   "palette.group.menu": "תפריט",

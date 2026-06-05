@@ -58,6 +58,8 @@ const fileExplorerExpanded = new Set();
 const fileExplorerHiddenStorageKey = 'yolomux.fileExplorer.showHidden';
 const fileExplorerRootModeStorageKey = 'yolomux.fileExplorer.rootMode';
 const fileExplorerTreeShowDatesStorageKey = 'yolomux.fileExplorer.treeShowDates.v1';
+const fileExplorerTreeDateModeStorageKey = 'yolomux.fileExplorer.treeDateMode.v1';
+const fileExplorerTreeDateModes = ['none', 'date', 'relative'];
 const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
@@ -223,10 +225,8 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.toml': 'ini', '.ini': 'ini', '.cfg': 'ini',
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
-const openFiles = new Map();  // path -> {mtime, size, kind, original, content, dirty}
-const fileEditorTabPaths = new Set();
-const filePreviewTabPaths = new Set();
-const openFileOwnerSessions = new Map();  // path -> Set<tmux session>
+const fileState = new Map();  // path -> open-file content plus editor tab/preview/owner/mode/blame state
+const openFiles = fileState;  // compatibility alias during the file-state migration
 const fileExplorerDirectorySignatures = new Map();
 const fileExplorerKnownEntryNames = new Map();
 const fileExplorerNewEntryUntil = new Map();
@@ -245,13 +245,10 @@ let filesystemRefreshInFlight = false;
 let fileExplorerRepoInfoCacheLoaded = false;
 let fileExplorerRootMode = readStoredFileExplorerRootMode();
 let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
-const fileEditorViewMode = new Map();  // layout item or path -> "edit" | "preview" | "split"
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
-const fileEditorImageMode = new Map();  // path -> "original" when zoomed to natural image size
 let fileEditorWrapEnabled = readStoredEditorWrap();
 // DOIT.26: inline git blame (Cursor-style). Persisted toggle + a per-path cache of the /api/blame payload.
 let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
-const editorBlameByPath = new Map();  // path -> {lines: {lineNo: {sha, author, time, summary, pr}}, in_repo}
 const editorBlameFetches = new Map();  // DOIT.34 #3: in-flight /api/blame fetch per path (dedup concurrent panels)
 let fileEditorBlameAllLines = false;  // DOIT.26: annotate every line vs current-line only (set from settings in applySettingsPayload)
 let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
@@ -263,7 +260,6 @@ let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cu
 let fileEditorAutosaveEnabled = false;
 let fileEditorAutosaveDelaySeconds = 2.5;
 const fileEditorAutosaveTimers = new Map();
-const fileEditorConflictDialogs = new Set();
 let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
 let preferencesSearchText = '';
@@ -294,7 +290,7 @@ let fileExplorerRefreshDeferred = false;
 let sessionFilesSortMode = 'mtime';
 let sessionFilesSelectedSession = '';
 let changesSelectedPath = '';  // C5: the currently highlighted Modified-files row (persists across re-renders)
-let fileExplorerTreeShowDates = readStoredFileExplorerTreeShowDates();
+let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready'
@@ -991,8 +987,15 @@ async function apiFetch(url, options = {}) {
 
 async function apiFetchJson(url, options = {}) {
   const response = await apiFetch(url, options);
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.statusText = response.statusText || '';
+    error.payload = payload || {};
+    error.response = response;
+    throw error;
+  }
   return payload;
 }
 
@@ -1039,6 +1042,123 @@ function readStoredJson(key, fallback = null) {
     const raw = window.localStorage?.getItem(key);
     return raw ? JSON.parse(raw) : fallback;
   } catch (_) { return fallback; }
+}
+
+function normalizeFileStateRecord(state) {
+  if (!state || typeof state !== 'object') state = {};
+  if (!(state.editorTabItems instanceof Set)) state.editorTabItems = new Set();
+  if (!(state.previewTabItems instanceof Set)) state.previewTabItems = new Set();
+  if (!(state.ownerSessions instanceof Set)) state.ownerSessions = new Set();
+  if (!(state.viewMode instanceof Map)) state.viewMode = new Map();
+  if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = '';
+  if (!Object.prototype.hasOwnProperty.call(state, 'blame')) state.blame = null;
+  if (!Object.prototype.hasOwnProperty.call(state, 'conflictDialogOpen')) state.conflictDialogOpen = false;
+  return state;
+}
+
+function ensureFileState(path, defaults = null) {
+  if (!path) return null;
+  let state = fileState.get(path);
+  if (!state) {
+    state = defaults && typeof defaults === 'object' ? defaults : {};
+    fileState.set(path, state);
+  } else if (defaults && typeof defaults === 'object' && state !== defaults) {
+    Object.assign(state, defaults);
+  }
+  return normalizeFileStateRecord(state);
+}
+
+function fileStateFor(path) {
+  const state = path ? fileState.get(path) : null;
+  return state ? normalizeFileStateRecord(state) : null;
+}
+
+function setFileState(path, state) {
+  if (!path) return null;
+  const previous = fileStateFor(path);
+  if (previous && previous !== state && state && typeof state === 'object') {
+    if (!(state.editorTabItems instanceof Set)) state.editorTabItems = previous.editorTabItems;
+    if (!(state.previewTabItems instanceof Set)) state.previewTabItems = previous.previewTabItems;
+    if (!(state.ownerSessions instanceof Set)) state.ownerSessions = previous.ownerSessions;
+    if (!(state.viewMode instanceof Map)) state.viewMode = previous.viewMode;
+    if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = previous.imageMode;
+    if (!Object.prototype.hasOwnProperty.call(state, 'blame')) state.blame = previous.blame;
+    if (!Object.prototype.hasOwnProperty.call(state, 'conflictDialogOpen')) state.conflictDialogOpen = previous.conflictDialogOpen;
+  }
+  const normalized = normalizeFileStateRecord(state);
+  fileState.set(path, normalized);
+  return normalized;
+}
+
+function deleteFileState(path) {
+  if (!path) return false;
+  return fileState.delete(path);
+}
+
+function fileEditorTabItemsForPath(path) {
+  return Array.from(fileStateFor(path)?.editorTabItems || []);
+}
+
+function filePreviewTabItemsForPath(path) {
+  return Array.from(fileStateFor(path)?.previewTabItems || []);
+}
+
+function fileHasEditorTab(path) {
+  return fileEditorTabItemsForPath(path).length > 0;
+}
+
+function addFileEditorTabItem(path, item = fileEditorItemFor(path)) {
+  const state = ensureFileState(path);
+  if (state && item) state.editorTabItems.add(item);
+}
+
+function addFilePreviewTabItem(path, item = filePreviewItemFor(path)) {
+  const state = ensureFileState(path);
+  if (state && item) state.previewTabItems.add(item);
+}
+
+function removeFileEditorTabItem(path, item = fileEditorItemFor(path)) {
+  fileStateFor(path)?.editorTabItems.delete(item);
+}
+
+function removeFilePreviewTabItem(path, item = filePreviewItemFor(path)) {
+  fileStateFor(path)?.previewTabItems.delete(item);
+}
+
+function fileEditorViewModesForPath(path, create = false) {
+  const state = create ? ensureFileState(path) : fileStateFor(path);
+  return state?.viewMode || new Map();
+}
+
+function fileEditorImageModeForPath(path) {
+  return fileStateFor(path)?.imageMode || '';
+}
+
+function setFileEditorImageModeForPath(path, mode) {
+  const state = ensureFileState(path);
+  if (state) state.imageMode = mode || '';
+}
+
+function editorBlameForPath(path) {
+  return fileStateFor(path)?.blame || null;
+}
+
+function setEditorBlameForPath(path, blame) {
+  const state = ensureFileState(path);
+  if (state) state.blame = blame || null;
+}
+
+function hasEditorBlameForPath(path) {
+  return Boolean(editorBlameForPath(path));
+}
+
+function fileConflictDialogOpen(path) {
+  return fileStateFor(path)?.conflictDialogOpen === true;
+}
+
+function setFileConflictDialogOpen(path, open) {
+  const state = ensureFileState(path);
+  if (state) state.conflictDialogOpen = open === true;
 }
 
 // Normalized view of a session's transcript metadata — prevents each call site from re-implementing
@@ -1162,12 +1282,18 @@ function readStoredDiffRefsByRepo() {
   }
 }
 
-function readStoredFileExplorerTreeShowDates() {
-  return storageGet(fileExplorerTreeShowDatesStorageKey) === '1';
+function normalizeFileExplorerTreeDateMode(value) {
+  return fileExplorerTreeDateModes.includes(value) ? value : 'none';
 }
 
-function writeStoredFileExplorerTreeShowDates(value) {
-  storageSet(fileExplorerTreeShowDatesStorageKey, value ? '1' : '0');
+function readStoredFileExplorerTreeDateMode() {
+  const value = storageGet(fileExplorerTreeDateModeStorageKey);
+  if (value !== null) return normalizeFileExplorerTreeDateMode(value);
+  return storageGet(fileExplorerTreeShowDatesStorageKey) === '1' ? 'date' : 'none';
+}
+
+function writeStoredFileExplorerTreeDateMode(value) {
+  storageSet(fileExplorerTreeDateModeStorageKey, normalizeFileExplorerTreeDateMode(value));
 }
 
 function readStoredFileExplorerTreeSortMode() {
@@ -1364,11 +1490,61 @@ function syncFileExplorerHiddenButton(button) {
   });
 }
 
+function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateMode) {
+  const normalized = normalizeFileExplorerTreeDateMode(mode);
+  if (normalized === 'date') return 'Date';
+  if (normalized === 'relative') return 'Ago';
+  return 'None';
+}
+
+function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
+  return `Date display: ${fileExplorerTreeDateModeLabel(mode)}. Click to cycle None, Date, Ago.`;
+}
+
 function syncFileExplorerTreeDateButton(button) {
-  syncPressedButton(button, fileExplorerTreeShowDates, {
-    labelOn: 'Hide modified dates',
-    labelOff: 'Show modified dates',
-  });
+  if (!button) return;
+  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  const active = mode !== 'none';
+  button.classList.toggle('active', active);
+  button.dataset.dateMode = mode;
+  button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  button.textContent = fileExplorerTreeDateModeLabel(mode);
+  const label = fileExplorerTreeDateModeTitle(mode);
+  button.title = label;
+  button.setAttribute('aria-label', label);
+}
+
+function syncFileExplorerTreeDateButtons(scope = document) {
+  for (const button of scope.querySelectorAll?.('[data-file-explorer-tree-dates]') || []) {
+    syncFileExplorerTreeDateButton(button);
+  }
+}
+
+function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateMode) {
+  const normalized = normalizeFileExplorerTreeDateMode(mode);
+  const index = fileExplorerTreeDateModes.indexOf(normalized);
+  return fileExplorerTreeDateModes[(index + 1) % fileExplorerTreeDateModes.length];
+}
+
+function refreshFileExplorerTreeDateModeSurfaces() {
+  syncFileExplorerTreeDateButtons();
+  if (typeof refreshFileExplorerTrees === 'function') {
+    void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  }
+  if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
+  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
+}
+
+function setFileExplorerTreeDateMode(mode) {
+  const next = normalizeFileExplorerTreeDateMode(mode);
+  if (next === fileExplorerTreeDateMode) return;
+  fileExplorerTreeDateMode = next;
+  writeStoredFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  refreshFileExplorerTreeDateModeSurfaces();
+}
+
+function cycleFileExplorerTreeDateMode() {
+  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode());
 }
 
 function renderTabMetaToggle() {
@@ -2796,11 +2972,10 @@ function openFileEditorItems() {
   if (sharedImageViewerPath && openFiles.has(sharedImageViewerPath)) {
     items.push(imageViewerItemFor(sharedImageViewerPath));
   }
-  for (const path of fileEditorTabPaths) {
-    if (openFiles.has(path)) items.push(fileEditorItemFor(path));
-  }
-  for (const path of filePreviewTabPaths) {
-    if (openFiles.has(path)) items.push(filePreviewItemFor(path));
+  for (const [path, state] of openFiles.entries()) {
+    normalizeFileStateRecord(state);
+    for (const item of state.editorTabItems) items.push(item);
+    for (const item of state.previewTabItems) items.push(item);
   }
   return items;
 }
@@ -2819,43 +2994,49 @@ function isLayoutItem(item) {
 
 function registerFileEditorLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
-  fileEditorTabPaths.add(path);
-  if (!openFiles.has(path)) {
-    openFiles.set(path, {
+  const item = fileEditorItemFor(path);
+  addFileEditorTabItem(path, item);
+  if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
+    syncFileLayoutItems();
+    return item;
+  }
+  ensureFileState(path, {
       mtime: 0,
       kind: 'loading',
       original: '',
       content: '',
       dirty: false,
       loading: true,
-    });
-  }
+  });
   syncFileLayoutItems();
-  return fileEditorItemFor(path);
+  return item;
 }
 
 function registerFilePreviewLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
-  filePreviewTabPaths.add(path);
-  if (!openFiles.has(path)) {
-    openFiles.set(path, {
+  const item = filePreviewItemFor(path);
+  addFilePreviewTabItem(path, item);
+  if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
+    syncFileLayoutItems();
+    return item;
+  }
+  ensureFileState(path, {
       mtime: 0,
       kind: 'loading',
       original: '',
       content: '',
       dirty: false,
       loading: true,
-    });
-  }
+  });
   syncFileLayoutItems();
-  return filePreviewItemFor(path);
+  return item;
 }
 
 function registerImageViewerLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
   sharedImageViewerPath = path;
-  if (!openFiles.has(path)) {
-    openFiles.set(path, {
+  if (!openFiles.get(path)?.kind) {
+    ensureFileState(path, {
       mtime: 0,
       kind: 'image',
       original: '',
@@ -4137,9 +4318,24 @@ function displayToastContainer(session) {
   return document.querySelector('.panel-toast-stack') || attentionAlerts;
 }
 
+function compactNotificationTitle(scope, message) {
+  const suffix = String(message || '').trim();
+  const label = String(scope || '').trim();
+  if (!label) return suffix ? `YOLOmux ${suffix}` : 'YOLOmux';
+  return suffix ? `YOLOmux[${label}] ${suffix}` : `YOLOmux[${label}]`;
+}
+
+function sessionNotificationTitle(session, state) {
+  return compactNotificationTitle(sessionLabel(session), state?.label || '');
+}
+
+function hostNotificationTitle(message) {
+  return compactNotificationTitle(serverHostname, message);
+}
+
 function showAttentionAlert(session, state) {
   const node = showToast(
-    `YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}`,
+    sessionNotificationTitle(session, state),
     state.reason,
     {
       container: attentionAlerts,
@@ -4250,7 +4446,7 @@ function maybeNotifyState(session, state, options = {}) {
   });
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(`YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}`, {
+    sendBrowserNotification(sessionNotificationTitle(session, state), {
       body,
       tag: key,
       renotify: true,
@@ -4324,7 +4520,7 @@ function maybeNotifyWatchedPr(ref, key, message, url) {
   postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(`YOLOmux - ${serverHostname}: ${message}`, {
+    sendBrowserNotification(hostNotificationTitle(message), {
       body: ref,
       tag: signature,
       renotify: true,
@@ -5712,15 +5908,7 @@ async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
   try {
     hydrateFileExplorerRepoInfoCache();
-    const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`);
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      fileExplorerPathError = payload.error || `Cannot open ${root} (${response.status})`;
-      fileExplorerLastListError = {path: root, status: response.status, error: fileExplorerPathError, network: false};
-      console.warn('fs list failed', root, response.status, fileExplorerPathError);
-      return null;
-    }
-    const payload = await response.json();
+    const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(root)}`);
     const entries = payload.entries || [];
     fileExplorerPathError = '';
     fileExplorerLastListError = null;
@@ -5729,9 +5917,12 @@ async function fetchDirectory(path, options = {}) {
     if (options.recordSignature !== false) recordDirectorySignature(root, entries);
     return entries;
   } catch (err) {
-    fileExplorerPathError = `Cannot open ${root}: ${err}`;
-    fileExplorerLastListError = {path: root, status: 0, error: fileExplorerPathError, network: true};
-    console.warn('fs list error', root, err);
+    const status = Number(err?.status) || 0;
+    fileExplorerPathError = status
+      ? err.message || `Cannot open ${root} (${status})`
+      : `Cannot open ${root}: ${err}`;
+    fileExplorerLastListError = {path: root, status, error: fileExplorerPathError, network: !status};
+    console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
     return null;
   }
 }
@@ -6553,7 +6744,7 @@ function fileTreeDisplayParts(path, entry) {
 }
 
 function fileTreeMtimeText(entry) {
-  return sessionFileTimeText(entry?.mtime);
+  return sessionFileDisplayTimeText(entry?.mtime);
 }
 
 function sortedFileTreeEntries(entries) {
@@ -6792,7 +6983,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     gitStatus,
     iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
     nameHtml: differMode ? null : displayName.html,
-    dateText: fileExplorerTreeShowDates || differMode ? fileTreeMtimeText(entry) : '',
+    dateText: fileTreeMtimeText(entry),
     diffParts: changedFile ? sessionFileDiffText(changedFile) : [],
     agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : '',
     dirCountText,
@@ -7122,8 +7313,7 @@ async function refreshFileIndexStatus(root) {
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
   let payload;
   try {
-    const response = await apiFetch(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
-    payload = await response.json();
+    payload = await apiFetchJson(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
   } catch (error) {
     return;  // transient error: keep the prior badge, don't flip it
   }
@@ -7345,10 +7535,7 @@ function startFileTreeDrag(event, row, fullPath, entry) {
 }
 
 async function fetchFilePathInfo(path) {
-  const response = await apiFetch(`/api/fs/info?path=${encodeURIComponent(path)}`);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
-  return payload;
+  return apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`);
 }
 
 async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
@@ -7443,13 +7630,11 @@ async function createFileExplorerFile() {
   const path = childNameToPath(currentFileExplorerRoot(), name);
   if (!path) return;
   try {
-    const response = await apiFetch('/api/fs/write', {
+    await apiFetchJson('/api/fs/write', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path, content: ''}),
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
     statusEl.textContent = `created ${basenameOf(path)}`;
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
@@ -7467,13 +7652,11 @@ async function createFileExplorerFolder() {
   const path = childNameToPath(currentFileExplorerRoot(), name);
   if (!path) return;
   try {
-    const response = await apiFetch('/api/fs/mkdir', {
+    await apiFetchJson('/api/fs/mkdir', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path}),
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
     statusEl.textContent = `created ${basenameOf(path)}`;
     await refreshFileExplorerTrees();
   } catch (error) {
@@ -7499,9 +7682,7 @@ function bindFileExplorerHeaderActions(container = document) {
     else if (action.matches('[data-file-explorer-refresh]')) refreshFileExplorerTrees();
     else if (action.matches('[data-file-explorer-collapse]')) collapseAllFileExplorerDirectories();
     else if (action.matches('[data-file-explorer-tree-dates]')) {
-      fileExplorerTreeShowDates = !fileExplorerTreeShowDates;
-      writeStoredFileExplorerTreeShowDates(fileExplorerTreeShowDates);
-      refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+      cycleFileExplorerTreeDateMode();
     }
   });
   container.addEventListener('change', event => {
@@ -7528,13 +7709,11 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   if (!window.confirm(confirmText)) return;
   try {
     for (const path of deletePaths) {
-      const response = await apiFetch('/api/fs/delete', {
+      await apiFetchJson('/api/fs/delete', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({path}),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
     }
     for (const path of Array.from(openFiles.keys())) {
       if (deletePaths.some(deletedPath => path === deletedPath || path.startsWith(`${deletedPath}/`))) {
@@ -7657,13 +7836,11 @@ async function renameFileTreePath(fullPath, entry, newName) {
   const trimmed = newName.trim();
   if (!trimmed || trimmed === currentName) return false;
   try {
-    const response = await apiFetch('/api/fs/rename', {
+    const payload = await apiFetchJson('/api/fs/rename', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path: fullPath, new_name: trimmed}),
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
     const newPath = payload.path;
     if (fileExplorerSelectedPaths.delete(fullPath)) fileExplorerSelectedPaths.add(newPath);
     if (fileExplorerSelectionAnchor === fullPath) fileExplorerSelectionAnchor = newPath;
@@ -7828,8 +8005,8 @@ function fileEntryChanged(state, entry) {
 function filePanelItemsForPath(path) {
   const items = [];
   if (sharedImageViewerPath === path) items.push(imageViewerItemFor(path));
-  if (fileEditorTabPaths.has(path)) items.push(fileEditorItemFor(path));
-  if (filePreviewTabPaths.has(path)) items.push(filePreviewItemFor(path));
+  items.push(...fileEditorTabItemsForPath(path));
+  items.push(...filePreviewTabItemsForPath(path));
   return items;
 }
 
@@ -7839,14 +8016,14 @@ function openFilePathHasOwner(path) {
 
 function removeFilePanelOwner(path, item) {
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
-  else if (isFilePreviewItem(item)) filePreviewTabPaths.delete(path);
-  else fileEditorTabPaths.delete(path);
-  fileEditorViewMode.delete(item);
+  else if (isFilePreviewItem(item)) removeFilePreviewTabItem(path, item);
+  else removeFileEditorTabItem(path, item);
+  fileEditorViewModesForPath(path).delete(item);
   // DOIT.6 #73: also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
   // so these item-keyed maps don't grow unbounded as editor tabs open and close.
   fileEditorViewState.delete(item);
   tabLastActivatedAt.delete(item);
-  if (!openFilePathHasOwner(path)) openFileOwnerSessions.delete(path);
+  if (!openFilePathHasOwner(path)) fileStateFor(path)?.ownerSessions.clear();
 }
 
 function normalizedOpenFileOwnerSession(value) {
@@ -7857,13 +8034,11 @@ function normalizedOpenFileOwnerSession(value) {
 function rememberOpenFileOwner(path, ownerSession) {
   const session = normalizedOpenFileOwnerSession(ownerSession);
   if (!path || !session) return;
-  const owners = openFileOwnerSessions.get(path) || new Set();
-  owners.add(session);
-  openFileOwnerSessions.set(path, owners);
+  ensureFileState(path)?.ownerSessions.add(session);
 }
 
 function openFileOwnerSessionsForPath(path) {
-  return Array.from(openFileOwnerSessions.get(path) || [])
+  return Array.from(fileStateFor(path)?.ownerSessions || [])
     .filter(session => sessions.includes(session))
     .sort((left, right) => sessions.indexOf(left) - sessions.indexOf(right) || left.localeCompare(right));
 }
@@ -7895,9 +8070,9 @@ function setOpenFileOwner(path, item, options = {}) {
   if (isImageViewerItem(item)) {
     replacementSlots = replaceSharedImageViewerPath(path);
   } else if (isFilePreviewItem(item)) {
-    filePreviewTabPaths.add(path);
+    addFilePreviewTabItem(path, item);
   } else {
-    fileEditorTabPaths.add(path);
+    addFileEditorTabItem(path, item);
   }
   syncFileLayoutItems();
   return replacementSlots;
@@ -7918,9 +8093,7 @@ function replaceSharedImageViewerPath(path) {
     removePanelForItem(previousItem);
     sharedImageViewerPath = null;
     if (!openFilePathHasOwner(previousPath)) {
-      openFiles.delete(previousPath);
-      fileEditorViewMode.delete(previousPath);
-      fileEditorImageMode.delete(previousPath);
+      deleteFileState(previousPath);
     }
   }
   sharedImageViewerPath = path;
@@ -8242,8 +8415,8 @@ async function showFileConflictCompareDialog(path, panel = null) {
 }
 
 async function showFileSaveConflictDialog(path, panel = null, options = {}) {
-  if (fileEditorConflictDialogs.has(path)) return false;
-  fileEditorConflictDialogs.add(path);
+  if (fileConflictDialogOpen(path)) return false;
+  setFileConflictDialogOpen(path, true);
   try {
     const state = openFiles.get(path);
     if (state) {
@@ -8269,7 +8442,7 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
     if (action === 'compare') return showFileConflictCompareDialog(path, panel);
     return false;
   } finally {
-    fileEditorConflictDialogs.delete(path);
+    setFileConflictDialogOpen(path, false);
   }
 }
 
@@ -8350,7 +8523,7 @@ function showFileEditorPaneForPath(path, options = {}) {
 function openFilesSetAndShow(path, state, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   const replacementSlots = setOpenFileOwner(path, item, options);
-  openFiles.set(path, state);
+  setFileState(path, state);
   syncFileLayoutItems();
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
   return showFileEditorPaneForPath(path, {...options, item});
@@ -8411,9 +8584,7 @@ async function refreshOpenFileDiff(path, options = {}) {
       const refString = (options.fromRef || options.toRef)
         ? `from=${encodeURIComponent(options.fromRef || 'HEAD')}&to=${encodeURIComponent(options.toRef || 'current')}`
         : diffRefQueryString(fileRepoForPath(path));
-      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`);
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || response.status);
+      const payload = await apiFetchJson(`/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`);
       applyOpenFileDiffPayload(state, payload);
       refreshOpenFileDiffDecorations(path);
       return true;
@@ -8454,10 +8625,11 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     item,
     ownerSession: options.ownerSession || normalizedOpenFileOwnerSession(entry?.session),
   };
+  const alreadyOpen = Boolean(openFiles.get(fullPath)?.kind);
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
   else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
   recordEditorNav(item);   // DOIT.21: push this tab to the back/forward history (no-op while navigating)
-  if (openFiles.has(fullPath)) {
+  if (alreadyOpen) {
     await showFileEditorPaneForPath(fullPath, openOptions);
     if (options.viewMode) renderOpenFilePath(fullPath);
     return item;
@@ -8473,19 +8645,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     return item;
   }
   try {
-    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const message = payload.error || response.status;
-      const state = response.status === 413
-        ? tooLargeFileState(entry?.size ?? null, String(message))
-        : response.status === 404
-          ? missingFileState(String(message))
-          : fileErrorState(message);
-      await openFilesSetAndShow(fullPath, state, openOptions);
-      return item;
-    }
-    const payload = await response.json();
+    const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
     await openFilesSetAndShow(fullPath, {
       mtime: filePayloadMtime(payload),
       size: payload.size,
@@ -8497,6 +8657,17 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     }, openOptions);
     return item;
   } catch (err) {
+    const status = Number(err?.status) || 0;
+    if (status) {
+      const message = err?.payload?.error || status;
+      const state = status === 413
+        ? tooLargeFileState(entry?.size ?? null, String(message))
+        : status === 404
+          ? missingFileState(String(message))
+          : fileErrorState(message);
+      await openFilesSetAndShow(fullPath, state, openOptions);
+      return item;
+    }
     showFileOpenError(fullPath, err);
     return null;
   }
@@ -8508,7 +8679,7 @@ async function openFileCrossPaneSplit(path) {
   const previewItem = filePreviewItemFor(path);
   setFileEditorViewMode(path, 'edit', editorItem);
   setFileEditorViewMode(path, 'preview', previewItem);
-  if (!openFiles.has(path) || !fileEditorTabPaths.has(path)) {
+  if (!openFiles.get(path)?.kind || !fileHasEditorTab(path)) {
     await openFileInEditor(path, {name: basenameOf(path)}, {item: editorItem});
   } else {
     setOpenFileOwner(path, editorItem);
@@ -8562,20 +8733,7 @@ async function openFileStateFromDisk(path, entry = null) {
     }};
   }
   try {
-    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const message = String(payload.error || response.status);
-      const state = response.status === 413
-        ? tooLargeFileState(fileEntry.size ?? null, message)
-        : response.status === 404
-          ? missingFileState(message)
-          : fileErrorState(message);
-      state.mtime = fileEntryMtime(fileEntry);
-      state.size = fileEntry.size ?? null;
-      return {state};
-    }
-    const payload = await response.json();
+    const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
     return {state: {
       mtime: filePayloadMtime(payload),
       size: payload.size,
@@ -8586,6 +8744,18 @@ async function openFileStateFromDisk(path, entry = null) {
       gitTracked: payload.git_tracked === true,
     }};
   } catch (error) {
+    const status = Number(error?.status) || 0;
+    if (status) {
+      const message = String(error?.payload?.error || status);
+      const state = status === 413
+        ? tooLargeFileState(fileEntry.size ?? null, message)
+        : status === 404
+          ? missingFileState(message)
+          : fileErrorState(message);
+      state.mtime = fileEntryMtime(fileEntry);
+      state.size = fileEntry.size ?? null;
+      return {state};
+    }
     return {state: fileErrorState(error)};
   }
 }
@@ -8598,7 +8768,7 @@ function markOpenFileMissing(path) {
     delete state.externalChanged;
     delete state.externalError;
   } else {
-    openFiles.set(path, missingFileState());
+    setFileState(path, missingFileState());
   }
   renderOpenFilePath(path);
 }
@@ -8619,7 +8789,7 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
     return false;
   }
   clearFileAutosaveTimer(path);
-  openFiles.set(path, clearOpenFileExternalState(loaded.state));
+  setFileState(path, clearOpenFileExternalState(loaded.state));
   renderOpenFilePath(path);
   if (previous?.diff !== undefined) refreshOpenFileDiff(path);
   return true;
@@ -9107,16 +9277,14 @@ function codeMirrorWrapMarkerExtension(api) {
   }, {dark: scheme.dark});
 }
 
-// DOIT.26: inline git blame. Lazily fetch the /api/blame payload for a path into editorBlameByPath.
+// DOIT.26: inline git blame. Lazily fetch the /api/blame payload into the path's fileState record.
 // DOIT.34 #3: dedup concurrent fetches (multiple open panels for one path share a single request).
 async function fetchEditorBlame(path) {
   if (editorBlameFetches.has(path)) return editorBlameFetches.get(path);
   const promise = (async () => {
     try {
-      const response = await apiFetch(`/api/blame?path=${encodeURIComponent(path)}`);
-      if (!response.ok) return null;
-      const data = await response.json();
-      editorBlameByPath.set(path, data);
+      const data = await apiFetchJson(`/api/blame?path=${encodeURIComponent(path)}`);
+      setEditorBlameForPath(path, data);
       return data;
     } catch (_error) {
       return null;
@@ -9132,9 +9300,9 @@ async function fetchEditorBlame(path) {
 // (the common case: enable blame, THEN open a new file), fetch it and nudge the open editors so the
 // blame ViewPlugin recomputes its decoration against the now-populated cache — no manual toggle needed.
 async function ensureEditorBlameForPath(path) {
-  if (!fileEditorBlameEnabled || !path || editorBlameByPath.has(path)) return;
+  if (!fileEditorBlameEnabled || !path || hasEditorBlameForPath(path)) return;
   await fetchEditorBlame(path);
-  if (!fileEditorBlameEnabled || !editorBlameByPath.has(path)) return;
+  if (!fileEditorBlameEnabled || !hasEditorBlameForPath(path)) return;
   for (const panel of fileEditorPanelsForPath(path)) {
     const view = panel?._cmView;
     if (!view) continue;
@@ -9165,7 +9333,7 @@ function codeMirrorBlameExtension(api, path) {
   if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
   const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
   const build = view => {
-    const blame = editorBlameByPath.get(path);
+    const blame = editorBlameForPath(path);
     if (!blame || !blame.lines) return api.Decoration.none;
     // DOIT.26: annotate EVERY visible line when fileEditorBlameAllLines is on, else just the cursor line
     // (the Cursor default). Viewport-scoped so a huge file only decorates what's on screen.
@@ -9554,9 +9722,7 @@ async function removeOpenFile(path, options = {}) {
     removePanelForItem(item);
   }
   if (!openFilePathHasOwner(path)) {
-    openFiles.delete(path);
-    fileEditorViewMode.delete(path);
-    fileEditorImageMode.delete(path);
+    deleteFileState(path);
   }
   syncFileLayoutItems();
   if (activeFile === path && !openFilePathHasOwner(path)) {
@@ -9599,17 +9765,18 @@ function renameOpenFilePath(oldPath, newPath) {
   const newItem = fileEditorItemFor(newPath);
   const oldPreviewItem = filePreviewItemFor(oldPath);
   const newPreviewItem = filePreviewItemFor(newPath);
-  const state = openFiles.get(oldPath);
+  const state = fileStateFor(oldPath);
   const wasInLayout = itemInLayout(oldItem) || itemInLayout(oldPreviewItem);
   const panelItems = [oldItem, oldPreviewItem].filter(item => panelNodes.has(item));
-  openFiles.delete(oldPath);
-  openFiles.set(newPath, state);
-  if (fileEditorTabPaths.delete(oldPath)) fileEditorTabPaths.add(newPath);
-  if (filePreviewTabPaths.delete(oldPath)) filePreviewTabPaths.add(newPath);
+  deleteFileState(oldPath);
+  setFileState(newPath, state);
+  if (state.editorTabItems.delete(oldItem)) state.editorTabItems.add(newItem);
+  if (state.previewTabItems.delete(oldPreviewItem)) state.previewTabItems.add(newPreviewItem);
+  const viewModes = state.viewMode;
   for (const [oldKey, newKey] of [[oldItem, newItem], [oldPreviewItem, newPreviewItem]]) {
-    if (fileEditorViewMode.has(oldKey)) {
-      fileEditorViewMode.set(newKey, fileEditorViewMode.get(oldKey));
-      fileEditorViewMode.delete(oldKey);
+    if (viewModes.has(oldKey)) {
+      viewModes.set(newKey, viewModes.get(oldKey));
+      viewModes.delete(oldKey);
     }
     // DOIT.6 #73: migrate the item-keyed scroll/selection state and the LRU timestamp on rename too,
     // so they don't leak under the old item id (and the LRU ordering survives the rename).
@@ -9622,13 +9789,9 @@ function renameOpenFilePath(oldPath, newPath) {
       tabLastActivatedAt.delete(oldKey);
     }
   }
-  if (fileEditorViewMode.has(oldPath)) {
-    fileEditorViewMode.set(newPath, fileEditorViewMode.get(oldPath));
-    fileEditorViewMode.delete(oldPath);
-  }
-  if (fileEditorImageMode.has(oldPath)) {
-    fileEditorImageMode.set(newPath, fileEditorImageMode.get(oldPath));
-    fileEditorImageMode.delete(oldPath);
+  if (viewModes.has(oldPath)) {
+    viewModes.set(newPath, viewModes.get(oldPath));
+    viewModes.delete(oldPath);
   }
   for (const item of panelItems) {
     const panel = panelNodes.get(item);
@@ -9650,7 +9813,8 @@ function editorViewModeKey(path, item = null) {
 
 function editorViewModeFor(path, item = null) {
   if (isFilePreviewItem(item)) return 'preview';
-  const mode = fileEditorViewMode.get(editorViewModeKey(path, item)) || fileEditorViewMode.get(path);
+  const modes = fileEditorViewModesForPath(path);
+  const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
   if (!editorPreviewModeAvailable(path)) return 'edit';
   if (editorViewModes.has(mode)) return mode;
@@ -9661,7 +9825,7 @@ function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
   if (isFilePreviewItem(item)) mode = 'preview';
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
-  fileEditorViewMode.set(editorViewModeKey(path, item), mode);
+  fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
@@ -9959,7 +10123,7 @@ async function applyEditorBlamePreference() {
     const path = panel.dataset.filePath;
     const state = openFiles.get(path);
     if (!path || state?.kind !== 'text') continue;
-    if (fileEditorBlameEnabled && !editorBlameByPath.has(path)) await fetchEditorBlame(path);
+    if (fileEditorBlameEnabled && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
     renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
   }
 }
@@ -12415,17 +12579,16 @@ function summaryContextLine(label, text, url = '', linkLabel = '', linkClass = '
 async function ensureSession(session) {
   if (readOnlyMode) return true;
   try {
-    const response = await apiFetch(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session create failed')}`);
-      return false;
-    }
+    const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     statusEl.innerHTML = payload.created
       ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
       : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
     return true;
   } catch (error) {
+    if (error?.status) {
+      statusErr(`${esc(error.payload?.error || 'session create failed')}`);
+      return false;
+    }
     statusErr(`session check failed: ${esc(error)}`);
     return false;
   }
@@ -12439,12 +12602,7 @@ async function createNextSession(agent) {
   const agentLabel = agentName(agent) || 'agent';
   statusEl.textContent = `creating ${agentLabel} session...`;
   try {
-    const response = await apiFetch(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session create failed')}`);
-      return;
-    }
+    const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
     updateSessionList(payload.sessions || []);
     renderSessionButtons();
@@ -12455,6 +12613,10 @@ async function createNextSession(agent) {
     renderAutoApproveButtons();
     statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
   } catch (error) {
+    if (error?.status) {
+      statusErr(`${esc(error.payload?.error || 'session create failed')}`);
+      return;
+    }
     statusErr(`session create failed: ${esc(error)}`);
   }
 }
@@ -12615,12 +12777,7 @@ async function renameTmuxSession(session, proposedName) {
   }
   statusEl.textContent = `renaming ${sessionLabel(session)}...`;
   try {
-    const response = await apiFetch(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session rename failed')}`);
-      return false;
-    }
+    const payload = await apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
     const renamed = payload.new_session || newName;
     replaceTmuxSessionInClient(session, renamed, payload.sessions);
     closeSessionRenameDialog();
@@ -12630,6 +12787,10 @@ async function renameTmuxSession(session, proposedName) {
     statusOk(`renamed ${esc(session)} to ${esc(renamed)}`);
     return true;
   } catch (error) {
+    if (error?.status) {
+      statusErr(`${esc(error.payload?.error || 'session rename failed')}`);
+      return false;
+    }
     statusErr(`session rename failed: ${esc(error)}`);
     return false;
   }
@@ -12644,12 +12805,7 @@ async function killTmuxSession(session) {
   if (!window.confirm(`Kill tmux session ${sessionLabel(session)}?`)) return false;
   statusEl.textContent = `killing ${sessionLabel(session)}...`;
   try {
-    const response = await apiFetch(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session kill failed')}`);
-      return false;
-    }
+    const payload = await apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
     stopSessionUi(session);
     const sessionsChanged = updateSessionList(payload.sessions || []);
@@ -12663,6 +12819,10 @@ async function killTmuxSession(session) {
     statusOk(`killed ${esc(sessionLabel(session))}`);
     return true;
   } catch (error) {
+    if (error?.status) {
+      statusErr(`${esc(error.payload?.error || 'session kill failed')}`);
+      return false;
+    }
     statusErr(`session kill failed: ${esc(error)}`);
     return false;
   }
@@ -12854,7 +13014,7 @@ function dismissTerminalConnectionToasts(session) {
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
   dismissTerminalConnectionToasts(session);
   const node = showToast(
-    `YOLOmux - ${serverHostname}: ${sessionLabel(session)} terminal`,
+    compactNotificationTitle(sessionLabel(session), 'terminal'),
     text,
     {
       container: displayToastContainer(session),
@@ -12914,8 +13074,7 @@ async function confirmSessionGoneOrReconnect(session, item) {
   try {
     let order = null;
     try {
-      const response = await apiFetch('/api/auto-approve');
-      const payload = await response.json();
+      const payload = await apiFetchJson('/api/auto-approve');
       if (Array.isArray(payload.session_order)) order = payload.session_order;
     } catch (_) {}
     if (item.manualClose || terminals.get(session) !== item) return;
@@ -14803,7 +14962,7 @@ async function clearYoagentConversation() {
   yoagentNotice = null;
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
-    await apiFetch('/api/yoagent/reset', {method: 'POST'});
+    await apiFetchJson('/api/yoagent/reset', {method: 'POST'});
     statusEl.textContent = t('yoagent.statusCleared');
   } catch (error) {
     statusErr(`${esc(t('yoagent.statusClearFailed', {error}))}`);
@@ -14820,14 +14979,12 @@ async function sendYoagentChatMessage(rawText) {
   yoagentNotice = null;
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
   try {
-    const response = await apiFetch('/api/yoagent/chat', {
+    const payload = await apiFetchJson('/api/yoagent/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       // DOIT.8 Phase 1: pass the active UI locale so the LLM backend replies in that language.
       body: JSON.stringify({message: text, history: yoagentMessages.slice(-10), locale: i18nActiveLocaleId()}),
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     if (payload.fallback && payload.fallback_reason) {
       yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
     }
@@ -14852,9 +15009,7 @@ async function refreshActivitySummary(options = {}) {
     const params = new URLSearchParams();
     if (options.force) params.set('force', '1');
     params.set('locale', i18nActiveLocaleId());
-    const response = await apiFetch(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.status);
+    const payload = await apiFetchJson(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     if (!requestIsCurrent()) return;
     activitySummaryPayload = payload;
   } catch (error) {
@@ -16208,6 +16363,38 @@ function sessionFileTimeText(mtime) {
   return localizedDateTimeFormat(value, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 }
 
+function compactAgeNumber(value) {
+  const rounded = Math.round(Number(value || 0) * 10) / 10;
+  if (!Number.isFinite(rounded)) return '0';
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+function sessionFileRelativeTimeText(mtime, nowSeconds = Date.now() / 1000) {
+  const value = Number(mtime || 0);
+  if (!value) return '';
+  const now = Number(nowSeconds);
+  if (!Number.isFinite(now)) return '';
+  const age = now - value;
+  if (age <= 0) return 'now';
+  if (age < 60) return '<1 min ago';
+  if (age < 3600) {
+    const minutes = Math.max(1, Math.round(age / 60));
+    return `${minutes} min ago`;
+  }
+  if (age < 86400) {
+    const hoursText = compactAgeNumber(age / 3600);
+    return `${hoursText} ${hoursText === '1' ? 'hr' : 'hrs'} ago`;
+  }
+  const daysText = compactAgeNumber(age / 86400);
+  return `${daysText} ${daysText === '1' ? 'day' : 'days'} ago`;
+}
+
+function sessionFileDisplayTimeText(mtime) {
+  if (fileExplorerTreeDateMode === 'date') return sessionFileTimeText(mtime);
+  if (fileExplorerTreeDateMode === 'relative') return sessionFileRelativeTimeText(mtime);
+  return '';
+}
+
 function sessionFileDiffText(item) {
   return [
     Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: 'add', text: `+${Number(item.added)}`} : null,
@@ -16397,6 +16584,13 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
 
 // Build a synthetic file-tree entry structure from flat session file items so renderTreeChildren
 // can render the Differ using the same DOM-mutation logic as the Finder.
+function updateSyntheticTreeEntryMtime(entry, mtime) {
+  const value = Number(mtime || 0);
+  if (!Number.isFinite(value) || value <= 0) return;
+  const current = Number(entry.mtime || 0);
+  if (!Number.isFinite(current) || value > current) entry.mtime = value;
+}
+
 function buildSessionFileTree(repoPath, sessionFiles) {
   const entriesByDir = new Map(); // normalizedDirPath → [{name, kind, mtime?, size?}]
   const sessionFilesMap = new Map(); // absPath → sessionFileItem
@@ -16413,9 +16607,12 @@ function buildSessionFileTree(repoPath, sessionFiles) {
       const key = normalizeDirectoryPath(parentAbsPath);
       if (!entriesByDir.has(key)) entriesByDir.set(key, []);
       const siblings = entriesByDir.get(key);
-      if (!siblings.some(e => e.name === parts[i - 1])) {
-        siblings.push({name: parts[i - 1], kind: 'dir'});
+      let dirEntry = siblings.find(e => e.kind === 'dir' && e.name === parts[i - 1]);
+      if (!dirEntry) {
+        dirEntry = {name: parts[i - 1], kind: 'dir'};
+        siblings.push(dirEntry);
       }
+      updateSyntheticTreeEntryMtime(dirEntry, item.mtime);
     }
     // File leaf
     const fileName = parts[parts.length - 1];
@@ -16468,7 +16665,7 @@ function changeFileRowHtml(item, options = {}) {
   const name = item.__displayName || basenameOf(absPath || item.path || '');
   const rel = item.path || absPath;
   const parentLabel = changeFileParentLabel(rel);
-  const timeText = sessionFileTimeText(item.mtime);
+  const timeText = sessionFileDisplayTimeText(item.mtime);
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentSlotHtml = changeFileAgentsHtml(item);
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
@@ -16585,6 +16782,13 @@ function renderChangesGroups(groupsEl, files, options = {}) {
 
 // Returns the static toolbar/header HTML for the main Changes panel.
 // The .changes-groups div is filled by renderChangesGroups separately.
+function fileExplorerTreeDateButtonHtml(extraClass = '') {
+  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  const active = mode !== 'none';
+  const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass].filter(Boolean).join(' ');
+  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeLabel(mode))}</button>`;
+}
+
 function changesPanelStaticHtml() {
   const target = sessionFilesPayload.session || sessionFilesTargetSession();
   const files = sessionFilesPayload.files || [];
@@ -16600,6 +16804,7 @@ function changesPanelStaticHtml() {
         <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>${esc(t('changes.sort.recent'))}</option>
         <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>${esc(t('changes.sort.name'))}</option>
       </select></label>
+      ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
       <button type="button" class="changes-refresh" data-session-files-refresh>${esc(t('changes.refresh'))}</button>
     </div>
     ${comparison}
@@ -16625,6 +16830,7 @@ function fileExplorerChangesPanelStaticHtml() {
         <span class="changes-sort-divider" aria-hidden="true">|</span>
         <button type="button" class="changes-sort-seg${sessionFilesSortMode === 'name' ? ' active' : ''}" data-session-files-sort data-sort-value="name" aria-pressed="${sessionFilesSortMode === 'name' ? 'true' : 'false'}">${esc(t('changes.sort.name'))}</button>
       </span>
+      ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
@@ -16766,6 +16972,7 @@ function createChangesPanel() {
   }
   bindPanelShell(panel, changesItemId);
   bindChangesPanel(panel);
+  bindFileExplorerHeaderActions(panel);
   bindChangedFileRowBehaviors(panel);
   if (!sessionFilesPayload.loaded || sessionFilesPayload.session !== sessionFilesTargetSession()) {
     fetchSessionFiles({destination: 'changes', silent: true});
@@ -16776,7 +16983,7 @@ function createChangesPanel() {
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
 function renderChangesPanels(options = {}) {
@@ -17340,7 +17547,7 @@ function createFileExplorerPanel() {
           <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}">▣</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="${esc(t('finder.toolbar.refresh'))}" aria-label="${esc(t('finder.toolbar.refresh'))}">↻</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
-          <button type="button" class="file-explorer-header-action file-explorer-date-toggle" data-file-explorer-tree-dates title="${esc(t('finder.toolbar.dates'))}" aria-pressed="${fileExplorerTreeShowDates ? 'true' : 'false'}">${esc(t('finder.toolbar.datesLabel'))}</button>
+          ${fileExplorerTreeDateButtonHtml()}
           <button type="button" class="file-explorer-header-action file-explorer-changes-toggle" data-file-explorer-changes-toggle title="${esc(fileExplorerChangesHidden ? t('changes.show') : t('changes.hide'))}" aria-pressed="${fileExplorerChangesHidden ? 'false' : 'true'}">Δ</button>
           <select class="file-explorer-sort-select" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
             <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
@@ -17783,7 +17990,7 @@ function applyFileEditorImageMode(imagePane, img, path, options = {}) {
   const preserveScroll = options.preserveScroll === true;
   const scrollLeft = preserveScroll ? imagePane.scrollLeft : 0;
   const scrollTop = preserveScroll ? imagePane.scrollTop : 0;
-  const original = fileEditorImageMode.get(path) === 'original';
+  const original = fileEditorImageModeForPath(path) === 'original';
   imagePane.classList.toggle('original-size', original);
   imagePane.classList.toggle('fit-size', !original);
   img.classList.toggle('original-size', original);
@@ -17819,8 +18026,8 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
     img.src = rawFileUrl(path, {v: version});
     img.alt = path;
     img.addEventListener('click', () => {
-      const nextMode = fileEditorImageMode.get(path) === 'original' ? 'fit' : 'original';
-      fileEditorImageMode.set(path, nextMode);
+      const nextMode = fileEditorImageModeForPath(path) === 'original' ? 'fit' : 'original';
+      setFileEditorImageModeForPath(path, nextMode);
       applyFileEditorImageMode(imagePane, img, path, {preserveScroll: true});
     });
     if (typeof ResizeObserver === 'function') {
@@ -18711,7 +18918,7 @@ function loadFileEditorState(path, panel, item) {
       const entry = fetched.entry;
       if (!entry) {
         if (fetched.missing) markOpenFileMissing(path);
-        else openFiles.set(path, fileErrorState(fetched.error || 'failed to inspect image'));
+        else setFileState(path, fileErrorState(fetched.error || 'failed to inspect image'));
         renderSessionButtons();
         renderPaneTabStrips();
         return;
@@ -18719,9 +18926,9 @@ function loadFileEditorState(path, panel, item) {
       if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
         const state = tooLargeFileState(Number(entry.size));
         state.mtime = fileEntryMtime(entry);
-        openFiles.set(path, state);
+        setFileState(path, state);
       } else {
-        openFiles.set(path, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
+        setFileState(path, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
       }
       renderFileEditorPanel(panel, item);
       renderSessionButtons();
@@ -18729,29 +18936,28 @@ function loadFileEditorState(path, panel, item) {
       return;
     }
     try {
-      const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        const message = String(payload.error || response.status);
-        openFiles.set(path, response.status === 413
+      const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
+      setFileState(path, {
+        mtime: filePayloadMtime(payload),
+        size: payload.size,
+        kind: 'text',
+        original: payload.content,
+        content: payload.content,
+        dirty: false,
+        gitTracked: payload.git_tracked === true,
+      });
+    } catch (err) {
+      const status = Number(err?.status) || 0;
+      if (status) {
+        const message = String(err?.payload?.error || status);
+        setFileState(path, status === 413
           ? tooLargeFileState(null, message)
-          : response.status === 404
+          : status === 404
             ? missingFileState(message)
             : fileErrorState(message));
       } else {
-        const payload = await response.json();
-        openFiles.set(path, {
-          mtime: filePayloadMtime(payload),
-          size: payload.size,
-          kind: 'text',
-          original: payload.content,
-          content: payload.content,
-          dirty: false,
-          gitTracked: payload.git_tracked === true,
-        });
+        setFileState(path, fileErrorState(err));
       }
-    } catch (err) {
-      openFiles.set(path, fileErrorState(err));
     }
     renderFileEditorPanel(panel, item);
     renderSessionButtons();
@@ -20075,8 +20281,7 @@ function renderWatchedPrs() {
 
 async function refreshWatchedPrs() {
   try {
-    const response = await apiFetch('/api/watched-prs');
-    const data = await response.json();
+    const data = await apiFetchJson('/api/watched-prs');
     if (!data || typeof data !== 'object') return;
     watchedPrsData = {
       watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
@@ -20680,16 +20885,11 @@ async function uploadFiles(session, fileList, options = {}) {
     formData.append('files', file, file.name || 'upload.bin');
   }
   try {
-    const response = await apiFetch(`/api/upload?session=${encodeURIComponent(session)}`, {
+    const payload = await apiFetchJson(`/api/upload?session=${encodeURIComponent(session)}`, {
       method: 'POST',
       credentials: 'same-origin',
       body: formData,
     });
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`upload failed: ${esc(payload.error || response.statusText)}`);
-      return;
-    }
     const paths = (payload.files || []).map(file => file.path).filter(Boolean);
     if (options.source === 'paste') syncPasteCountersFromPayload(payload);
     activateTab(session, 'terminal');
@@ -20700,7 +20900,7 @@ async function uploadFiles(session, fileList, options = {}) {
     refreshOpenEventLogs();
     refreshTranscripts();
   } catch (error) {
-    statusErr(`upload failed: ${esc(error)}`);
+    statusErr(`upload failed: ${esc(error?.payload?.error || error)}`);
   }
 }
 
@@ -21152,9 +21352,17 @@ async function setAutoApprove(session, enabled) {
     return;
   }
   try {
-    const response = await apiFetch(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
+    const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
+    autoApproveStates.set(session, payload);
+    updateDocumentTitle();
+    updateSessionButtonStates();
+    renderAutoApproveButton(session, payload);
+    statusEl.innerHTML = payload.enabled
+      ? `<span class="ok">enabled YOLO for ${esc(sessionLabel(session))}</span>`
+      : `<span class="ok">disabled YOLO for ${esc(sessionLabel(session))}</span>`;
+  } catch (error) {
+    const payload = error?.payload || {};
+    if (error?.status) {
       if (payload?.target || payload?.session) {
         autoApproveStates.set(session, payload);
         updateDocumentTitle();
@@ -21164,14 +21372,6 @@ async function setAutoApprove(session, enabled) {
       statusErr(`${esc(payload.error || 'YOLO approval failed')}`);
       return;
     }
-    autoApproveStates.set(session, payload);
-    updateDocumentTitle();
-    updateSessionButtonStates();
-    renderAutoApproveButton(session, payload);
-    statusEl.innerHTML = payload.enabled
-      ? `<span class="ok">enabled YOLO for ${esc(sessionLabel(session))}</span>`
-      : `<span class="ok">disabled YOLO for ${esc(sessionLabel(session))}</span>`;
-  } catch (error) {
     statusErr(`YOLO request failed: ${esc(error)}`);
   }
 }
@@ -21188,8 +21388,7 @@ async function refreshAutoStatuses() {
 
 async function loadAutoStatuses() {
   try {
-    const response = await apiFetch('/api/auto-approve');
-    const payload = await response.json();
+    const payload = await apiFetchJson('/api/auto-approve');
     const previousActive = activeSessions.slice();
     const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
     if (payload.rules) {
@@ -21204,8 +21403,7 @@ async function loadAutoStatuses() {
   } catch (_) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
-        const response = await apiFetch(`/api/auto-approve?session=${encodeURIComponent(session)}`);
-        const payload = await response.json();
+        const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}`);
         autoApproveStates.set(session, payload);
       } catch (_) {}
     }
@@ -21394,8 +21592,7 @@ async function refreshTranscripts() {
   renderInfoPanel();
   transcriptMetaRefreshPromise = (async () => {
     try {
-      const response = await apiFetch('/api/transcripts');
-      transcriptMeta = await response.json();
+      transcriptMeta = await apiFetchJson('/api/transcripts');
       transcriptMetaLoaded = true;
       transcriptMetaLoadError = '';
       maybeHandleServerVersionChange(transcriptMeta.server_version);
@@ -21517,8 +21714,7 @@ function updateTranscriptPathRow(session, path, fallback = 'no transcript path')
 
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
-    const response = await apiFetch(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-    const payload = await response.json();
+    const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
     if (payload.items) {
       updateTranscriptPathRow(session, payload.path);
       renderTranscriptItems(preview, payload.path, payload.items, options);
@@ -21643,17 +21839,16 @@ async function refreshEventLog(session) {
   const node = document.getElementById(`events-${session}`);
   if (!node) return;
   try {
-    const response = await apiFetch(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
-    const payload = await response.json();
-    if (!response.ok) {
-      node.innerHTML = `<div class="event-empty">${esc(payload.error || 'failed to load events')}</div>`;
-      return;
-    }
+    const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
     const events = Array.isArray(payload.events) ? payload.events : [];
     node.innerHTML = events.length
       ? events.slice().reverse().map(eventItemHtml).join('')
       : '<div class="event-empty">no events yet</div>';
   } catch (error) {
+    if (error?.status) {
+      node.innerHTML = `<div class="event-empty">${esc(error.payload?.error || 'failed to load events')}</div>`;
+      return;
+    }
     node.innerHTML = `<div class="event-empty">failed to load events: ${esc(error)}</div>`;
   }
 }
@@ -21722,9 +21917,7 @@ function renderLatency(latestMs) {
 async function updateLatency() {
   const startedAt = performance.now();
   try {
-    const response = await apiFetch(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
-    if (!response.ok) throw new Error(response.statusText || `HTTP ${response.status}`);
-    await response.json();
+    await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
     const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
     latencySamples = [...latencySamples, elapsedMs].slice(-latencySamplesMax);
     renderLatency(elapsedMs);
@@ -21792,8 +21985,7 @@ async function showContext(session) {
   body.innerHTML = '';
   body.textContent = t('common.loading');
   modal.classList.add('open');
-  const response = await apiFetch(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-  const payload = await response.json();
+  const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
   if (payload.text) {
     body.textContent = `${payload.path}\n\n${payload.text}`;
   } else {

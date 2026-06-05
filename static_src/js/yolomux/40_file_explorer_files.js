@@ -43,15 +43,7 @@ async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
   try {
     hydrateFileExplorerRepoInfoCache();
-    const response = await apiFetch(`/api/fs/list?path=${encodeURIComponent(root)}`);
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      fileExplorerPathError = payload.error || `Cannot open ${root} (${response.status})`;
-      fileExplorerLastListError = {path: root, status: response.status, error: fileExplorerPathError, network: false};
-      console.warn('fs list failed', root, response.status, fileExplorerPathError);
-      return null;
-    }
-    const payload = await response.json();
+    const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(root)}`);
     const entries = payload.entries || [];
     fileExplorerPathError = '';
     fileExplorerLastListError = null;
@@ -60,9 +52,12 @@ async function fetchDirectory(path, options = {}) {
     if (options.recordSignature !== false) recordDirectorySignature(root, entries);
     return entries;
   } catch (err) {
-    fileExplorerPathError = `Cannot open ${root}: ${err}`;
-    fileExplorerLastListError = {path: root, status: 0, error: fileExplorerPathError, network: true};
-    console.warn('fs list error', root, err);
+    const status = Number(err?.status) || 0;
+    fileExplorerPathError = status
+      ? err.message || `Cannot open ${root} (${status})`
+      : `Cannot open ${root}: ${err}`;
+    fileExplorerLastListError = {path: root, status, error: fileExplorerPathError, network: !status};
+    console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
     return null;
   }
 }
@@ -884,7 +879,7 @@ function fileTreeDisplayParts(path, entry) {
 }
 
 function fileTreeMtimeText(entry) {
-  return sessionFileTimeText(entry?.mtime);
+  return sessionFileDisplayTimeText(entry?.mtime);
 }
 
 function sortedFileTreeEntries(entries) {
@@ -1123,7 +1118,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     gitStatus,
     iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
     nameHtml: differMode ? null : displayName.html,
-    dateText: fileExplorerTreeShowDates || differMode ? fileTreeMtimeText(entry) : '',
+    dateText: fileTreeMtimeText(entry),
     diffParts: changedFile ? sessionFileDiffText(changedFile) : [],
     agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : '',
     dirCountText,
@@ -1453,8 +1448,7 @@ async function refreshFileIndexStatus(root) {
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
   let payload;
   try {
-    const response = await apiFetch(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
-    payload = await response.json();
+    payload = await apiFetchJson(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
   } catch (error) {
     return;  // transient error: keep the prior badge, don't flip it
   }
@@ -1676,10 +1670,7 @@ function startFileTreeDrag(event, row, fullPath, entry) {
 }
 
 async function fetchFilePathInfo(path) {
-  const response = await apiFetch(`/api/fs/info?path=${encodeURIComponent(path)}`);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
-  return payload;
+  return apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`);
 }
 
 async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
@@ -1774,13 +1765,11 @@ async function createFileExplorerFile() {
   const path = childNameToPath(currentFileExplorerRoot(), name);
   if (!path) return;
   try {
-    const response = await apiFetch('/api/fs/write', {
+    await apiFetchJson('/api/fs/write', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path, content: ''}),
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
     statusEl.textContent = `created ${basenameOf(path)}`;
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
@@ -1798,13 +1787,11 @@ async function createFileExplorerFolder() {
   const path = childNameToPath(currentFileExplorerRoot(), name);
   if (!path) return;
   try {
-    const response = await apiFetch('/api/fs/mkdir', {
+    await apiFetchJson('/api/fs/mkdir', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path}),
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
     statusEl.textContent = `created ${basenameOf(path)}`;
     await refreshFileExplorerTrees();
   } catch (error) {
@@ -1830,9 +1817,7 @@ function bindFileExplorerHeaderActions(container = document) {
     else if (action.matches('[data-file-explorer-refresh]')) refreshFileExplorerTrees();
     else if (action.matches('[data-file-explorer-collapse]')) collapseAllFileExplorerDirectories();
     else if (action.matches('[data-file-explorer-tree-dates]')) {
-      fileExplorerTreeShowDates = !fileExplorerTreeShowDates;
-      writeStoredFileExplorerTreeShowDates(fileExplorerTreeShowDates);
-      refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+      cycleFileExplorerTreeDateMode();
     }
   });
   container.addEventListener('change', event => {
@@ -1859,13 +1844,11 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
   if (!window.confirm(confirmText)) return;
   try {
     for (const path of deletePaths) {
-      const response = await apiFetch('/api/fs/delete', {
+      await apiFetchJson('/api/fs/delete', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({path}),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
     }
     for (const path of Array.from(openFiles.keys())) {
       if (deletePaths.some(deletedPath => path === deletedPath || path.startsWith(`${deletedPath}/`))) {
@@ -1988,13 +1971,11 @@ async function renameFileTreePath(fullPath, entry, newName) {
   const trimmed = newName.trim();
   if (!trimmed || trimmed === currentName) return false;
   try {
-    const response = await apiFetch('/api/fs/rename', {
+    const payload = await apiFetchJson('/api/fs/rename', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({path: fullPath, new_name: trimmed}),
     });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || response.statusText || response.status);
     const newPath = payload.path;
     if (fileExplorerSelectedPaths.delete(fullPath)) fileExplorerSelectedPaths.add(newPath);
     if (fileExplorerSelectionAnchor === fullPath) fileExplorerSelectionAnchor = newPath;
@@ -2159,8 +2140,8 @@ function fileEntryChanged(state, entry) {
 function filePanelItemsForPath(path) {
   const items = [];
   if (sharedImageViewerPath === path) items.push(imageViewerItemFor(path));
-  if (fileEditorTabPaths.has(path)) items.push(fileEditorItemFor(path));
-  if (filePreviewTabPaths.has(path)) items.push(filePreviewItemFor(path));
+  items.push(...fileEditorTabItemsForPath(path));
+  items.push(...filePreviewTabItemsForPath(path));
   return items;
 }
 
@@ -2170,14 +2151,14 @@ function openFilePathHasOwner(path) {
 
 function removeFilePanelOwner(path, item) {
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
-  else if (isFilePreviewItem(item)) filePreviewTabPaths.delete(path);
-  else fileEditorTabPaths.delete(path);
-  fileEditorViewMode.delete(item);
+  else if (isFilePreviewItem(item)) removeFilePreviewTabItem(path, item);
+  else removeFileEditorTabItem(path, item);
+  fileEditorViewModesForPath(path).delete(item);
   // DOIT.6 #73: also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
   // so these item-keyed maps don't grow unbounded as editor tabs open and close.
   fileEditorViewState.delete(item);
   tabLastActivatedAt.delete(item);
-  if (!openFilePathHasOwner(path)) openFileOwnerSessions.delete(path);
+  if (!openFilePathHasOwner(path)) fileStateFor(path)?.ownerSessions.clear();
 }
 
 function normalizedOpenFileOwnerSession(value) {
@@ -2188,13 +2169,11 @@ function normalizedOpenFileOwnerSession(value) {
 function rememberOpenFileOwner(path, ownerSession) {
   const session = normalizedOpenFileOwnerSession(ownerSession);
   if (!path || !session) return;
-  const owners = openFileOwnerSessions.get(path) || new Set();
-  owners.add(session);
-  openFileOwnerSessions.set(path, owners);
+  ensureFileState(path)?.ownerSessions.add(session);
 }
 
 function openFileOwnerSessionsForPath(path) {
-  return Array.from(openFileOwnerSessions.get(path) || [])
+  return Array.from(fileStateFor(path)?.ownerSessions || [])
     .filter(session => sessions.includes(session))
     .sort((left, right) => sessions.indexOf(left) - sessions.indexOf(right) || left.localeCompare(right));
 }
@@ -2226,9 +2205,9 @@ function setOpenFileOwner(path, item, options = {}) {
   if (isImageViewerItem(item)) {
     replacementSlots = replaceSharedImageViewerPath(path);
   } else if (isFilePreviewItem(item)) {
-    filePreviewTabPaths.add(path);
+    addFilePreviewTabItem(path, item);
   } else {
-    fileEditorTabPaths.add(path);
+    addFileEditorTabItem(path, item);
   }
   syncFileLayoutItems();
   return replacementSlots;
@@ -2249,9 +2228,7 @@ function replaceSharedImageViewerPath(path) {
     removePanelForItem(previousItem);
     sharedImageViewerPath = null;
     if (!openFilePathHasOwner(previousPath)) {
-      openFiles.delete(previousPath);
-      fileEditorViewMode.delete(previousPath);
-      fileEditorImageMode.delete(previousPath);
+      deleteFileState(previousPath);
     }
   }
   sharedImageViewerPath = path;
@@ -2573,8 +2550,8 @@ async function showFileConflictCompareDialog(path, panel = null) {
 }
 
 async function showFileSaveConflictDialog(path, panel = null, options = {}) {
-  if (fileEditorConflictDialogs.has(path)) return false;
-  fileEditorConflictDialogs.add(path);
+  if (fileConflictDialogOpen(path)) return false;
+  setFileConflictDialogOpen(path, true);
   try {
     const state = openFiles.get(path);
     if (state) {
@@ -2600,7 +2577,7 @@ async function showFileSaveConflictDialog(path, panel = null, options = {}) {
     if (action === 'compare') return showFileConflictCompareDialog(path, panel);
     return false;
   } finally {
-    fileEditorConflictDialogs.delete(path);
+    setFileConflictDialogOpen(path, false);
   }
 }
 
@@ -2681,7 +2658,7 @@ function showFileEditorPaneForPath(path, options = {}) {
 function openFilesSetAndShow(path, state, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   const replacementSlots = setOpenFileOwner(path, item, options);
-  openFiles.set(path, state);
+  setFileState(path, state);
   syncFileLayoutItems();
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
   return showFileEditorPaneForPath(path, {...options, item});
@@ -2742,9 +2719,7 @@ async function refreshOpenFileDiff(path, options = {}) {
       const refString = (options.fromRef || options.toRef)
         ? `from=${encodeURIComponent(options.fromRef || 'HEAD')}&to=${encodeURIComponent(options.toRef || 'current')}`
         : diffRefQueryString(fileRepoForPath(path));
-      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`);
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || response.status);
+      const payload = await apiFetchJson(`/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`);
       applyOpenFileDiffPayload(state, payload);
       refreshOpenFileDiffDecorations(path);
       return true;
@@ -2785,10 +2760,11 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     item,
     ownerSession: options.ownerSession || normalizedOpenFileOwnerSession(entry?.session),
   };
+  const alreadyOpen = Boolean(openFiles.get(fullPath)?.kind);
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
   else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
   recordEditorNav(item);   // DOIT.21: push this tab to the back/forward history (no-op while navigating)
-  if (openFiles.has(fullPath)) {
+  if (alreadyOpen) {
     await showFileEditorPaneForPath(fullPath, openOptions);
     if (options.viewMode) renderOpenFilePath(fullPath);
     return item;
@@ -2804,19 +2780,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     return item;
   }
   try {
-    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const message = payload.error || response.status;
-      const state = response.status === 413
-        ? tooLargeFileState(entry?.size ?? null, String(message))
-        : response.status === 404
-          ? missingFileState(String(message))
-          : fileErrorState(message);
-      await openFilesSetAndShow(fullPath, state, openOptions);
-      return item;
-    }
-    const payload = await response.json();
+    const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
     await openFilesSetAndShow(fullPath, {
       mtime: filePayloadMtime(payload),
       size: payload.size,
@@ -2828,6 +2792,17 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     }, openOptions);
     return item;
   } catch (err) {
+    const status = Number(err?.status) || 0;
+    if (status) {
+      const message = err?.payload?.error || status;
+      const state = status === 413
+        ? tooLargeFileState(entry?.size ?? null, String(message))
+        : status === 404
+          ? missingFileState(String(message))
+          : fileErrorState(message);
+      await openFilesSetAndShow(fullPath, state, openOptions);
+      return item;
+    }
     showFileOpenError(fullPath, err);
     return null;
   }
@@ -2839,7 +2814,7 @@ async function openFileCrossPaneSplit(path) {
   const previewItem = filePreviewItemFor(path);
   setFileEditorViewMode(path, 'edit', editorItem);
   setFileEditorViewMode(path, 'preview', previewItem);
-  if (!openFiles.has(path) || !fileEditorTabPaths.has(path)) {
+  if (!openFiles.get(path)?.kind || !fileHasEditorTab(path)) {
     await openFileInEditor(path, {name: basenameOf(path)}, {item: editorItem});
   } else {
     setOpenFileOwner(path, editorItem);
@@ -2893,20 +2868,7 @@ async function openFileStateFromDisk(path, entry = null) {
     }};
   }
   try {
-    const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const message = String(payload.error || response.status);
-      const state = response.status === 413
-        ? tooLargeFileState(fileEntry.size ?? null, message)
-        : response.status === 404
-          ? missingFileState(message)
-          : fileErrorState(message);
-      state.mtime = fileEntryMtime(fileEntry);
-      state.size = fileEntry.size ?? null;
-      return {state};
-    }
-    const payload = await response.json();
+    const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
     return {state: {
       mtime: filePayloadMtime(payload),
       size: payload.size,
@@ -2917,6 +2879,18 @@ async function openFileStateFromDisk(path, entry = null) {
       gitTracked: payload.git_tracked === true,
     }};
   } catch (error) {
+    const status = Number(error?.status) || 0;
+    if (status) {
+      const message = String(error?.payload?.error || status);
+      const state = status === 413
+        ? tooLargeFileState(fileEntry.size ?? null, message)
+        : status === 404
+          ? missingFileState(message)
+          : fileErrorState(message);
+      state.mtime = fileEntryMtime(fileEntry);
+      state.size = fileEntry.size ?? null;
+      return {state};
+    }
     return {state: fileErrorState(error)};
   }
 }
@@ -2929,7 +2903,7 @@ function markOpenFileMissing(path) {
     delete state.externalChanged;
     delete state.externalError;
   } else {
-    openFiles.set(path, missingFileState());
+    setFileState(path, missingFileState());
   }
   renderOpenFilePath(path);
 }
@@ -2950,7 +2924,7 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
     return false;
   }
   clearFileAutosaveTimer(path);
-  openFiles.set(path, clearOpenFileExternalState(loaded.state));
+  setFileState(path, clearOpenFileExternalState(loaded.state));
   renderOpenFilePath(path);
   if (previous?.diff !== undefined) refreshOpenFileDiff(path);
   return true;
@@ -3438,16 +3412,14 @@ function codeMirrorWrapMarkerExtension(api) {
   }, {dark: scheme.dark});
 }
 
-// DOIT.26: inline git blame. Lazily fetch the /api/blame payload for a path into editorBlameByPath.
+// DOIT.26: inline git blame. Lazily fetch the /api/blame payload into the path's fileState record.
 // DOIT.34 #3: dedup concurrent fetches (multiple open panels for one path share a single request).
 async function fetchEditorBlame(path) {
   if (editorBlameFetches.has(path)) return editorBlameFetches.get(path);
   const promise = (async () => {
     try {
-      const response = await apiFetch(`/api/blame?path=${encodeURIComponent(path)}`);
-      if (!response.ok) return null;
-      const data = await response.json();
-      editorBlameByPath.set(path, data);
+      const data = await apiFetchJson(`/api/blame?path=${encodeURIComponent(path)}`);
+      setEditorBlameForPath(path, data);
       return data;
     } catch (_error) {
       return null;
@@ -3463,9 +3435,9 @@ async function fetchEditorBlame(path) {
 // (the common case: enable blame, THEN open a new file), fetch it and nudge the open editors so the
 // blame ViewPlugin recomputes its decoration against the now-populated cache — no manual toggle needed.
 async function ensureEditorBlameForPath(path) {
-  if (!fileEditorBlameEnabled || !path || editorBlameByPath.has(path)) return;
+  if (!fileEditorBlameEnabled || !path || hasEditorBlameForPath(path)) return;
   await fetchEditorBlame(path);
-  if (!fileEditorBlameEnabled || !editorBlameByPath.has(path)) return;
+  if (!fileEditorBlameEnabled || !hasEditorBlameForPath(path)) return;
   for (const panel of fileEditorPanelsForPath(path)) {
     const view = panel?._cmView;
     if (!view) continue;
@@ -3496,7 +3468,7 @@ function codeMirrorBlameExtension(api, path) {
   if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
   const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
   const build = view => {
-    const blame = editorBlameByPath.get(path);
+    const blame = editorBlameForPath(path);
     if (!blame || !blame.lines) return api.Decoration.none;
     // DOIT.26: annotate EVERY visible line when fileEditorBlameAllLines is on, else just the cursor line
     // (the Cursor default). Viewport-scoped so a huge file only decorates what's on screen.
@@ -3885,9 +3857,7 @@ async function removeOpenFile(path, options = {}) {
     removePanelForItem(item);
   }
   if (!openFilePathHasOwner(path)) {
-    openFiles.delete(path);
-    fileEditorViewMode.delete(path);
-    fileEditorImageMode.delete(path);
+    deleteFileState(path);
   }
   syncFileLayoutItems();
   if (activeFile === path && !openFilePathHasOwner(path)) {
@@ -3930,17 +3900,18 @@ function renameOpenFilePath(oldPath, newPath) {
   const newItem = fileEditorItemFor(newPath);
   const oldPreviewItem = filePreviewItemFor(oldPath);
   const newPreviewItem = filePreviewItemFor(newPath);
-  const state = openFiles.get(oldPath);
+  const state = fileStateFor(oldPath);
   const wasInLayout = itemInLayout(oldItem) || itemInLayout(oldPreviewItem);
   const panelItems = [oldItem, oldPreviewItem].filter(item => panelNodes.has(item));
-  openFiles.delete(oldPath);
-  openFiles.set(newPath, state);
-  if (fileEditorTabPaths.delete(oldPath)) fileEditorTabPaths.add(newPath);
-  if (filePreviewTabPaths.delete(oldPath)) filePreviewTabPaths.add(newPath);
+  deleteFileState(oldPath);
+  setFileState(newPath, state);
+  if (state.editorTabItems.delete(oldItem)) state.editorTabItems.add(newItem);
+  if (state.previewTabItems.delete(oldPreviewItem)) state.previewTabItems.add(newPreviewItem);
+  const viewModes = state.viewMode;
   for (const [oldKey, newKey] of [[oldItem, newItem], [oldPreviewItem, newPreviewItem]]) {
-    if (fileEditorViewMode.has(oldKey)) {
-      fileEditorViewMode.set(newKey, fileEditorViewMode.get(oldKey));
-      fileEditorViewMode.delete(oldKey);
+    if (viewModes.has(oldKey)) {
+      viewModes.set(newKey, viewModes.get(oldKey));
+      viewModes.delete(oldKey);
     }
     // DOIT.6 #73: migrate the item-keyed scroll/selection state and the LRU timestamp on rename too,
     // so they don't leak under the old item id (and the LRU ordering survives the rename).
@@ -3953,13 +3924,9 @@ function renameOpenFilePath(oldPath, newPath) {
       tabLastActivatedAt.delete(oldKey);
     }
   }
-  if (fileEditorViewMode.has(oldPath)) {
-    fileEditorViewMode.set(newPath, fileEditorViewMode.get(oldPath));
-    fileEditorViewMode.delete(oldPath);
-  }
-  if (fileEditorImageMode.has(oldPath)) {
-    fileEditorImageMode.set(newPath, fileEditorImageMode.get(oldPath));
-    fileEditorImageMode.delete(oldPath);
+  if (viewModes.has(oldPath)) {
+    viewModes.set(newPath, viewModes.get(oldPath));
+    viewModes.delete(oldPath);
   }
   for (const item of panelItems) {
     const panel = panelNodes.get(item);

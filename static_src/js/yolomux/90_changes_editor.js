@@ -662,6 +662,38 @@ function sessionFileTimeText(mtime) {
   return localizedDateTimeFormat(value, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 }
 
+function compactAgeNumber(value) {
+  const rounded = Math.round(Number(value || 0) * 10) / 10;
+  if (!Number.isFinite(rounded)) return '0';
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+function sessionFileRelativeTimeText(mtime, nowSeconds = Date.now() / 1000) {
+  const value = Number(mtime || 0);
+  if (!value) return '';
+  const now = Number(nowSeconds);
+  if (!Number.isFinite(now)) return '';
+  const age = now - value;
+  if (age <= 0) return 'now';
+  if (age < 60) return '<1 min ago';
+  if (age < 3600) {
+    const minutes = Math.max(1, Math.round(age / 60));
+    return `${minutes} min ago`;
+  }
+  if (age < 86400) {
+    const hoursText = compactAgeNumber(age / 3600);
+    return `${hoursText} ${hoursText === '1' ? 'hr' : 'hrs'} ago`;
+  }
+  const daysText = compactAgeNumber(age / 86400);
+  return `${daysText} ${daysText === '1' ? 'day' : 'days'} ago`;
+}
+
+function sessionFileDisplayTimeText(mtime) {
+  if (fileExplorerTreeDateMode === 'date') return sessionFileTimeText(mtime);
+  if (fileExplorerTreeDateMode === 'relative') return sessionFileRelativeTimeText(mtime);
+  return '';
+}
+
 function sessionFileDiffText(item) {
   return [
     Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: 'add', text: `+${Number(item.added)}`} : null,
@@ -851,6 +883,13 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
 
 // Build a synthetic file-tree entry structure from flat session file items so renderTreeChildren
 // can render the Differ using the same DOM-mutation logic as the Finder.
+function updateSyntheticTreeEntryMtime(entry, mtime) {
+  const value = Number(mtime || 0);
+  if (!Number.isFinite(value) || value <= 0) return;
+  const current = Number(entry.mtime || 0);
+  if (!Number.isFinite(current) || value > current) entry.mtime = value;
+}
+
 function buildSessionFileTree(repoPath, sessionFiles) {
   const entriesByDir = new Map(); // normalizedDirPath → [{name, kind, mtime?, size?}]
   const sessionFilesMap = new Map(); // absPath → sessionFileItem
@@ -867,9 +906,12 @@ function buildSessionFileTree(repoPath, sessionFiles) {
       const key = normalizeDirectoryPath(parentAbsPath);
       if (!entriesByDir.has(key)) entriesByDir.set(key, []);
       const siblings = entriesByDir.get(key);
-      if (!siblings.some(e => e.name === parts[i - 1])) {
-        siblings.push({name: parts[i - 1], kind: 'dir'});
+      let dirEntry = siblings.find(e => e.kind === 'dir' && e.name === parts[i - 1]);
+      if (!dirEntry) {
+        dirEntry = {name: parts[i - 1], kind: 'dir'};
+        siblings.push(dirEntry);
       }
+      updateSyntheticTreeEntryMtime(dirEntry, item.mtime);
     }
     // File leaf
     const fileName = parts[parts.length - 1];
@@ -922,7 +964,7 @@ function changeFileRowHtml(item, options = {}) {
   const name = item.__displayName || basenameOf(absPath || item.path || '');
   const rel = item.path || absPath;
   const parentLabel = changeFileParentLabel(rel);
-  const timeText = sessionFileTimeText(item.mtime);
+  const timeText = sessionFileDisplayTimeText(item.mtime);
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentSlotHtml = changeFileAgentsHtml(item);
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
@@ -1039,6 +1081,13 @@ function renderChangesGroups(groupsEl, files, options = {}) {
 
 // Returns the static toolbar/header HTML for the main Changes panel.
 // The .changes-groups div is filled by renderChangesGroups separately.
+function fileExplorerTreeDateButtonHtml(extraClass = '') {
+  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  const active = mode !== 'none';
+  const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass].filter(Boolean).join(' ');
+  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeLabel(mode))}</button>`;
+}
+
 function changesPanelStaticHtml() {
   const target = sessionFilesPayload.session || sessionFilesTargetSession();
   const files = sessionFilesPayload.files || [];
@@ -1054,6 +1103,7 @@ function changesPanelStaticHtml() {
         <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>${esc(t('changes.sort.recent'))}</option>
         <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>${esc(t('changes.sort.name'))}</option>
       </select></label>
+      ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
       <button type="button" class="changes-refresh" data-session-files-refresh>${esc(t('changes.refresh'))}</button>
     </div>
     ${comparison}
@@ -1079,6 +1129,7 @@ function fileExplorerChangesPanelStaticHtml() {
         <span class="changes-sort-divider" aria-hidden="true">|</span>
         <button type="button" class="changes-sort-seg${sessionFilesSortMode === 'name' ? ' active' : ''}" data-session-files-sort data-sort-value="name" aria-pressed="${sessionFilesSortMode === 'name' ? 'true' : 'false'}">${esc(t('changes.sort.name'))}</button>
       </span>
+      ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
       <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
@@ -1220,6 +1271,7 @@ function createChangesPanel() {
   }
   bindPanelShell(panel, changesItemId);
   bindChangesPanel(panel);
+  bindFileExplorerHeaderActions(panel);
   bindChangedFileRowBehaviors(panel);
   if (!sessionFilesPayload.loaded || sessionFilesPayload.session !== sessionFilesTargetSession()) {
     fetchSessionFiles({destination: 'changes', silent: true});
@@ -1230,7 +1282,7 @@ function createChangesPanel() {
 function activeChangesControl(panel) {
   const active = document.activeElement;
   if (!active || !panel?.contains(active)) return null;
-  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
+  return active.closest?.('[data-session-files-session], [data-session-files-sort], [data-diff-ref-from], [data-diff-ref-to], [data-session-files-refresh], [data-file-explorer-tree-dates], [data-uploaded-files-toggle], [data-changes-folder-toggle], [data-changes-repo-toggle]') || null;
 }
 
 function renderChangesPanels(options = {}) {
@@ -1794,7 +1846,7 @@ function createFileExplorerPanel() {
           <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}">▣</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="${esc(t('finder.toolbar.refresh'))}" aria-label="${esc(t('finder.toolbar.refresh'))}">↻</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
-          <button type="button" class="file-explorer-header-action file-explorer-date-toggle" data-file-explorer-tree-dates title="${esc(t('finder.toolbar.dates'))}" aria-pressed="${fileExplorerTreeShowDates ? 'true' : 'false'}">${esc(t('finder.toolbar.datesLabel'))}</button>
+          ${fileExplorerTreeDateButtonHtml()}
           <button type="button" class="file-explorer-header-action file-explorer-changes-toggle" data-file-explorer-changes-toggle title="${esc(fileExplorerChangesHidden ? t('changes.show') : t('changes.hide'))}" aria-pressed="${fileExplorerChangesHidden ? 'false' : 'true'}">Δ</button>
           <select class="file-explorer-sort-select" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
             <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
@@ -2237,7 +2289,7 @@ function applyFileEditorImageMode(imagePane, img, path, options = {}) {
   const preserveScroll = options.preserveScroll === true;
   const scrollLeft = preserveScroll ? imagePane.scrollLeft : 0;
   const scrollTop = preserveScroll ? imagePane.scrollTop : 0;
-  const original = fileEditorImageMode.get(path) === 'original';
+  const original = fileEditorImageModeForPath(path) === 'original';
   imagePane.classList.toggle('original-size', original);
   imagePane.classList.toggle('fit-size', !original);
   img.classList.toggle('original-size', original);
@@ -2273,8 +2325,8 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
     img.src = rawFileUrl(path, {v: version});
     img.alt = path;
     img.addEventListener('click', () => {
-      const nextMode = fileEditorImageMode.get(path) === 'original' ? 'fit' : 'original';
-      fileEditorImageMode.set(path, nextMode);
+      const nextMode = fileEditorImageModeForPath(path) === 'original' ? 'fit' : 'original';
+      setFileEditorImageModeForPath(path, nextMode);
       applyFileEditorImageMode(imagePane, img, path, {preserveScroll: true});
     });
     if (typeof ResizeObserver === 'function') {
@@ -3165,7 +3217,7 @@ function loadFileEditorState(path, panel, item) {
       const entry = fetched.entry;
       if (!entry) {
         if (fetched.missing) markOpenFileMissing(path);
-        else openFiles.set(path, fileErrorState(fetched.error || 'failed to inspect image'));
+        else setFileState(path, fileErrorState(fetched.error || 'failed to inspect image'));
         renderSessionButtons();
         renderPaneTabStrips();
         return;
@@ -3173,9 +3225,9 @@ function loadFileEditorState(path, panel, item) {
       if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
         const state = tooLargeFileState(Number(entry.size));
         state.mtime = fileEntryMtime(entry);
-        openFiles.set(path, state);
+        setFileState(path, state);
       } else {
-        openFiles.set(path, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
+        setFileState(path, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
       }
       renderFileEditorPanel(panel, item);
       renderSessionButtons();
@@ -3183,29 +3235,28 @@ function loadFileEditorState(path, panel, item) {
       return;
     }
     try {
-      const response = await apiFetch(`/api/fs/read?path=${encodeURIComponent(path)}`);
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        const message = String(payload.error || response.status);
-        openFiles.set(path, response.status === 413
+      const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
+      setFileState(path, {
+        mtime: filePayloadMtime(payload),
+        size: payload.size,
+        kind: 'text',
+        original: payload.content,
+        content: payload.content,
+        dirty: false,
+        gitTracked: payload.git_tracked === true,
+      });
+    } catch (err) {
+      const status = Number(err?.status) || 0;
+      if (status) {
+        const message = String(err?.payload?.error || status);
+        setFileState(path, status === 413
           ? tooLargeFileState(null, message)
-          : response.status === 404
+          : status === 404
             ? missingFileState(message)
             : fileErrorState(message));
       } else {
-        const payload = await response.json();
-        openFiles.set(path, {
-          mtime: filePayloadMtime(payload),
-          size: payload.size,
-          kind: 'text',
-          original: payload.content,
-          content: payload.content,
-          dirty: false,
-          gitTracked: payload.git_tracked === true,
-        });
+        setFileState(path, fileErrorState(err));
       }
-    } catch (err) {
-      openFiles.set(path, fileErrorState(err));
     }
     renderFileEditorPanel(panel, item);
     renderSessionButtons();

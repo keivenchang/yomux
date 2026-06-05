@@ -11,8 +11,15 @@ async function apiFetch(url, options = {}) {
 
 async function apiFetchJson(url, options = {}) {
   const response = await apiFetch(url, options);
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload?.error || response.statusText || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.statusText = response.statusText || '';
+    error.payload = payload || {};
+    error.response = response;
+    throw error;
+  }
   return payload;
 }
 
@@ -59,6 +66,123 @@ function readStoredJson(key, fallback = null) {
     const raw = window.localStorage?.getItem(key);
     return raw ? JSON.parse(raw) : fallback;
   } catch (_) { return fallback; }
+}
+
+function normalizeFileStateRecord(state) {
+  if (!state || typeof state !== 'object') state = {};
+  if (!(state.editorTabItems instanceof Set)) state.editorTabItems = new Set();
+  if (!(state.previewTabItems instanceof Set)) state.previewTabItems = new Set();
+  if (!(state.ownerSessions instanceof Set)) state.ownerSessions = new Set();
+  if (!(state.viewMode instanceof Map)) state.viewMode = new Map();
+  if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = '';
+  if (!Object.prototype.hasOwnProperty.call(state, 'blame')) state.blame = null;
+  if (!Object.prototype.hasOwnProperty.call(state, 'conflictDialogOpen')) state.conflictDialogOpen = false;
+  return state;
+}
+
+function ensureFileState(path, defaults = null) {
+  if (!path) return null;
+  let state = fileState.get(path);
+  if (!state) {
+    state = defaults && typeof defaults === 'object' ? defaults : {};
+    fileState.set(path, state);
+  } else if (defaults && typeof defaults === 'object' && state !== defaults) {
+    Object.assign(state, defaults);
+  }
+  return normalizeFileStateRecord(state);
+}
+
+function fileStateFor(path) {
+  const state = path ? fileState.get(path) : null;
+  return state ? normalizeFileStateRecord(state) : null;
+}
+
+function setFileState(path, state) {
+  if (!path) return null;
+  const previous = fileStateFor(path);
+  if (previous && previous !== state && state && typeof state === 'object') {
+    if (!(state.editorTabItems instanceof Set)) state.editorTabItems = previous.editorTabItems;
+    if (!(state.previewTabItems instanceof Set)) state.previewTabItems = previous.previewTabItems;
+    if (!(state.ownerSessions instanceof Set)) state.ownerSessions = previous.ownerSessions;
+    if (!(state.viewMode instanceof Map)) state.viewMode = previous.viewMode;
+    if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = previous.imageMode;
+    if (!Object.prototype.hasOwnProperty.call(state, 'blame')) state.blame = previous.blame;
+    if (!Object.prototype.hasOwnProperty.call(state, 'conflictDialogOpen')) state.conflictDialogOpen = previous.conflictDialogOpen;
+  }
+  const normalized = normalizeFileStateRecord(state);
+  fileState.set(path, normalized);
+  return normalized;
+}
+
+function deleteFileState(path) {
+  if (!path) return false;
+  return fileState.delete(path);
+}
+
+function fileEditorTabItemsForPath(path) {
+  return Array.from(fileStateFor(path)?.editorTabItems || []);
+}
+
+function filePreviewTabItemsForPath(path) {
+  return Array.from(fileStateFor(path)?.previewTabItems || []);
+}
+
+function fileHasEditorTab(path) {
+  return fileEditorTabItemsForPath(path).length > 0;
+}
+
+function addFileEditorTabItem(path, item = fileEditorItemFor(path)) {
+  const state = ensureFileState(path);
+  if (state && item) state.editorTabItems.add(item);
+}
+
+function addFilePreviewTabItem(path, item = filePreviewItemFor(path)) {
+  const state = ensureFileState(path);
+  if (state && item) state.previewTabItems.add(item);
+}
+
+function removeFileEditorTabItem(path, item = fileEditorItemFor(path)) {
+  fileStateFor(path)?.editorTabItems.delete(item);
+}
+
+function removeFilePreviewTabItem(path, item = filePreviewItemFor(path)) {
+  fileStateFor(path)?.previewTabItems.delete(item);
+}
+
+function fileEditorViewModesForPath(path, create = false) {
+  const state = create ? ensureFileState(path) : fileStateFor(path);
+  return state?.viewMode || new Map();
+}
+
+function fileEditorImageModeForPath(path) {
+  return fileStateFor(path)?.imageMode || '';
+}
+
+function setFileEditorImageModeForPath(path, mode) {
+  const state = ensureFileState(path);
+  if (state) state.imageMode = mode || '';
+}
+
+function editorBlameForPath(path) {
+  return fileStateFor(path)?.blame || null;
+}
+
+function setEditorBlameForPath(path, blame) {
+  const state = ensureFileState(path);
+  if (state) state.blame = blame || null;
+}
+
+function hasEditorBlameForPath(path) {
+  return Boolean(editorBlameForPath(path));
+}
+
+function fileConflictDialogOpen(path) {
+  return fileStateFor(path)?.conflictDialogOpen === true;
+}
+
+function setFileConflictDialogOpen(path, open) {
+  const state = ensureFileState(path);
+  if (state) state.conflictDialogOpen = open === true;
 }
 
 // Normalized view of a session's transcript metadata — prevents each call site from re-implementing
@@ -182,12 +306,18 @@ function readStoredDiffRefsByRepo() {
   }
 }
 
-function readStoredFileExplorerTreeShowDates() {
-  return storageGet(fileExplorerTreeShowDatesStorageKey) === '1';
+function normalizeFileExplorerTreeDateMode(value) {
+  return fileExplorerTreeDateModes.includes(value) ? value : 'none';
 }
 
-function writeStoredFileExplorerTreeShowDates(value) {
-  storageSet(fileExplorerTreeShowDatesStorageKey, value ? '1' : '0');
+function readStoredFileExplorerTreeDateMode() {
+  const value = storageGet(fileExplorerTreeDateModeStorageKey);
+  if (value !== null) return normalizeFileExplorerTreeDateMode(value);
+  return storageGet(fileExplorerTreeShowDatesStorageKey) === '1' ? 'date' : 'none';
+}
+
+function writeStoredFileExplorerTreeDateMode(value) {
+  storageSet(fileExplorerTreeDateModeStorageKey, normalizeFileExplorerTreeDateMode(value));
 }
 
 function readStoredFileExplorerTreeSortMode() {
@@ -384,11 +514,61 @@ function syncFileExplorerHiddenButton(button) {
   });
 }
 
+function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateMode) {
+  const normalized = normalizeFileExplorerTreeDateMode(mode);
+  if (normalized === 'date') return 'Date';
+  if (normalized === 'relative') return 'Ago';
+  return 'None';
+}
+
+function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
+  return `Date display: ${fileExplorerTreeDateModeLabel(mode)}. Click to cycle None, Date, Ago.`;
+}
+
 function syncFileExplorerTreeDateButton(button) {
-  syncPressedButton(button, fileExplorerTreeShowDates, {
-    labelOn: 'Hide modified dates',
-    labelOff: 'Show modified dates',
-  });
+  if (!button) return;
+  const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  const active = mode !== 'none';
+  button.classList.toggle('active', active);
+  button.dataset.dateMode = mode;
+  button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  button.textContent = fileExplorerTreeDateModeLabel(mode);
+  const label = fileExplorerTreeDateModeTitle(mode);
+  button.title = label;
+  button.setAttribute('aria-label', label);
+}
+
+function syncFileExplorerTreeDateButtons(scope = document) {
+  for (const button of scope.querySelectorAll?.('[data-file-explorer-tree-dates]') || []) {
+    syncFileExplorerTreeDateButton(button);
+  }
+}
+
+function nextFileExplorerTreeDateMode(mode = fileExplorerTreeDateMode) {
+  const normalized = normalizeFileExplorerTreeDateMode(mode);
+  const index = fileExplorerTreeDateModes.indexOf(normalized);
+  return fileExplorerTreeDateModes[(index + 1) % fileExplorerTreeDateModes.length];
+}
+
+function refreshFileExplorerTreeDateModeSurfaces() {
+  syncFileExplorerTreeDateButtons();
+  if (typeof refreshFileExplorerTrees === 'function') {
+    void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  }
+  if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
+  if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
+}
+
+function setFileExplorerTreeDateMode(mode) {
+  const next = normalizeFileExplorerTreeDateMode(mode);
+  if (next === fileExplorerTreeDateMode) return;
+  fileExplorerTreeDateMode = next;
+  writeStoredFileExplorerTreeDateMode(fileExplorerTreeDateMode);
+  refreshFileExplorerTreeDateModeSurfaces();
+}
+
+function cycleFileExplorerTreeDateMode() {
+  setFileExplorerTreeDateMode(nextFileExplorerTreeDateMode());
 }
 
 function renderTabMetaToggle() {

@@ -266,7 +266,7 @@
   "notify.pr.merged": "⟦ƤŘ {ref} ɱéřǧéđ····⟧",
   "notify.pr.review": "⟦Řéṽíéŵ {decision} óñ {ref}····⟧",
   "notify.testBody": "⟦ÝÓŁÓɱúẋ íñ-ƥáǧé áłéřťš ářé éñáƀłéđ.··············⟧",
-  "notify.testTitle": "⟦ÝÓŁÓɱúẋ - {host}: ñóťíƒíçáťíóñš éñáƀłéđ·············⟧",
+  "notify.testTitle": "⟦ÝÓŁÓɱúẋ[{host}] ñóťíƒíçáťíóñš éñáƀłéđ············⟧",
   "palette.aria": "⟦Çóɱɱáñđ ƥáłéťťé······⟧",
   "palette.group.files": "⟦Ƒíłéš··⟧",
   "palette.group.menu": "⟦Ɱéñú··⟧",

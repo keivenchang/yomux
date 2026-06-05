@@ -364,6 +364,34 @@ body.theme-light {
   --panel-close-hover-bg: rgba(15, 23, 42, 0.08);
 }
 * { box-sizing: border-box; }
+.actions button,
+.info-refresh,
+.info-sort-button,
+.changes-repo-head,
+.file-explorer-changes-head .changes-sort-seg,
+.file-editor-mode-control button,
+.file-editor-preview-font-panel button,
+.file-editor-toolbar button,
+.file-editor-gutter-panel,
+.file-editor-wrap-panel,
+.file-editor-find-panel,
+.file-editor-diff-panel,
+.file-editor-diff-expand-panel,
+.file-editor-theme-panel,
+.file-editor-reload-panel,
+.file-editor-cross-split-panel,
+.file-editor-blame-panel,
+.file-editor-save-panel,
+.pane-tab-close,
+.repo-chip-menu .repo-chip-row,
+.path-copy-button,
+.popover-copy-button {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
 html {
   height: 100%;
 }

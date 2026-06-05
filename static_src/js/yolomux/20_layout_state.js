@@ -684,11 +684,10 @@ function openFileEditorItems() {
   if (sharedImageViewerPath && openFiles.has(sharedImageViewerPath)) {
     items.push(imageViewerItemFor(sharedImageViewerPath));
   }
-  for (const path of fileEditorTabPaths) {
-    if (openFiles.has(path)) items.push(fileEditorItemFor(path));
-  }
-  for (const path of filePreviewTabPaths) {
-    if (openFiles.has(path)) items.push(filePreviewItemFor(path));
+  for (const [path, state] of openFiles.entries()) {
+    normalizeFileStateRecord(state);
+    for (const item of state.editorTabItems) items.push(item);
+    for (const item of state.previewTabItems) items.push(item);
   }
   return items;
 }
@@ -707,43 +706,49 @@ function isLayoutItem(item) {
 
 function registerFileEditorLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
-  fileEditorTabPaths.add(path);
-  if (!openFiles.has(path)) {
-    openFiles.set(path, {
+  const item = fileEditorItemFor(path);
+  addFileEditorTabItem(path, item);
+  if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
+    syncFileLayoutItems();
+    return item;
+  }
+  ensureFileState(path, {
       mtime: 0,
       kind: 'loading',
       original: '',
       content: '',
       dirty: false,
       loading: true,
-    });
-  }
+  });
   syncFileLayoutItems();
-  return fileEditorItemFor(path);
+  return item;
 }
 
 function registerFilePreviewLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
-  filePreviewTabPaths.add(path);
-  if (!openFiles.has(path)) {
-    openFiles.set(path, {
+  const item = filePreviewItemFor(path);
+  addFilePreviewTabItem(path, item);
+  if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
+    syncFileLayoutItems();
+    return item;
+  }
+  ensureFileState(path, {
       mtime: 0,
       kind: 'loading',
       original: '',
       content: '',
       dirty: false,
       loading: true,
-    });
-  }
+  });
   syncFileLayoutItems();
-  return filePreviewItemFor(path);
+  return item;
 }
 
 function registerImageViewerLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
   sharedImageViewerPath = path;
-  if (!openFiles.has(path)) {
-    openFiles.set(path, {
+  if (!openFiles.get(path)?.kind) {
+    ensureFileState(path, {
       mtime: 0,
       kind: 'image',
       original: '',
@@ -2025,9 +2030,24 @@ function displayToastContainer(session) {
   return document.querySelector('.panel-toast-stack') || attentionAlerts;
 }
 
+function compactNotificationTitle(scope, message) {
+  const suffix = String(message || '').trim();
+  const label = String(scope || '').trim();
+  if (!label) return suffix ? `YOLOmux ${suffix}` : 'YOLOmux';
+  return suffix ? `YOLOmux[${label}] ${suffix}` : `YOLOmux[${label}]`;
+}
+
+function sessionNotificationTitle(session, state) {
+  return compactNotificationTitle(sessionLabel(session), state?.label || '');
+}
+
+function hostNotificationTitle(message) {
+  return compactNotificationTitle(serverHostname, message);
+}
+
 function showAttentionAlert(session, state) {
   const node = showToast(
-    `YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}`,
+    sessionNotificationTitle(session, state),
     state.reason,
     {
       container: attentionAlerts,
@@ -2138,7 +2158,7 @@ function maybeNotifyState(session, state, options = {}) {
   });
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(`YOLOmux - ${serverHostname}: ${sessionLabel(session)} ${state.label}`, {
+    sendBrowserNotification(sessionNotificationTitle(session, state), {
       body,
       tag: key,
       renotify: true,
@@ -2212,7 +2232,7 @@ function maybeNotifyWatchedPr(ref, key, message, url) {
   postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(`YOLOmux - ${serverHostname}: ${message}`, {
+    sendBrowserNotification(hostNotificationTitle(message), {
       body: ref,
       tag: signature,
       renotify: true,

@@ -1084,17 +1084,16 @@ function summaryContextLine(label, text, url = '', linkLabel = '', linkClass = '
 async function ensureSession(session) {
   if (readOnlyMode) return true;
   try {
-    const response = await apiFetch(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session create failed')}`);
-      return false;
-    }
+    const payload = await apiFetchJson(`/api/ensure-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     statusEl.innerHTML = payload.created
       ? `<span class="ok">created ${esc(sessionLabel(session))} with Claude</span>`
       : `<span class="ok">${esc(sessionLabel(session))} ready</span>`;
     return true;
   } catch (error) {
+    if (error?.status) {
+      statusErr(`${esc(error.payload?.error || 'session create failed')}`);
+      return false;
+    }
     statusErr(`session check failed: ${esc(error)}`);
     return false;
   }
@@ -1108,12 +1107,7 @@ async function createNextSession(agent) {
   const agentLabel = agentName(agent) || 'agent';
   statusEl.textContent = `creating ${agentLabel} session...`;
   try {
-    const response = await apiFetch(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session create failed')}`);
-      return;
-    }
+    const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
     updateSessionList(payload.sessions || []);
     renderSessionButtons();
@@ -1124,6 +1118,10 @@ async function createNextSession(agent) {
     renderAutoApproveButtons();
     statusOk(`created ${esc(sessionLabel(payload.session))} (${esc(payload.session)}) with ${esc(agentName(payload.agent) || agentLabel)}`);
   } catch (error) {
+    if (error?.status) {
+      statusErr(`${esc(error.payload?.error || 'session create failed')}`);
+      return;
+    }
     statusErr(`session create failed: ${esc(error)}`);
   }
 }
@@ -1284,12 +1282,7 @@ async function renameTmuxSession(session, proposedName) {
   }
   statusEl.textContent = `renaming ${sessionLabel(session)}...`;
   try {
-    const response = await apiFetch(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session rename failed')}`);
-      return false;
-    }
+    const payload = await apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
     const renamed = payload.new_session || newName;
     replaceTmuxSessionInClient(session, renamed, payload.sessions);
     closeSessionRenameDialog();
@@ -1299,6 +1292,10 @@ async function renameTmuxSession(session, proposedName) {
     statusOk(`renamed ${esc(session)} to ${esc(renamed)}`);
     return true;
   } catch (error) {
+    if (error?.status) {
+      statusErr(`${esc(error.payload?.error || 'session rename failed')}`);
+      return false;
+    }
     statusErr(`session rename failed: ${esc(error)}`);
     return false;
   }
@@ -1313,12 +1310,7 @@ async function killTmuxSession(session) {
   if (!window.confirm(`Kill tmux session ${sessionLabel(session)}?`)) return false;
   statusEl.textContent = `killing ${sessionLabel(session)}...`;
   try {
-    const response = await apiFetch(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) {
-      statusErr(`${esc(payload.error || 'session kill failed')}`);
-      return false;
-    }
+    const payload = await apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
     const previousActive = activeSessions.slice();
     stopSessionUi(session);
     const sessionsChanged = updateSessionList(payload.sessions || []);
@@ -1332,6 +1324,10 @@ async function killTmuxSession(session) {
     statusOk(`killed ${esc(sessionLabel(session))}`);
     return true;
   } catch (error) {
+    if (error?.status) {
+      statusErr(`${esc(error.payload?.error || 'session kill failed')}`);
+      return false;
+    }
     statusErr(`session kill failed: ${esc(error)}`);
     return false;
   }
@@ -1523,7 +1519,7 @@ function dismissTerminalConnectionToasts(session) {
 function showTerminalConnectionToast(session, text, countdownMs = toastDurationMs) {
   dismissTerminalConnectionToasts(session);
   const node = showToast(
-    `YOLOmux - ${serverHostname}: ${sessionLabel(session)} terminal`,
+    compactNotificationTitle(sessionLabel(session), 'terminal'),
     text,
     {
       container: displayToastContainer(session),
@@ -1583,8 +1579,7 @@ async function confirmSessionGoneOrReconnect(session, item) {
   try {
     let order = null;
     try {
-      const response = await apiFetch('/api/auto-approve');
-      const payload = await response.json();
+      const payload = await apiFetchJson('/api/auto-approve');
       if (Array.isArray(payload.session_order)) order = payload.session_order;
     } catch (_) {}
     if (item.manualClose || terminals.get(session) !== item) return;
