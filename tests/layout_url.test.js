@@ -2545,6 +2545,8 @@ function makeFileTree(paths) {
   assert.ok(/--diff-add-line-bg:\s*color-mix\(in srgb, var\(--code-diff-add\) 30%/.test(preferencesCss), '#250: diff added lines use a muted green fill (soft tint over the dark bg)');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#d2f0d6/.test(preferencesCss), 'light diff added lines use the pleasant soft green (image 025)');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#fbe5e5/.test(preferencesCss), 'light diff removed lines use the pleasant soft pink (image 025)');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*#7f1d1d[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses dark red on a distinct red fill (image 055)');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedText\s*\{[\s\S]*color:\s*#064e3b[\s\S]*background:\s*#b9e7c2/.test(preferencesCss), 'light diff added inline text uses dark green on a distinct green fill');
   assert.ok(/--diff-remove-line-bg:\s*color-mix\(in srgb, var\(--code-diff-remove\) 32%/.test(preferencesCss), '#250: diff removed lines use a muted red fill (soft tint over the dark bg)');
   // DOIT.16 C3: a .panel-overlay-root must NOT be the scroll container (else the inactive-pane dim
   // scrolls away). The overlay-root bodies are overflow:hidden; the scrolling lives on inner wrappers.
@@ -2558,8 +2560,9 @@ function makeFileTree(paths) {
   assert.ok(/body\.theme-light \.file-explorer-changes-panel \.changes-comparison-head\s*\{[\s\S]*background:\s*transparent/.test(preferencesCss), '#253: the Finder "Comparing…" caption has no box chrome in light mode (blends as text)');
   assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(preferencesCss), false, 'deleted rows carry no number via unified-merge read-only widgets, not a transparent-text gutter hack');
   assert.ok(preferencesCss.includes('clip-path: inset(0 -100vw)'), 'diff line backgrounds extend to the full editor width');
-  // #44: diffs render as full-line red/green only (highlightChanges:false in both merge views) — there
-  // is no intra-line token overlay at all, so the .cm-*Text rules and --diff-*-text-bg tokens are gone.
+  // #44: diffs render as full-line red/green only (highlightChanges:false in both merge views). The old
+  // YOLOmux intra-line token overlay stays gone; CodeMirror still emits its built-in changed/deleted
+  // text spans, which we only style for light-theme contrast.
   const diffBundle = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.equal((diffBundle.match(/highlightChanges: false/g) || []).length, 2, '#44: both merge views disable intra-line change highlighting');
   assert.equal(diffBundle.includes('highlightChanges: true'), false, '#44: no merge view re-enables intra-line highlighting');

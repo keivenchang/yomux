@@ -7992,6 +7992,17 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-changedLineGutter {
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
   background: #f1c5c5;
 }
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedText,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk .cm-deletedText {
+  color: #7f1d1d;
+  background: #f4b7b7;
+  text-decoration-color: #7f1d1d;
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText {
+  color: #064e3b;
+  background: #b9e7c2;
+  text-decoration-color: #064e3b;
+}
 /* Light editor (DOIT.12 B5): the overview-ruler ticks kept saturated dark green/red
    that mismatched the light diff line fills — match them to --code-diff-*. */
 body.editor-theme-light .file-editor-diff-codemirror .cm-diff-overview-tick.add {
