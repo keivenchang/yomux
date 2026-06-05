@@ -3,7 +3,7 @@ function sessionForFileRepo(path) {
   if (!normalized) return '';
   const matches = sessions
     .map(session => {
-      const root = normalizeDirectoryPath(transcriptMeta.sessions?.[session]?.project?.git?.root || '');
+      const root = normalizeDirectoryPath(sessionTranscriptInfo(session).gitRoot);
       const containsPath = root && (normalized === root || normalized.startsWith(`${root}/`));
       return containsPath ? {session, root} : null;
     })
@@ -55,7 +55,7 @@ function fileRepoForPath(path) {
   }
   addRoot(openFiles.get(path)?.diffRepo);
   for (const session of sessions) {
-    addRoot(transcriptMeta.sessions?.[session]?.project?.git?.root);
+    addRoot(sessionTranscriptInfo(session).gitRoot);
   }
   addRoot(repoRoot);
   return roots.sort((left, right) => right.length - left.length)[0] || '';

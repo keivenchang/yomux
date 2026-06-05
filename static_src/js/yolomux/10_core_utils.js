@@ -46,6 +46,35 @@ function storageSet(key, value) {
   } catch (_) {}
 }
 
+function readStoredSet(key) {
+  try {
+    const raw = window.localStorage?.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch (_) { return new Set(); }
+}
+
+function readStoredJson(key, fallback = null) {
+  try {
+    const raw = window.localStorage?.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (_) { return fallback; }
+}
+
+// Normalized view of a session's transcript metadata — prevents each call site from re-implementing
+// the same `?.[session]?.project?.git?.root` chain differently.
+function sessionTranscriptInfo(session) {
+  const info = transcriptMeta.sessions?.[session] || {};
+  const git = info.project?.git || {};
+  return {
+    gitRoot: git.root || '',
+    gitCwd: git.cwd || '',
+    gitBranch: git.branch || '',
+    selectedPath: info.selected_pane?.current_path || '',
+    info,
+  };
+}
+
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
 // call sites that report a result. Both take already-built (and esc'd) inner HTML.
 function statusErr(html) {
@@ -176,14 +205,8 @@ function normalizeStoredFileExplorerIndexedDir(path) {
 }
 
 function readStoredFileExplorerIndexedDirs() {
-  const raw = storageGet(fileExplorerIndexedDirsStorageKey);
-  try {
-    const parsed = raw ? JSON.parse(raw) : [];
-    const paths = Array.isArray(parsed) ? parsed : [];
-    return new Set(paths.map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
-  } catch (_) {
-    return new Set();
-  }
+  const paths = readStoredJson(fileExplorerIndexedDirsStorageKey, []);
+  return new Set((Array.isArray(paths) ? paths : []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
 }
 
 function writeStoredFileExplorerIndexedDirs() {

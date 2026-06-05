@@ -1336,7 +1336,7 @@ function commandPaletteCommandItems() {
 
 function fileQuickOpenRootForSearch() {
   const target = currentSessionActionTarget();
-  const gitRoot = isTmuxSession(target) ? transcriptMeta.sessions?.[target]?.project?.git?.root : '';
+  const gitRoot = isTmuxSession(target) ? sessionTranscriptInfo(target).gitRoot : '';
   if (gitRoot) return normalizeDirectoryPath(gitRoot);
   const activeTmux = activeTmuxDirectoryPath(target);
   if (activeTmux) return activeTmux;

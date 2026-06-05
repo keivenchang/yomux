@@ -277,25 +277,9 @@ let uploadedFilesCollapsed = (() => {
     return true;
   }
 })();
-let changesFolderCollapsed = (() => {
-  try {
-    const value = window.localStorage?.getItem(changesFolderCollapsedStorageKey);
-    const parsed = value ? JSON.parse(value) : [];
-    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
-  } catch (_) {
-    return new Set();
-  }
-})();
+let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 // DOIT.23: per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
-let changesRepoCollapsed = (() => {
-  try {
-    const value = window.localStorage?.getItem(changesRepoCollapsedStorageKey);
-    const parsed = value ? JSON.parse(value) : [];
-    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
-  } catch (_) {
-    return new Set();
-  }
-})();
+let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let sessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let sessionFilesPayloadSignature = '';
@@ -421,8 +405,7 @@ const splitPaneKeys = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'];
 const paneKeys = [...basePaneKeys, ...splitPaneKeys];
 const layoutTreeKey = '__tree';
 const layoutTreeParamPrefix = 'tree:';
-const minSplitPaneWidthPx = 320;
-const minSplitPaneHeightPx = 220;
+
 const defaultSplitPercent = 50;
 const fileExplorerSplitPercent = 22;
 const layoutBoundaryDropFraction = 0.08;
@@ -468,7 +451,7 @@ const TAB_TYPES = [
     createPanel: () => createInfoPanel(),
     className: () => 'info',
     icon: 'branch-info',
-    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
   {
@@ -486,7 +469,7 @@ const TAB_TYPES = [
     createPanel: () => createFileExplorerPanel(),
     className: () => 'file-explorer',
     icon: 'finder',
-    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
   {
@@ -504,7 +487,7 @@ const TAB_TYPES = [
     createPanel: () => createPreferencesPanel(),
     className: () => 'preferences-item',
     icon: 'gear',
-    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
   {
@@ -522,7 +505,7 @@ const TAB_TYPES = [
     createPanel: () => createChangesPanel(),
     className: () => 'changes-item',
     icon: 'changes',
-    minWidth: () => rootCssLengthPx('--changes-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--changes-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
   {
@@ -539,7 +522,7 @@ const TAB_TYPES = [
     createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item image-viewer-item',
     icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 1,
   },
   {
@@ -556,7 +539,7 @@ const TAB_TYPES = [
     createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item',
     icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 1,
   },
   {
@@ -573,7 +556,7 @@ const TAB_TYPES = [
     createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item file-preview-item',
     icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 1,
   },
 ];

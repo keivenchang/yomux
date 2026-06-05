@@ -63,20 +63,20 @@
   font: var(--ui-font-size-xs)/1 var(--mono-font);
 }
 .session-button-detail.pr-status-failing {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .session-button-detail.pr-status-pending,
 .session-button-detail.pr-status-draft {
   color: var(--accent-gold);
 }
 .session-button-detail.pr-status-passing {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .session-button-detail.pr-status-merged {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .session-button-detail.pr-status-closed {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
 .session-state-badge {
   min-width: 26px;
@@ -414,7 +414,7 @@ body.theme-light .ci-indicator.branch-indicator {
   position: absolute;
   top: calc(100% + 2px);
   left: 0;
-  z-index: 80;
+  z-index: var(--z-session-popover);
   width: var(--pane-tab-popover-inline-size);
   max-width: var(--popover-max-inline-size);
   max-height: calc(100vh - var(--topbar-height) - var(--popover-edge-gap));
@@ -645,7 +645,7 @@ body.theme-light .branch-link {
 .meta a.pr-status-failing,
 .summary-context a.pr-status-failing,
 .info-cell a.pr-status-failing {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .popover-value a.pr-status-pending,
 .popover-value a.pr-status-draft,
@@ -661,18 +661,18 @@ body.theme-light .branch-link {
 .meta a.pr-status-passing,
 .summary-context a.pr-status-passing,
 .info-cell a.pr-status-passing {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .popover-value a.pr-status-merged,
 .meta a.pr-status-merged,
 .summary-context a.pr-status-merged,
 .branch-meta a.pr-status-merged,
 .info-cell a.pr-status-merged {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .popover-value a.pr-status-closed,
 .meta a.pr-status-closed,
 .summary-context a.pr-status-closed,
 .info-cell a.pr-status-closed {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }

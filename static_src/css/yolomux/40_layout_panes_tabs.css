@@ -57,7 +57,7 @@
 }
 .layout-resizer {
   position: relative;
-  z-index: 20;
+  z-index: var(--z-resizer);
   flex: 0 0 var(--pane-resizer-size);
   align-self: stretch;
   background: transparent;
@@ -116,7 +116,7 @@
 .layout-resizer::after {
   content: "";
   position: absolute;
-  z-index: 1;
+  z-index: var(--z-stacking-base);
 }
 .resizer-row::after {
   inset-block: 0;
@@ -165,7 +165,7 @@ body.theme-light .drop-slot.drag-over {
 .grid.drop-preview::before {
   content: attr(data-drop-label);
   position: absolute;
-  z-index: 12;
+  z-index: var(--z-pane-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -178,7 +178,7 @@ body.theme-light .drop-slot.drag-over {
   pointer-events: none;
 }
 .grid.drop-preview::before {
-  z-index: 38;
+  z-index: var(--z-drop-preview);
 }
 .drop-slot.drop-preview-middle::before {
   inset: 18%;
@@ -307,7 +307,7 @@ body.theme-light .drop-slot.drag-over {
   content: "Drop files to upload";
   position: absolute;
   inset: 36px 10px 10px 10px;
-  z-index: 7;
+  z-index: var(--z-pane-tab-strip);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -683,7 +683,7 @@ body.theme-light .drop-slot.drag-over {
   position: absolute;
   left: var(--tab-drop-x, 2px);
   top: var(--tab-drop-y, 0px);
-  z-index: 45;
+  z-index: var(--z-drag-ghost);
   width: 12px;
   height: var(--tab-drop-height, 27px);
   border: 0;
@@ -995,7 +995,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   position: fixed;
   top: var(--pane-tab-popover-top, 72px);
   left: var(--pane-tab-popover-left, 0);
-  z-index: 170;
+  z-index: var(--z-pane-modal);
   width: var(--pane-tab-popover-inline-size);
   max-width: var(--popover-max-inline-size);
   max-height: var(--pane-tab-popover-max-block-size);
@@ -1008,7 +1008,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
     0 0 0 1px rgba(154, 214, 98, 0.12);
 }
 .pane-tab.popover-open {
-  z-index: 170;
+  z-index: var(--z-pane-modal);
 }
 .pane-tab.popover-open > .session-popover {
   visibility: visible;

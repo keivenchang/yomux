@@ -149,7 +149,7 @@
 }
 .diff-ref-suggestion-popover {
   position: fixed;
-  z-index: 260;
+  z-index: var(--z-ref-suggestion);
   max-height: min(320px, 42vh);
   overflow: auto;
   padding: 4px;
@@ -854,7 +854,7 @@
 .command-palette {
   position: fixed;
   inset: 0;
-  z-index: 260;
+  z-index: var(--z-ref-suggestion);
   display: grid;
   align-items: start;
   justify-items: center;
@@ -1000,7 +1000,7 @@ body.theme-light .command-palette-view-chip {
 .keyboard-shortcuts-overlay {
   position: fixed;
   inset: 0;
-  z-index: 270;
+  z-index: var(--z-file-conflict-dialog);
   display: grid;
   align-items: start;
   justify-items: center;

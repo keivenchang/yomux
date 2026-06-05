@@ -410,6 +410,28 @@ def write_locales() -> bool:
     return changed
 
 
+def lint_duplicate_functions() -> list[str]:
+    """Return error lines for top-level function names declared in more than one JS source file."""
+    import collections
+    js_sources = ASSETS.get("yolomux.js", [])
+    name_to_files: dict[str, list[str]] = collections.defaultdict(list)
+    for part in js_sources:
+        path = repo_path(part)
+        try:
+            text = read_text(path)
+        except FileNotFoundError:
+            continue
+        for line in text.splitlines():
+            m = re.match(r"^function\s+(\w+)\s*\(", line)
+            if m:
+                name_to_files[m.group(1)].append(str(part))
+    errors = []
+    for name, files in sorted(name_to_files.items()):
+        if len(files) > 1:
+            errors.append(f"duplicate function '{name}' in: {', '.join(files)}")
+    return errors
+
+
 def check_locales() -> list[str]:
     stale: list[str] = []
     for locale, text in expected_locale_outputs().items():
@@ -503,8 +525,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.check:
             stale = [asset for asset in assets if not check_asset(asset)]
             stale += check_locales()
-            if stale:
-                print("stale static assets: " + ", ".join(stale), file=sys.stderr)
+            dup_errors = lint_duplicate_functions()
+            for err in dup_errors:
+                print(err, file=sys.stderr)
+            if stale or dup_errors:
+                if stale:
+                    print("stale static assets: " + ", ".join(stale), file=sys.stderr)
                 return 1
             return 0
 

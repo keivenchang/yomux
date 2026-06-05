@@ -500,9 +500,8 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
 
 function projectDirName(session, info) {
   if (!info) return t('common.loading');
-  const project = info?.project || {};
-  const git = project.git;
-  const path = git?.root || git?.cwd || info?.selected_pane?.current_path || '';
+  const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
+  const path = gitRoot || gitCwd || selectedPath;
   return pathBasename(path) || 'no path';
 }
 

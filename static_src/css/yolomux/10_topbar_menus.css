@@ -4,7 +4,7 @@
      leave the bar neutral at rest and use the shared tab-strip green only for hover/focus feedback. */
   min-height: calc(var(--compact-control-height) + 4px);
   position: relative;
-  z-index: 180;
+  z-index: var(--z-topbar);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -51,9 +51,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff4f5;
-  background: #b42332;
-  border: 1px solid #ff8a95;
+  color: var(--transport-warning-text);
+  background: var(--transport-warning-bg);
+  border: 1px solid var(--transport-warning-border);
   border-radius: 999px;
   font: 900 var(--ui-font-size-sm)/1 var(--ui-font);
   cursor: help;
@@ -69,7 +69,7 @@
   position: fixed;
   top: calc(var(--topbar-height) - 2px);
   left: var(--popover-edge-gap);
-  z-index: 160;
+  z-index: var(--z-transport-warning);
   width: min(60ch, var(--popover-max-inline-size));
   padding: 8px 10px;
   color: #ffd8dc;
@@ -414,7 +414,7 @@ body.theme-light .topbar-language {
   opacity: 0;
   pointer-events: none;
   position: absolute;
-  z-index: 92;
+  z-index: var(--z-menu-dropdown);
   width: var(--app-menu-fit-width, max-content);
   max-width: var(--app-menu-max-inline-size);
   max-height: var(--app-menu-max-block-size);

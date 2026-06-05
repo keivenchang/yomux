@@ -278,25 +278,9 @@ let uploadedFilesCollapsed = (() => {
     return true;
   }
 })();
-let changesFolderCollapsed = (() => {
-  try {
-    const value = window.localStorage?.getItem(changesFolderCollapsedStorageKey);
-    const parsed = value ? JSON.parse(value) : [];
-    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
-  } catch (_) {
-    return new Set();
-  }
-})();
+let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 // DOIT.23: per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
-let changesRepoCollapsed = (() => {
-  try {
-    const value = window.localStorage?.getItem(changesRepoCollapsedStorageKey);
-    const parsed = value ? JSON.parse(value) : [];
-    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
-  } catch (_) {
-    return new Set();
-  }
-})();
+let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let sessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let sessionFilesPayloadSignature = '';
@@ -422,8 +406,7 @@ const splitPaneKeys = ['leftTop', 'leftBottom', 'rightTop', 'rightBottom'];
 const paneKeys = [...basePaneKeys, ...splitPaneKeys];
 const layoutTreeKey = '__tree';
 const layoutTreeParamPrefix = 'tree:';
-const minSplitPaneWidthPx = 320;
-const minSplitPaneHeightPx = 220;
+
 const defaultSplitPercent = 50;
 const fileExplorerSplitPercent = 22;
 const layoutBoundaryDropFraction = 0.08;
@@ -469,7 +452,7 @@ const TAB_TYPES = [
     createPanel: () => createInfoPanel(),
     className: () => 'info',
     icon: 'branch-info',
-    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
   {
@@ -487,7 +470,7 @@ const TAB_TYPES = [
     createPanel: () => createFileExplorerPanel(),
     className: () => 'file-explorer',
     icon: 'finder',
-    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--file-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
   {
@@ -505,7 +488,7 @@ const TAB_TYPES = [
     createPanel: () => createPreferencesPanel(),
     className: () => 'preferences-item',
     icon: 'gear',
-    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
   {
@@ -523,7 +506,7 @@ const TAB_TYPES = [
     createPanel: () => createChangesPanel(),
     className: () => 'changes-item',
     icon: 'changes',
-    minWidth: () => rootCssLengthPx('--changes-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--changes-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
   {
@@ -540,7 +523,7 @@ const TAB_TYPES = [
     createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item image-viewer-item',
     icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 1,
   },
   {
@@ -557,7 +540,7 @@ const TAB_TYPES = [
     createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item',
     icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 1,
   },
   {
@@ -574,7 +557,7 @@ const TAB_TYPES = [
     createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item file-preview-item',
     icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || minSplitPaneWidthPx,
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 1,
   },
 ];
@@ -1043,6 +1026,35 @@ function storageSet(key, value) {
   } catch (_) {}
 }
 
+function readStoredSet(key) {
+  try {
+    const raw = window.localStorage?.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch (_) { return new Set(); }
+}
+
+function readStoredJson(key, fallback = null) {
+  try {
+    const raw = window.localStorage?.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (_) { return fallback; }
+}
+
+// Normalized view of a session's transcript metadata — prevents each call site from re-implementing
+// the same `?.[session]?.project?.git?.root` chain differently.
+function sessionTranscriptInfo(session) {
+  const info = transcriptMeta.sessions?.[session] || {};
+  const git = info.project?.git || {};
+  return {
+    gitRoot: git.root || '',
+    gitCwd: git.cwd || '',
+    gitBranch: git.branch || '',
+    selectedPath: info.selected_pane?.current_path || '',
+    info,
+  };
+}
+
 // Centralized status-line writers: the err/ok pill markup is defined here, not re-inlined at the ~55
 // call sites that report a result. Both take already-built (and esc'd) inner HTML.
 function statusErr(html) {
@@ -1173,14 +1185,8 @@ function normalizeStoredFileExplorerIndexedDir(path) {
 }
 
 function readStoredFileExplorerIndexedDirs() {
-  const raw = storageGet(fileExplorerIndexedDirsStorageKey);
-  try {
-    const parsed = raw ? JSON.parse(raw) : [];
-    const paths = Array.isArray(parsed) ? parsed : [];
-    return new Set(paths.map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
-  } catch (_) {
-    return new Set();
-  }
+  const paths = readStoredJson(fileExplorerIndexedDirsStorageKey, []);
+  return new Set((Array.isArray(paths) ? paths : []).map(normalizeStoredFileExplorerIndexedDir).filter(Boolean));
 }
 
 function writeStoredFileExplorerIndexedDirs() {
@@ -3442,7 +3448,7 @@ function commandPaletteCommandItems() {
 
 function fileQuickOpenRootForSearch() {
   const target = currentSessionActionTarget();
-  const gitRoot = isTmuxSession(target) ? transcriptMeta.sessions?.[target]?.project?.git?.root : '';
+  const gitRoot = isTmuxSession(target) ? sessionTranscriptInfo(target).gitRoot : '';
   if (gitRoot) return normalizeDirectoryPath(gitRoot);
   const activeTmux = activeTmuxDirectoryPath(target);
   if (activeTmux) return activeTmux;
@@ -10699,9 +10705,8 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
 
 function projectDirName(session, info) {
   if (!info) return t('common.loading');
-  const project = info?.project || {};
-  const git = project.git;
-  const path = git?.root || git?.cwd || info?.selected_pane?.current_path || '';
+  const {gitRoot, gitCwd, selectedPath} = sessionTranscriptInfo(session);
+  const path = gitRoot || gitCwd || selectedPath;
   return pathBasename(path) || 'no path';
 }
 
@@ -12942,10 +12947,10 @@ function dropZoneForRect(event, rect) {
   if (!rect.width || !rect.height) return 'middle';
   const x = (event.clientX - rect.left) / rect.width;
   const y = (event.clientY - rect.top) / rect.height;
-  if (y < 0.24) return rect.height / 2 >= minSplitPaneHeightPx ? 'top' : 'middle';
-  if (y > 0.76) return rect.height / 2 >= minSplitPaneHeightPx ? 'bottom' : 'middle';
-  if (x < 0.24) return rect.width / 2 >= minSplitPaneWidthPx ? 'left' : 'middle';
-  if (x > 0.76) return rect.width / 2 >= minSplitPaneWidthPx ? 'right' : 'middle';
+  if (y < 0.24) return rect.height / 2 >= (rootCssLengthPx('--min-split-pane-height') || 220) ? 'top' : 'middle';
+  if (y > 0.76) return rect.height / 2 >= (rootCssLengthPx('--min-split-pane-height') || 220) ? 'bottom' : 'middle';
+  if (x < 0.24) return rect.width / 2 >= (rootCssLengthPx('--min-split-pane-width') || 320) ? 'left' : 'middle';
+  if (x > 0.76) return rect.width / 2 >= (rootCssLengthPx('--min-split-pane-width') || 320) ? 'right' : 'middle';
   return 'middle';
 }
 
@@ -13353,10 +13358,10 @@ function splitPercentForPointer(section, nodeOrDirection, event) {
   const children = Array.isArray(nodeOrDirection?.children) ? nodeOrDirection.children : null;
   const minFirst = children
     ? (direction === 'column' ? layoutNodeMinHeight(children[0]) : layoutNodeMinWidth(children[0]))
-    : (direction === 'column' ? minSplitPaneHeightPx : minSplitPaneWidthPx);
+    : (direction === 'column' ? rootCssLengthPx('--min-split-pane-height') || 220 : rootCssLengthPx('--min-split-pane-width') || 320);
   const minSecond = children
     ? (direction === 'column' ? layoutNodeMinHeight(children[1]) : layoutNodeMinWidth(children[1]))
-    : (direction === 'column' ? minSplitPaneHeightPx : minSplitPaneWidthPx);
+    : (direction === 'column' ? rootCssLengthPx('--min-split-pane-height') || 220 : rootCssLengthPx('--min-split-pane-width') || 320);
   if (size >= minFirst + minSecond) {
     const minFirstPct = (minFirst / size) * 100;
     const maxFirstPct = 100 - (minSecond / size) * 100;
@@ -13386,7 +13391,7 @@ function pruneSmallLayoutSlots() {
 function minWidthForLayoutItem(item) {
   const type = tabTypeForItem(item);
   if (type?.minWidth) return type.minWidth(item);
-  return minSplitPaneWidthPx;
+  return rootCssLengthPx('--min-split-pane-width') || 320;
 }
 
 function minWidthForLayoutSlot(slot, slots = layoutSlots) {
@@ -13398,19 +13403,19 @@ function layoutVisiblePaneCount(slots = layoutSlots) {
 }
 
 function layoutNodeMinWidth(node, slots = layoutSlots) {
-  if (!node) return minSplitPaneWidthPx;
-  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minWidthForLayoutSlot(node.slot, slots) : minSplitPaneWidthPx;
+  if (!node) return rootCssLengthPx('--min-split-pane-width') || 320;
+  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minWidthForLayoutSlot(node.slot, slots) : rootCssLengthPx('--min-split-pane-width') || 320;
   const children = node.children || [];
-  if (node.split === 'column') return Math.max(...children.map(child => layoutNodeMinWidth(child, slots)), minSplitPaneWidthPx);
+  if (node.split === 'column') return Math.max(...children.map(child => layoutNodeMinWidth(child, slots)), rootCssLengthPx('--min-split-pane-width') || 320);
   return children.reduce((sum, child) => sum + layoutNodeMinWidth(child, slots), 0);
 }
 
 function layoutNodeMinHeight(node, slots = layoutSlots) {
-  if (!node) return minSplitPaneHeightPx;
-  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minSplitPaneHeightPx : minSplitPaneHeightPx;
+  if (!node) return rootCssLengthPx('--min-split-pane-height') || 220;
+  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? rootCssLengthPx('--min-split-pane-height') || 220 : rootCssLengthPx('--min-split-pane-height') || 220;
   const children = node.children || [];
   if (node.split === 'column') return children.reduce((sum, child) => sum + layoutNodeMinHeight(child, slots), 0);
-  return Math.max(...children.map(child => layoutNodeMinHeight(child, slots)), minSplitPaneHeightPx);
+  return Math.max(...children.map(child => layoutNodeMinHeight(child, slots)), rootCssLengthPx('--min-split-pane-height') || 220);
 }
 
 function prunePriorityForLayoutSlot(slot) {
@@ -13438,7 +13443,7 @@ function smallLayoutSlotCandidate() {
     if (isVirtualItem(item) && (!virtualCandidate || area < virtualCandidate.area)) {
       virtualCandidate = {slot, area, priority};
     }
-    const tooSmall = rect.width < minWidthForLayoutSlot(slot) || rect.height < minSplitPaneHeightPx;
+    const tooSmall = rect.width < minWidthForLayoutSlot(slot) || rect.height < (rootCssLengthPx('--min-split-pane-height') || 220);
     if (!tooSmall) continue;
     const nextCandidate = {slot, area, priority};
     if (!candidate || priority < candidate.priority || (priority === candidate.priority && area < candidate.area)) {
@@ -15453,7 +15458,7 @@ function sessionForFileRepo(path) {
   if (!normalized) return '';
   const matches = sessions
     .map(session => {
-      const root = normalizeDirectoryPath(transcriptMeta.sessions?.[session]?.project?.git?.root || '');
+      const root = normalizeDirectoryPath(sessionTranscriptInfo(session).gitRoot);
       const containsPath = root && (normalized === root || normalized.startsWith(`${root}/`));
       return containsPath ? {session, root} : null;
     })
@@ -15505,7 +15510,7 @@ function fileRepoForPath(path) {
   }
   addRoot(openFiles.get(path)?.diffRepo);
   for (const session of sessions) {
-    addRoot(transcriptMeta.sessions?.[session]?.project?.git?.root);
+    addRoot(sessionTranscriptInfo(session).gitRoot);
   }
   addRoot(repoRoot);
   return roots.sort((left, right) => right.length - left.length)[0] || '';

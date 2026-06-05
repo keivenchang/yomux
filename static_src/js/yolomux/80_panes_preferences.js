@@ -197,10 +197,10 @@ function splitPercentForPointer(section, nodeOrDirection, event) {
   const children = Array.isArray(nodeOrDirection?.children) ? nodeOrDirection.children : null;
   const minFirst = children
     ? (direction === 'column' ? layoutNodeMinHeight(children[0]) : layoutNodeMinWidth(children[0]))
-    : (direction === 'column' ? minSplitPaneHeightPx : minSplitPaneWidthPx);
+    : (direction === 'column' ? rootCssLengthPx('--min-split-pane-height') || 220 : rootCssLengthPx('--min-split-pane-width') || 320);
   const minSecond = children
     ? (direction === 'column' ? layoutNodeMinHeight(children[1]) : layoutNodeMinWidth(children[1]))
-    : (direction === 'column' ? minSplitPaneHeightPx : minSplitPaneWidthPx);
+    : (direction === 'column' ? rootCssLengthPx('--min-split-pane-height') || 220 : rootCssLengthPx('--min-split-pane-width') || 320);
   if (size >= minFirst + minSecond) {
     const minFirstPct = (minFirst / size) * 100;
     const maxFirstPct = 100 - (minSecond / size) * 100;
@@ -230,7 +230,7 @@ function pruneSmallLayoutSlots() {
 function minWidthForLayoutItem(item) {
   const type = tabTypeForItem(item);
   if (type?.minWidth) return type.minWidth(item);
-  return minSplitPaneWidthPx;
+  return rootCssLengthPx('--min-split-pane-width') || 320;
 }
 
 function minWidthForLayoutSlot(slot, slots = layoutSlots) {
@@ -242,19 +242,19 @@ function layoutVisiblePaneCount(slots = layoutSlots) {
 }
 
 function layoutNodeMinWidth(node, slots = layoutSlots) {
-  if (!node) return minSplitPaneWidthPx;
-  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minWidthForLayoutSlot(node.slot, slots) : minSplitPaneWidthPx;
+  if (!node) return rootCssLengthPx('--min-split-pane-width') || 320;
+  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minWidthForLayoutSlot(node.slot, slots) : rootCssLengthPx('--min-split-pane-width') || 320;
   const children = node.children || [];
-  if (node.split === 'column') return Math.max(...children.map(child => layoutNodeMinWidth(child, slots)), minSplitPaneWidthPx);
+  if (node.split === 'column') return Math.max(...children.map(child => layoutNodeMinWidth(child, slots)), rootCssLengthPx('--min-split-pane-width') || 320);
   return children.reduce((sum, child) => sum + layoutNodeMinWidth(child, slots), 0);
 }
 
 function layoutNodeMinHeight(node, slots = layoutSlots) {
-  if (!node) return minSplitPaneHeightPx;
-  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? minSplitPaneHeightPx : minSplitPaneHeightPx;
+  if (!node) return rootCssLengthPx('--min-split-pane-height') || 220;
+  if (node.slot) return paneHasLayoutContent(node.slot, slots) ? rootCssLengthPx('--min-split-pane-height') || 220 : rootCssLengthPx('--min-split-pane-height') || 220;
   const children = node.children || [];
   if (node.split === 'column') return children.reduce((sum, child) => sum + layoutNodeMinHeight(child, slots), 0);
-  return Math.max(...children.map(child => layoutNodeMinHeight(child, slots)), minSplitPaneHeightPx);
+  return Math.max(...children.map(child => layoutNodeMinHeight(child, slots)), rootCssLengthPx('--min-split-pane-height') || 220);
 }
 
 function prunePriorityForLayoutSlot(slot) {
@@ -282,7 +282,7 @@ function smallLayoutSlotCandidate() {
     if (isVirtualItem(item) && (!virtualCandidate || area < virtualCandidate.area)) {
       virtualCandidate = {slot, area, priority};
     }
-    const tooSmall = rect.width < minWidthForLayoutSlot(slot) || rect.height < minSplitPaneHeightPx;
+    const tooSmall = rect.width < minWidthForLayoutSlot(slot) || rect.height < (rootCssLengthPx('--min-split-pane-height') || 220);
     if (!tooSmall) continue;
     const nextCandidate = {slot, area, priority};
     if (!candidate || priority < candidate.priority || (priority === candidate.priority && area < candidate.area)) {

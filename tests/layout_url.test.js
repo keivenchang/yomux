@@ -4299,7 +4299,7 @@ function makeFileTree(paths) {
   const attentionCss = fs.readFileSync('static/yolomux.css', 'utf8');
   // The attention toast must clear the topbar (z-index:180): it sits below the topbar's height and above
   // it in z (200), so the amber Keep/x toast is never painted under the topbar and clipped.
-  assert.ok(/\.attention-alerts\s*\{[\s\S]*top:\s*calc\(var\(--compact-control-height\) \+ 20px\)[\s\S]*right:\s*12px[\s\S]*left:\s*auto[\s\S]*z-index:\s*200/.test(attentionCss), 'global attention stack is pinned top-right BELOW the topbar (clears its height) and above it in z (200)');
+  assert.ok(/\.attention-alerts\s*\{[\s\S]*top:\s*calc\(var\(--compact-control-height\) \+ 20px\)[\s\S]*right:\s*12px[\s\S]*left:\s*auto[\s\S]*z-index:\s*var\(--z-full-screen-overlay\)/.test(attentionCss), 'global attention stack is pinned top-right BELOW the topbar (clears its height) and above it in z (var(--z-full-screen-overlay))');
 }
 
 {
@@ -5117,7 +5117,7 @@ function makeFileTree(paths) {
     assert.ok(/\.preferences-setting-control\.setting-type-select,\s*\.preferences-setting-control\.setting-type-text\s*\{[^}]*justify-content:\s*start/.test(css), 'Preferences selects/text inputs are left-aligned from the shared inset');
     assert.ok(/\.preferences-setting-control\.setting-type-number input\[type="number"\]\s*\{[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(css), 'Preferences number inputs are left-aligned from the shared inset');
     // #258 (toast): the toast stack clears the topbar (z-index above 180) and messages wrap, not clip.
-    assert.ok(/\.panel-toast-stack\s*\{[^}]*z-index:\s*200/.test(css), '#258: the toast stack renders above the topbar (z-index 200) so it is not clipped under it');
+    assert.ok(/\.panel-toast-stack\s*\{[^}]*z-index:\s*var\(--z-full-screen-overlay\)/.test(css), '#258: the toast stack renders above the topbar (var(--z-full-screen-overlay)) so it is not clipped under it');
     assert.ok(/\.toast-line\s*\{[^}]*white-space:\s*normal/.test(css), '#258: toast messages wrap (white-space:normal) instead of ellipsis-clipping');
     assert.equal(/\.toast-line\s*\{[^}]*white-space:\s*nowrap/.test(css), false, '#258: the old nowrap/ellipsis clipping of the toast message line is gone');
   }

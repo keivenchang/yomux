@@ -1707,10 +1707,10 @@ function dropZoneForRect(event, rect) {
   if (!rect.width || !rect.height) return 'middle';
   const x = (event.clientX - rect.left) / rect.width;
   const y = (event.clientY - rect.top) / rect.height;
-  if (y < 0.24) return rect.height / 2 >= minSplitPaneHeightPx ? 'top' : 'middle';
-  if (y > 0.76) return rect.height / 2 >= minSplitPaneHeightPx ? 'bottom' : 'middle';
-  if (x < 0.24) return rect.width / 2 >= minSplitPaneWidthPx ? 'left' : 'middle';
-  if (x > 0.76) return rect.width / 2 >= minSplitPaneWidthPx ? 'right' : 'middle';
+  if (y < 0.24) return rect.height / 2 >= (rootCssLengthPx('--min-split-pane-height') || 220) ? 'top' : 'middle';
+  if (y > 0.76) return rect.height / 2 >= (rootCssLengthPx('--min-split-pane-height') || 220) ? 'bottom' : 'middle';
+  if (x < 0.24) return rect.width / 2 >= (rootCssLengthPx('--min-split-pane-width') || 320) ? 'left' : 'middle';
+  if (x > 0.76) return rect.width / 2 >= (rootCssLengthPx('--min-split-pane-width') || 320) ? 'right' : 'middle';
   return 'middle';
 }
 
