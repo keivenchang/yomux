@@ -9,6 +9,13 @@ async function apiFetch(url, options = {}) {
   return response;
 }
 
+async function apiFetchJson(url, options = {}) {
+  const response = await apiFetch(url, options);
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
 async function redirectToLogin(response) {
   if (authRedirectStarted) return;
   authRedirectStarted = true;

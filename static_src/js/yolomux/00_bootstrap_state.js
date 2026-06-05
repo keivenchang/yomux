@@ -372,16 +372,16 @@ const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
-let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
-let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15000);
+let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 200);
+let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15001);
 // DOIT.29: watched PRs poll on their own (longer) cadence; the latest payload + last-seen status per
 // PR ref (for notify-on-transition diffing) live here.
-let watchedPrRefreshMs = initialSetting('performance.watched_pr_refresh_ms', 60000);
+let watchedPrRefreshMs = initialSetting('performance.watched_pr_refresh_ms', 60001);
 let watchedPrsData = {watched_prs: [], truncated: 0, invalid: [], refresh_ms: watchedPrRefreshMs};
 const watchedPrLastStatus = new Map();
-let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1250);
-let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
-let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
+let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1253);
+let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3001);
+let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5003);
 let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
 const latencySamplesMax = 24;
@@ -397,7 +397,7 @@ let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_m
 let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms', 120);
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
-let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3000);
+let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3001);
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);

@@ -373,16 +373,16 @@ const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
-let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
-let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15000);
+let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 200);
+let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15001);
 // DOIT.29: watched PRs poll on their own (longer) cadence; the latest payload + last-seen status per
 // PR ref (for notify-on-transition diffing) live here.
-let watchedPrRefreshMs = initialSetting('performance.watched_pr_refresh_ms', 60000);
+let watchedPrRefreshMs = initialSetting('performance.watched_pr_refresh_ms', 60001);
 let watchedPrsData = {watched_prs: [], truncated: 0, invalid: [], refresh_ms: watchedPrRefreshMs};
 const watchedPrLastStatus = new Map();
-let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1250);
-let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
-let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
+let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1253);
+let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3001);
+let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5003);
 let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
 const latencySamplesMax = 24;
@@ -398,7 +398,7 @@ let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_m
 let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms', 120);
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
-let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3000);
+let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3001);
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
@@ -1004,6 +1004,13 @@ async function apiFetch(url, options = {}) {
     throw new Error('authentication required');
   }
   return response;
+}
+
+async function apiFetchJson(url, options = {}) {
+  const response = await apiFetch(url, options);
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
 }
 
 async function redirectToLogin(response) {
@@ -4711,9 +4718,7 @@ async function openYoloRuleFile() {
     return;
   }
   try {
-    const response = await apiFetch('/api/yolo-rules/open', {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/yolo-rules/open', {method: 'POST'});
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
@@ -4725,9 +4730,7 @@ async function openYoloRuleFile() {
 
 async function reloadYoloRules() {
   try {
-    const response = await apiFetch('/api/yolo-rules/reload', {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/yolo-rules/reload', {method: 'POST'});
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     const level = payload.error ? 'error' : '';
@@ -4742,9 +4745,7 @@ async function reloadYoloRules() {
 
 async function refreshYoloRulesStatus(options = {}) {
   try {
-    const response = await apiFetch('/api/yolo-rules');
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/yolo-rules');
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     return payload;
@@ -8308,7 +8309,12 @@ async function refreshOpenFileDiff(path, options = {}) {
   state._diffLoadingPromise = (async () => {
     try {
       // C6: diff the file against ITS repo's FROM/TO (not a global pair), so a per-repo selection applies.
-      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString(fileRepoForPath(path))}`);
+      // When called from the Modified-files panel, explicit fromRef/toRef override the lookup so the diff
+      // always matches exactly what the panel showed — even for repos not in diffRefsByRepo.
+      const refString = (options.fromRef || options.toRef)
+        ? `from=${encodeURIComponent(options.fromRef || 'HEAD')}&to=${encodeURIComponent(options.toRef || 'current')}`
+        : diffRefQueryString(fileRepoForPath(path));
+      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`);
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || response.status);
       applyOpenFileDiffPayload(state, payload);
@@ -10046,12 +10052,12 @@ function applySettingsPayload(payload, options = {}) {
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
   clientSettingsMtimeNs = nextMtime;
-  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 220);
-  metadataRefreshMs = numberSetting('performance.metadata_refresh_ms', 15000);
-  watchedPrRefreshMs = numberSetting('performance.watched_pr_refresh_ms', 60000);
-  paneStateRefreshMs = numberSetting('performance.pane_state_refresh_ms', 1250);
-  latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3000);
-  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5000);
+  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 200);
+  metadataRefreshMs = numberSetting('performance.metadata_refresh_ms', 15001);
+  watchedPrRefreshMs = numberSetting('performance.watched_pr_refresh_ms', 60001);
+  paneStateRefreshMs = numberSetting('performance.pane_state_refresh_ms', 1253);
+  latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3001);
+  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5003);
   redReminderMs = numberSetting('appearance.red_reminder_ms', 1550);
   yoloRotateMs = numberSetting('appearance.yolo_rotate_ms', 20000);
   toastDurationMs = numberSetting('notifications.toast_duration_ms', 10000);
@@ -10062,7 +10068,7 @@ function applySettingsPayload(payload, options = {}) {
   menuHoverCloseDelayMs = hoverCloseDelayMs;
   tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
-  fileExplorerRefreshMs = numberSetting('file_explorer.refresh_ms', 3000);
+  fileExplorerRefreshMs = numberSetting('file_explorer.refresh_ms', 3001);
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
@@ -16384,8 +16390,9 @@ function changeFileRowHtml(item, options = {}) {
   const isImage = IMAGE_EXTENSIONS.has(fileExtensionOf(name));
   const titleAttr = isImage ? '' : ` title="${esc(absPath)}"`;
   const sizeAttr = item.size === null || item.size === undefined ? '' : ` data-change-size="${esc(String(item.size))}"`;
+  const repoAttr = item.repo ? ` data-open-change-repo="${esc(item.repo)}"` : '';
   const actionAttr = absPath
-    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" data-change-rel="${esc(rel || '')}"${sizeAttr}${titleAttr}`
+    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" data-change-rel="${esc(rel || '')}"${repoAttr}${sizeAttr}${titleAttr}`
     : ' disabled';
   return `<button type="button" class="changes-file-row${compactClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
     <span class="changes-status changes-status-${esc(statusClass)}">${esc(statusKey)}</span>
@@ -16558,13 +16565,25 @@ function renderChangesPanels(options = {}) {
   }
 }
 
-async function openChangedFileInDiff(path, ownerSession = '', status = '') {
+async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '') {
   const item = fileEditorItemFor(path);
   const normalizedStatus = String(status || '').toUpperCase();
   const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';
   const isTouchedOnly = normalizedStatus === 'T';
   const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';
   setFileEditorViewMode(path, initialMode, item);
+  // Use the payload's own FROM/TO for this file's repo so the diff matches what the panel shows,
+  // even when the repo is not in diffRefsByRepo (e.g. a repo outside the active session's checkout).
+  const payloadRepoRefs = (() => {
+    for (const payload of [sessionFilesPayload, fileExplorerSessionFilesPayload]) {
+      const refsMap = payload?.refs_by_repo;
+      if (!refsMap || typeof refsMap !== 'object') continue;
+      const key = repo || fileRepoForPath(path);
+      const refs = refsMap[key];
+      if (refs?.from_ref || refs?.to_ref) return {fromRef: refs.from_ref, toRef: refs.to_ref};
+    }
+    return {};
+  })();
   if (normalizedStatus === 'D') {
     await openFilesSetAndShow(path, {
       mtime: 0,
@@ -16579,7 +16598,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '') {
   } else {
     await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: initialMode});
   }
-  const diffReady = await refreshOpenFileDiff(path, {silent: true});
+  const diffReady = await refreshOpenFileDiff(path, {silent: true, ...payloadRepoRefs});
   if (diffReady && !isAddedChange && !isTouchedOnly) setFileEditorViewMode(path, 'diff', item);
   if (!diffReady && (isAddedChange || isTouchedOnly)) setFileEditorViewMode(path, 'edit', item);
   renderOpenFilePath(path);
@@ -16727,7 +16746,7 @@ function bindChangesPanel(panel) {
     const path = fileRow.dataset.openChangeFile;
     if (path) {
       const ownerSession = fileRow.dataset.openChangeSession || '';
-      await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '');
+      await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '', fileRow.dataset.openChangeRepo || '');
     }
   });
   // C5: single-click selects/highlights a Modified-files row (Finder-like), without opening it — the
@@ -16929,13 +16948,11 @@ async function saveSettingsPatch(patch, options = {}) {
   const preservedLayout = options.preserveLayout === false ? null : cloneLayoutSlots();
   const preservedLayoutSignature = preservedLayout ? layoutSlotsSignature(preservedLayout) : '';
   const preservedFocus = focusedPanelItem;
-  const response = await apiFetch('/api/settings', {
+  const payload = await apiFetchJson('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({settings: patch}),
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
   applySettingsPayload(payload, {force: true, applyEditorDefaults: options.applyEditorDefaults === true});
   if (preservedLayout && layoutSlotsSignature() !== preservedLayoutSignature) {
     applyLayoutSlots(preservedLayout, {
@@ -18068,8 +18085,17 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   if (!state.diffLoaded && !state.diffUnavailable) await refreshOpenFileDiff(path, {silent: true});
   if (panel._cmGeneration !== generation) return null;
   if (!openFileDiffAvailable(state)) {
-    setFileEditorPanelStatus(panel, state.diffError ? `diff unavailable: ${state.diffError}` : 'No diff for this file', 'warn');
-    return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
+    if (state.diffUnavailable) {
+      const msg = `diff unavailable: ${state.diffError || 'unknown error'}`;
+      setFileEditorPanelStatus(panel, msg, 'warn');
+      return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
+    }
+    // Diff loaded but empty — file matches selected refs. Stay in diff mode so the user
+    // can use the FROM/TO picker to compare against a different ref.
+    setFileEditorPanelStatus(panel, 'No changes vs selected refs', '');
+    destroyCodeMirrorPanel(panel);
+    container.replaceChildren(fileEditorEmptyState('No diff', 'File matches the selected refs. Use the ref picker to compare against a different commit.'));
+    return true;
   }
   const original = String(state.diffOriginal || '');
   const api = await loadCodeMirrorApi();
@@ -18331,7 +18357,7 @@ function renderFileEditorPanel(panel, item) {
   // DOIT.6 #149: do NOT auto-load the diff when a file opens/renders. The diff loads only on explicit
   // diff-mode entry (the Diff button + the Modified-files menu both open in diff view and load there),
   // so opening/editing a file does zero diff work (one fewer network round-trip + re-render; ties to DOIT.9).
-  if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && !openFileDiffAvailable(state)) {
+  if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && state.diffUnavailable) {
     setFileEditorViewMode(path, 'edit', item);
   }
   const mode = editorViewModeFor(path, item);

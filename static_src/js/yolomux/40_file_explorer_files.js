@@ -2646,7 +2646,12 @@ async function refreshOpenFileDiff(path, options = {}) {
   state._diffLoadingPromise = (async () => {
     try {
       // C6: diff the file against ITS repo's FROM/TO (not a global pair), so a per-repo selection applies.
-      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString(fileRepoForPath(path))}`);
+      // When called from the Modified-files panel, explicit fromRef/toRef override the lookup so the diff
+      // always matches exactly what the panel showed — even for repos not in diffRefsByRepo.
+      const refString = (options.fromRef || options.toRef)
+        ? `from=${encodeURIComponent(options.fromRef || 'HEAD')}&to=${encodeURIComponent(options.toRef || 'current')}`
+        : diffRefQueryString(fileRepoForPath(path));
+      const response = await apiFetch(`/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`);
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || response.status);
       applyOpenFileDiffPayload(state, payload);

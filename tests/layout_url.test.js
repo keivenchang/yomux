@@ -2227,7 +2227,10 @@ function makeFileTree(paths) {
   const diffGutterCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(diffGutterCss), false, '#17: deleted-line numbers are suppressed natively by unifiedMergeView, not by a transparent-text gutter hack');
   // C6: editor diffs carry the FILE'S REPO refs (per-repo), not a single global pair.
-  assert.ok(appSource.includes('/api/fs/diff?path=${encodeURIComponent(path)}&${diffRefQueryString(fileRepoForPath(path))}'), 'editor diff requests carry the per-repo FROM/TO refs');
+  // When explicit fromRef/toRef are provided (e.g. from the Modified-files panel click), they take precedence;
+  // otherwise falls back to diffRefQueryString(fileRepoForPath(path)) so per-repo selections still apply.
+  assert.ok(appSource.includes('diffRefQueryString(fileRepoForPath(path))'), 'editor diff requests fall back to per-repo FROM/TO refs');
+  assert.ok(appSource.includes('options.fromRef || options.toRef'), 'editor diff accepts explicit FROM/TO override from Modified-files panel click');
   assert.ok(appSource.includes("const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';"), 'diff editor editability follows TO=current after the FROM/TO flip');
   assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent;'), 'diff editor allows edits on the new/current side');
   assert.ok(/function destroyCodeMirrorPanel[\s\S]*\.cm-diff-overview'\)\?\.remove\(\)/.test(appSource), '#26: tearing down the CodeMirror panel removes the diff scrollbar overview so its red/green ticks do not linger in edit/normal mode');

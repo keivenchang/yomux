@@ -1425,7 +1425,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["commentColor"] == metrics["listMarkerColor"]
     assert metrics["inlineCodeBg"] != "rgba(0, 0, 0, 0)"
     assert metrics["inlineCodeBorder"] != "rgba(0, 0, 0, 0)"
-    assert metrics["filePopoverPointerEvents"] == "none"
+    assert metrics["filePopoverPointerEvents"] == "auto"  # popover-open tab: interactive when visible
     assert metrics["filePopoverCopyPointerEvents"] == "auto"
     assert metrics["findControlClickable"]
     assert metrics["wrapControlClickable"]

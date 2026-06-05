@@ -257,9 +257,7 @@ async function openYoloRuleFile() {
     return;
   }
   try {
-    const response = await apiFetch('/api/yolo-rules/open', {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/yolo-rules/open', {method: 'POST'});
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     await openFileInEditor(payload.path || yoloRulePath(), {name: basenameOf(payload.path || yoloRulePath())});
@@ -271,9 +269,7 @@ async function openYoloRuleFile() {
 
 async function reloadYoloRules() {
   try {
-    const response = await apiFetch('/api/yolo-rules/reload', {method: 'POST'});
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/yolo-rules/reload', {method: 'POST'});
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     const level = payload.error ? 'error' : '';
@@ -288,9 +284,7 @@ async function reloadYoloRules() {
 
 async function refreshYoloRulesStatus(options = {}) {
   try {
-    const response = await apiFetch('/api/yolo-rules');
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const payload = await apiFetchJson('/api/yolo-rules');
     yoloRulesPayload = payload;
     renderPreferencesPanels();
     return payload;

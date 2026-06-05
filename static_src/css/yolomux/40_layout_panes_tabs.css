@@ -1032,6 +1032,9 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   max-height: min(42vh, var(--pane-tab-popover-max-block-size));
   pointer-events: none;
 }
+.pane-tab.popover-open > .session-popover.file-popover {
+  pointer-events: auto;
+}
 .pane-tab > .session-popover.file-popover .popover-copy-button {
   pointer-events: auto;
 }

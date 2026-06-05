@@ -940,8 +940,9 @@ function changeFileRowHtml(item, options = {}) {
   const isImage = IMAGE_EXTENSIONS.has(fileExtensionOf(name));
   const titleAttr = isImage ? '' : ` title="${esc(absPath)}"`;
   const sizeAttr = item.size === null || item.size === undefined ? '' : ` data-change-size="${esc(String(item.size))}"`;
+  const repoAttr = item.repo ? ` data-open-change-repo="${esc(item.repo)}"` : '';
   const actionAttr = absPath
-    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" data-change-rel="${esc(rel || '')}"${sizeAttr}${titleAttr}`
+    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" data-change-rel="${esc(rel || '')}"${repoAttr}${sizeAttr}${titleAttr}`
     : ' disabled';
   return `<button type="button" class="changes-file-row${compactClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
     <span class="changes-status changes-status-${esc(statusClass)}">${esc(statusKey)}</span>
@@ -1114,13 +1115,25 @@ function renderChangesPanels(options = {}) {
   }
 }
 
-async function openChangedFileInDiff(path, ownerSession = '', status = '') {
+async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '') {
   const item = fileEditorItemFor(path);
   const normalizedStatus = String(status || '').toUpperCase();
   const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';
   const isTouchedOnly = normalizedStatus === 'T';
   const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';
   setFileEditorViewMode(path, initialMode, item);
+  // Use the payload's own FROM/TO for this file's repo so the diff matches what the panel shows,
+  // even when the repo is not in diffRefsByRepo (e.g. a repo outside the active session's checkout).
+  const payloadRepoRefs = (() => {
+    for (const payload of [sessionFilesPayload, fileExplorerSessionFilesPayload]) {
+      const refsMap = payload?.refs_by_repo;
+      if (!refsMap || typeof refsMap !== 'object') continue;
+      const key = repo || fileRepoForPath(path);
+      const refs = refsMap[key];
+      if (refs?.from_ref || refs?.to_ref) return {fromRef: refs.from_ref, toRef: refs.to_ref};
+    }
+    return {};
+  })();
   if (normalizedStatus === 'D') {
     await openFilesSetAndShow(path, {
       mtime: 0,
@@ -1135,7 +1148,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '') {
   } else {
     await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: initialMode});
   }
-  const diffReady = await refreshOpenFileDiff(path, {silent: true});
+  const diffReady = await refreshOpenFileDiff(path, {silent: true, ...payloadRepoRefs});
   if (diffReady && !isAddedChange && !isTouchedOnly) setFileEditorViewMode(path, 'diff', item);
   if (!diffReady && (isAddedChange || isTouchedOnly)) setFileEditorViewMode(path, 'edit', item);
   renderOpenFilePath(path);
@@ -1283,7 +1296,7 @@ function bindChangesPanel(panel) {
     const path = fileRow.dataset.openChangeFile;
     if (path) {
       const ownerSession = fileRow.dataset.openChangeSession || '';
-      await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '');
+      await openChangedFileInDiff(path, ownerSession, fileRow.dataset.openChangeStatus || '', fileRow.dataset.openChangeRepo || '');
     }
   });
   // C5: single-click selects/highlights a Modified-files row (Finder-like), without opening it — the
@@ -1485,13 +1498,11 @@ async function saveSettingsPatch(patch, options = {}) {
   const preservedLayout = options.preserveLayout === false ? null : cloneLayoutSlots();
   const preservedLayoutSignature = preservedLayout ? layoutSlotsSignature(preservedLayout) : '';
   const preservedFocus = focusedPanelItem;
-  const response = await apiFetch('/api/settings', {
+  const payload = await apiFetchJson('/api/settings', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({settings: patch}),
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
   applySettingsPayload(payload, {force: true, applyEditorDefaults: options.applyEditorDefaults === true});
   if (preservedLayout && layoutSlotsSignature() !== preservedLayoutSignature) {
     applyLayoutSlots(preservedLayout, {
@@ -2624,8 +2635,17 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   if (!state.diffLoaded && !state.diffUnavailable) await refreshOpenFileDiff(path, {silent: true});
   if (panel._cmGeneration !== generation) return null;
   if (!openFileDiffAvailable(state)) {
-    setFileEditorPanelStatus(panel, state.diffError ? `diff unavailable: ${state.diffError}` : 'No diff for this file', 'warn');
-    return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
+    if (state.diffUnavailable) {
+      const msg = `diff unavailable: ${state.diffError || 'unknown error'}`;
+      setFileEditorPanelStatus(panel, msg, 'warn');
+      return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
+    }
+    // Diff loaded but empty — file matches selected refs. Stay in diff mode so the user
+    // can use the FROM/TO picker to compare against a different ref.
+    setFileEditorPanelStatus(panel, 'No changes vs selected refs', '');
+    destroyCodeMirrorPanel(panel);
+    container.replaceChildren(fileEditorEmptyState('No diff', 'File matches the selected refs. Use the ref picker to compare against a different commit.'));
+    return true;
   }
   const original = String(state.diffOriginal || '');
   const api = await loadCodeMirrorApi();
@@ -2887,7 +2907,7 @@ function renderFileEditorPanel(panel, item) {
   // DOIT.6 #149: do NOT auto-load the diff when a file opens/renders. The diff loads only on explicit
   // diff-mode entry (the Diff button + the Modified-files menu both open in diff view and load there),
   // so opening/editing a file does zero diff work (one fewer network round-trip + re-render; ties to DOIT.9).
-  if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && !openFileDiffAvailable(state)) {
+  if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && state.diffUnavailable) {
     setFileEditorViewMode(path, 'edit', item);
   }
   const mode = editorViewModeFor(path, item);
