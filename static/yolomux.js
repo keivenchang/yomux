@@ -8315,10 +8315,6 @@ async function refreshOpenFileDiff(path, options = {}) {
       if (!response.ok) throw new Error(payload.error || response.status);
       applyOpenFileDiffPayload(state, payload);
       refreshOpenFileDiffDecorations(path);
-      for (const panel of fileEditorPanelsForPath(path)) {
-        updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panel.dataset.layoutItem || '');
-        if (editorViewModeFor(path, panel.dataset.layoutItem || '') === 'diff') renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
-      }
       return true;
     } catch (error) {
       markOpenFileDiffUnavailable(state, error);
@@ -8329,6 +8325,15 @@ async function refreshOpenFileDiff(path, options = {}) {
     } finally {
       state.diffLoading = false;
       state._diffLoadingPromise = null;
+      // Repaint after clearing diffLoading. Rendering while it is still true leaves the diff toolbar
+      // disabled even though the MergeView has already been built, so the expand/collapse context button
+      // ignores clicks until some unrelated render happens.
+      for (const panel of fileEditorPanelsForPath(path)) {
+        const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+        updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, item);
+        updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
+        if (editorViewModeFor(path, item) === 'diff') renderFileEditorPanel(panel, item);
+      }
     }
   })();
   return state._diffLoadingPromise;
@@ -10647,9 +10652,8 @@ function sessionWorkDescription(session, info, limit = 96) {
   const git = project.git;
   const pr = displayPullRequest(info);
   if (pr?.number) {
-    const status = pullRequestStatusDisplay(pr);
     const title = pr.title || pr.description || '';
-    const prefix = `#${pr.number}${status ? ` ${status}` : ''}`;
+    const prefix = pullRequestLinkLabel(pr);
     return shortText(title ? `${prefix}: ${title}` : prefix, limit);
   }
   const linear = project.linear || [];
@@ -10682,8 +10686,7 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
   const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
   if (linear) parts.push(linear);
   if (pr?.number) {
-    const status = pullRequestStatusDisplay(pr);
-    parts.push(`#${pr.number}${status ? ` ${status}` : ''}`);
+    parts.push(pullRequestLinkLabel(pr));
   }
   const desc = sessionWorkDescription(item, info, 180);
   if (desc && !parts.includes(desc)) parts.push(desc);
@@ -10742,6 +10745,57 @@ function filePopoverPathHtml(path) {
   return `<span class="popover-copy-value">${esc(path)}</span>${pathCopyButtonHtml(path, {className: 'popover-copy-button', dataAttr: 'data-copy-popover-path'})}`;
 }
 
+function sessionPopoverSubtitleHtml(session, info, fallback = '') {
+  const project = info?.project || {};
+  const git = project.git;
+  const pr = displayPullRequest(info);
+  const chips = [];
+  if (isDefaultBranch(git)) chips.push(defaultBranchBadgeHtml(session, info));
+  if (pr?.number) chips.push(pullRequestNumberIndicatorHtml(session, pr));
+  const text = pr?.number
+    ? shortText(pr.title || pr.description || '', 220)
+    : String(fallback || '');
+  const textHtml = text ? `<span class="popover-subtitle-text">${esc(text)}</span>` : '';
+  return `<div class="popover-subtitle">${chips.join('')}${textHtml}</div>`;
+}
+
+function sessionBranchValueHtml(session, info) {
+  const git = info?.project?.git;
+  if (!git?.branch) return '';
+  const branchHtml = isDefaultBranch(git)
+    ? defaultBranchBadgeHtml(session, info)
+    : branchLinkHtml(git, git.branch);
+  return `${branchHtml}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`;
+}
+
+function pullRequestPopoverRowHtml(session, pr) {
+  const prParts = [pullRequestNumberIndicatorHtml(session, pr), pullRequestAuthorHtml(pr)].filter(Boolean);
+  const checks = pullRequestChecksHtml(pr);
+  if (checks) prParts.push(checks);
+  const review = pullRequestReviewInlineHtml(pr);
+  if (review) prParts.push(review);
+  return metaJoin(prParts);
+}
+
+function gitStatusHasFacts(git) {
+  return Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind);
+}
+
+function popoverActivityText(session, git) {
+  const text = String(sessionActivitySummary(session)?.local || '').trim();
+  if (!text) return '';
+  return gitStatusHasFacts(git)
+    ? text.replace(/\s*Status check:\s*[^.]+\.?\s*$/i, '').trim()
+    : text;
+}
+
+function gitHeadValueHtml(git) {
+  const head = String(git?.head || '').trim();
+  const match = head.match(/^([0-9a-f]{7,40})\b/i);
+  if (match) return esc(match[1]);
+  return esc(shortText(subjectWithoutPullRequestNumber(gitHeadSubject(git)), 120));
+}
+
 function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessionState(session, info)) {
   const project = info?.project || {};
   const git = project.git;
@@ -10751,6 +10805,7 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const description = sessionWorkDescription(session, info, 220);
   const title = `${sessionLabel(session)} · ${projectDirName(session, info)}`;
   const subtitle = description || git?.branch || pane?.current_path || t('git.noCheckout');
+  const subtitleHtml = sessionPopoverSubtitleHtml(session, info, subtitle);
   const rows = [];
   const stateValue = `${sessionStateHtml(state)} <span class="meta-muted">${esc(state.reason)}</span>`;
   const autoPayload = autoApproveStates.get(session);
@@ -10759,13 +10814,10 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
   const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
   rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
-  const activity = sessionActivitySummary(session);
-  if (activity?.local) rows.push(popoverRow(yoagentTabLabel(), esc(activity.local)));
+  const activityText = popoverActivityText(session, git);
+  if (activityText) rows.push(popoverRow(yoagentTabLabel(), esc(activityText)));
   rows.push(popoverRow(t('popover.path'), displayPath));
-  if (git?.branch) rows.push(popoverRow(t('popover.branch'), `${branchLinkHtml(git, git.branch)}${git.upstream ? `<span class="meta-muted"> -> ${esc(git.upstream)}</span>` : ''}`));
-  if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {
-    rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
-  }
+  if (git?.branch) rows.push(popoverRow(t('popover.branch'), sessionBranchValueHtml(session, info)));
   let linearValue = '';
   let linearDesc = '';
   if (linear.length) {
@@ -10774,32 +10826,23 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
     if (linearValue) rows.push(popoverRow('Linear', linearValue));
     if (linearDesc) rows.push(popoverRow(t('popover.details'), linearDesc));
   }
-  let prDesc = '';
   if (pr?.number) {
-    const prParts = [pullRequestLinkHtml(pr), pullRequestAuthorHtml(pr)].filter(Boolean);
-    const checks = pullRequestChecksHtml(pr);
-    if (checks) prParts.push(checks);
-    const review = pullRequestReviewInlineHtml(pr);
-    if (review) prParts.push(review);
-    rows.push(popoverRow('PR', metaJoin(prParts)));
-    prDesc = pullRequestDescriptionInlineHtml(pr);
-  }
-  if (prDesc) {
-    rows.push(popoverRow(t('popover.desc'), prDesc));
+    rows.push(popoverRow('PR', pullRequestPopoverRowHtml(session, pr)));
   }
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
   if (git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
-  if (git?.head) rows.push(popoverRow('HEAD', git.head));
+  if (git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
+  if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return `<div class="session-popover" role="tooltip">
     <div class="popover-head">
       <div>
         <div class="popover-title">${esc(title)}</div>
-        <div class="popover-subtitle">${esc(subtitle)}</div>
+        ${subtitleHtml}
       </div>
     </div>
     ${rows.join('')}
-    ${otherBranchesHtml(git)}
+    ${otherBranchesHtml(session, info)}
   </div>`;
 }
 
@@ -10816,14 +10859,6 @@ function popoverPairRow(leftLabel, leftValueHtml, rightLabel, rightValueHtml) {
 
 function stripTitleAttrs(html) {
   return String(html || '').replace(/\s+title="[^"]*"/g, '');
-}
-
-function pullRequestDescriptionInlineHtml(pr) {
-  const title = String(pr?.title || '').trim();
-  const description = String(pr?.description || '').trim();
-  const body = description && description !== title ? description.replace(/^#+\s*Overview:\s*/i, '').trim() : '';
-  const text = [title, body].filter(Boolean).join(' · ');
-  return text ? esc(shortText(text, 180)) : '';
 }
 
 function linearInlineHtml(issues) {
@@ -10876,15 +10911,63 @@ function pullRequestLinkForBranch(git, branch) {
   const repoUrl = git?.github_repo?.url;
   if (!pr?.number) return '';
   const url = pr.url || (repoUrl ? `${repoUrl}/pull/${pr.number}` : '');
-  const status = pullRequestStatusDisplay(pr);
-  const label = `#${pr.number}${status ? ` ${status}` : ''}`;
-  return linkHtml(url, label, pr.title || pr.description || branch.subject || '', pullRequestStatusClass(pr));
+  return linkHtml(url, pullRequestLinkLabel(pr), pr.title || pr.description || branch.subject || '', pullRequestStatusClass(pr));
+}
+
+function pullRequestNumberChipLinkHtml(session, pr) {
+  if (!pr?.number) return '';
+  const chip = pullRequestNumberIndicatorHtml(session, pr);
+  if (!pr.url) return chip;
+  const title = pr.title || pr.description || '';
+  const titleAttr = title ? ` title="${esc(title)}"` : '';
+  return `<a href="${esc(pr.url)}" target="_blank" rel="noreferrer noopener" draggable="false"${titleAttr} class="popover-chip-link">${chip}</a>`;
+}
+
+function pullRequestForBranch(git, branch, info) {
+  const pr = branch?.current ? displayPullRequest(info) || branch.pull_request : branch?.pull_request;
+  if (!pr?.number) return null;
+  return {
+    ...pr,
+    url: pr.url || githubPullRequestUrlFromGit(git, pr.number),
+  };
+}
+
+function branchListBranchHtml(session, git, branch) {
+  const branchName = branch?.name || '';
+  if (isDefaultBranch({branch: branchName})) {
+    const classes = branch?.current
+      ? metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')
+      : 'ci-indicator tab-symbol branch-indicator';
+    return `<span class="${esc(classes)}">MAIN</span>`;
+  }
+  return branchLinkHtml(git, branchName);
+}
+
+function normalizeBranchSubjectText(value) {
+  return subjectWithoutPullRequestNumber(value).replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function branchListSubjectHtml(branch, pr) {
+  const subject = subjectWithoutPullRequestNumber(branch?.subject || '');
+  if (!subject) return '';
+  if (branch?.current) {
+    const currentTitles = [pr?.title, pr?.description].map(normalizeBranchSubjectText).filter(Boolean);
+    if (currentTitles.includes(normalizeBranchSubjectText(subject))) return '';
+  }
+  return `<div class="branch-subject">${esc(shortText(subject, 240))}</div>`;
+}
+
+function branchPullRequestMetaHtml(session, pr) {
+  if (!pr?.number) return '';
+  const parts = [pullRequestNumberChipLinkHtml(session, pr)];
+  const status = pullRequestInlineStatusDisplay(pr);
+  if (status) parts.push(`<span class="meta-pr-status ${esc(pullRequestStatusClass(pr))}">${esc(status)}</span>`);
+  return metaJoin(parts);
 }
 
 function pullRequestTextForBranch(pr, fallback = '') {
   if (!pr?.number) return '';
-  const status = pullRequestStatusDisplay(pr);
-  return [`#${pr.number}${status ? ` ${status}` : ''}`, pr.title || pr.description || fallback].filter(Boolean).join(' ');
+  return [pullRequestLinkLabel(pr), pr.title || pr.description || fallback].filter(Boolean).join(' ');
 }
 
 function branchUpdatedText(branch) {
@@ -10896,21 +10979,23 @@ function branchUpdatedText(branch) {
   return branch?.updated || '';
 }
 
-function otherBranchesHtml(git) {
+function otherBranchesHtml(session, info) {
+  const git = info?.project?.git;
   const inventory = git?.other_branches || {};
   const branches = inventory.branches || [];
   if (!branches.length) {
     return `<div class="branch-list"><div class="branch-list-title">${esc(t('branch.all'))}</div><div class="meta-muted">${esc(t('branch.none'))}</div></div>`;
   }
   const items = branches.map(branch => {
-    const branchLink = branchLinkHtml(git, branch.name);
-    const prLink = pullRequestLinkForBranch(git, branch);
+    const pr = pullRequestForBranch(git, branch, info);
+    const branchLink = branchListBranchHtml(session, git, branch);
+    const prLink = branchPullRequestMetaHtml(session, pr);
     const linearLinks = (branch.linear_ids || []).map(linearIssueLinkHtml).filter(Boolean).join(' ');
     const meta = [prLink, linearLinks, esc(branchUpdatedText(branch))].filter(Boolean).join(' ');
     return `<div class="branch-item">
-      <div class="branch-name">${branch.current ? `<span class="info-branch-current">${esc(t('branch.current'))}</span> ` : ''}${branchLink}</div>
+      <div class="branch-name">${branchLink}</div>
       <div class="branch-meta">${meta}</div>
-      <div class="branch-subject">${esc(shortText(branch.subject || '', 240))}</div>
+      ${branchListSubjectHtml(branch, pr)}
     </div>`;
   }).join('');
   const hidden = Number(inventory.hidden_count || 0) > 0
@@ -11957,9 +12042,19 @@ function pullRequestStatusDisplay(pr) {
   return status.replace(/\bci\b/gi, 'CI').toUpperCase();
 }
 
+function pullRequestIsMerged(pr) {
+  return pullRequestStatusLabel(pr).toLowerCase() === 'merged';
+}
+
+function pullRequestInlineStatusDisplay(pr) {
+  const key = pullRequestStatusLabel(pr).toLowerCase();
+  if (key === 'merged' || key === 'open') return '';
+  return pullRequestStatusDisplay(pr);
+}
+
 function pullRequestLinkLabel(pr) {
-  const status = pullRequestStatusDisplay(pr);
-  return `PR #${pr.number}${status ? ` ${status}` : ''}`;
+  const status = pullRequestInlineStatusDisplay(pr);
+  return `#${pr.number}${status ? ` ${status}` : ''}`;
 }
 
 function pullRequestStatusClass(pr) {
@@ -11984,12 +12079,12 @@ function pullRequestCiStatusClass(pr) {
 function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (!['merged', 'draft', 'closed'].includes(status)) return '';
+  if (!['draft', 'closed'].includes(status)) return '';
   return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${esc(pullRequestStatusDisplay(pr))}</span>`;
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
-  if (pullRequestStatusLabel(pr).toLowerCase() === 'merged') return '';
+  if (pullRequestIsMerged(pr)) return '';
   const state = pr?.checks?.state;
   if (!state || state === 'unknown') return '';
   return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestCiStatusClass(pr)}`)}">CI</span>`;
@@ -11999,7 +12094,10 @@ function pullRequestNumberIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   // No native title — the rich custom session popover already shows PR #, CI, and review state
   // (DOIT.6: avoid a duplicate browser tooltip alongside the popover).
-  return `<span class="ci-indicator tab-symbol pr-number-chip">#${esc(String(pr.number))}</span>`;
+  const classes = pullRequestIsMerged(pr)
+    ? metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol pr-number-chip ${pullRequestStatusClass(pr)}`)
+    : 'ci-indicator tab-symbol pr-number-chip';
+  return `<span class="${esc(classes)}">#${esc(String(pr.number))}</span>`;
 }
 
 // #38: GitHub reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED) per PR.
@@ -12060,12 +12158,11 @@ function pullRequestAuthorHtml(pr) {
 }
 
 function pullRequestColumnLinkHtml(pr) {
-  const status = pullRequestStatusDisplay(pr);
-  const label = `#${pr.number}${status ? ` ${status}` : ''}`;
-  return linkHtml(pr.url, label, pr.title || pr.description || '', pullRequestStatusClass(pr));
+  return linkHtml(pr.url, pullRequestLinkLabel(pr), pr.title || pr.description || '', pullRequestStatusClass(pr));
 }
 
 function pullRequestChecksHtml(pr) {
+  if (pullRequestIsMerged(pr)) return '';
   const checks = pr?.checks;
   if (!checks || !checks.state || checks.state === 'unknown') return '';
   const cls = pullRequestCiStatusClass(pr);
@@ -12120,7 +12217,7 @@ function projectMetaHtml(session, info) {
   if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (pr?.number) {
-    if (pr.checks?.state && pr.checks.state !== 'unknown') {
+    if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }
@@ -15389,13 +15486,25 @@ function repoDiffRefs(repo) {
 // C6: which repo a given absolute file path belongs to, from the loaded Modified-files payloads, so a
 // file's diff uses ITS repo's FROM/TO. Empty when the file isn't in a known changed repo (-> global default).
 function fileRepoForPath(path) {
-  if (!path) return '';
+  const normalized = normalizeDirectoryPath(path);
+  if (!path || !normalized) return '';
+  const roots = [];
+  const addRoot = root => {
+    const repo = normalizeDirectoryPath(root || '');
+    if (repo && repo !== '/' && pathIsInsideDirectory(normalized, repo)) roots.push(repo);
+  };
   for (const payload of [sessionFilesPayload, fileExplorerSessionFilesPayload]) {
     for (const file of payload?.files || []) {
-      if (file?.abs_path === path) return file.repo || '';
+      if (file?.abs_path === path && file.repo) return file.repo;
     }
+    for (const repoInfo of payload?.repos || []) addRoot(repoInfo?.repo);
   }
-  return '';
+  addRoot(openFiles.get(path)?.diffRepo);
+  for (const session of sessions) {
+    addRoot(transcriptMeta.sessions?.[session]?.project?.git?.root);
+  }
+  addRoot(repoRoot);
+  return roots.sort((left, right) => right.length - left.length)[0] || '';
 }
 
 function diffRefParams(repo) {

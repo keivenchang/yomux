@@ -345,6 +345,12 @@ globalThis.__layoutTestApi = {
   diffRefParams,
   diffRefFromSuggestions,
   diffRefToSuggestions,
+  fileRepoForPath,
+  setDiffRefsByRepoForTest(repo, refs) {
+    if (!repo) return;
+    if (!refs) delete diffRefsByRepo[repo];
+    else diffRefsByRepo[repo] = {from: refs.from, to: refs.to};
+  },
   globalActivitySummaryHtml,
   yoagentSessionSummariesHtml,
   yoagentChatHtml,
@@ -511,6 +517,7 @@ globalThis.__layoutTestApi = {
   openFileEditorItems,
   pullRequestStatusLabel,
   pullRequestStatusDisplay,
+  pullRequestLinkLabel,
   pullRequestApprovalIndicatorHtml,
   pullRequestCompactBadgesHtml,
   pullRequestNumberIndicatorHtml,
@@ -1687,6 +1694,11 @@ function makeFileTree(paths) {
   assert.ok(!api.pullRequestNumberIndicatorHtml('5', {number: 123}).includes('title='), '#8: the PR number chip has no native title tooltip');
   assert.ok(!api.pullRequestApprovalIndicatorHtml('5', {number: 123, state: 'open', review_decision: 'APPROVED'}).includes('title='), '#8: the approval chip has no native title tooltip');
   assert.ok(!api.pullRequestCompactBadgesHtml('5', {number: 123, state: 'open', review_decision: 'APPROVED'}).includes('title='), '#8: the compact PR badge row has no native title tooltips');
+  const mergedBadges = api.pullRequestCompactBadgesHtml('5', {number: 123, merged: true});
+  assert.ok(/pr-number-chip pr-status-merged/.test(mergedBadges) && />#123</.test(mergedBadges), 'merged PR tab uses one purple #number chip');
+  assert.equal(mergedBadges.includes('MERGED'), false, 'merged PR tab omits the redundant MERGED text badge');
+  assert.equal(api.pullRequestLinkLabel({number: 123, merged: true}), '#123', 'merged PR inline labels omit redundant MERGED text');
+  assert.equal(api.pullRequestLinkLabel({number: 123, state: 'open'}), '#123', 'open PR inline labels omit redundant OPEN text');
 }
 
 {
@@ -1970,6 +1982,16 @@ function makeFileTree(paths) {
   assert.ok(api.diffRefFromSuggestions('/repo/app').some(item => item.subject === 'older base commit'), 'Changes pane FROM picker has recent commit subjects available to the popup');
   assert.equal(api.diffRefFromSuggestions().some(item => item.ref === 'current'), false, 'FROM picker does not suggest current as the older base');
   assert.equal(api.diffRefToSuggestions('HEAD').map(item => item.ref).join(','), 'current', 'TO picker only offers refs newer than the selected FROM base');
+  api.setDiffRefsByRepoForTest('/repo/app', {from: '611d3bb', to: '56c8fc4'});
+  assert.equal(api.fileRepoForPath('/repo/app/README.md'), '/repo/app', 'C6: editor diff refs use the exact changed-file repo when the file is in the Modified-files payload');
+  api.setSessionFilesPayloadForTest({session: '1', loaded: true, errors: [], refs_by_repo: {}, repos: [{repo: '/repo/app'}], files: []});
+  assert.equal(api.fileRepoForPath('/repo/app/src/unchanged.py'), '/repo/app', 'C6: editor diff refs can infer the repo from the Modified-files repo header even when the file row is absent');
+  api.setSessionFilesPayloadForTest({session: '1', loaded: true, errors: [], refs_by_repo: {}, repos: [], files: []});
+  api.setOpenFileStateForTest('/repo/app/src/unchanged.py', {kind: 'text', diffRepo: '/repo/app'});
+  const loadedEditorRepo = api.fileRepoForPath('/repo/app/src/unchanged.py');
+  assert.equal(loadedEditorRepo, '/repo/app', 'C6: editor diff refs fall back to the repo returned by a previous /api/fs/diff payload');
+  assert.equal(api.diffRefParams(loadedEditorRepo).from, '611d3bb', 'C6: an editor-only diff repo still picks the repo-scoped FROM ref');
+  assert.equal(api.diffRefParams(loadedEditorRepo).to, '56c8fc4', 'C6: an editor-only diff repo still picks the repo-scoped TO ref');
   const duplicateShaOptions = api.diffRefSelectOptionsHtml('abc123def4567890', {suggestions: [{ref: 'abc123d', short: 'abc123d', subject: 'same commit'}]});
   assert.equal((duplicateShaOptions.match(/<option/g) || []).length, 1, 'diff ref picker dedupes full SHA and short SHA for the same commit');
   assert.equal(duplicateShaOptions.includes('selected ref'), false, 'diff ref picker does not add a synthetic duplicate for a selected SHA already in suggestions');
@@ -2210,6 +2232,13 @@ function makeFileTree(paths) {
   assert.equal(api.codeMirrorDiffLayout({getBoundingClientRect: () => ({width: 300})}), 'inline', '#33: a narrow pane also uses the unified diff');
   assert.ok(/if \(state\.diffLoading && state\._diffLoadingPromise\) return state\._diffLoadingPromise/.test(appSource), '#43: concurrent diff loads are deduped (callers await one in-flight load), so the panel never renders against an un-loaded original');
   assert.ok(/if \(!state\.diffLoaded && !state\.diffUnavailable\) await refreshOpenFileDiff/.test(appSource), '#43: the diff panel awaits the load before rendering, so an untracked/all-added file resolves to diffUnavailable and falls back to the plain editor instead of flashing all-green');
+  const refreshDiffStart = appSource.indexOf('async function refreshOpenFileDiff(');
+  const openFileEditorStart = appSource.indexOf('async function openFileInEditor(', refreshDiffStart);
+  assert.ok(refreshDiffStart > 0 && openFileEditorStart > refreshDiffStart, '#43: refreshOpenFileDiff body is locatable');
+  const refreshDiffBody = appSource.slice(refreshDiffStart, openFileEditorStart);
+  const diffLoadingClearIndex = refreshDiffBody.indexOf('state.diffLoading = false;');
+  const diffPanelRenderIndex = refreshDiffBody.indexOf('renderFileEditorPanel(panel, item);');
+  assert.ok(diffLoadingClearIndex >= 0 && diffPanelRenderIndex > diffLoadingClearIndex, '#43: diff-load completion clears diffLoading before repainting the panel, so the expanded-context toolbar button is not left disabled');
   assert.equal(api.openFileDiffAvailable({kind: 'text', diffLoaded: true, untracked: true, diff: 'diff --git a/a b/a\n--- /dev/null\n+++ b/a\n@@\n+x'}), false, '#43: an untracked/all-added file reports no diff, so it never enters diff view');
   assert.ok(/function openDraggedFilesInEditor[\s\S]*await refreshOpenFileDiff\(path[\s\S]*openFileDiffAvailable\(draggedState\)[\s\S]*setFileEditorViewMode\(path, 'diff'/.test(appSource), '#39: a dragged CHANGED file opens in the same unified diff view as double-click (routes through the shared refreshOpenFileDiff/diff path)');
   assert.ok(appSource.includes('data-file-explorer-new-folder'), 'Finder header exposes new-folder action');
@@ -4278,30 +4307,84 @@ function makeFileTree(paths) {
     project: {
       git: {
         branch: 'main',
+        root: '/home/test/project',
+        upstream: 'origin/main',
+        dirty_count: 10,
+        behind: 18,
         head: '747c3fd0c6 ci: Update the dep for the whl publish to be automated (#9961)',
         github_repo: {url: 'https://github.com/ai-project/project'},
+        other_branches: {
+          branches: [
+            {
+              name: 'main',
+              current: true,
+              subject: 'ci: Update the dep for the whl publish to be automated (#9961)',
+              updated: '13 hours ago',
+            },
+            {
+              name: 'keivenc/DIS-2141__internlm-tool-parser-parity',
+              subject: 'feat: add InternLM tool parser parity',
+              pull_request: {
+                number: 10075,
+                status_label: 'PASSING',
+                url: 'https://github.com/ai-project/project/pull/10075',
+              },
+              linear_ids: ['DIS-2141'],
+              updated: '3 days ago',
+            },
+          ],
+        },
       },
       pull_request: null,
     },
+    selected_pane: {current_path: '/home/test/project'},
   };
   const html = api.tmuxPaneTabHtml('4', info, null, true);
   const tabBadgeSource = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(tabBadgeSource.includes('function pullRequestNumberIndicatorHtml'), 'tab renders the PR number chip helper');
-  assert.ok(/<span class="ci-indicator tab-symbol pr-number-chip"[^>]*>#9961<\/span>/.test(html), 'open PR tab renders the #number as a black chip');
+  assert.ok(/<span class="ci-indicator tab-symbol pr-number-chip pr-status-merged"[^>]*>#9961<\/span>/.test(html), 'merged default-branch tab renders the #number as a purple chip');
   assert.ok(html.includes('>YO<'), 'tab includes YO marker');
   assert.equal(/session-yolo-marker[^"]*tab-symbol/.test(html), false, 'YO marker stays visible when metadata badges are hidden');
   assert.ok(html.includes('>4<'), 'tab includes session number');
   assert.ok(html.includes('>MAIN<'), 'tab marks default branch');
-  assertNoStandalonePrBadge(html, 'open PR tab');
+  assertNoStandalonePrBadge(html, 'merged default-branch tab');
   // #42: a source-inferred PR with no explicit status_label still reports no status (we don't trust a
   // raw merged flag on an inferred PR)...
   assert.equal(api.pullRequestStatusLabel({number: 9961, source_only: true, merged: true}), '');
   // ...but an explicit status_label is honored even when source_only, so the default-branch head merge
   // commit (which is, by definition, merged) reports MERGED.
   assert.equal(api.pullRequestStatusLabel({number: 9961, source_only: true, status_label: 'merged'}), 'merged');
-  assert.ok(html.includes('MERGED'), '#42: a default-branch HEAD merge commit (#9961) shows MERGED on the tab');
-  assert.ok(html.includes('pr-status-merged'), '#42: the inferred merged PR uses the merged status color');
+  assert.equal(html.includes('MERGED'), false, '#42: a default-branch HEAD merge commit (#9961) consolidates merged state into the purple #number chip');
+  assert.ok(html.includes('pr-status-merged'), '#42: the inferred merged PR uses the merged status color on the #number chip');
   assert.equal(html.includes('(#9961)'), false, 'tab title strips duplicated PR suffix');
+  api.setActivitySummaryPayloadForTest({
+    sessions: {
+      '4': {
+        local: 'Claude session 4 is idle in project. It currently has 10 files changed. Status check: 10 dirty files; 18 commits behind.',
+      },
+    },
+  });
+  const popover = api.sessionPopoverHtml('4', info, 'claude', true);
+  assert.ok(/popover-subtitle[\s\S]*branch-indicator[^>]*>MAIN<[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<[\s\S]*ci: Update the dep/.test(popover), 'merged PR popover header mirrors the tab convention: MAIN chip, purple #number chip, then title');
+  assert.equal(popover.includes('#9961:'), false, 'merged PR popover header omits the old #number text prefix');
+  assert.ok(/popover-label">branch<\/div><div class="popover-value"><span class="ci-indicator tab-symbol branch-indicator[^"]*">MAIN<\/span>/.test(popover), 'merged PR popover branch row uses the same MAIN chip as the tab');
+  assert.ok(/popover-label">PR<\/div><div class="popover-value"><span class="ci-indicator tab-symbol pr-number-chip pr-status-merged[^"]*">#9961<\/span>/.test(popover), 'merged PR popover PR row uses the same purple #number chip as the tab');
+  assert.equal(popover.includes('#9961 MERGED'), false, 'merged PR popover omits redundant MERGED text');
+  assert.equal(popover.includes('PR #9961'), false, 'merged PR popover avoids repeating PR before the #number value');
+  assert.equal(popover.includes('popover-label">desc'), false, 'merged PR popover omits the desc row because the header already carries the PR title');
+  assert.equal(popover.includes('Status check:'), false, 'merged PR popover removes the YO!agent status sentence when the dedicated git row is present');
+  assert.ok(popover.includes('10 dirty · 18 behind'), 'merged PR popover keeps git facts in the dedicated git row');
+  const branchListIndex = popover.indexOf('<div class="branch-list"');
+  const detailLabels = [...popover.slice(0, branchListIndex).matchAll(/popover-label">([^<]+)/g)].map(match => match[1]);
+  assert.equal(detailLabels[detailLabels.length - 1], 'git', 'merged PR popover makes git the final detail row');
+  const headRow = popover.match(/popover-label">HEAD<\/div><div class="popover-value">([^<]+)<\/div><\/div>/)?.[1] || '';
+  assert.equal(headRow, '747c3fd0c6', 'merged PR popover HEAD row shows only the SHA, not the repeated subject and PR suffix');
+  const branchList = popover.slice(branchListIndex);
+  assert.equal(branchList.includes('info-branch-current'), false, 'popover branch list drops the redundant current label');
+  assert.ok(/branch-name"><span class="ci-indicator tab-symbol branch-indicator[^"]*">MAIN<\/span>[\s\S]*branch-meta">[\s\S]*pr-number-chip pr-status-merged[^>]*>#9961<\/span>/.test(branchList), 'popover branch list mirrors MAIN and merged PR chips for the current branch');
+  assert.equal(branchList.includes('<div class="branch-subject">ci: Update the dep'), false, 'popover branch list suppresses the current branch subject when it duplicates the header title');
+  assert.ok(/popover-chip-link[\s\S]*pr-number-chip[^>]*>#10075<\/span>[\s\S]*meta-pr-status pr-status-passing[^>]*>PASSING/.test(branchList), 'popover branch list shows non-current PR numbers as chips while keeping meaningful status text');
+  assert.ok(branchList.includes('<div class="branch-subject">feat: add InternLM tool parser parity</div>'), 'popover branch list keeps non-current branch subjects because they add detail');
 
   const blockedHtml = api.tmuxPaneTabHtml('4', info, {key: 'blocked', short: 'BLK', label: 'Blocked', reason: 'blocked command'}, false);
   assert.ok(blockedHtml.includes('--attention-animation-delay:'), 'red attention badges carry a synchronized animation delay');
@@ -4334,7 +4417,7 @@ function makeFileTree(paths) {
   api.applyServerMetadataPulsesForTest('4', {main: 20000, pr: 20000});
   const metadataPulseHtml = api.tmuxPaneTabHtml('4', info, {key: 'idle'}, true);
   assert.ok(metadataPulseHtml.includes('branch-indicator metadata-pulse'), 'MAIN badge pulses after metadata change');
-  assert.equal(metadataPulseHtml.includes('pr-indicator metadata-pulse'), false, 'open PR number badge is not rendered or pulsed');
+  assert.equal(metadataPulseHtml.includes('pr-number-chip metadata-pulse'), false, 'open PR number chip is not pulsed by PR metadata changes');
 
   const mergedInfo = {
     project: {
@@ -4344,7 +4427,7 @@ function makeFileTree(paths) {
   };
   api.applyServerMetadataPulsesForTest('8', {status: 20000});
   const mergedPulseHtml = api.tmuxPaneTabHtml('8', mergedInfo, {key: 'idle'}, true);
-  assert.ok(mergedPulseHtml.includes('pr-status-merged metadata-pulse'), 'MERGED badge pulses after status change');
+  assert.ok(mergedPulseHtml.includes('pr-number-chip pr-status-merged metadata-pulse'), 'merged #number chip pulses after status change');
 
   [
     {session: '9', number: 13, state: 'failure', statusLabel: 'CI failing', statusClass: 'pr-status-failing', pulse: true, label: 'failing open PR'},

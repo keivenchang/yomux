@@ -2661,10 +2661,6 @@ async function refreshOpenFileDiff(path, options = {}) {
       if (!response.ok) throw new Error(payload.error || response.status);
       applyOpenFileDiffPayload(state, payload);
       refreshOpenFileDiffDecorations(path);
-      for (const panel of fileEditorPanelsForPath(path)) {
-        updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panel.dataset.layoutItem || '');
-        if (editorViewModeFor(path, panel.dataset.layoutItem || '') === 'diff') renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
-      }
       return true;
     } catch (error) {
       markOpenFileDiffUnavailable(state, error);
@@ -2675,6 +2671,15 @@ async function refreshOpenFileDiff(path, options = {}) {
     } finally {
       state.diffLoading = false;
       state._diffLoadingPromise = null;
+      // Repaint after clearing diffLoading. Rendering while it is still true leaves the diff toolbar
+      // disabled even though the MergeView has already been built, so the expand/collapse context button
+      // ignores clicks until some unrelated render happens.
+      for (const panel of fileEditorPanelsForPath(path)) {
+        const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+        updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, item);
+        updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
+        if (editorViewModeFor(path, item) === 'diff') renderFileEditorPanel(panel, item);
+      }
     }
   })();
   return state._diffLoadingPromise;

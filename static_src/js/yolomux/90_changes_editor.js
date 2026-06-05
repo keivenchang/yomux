@@ -40,13 +40,25 @@ function repoDiffRefs(repo) {
 // C6: which repo a given absolute file path belongs to, from the loaded Modified-files payloads, so a
 // file's diff uses ITS repo's FROM/TO. Empty when the file isn't in a known changed repo (-> global default).
 function fileRepoForPath(path) {
-  if (!path) return '';
+  const normalized = normalizeDirectoryPath(path);
+  if (!path || !normalized) return '';
+  const roots = [];
+  const addRoot = root => {
+    const repo = normalizeDirectoryPath(root || '');
+    if (repo && repo !== '/' && pathIsInsideDirectory(normalized, repo)) roots.push(repo);
+  };
   for (const payload of [sessionFilesPayload, fileExplorerSessionFilesPayload]) {
     for (const file of payload?.files || []) {
-      if (file?.abs_path === path) return file.repo || '';
+      if (file?.abs_path === path && file.repo) return file.repo;
     }
+    for (const repoInfo of payload?.repos || []) addRoot(repoInfo?.repo);
   }
-  return '';
+  addRoot(openFiles.get(path)?.diffRepo);
+  for (const session of sessions) {
+    addRoot(transcriptMeta.sessions?.[session]?.project?.git?.root);
+  }
+  addRoot(repoRoot);
+  return roots.sort((left, right) => right.length - left.length)[0] || '';
 }
 
 function diffRefParams(repo) {

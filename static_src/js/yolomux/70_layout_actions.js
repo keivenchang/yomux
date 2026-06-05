@@ -811,9 +811,19 @@ function pullRequestStatusDisplay(pr) {
   return status.replace(/\bci\b/gi, 'CI').toUpperCase();
 }
 
+function pullRequestIsMerged(pr) {
+  return pullRequestStatusLabel(pr).toLowerCase() === 'merged';
+}
+
+function pullRequestInlineStatusDisplay(pr) {
+  const key = pullRequestStatusLabel(pr).toLowerCase();
+  if (key === 'merged' || key === 'open') return '';
+  return pullRequestStatusDisplay(pr);
+}
+
 function pullRequestLinkLabel(pr) {
-  const status = pullRequestStatusDisplay(pr);
-  return `PR #${pr.number}${status ? ` ${status}` : ''}`;
+  const status = pullRequestInlineStatusDisplay(pr);
+  return `#${pr.number}${status ? ` ${status}` : ''}`;
 }
 
 function pullRequestStatusClass(pr) {
@@ -838,12 +848,12 @@ function pullRequestCiStatusClass(pr) {
 function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
-  if (!['merged', 'draft', 'closed'].includes(status)) return '';
+  if (!['draft', 'closed'].includes(status)) return '';
   return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${esc(pullRequestStatusDisplay(pr))}</span>`;
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
-  if (pullRequestStatusLabel(pr).toLowerCase() === 'merged') return '';
+  if (pullRequestIsMerged(pr)) return '';
   const state = pr?.checks?.state;
   if (!state || state === 'unknown') return '';
   return `<span class="${metadataBadgeClasses(session, 'ci', `ci-indicator tab-symbol ${pullRequestCiStatusClass(pr)}`)}">CI</span>`;
@@ -853,7 +863,10 @@ function pullRequestNumberIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   // No native title — the rich custom session popover already shows PR #, CI, and review state
   // (DOIT.6: avoid a duplicate browser tooltip alongside the popover).
-  return `<span class="ci-indicator tab-symbol pr-number-chip">#${esc(String(pr.number))}</span>`;
+  const classes = pullRequestIsMerged(pr)
+    ? metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol pr-number-chip ${pullRequestStatusClass(pr)}`)
+    : 'ci-indicator tab-symbol pr-number-chip';
+  return `<span class="${esc(classes)}">#${esc(String(pr.number))}</span>`;
 }
 
 // #38: GitHub reviewDecision (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED) per PR.
@@ -914,12 +927,11 @@ function pullRequestAuthorHtml(pr) {
 }
 
 function pullRequestColumnLinkHtml(pr) {
-  const status = pullRequestStatusDisplay(pr);
-  const label = `#${pr.number}${status ? ` ${status}` : ''}`;
-  return linkHtml(pr.url, label, pr.title || pr.description || '', pullRequestStatusClass(pr));
+  return linkHtml(pr.url, pullRequestLinkLabel(pr), pr.title || pr.description || '', pullRequestStatusClass(pr));
 }
 
 function pullRequestChecksHtml(pr) {
+  if (pullRequestIsMerged(pr)) return '';
   const checks = pr?.checks;
   if (!checks || !checks.state || checks.state === 'unknown') return '';
   const cls = pullRequestCiStatusClass(pr);
@@ -974,7 +986,7 @@ function projectMetaHtml(session, info) {
   if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
   if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (pr?.number) {
-    if (pr.checks?.state && pr.checks.state !== 'unknown') {
+    if (!pullRequestIsMerged(pr) && pr.checks?.state && pr.checks.state !== 'unknown') {
       parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
     }
   }

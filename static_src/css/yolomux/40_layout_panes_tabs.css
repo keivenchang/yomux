@@ -1307,7 +1307,7 @@ body.theme-light .meta a:hover,
 body.theme-light .summary-context a:hover {
   color: #1e3a8a;
 }
-/* DOIT.19: a MERGED PR link must read purple (GitHub convention + matches the purple MERGED tab badge),
+/* DOIT.19: a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
    not the generic link blue above. The dark `.meta a.pr-status-merged{#c084fc}` (20_*.css) is out-won in
    light mode by `body.theme-light .meta a` (same 0,2,1, later in source), so re-assert at 0,3,1 here. */
 body.theme-light .popover-value a.pr-status-merged,
