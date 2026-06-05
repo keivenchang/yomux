@@ -878,7 +878,7 @@ function fileTreeDisplayParts(path, entry) {
         : esc(entry.name)) + linkSuffixHtml,
     };
   }
-  const baseText = entry.kind === 'file' ? `${entry.name}${fileTreeNumstatText(path)}` : entry.name;
+  const baseText = entry.name;
   if (linkTarget) return {text: baseText + linkSuffixText, html: esc(baseText) + linkSuffixHtml};
   return {text: baseText, html: ''};
 }
@@ -908,6 +908,7 @@ function fileTreeGitStatusClass(status) {
   if (key === 'D') return 'git-deleted';
   if (key === 'S') return 'git-staged';
   if (key === 'M') return 'git-modified';
+  if (key === 'T') return 'git-transcript';
   return '';
 }
 
@@ -955,6 +956,12 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     name.className = 'file-tree-name';
     row.appendChild(name);
   }
+  let diff = row.querySelector(':scope > .file-tree-diff');
+  if (!diff) {
+    diff = document.createElement('span');
+    diff.className = 'file-tree-diff';
+    row.appendChild(diff);
+  }
   let status = row.querySelector(':scope > .file-tree-git-status');
   if (!status) {
     status = document.createElement('span');
@@ -967,6 +974,10 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     date.className = 'file-tree-date changes-file-date';
     row.appendChild(date);
   }
+  // Keep DOM order: icon → name → diff → status → date
+  if (name.nextSibling !== diff) row.insertBefore(diff, name.nextSibling);
+  if (diff.nextSibling !== status) row.insertBefore(status, diff.nextSibling);
+  if (status.nextSibling !== date) row.insertBefore(date, status.nextSibling);
   icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
   if (icon.textContent !== iconText) icon.textContent = iconText;
   if (options.nameHtml) {
@@ -976,6 +987,10 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     name.innerHTML = '';
     name.textContent = nameText;
   }
+  const diffParts = options.diffParts || [];
+  const diffHtml = diffParts.map(p => `<span class="changes-diff-${esc(p.kind)}">${esc(p.text)}</span>`).join(' ');
+  if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
+  diff.hidden = !diffParts.length;
   status.textContent = options.gitStatus || '';
   status.hidden = !options.gitStatus;
   date.textContent = options.dateText || '';
@@ -1010,7 +1025,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
   const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : fileExplorerIndexBadgeText(fullPath);
   const gitClass = fileTreeGitStatusClass(gitStatus);
-  for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
+  for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
     row.classList.toggle(className, className === gitClass);
   }
   if (entry.kind === 'dir' && entry.is_repo === true) {
@@ -1041,11 +1056,13 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   else row.removeAttribute('aria-current');
   const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
   const displayName = fileTreeDisplayParts(fullPath, entry);
+  const changedFile = entry.kind === 'file' ? fileTreeChangedFile(fullPath) : null;
   updateFileTreeRowContents(row, icon, displayName.text, {
     gitStatus,
     iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
     nameHtml: displayName.html,
     dateText: fileExplorerTreeShowDates ? fileTreeMtimeText(entry) : '',
+    diffParts: changedFile ? sessionFileDiffText(changedFile) : [],
   });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
     bindFileImagePreview(row, fullPath, entry);

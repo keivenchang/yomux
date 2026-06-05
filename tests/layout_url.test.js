@@ -3454,7 +3454,8 @@ function makeFileTree(paths) {
   assert.equal(repoName.textContent, 'app [feature/x +5/-3]', 'repo rows show cached branch and aggregate numstat inline');
   assert.ok(repoName.innerHTML.includes('file-tree-repo-branch'), 'repo row branch is wrapped for monospace styling');
   assert.equal(gitTree.children[0].classList.contains('repo-non-main'), true, 'non-main repo rows stand out');
-  assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-name').textContent, 'README.md (+5/-3)', 'changed file rows show numstat inline');
+  assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-name').textContent, 'README.md', 'changed file name has no inline numstat');
+  assert.ok(gitTree.children[1].querySelector(':scope > .file-tree-diff').innerHTML.includes('changes-diff-add') && gitTree.children[1].querySelector(':scope > .file-tree-diff').innerHTML.includes('changes-diff-remove'), 'changed file diff stats in separate diff element with colored spans');
   assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-git-status').textContent, 'M');
 
   const slots = api.emptyLayoutSlots();
@@ -5396,7 +5397,8 @@ function makeFileTree(paths) {
   // C7: the embedded title now names the session via changes.titleForSession; assert its localized stems
   // surround the session (independent of the session label value).
   const titleStems = zhHant['changes.titleForSession'].split('{session}');
-  assert.ok(titleStems.every(stem => !stem || panel.includes(stem)), '#121/C7: the Modified-files title is localized and names the session');
+  const escHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  assert.ok(titleStems.every(stem => !stem || panel.includes(escHtml(stem))), '#121/C7: the Modified-files title is localized and names the session');
   assert.ok(panel.includes(`>${zhHant['changes.refresh']}</button>`), '#121: the Modified-files Refresh button is localized');
   // C6/C15 follow-up: the FROM/TO text pickers are inline in each repo's localized comparison sentence
   // (no separate FROM/TO labels); assert the sentence's localized text stems surround the inputs.

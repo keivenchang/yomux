@@ -6419,16 +6419,34 @@ body.theme-light .modal.about-open {
 .file-tree-row.git-modified:not(.selected) .file-tree-name {
   color: #f5c542;
 }
+.file-tree-row.git-modified:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: #f5c542;
+}
 .file-tree-row.git-untracked:not(.selected) .file-tree-name {
   color: #7ee787;
+}
+.file-tree-row.git-untracked:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: #2dd4bf;
 }
 .file-tree-row.git-deleted:not(.selected) .file-tree-name {
   color: #ff8585;
   text-decoration: line-through;
 }
+.file-tree-row.git-deleted:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: #ff5d5d;
+}
 .file-tree-row.git-staged:not(.selected) .file-tree-name {
   color: #c4f970;
   font-weight: 700;
+}
+.file-tree-row.git-staged:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: #76b900;
+}
+.file-tree-row.git-transcript:not(.selected) .file-tree-name {
+  color: var(--muted);
+}
+.file-tree-row.git-transcript:not(.selected) .file-tree-git-status:not([hidden]) {
+  background: #94a3b8;
 }
 .file-tree-row.kind-dir {
   color: var(--text);
@@ -6657,26 +6675,41 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   text-shadow: none;
 }
 .file-tree-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   color: currentColor;
 }
-.file-tree-git-status {
-  margin-inline-start: auto;
-  padding-inline-start: 6px;
-  color: currentColor;
+.file-tree-diff {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;
 }
+.file-tree-git-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 13px;
+  height: 16px;
+  padding: 0 1px;
+  border-radius: 3px;
+  color: #061207;
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+}
 .file-tree-date {
-  margin-inline-start: auto;
-  padding-inline-start: 8px;
+  flex-shrink: 0;
+  padding-inline-start: 5px;
   color: var(--muted);
   white-space: nowrap;
-}
-.file-tree-git-status:not([hidden]) + .file-tree-date:not([hidden]) {
-  margin-inline-start: 4px;
 }
 .file-tree-children {
   position: relative;
