@@ -739,12 +739,13 @@ body.resizing-file-explorer-changes {
   flex: 0 0 var(--file-explorer-changes-size);
   min-height: var(--file-explorer-changes-min-block-size);
   container-type: inline-size;
+  isolation: isolate;
   overflow-y: scroll;
   overflow-x: auto;
   scrollbar-gutter: stable;
   scrollbar-color: rgba(118, 185, 0, 0.55) rgba(255, 255, 255, 0.06);
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
-  padding: 5px;
+  padding: 0 5px 5px;
 }
 .file-explorer-changes-panel:hover,
 .file-explorer-changes-panel:focus-within {
@@ -784,18 +785,20 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
 .file-explorer-changes-head {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 6;
   display: grid;
   /* C6 moved the diff-ref controls into each repo header; C8 added a compact sort. Children are now
      title (flex), sort, refresh, close. */
   grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 6px;
-  padding: 4px 5px;
-  margin: -5px -5px 5px;
+  padding: 3px 5px;
+  margin: 0 -5px 2px;
   border-bottom: 1px solid var(--line);
   background: var(--pane-bar-bg, var(--panel2));
+  background-clip: padding-box;
   color: var(--text);
+  box-shadow: 0 2px 0 var(--pane-bar-bg, var(--panel2));
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
@@ -929,14 +932,16 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 }
 @container (max-width: 520px) {
   .file-explorer-changes-head {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
     grid-template-areas:
-      "title refresh close"
-      "refs refs refs";
-    gap: 4px;
+      "title sort refresh close";
+    gap: 3px;
   }
   .file-explorer-changes-head .changes-title {
     grid-area: title;
+  }
+  .file-explorer-changes-head .changes-sort-toggle {
+    grid-area: sort;
   }
   .file-explorer-changes-head .changes-close {
     grid-area: close;
@@ -1639,6 +1644,16 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 .file-editor-codemirror-panel .cm-scroller {
   scrollbar-color: rgba(118, 185, 0, 0.4) rgba(255, 255, 255, 0.05);
 }
+.file-editor-codemirror .cm-content ::selection,
+.file-editor-codemirror-panel .cm-content ::selection {
+  background: transparent !important;
+  color: inherit !important;
+}
+.file-editor-codemirror .cm-content ::-moz-selection,
+.file-editor-codemirror-panel .cm-content ::-moz-selection {
+  background: transparent !important;
+  color: inherit !important;
+}
 .file-editor.editor-wrap .file-editor-codemirror .cm-lineWrapping .cm-line,
 .file-editor-panel.editor-wrap .file-editor-codemirror-panel .cm-lineWrapping .cm-line {
   padding-inline-start: calc(6px + var(--editor-wrap-marker-col));
@@ -1669,11 +1684,13 @@ body.editor-theme-light .cm-wrap-marker {
 body.editor-theme-light .file-editor-codemirror .cm-editor,
 body.editor-theme-light .file-editor-codemirror-panel .cm-editor,
 body.editor-theme-light .file-editor-codemirror .cm-scroller,
-body.editor-theme-light .file-editor-codemirror-panel .cm-scroller,
+body.editor-theme-light .file-editor-codemirror-panel .cm-scroller {
+  color: var(--text) !important;
+  background: var(--editor-bg) !important;
+}
 body.editor-theme-light .file-editor-codemirror .cm-content,
 body.editor-theme-light .file-editor-codemirror-panel .cm-content {
   color: var(--text) !important;
-  background: var(--editor-bg) !important;
 }
 body.editor-theme-light .file-editor-codemirror .cm-gutters,
 body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {

@@ -1349,9 +1349,9 @@ function fileExplorerIndexBadgeText(path) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
     return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
   }
-  // C11 #1: a directory INSIDE an indexed root is already covered by that root's index — label it
-  // "covered" so it doesn't read as un-indexed (and so the user knows not to index it separately).
-  if (fileExplorerIndexedAncestor(path)) return 'covered';
+  // A directory inside an indexed root is already handled by that root. Do not repeat a badge on every
+  // descendant row; the root's INDEXED badge is enough signal.
+  if (fileExplorerIndexedAncestor(path)) return '';
   return '';
 }
 
@@ -1430,7 +1430,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   if (indexed) {
     const ancestor = fileExplorerIndexedAncestor(normalized);
     if (ancestor) {
-      if (statusEl) statusEl.textContent = `${compactHomePath(normalized)} is already covered by ${compactHomePath(ancestor)}`;
+      if (statusEl) statusEl.textContent = `${compactHomePath(normalized)} is already indexed by ${compactHomePath(ancestor)}`;
       return;
     }
     fileExplorerIndexedDirs.add(normalized);
@@ -1525,10 +1525,10 @@ function updateFileExplorerIndexedDirectoryRows() {
   document.querySelectorAll('.file-tree-row.kind-dir[data-path]').forEach(row => {
     const path = row.dataset.path || '';
     const indexed = fileExplorerDirectoryIsIndexed(path);
-    const covered = !indexed && Boolean(fileExplorerIndexedAncestor(path));  // C11 #1
+    const indexedDescendant = !indexed && Boolean(fileExplorerIndexedAncestor(path));
     row.dataset.indexed = indexed ? 'true' : 'false';
     row.classList.toggle('indexed-directory', indexed);
-    row.classList.toggle('covered-directory', covered);
+    row.classList.toggle('indexed-descendant-directory', indexedDescendant);
     if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
     const icon = row.querySelector(':scope > .file-tree-icon');
     if (icon) {
@@ -3249,8 +3249,17 @@ function codeMirrorThemeExtension(api) {
       borderLeftColor: scheme.cursor,
       borderLeftWidth: '2px',
     },
-    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
+    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, &.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
       backgroundColor: scheme.selection,
+      boxShadow: scheme.dark ? 'inset 0 0 0 1px rgba(191, 219, 254, 0.42)' : 'inset 0 0 0 1px rgba(29, 78, 216, 0.24)',
+    },
+    '.cm-content ::selection': {
+      backgroundColor: 'transparent !important',
+      color: 'inherit !important',
+    },
+    '.cm-content ::-moz-selection': {
+      backgroundColor: 'transparent !important',
+      color: 'inherit !important',
     },
     '.cm-activeLine': {
       backgroundColor: scheme.activeLine,
@@ -3335,7 +3344,7 @@ function codeMirrorWrapMarkerExtension(api) {
       if (this.frame) cancelAnimationFrame(this.frame);
       this.layer.remove();
     }
-  });
+  }, {dark: scheme.dark});
 }
 
 // DOIT.26: inline git blame. Lazily fetch the /api/blame payload for a path into editorBlameByPath.

@@ -164,30 +164,80 @@ function createPanel(session) {
   return panel;
 }
 
+function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) {
+  if (!button) return;
+  button.classList.toggle('loading', loading);
+  button.disabled = loading;
+  button.setAttribute('aria-busy', loading ? 'true' : 'false');
+  button.textContent = loading ? t('info.loadingShort') : idleLabel;
+  button.title = loading ? t('info.loadingRepo') : idleTitle;
+  button.setAttribute('aria-label', loading ? t('info.loadingRepo') : idleTitle);
+}
+
+function syncTranscriptMetaLoadingUi() {
+  document.querySelectorAll('[data-info-refresh]').forEach(button => {
+    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
+  });
+  const metaRefreshButton = refreshMeta;
+  if (metaRefreshButton) {
+    metaRefreshButton.classList.toggle('loading', transcriptMetaLoading);
+    metaRefreshButton.disabled = transcriptMetaLoading;
+    metaRefreshButton.setAttribute('aria-busy', transcriptMetaLoading ? 'true' : 'false');
+    if (transcriptMetaLoading) {
+      metaRefreshButton.title = t('info.loadingRepo');
+      metaRefreshButton.setAttribute('aria-label', t('info.loadingRepo'));
+    } else {
+      refreshMetaButtonTitle();
+      metaRefreshButton.setAttribute('aria-label', t('meta.refreshAria'));
+    }
+  }
+  document.getElementById(`panel-${infoItemId}`)?.classList.toggle('metadata-loading', transcriptMetaLoading);
+}
+
+function infoMetadataLoadingHtml() {
+  return `<div class="info-empty info-loading" role="status" aria-live="polite">
+    <span class="info-loading-spinner" aria-hidden="true"></span>
+    <span>${esc(t('info.loadingRepo'))}</span>
+  </div>`;
+}
+
 function renderInfoPanel() {
   const node = document.getElementById('info-content');
   if (!node) return;
+  syncTranscriptMetaLoadingUi();
   bindInfoPrContextMenu(node);   // DOIT.29: idempotent — "Watch this PR" on the PR column
   renderWatchedPrs();   // DOIT.29: the Watched PRs section repaints alongside the branch table
   const rows = infoBranchRows();
   if (!rows.length) {
-    node.innerHTML = '<div class="info-empty">No branch metadata loaded yet.</div>';
+    if (transcriptMetaLoading) {
+      node.innerHTML = infoMetadataLoadingHtml();
+      return;
+    }
+    if (transcriptMetaLoadError) {
+      node.innerHTML = `<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
+      return;
+    }
+    if (!transcriptMetaLoaded) {
+      node.innerHTML = infoMetadataLoadingHtml();
+      return;
+    }
+    node.innerHTML = `<div class="info-empty">${esc(t('info.empty'))}</div>`;
     return;
   }
   const headerCell = (key, label) => {
     const active = infoBranchSort.key === key;
-    const dirLabel = active ? (infoBranchSort.dir === 'asc' ? 'ascending' : 'descending') : 'unsorted';
+    const dirLabel = active ? (infoBranchSort.dir === 'asc' ? t('sort.ascending') : t('sort.descending')) : t('sort.unsorted');
     const marker = active ? (infoBranchSort.dir === 'asc' ? 'A-Z' : 'Z-A') : '';
-    return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="sort ${esc(label)} ${esc(dirLabel)}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
+    return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="${esc(t('sort.aria', {label, dir: dirLabel}))}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
   };
   const header = `<div class="info-row header">
-    <div class="info-cell">${headerCell('session', 'session-name')}</div>
-    <div class="info-cell">${headerCell('path', 'path')}</div>
-    <div class="info-cell">${headerCell('branch', 'branch')}</div>
+    <div class="info-cell">${headerCell('session', t('info.header.session'))}</div>
+    <div class="info-cell">${headerCell('path', t('info.header.path'))}</div>
+    <div class="info-cell">${headerCell('branch', t('info.header.branch'))}</div>
     <div class="info-cell">${headerCell('pr', 'PR')}</div>
     <div class="info-cell">${headerCell('linear', 'Linear')}</div>
-    <div class="info-cell">${headerCell('desc', 'desc')}</div>
-    <div class="info-cell">${headerCell('updated', 'updated')}</div>
+    <div class="info-cell">${headerCell('desc', t('info.header.desc'))}</div>
+    <div class="info-cell">${headerCell('updated', t('info.header.updated'))}</div>
   </div>`;
   const body = rows.map(row => `<div class="info-row${row.current ? ' current' : ''}">
     <div class="info-cell" title="${esc(row.session)}">${esc(row.session)}</div>
@@ -196,7 +246,7 @@ function renderInfoPanel() {
     <div class="info-cell" title="${esc(row.prTitle)}">${row.prHtml}</div>
     <div class="info-cell" title="${esc(row.linearTitle)}">${row.linearHtml}</div>
     <div class="info-cell" title="${esc(row.desc)}">${esc(row.desc)}</div>
-    <div class="info-cell" title="${esc(row.updated)}">${esc(row.updated)}</div>
+    <div class="info-cell" title="${esc(row.updatedTitle || row.updated)}">${esc(row.updatedText || row.updated)}</div>
   </div>`).join('');
   node.innerHTML = header + body;
   node.querySelectorAll('[data-info-sort]').forEach(button => {
@@ -225,7 +275,7 @@ function normalizeWatchedPrRef(entry) {
 }
 
 function watchedPrStatusText(pr) {
-  return pullRequestStatusDisplay(pr) || (pr?.state ? String(pr.state).toUpperCase() : 'UNKNOWN');
+  return pullRequestStatusDisplay(pr) || (pr?.state ? String(pr.state).toUpperCase() : t('common.unknown'));
 }
 
 // The Watched PRs section of YO!info — PRs tracked independent of any open session's branch. Reuses
@@ -490,6 +540,8 @@ function rawInfoBranchRows() {
         branchHtml: branchLinkHtml(git, branch.name),
         desc,
         updated: branch.updated || '',
+        updatedText: branchUpdatedText(branch),
+        updatedTitle: branch.updated || branchUpdatedText(branch),
         updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
         prHtml: prHtml || '',
         prTitle,
@@ -967,24 +1019,24 @@ function showUploadResult(session, payload, inserted) {
   if (!node) return;
   const files = payload.files || [];
   const paths = files.map(file => file.path).filter(Boolean);
-  const label = files.length === 1 ? (files[0].saved_name || files[0].name || 'file') : `${files.length} files`;
+  const label = files.length === 1 ? (files[0].saved_name || files[0].name || t('popover.kind.file')) : t('files.count', {count: files.length});
   const target = payload.target_dir || '';
-  const insertedText = inserted ? '; path inserted' : '; terminal not connected';
+  const uploadResultKey = inserted ? 'upload.resultInserted' : 'upload.resultTerminalDisconnected';
   const expiresAt = Date.now() + toastDurationMs;
   const newEntries = files.length
     ? files.map(file => {
-      const name = file.saved_name || file.name || 'file';
+      const name = file.saved_name || file.name || t('popover.kind.file');
       const destination = pathBasename(file.path || target) || target;
       return {
         id: ++uploadResultSequence,
-        text: `uploaded ${name} to ${destination}${insertedText}`,
+        text: t(uploadResultKey, {name, destination}),
         path: file.path || '',
         expiresAt,
       };
     })
     : [{
       id: ++uploadResultSequence,
-      text: `uploaded ${label} to ${pathBasename(target) || target}${insertedText}`,
+      text: t(uploadResultKey, {name: label, destination: pathBasename(target) || target}),
       path: target,
       expiresAt,
     }];
@@ -996,9 +1048,9 @@ function showUploadResult(session, payload, inserted) {
 
 function ensureUploadResultShell(session, node) {
   return ensureToastShell(node, {
-    title: `YOLOmux - ${serverHostname}: ${sessionLabel(session)} upload`,
-    closeLabel: 'Hide upload status',
-    keepLabel: 'Keep upload status visible',
+    title: t('upload.resultTitle', {host: serverHostname, session: sessionLabel(session)}),
+    closeLabel: t('upload.hideStatus'),
+    keepLabel: t('upload.keepStatus'),
     onKeep: () => keepUploadResult(session),
     onClose: () => hideUploadResult(session),
   });
@@ -1573,58 +1625,74 @@ function maybeHandleServerVersionChange(serverVersion) {
 }
 
 async function refreshTranscripts() {
-  try {
-    const response = await apiFetch('/api/transcripts');
-    transcriptMeta = await response.json();
-    maybeHandleServerVersionChange(transcriptMeta.server_version);
-    // #39: keep agent login status fresh so the new-session picker re-enables an agent after login.
-    if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
-    updateMetadataBadgePulses(transcriptMeta);
-    const previousActive = activeSessions.slice();
-    const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
-    await loadAutoStatuses();
-    if (sessionsChanged) renderPanels(previousActive);
-    renderSessionButtons();
-    renderInfoPanel();
-    renderYoagentPanel();
-    refreshActivitySummary({silent: true});
-    for (const session of activeSessions.filter(isTmuxSession)) {
-      const meta = document.getElementById(`meta-${session}`);
-      const preview = document.getElementById(`transcript-${session}`);
-      const info = transcriptMeta.sessions?.[session];
-      const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
-      updatePanelHeader(session, info);
-      if (meta) {
-        meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
-        meta.removeAttribute('title');
+  if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
+  transcriptMetaLoading = true;
+  transcriptMetaLoadError = '';
+  syncTranscriptMetaLoadingUi();
+  renderInfoPanel();
+  transcriptMetaRefreshPromise = (async () => {
+    try {
+      const response = await apiFetch('/api/transcripts');
+      transcriptMeta = await response.json();
+      transcriptMetaLoaded = true;
+      transcriptMetaLoadError = '';
+      maybeHandleServerVersionChange(transcriptMeta.server_version);
+      // #39: keep agent login status fresh so the new-session picker re-enables an agent after login.
+      if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
+      updateMetadataBadgePulses(transcriptMeta);
+      const previousActive = activeSessions.slice();
+      const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+      await loadAutoStatuses();
+      if (sessionsChanged) renderPanels(previousActive);
+      renderSessionButtons();
+      renderInfoPanel();
+      renderYoagentPanel();
+      refreshActivitySummary({silent: true});
+      for (const session of activeSessions.filter(isTmuxSession)) {
+        const meta = document.getElementById(`meta-${session}`);
+        const preview = document.getElementById(`transcript-${session}`);
+        const info = transcriptMeta.sessions?.[session];
+        const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
+        updatePanelHeader(session, info);
+        if (meta) {
+          meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+          meta.removeAttribute('title');
+        }
+        renderSummaryContext(session, info, agent);
+        if (agent?.transcript) {
+          updateTranscriptPathRow(session, agent.transcript);
+          preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
+          refreshTranscriptPreview(session, preview, {preserveScroll: false});
+        } else if (agent?.error) {
+          updateTranscriptPathRow(session, '', agent.error);
+          preview.textContent = agent.error;
+        } else {
+          updateTranscriptPathRow(session, '', 'no agent transcript found');
+          preview.textContent = 'no agent transcript found';
+        }
       }
-      renderSummaryContext(session, info, agent);
-      if (agent?.transcript) {
-        updateTranscriptPathRow(session, agent.transcript);
-        preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
-        refreshTranscriptPreview(session, preview, {preserveScroll: false});
-      } else if (agent?.error) {
-        updateTranscriptPathRow(session, '', agent.error);
-        preview.textContent = agent.error;
-      } else {
-        updateTranscriptPathRow(session, '', 'no agent transcript found');
-        preview.textContent = 'no agent transcript found';
+      renderPaneTabStrips();
+      scheduleFileExplorerActiveTabSync();
+      refreshWatchedFilesystem();
+      trackSessionStateChanges();
+      refreshOpenEventLogs();
+    } catch (error) {
+      transcriptMetaLoadError = String(error);
+      for (const session of activeSessions.filter(isTmuxSession)) {
+        const meta = document.getElementById(`meta-${session}`);
+        const preview = document.getElementById(`transcript-${session}`);
+        if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
+        updateTranscriptPathRow(session, '', 'transcript lookup failed');
+        if (preview) preview.textContent = `transcript lookup failed: ${error}`;
       }
+    } finally {
+      transcriptMetaLoading = false;
+      transcriptMetaRefreshPromise = null;
+      syncTranscriptMetaLoadingUi();
+      renderInfoPanel();
     }
-    renderPaneTabStrips();
-    scheduleFileExplorerActiveTabSync();
-    refreshWatchedFilesystem();
-    trackSessionStateChanges();
-    refreshOpenEventLogs();
-  } catch (error) {
-    for (const session of activeSessions.filter(isTmuxSession)) {
-      const meta = document.getElementById(`meta-${session}`);
-      const preview = document.getElementById(`transcript-${session}`);
-      if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
-      updateTranscriptPathRow(session, '', 'transcript lookup failed');
-      if (preview) preview.textContent = `transcript lookup failed: ${error}`;
-    }
-  }
+  })();
+  return transcriptMetaRefreshPromise;
 }
 
 function updatePanelHeader(session, info) {
@@ -1957,7 +2025,9 @@ async function showContext(session) {
   const modal = document.getElementById('modal');
   const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
+  modal.classList.remove('about-open');
   title.textContent = `${sessionLabel(session)} transcript tail`;
+  body.innerHTML = '';
   body.textContent = t('common.loading');
   modal.classList.add('open');
   const response = await apiFetch(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
@@ -2014,7 +2084,10 @@ if (tabMetaToggle) {
 }
 if (logoutButton) logoutButton.onclick = () => { window.location.href = '/logout'; };
 notifyToggle.onclick = toggleNotifications;
-document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
+document.getElementById('closeModal').onclick = () => {
+  const modal = document.getElementById('modal');
+  modal.classList.remove('open', 'about-open');
+};
 document.addEventListener('click', event => {
   if (event.target?.closest?.('.app-menu')) return;
   closeAppMenus();

@@ -82,7 +82,8 @@ const TERMINAL_THEMES = {
     foreground: '#dfe6ef',
     cursor: '#f5f7fb',
     cursorAccent: '#11151d',
-    selectionBackground: '#3a4b64',
+    selectionBackground: '#2563eb',
+    selectionForeground: '#ffffff',
     black: '#0f1115',
     red: '#ff6673',
     green: '#76b900',
@@ -105,7 +106,8 @@ const TERMINAL_THEMES = {
     foreground: '#111827',
     cursor: '#0f172a',
     cursorAccent: '#ffffff',
-    selectionBackground: '#cfe3ff',
+    selectionBackground: '#93c5fd',
+    selectionForeground: '#071327',
     black: '#1f2328',
     red: '#a31515',
     green: '#008000',
@@ -127,77 +129,77 @@ const TERMINAL_THEMES = {
 const EDITOR_SCHEMES = {
   dark: {
     id: 'dark', label: 'YOLOmux Dark', dark: true,
-    bg: '#0f1115', fg: '#cfd3dc', cursor: '#ffffff', selection: 'rgba(87, 112, 148, 0.46)', activeLine: 'rgba(255, 255, 255, 0.04)',
+    bg: '#0f1115', fg: '#cfd3dc', cursor: '#ffffff', selection: 'rgba(96, 165, 250, 0.38)', activeLine: 'rgba(255, 255, 255, 0.04)',
     gutterBg: '#151922', lineNo: '#9aa5b1', panel: '#151922', panel2: '#1e2430', line: '#303948', previewBg: '#151922',
     syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ffffff', emphasis: '#ffffff', invalid: '#ff6673'},
-    diff: {addFg: '#3fb950', removeFg: '#f85149'},
+    diff: {addFg: '#56d364', removeFg: '#ff7b72'},
   },
   'one-dark': {
     id: 'one-dark', label: 'One Dark', dark: true,
-    bg: '#282c34', fg: '#abb2bf', cursor: '#528bff', selection: '#3e4451', activeLine: '#2c313c',
+    bg: '#282c34', fg: '#abb2bf', cursor: '#528bff', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#2c313c',
     gutterBg: '#282c34', lineNo: '#636d83', panel: '#282c34', panel2: '#2c313c', line: '#3e4451', previewBg: '#30343d',
     syntax: {comment: '#5c6370', keyword: '#c678dd', string: '#98c379', number: '#d19a66', function: '#61afef', type: '#e5c07b', variable: '#e06c75', tag: '#e06c75', heading: '#e06c75', link: '#61afef', inlineCode: '#98c379', inlineCodeBg: 'rgba(152, 195, 121, 0.14)', inlineCodeBorder: 'rgba(152, 195, 121, 0.32)', atom: '#56b6c2', property: '#61afef', strong: '#e5c07b', emphasis: '#d19a66', invalid: '#e06c75'},
     diff: {addFg: '#98c379', removeFg: '#e06c75'},
   },
   dracula: {
     id: 'dracula', label: 'Dracula', dark: true,
-    bg: '#282a36', fg: '#f8f8f2', cursor: '#f8f8f0', selection: '#44475a', activeLine: '#44475a',
+    bg: '#282a36', fg: '#f8f8f2', cursor: '#f8f8f0', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#44475a',
     gutterBg: '#282a36', lineNo: '#6272a4', panel: '#282a36', panel2: '#343746', line: '#44475a', previewBg: '#333645',
     syntax: {comment: '#6272a4', keyword: '#ff79c6', string: '#f1fa8c', number: '#bd93f9', function: '#50fa7b', type: '#8be9fd', variable: '#f8f8f2', tag: '#ff79c6', heading: '#bd93f9', link: '#8be9fd', inlineCode: '#50fa7b', inlineCodeBg: 'rgba(80, 250, 123, 0.14)', inlineCodeBorder: 'rgba(80, 250, 123, 0.34)', atom: '#bd93f9', property: '#8be9fd', strong: '#f1fa8c', emphasis: '#ffb86c', invalid: '#ff5555'},
     diff: {addFg: '#50fa7b', removeFg: '#ff5555'},
   },
   monokai: {
     id: 'monokai', label: 'Monokai', dark: true,
-    bg: '#272822', fg: '#f8f8f2', cursor: '#f8f8f0', selection: '#49483e', activeLine: '#3e3d32',
+    bg: '#272822', fg: '#f8f8f2', cursor: '#f8f8f0', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#3e3d32',
     gutterBg: '#272822', lineNo: '#90908a', panel: '#272822', panel2: '#34352d', line: '#49483e', previewBg: '#333329',
     syntax: {comment: '#75715e', keyword: '#f92672', string: '#e6db74', number: '#ae81ff', function: '#a6e22e', type: '#66d9ef', variable: '#f8f8f2', tag: '#f92672', heading: '#a6e22e', link: '#66d9ef', inlineCode: '#e6db74', inlineCodeBg: 'rgba(230, 219, 116, 0.14)', inlineCodeBorder: 'rgba(230, 219, 116, 0.32)', atom: '#ae81ff', property: '#66d9ef', strong: '#fd971f', emphasis: '#fd971f', invalid: '#f92672'},
     diff: {addFg: '#a6e22e', removeFg: '#f92672'},
   },
   'vscode-dark-plus': {
     id: 'vscode-dark-plus', label: 'VS Code Dark+', dark: true,
-    bg: '#1e1e1e', fg: '#d4d4d4', cursor: '#aeafad', selection: '#264f78', activeLine: '#2a2d2e',
+    bg: '#1e1e1e', fg: '#d4d4d4', cursor: '#aeafad', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#2a2d2e',
     gutterBg: '#1e1e1e', lineNo: '#858585', panel: '#1e1e1e', panel2: '#252526', line: '#3c3c3c', previewBg: '#252526',
     syntax: {comment: '#6a9955', keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', function: '#dcdcaa', type: '#4ec9b0', variable: '#9cdcfe', tag: '#569cd6', heading: '#4fc1ff', headingBg: '#263342', link: '#3794ff', inlineCode: '#ffb86c', inlineCodeBg: 'rgba(255, 184, 108, 0.16)', inlineCodeBorder: 'rgba(255, 184, 108, 0.36)', atom: '#c586c0', property: '#9cdcfe', strong: '#ffd866', emphasis: '#c586c0', invalid: '#f14c4c'},
     diff: {addFg: '#6a9955', removeFg: '#f14c4c'},
   },
   nord: {
     id: 'nord', label: 'Nord', dark: true,
-    bg: '#2e3440', fg: '#d8dee9', cursor: '#d8dee9', selection: '#434c5e', activeLine: '#3b4252',
+    bg: '#2e3440', fg: '#d8dee9', cursor: '#d8dee9', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#3b4252',
     gutterBg: '#2e3440', lineNo: '#4c566a', panel: '#2e3440', panel2: '#3b4252', line: '#4c566a', previewBg: '#343b49',
     syntax: {comment: '#616e88', keyword: '#81a1c1', string: '#a3be8c', number: '#b48ead', function: '#88c0d0', type: '#8fbcbb', variable: '#d8dee9', tag: '#81a1c1', heading: '#88c0d0', link: '#88c0d0', inlineCode: '#a3be8c', inlineCodeBg: 'rgba(163, 190, 140, 0.14)', inlineCodeBorder: 'rgba(163, 190, 140, 0.32)', atom: '#b48ead', property: '#8fbcbb', strong: '#ebcb8b', emphasis: '#d08770', invalid: '#bf616a'},
     diff: {addFg: '#a3be8c', removeFg: '#bf616a'},
   },
   'github-light': {
     id: 'github-light', label: 'GitHub Light', dark: false,
-    bg: '#ffffff', fg: '#1f2328', cursor: '#0969da', selection: '#0969da33', activeLine: '#f4f6f9',
+    bg: '#ffffff', fg: '#1f2328', cursor: '#0969da', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f4f6f9',
     gutterBg: '#ffffff', lineNo: '#8c959f', panel: '#f6f8fa', panel2: '#eef2f6', line: '#d0d7de', previewBg: '#fff6df',
     syntax: {comment: '#57606a', keyword: '#cf222e', string: '#116329', number: '#0550ae', function: '#8250df', type: '#953800', variable: '#24292f', tag: '#116329', heading: '#6f42c1', headingBg: '#f1eafe', link: '#0969da', inlineCode: '#a40e26', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#d8a657', atom: '#0550ae', property: '#0969da', strong: '#0f172a', emphasis: '#953800', invalid: '#82071e'},
     diff: {addFg: '#116329', removeFg: '#82071e'},
   },
   'yolomux-light': {
     id: 'yolomux-light', label: 'YOLOmux Light', dark: false,
-    bg: '#ffffff', fg: '#1f2937', cursor: '#0f3d22', selection: 'rgba(29, 78, 216, 0.22)', activeLine: '#f4f7fb',
+    bg: '#ffffff', fg: '#1f2937', cursor: '#0f3d22', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f4f7fb',
     gutterBg: '#f6f8fa', lineNo: '#64748b', panel: '#f6f8fa', panel2: '#eef2f7', line: '#d0d7de', previewBg: '#ffffff',
     syntax: {comment: '#64748b', keyword: '#6d28d9', string: '#166534', number: '#a16207', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#0f3d22', headingBg: '#ffffff', link: '#075985', inlineCode: '#0f4c81', inlineCodeBg: '#eef6ff', inlineCodeBorder: '#8ab4f8', atom: '#9d174d', property: '#1d4ed8', strong: '#a11b1b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
     diff: {addFg: '#15803d', removeFg: '#b91c1c'},
   },
   'vscode-light-plus': {
     id: 'vscode-light-plus', label: 'VS Code Light+', dark: false,
-    bg: '#ffffff', fg: '#1f1f1f', cursor: '#000000', selection: '#add6ff', activeLine: '#f5f5f5',
+    bg: '#ffffff', fg: '#1f1f1f', cursor: '#000000', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f5f5f5',
     gutterBg: '#ffffff', lineNo: '#6e7681', panel: '#f3f3f3', panel2: '#e9e9e9', line: '#d4d4d4', previewBg: '#ffffff',
     syntax: {comment: '#008000', keyword: '#0000ff', control: '#af00db', string: '#a31515', number: '#098658', function: '#795e26', type: '#267f99', variable: '#1f1f1f', tag: '#800000', heading: '#800000', link: '#0451a5', inlineCode: '#800000', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#e0b45f', atom: '#0000ff', property: '#001080', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
     diff: {addFg: '#098658', removeFg: '#a31515'},
   },
   'one-light': {
     id: 'one-light', label: 'One Light', dark: false,
-    bg: '#fafafa', fg: '#383a42', cursor: '#526fff', selection: '#e5e5e6', activeLine: '#f0f0f0',
+    bg: '#fafafa', fg: '#383a42', cursor: '#526fff', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f0f0f0',
     gutterBg: '#fafafa', lineNo: '#9d9d9f', panel: '#f3f3f3', panel2: '#ececec', line: '#d8d8d8', previewBg: '#fff6df',
     syntax: {comment: '#8a8c93', keyword: '#a626a4', string: '#50a14f', number: '#986801', function: '#4078f2', type: '#c18401', variable: '#e45649', tag: '#e45649', heading: '#e45649', link: '#4078f2', inlineCode: '#50a14f', inlineCodeBg: '#edf7ed', inlineCodeBorder: '#9cd29a', atom: '#986801', property: '#4078f2', strong: '#383a42', emphasis: '#986801', invalid: '#ff1414'},
     diff: {addFg: '#2db448', removeFg: '#ff1414'},
   },
   'solarized-light': {
     id: 'solarized-light', label: 'Solarized Light', dark: false,
-    bg: '#fdf6e3', fg: '#657b83', cursor: '#657b83', selection: '#eee8d5', activeLine: '#eee8d5',
+    bg: '#fdf6e3', fg: '#657b83', cursor: '#657b83', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#eee8d5',
     gutterBg: '#eee8d5', lineNo: '#93a1a1', panel: '#f7efd8', panel2: '#eee8d5', line: '#d9d2bd', previewBg: '#f7efd8',
     syntax: {comment: '#93a1a1', keyword: '#859900', string: '#2aa198', number: '#d33682', function: '#268bd2', type: '#b58900', variable: '#268bd2', tag: '#268bd2', heading: '#cb4b16', link: '#268bd2', inlineCode: '#2aa198', inlineCodeBg: '#eee8d5', inlineCodeBorder: '#d9d2bd', atom: '#d33682', property: '#268bd2', strong: '#586e75', emphasis: '#b58900', invalid: '#dc322f'},
     diff: {addFg: '#859900', removeFg: '#dc322f'},
@@ -356,6 +358,8 @@ const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
+const documentTitleIdleThresholdMs = 120000;
+let documentTitleIdleSinceMs = null;
 const uploadResultsBySession = new Map();
 const uploadCleanupTimers = new Map();
 let uploadResultSequence = 0;
@@ -454,11 +458,11 @@ const TAB_TYPES = [
     aliases: ['info', infoItemId, 'yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
     match: item => item === infoItemId || item === yoagentItemId || item === legacyYosupItemId,
     label: () => infoTabLabel(),
-    shortLabel: () => 'Term',
-    terminalTitle: () => `unavailable for ${infoTabLabel()}`,
+    shortLabel: () => infoTabLabel(),
+    terminalTitle: () => t('tab.unavailableFor', {name: infoTabLabel()}),
     sortRank: 0,
     param: () => 'info',
-    detail: () => 'Repo metadata, PRs, CI, and the AI activity summary',
+    detail: () => t('info.subtitle'),
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     className: () => 'info',
@@ -473,7 +477,7 @@ const TAB_TYPES = [
     match: item => item === fileExplorerItemId,
     label: () => fileExplorerLabel(),
     shortLabel: () => fileExplorerLabel(),
-    terminalTitle: () => `unavailable for ${fileExplorerLabel()}`,
+    terminalTitle: () => t('tab.unavailableFor', {name: fileExplorerLabel()}),
     sortRank: 0.5,
     param: () => 'files',
     detail: () => compactHomePath(fileExplorerRoot || homePath || '/'),
@@ -489,9 +493,9 @@ const TAB_TYPES = [
     id: prefsItemId,
     aliases: ['prefs', 'preferences', prefsItemId],
     match: item => item === prefsItemId,
-    label: () => 'Preferences',
-    shortLabel: () => 'Prefs',
-    terminalTitle: () => 'unavailable for Preferences',
+    label: () => t('tab.preferences'),
+    shortLabel: () => t('tab.preferences.short'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.preferences')}),
     sortRank: 0.65,
     param: () => 'prefs',
     detail: () => compactHomePath(settingsConfigPath()),
@@ -507,9 +511,9 @@ const TAB_TYPES = [
     id: changesItemId,
     aliases: ['changes', changesItemId],
     match: item => item === changesItemId,
-    label: () => 'Changes',
-    shortLabel: () => 'Changes',
-    terminalTitle: () => 'unavailable for Changes',
+    label: () => t('tab.changes'),
+    shortLabel: () => t('tab.changes'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.changes')}),
     sortRank: 0.7,
     param: () => 'changes',
     detail: () => changesTabDetail(),
@@ -525,8 +529,8 @@ const TAB_TYPES = [
     prefix: imageViewerItemPrefix,
     match: item => typeof item === 'string' && item.startsWith(imageViewerItemPrefix),
     label: item => basenameOf(fileItemPath(item)),
-    shortLabel: () => 'Image',
-    terminalTitle: () => 'unavailable for image viewer',
+    shortLabel: () => t('popover.kind.image'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.image')}),
     sortRank: 0.74,
     param: item => item,
     detail: item => compactHomePath(fileItemPath(item)),
@@ -688,6 +692,10 @@ let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessio
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
+let transcriptMetaLoading = false;
+let transcriptMetaLoaded = false;
+let transcriptMetaLoadError = '';
+let transcriptMetaRefreshPromise = null;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;

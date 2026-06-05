@@ -3,7 +3,9 @@
 //
 // Source entry for the vendored CodeMirror spike bundle.
 // Rebuild with:
-// NODE_PATH=/tmp/yolomux-cm/node_modules /tmp/yolomux-cm/node_modules/.bin/esbuild prototypes/codemirror-entry.js --bundle --format=iife --global-name=YOLOmuxCodeMirrorBundle --outfile=static/codemirror.js --minify
+// cd prototypes/codemirror-bundle
+// npm ci
+// npm run build
 
 import {basicSetup} from "codemirror";
 import {Compartment, EditorState} from "@codemirror/state";

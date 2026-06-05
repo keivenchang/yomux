@@ -1172,24 +1172,22 @@ function createInfoPanel() {
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel())} / ${esc(yoagentTabLabel())}">
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel())}</span></button>
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
+        <div class="info-subtab-group" role="presentation">
+          <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel())}</span></button>
+          <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
+        </div>
+        <div class="info-subtab-actions">
+          <button type="button" class="info-refresh" data-info-subtab-action="info" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
+          <button type="button" class="info-refresh" data-info-subtab-action="yoagent" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
+        </div>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
         <div class="info-subview" data-info-subview="info">
-          <div class="transcript-head info-head">
-            <span>${esc(infoTabLabel())}</span>
-            <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
-          </div>
           <div id="info-content" class="info-list"></div>
           <div id="info-watched" class="info-watched"></div>
         </div>
         <div class="info-subview yoagent-subview" data-info-subview="yoagent">
-          <div class="transcript-head info-head">
-            <span>${esc(yoagentTabLabel())}</span>
-            <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
-          </div>
           <div id="yoagent-content" class="info-list yoagent-list"></div>
         </div>
       </div>`;
@@ -1263,6 +1261,9 @@ function applyInfoSubTab(panel = document.getElementById(`panel-${infoItemId}`))
   });
   panel.querySelectorAll('[data-info-subview]').forEach(view => {
     view.classList.toggle('active', view.dataset.infoSubview === infoPanelSubTab);
+  });
+  panel.querySelectorAll('[data-info-subtab-action]').forEach(button => {
+    button.hidden = button.dataset.infoSubtabAction !== infoPanelSubTab;
   });
 }
 

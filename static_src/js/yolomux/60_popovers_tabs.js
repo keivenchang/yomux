@@ -333,10 +333,10 @@ function yoloMarkerHtml(session, auto, options = {}) {
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
   const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
-  const stateText = auto ? 'on here' : (locked ? 'on elsewhere' : 'off');
+  const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
   const title = options.toggle && readOnlyMode
-    ? `YOLO ${stateText} for ${sessionLabel(session)}; readonly access`
-    : (options.toggle ? `YOLO ${stateText} for ${sessionLabel(session)}` : `YOLO ${stateText}`);
+    ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
+    : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
@@ -457,9 +457,9 @@ function sessionWorkDescription(session, info, limit = 96) {
   const git = project.git;
   const pr = displayPullRequest(info);
   if (pr?.number) {
-    const status = pullRequestStatusLabel(pr);
+    const status = pullRequestStatusDisplay(pr);
     const title = pr.title || pr.description || '';
-    const prefix = `#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`;
+    const prefix = `#${pr.number}${status ? ` ${status}` : ''}`;
     return shortText(title ? `${prefix}: ${title}` : prefix, limit);
   }
   const linear = project.linear || [];
@@ -481,7 +481,7 @@ function sessionTabDescription(session, info) {
 }
 
 function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
-  if (isInfoItem(item)) return 'all branches sorted by recent activity';
+  if (isInfoItem(item)) return t('tab.info.detail');
   const project = info?.project || {};
   const git = project.git;
   const parts = [];
@@ -492,8 +492,8 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
   const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
   if (linear) parts.push(linear);
   if (pr?.number) {
-    const status = pullRequestStatusLabel(pr);
-    parts.push(`#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`);
+    const status = pullRequestStatusDisplay(pr);
+    parts.push(`#${pr.number}${status ? ` ${status}` : ''}`);
   }
   const desc = sessionWorkDescription(item, info, 180);
   if (desc && !parts.includes(desc)) parts.push(desc);
@@ -560,14 +560,14 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
   const title = `${sessionLabel(session)} · ${projectDirName(session, info)}`;
-  const subtitle = description || git?.branch || pane?.current_path || 'no checkout detected';
+  const subtitle = description || git?.branch || pane?.current_path || t('git.noCheckout');
   const rows = [];
   const stateValue = `${sessionStateHtml(state)} <span class="meta-muted">${esc(state.reason)}</span>`;
   const autoPayload = autoApproveStates.get(session);
   const autoElsewhere = autoApproveEnabledElsewhere(autoPayload);
-  const autoText = autoEnabled ? 'YOLO on' : (autoElsewhere ? 'YOLO elsewhere' : '');
-  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || 'not detected');
-  const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
+  const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
+  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
+  const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
   rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
   const activity = sessionActivitySummary(session);
   if (activity?.local) rows.push(popoverRow(yoagentTabLabel(), esc(activity.local)));
@@ -661,10 +661,10 @@ function linearDescriptionsInlineHtml(issues) {
 
 function gitStatusText(git) {
   const parts = [];
-  if (Number.isFinite(git.dirty_count)) parts.push(`${git.dirty_count} dirty`);
-  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`${git.ahead} ahead`);
-  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`${git.behind} behind`);
-  return esc(parts.length ? parts.join(' · ') : 'clean');
+  if (Number.isFinite(git.dirty_count)) parts.push(t('git.dirty', {count: git.dirty_count}));
+  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(t('git.ahead', {count: git.ahead}));
+  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(t('git.behind', {count: git.behind}));
+  return esc(parts.length ? parts.join(' · ') : t('git.clean'));
 }
 
 function branchLinkHtml(git, branchName) {
@@ -687,14 +687,23 @@ function pullRequestLinkForBranch(git, branch) {
   if (!pr?.number) return '';
   const url = pr.url || (repoUrl ? `${repoUrl}/pull/${pr.number}` : '');
   const status = pullRequestStatusDisplay(pr);
-  const label = `#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`;
+  const label = `#${pr.number}${status ? ` ${status}` : ''}`;
   return linkHtml(url, label, pr.title || pr.description || branch.subject || '', pullRequestStatusClass(pr));
 }
 
 function pullRequestTextForBranch(pr, fallback = '') {
   if (!pr?.number) return '';
   const status = pullRequestStatusDisplay(pr);
-  return [`#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`, pr.title || pr.description || fallback].filter(Boolean).join(' ');
+  return [`#${pr.number}${status ? ` ${status}` : ''}`, pr.title || pr.description || fallback].filter(Boolean).join(' ');
+}
+
+function branchUpdatedText(branch) {
+  const ts = Number(branch?.updated_ts || 0);
+  if (Number.isFinite(ts) && ts > 0) {
+    const seconds = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    return relativeTimeFormat(seconds);
+  }
+  return branch?.updated || '';
 }
 
 function otherBranchesHtml(git) {
@@ -707,7 +716,7 @@ function otherBranchesHtml(git) {
     const branchLink = branchLinkHtml(git, branch.name);
     const prLink = pullRequestLinkForBranch(git, branch);
     const linearLinks = (branch.linear_ids || []).map(linearIssueLinkHtml).filter(Boolean).join(' ');
-    const meta = [prLink, linearLinks, esc(branch.updated || '')].filter(Boolean).join(' ');
+    const meta = [prLink, linearLinks, esc(branchUpdatedText(branch))].filter(Boolean).join(' ');
     return `<div class="branch-item">
       <div class="branch-name">${branch.current ? `<span class="info-branch-current">${esc(t('branch.current'))}</span> ` : ''}${branchLink}</div>
       <div class="branch-meta">${meta}</div>

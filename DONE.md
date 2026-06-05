@@ -4,6 +4,17 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 detail (file/symbol, fix, tests) lives in the git commit history on `main`. Each item shipped to
 dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 
+## 2026-06-04
+
+### DOIT.36 audit batch archived
+- Completed and removed `DOIT.36.md`. The shipped fixes cover terminal URL hard-wrap false-joins, login-test locale isolation, block editor cursor default, Preferences control alignment, Finder/Modified-files behavior parity, repo-scoped Modified-files diff refs, explicit-session Modified-files targeting, Modified-files sorting/header polish, multi-repo pane metadata, Finder delete shortcut, indexed-search state cleanup, first-drag pane-move latency, app-menu detail-width measurement, and the Finder/Modified-files resizer token reuse.
+- `TODO.md` no longer lists DOIT.36 as active; the remaining live queue starts with the non-DOIT shipped-feature follow-ups and the larger Big-Bang items.
+
+### GUI and localization polish
+- About is now a localized modal at the bottom of Help: the large brand glyph spins, Chinese uses `優` / `优` and `樂` / `乐`, Close is the visible `X`, `SHA` remains literal, and Keiven Chang links to LinkedIn.
+- Localized the upload/attention toast shell, upload result messages, YO!info / YO!agent Chinese labels, user-facing PR/session status labels, fallback relative-time strings, `Refresh summary`, git/status popover text, and info-table empty/header/sort strings. Added tests so Chinese surfaces do not regress while protocol terms like `SHA`, `PR`, `CI`, `HEAD`, `git`, and `tmux` stay literal where intended.
+- Recorded the vendored CodeMirror package versions and pinned the bundle dependency record so future CodeMirror upgrades are explicit.
+
 ## 2026-06-03
 
 ### Menu dropdowns: width/wrap fix, new-session labels, Term always offered (images 055/056)

@@ -801,10 +801,13 @@ function pullRequestStatusDisplay(pr) {
   if (!status) return '';
   const key = status.toLowerCase();
   if (key === 'unknown') return '';
-  if (key === 'merged') return 'MERGED';
-  if (key === 'draft') return 'DRAFT';
-  if (key === 'closed') return 'CLOSED';
-  if (key === 'open') return 'OPEN';
+  if (key === 'merged') return t('pr.status.merged');
+  if (key === 'draft') return t('pr.status.draft');
+  if (key === 'closed') return t('pr.status.closed');
+  if (key === 'open') return t('pr.status.open');
+  if (key.includes('failing')) return t('pr.status.failing');
+  if (key.includes('pending')) return t('pr.status.pending');
+  if (key.includes('passing')) return t('pr.status.passing');
   return status.replace(/\bci\b/gi, 'CI').toUpperCase();
 }
 
@@ -836,7 +839,7 @@ function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
   if (!['merged', 'draft', 'closed'].includes(status)) return '';
-  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${pullRequestStatusDisplay(pr)}</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${esc(pullRequestStatusDisplay(pr))}</span>`;
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
@@ -866,9 +869,9 @@ function pullRequestApprovalClass(decision) {
 }
 
 function pullRequestApprovalLabel(decision) {
-  if (decision === 'APPROVED') return 'Approved';
-  if (decision === 'CHANGES_REQUESTED') return 'Changes';
-  if (decision === 'REVIEW_REQUIRED') return 'Review';
+  if (decision === 'APPROVED') return t('pr.review.approvedShort');
+  if (decision === 'CHANGES_REQUESTED') return t('pr.review.changesShort');
+  if (decision === 'REVIEW_REQUIRED') return t('pr.review.reviewShort');
   return '';
 }
 
@@ -907,7 +910,7 @@ function pullRequestLinkHtml(pr) {
 
 function pullRequestAuthorHtml(pr) {
   const author = String(pr?.author_login || '').trim();
-  return author ? `<span class="meta-muted">by ${esc(author)}</span>` : '';
+  return author ? `<span class="meta-muted">${esc(t('pr.authorBy', {author}))}</span>` : '';
 }
 
 function pullRequestColumnLinkHtml(pr) {
@@ -920,15 +923,15 @@ function pullRequestChecksHtml(pr) {
   const checks = pr?.checks;
   if (!checks || !checks.state || checks.state === 'unknown') return '';
   const cls = pullRequestCiStatusClass(pr);
-  const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || `CI ${checks.state}`)}</span>`];
+  const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || t('pr.checks.state', {state: checks.state}))}</span>`];
   const checkLinks = items => (items || []).map(item => (
     item?.name ? linkHtml(item.url || '', item.name, item.state || '') : ''
   )).filter(Boolean).join(', ');
   const failing = checkLinks(checks.failing);
   const pending = checkLinks(checks.pending);
-  if (failing) parts.push(`<span class="meta-muted">failing: ${failing}</span>`);
-  if (pending) parts.push(`<span class="meta-muted">pending: ${pending}</span>`);
-  if (Number.isFinite(checks.total)) parts.push(`<span class="meta-muted">${checks.total} checks</span>`);
+  if (failing) parts.push(`<span class="meta-muted">${esc(t('pr.checks.failing'))}: ${failing}</span>`);
+  if (pending) parts.push(`<span class="meta-muted">${esc(t('pr.checks.pending'))}: ${pending}</span>`);
+  if (Number.isFinite(checks.total)) parts.push(`<span class="meta-muted">${esc(t('pr.checks.count', {count: checks.total}))}</span>`);
   return metaJoin(parts);
 }
 
@@ -960,16 +963,16 @@ function projectMetaHtml(session, info) {
   const fullPath = panelFullPath(session, info);
   if (!git) {
     if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-    parts.push('<span class="meta-muted">no git checkout detected</span>');
+    parts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return metaJoin(parts);
   }
   const pr = displayPullRequest(info);
   if (pr?.number) parts.push(pullRequestLinkHtml(pr));
   if (git.branch) parts.push(`<span class="meta-branch">${esc(shortBranch(git.branch))}</span>`);
   if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">behind ${git.behind}</span>`);
-  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">ahead ${git.ahead}</span>`);
-  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">dirty ${git.dirty_count}</span>`);
+  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
+  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
+  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (pr?.number) {
     if (pr.checks?.state && pr.checks.state !== 'unknown') {
       parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
@@ -988,7 +991,7 @@ function projectMetaHtml(session, info) {
     const extra = repos.length - 1;
     parts.push(`<button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: extra}))}" aria-label="${esc(t('detail.repos.more', {count: extra}))}">+${extra} ${esc(t('detail.repos.label'))}</button>`);
   }
-  return parts.length ? metaJoin(parts) : '<span class="meta-muted">git checkout detected</span>';
+  return parts.length ? metaJoin(parts) : `<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`;
 }
 
 // C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
@@ -997,9 +1000,9 @@ function repoChipMenuRowHtml(repo) {
   const label = compactHomePath(repo.root || '');
   const bits = [];
   if (repo.branch) bits.push(`<span class="meta-branch">${esc(shortBranch(repo.branch))}</span>`);
-  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) bits.push(`<span class="meta-muted">dirty ${repo.dirty_count}</span>`);
-  if (Number.isFinite(repo.ahead) && repo.ahead > 0) bits.push(`<span class="meta-muted">ahead ${repo.ahead}</span>`);
-  if (Number.isFinite(repo.behind) && repo.behind > 0) bits.push(`<span class="meta-muted">behind ${repo.behind}</span>`);
+  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) bits.push(`<span class="meta-muted">${esc(t('git.dirty', {count: repo.dirty_count}))}</span>`);
+  if (Number.isFinite(repo.ahead) && repo.ahead > 0) bits.push(`<span class="meta-muted">${esc(t('git.ahead', {count: repo.ahead}))}</span>`);
+  if (Number.isFinite(repo.behind) && repo.behind > 0) bits.push(`<span class="meta-muted">${esc(t('git.behind', {count: repo.behind}))}</span>`);
   const primary = repo.primary ? ' repo-chip-row-primary' : '';
   return `<button type="button" class="repo-chip-row${primary}" data-repo-chip-open="${esc(repo.root || '')}">
     <span class="repo-chip-path">${esc(label)}</span>

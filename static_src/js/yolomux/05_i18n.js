@@ -52,19 +52,22 @@ function i18nActiveLocaleId() {
   return i18nActiveLocale;
 }
 
-// DOIT.8 Phase 3: render an "N units ago" relative time in the active locale's native phrasing via
-// Intl.RelativeTimeFormat. Falls back to a plain English string if the API is unavailable.
+// DOIT.8 Phase 3: render a relative time in the active locale's native phrasing via
+// Intl.RelativeTimeFormat. Falls back through local catalog strings if the browser API is unavailable.
 function relativeTimeFormat(secondsAgo) {
   const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
   let value;
   let unit;
   if (sec < 3600) { value = Math.round(sec / 60); unit = 'minute'; }
   else if (sec < 86400) { value = Math.round(sec / 3600); unit = 'hour'; }
-  else { value = Math.round(sec / 86400); unit = 'day'; }
+  else if (sec < 604800) { value = Math.round(sec / 86400); unit = 'day'; }
+  else if (sec < 2629800) { value = Math.round(sec / 604800); unit = 'week'; }
+  else if (sec < 31557600) { value = Math.round(sec / 2629800); unit = 'month'; }
+  else { value = Math.round(sec / 31557600); unit = 'year'; }
   try {
     return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always'}).format(-value, unit);
   } catch (_) {
-    return `${value} ${unit}${value === 1 ? '' : 's'} ago`;
+    return t(`relative.${unit}`, {count: value});
   }
 }
 
@@ -161,6 +164,7 @@ function rerenderForLocale() {
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true});
   if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
+  if (document.getElementById('modal')?.classList?.contains('about-open') && typeof showAboutModal === 'function') showAboutModal();
   // The Modified-files / Changes panels (the Finder's panel AND the standalone Changes tab) localize
   // their title, FROM/TO, session/sort, and Refresh strings in the panel head — but the loop above
   // never touched them, so a language switch left them stale. Force-re-render BOTH destinations so the

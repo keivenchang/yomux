@@ -134,7 +134,8 @@
   --editor-scheme-gutter-bg: #151922;
   --editor-scheme-preview-bg: #342f22;
   --editor-cursor: #f5f7fb;
-  --editor-selection: rgba(87, 112, 148, 0.46);
+  --editor-selection: rgba(96, 165, 250, 0.38);
+  --text-selection-bg: #2563eb;
   --editor-active-line: rgba(255, 255, 255, 0.04);
   --editor-line-number: #9aa5b1;
   --markdown-heading: #d2ff8a;
@@ -155,8 +156,8 @@
   --code-inline-bg: rgba(245, 197, 66, 0.14);
   --code-inline-border: rgba(245, 197, 66, 0.24);
   --code-invalid: #ff6673;
-  --code-diff-add: #3fb950;
-  --code-diff-remove: #f85149;
+  --code-diff-add: #56d364;
+  --code-diff-remove: #ff7b72;
   --file-selection-bg: rgba(75, 190, 72, 0.46);
   --file-selection-border: #9ee85d;
   --file-selection-text: #f7fff0;
@@ -318,6 +319,7 @@ body.theme-light {
   --inactive-tab-border: #9aa6b6;
   --shadow-popover: 0 18px 50px rgba(15, 23, 42, 0.24);
   --shadow-elevated: 0 16px 42px rgba(15, 23, 42, 0.24);
+  --text-selection-bg: #93c5fd;
   --file-selection-bg: rgba(90, 190, 70, 0.34);
   --file-selection-border: #3f8f2d;
   --file-selection-text: #10230b;
@@ -347,6 +349,12 @@ body {
   background: var(--bg);
   color: var(--text);
   font: var(--ui-font-size)/1.4 var(--ui-font);
+}
+::selection {
+  background: var(--text-selection-bg);
+}
+::-moz-selection {
+  background: var(--text-selection-bg);
 }
 .topbar {
   /* DOIT.12 A1/A2: the "big space" above the green tabs was the topbar's OWN cool-gray bg showing where
@@ -793,9 +801,11 @@ body.theme-light .topbar-language {
 }
 .app-submenu-popover {
   display: none;
+  --app-submenu-inline-offset: 22px;
   width: var(--app-menu-fit-width, max-content);
-  max-width: var(--app-menu-max-inline-size);
-  margin: 2px 0 5px 22px;
+  max-width: calc(100% - var(--app-submenu-inline-offset));
+  margin-block: 2px 5px;
+  margin-inline: var(--app-submenu-inline-offset) 0;
   padding: 4px;
   color: #e7ecf3;
   background: #0d131b;
@@ -979,7 +989,7 @@ body.theme-light .topbar-language {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  max-width: 42ch;
+  max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
   color: #aeb8c7;
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
@@ -1898,14 +1908,12 @@ body.theme-light .branch-link {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
 }
-.info-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 .info-refresh {
   margin-inline-start: auto;
   height: 22px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -1918,6 +1926,25 @@ body.theme-light .branch-link {
 .info-refresh:focus-visible {
   border-color: var(--brand-green);
   color: #f2ffe8;
+}
+.info-refresh.loading {
+  cursor: wait;
+  opacity: 0.86;
+}
+.info-refresh.loading::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border: 2px solid color-mix(in srgb, currentColor 32%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: metadata-refresh-spin 0.9s linear infinite;
+}
+#refreshMeta.loading::before {
+  animation: metadata-refresh-spin 0.9s linear infinite;
+}
+@keyframes metadata-refresh-spin {
+  to { transform: rotate(360deg); }
 }
 .changes-body,
 .file-explorer-changes-panel {
@@ -2001,6 +2028,69 @@ body.theme-light .branch-link {
 .diff-ref-controls.compact .diff-ref-control input {
   width: clamp(46px, 7vw, 82px);
   height: 20px;
+}
+.diff-ref-suggestion-popover {
+  position: fixed;
+  z-index: 260;
+  max-height: min(320px, 42vh);
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel2);
+  color: var(--text);
+  box-shadow: var(--shadow-elevated);
+  font-family: var(--ui-font);
+}
+.diff-ref-suggestion-popover[hidden] {
+  display: none;
+}
+.diff-ref-suggestion-popover.compact {
+  max-height: min(230px, 34vh);
+}
+.diff-ref-suggestion-option {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  display: grid;
+  grid-template-columns: minmax(7ch, 9ch) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.diff-ref-suggestion-popover.compact .diff-ref-suggestion-option {
+  height: 22px;
+}
+.diff-ref-suggestion-option:hover,
+.diff-ref-suggestion-option.active {
+  background: color-mix(in srgb, var(--brand-green) 14%, transparent);
+}
+.diff-ref-suggestion-ref {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 800 var(--ui-font-size-xs)/1 var(--mono-font);
+  color: var(--text);
+}
+.diff-ref-suggestion-subject {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
+  color: var(--muted);
+}
+.diff-ref-suggestion-empty {
+  padding: 5px 7px;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
 .changes-refresh {
   padding: 0 8px;
@@ -2907,7 +2997,8 @@ body.theme-light .preferences-setting-control textarea,
 body.theme-light .changes-control select,
 body.theme-light .changes-refresh,
 body.theme-light .diff-ref-input,
-body.theme-light .diff-ref-control input {
+body.theme-light .diff-ref-control input,
+body.theme-light .diff-ref-suggestion-popover {
   background: #ffffff;
   color: var(--text);
 }
@@ -5074,9 +5165,6 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .info-subview.active {
   display: flex;
 }
-.info-subview .info-head {
-  flex: 0 0 auto;
-}
 .info-subview .info-list {
   flex: 1;
 }
@@ -5092,20 +5180,37 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 /* The segmented sub-tab toggle that switches between YO!info and YO!agent (its own row under the tabs). */
 .info-subtabs {
   display: flex;
-  gap: 0;
-  padding: 6px 10px 4px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
   /* DOIT.28 C1: route through a theme token so it flips light/dark — the hardcoded near-black slab
      was a black band on the light pane. */
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
+  border-block-end: 1px solid var(--line);
+}
+.info-subtab-group {
+  display: flex;
+  min-width: 0;
+}
+.info-subtab-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline-start: auto;
 }
 .info-subtab {
   flex: 0 0 auto;
-  padding: 4px 14px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--muted);
+  min-height: var(--pane-tab-height);
+  padding: 0 14px;
+  border: 1px solid var(--pane-inactive-tab-border);
+  background: var(--pane-inactive-tab-bg);
+  color: var(--pane-tab-text);
   font: inherit;
+  font-weight: 700;
   cursor: pointer;
+}
+.info-subtab .session-button-dir {
+  color: inherit;
 }
 .info-subtab:first-child {
   border-radius: 6px 0 0 6px;
@@ -5116,13 +5221,13 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .info-subtab.active {
   color: var(--pane-tab-active-text);
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
 }
 .info-subtab:not(.active):hover {
-  color: var(--text);
+  color: var(--pane-tab-text);
   /* DOIT.28 C1: a token-based hover tint (the white tint was invisible on a light band). */
-  background: color-mix(in srgb, var(--text) 8%, transparent);
+  background: var(--pane-inactive-tab-bg-hover);
 }
 .info-list {
   min-height: 0;
@@ -5460,10 +5565,41 @@ body.theme-light .yoagent-global {
   background: #ffffff;
   border-color: var(--line);
 }
+body.theme-light .yoagent-chat,
+body.theme-light .yoagent-session-summary,
+body.theme-light .yoagent-message {
+  color: #111827;
+  background: #ffffff;
+  border-color: #cbd5e1;
+}
 body.theme-light .yoagent-global-head,
 body.theme-light .yoagent-headline,
 body.theme-light .yoagent-line {
   color: var(--text);
+}
+body.theme-light .yoagent-generated,
+body.theme-light .yoagent-empty,
+body.theme-light .yoagent-session-summary-head,
+body.theme-light .yoagent-message-role {
+  color: #475569;
+}
+body.theme-light .yoagent-message-body.markdown-body,
+body.theme-light .yoagent-session-summary-body.markdown-body {
+  color: #111827;
+}
+body.theme-light .yoagent-chat .markdown-body strong,
+body.theme-light .yoagent-session-summary .markdown-body strong {
+  color: #111827;
+}
+body.theme-light .yoagent-chat .markdown-body em,
+body.theme-light .yoagent-session-summary .markdown-body em {
+  color: #374151;
+}
+body.theme-light .yoagent-chat .markdown-body :not(pre) > code,
+body.theme-light .yoagent-session-summary .markdown-body :not(pre) > code {
+  color: #0f4c81;
+  background: #eef6ff;
+  border-color: #8ab4f8;
 }
 /* Light mode: the composer + pills adapt via theme tokens; the rendered code blocks need an explicit
    light box + dark text (the shared `.markdown-body pre` is dark-only and only the file editor had a
@@ -5624,6 +5760,22 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   color: var(--muted);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
+.info-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.info-loading-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--muted) 28%, transparent);
+  border-top-color: var(--pane-tab-active-bg);
+  border-radius: 50%;
+  animation: metadata-refresh-spin 0.9s linear infinite;
+}
+.info-error {
+  color: var(--bad);
+}
 /* DOIT.29: the Watched PRs section of YO!info (PRs tracked independent of any open session). Its own
    container below the branch table, separated by a rule; rows reuse .info-cell but a tighter 4-col grid. */
 .info-watched {
@@ -5717,13 +5869,19 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .server-update-banner-reload {
   cursor: pointer;
-  border: 1px solid var(--accent-gold, #f0b85d);
+  border: 1px solid #b91c1c;
   border-radius: 4px;
-  background: var(--accent-gold, #f0b85d);
-  color: #1b2230;
+  background: #dc2626;
+  color: #ffffff;
   font: inherit;
   font-weight: 800;
   padding: 2px 10px;
+}
+.server-update-banner-reload:hover,
+.server-update-banner-reload:focus-visible {
+  border-color: #991b1b;
+  background: #b91c1c;
+  color: #ffffff;
 }
 .server-update-banner-dismiss {
   cursor: pointer;
@@ -5753,6 +5911,16 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   justify-content: space-between;
   align-items: center;
 }
+#closeModal {
+  inline-size: 32px;
+  block-size: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  font: 900 var(--ui-font-size-lg)/1 var(--ui-font);
+}
 .modal pre {
   margin: 0;
   padding: 12px;
@@ -5760,6 +5928,94 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.modal.about-open {
+  inset: 18vh auto auto 50%;
+  width: min(520px, calc(100vw - 28px));
+  min-height: 0;
+  transform: translateX(-50%);
+  background: var(--panel);
+  box-shadow: var(--shadow-elevated);
+}
+.modal.about-open #modalBody {
+  white-space: normal;
+  font-family: var(--ui-font);
+}
+.about-modal {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+}
+.about-brand-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+.about-brand-row [class^="about-brand-"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 46px;
+  line-height: 0.9;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+.about-brand-yo {
+  padding: 3px 6px 5px;
+  color: #071000;
+  background: var(--brand-green);
+  border-radius: 4px;
+  transform-origin: center;
+  animation: yolo-marker-rotate var(--yolo-rotation-duration, 20s) linear infinite;
+  animation-delay: var(--yolo-rotate-delay, 0s);
+}
+.about-brand-lo {
+  color: var(--brand-green);
+}
+.about-brand-m {
+  color: #3b82f6;
+}
+.about-brand-u {
+  color: #ef4444;
+}
+.about-brand-x {
+  color: #f59e0b;
+}
+.about-version {
+  color: var(--muted);
+  font: 900 var(--ui-font-size-xl)/1 var(--mono-font);
+}
+.about-details {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+.about-details div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+}
+.about-details dt {
+  color: var(--muted);
+  font-weight: 800;
+}
+.about-details dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.about-author {
+  justify-self: start;
+  color: var(--markdown-link);
+  font-size: var(--ui-font-size-sm);
+  font-weight: 800;
+  text-decoration: underline;
+}
+body.theme-light .modal.about-open {
+  background: #ffffff;
 }
 @media (max-width: 1500px) {
   .topbar {
@@ -6212,9 +6468,8 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   letter-spacing: 0;
   text-transform: uppercase;
 }
-/* C11 #1: a directory covered by an indexed ancestor — a quiet muted marker (not the bright indexed
-   green), so it reads as "already handled, don't index separately". Token-based: flips with the theme. */
-.file-tree-row.covered-directory:not(.selected) .file-tree-git-status {
+/* A directory under an indexed ancestor stays visually quiet; only the indexed root carries the badge. */
+.file-tree-row.indexed-descendant-directory:not(.selected) .file-tree-git-status {
   color: var(--muted);
   font-style: italic;
   letter-spacing: 0;
@@ -6250,6 +6505,17 @@ body.theme-light .server-update-banner {
 }
 body.theme-light .server-update-banner-dismiss {
   color: #586072;
+}
+body.theme-light .server-update-banner-reload {
+  border-color: #b91c1c;
+  background: #dc2626;
+  color: #ffffff;
+}
+body.theme-light .server-update-banner-reload:hover,
+body.theme-light .server-update-banner-reload:focus-visible {
+  border-color: #991b1b;
+  background: #b91c1c;
+  color: #ffffff;
 }
 body.theme-light .file-tree-row.selected {
   box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
@@ -7243,12 +7509,13 @@ body.resizing-file-explorer-changes {
   flex: 0 0 var(--file-explorer-changes-size);
   min-height: var(--file-explorer-changes-min-block-size);
   container-type: inline-size;
+  isolation: isolate;
   overflow-y: scroll;
   overflow-x: auto;
   scrollbar-gutter: stable;
   scrollbar-color: rgba(118, 185, 0, 0.55) rgba(255, 255, 255, 0.06);
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
-  padding: 5px;
+  padding: 0 5px 5px;
 }
 .file-explorer-changes-panel:hover,
 .file-explorer-changes-panel:focus-within {
@@ -7288,18 +7555,20 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
 .file-explorer-changes-head {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 6;
   display: grid;
   /* C6 moved the diff-ref controls into each repo header; C8 added a compact sort. Children are now
      title (flex), sort, refresh, close. */
   grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 6px;
-  padding: 4px 5px;
-  margin: -5px -5px 5px;
+  padding: 3px 5px;
+  margin: 0 -5px 2px;
   border-bottom: 1px solid var(--line);
   background: var(--pane-bar-bg, var(--panel2));
+  background-clip: padding-box;
   color: var(--text);
+  box-shadow: 0 2px 0 var(--pane-bar-bg, var(--panel2));
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
@@ -7433,14 +7702,16 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 }
 @container (max-width: 520px) {
   .file-explorer-changes-head {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
     grid-template-areas:
-      "title refresh close"
-      "refs refs refs";
-    gap: 4px;
+      "title sort refresh close";
+    gap: 3px;
   }
   .file-explorer-changes-head .changes-title {
     grid-area: title;
+  }
+  .file-explorer-changes-head .changes-sort-toggle {
+    grid-area: sort;
   }
   .file-explorer-changes-head .changes-close {
     grid-area: close;
@@ -8143,6 +8414,16 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 .file-editor-codemirror-panel .cm-scroller {
   scrollbar-color: rgba(118, 185, 0, 0.4) rgba(255, 255, 255, 0.05);
 }
+.file-editor-codemirror .cm-content ::selection,
+.file-editor-codemirror-panel .cm-content ::selection {
+  background: transparent !important;
+  color: inherit !important;
+}
+.file-editor-codemirror .cm-content ::-moz-selection,
+.file-editor-codemirror-panel .cm-content ::-moz-selection {
+  background: transparent !important;
+  color: inherit !important;
+}
 .file-editor.editor-wrap .file-editor-codemirror .cm-lineWrapping .cm-line,
 .file-editor-panel.editor-wrap .file-editor-codemirror-panel .cm-lineWrapping .cm-line {
   padding-inline-start: calc(6px + var(--editor-wrap-marker-col));
@@ -8173,11 +8454,13 @@ body.editor-theme-light .cm-wrap-marker {
 body.editor-theme-light .file-editor-codemirror .cm-editor,
 body.editor-theme-light .file-editor-codemirror-panel .cm-editor,
 body.editor-theme-light .file-editor-codemirror .cm-scroller,
-body.editor-theme-light .file-editor-codemirror-panel .cm-scroller,
+body.editor-theme-light .file-editor-codemirror-panel .cm-scroller {
+  color: var(--text) !important;
+  background: var(--editor-bg) !important;
+}
 body.editor-theme-light .file-editor-codemirror .cm-content,
 body.editor-theme-light .file-editor-codemirror-panel .cm-content {
   color: var(--text) !important;
-  background: var(--editor-bg) !important;
 }
 body.editor-theme-light .file-editor-codemirror .cm-gutters,
 body.editor-theme-light .file-editor-codemirror-panel .cm-gutters {

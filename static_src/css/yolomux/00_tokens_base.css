@@ -133,7 +133,8 @@
   --editor-scheme-gutter-bg: #151922;
   --editor-scheme-preview-bg: #342f22;
   --editor-cursor: #f5f7fb;
-  --editor-selection: rgba(87, 112, 148, 0.46);
+  --editor-selection: rgba(96, 165, 250, 0.38);
+  --text-selection-bg: #2563eb;
   --editor-active-line: rgba(255, 255, 255, 0.04);
   --editor-line-number: #9aa5b1;
   --markdown-heading: #d2ff8a;
@@ -154,8 +155,8 @@
   --code-inline-bg: rgba(245, 197, 66, 0.14);
   --code-inline-border: rgba(245, 197, 66, 0.24);
   --code-invalid: #ff6673;
-  --code-diff-add: #3fb950;
-  --code-diff-remove: #f85149;
+  --code-diff-add: #56d364;
+  --code-diff-remove: #ff7b72;
   --file-selection-bg: rgba(75, 190, 72, 0.46);
   --file-selection-border: #9ee85d;
   --file-selection-text: #f7fff0;
@@ -317,6 +318,7 @@ body.theme-light {
   --inactive-tab-border: #9aa6b6;
   --shadow-popover: 0 18px 50px rgba(15, 23, 42, 0.24);
   --shadow-elevated: 0 16px 42px rgba(15, 23, 42, 0.24);
+  --text-selection-bg: #93c5fd;
   --file-selection-bg: rgba(90, 190, 70, 0.34);
   --file-selection-border: #3f8f2d;
   --file-selection-text: #10230b;
@@ -346,4 +348,10 @@ body {
   background: var(--bg);
   color: var(--text);
   font: var(--ui-font-size)/1.4 var(--ui-font);
+}
+::selection {
+  background: var(--text-selection-bg);
+}
+::-moz-selection {
+  background: var(--text-selection-bg);
 }

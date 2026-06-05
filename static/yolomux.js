@@ -83,7 +83,8 @@ const TERMINAL_THEMES = {
     foreground: '#dfe6ef',
     cursor: '#f5f7fb',
     cursorAccent: '#11151d',
-    selectionBackground: '#3a4b64',
+    selectionBackground: '#2563eb',
+    selectionForeground: '#ffffff',
     black: '#0f1115',
     red: '#ff6673',
     green: '#76b900',
@@ -106,7 +107,8 @@ const TERMINAL_THEMES = {
     foreground: '#111827',
     cursor: '#0f172a',
     cursorAccent: '#ffffff',
-    selectionBackground: '#cfe3ff',
+    selectionBackground: '#93c5fd',
+    selectionForeground: '#071327',
     black: '#1f2328',
     red: '#a31515',
     green: '#008000',
@@ -128,77 +130,77 @@ const TERMINAL_THEMES = {
 const EDITOR_SCHEMES = {
   dark: {
     id: 'dark', label: 'YOLOmux Dark', dark: true,
-    bg: '#0f1115', fg: '#cfd3dc', cursor: '#ffffff', selection: 'rgba(87, 112, 148, 0.46)', activeLine: 'rgba(255, 255, 255, 0.04)',
+    bg: '#0f1115', fg: '#cfd3dc', cursor: '#ffffff', selection: 'rgba(96, 165, 250, 0.38)', activeLine: 'rgba(255, 255, 255, 0.04)',
     gutterBg: '#151922', lineNo: '#9aa5b1', panel: '#151922', panel2: '#1e2430', line: '#303948', previewBg: '#151922',
     syntax: {comment: '#8b95a5', keyword: '#c792ea', string: '#86efac', number: '#f8dfa3', function: '#93c5fd', type: '#67e8f9', variable: '#f5f7fb', tag: '#f0abfc', heading: '#76b900', link: '#7ee9ff', inlineCode: '#9aa5b1', inlineCodeBg: 'rgba(154, 165, 177, 0.14)', inlineCodeBorder: 'rgba(154, 165, 177, 0.24)', atom: '#ffd36b', property: '#96d6ff', strong: '#ffffff', emphasis: '#ffffff', invalid: '#ff6673'},
-    diff: {addFg: '#3fb950', removeFg: '#f85149'},
+    diff: {addFg: '#56d364', removeFg: '#ff7b72'},
   },
   'one-dark': {
     id: 'one-dark', label: 'One Dark', dark: true,
-    bg: '#282c34', fg: '#abb2bf', cursor: '#528bff', selection: '#3e4451', activeLine: '#2c313c',
+    bg: '#282c34', fg: '#abb2bf', cursor: '#528bff', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#2c313c',
     gutterBg: '#282c34', lineNo: '#636d83', panel: '#282c34', panel2: '#2c313c', line: '#3e4451', previewBg: '#30343d',
     syntax: {comment: '#5c6370', keyword: '#c678dd', string: '#98c379', number: '#d19a66', function: '#61afef', type: '#e5c07b', variable: '#e06c75', tag: '#e06c75', heading: '#e06c75', link: '#61afef', inlineCode: '#98c379', inlineCodeBg: 'rgba(152, 195, 121, 0.14)', inlineCodeBorder: 'rgba(152, 195, 121, 0.32)', atom: '#56b6c2', property: '#61afef', strong: '#e5c07b', emphasis: '#d19a66', invalid: '#e06c75'},
     diff: {addFg: '#98c379', removeFg: '#e06c75'},
   },
   dracula: {
     id: 'dracula', label: 'Dracula', dark: true,
-    bg: '#282a36', fg: '#f8f8f2', cursor: '#f8f8f0', selection: '#44475a', activeLine: '#44475a',
+    bg: '#282a36', fg: '#f8f8f2', cursor: '#f8f8f0', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#44475a',
     gutterBg: '#282a36', lineNo: '#6272a4', panel: '#282a36', panel2: '#343746', line: '#44475a', previewBg: '#333645',
     syntax: {comment: '#6272a4', keyword: '#ff79c6', string: '#f1fa8c', number: '#bd93f9', function: '#50fa7b', type: '#8be9fd', variable: '#f8f8f2', tag: '#ff79c6', heading: '#bd93f9', link: '#8be9fd', inlineCode: '#50fa7b', inlineCodeBg: 'rgba(80, 250, 123, 0.14)', inlineCodeBorder: 'rgba(80, 250, 123, 0.34)', atom: '#bd93f9', property: '#8be9fd', strong: '#f1fa8c', emphasis: '#ffb86c', invalid: '#ff5555'},
     diff: {addFg: '#50fa7b', removeFg: '#ff5555'},
   },
   monokai: {
     id: 'monokai', label: 'Monokai', dark: true,
-    bg: '#272822', fg: '#f8f8f2', cursor: '#f8f8f0', selection: '#49483e', activeLine: '#3e3d32',
+    bg: '#272822', fg: '#f8f8f2', cursor: '#f8f8f0', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#3e3d32',
     gutterBg: '#272822', lineNo: '#90908a', panel: '#272822', panel2: '#34352d', line: '#49483e', previewBg: '#333329',
     syntax: {comment: '#75715e', keyword: '#f92672', string: '#e6db74', number: '#ae81ff', function: '#a6e22e', type: '#66d9ef', variable: '#f8f8f2', tag: '#f92672', heading: '#a6e22e', link: '#66d9ef', inlineCode: '#e6db74', inlineCodeBg: 'rgba(230, 219, 116, 0.14)', inlineCodeBorder: 'rgba(230, 219, 116, 0.32)', atom: '#ae81ff', property: '#66d9ef', strong: '#fd971f', emphasis: '#fd971f', invalid: '#f92672'},
     diff: {addFg: '#a6e22e', removeFg: '#f92672'},
   },
   'vscode-dark-plus': {
     id: 'vscode-dark-plus', label: 'VS Code Dark+', dark: true,
-    bg: '#1e1e1e', fg: '#d4d4d4', cursor: '#aeafad', selection: '#264f78', activeLine: '#2a2d2e',
+    bg: '#1e1e1e', fg: '#d4d4d4', cursor: '#aeafad', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#2a2d2e',
     gutterBg: '#1e1e1e', lineNo: '#858585', panel: '#1e1e1e', panel2: '#252526', line: '#3c3c3c', previewBg: '#252526',
     syntax: {comment: '#6a9955', keyword: '#569cd6', string: '#ce9178', number: '#b5cea8', function: '#dcdcaa', type: '#4ec9b0', variable: '#9cdcfe', tag: '#569cd6', heading: '#4fc1ff', headingBg: '#263342', link: '#3794ff', inlineCode: '#ffb86c', inlineCodeBg: 'rgba(255, 184, 108, 0.16)', inlineCodeBorder: 'rgba(255, 184, 108, 0.36)', atom: '#c586c0', property: '#9cdcfe', strong: '#ffd866', emphasis: '#c586c0', invalid: '#f14c4c'},
     diff: {addFg: '#6a9955', removeFg: '#f14c4c'},
   },
   nord: {
     id: 'nord', label: 'Nord', dark: true,
-    bg: '#2e3440', fg: '#d8dee9', cursor: '#d8dee9', selection: '#434c5e', activeLine: '#3b4252',
+    bg: '#2e3440', fg: '#d8dee9', cursor: '#d8dee9', selection: 'rgba(96, 165, 250, 0.38)', activeLine: '#3b4252',
     gutterBg: '#2e3440', lineNo: '#4c566a', panel: '#2e3440', panel2: '#3b4252', line: '#4c566a', previewBg: '#343b49',
     syntax: {comment: '#616e88', keyword: '#81a1c1', string: '#a3be8c', number: '#b48ead', function: '#88c0d0', type: '#8fbcbb', variable: '#d8dee9', tag: '#81a1c1', heading: '#88c0d0', link: '#88c0d0', inlineCode: '#a3be8c', inlineCodeBg: 'rgba(163, 190, 140, 0.14)', inlineCodeBorder: 'rgba(163, 190, 140, 0.32)', atom: '#b48ead', property: '#8fbcbb', strong: '#ebcb8b', emphasis: '#d08770', invalid: '#bf616a'},
     diff: {addFg: '#a3be8c', removeFg: '#bf616a'},
   },
   'github-light': {
     id: 'github-light', label: 'GitHub Light', dark: false,
-    bg: '#ffffff', fg: '#1f2328', cursor: '#0969da', selection: '#0969da33', activeLine: '#f4f6f9',
+    bg: '#ffffff', fg: '#1f2328', cursor: '#0969da', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f4f6f9',
     gutterBg: '#ffffff', lineNo: '#8c959f', panel: '#f6f8fa', panel2: '#eef2f6', line: '#d0d7de', previewBg: '#fff6df',
     syntax: {comment: '#57606a', keyword: '#cf222e', string: '#116329', number: '#0550ae', function: '#8250df', type: '#953800', variable: '#24292f', tag: '#116329', heading: '#6f42c1', headingBg: '#f1eafe', link: '#0969da', inlineCode: '#a40e26', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#d8a657', atom: '#0550ae', property: '#0969da', strong: '#0f172a', emphasis: '#953800', invalid: '#82071e'},
     diff: {addFg: '#116329', removeFg: '#82071e'},
   },
   'yolomux-light': {
     id: 'yolomux-light', label: 'YOLOmux Light', dark: false,
-    bg: '#ffffff', fg: '#1f2937', cursor: '#0f3d22', selection: 'rgba(29, 78, 216, 0.22)', activeLine: '#f4f7fb',
+    bg: '#ffffff', fg: '#1f2937', cursor: '#0f3d22', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f4f7fb',
     gutterBg: '#f6f8fa', lineNo: '#64748b', panel: '#f6f8fa', panel2: '#eef2f7', line: '#d0d7de', previewBg: '#ffffff',
     syntax: {comment: '#64748b', keyword: '#6d28d9', string: '#166534', number: '#a16207', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#0f3d22', headingBg: '#ffffff', link: '#075985', inlineCode: '#0f4c81', inlineCodeBg: '#eef6ff', inlineCodeBorder: '#8ab4f8', atom: '#9d174d', property: '#1d4ed8', strong: '#a11b1b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
     diff: {addFg: '#15803d', removeFg: '#b91c1c'},
   },
   'vscode-light-plus': {
     id: 'vscode-light-plus', label: 'VS Code Light+', dark: false,
-    bg: '#ffffff', fg: '#1f1f1f', cursor: '#000000', selection: '#add6ff', activeLine: '#f5f5f5',
+    bg: '#ffffff', fg: '#1f1f1f', cursor: '#000000', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f5f5f5',
     gutterBg: '#ffffff', lineNo: '#6e7681', panel: '#f3f3f3', panel2: '#e9e9e9', line: '#d4d4d4', previewBg: '#ffffff',
     syntax: {comment: '#008000', keyword: '#0000ff', control: '#af00db', string: '#a31515', number: '#098658', function: '#795e26', type: '#267f99', variable: '#1f1f1f', tag: '#800000', heading: '#800000', link: '#0451a5', inlineCode: '#800000', inlineCodeBg: '#fff1d6', inlineCodeBorder: '#e0b45f', atom: '#0000ff', property: '#001080', strong: '#000000', emphasis: '#795e26', invalid: '#a31515'},
     diff: {addFg: '#098658', removeFg: '#a31515'},
   },
   'one-light': {
     id: 'one-light', label: 'One Light', dark: false,
-    bg: '#fafafa', fg: '#383a42', cursor: '#526fff', selection: '#e5e5e6', activeLine: '#f0f0f0',
+    bg: '#fafafa', fg: '#383a42', cursor: '#526fff', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f0f0f0',
     gutterBg: '#fafafa', lineNo: '#9d9d9f', panel: '#f3f3f3', panel2: '#ececec', line: '#d8d8d8', previewBg: '#fff6df',
     syntax: {comment: '#8a8c93', keyword: '#a626a4', string: '#50a14f', number: '#986801', function: '#4078f2', type: '#c18401', variable: '#e45649', tag: '#e45649', heading: '#e45649', link: '#4078f2', inlineCode: '#50a14f', inlineCodeBg: '#edf7ed', inlineCodeBorder: '#9cd29a', atom: '#986801', property: '#4078f2', strong: '#383a42', emphasis: '#986801', invalid: '#ff1414'},
     diff: {addFg: '#2db448', removeFg: '#ff1414'},
   },
   'solarized-light': {
     id: 'solarized-light', label: 'Solarized Light', dark: false,
-    bg: '#fdf6e3', fg: '#657b83', cursor: '#657b83', selection: '#eee8d5', activeLine: '#eee8d5',
+    bg: '#fdf6e3', fg: '#657b83', cursor: '#657b83', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#eee8d5',
     gutterBg: '#eee8d5', lineNo: '#93a1a1', panel: '#f7efd8', panel2: '#eee8d5', line: '#d9d2bd', previewBg: '#f7efd8',
     syntax: {comment: '#93a1a1', keyword: '#859900', string: '#2aa198', number: '#d33682', function: '#268bd2', type: '#b58900', variable: '#268bd2', tag: '#268bd2', heading: '#cb4b16', link: '#268bd2', inlineCode: '#2aa198', inlineCodeBg: '#eee8d5', inlineCodeBorder: '#d9d2bd', atom: '#d33682', property: '#268bd2', strong: '#586e75', emphasis: '#b58900', invalid: '#dc322f'},
     diff: {addFg: '#859900', removeFg: '#dc322f'},
@@ -357,6 +359,8 @@ const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
+const documentTitleIdleThresholdMs = 120000;
+let documentTitleIdleSinceMs = null;
 const uploadResultsBySession = new Map();
 const uploadCleanupTimers = new Map();
 let uploadResultSequence = 0;
@@ -455,11 +459,11 @@ const TAB_TYPES = [
     aliases: ['info', infoItemId, 'yoagent', 'yo!agent', 'yo-agent', 'yosup', 'yo', 'sup', yoagentItemId, legacyYosupItemId],
     match: item => item === infoItemId || item === yoagentItemId || item === legacyYosupItemId,
     label: () => infoTabLabel(),
-    shortLabel: () => 'Term',
-    terminalTitle: () => `unavailable for ${infoTabLabel()}`,
+    shortLabel: () => infoTabLabel(),
+    terminalTitle: () => t('tab.unavailableFor', {name: infoTabLabel()}),
     sortRank: 0,
     param: () => 'info',
-    detail: () => 'Repo metadata, PRs, CI, and the AI activity summary',
+    detail: () => t('info.subtitle'),
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
     className: () => 'info',
@@ -474,7 +478,7 @@ const TAB_TYPES = [
     match: item => item === fileExplorerItemId,
     label: () => fileExplorerLabel(),
     shortLabel: () => fileExplorerLabel(),
-    terminalTitle: () => `unavailable for ${fileExplorerLabel()}`,
+    terminalTitle: () => t('tab.unavailableFor', {name: fileExplorerLabel()}),
     sortRank: 0.5,
     param: () => 'files',
     detail: () => compactHomePath(fileExplorerRoot || homePath || '/'),
@@ -490,9 +494,9 @@ const TAB_TYPES = [
     id: prefsItemId,
     aliases: ['prefs', 'preferences', prefsItemId],
     match: item => item === prefsItemId,
-    label: () => 'Preferences',
-    shortLabel: () => 'Prefs',
-    terminalTitle: () => 'unavailable for Preferences',
+    label: () => t('tab.preferences'),
+    shortLabel: () => t('tab.preferences.short'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.preferences')}),
     sortRank: 0.65,
     param: () => 'prefs',
     detail: () => compactHomePath(settingsConfigPath()),
@@ -508,9 +512,9 @@ const TAB_TYPES = [
     id: changesItemId,
     aliases: ['changes', changesItemId],
     match: item => item === changesItemId,
-    label: () => 'Changes',
-    shortLabel: () => 'Changes',
-    terminalTitle: () => 'unavailable for Changes',
+    label: () => t('tab.changes'),
+    shortLabel: () => t('tab.changes'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.changes')}),
     sortRank: 0.7,
     param: () => 'changes',
     detail: () => changesTabDetail(),
@@ -526,8 +530,8 @@ const TAB_TYPES = [
     prefix: imageViewerItemPrefix,
     match: item => typeof item === 'string' && item.startsWith(imageViewerItemPrefix),
     label: item => basenameOf(fileItemPath(item)),
-    shortLabel: () => 'Image',
-    terminalTitle: () => 'unavailable for image viewer',
+    shortLabel: () => t('popover.kind.image'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.image')}),
     sortRank: 0.74,
     param: item => item,
     detail: item => compactHomePath(fileItemPath(item)),
@@ -689,6 +693,10 @@ let layoutItems = [infoItemId, fileExplorerItemId, prefsItemId, ...visibleSessio
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {};
+let transcriptMetaLoading = false;
+let transcriptMetaLoaded = false;
+let transcriptMetaLoadError = '';
+let transcriptMetaRefreshPromise = null;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
@@ -826,19 +834,22 @@ function i18nActiveLocaleId() {
   return i18nActiveLocale;
 }
 
-// DOIT.8 Phase 3: render an "N units ago" relative time in the active locale's native phrasing via
-// Intl.RelativeTimeFormat. Falls back to a plain English string if the API is unavailable.
+// DOIT.8 Phase 3: render a relative time in the active locale's native phrasing via
+// Intl.RelativeTimeFormat. Falls back through local catalog strings if the browser API is unavailable.
 function relativeTimeFormat(secondsAgo) {
   const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
   let value;
   let unit;
   if (sec < 3600) { value = Math.round(sec / 60); unit = 'minute'; }
   else if (sec < 86400) { value = Math.round(sec / 3600); unit = 'hour'; }
-  else { value = Math.round(sec / 86400); unit = 'day'; }
+  else if (sec < 604800) { value = Math.round(sec / 86400); unit = 'day'; }
+  else if (sec < 2629800) { value = Math.round(sec / 604800); unit = 'week'; }
+  else if (sec < 31557600) { value = Math.round(sec / 2629800); unit = 'month'; }
+  else { value = Math.round(sec / 31557600); unit = 'year'; }
   try {
     return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always'}).format(-value, unit);
   } catch (_) {
-    return `${value} ${unit}${value === 1 ? '' : 's'} ago`;
+    return t(`relative.${unit}`, {count: value});
   }
 }
 
@@ -935,6 +946,7 @@ function rerenderForLocale() {
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true});
   if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
+  if (document.getElementById('modal')?.classList?.contains('about-open') && typeof showAboutModal === 'function') showAboutModal();
   // The Modified-files / Changes panels (the Finder's panel AND the standalone Changes tab) localize
   // their title, FROM/TO, session/sort, and Refresh strings in the panel head — but the loop above
   // never touched them, so a language switch left them stale. Force-re-render BOTH destinations so the
@@ -2853,9 +2865,9 @@ const stateDefs = {
 
 function stateDef(key) {
   // #121: resolve the human label through t() on each access so a runtime language switch
-  // re-localizes it (stateDefs is frozen at load). The terse `short` badge codes stay as-is.
+  // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
   const resolvedKey = stateDefs[key] ? key : 'idle';
-  return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`)};
+  return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`), short: t(`state.short.${resolvedKey}`)};
 }
 
 function terminalDisconnected(session) {
@@ -2982,9 +2994,28 @@ function runningAgentCount() {
   return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session))).length;
 }
 
+function documentTitleNowMs() {
+  const testNow = Number(window.__yolomuxDocumentTitleNowMs);
+  return Number.isFinite(testNow) ? testNow : Date.now();
+}
+
+function documentTitleIdleMinutes(now) {
+  if (documentTitleIdleSinceMs === null) return 0;
+  const elapsedMs = Math.max(0, now - documentTitleIdleSinceMs);
+  return elapsedMs >= documentTitleIdleThresholdMs ? Math.max(2, Math.floor(elapsedMs / 60000)) : 0;
+}
+
 function updateDocumentTitle() {
   const count = runningAgentCount();
-  document.title = count > 0 ? `YOLOmux [${count} running]` : 'YOLOmux [idle]';
+  if (count > 0) {
+    documentTitleIdleSinceMs = null;
+    document.title = `YOLOmux [${count} running]`;
+    return;
+  }
+  const now = documentTitleNowMs();
+  if (documentTitleIdleSinceMs === null) documentTitleIdleSinceMs = now;
+  const idleMinutes = documentTitleIdleMinutes(now);
+  document.title = idleMinutes ? `YOLOmux (idle for ${idleMinutes} min)` : 'YOLOmux [idle]';
 }
 
 // Cross-session "what's going on" rollup for the always-visible top-bar status line: how many tmux
@@ -3072,7 +3103,7 @@ function sessionStateHtml(state) {
   // DOIT.6: 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key)) return '';
-  return stateBadgeHtml(state.key, state.short, `${state.label}: ${state.reason}`);
+  return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`);
 }
 
 function inactiveTabItems() {
@@ -3914,8 +3945,8 @@ function ensureToastShell(node, options = {}) {
       <div class="toast-header">
         <div class="toast-title"></div>
         <div class="toast-control-row">
-          <button type="button" class="toast-keep" data-toast-keep aria-label="${esc(options.keepLabel || 'Keep alert visible')}">Keep</button>
-          <button type="button" class="toast-close" data-toast-close aria-label="${esc(options.closeLabel || 'Close alert')}">x</button>
+          <button type="button" class="toast-keep" data-toast-keep aria-label="${esc(options.keepLabel || t('toast.keepAlert'))}">${esc(t('toast.keep'))}</button>
+          <button type="button" class="toast-close" data-toast-close aria-label="${esc(options.closeLabel || t('toast.closeAlert'))}">X</button>
         </div>
       </div>
       <div class="toast-body"></div>
@@ -3983,7 +4014,7 @@ function summarizeToastLines(lines, options = {}) {
   const hidden = normalized.slice(toastMaxLines - 1);
   const countdownValues = hidden.map(item => item.countdownMs).filter(Number.isFinite);
   visible.push({
-    text: `+${hidden.length} more`,
+    text: t('common.more', {count: hidden.length}),
     countdownMs: countdownValues.length ? Math.max(...countdownValues) : options.countdownMs,
   });
   return visible;
@@ -4087,13 +4118,13 @@ function removeAttentionAlert(id) {
 }
 
 function sendTestNotification() {
-  showToast(`YOLOmux - ${serverHostname}: notifications enabled`, 'YOLOmux in-page alerts are enabled.', {
+  showToast(t('notify.testTitle', {host: serverHostname}), t('notify.testBody'), {
     container: displayToastContainer(focusedPanelItem),
   });
   if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(`YOLOmux - ${serverHostname}: notifications enabled`, {
-      body: 'YOLOmux can send browser notifications from this server.',
+    sendBrowserNotification(t('notify.testTitle', {host: serverHostname}), {
+      body: t('notify.browserTestBody'),
       tag: `yolomux:test:${Date.now()}`,
     });
     postEvent(null, 'notification_test_sent', 'notification test sent', {hostname: serverHostname});
@@ -4403,6 +4434,55 @@ function menuGroups(...groups) {
   return items;
 }
 
+const aboutLinkedInUrl = 'https://www.linkedin.com/in/keivenchang/';
+
+function aboutDateTimeText() {
+  if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
+  try {
+    return new Date().toLocaleString([], {dateStyle: 'medium', timeStyle: 'medium'});
+  } catch (_) {
+    return new Date().toString();
+  }
+}
+
+function openAboutLinkedIn() {
+  window.open(aboutLinkedInUrl, '_blank', 'noopener,noreferrer');
+}
+
+function aboutCommitShaText() {
+  return bootstrap.versionCommit || bootstrap.commitSha || bootstrap.commit_sha || bootstrap.gitSha || bootstrap.git_sha || '';
+}
+
+function aboutBrandHtml() {
+  return `<span class="about-brand-yo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
+}
+
+function showAboutModal() {
+  const modal = document.getElementById('modal');
+  const title = document.getElementById('modalTitle');
+  const body = document.getElementById('modalBody');
+  const close = document.getElementById('closeModal');
+  if (!modal || !title || !body) return;
+  title.textContent = t('menu.help.about');
+  if (close) {
+    close.title = t('common.close');
+    close.setAttribute('aria-label', t('common.close'));
+  }
+  modal.classList.add('about-open');
+  const version = bootstrap.version || '';
+  const sha = aboutCommitShaText();
+  body.innerHTML = `<div class="about-modal">
+    <div class="about-brand-row">${aboutBrandHtml()}${version ? `<span class="about-version">${esc(version)}</span>` : ''}</div>
+    <dl class="about-details">
+      <div><dt>${esc(t('menu.help.about.datetime'))}</dt><dd>${esc(aboutDateTimeText())}</dd></div>
+      <div><dt>SHA</dt><dd>${esc(sha || t('common.unknown'))}</dd></div>
+      <div><dt>${esc(t('menu.help.about.version'))}</dt><dd>${esc(version || t('common.unknown'))}</dd></div>
+    </dl>
+    <a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a>
+  </div>`;
+  modal.classList.add('open');
+}
+
 function currentActiveMenuItem() {
   if (focusedPanelItem && itemIsActivePaneTab(focusedPanelItem)) return focusedPanelItem;
   if (focusedTerminal && itemIsActivePaneTab(focusedTerminal)) return focusedTerminal;
@@ -4440,9 +4520,9 @@ function menuTabDetail(item) {
 function changesTabDetail() {
   const count = sessionFilesPayload.files?.length || 0;
   const session = sessionFilesPayload.session || sessionFilesTargetSession();
-  if (sessionFilesLoading) return 'loading AI-changed files';
-  if (count) return `${count} changed file${count === 1 ? '' : 's'}${session ? ` for ${sessionLabel(session)}` : ''}`;
-  return session ? `no AI-changed files loaded for ${sessionLabel(session)}` : 'AI-changed files';
+  if (sessionFilesLoading) return t('changes.loading');
+  if (count) return `${tPlural('changes.fileCount', count)}${session ? t('changes.inSession', {session: sessionLabel(session)}) : ''}`;
+  return session ? t('changes.emptyAi') : t('changes.title');
 }
 
 function menuTabRowHtml(item, options = {}) {
@@ -4991,6 +5071,9 @@ function appMenuTree() {
             disabled: !projectReadmePath(),
             detail: t('menu.help.localReadme'),
           }),
+        ],
+        [
+          menuCommand(t('menu.help.about'), showAboutModal),
         ]
       ),
     },
@@ -5172,6 +5255,12 @@ function measureAppMenuContentWidth(popover) {
   // C14: a standalone submenu popover (measured on its own, with no .open parent) matches the base
   // `.app-submenu-popover { display:none }` rule and would measure 0 — force it visible for measurement.
   if (clone.classList?.contains('app-submenu-popover')) clone.style.display = 'block';
+  clone.querySelectorAll('.app-submenu-popover').forEach(submenu => {
+    submenu.style.display = 'block';
+    submenu.style.width = 'max-content';
+    submenu.style.minWidth = '0';
+    submenu.style.maxWidth = 'none';
+  });
   clone.querySelectorAll('.app-menu-command').forEach(command => {
     command.style.width = 'max-content';
     command.style.minWidth = '0';
@@ -6871,9 +6960,9 @@ function fileExplorerIndexBadgeText(path) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
     return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
   }
-  // C11 #1: a directory INSIDE an indexed root is already covered by that root's index — label it
-  // "covered" so it doesn't read as un-indexed (and so the user knows not to index it separately).
-  if (fileExplorerIndexedAncestor(path)) return 'covered';
+  // A directory inside an indexed root is already handled by that root. Do not repeat a badge on every
+  // descendant row; the root's INDEXED badge is enough signal.
+  if (fileExplorerIndexedAncestor(path)) return '';
   return '';
 }
 
@@ -6952,7 +7041,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
   if (indexed) {
     const ancestor = fileExplorerIndexedAncestor(normalized);
     if (ancestor) {
-      if (statusEl) statusEl.textContent = `${compactHomePath(normalized)} is already covered by ${compactHomePath(ancestor)}`;
+      if (statusEl) statusEl.textContent = `${compactHomePath(normalized)} is already indexed by ${compactHomePath(ancestor)}`;
       return;
     }
     fileExplorerIndexedDirs.add(normalized);
@@ -7047,10 +7136,10 @@ function updateFileExplorerIndexedDirectoryRows() {
   document.querySelectorAll('.file-tree-row.kind-dir[data-path]').forEach(row => {
     const path = row.dataset.path || '';
     const indexed = fileExplorerDirectoryIsIndexed(path);
-    const covered = !indexed && Boolean(fileExplorerIndexedAncestor(path));  // C11 #1
+    const indexedDescendant = !indexed && Boolean(fileExplorerIndexedAncestor(path));
     row.dataset.indexed = indexed ? 'true' : 'false';
     row.classList.toggle('indexed-directory', indexed);
-    row.classList.toggle('covered-directory', covered);
+    row.classList.toggle('indexed-descendant-directory', indexedDescendant);
     if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
     const icon = row.querySelector(':scope > .file-tree-icon');
     if (icon) {
@@ -8771,8 +8860,17 @@ function codeMirrorThemeExtension(api) {
       borderLeftColor: scheme.cursor,
       borderLeftWidth: '2px',
     },
-    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
+    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, &.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
       backgroundColor: scheme.selection,
+      boxShadow: scheme.dark ? 'inset 0 0 0 1px rgba(191, 219, 254, 0.42)' : 'inset 0 0 0 1px rgba(29, 78, 216, 0.24)',
+    },
+    '.cm-content ::selection': {
+      backgroundColor: 'transparent !important',
+      color: 'inherit !important',
+    },
+    '.cm-content ::-moz-selection': {
+      backgroundColor: 'transparent !important',
+      color: 'inherit !important',
     },
     '.cm-activeLine': {
       backgroundColor: scheme.activeLine,
@@ -8857,7 +8955,7 @@ function codeMirrorWrapMarkerExtension(api) {
       if (this.frame) cancelAnimationFrame(this.frame);
       this.layer.remove();
     }
-  });
+  }, {dark: scheme.dark});
 }
 
 // DOIT.26: inline git blame. Lazily fetch the /api/blame payload for a path into editorBlameByPath.
@@ -10362,10 +10460,10 @@ function yoloMarkerHtml(session, auto, options = {}) {
   const yoloAttr = ` data-yolo-session="${esc(session)}"`;
   const toggleAttr = options.toggle && !readOnlyMode ? ` data-auto-session="${esc(session)}"` : '';
   const rotationStyle = options.yoloWorking ? ` style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}"` : '';
-  const stateText = auto ? 'on here' : (locked ? 'on elsewhere' : 'off');
+  const stateText = auto ? t('yolo.state.onHere') : (locked ? t('yolo.state.onElsewhere') : t('yolo.state.off'));
   const title = options.toggle && readOnlyMode
-    ? `YOLO ${stateText} for ${sessionLabel(session)}; readonly access`
-    : (options.toggle ? `YOLO ${stateText} for ${sessionLabel(session)}` : `YOLO ${stateText}`);
+    ? t('yolo.titleReadonly', {state: stateText, session: sessionLabel(session)})
+    : (options.toggle ? t('yolo.titleForSession', {state: stateText, session: sessionLabel(session)}) : t('yolo.title', {state: stateText}));
   return `<span class="${esc(classes.join(' '))}"${yoloAttr}${toggleAttr}${rotationStyle} title="${esc(title)}">${esc(t('brand.marker'))}</span>`;
 }
 
@@ -10486,9 +10584,9 @@ function sessionWorkDescription(session, info, limit = 96) {
   const git = project.git;
   const pr = displayPullRequest(info);
   if (pr?.number) {
-    const status = pullRequestStatusLabel(pr);
+    const status = pullRequestStatusDisplay(pr);
     const title = pr.title || pr.description || '';
-    const prefix = `#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`;
+    const prefix = `#${pr.number}${status ? ` ${status}` : ''}`;
     return shortText(title ? `${prefix}: ${title}` : prefix, limit);
   }
   const linear = project.linear || [];
@@ -10510,7 +10608,7 @@ function sessionTabDescription(session, info) {
 }
 
 function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
-  if (isInfoItem(item)) return 'all branches sorted by recent activity';
+  if (isInfoItem(item)) return t('tab.info.detail');
   const project = info?.project || {};
   const git = project.git;
   const parts = [];
@@ -10521,8 +10619,8 @@ function tabMenuDetailText(item, info = transcriptMeta.sessions?.[item]) {
   const linear = (project.linear || []).map(issue => issue.identifier).filter(Boolean).join(', ');
   if (linear) parts.push(linear);
   if (pr?.number) {
-    const status = pullRequestStatusLabel(pr);
-    parts.push(`#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`);
+    const status = pullRequestStatusDisplay(pr);
+    parts.push(`#${pr.number}${status ? ` ${status}` : ''}`);
   }
   const desc = sessionWorkDescription(item, info, 180);
   if (desc && !parts.includes(desc)) parts.push(desc);
@@ -10589,14 +10687,14 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const pane = info?.selected_pane;
   const description = sessionWorkDescription(session, info, 220);
   const title = `${sessionLabel(session)} · ${projectDirName(session, info)}`;
-  const subtitle = description || git?.branch || pane?.current_path || 'no checkout detected';
+  const subtitle = description || git?.branch || pane?.current_path || t('git.noCheckout');
   const rows = [];
   const stateValue = `${sessionStateHtml(state)} <span class="meta-muted">${esc(state.reason)}</span>`;
   const autoPayload = autoApproveStates.get(session);
   const autoElsewhere = autoApproveEnabledElsewhere(autoPayload);
-  const autoText = autoEnabled ? 'YOLO on' : (autoElsewhere ? 'YOLO elsewhere' : '');
-  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || 'not detected');
-  const displayPath = panelFullPath(session, info) || pane?.current_path || 'not available';
+  const autoText = autoEnabled ? t('yolo.on') : (autoElsewhere ? t('yolo.elsewhere') : '');
+  const agentValue = agentKind ? `${agentName(agentKind)}${autoText ? ` · ${autoText}` : ''}` : (autoText || t('agent.notDetected'));
+  const displayPath = panelFullPath(session, info) || pane?.current_path || t('common.notAvailable');
   rows.push(popoverPairRow(t('popover.state'), stateValue, t('popover.agent'), agentValue));
   const activity = sessionActivitySummary(session);
   if (activity?.local) rows.push(popoverRow(yoagentTabLabel(), esc(activity.local)));
@@ -10690,10 +10788,10 @@ function linearDescriptionsInlineHtml(issues) {
 
 function gitStatusText(git) {
   const parts = [];
-  if (Number.isFinite(git.dirty_count)) parts.push(`${git.dirty_count} dirty`);
-  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`${git.ahead} ahead`);
-  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`${git.behind} behind`);
-  return esc(parts.length ? parts.join(' · ') : 'clean');
+  if (Number.isFinite(git.dirty_count)) parts.push(t('git.dirty', {count: git.dirty_count}));
+  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(t('git.ahead', {count: git.ahead}));
+  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(t('git.behind', {count: git.behind}));
+  return esc(parts.length ? parts.join(' · ') : t('git.clean'));
 }
 
 function branchLinkHtml(git, branchName) {
@@ -10716,14 +10814,23 @@ function pullRequestLinkForBranch(git, branch) {
   if (!pr?.number) return '';
   const url = pr.url || (repoUrl ? `${repoUrl}/pull/${pr.number}` : '');
   const status = pullRequestStatusDisplay(pr);
-  const label = `#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`;
+  const label = `#${pr.number}${status ? ` ${status}` : ''}`;
   return linkHtml(url, label, pr.title || pr.description || branch.subject || '', pullRequestStatusClass(pr));
 }
 
 function pullRequestTextForBranch(pr, fallback = '') {
   if (!pr?.number) return '';
   const status = pullRequestStatusDisplay(pr);
-  return [`#${pr.number}${status && status !== 'unknown' ? ` ${status}` : ''}`, pr.title || pr.description || fallback].filter(Boolean).join(' ');
+  return [`#${pr.number}${status ? ` ${status}` : ''}`, pr.title || pr.description || fallback].filter(Boolean).join(' ');
+}
+
+function branchUpdatedText(branch) {
+  const ts = Number(branch?.updated_ts || 0);
+  if (Number.isFinite(ts) && ts > 0) {
+    const seconds = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    return relativeTimeFormat(seconds);
+  }
+  return branch?.updated || '';
 }
 
 function otherBranchesHtml(git) {
@@ -10736,7 +10843,7 @@ function otherBranchesHtml(git) {
     const branchLink = branchLinkHtml(git, branch.name);
     const prLink = pullRequestLinkForBranch(git, branch);
     const linearLinks = (branch.linear_ids || []).map(linearIssueLinkHtml).filter(Boolean).join(' ');
-    const meta = [prLink, linearLinks, esc(branch.updated || '')].filter(Boolean).join(' ');
+    const meta = [prLink, linearLinks, esc(branchUpdatedText(branch))].filter(Boolean).join(' ');
     return `<div class="branch-item">
       <div class="branch-name">${branch.current ? `<span class="info-branch-current">${esc(t('branch.current'))}</span> ` : ''}${branchLink}</div>
       <div class="branch-meta">${meta}</div>
@@ -11777,10 +11884,13 @@ function pullRequestStatusDisplay(pr) {
   if (!status) return '';
   const key = status.toLowerCase();
   if (key === 'unknown') return '';
-  if (key === 'merged') return 'MERGED';
-  if (key === 'draft') return 'DRAFT';
-  if (key === 'closed') return 'CLOSED';
-  if (key === 'open') return 'OPEN';
+  if (key === 'merged') return t('pr.status.merged');
+  if (key === 'draft') return t('pr.status.draft');
+  if (key === 'closed') return t('pr.status.closed');
+  if (key === 'open') return t('pr.status.open');
+  if (key.includes('failing')) return t('pr.status.failing');
+  if (key.includes('pending')) return t('pr.status.pending');
+  if (key.includes('passing')) return t('pr.status.passing');
   return status.replace(/\bci\b/gi, 'CI').toUpperCase();
 }
 
@@ -11812,7 +11922,7 @@ function pullRequestStatusIndicatorHtml(session, pr) {
   if (!pr?.number) return '';
   const status = pullRequestStatusLabel(pr).toLowerCase();
   if (!['merged', 'draft', 'closed'].includes(status)) return '';
-  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${pullRequestStatusDisplay(pr)}</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol ${pullRequestStatusClass(pr)}`)}">${esc(pullRequestStatusDisplay(pr))}</span>`;
 }
 
 function pullRequestCiIndicatorHtml(session, pr) {
@@ -11842,9 +11952,9 @@ function pullRequestApprovalClass(decision) {
 }
 
 function pullRequestApprovalLabel(decision) {
-  if (decision === 'APPROVED') return 'Approved';
-  if (decision === 'CHANGES_REQUESTED') return 'Changes';
-  if (decision === 'REVIEW_REQUIRED') return 'Review';
+  if (decision === 'APPROVED') return t('pr.review.approvedShort');
+  if (decision === 'CHANGES_REQUESTED') return t('pr.review.changesShort');
+  if (decision === 'REVIEW_REQUIRED') return t('pr.review.reviewShort');
   return '';
 }
 
@@ -11883,7 +11993,7 @@ function pullRequestLinkHtml(pr) {
 
 function pullRequestAuthorHtml(pr) {
   const author = String(pr?.author_login || '').trim();
-  return author ? `<span class="meta-muted">by ${esc(author)}</span>` : '';
+  return author ? `<span class="meta-muted">${esc(t('pr.authorBy', {author}))}</span>` : '';
 }
 
 function pullRequestColumnLinkHtml(pr) {
@@ -11896,15 +12006,15 @@ function pullRequestChecksHtml(pr) {
   const checks = pr?.checks;
   if (!checks || !checks.state || checks.state === 'unknown') return '';
   const cls = pullRequestCiStatusClass(pr);
-  const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || `CI ${checks.state}`)}</span>`];
+  const parts = [`<span class="meta-pr-status ${cls}">${esc(checks.summary || t('pr.checks.state', {state: checks.state}))}</span>`];
   const checkLinks = items => (items || []).map(item => (
     item?.name ? linkHtml(item.url || '', item.name, item.state || '') : ''
   )).filter(Boolean).join(', ');
   const failing = checkLinks(checks.failing);
   const pending = checkLinks(checks.pending);
-  if (failing) parts.push(`<span class="meta-muted">failing: ${failing}</span>`);
-  if (pending) parts.push(`<span class="meta-muted">pending: ${pending}</span>`);
-  if (Number.isFinite(checks.total)) parts.push(`<span class="meta-muted">${checks.total} checks</span>`);
+  if (failing) parts.push(`<span class="meta-muted">${esc(t('pr.checks.failing'))}: ${failing}</span>`);
+  if (pending) parts.push(`<span class="meta-muted">${esc(t('pr.checks.pending'))}: ${pending}</span>`);
+  if (Number.isFinite(checks.total)) parts.push(`<span class="meta-muted">${esc(t('pr.checks.count', {count: checks.total}))}</span>`);
   return metaJoin(parts);
 }
 
@@ -11936,16 +12046,16 @@ function projectMetaHtml(session, info) {
   const fullPath = panelFullPath(session, info);
   if (!git) {
     if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-    parts.push('<span class="meta-muted">no git checkout detected</span>');
+    parts.push(`<span class="meta-muted">${esc(t('git.noCheckout'))}</span>`);
     return metaJoin(parts);
   }
   const pr = displayPullRequest(info);
   if (pr?.number) parts.push(pullRequestLinkHtml(pr));
   if (git.branch) parts.push(`<span class="meta-branch">${esc(shortBranch(git.branch))}</span>`);
   if (fullPath) parts.push(`<span class="meta-path">${esc(compactHomePath(fullPath))}</span>`);
-  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">behind ${git.behind}</span>`);
-  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">ahead ${git.ahead}</span>`);
-  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">dirty ${git.dirty_count}</span>`);
+  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">${esc(t('git.behind', {count: git.behind}))}</span>`);
+  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">${esc(t('git.ahead', {count: git.ahead}))}</span>`);
+  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">${esc(t('git.dirty', {count: git.dirty_count}))}</span>`);
   if (pr?.number) {
     if (pr.checks?.state && pr.checks.state !== 'unknown') {
       parts.push(`<span class="meta-pr-status ${pullRequestCiStatusClass(pr)}">${esc(pr.checks.summary || pullRequestStatusLabel(pr))}</span>`);
@@ -11964,7 +12074,7 @@ function projectMetaHtml(session, info) {
     const extra = repos.length - 1;
     parts.push(`<button type="button" class="meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: extra}))}" aria-label="${esc(t('detail.repos.more', {count: extra}))}">+${extra} ${esc(t('detail.repos.label'))}</button>`);
   }
-  return parts.length ? metaJoin(parts) : '<span class="meta-muted">git checkout detected</span>';
+  return parts.length ? metaJoin(parts) : `<span class="meta-muted">${esc(t('git.checkoutDetected'))}</span>`;
 }
 
 // C9: popover listing every repo a session touches (focused first), each row: path, branch, dirty,
@@ -11973,9 +12083,9 @@ function repoChipMenuRowHtml(repo) {
   const label = compactHomePath(repo.root || '');
   const bits = [];
   if (repo.branch) bits.push(`<span class="meta-branch">${esc(shortBranch(repo.branch))}</span>`);
-  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) bits.push(`<span class="meta-muted">dirty ${repo.dirty_count}</span>`);
-  if (Number.isFinite(repo.ahead) && repo.ahead > 0) bits.push(`<span class="meta-muted">ahead ${repo.ahead}</span>`);
-  if (Number.isFinite(repo.behind) && repo.behind > 0) bits.push(`<span class="meta-muted">behind ${repo.behind}</span>`);
+  if (Number.isFinite(repo.dirty_count) && repo.dirty_count > 0) bits.push(`<span class="meta-muted">${esc(t('git.dirty', {count: repo.dirty_count}))}</span>`);
+  if (Number.isFinite(repo.ahead) && repo.ahead > 0) bits.push(`<span class="meta-muted">${esc(t('git.ahead', {count: repo.ahead}))}</span>`);
+  if (Number.isFinite(repo.behind) && repo.behind > 0) bits.push(`<span class="meta-muted">${esc(t('git.behind', {count: repo.behind}))}</span>`);
   const primary = repo.primary ? ' repo-chip-row-primary' : '';
   return `<button type="button" class="repo-chip-row${primary}" data-repo-chip-open="${esc(repo.root || '')}">
     <span class="repo-chip-path">${esc(label)}</span>
@@ -14053,24 +14163,22 @@ function createInfoPanel() {
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel())} / ${esc(yoagentTabLabel())}">
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel())}</span></button>
-        <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
+        <div class="info-subtab-group" role="presentation">
+          <button type="button" class="info-subtab" role="tab" data-info-subtab="info"><span class="session-button-dir">${esc(infoTabLabel())}</span></button>
+          <button type="button" class="info-subtab" role="tab" data-info-subtab="yoagent"><span class="session-button-dir">${esc(yoagentTabLabel())}</span></button>
+        </div>
+        <div class="info-subtab-actions">
+          <button type="button" class="info-refresh" data-info-subtab-action="info" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
+          <button type="button" class="info-refresh" data-info-subtab-action="yoagent" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
+        </div>
       </div>
       <div class="info-pane panel-overlay-root">
         <div id="panel-toasts-${infoItemId}" class="panel-toast-stack"></div>
         <div class="info-subview" data-info-subview="info">
-          <div class="transcript-head info-head">
-            <span>${esc(infoTabLabel())}</span>
-            <button type="button" class="info-refresh" data-info-refresh title="${esc(t('info.refreshRepo'))}">${esc(t('info.refreshRepo'))}</button>
-          </div>
           <div id="info-content" class="info-list"></div>
           <div id="info-watched" class="info-watched"></div>
         </div>
         <div class="info-subview yoagent-subview" data-info-subview="yoagent">
-          <div class="transcript-head info-head">
-            <span>${esc(yoagentTabLabel())}</span>
-            <button type="button" class="info-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
-          </div>
           <div id="yoagent-content" class="info-list yoagent-list"></div>
         </div>
       </div>`;
@@ -14144,6 +14252,9 @@ function applyInfoSubTab(panel = document.getElementById(`panel-${infoItemId}`))
   });
   panel.querySelectorAll('[data-info-subview]').forEach(view => {
     view.classList.toggle('active', view.dataset.infoSubview === infoPanelSubTab);
+  });
+  panel.querySelectorAll('[data-info-subtab-action]').forEach(button => {
+    button.hidden = button.dataset.infoSubtabAction !== infoPanelSubTab;
   });
 }
 
@@ -15177,9 +15288,13 @@ function sessionFilesRefsQuery() {
 }
 
 const diffRefSuggestionLimit = 60;
-const diffRefDatalistCompactLimit = 40;
-const diffRefDatalistFullLimit = 80;
-let diffRefDatalistIdCounter = 0;
+const diffRefPopoverCompactLimit = 12;
+const diffRefPopoverFullLimit = 18;
+let diffRefPopover = null;
+let diffRefPopoverInput = null;
+let diffRefPopoverItemsCurrent = [];
+let diffRefPopoverActiveIndex = -1;
+let diffRefPopoverListenersInstalled = false;
 
 // C6: commit suggestions. With a `repo`, draw only from THAT repo's refs_by_repo so a picker never offers
 // a SHA from a sibling repo. With no repo (legacy/global callers), flatten every repo's refs as before.
@@ -15243,8 +15358,8 @@ function canonicalDiffRefValue(value, suggestions) {
 
 function diffRefOptionItems(value, options = {}) {
   const rawLimit = Number(options.maxItems);
-  const defaultLimit = options.compact ? diffRefDatalistCompactLimit : diffRefDatalistFullLimit;
-  const maxItems = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : defaultLimit, diffRefDatalistFullLimit));
+  const defaultLimit = options.compact ? diffRefPopoverCompactLimit : diffRefPopoverFullLimit;
+  const maxItems = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : defaultLimit, diffRefSuggestionLimit));
   const suggestions = Array.isArray(options.suggestions) ? options.suggestions : diffRefSuggestions();
   const items = suggestions.slice(0, maxItems);
   if (value && !items.some(item => diffRefOptionMatches(value, item))) {
@@ -15260,12 +15375,21 @@ function diffRefSelectOptionsHtml(value, options = {}) {
   }).join('');
 }
 
-function diffRefDatalistOptionsHtml(value, options = {}) {
-  return diffRefOptionItems(value, options).map(item => {
-    const label = diffRefOptionLabel(item);
-    const optionValue = diffRefOptionMatches(value, item) || !diffRefShaLike(item.ref) ? item.ref : (item.short || item.ref);
-    return `<option value="${esc(optionValue)}" label="${esc(label)}">${esc(label)}</option>`;
-  }).join('');
+function diffRefPopoverItems(value, options = {}) {
+  const rawLimit = Number(options.maxItems);
+  const defaultLimit = options.compact ? diffRefPopoverCompactLimit : diffRefPopoverFullLimit;
+  const maxItems = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : defaultLimit, diffRefSuggestionLimit));
+  const suggestions = Array.isArray(options.suggestions) ? options.suggestions : diffRefSuggestions();
+  const query = cleanDiffRef(value, '').toLowerCase();
+  const showAll = options.showAll === true || !query;
+  const matches = showAll
+    ? suggestions
+    : suggestions.filter(item => {
+      const label = diffRefOptionLabel(item).toLowerCase();
+      const search = [item?.ref, item?.short, item?.subject, label].filter(Boolean).join(' ').toLowerCase();
+      return diffRefOptionMatches(query, item) || search.includes(query);
+    });
+  return matches.slice(0, maxItems);
 }
 
 function diffRefFromSuggestions(repo) {
@@ -15282,12 +15406,6 @@ function diffRefToSuggestions(fromRef = diffRefFrom, repo) {
   return ordered.slice(0, Math.max(1, fromIndex));
 }
 
-function nextDiffRefDatalistId(repo, side) {
-  diffRefDatalistIdCounter += 1;
-  const normalized = String(repo || 'global').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 36) || 'repo';
-  return `diff-ref-${side}-${normalized}-${diffRefDatalistIdCounter}`;
-}
-
 function diffRefInputDisplayValue(value, suggestions) {
   const ref = cleanDiffRef(value, '');
   const match = (Array.isArray(suggestions) ? suggestions : []).find(item => diffRefOptionMatches(ref, item));
@@ -15301,30 +15419,178 @@ function diffRefInputHtml(options = {}) {
   const fallback = side === 'to' ? 'current' : 'HEAD';
   const value = cleanDiffRef(options.value, fallback);
   const suggestions = Array.isArray(options.suggestions) ? options.suggestions : (side === 'to' ? diffRefToSuggestions(diffRefFrom, repo) : diffRefFromSuggestions(repo));
-  const listId = nextDiffRefDatalistId(repo, side);
   const dataAttr = side === 'to' ? 'data-diff-ref-to' : 'data-diff-ref-from';
   const aria = options.aria || (side === 'to' ? t('diff.ref.to.aria') : t('diff.ref.from.aria'));
-  return `<input class="diff-ref-input" type="text" value="${esc(diffRefInputDisplayValue(value, suggestions))}" list="${esc(listId)}" ${dataAttr} data-diff-ref-input autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="${esc(aria)}"><datalist id="${esc(listId)}">${diffRefDatalistOptionsHtml(value, {compact, suggestions})}</datalist>`;
+  return `<input class="diff-ref-input" type="text" value="${esc(diffRefInputDisplayValue(value, suggestions))}" ${dataAttr} data-diff-ref-input autocomplete="off" autocapitalize="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="false" aria-label="${esc(aria)}">`;
 }
 
-function showDiffRefPicker(input) {
-  if (!input?.matches?.('[data-diff-ref-input]') || typeof input.showPicker !== 'function') return;
-  try {
-    input.showPicker();
-  } catch (_) {}
+function diffRefInputContext(input) {
+  const controls = input?.closest?.('[data-diff-ref-controls]');
+  const repo = controls?.dataset?.diffRefRepo || '';
+  const compact = controls?.classList?.contains('compact') === true;
+  const side = input?.matches?.('[data-diff-ref-to]') ? 'to' : 'from';
+  const fromInput = controls?.querySelector?.('[data-diff-ref-from]');
+  const fromValue = side === 'to'
+    ? (canonicalDiffRefValue(fromInput?.value, diffRefFromSuggestions(repo)) || fromInput?.value || repoDiffRefs(repo).from)
+    : repoDiffRefs(repo).from;
+  const suggestions = side === 'to' ? diffRefToSuggestions(fromValue, repo) : diffRefFromSuggestions(repo);
+  return {controls, repo, compact, side, suggestions};
+}
+
+function ensureDiffRefPopover() {
+  if (diffRefPopover) return diffRefPopover;
+  diffRefPopover = document.createElement('div');
+  diffRefPopover.className = 'diff-ref-suggestion-popover';
+  diffRefPopover.id = 'diff-ref-suggestion-popover';
+  diffRefPopover.role = 'listbox';
+  diffRefPopover.hidden = true;
+  diffRefPopover.addEventListener('pointerdown', event => {
+    event.preventDefault();
+  });
+  diffRefPopover.addEventListener('click', event => {
+    const option = event.target.closest?.('[data-diff-ref-option-index]');
+    if (!option || !diffRefPopover.contains(option)) return;
+    event.preventDefault();
+    chooseDiffRefPopoverOption(Number(option.dataset.diffRefOptionIndex));
+  });
+  document.body?.appendChild(diffRefPopover);
+  installDiffRefPopoverListeners();
+  return diffRefPopover;
+}
+
+function installDiffRefPopoverListeners() {
+  if (diffRefPopoverListenersInstalled) return;
+  document.addEventListener('pointerdown', event => {
+    const target = event.target;
+    if (target?.closest?.('[data-diff-ref-input]') || target?.closest?.('#diff-ref-suggestion-popover')) return;
+    hideDiffRefPopover();
+  });
+  window.addEventListener('resize', () => hideDiffRefPopover());
+  document.addEventListener('scroll', event => {
+    const target = event.target;
+    if (diffRefPopover && (target === diffRefPopover || diffRefPopover.contains(target))) return;
+    if (!diffRefPopoverInput || !diffRefPopover || diffRefPopover.hidden) return;
+    if (!diffRefPopoverInput.isConnected) {
+      hideDiffRefPopover();
+      return;
+    }
+    const context = diffRefInputContext(diffRefPopoverInput);
+    positionDiffRefPopover(diffRefPopoverInput, context.compact);
+  }, true);
+  diffRefPopoverListenersInstalled = true;
+}
+
+function positionDiffRefPopover(input, compact) {
+  const popover = ensureDiffRefPopover();
+  const rect = input?.getBoundingClientRect?.();
+  if (!rect) return;
+  const viewportWidth = Math.max(320, window.innerWidth || document.documentElement?.clientWidth || 1024);
+  const viewportHeight = Math.max(240, window.innerHeight || document.documentElement?.clientHeight || 720);
+  const minWidth = compact ? 420 : 520;
+  const maxWidth = compact ? 620 : 760;
+  const width = Math.min(maxWidth, viewportWidth - 16, Math.max(minWidth, rect.width));
+  const left = Math.max(8, Math.min(rect.left, viewportWidth - width - 8));
+  const top = Math.min(rect.bottom + 4, viewportHeight - 48);
+  popover.style.width = `${Math.round(width)}px`;
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(top)}px`;
+}
+
+function renderDiffRefPopover(input, options = {}) {
+  if (!input?.matches?.('[data-diff-ref-input]') || !document.body) return;
+  const popover = ensureDiffRefPopover();
+  const context = diffRefInputContext(input);
+  const items = diffRefPopoverItems(input.value, {
+    compact: context.compact,
+    suggestions: context.suggestions,
+    showAll: options.showAll === true,
+  });
+  diffRefPopoverInput = input;
+  diffRefPopoverItemsCurrent = items;
+  diffRefPopoverActiveIndex = items.findIndex(item => diffRefOptionMatches(input.value, item));
+  popover.classList.toggle('compact', context.compact);
+  if (!items.length) {
+    hideDiffRefPopover();
+    return;
+  }
+  popover.innerHTML = items.map((item, index) => {
+    const active = index === diffRefPopoverActiveIndex;
+    const ref = item?.short || item?.ref || '';
+    const subject = item?.subject || item?.ref || '';
+    const label = diffRefOptionLabel(item);
+    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span></button>`;
+  }).join('');
+  positionDiffRefPopover(input, context.compact);
+  popover.hidden = false;
+  input.setAttribute('aria-expanded', 'true');
+  input.setAttribute('aria-controls', popover.id);
+}
+
+function hideDiffRefPopover() {
+  if (diffRefPopover) diffRefPopover.hidden = true;
+  if (diffRefPopoverInput) {
+    diffRefPopoverInput.setAttribute('aria-expanded', 'false');
+    diffRefPopoverInput.removeAttribute('aria-controls');
+  }
+  diffRefPopoverInput = null;
+  diffRefPopoverItemsCurrent = [];
+  diffRefPopoverActiveIndex = -1;
+}
+
+function syncDiffRefPopoverActiveOption() {
+  if (!diffRefPopover || diffRefPopover.hidden) return;
+  diffRefPopover.querySelectorAll?.('[data-diff-ref-option-index]')?.forEach((button, index) => {
+    const active = index === diffRefPopoverActiveIndex;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+    if (active) button.scrollIntoView?.({block: 'nearest'});
+  });
+}
+
+function chooseDiffRefPopoverOption(index) {
+  const input = diffRefPopoverInput;
+  const item = diffRefPopoverItemsCurrent[index];
+  if (!input || !item) return false;
+  const context = diffRefInputContext(input);
+  input.value = diffRefInputDisplayValue(item.ref, context.suggestions);
+  hideDiffRefPopover();
+  commitDiffRefControls(context.controls || input.closest('[data-diff-ref-controls]'));
+  input.focus?.();
+  return true;
+}
+
+function handleDiffRefPopoverKeydown(event, input) {
+  if (!input?.matches?.('[data-diff-ref-input]')) return false;
+  const open = diffRefPopover && !diffRefPopover.hidden && diffRefPopoverInput === input;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (!open) renderDiffRefPopover(input, {showAll: true});
+    if (!diffRefPopoverItemsCurrent.length) return true;
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    diffRefPopoverActiveIndex = diffRefPopoverActiveIndex < 0
+      ? (delta > 0 ? 0 : diffRefPopoverItemsCurrent.length - 1)
+      : (diffRefPopoverActiveIndex + delta + diffRefPopoverItemsCurrent.length) % diffRefPopoverItemsCurrent.length;
+    syncDiffRefPopoverActiveOption();
+    return true;
+  }
+  if (event.key === 'Enter' && open && diffRefPopoverActiveIndex >= 0) {
+    event.preventDefault();
+    chooseDiffRefPopoverOption(diffRefPopoverActiveIndex);
+    return true;
+  }
+  return false;
+}
+
+function showDiffRefPicker(input, options = {}) {
+  if (!input?.matches?.('[data-diff-ref-input]')) return;
+  renderDiffRefPopover(input, {showAll: options.showAll !== false});
 }
 
 function refreshDiffRefToDatalist(controls) {
   if (!controls) return;
-  const repo = controls.dataset?.diffRefRepo || '';
-  const fromInput = controls.querySelector?.('[data-diff-ref-from]');
-  const toInput = controls.querySelector?.('[data-diff-ref-to]');
-  const toListId = toInput?.getAttribute?.('list') || '';
-  const toList = toListId ? controls.querySelector?.(`#${cssEscape(toListId)}`) : null;
-  if (!fromInput || !toInput || !toList) return;
-  const fromValue = canonicalDiffRefValue(fromInput.value, diffRefFromSuggestions(repo)) || fromInput.value;
-  const suggestions = diffRefToSuggestions(fromValue, repo);
-  toList.innerHTML = diffRefDatalistOptionsHtml(toInput.value, {compact: controls.classList?.contains('compact'), suggestions});
+  if (diffRefPopoverInput && controls.contains(diffRefPopoverInput)) {
+    renderDiffRefPopover(diffRefPopoverInput, {showAll: false});
+  }
 }
 
 // C6: FROM/TO controls scoped to one repo (data-diff-ref-repo). Options/selection come from that repo's
@@ -15982,7 +16248,7 @@ function applyFileExplorerChangesHidden() {
   document.body.classList.toggle('file-explorer-changes-hidden', fileExplorerChangesHidden);
   document.querySelectorAll('[data-file-explorer-changes-toggle]').forEach(btn => {
     btn.setAttribute('aria-pressed', fileExplorerChangesHidden ? 'false' : 'true');
-    btn.title = fileExplorerChangesHidden ? 'Show modified files' : 'Hide modified files';
+    btn.title = fileExplorerChangesHidden ? t('changes.show') : t('changes.hide');
   });
 }
 
@@ -15998,7 +16264,7 @@ function createChangesPanel() {
   panel.id = `panel-${changesItemId}`;
   panel.innerHTML = `
       <div class="panel-head changes-panel-head">
-        ${virtualPanelControlsHtml(changesItemId, 'Changes')}
+        ${virtualPanelControlsHtml(changesItemId, itemLabel(changesItemId))}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
@@ -16100,28 +16366,32 @@ function bindChangesPanel(panel) {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
+    renderDiffRefPopover(diffRefInput, {showAll: false});
   });
   panel.addEventListener('focusin', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
-    showDiffRefPicker(diffRefInput);
+    showDiffRefPicker(diffRefInput, {showAll: true});
   });
   panel.addEventListener('pointerdown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
-    showDiffRefPicker(diffRefInput);
+    showDiffRefPicker(diffRefInput, {showAll: true});
   });
   panel.addEventListener('keydown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
+    if (handleDiffRefPopoverKeydown(event, diffRefInput)) return;
     if (event.key === 'Enter') {
       event.preventDefault();
+      hideDiffRefPopover();
       commitDiffRefControls(diffRefInput.closest('[data-diff-ref-controls]') || panel);
       diffRefInput.blur?.();
     } else if (event.key === 'Escape') {
       event.preventDefault();
+      hideDiffRefPopover();
       // C6: revert to THIS repo's current ref, not the global default.
       const escRefs = repoDiffRefs(diffRefInput.closest('[data-diff-ref-controls]')?.dataset?.diffRefRepo || '');
       diffRefInput.value = diffRefInput.matches('[data-diff-ref-from]')
@@ -16834,29 +17104,33 @@ function createFileEditorPanel(item) {
     const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!input) return;
     refreshDiffRefToDatalist(diffRefPanel);
+    renderDiffRefPopover(input, {showAll: false});
   });
   diffRefPanel?.addEventListener('focusin', event => {
     const input = event.target.closest('[data-diff-ref-input]');
     if (!input) return;
     refreshDiffRefToDatalist(diffRefPanel);
-    showDiffRefPicker(input);
+    showDiffRefPicker(input, {showAll: true});
   });
   diffRefPanel?.addEventListener('pointerdown', event => {
     const input = event.target.closest('[data-diff-ref-input]');
     if (!input) return;
     refreshDiffRefToDatalist(diffRefPanel);
-    showDiffRefPicker(input);
+    showDiffRefPicker(input, {showAll: true});
   });
   diffRefPanel?.addEventListener('keydown', event => {
     const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!input) return;
     event.stopPropagation();
+    if (handleDiffRefPopoverKeydown(event, input)) return;
     if (event.key === 'Enter') {
       event.preventDefault();
+      hideDiffRefPopover();
       commitDiffRefControls(diffRefPanel);
       input.blur?.();
     } else if (event.key === 'Escape') {
       event.preventDefault();
+      hideDiffRefPopover();
       // C6: revert to this file's repo refs, not the global default.
       const repo = diffRefPanel?.dataset?.diffRefRepoRendered || '';
       const escRefs = repoDiffRefs(repo);
@@ -19070,30 +19344,80 @@ function createPanel(session) {
   return panel;
 }
 
+function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) {
+  if (!button) return;
+  button.classList.toggle('loading', loading);
+  button.disabled = loading;
+  button.setAttribute('aria-busy', loading ? 'true' : 'false');
+  button.textContent = loading ? t('info.loadingShort') : idleLabel;
+  button.title = loading ? t('info.loadingRepo') : idleTitle;
+  button.setAttribute('aria-label', loading ? t('info.loadingRepo') : idleTitle);
+}
+
+function syncTranscriptMetaLoadingUi() {
+  document.querySelectorAll('[data-info-refresh]').forEach(button => {
+    setMetadataRefreshButtonLoading(button, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
+  });
+  const metaRefreshButton = refreshMeta;
+  if (metaRefreshButton) {
+    metaRefreshButton.classList.toggle('loading', transcriptMetaLoading);
+    metaRefreshButton.disabled = transcriptMetaLoading;
+    metaRefreshButton.setAttribute('aria-busy', transcriptMetaLoading ? 'true' : 'false');
+    if (transcriptMetaLoading) {
+      metaRefreshButton.title = t('info.loadingRepo');
+      metaRefreshButton.setAttribute('aria-label', t('info.loadingRepo'));
+    } else {
+      refreshMetaButtonTitle();
+      metaRefreshButton.setAttribute('aria-label', t('meta.refreshAria'));
+    }
+  }
+  document.getElementById(`panel-${infoItemId}`)?.classList.toggle('metadata-loading', transcriptMetaLoading);
+}
+
+function infoMetadataLoadingHtml() {
+  return `<div class="info-empty info-loading" role="status" aria-live="polite">
+    <span class="info-loading-spinner" aria-hidden="true"></span>
+    <span>${esc(t('info.loadingRepo'))}</span>
+  </div>`;
+}
+
 function renderInfoPanel() {
   const node = document.getElementById('info-content');
   if (!node) return;
+  syncTranscriptMetaLoadingUi();
   bindInfoPrContextMenu(node);   // DOIT.29: idempotent — "Watch this PR" on the PR column
   renderWatchedPrs();   // DOIT.29: the Watched PRs section repaints alongside the branch table
   const rows = infoBranchRows();
   if (!rows.length) {
-    node.innerHTML = '<div class="info-empty">No branch metadata loaded yet.</div>';
+    if (transcriptMetaLoading) {
+      node.innerHTML = infoMetadataLoadingHtml();
+      return;
+    }
+    if (transcriptMetaLoadError) {
+      node.innerHTML = `<div class="info-empty info-error">${esc(t('info.loadFailed'))} ${esc(transcriptMetaLoadError)}</div>`;
+      return;
+    }
+    if (!transcriptMetaLoaded) {
+      node.innerHTML = infoMetadataLoadingHtml();
+      return;
+    }
+    node.innerHTML = `<div class="info-empty">${esc(t('info.empty'))}</div>`;
     return;
   }
   const headerCell = (key, label) => {
     const active = infoBranchSort.key === key;
-    const dirLabel = active ? (infoBranchSort.dir === 'asc' ? 'ascending' : 'descending') : 'unsorted';
+    const dirLabel = active ? (infoBranchSort.dir === 'asc' ? t('sort.ascending') : t('sort.descending')) : t('sort.unsorted');
     const marker = active ? (infoBranchSort.dir === 'asc' ? 'A-Z' : 'Z-A') : '';
-    return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="sort ${esc(label)} ${esc(dirLabel)}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
+    return `<button type="button" class="info-sort-button${active ? ' active' : ''}" data-info-sort="${esc(key)}" aria-label="${esc(t('sort.aria', {label, dir: dirLabel}))}"><span>${esc(label)}</span>${marker ? `<span class="info-sort-marker">${marker}</span>` : ''}</button>`;
   };
   const header = `<div class="info-row header">
-    <div class="info-cell">${headerCell('session', 'session-name')}</div>
-    <div class="info-cell">${headerCell('path', 'path')}</div>
-    <div class="info-cell">${headerCell('branch', 'branch')}</div>
+    <div class="info-cell">${headerCell('session', t('info.header.session'))}</div>
+    <div class="info-cell">${headerCell('path', t('info.header.path'))}</div>
+    <div class="info-cell">${headerCell('branch', t('info.header.branch'))}</div>
     <div class="info-cell">${headerCell('pr', 'PR')}</div>
     <div class="info-cell">${headerCell('linear', 'Linear')}</div>
-    <div class="info-cell">${headerCell('desc', 'desc')}</div>
-    <div class="info-cell">${headerCell('updated', 'updated')}</div>
+    <div class="info-cell">${headerCell('desc', t('info.header.desc'))}</div>
+    <div class="info-cell">${headerCell('updated', t('info.header.updated'))}</div>
   </div>`;
   const body = rows.map(row => `<div class="info-row${row.current ? ' current' : ''}">
     <div class="info-cell" title="${esc(row.session)}">${esc(row.session)}</div>
@@ -19102,7 +19426,7 @@ function renderInfoPanel() {
     <div class="info-cell" title="${esc(row.prTitle)}">${row.prHtml}</div>
     <div class="info-cell" title="${esc(row.linearTitle)}">${row.linearHtml}</div>
     <div class="info-cell" title="${esc(row.desc)}">${esc(row.desc)}</div>
-    <div class="info-cell" title="${esc(row.updated)}">${esc(row.updated)}</div>
+    <div class="info-cell" title="${esc(row.updatedTitle || row.updated)}">${esc(row.updatedText || row.updated)}</div>
   </div>`).join('');
   node.innerHTML = header + body;
   node.querySelectorAll('[data-info-sort]').forEach(button => {
@@ -19131,7 +19455,7 @@ function normalizeWatchedPrRef(entry) {
 }
 
 function watchedPrStatusText(pr) {
-  return pullRequestStatusDisplay(pr) || (pr?.state ? String(pr.state).toUpperCase() : 'UNKNOWN');
+  return pullRequestStatusDisplay(pr) || (pr?.state ? String(pr.state).toUpperCase() : t('common.unknown'));
 }
 
 // The Watched PRs section of YO!info — PRs tracked independent of any open session's branch. Reuses
@@ -19396,6 +19720,8 @@ function rawInfoBranchRows() {
         branchHtml: branchLinkHtml(git, branch.name),
         desc,
         updated: branch.updated || '',
+        updatedText: branchUpdatedText(branch),
+        updatedTitle: branch.updated || branchUpdatedText(branch),
         updatedTs: Number.isFinite(branch.updated_ts) ? branch.updated_ts : 0,
         prHtml: prHtml || '',
         prTitle,
@@ -19873,24 +20199,24 @@ function showUploadResult(session, payload, inserted) {
   if (!node) return;
   const files = payload.files || [];
   const paths = files.map(file => file.path).filter(Boolean);
-  const label = files.length === 1 ? (files[0].saved_name || files[0].name || 'file') : `${files.length} files`;
+  const label = files.length === 1 ? (files[0].saved_name || files[0].name || t('popover.kind.file')) : t('files.count', {count: files.length});
   const target = payload.target_dir || '';
-  const insertedText = inserted ? '; path inserted' : '; terminal not connected';
+  const uploadResultKey = inserted ? 'upload.resultInserted' : 'upload.resultTerminalDisconnected';
   const expiresAt = Date.now() + toastDurationMs;
   const newEntries = files.length
     ? files.map(file => {
-      const name = file.saved_name || file.name || 'file';
+      const name = file.saved_name || file.name || t('popover.kind.file');
       const destination = pathBasename(file.path || target) || target;
       return {
         id: ++uploadResultSequence,
-        text: `uploaded ${name} to ${destination}${insertedText}`,
+        text: t(uploadResultKey, {name, destination}),
         path: file.path || '',
         expiresAt,
       };
     })
     : [{
       id: ++uploadResultSequence,
-      text: `uploaded ${label} to ${pathBasename(target) || target}${insertedText}`,
+      text: t(uploadResultKey, {name: label, destination: pathBasename(target) || target}),
       path: target,
       expiresAt,
     }];
@@ -19902,9 +20228,9 @@ function showUploadResult(session, payload, inserted) {
 
 function ensureUploadResultShell(session, node) {
   return ensureToastShell(node, {
-    title: `YOLOmux - ${serverHostname}: ${sessionLabel(session)} upload`,
-    closeLabel: 'Hide upload status',
-    keepLabel: 'Keep upload status visible',
+    title: t('upload.resultTitle', {host: serverHostname, session: sessionLabel(session)}),
+    closeLabel: t('upload.hideStatus'),
+    keepLabel: t('upload.keepStatus'),
     onKeep: () => keepUploadResult(session),
     onClose: () => hideUploadResult(session),
   });
@@ -20479,58 +20805,74 @@ function maybeHandleServerVersionChange(serverVersion) {
 }
 
 async function refreshTranscripts() {
-  try {
-    const response = await apiFetch('/api/transcripts');
-    transcriptMeta = await response.json();
-    maybeHandleServerVersionChange(transcriptMeta.server_version);
-    // #39: keep agent login status fresh so the new-session picker re-enables an agent after login.
-    if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
-    updateMetadataBadgePulses(transcriptMeta);
-    const previousActive = activeSessions.slice();
-    const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
-    await loadAutoStatuses();
-    if (sessionsChanged) renderPanels(previousActive);
-    renderSessionButtons();
-    renderInfoPanel();
-    renderYoagentPanel();
-    refreshActivitySummary({silent: true});
-    for (const session of activeSessions.filter(isTmuxSession)) {
-      const meta = document.getElementById(`meta-${session}`);
-      const preview = document.getElementById(`transcript-${session}`);
-      const info = transcriptMeta.sessions?.[session];
-      const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
-      updatePanelHeader(session, info);
-      if (meta) {
-        meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
-        meta.removeAttribute('title');
+  if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;
+  transcriptMetaLoading = true;
+  transcriptMetaLoadError = '';
+  syncTranscriptMetaLoadingUi();
+  renderInfoPanel();
+  transcriptMetaRefreshPromise = (async () => {
+    try {
+      const response = await apiFetch('/api/transcripts');
+      transcriptMeta = await response.json();
+      transcriptMetaLoaded = true;
+      transcriptMetaLoadError = '';
+      maybeHandleServerVersionChange(transcriptMeta.server_version);
+      // #39: keep agent login status fresh so the new-session picker re-enables an agent after login.
+      if (transcriptMeta.agentAuth) agentAuth = transcriptMeta.agentAuth;
+      updateMetadataBadgePulses(transcriptMeta);
+      const previousActive = activeSessions.slice();
+      const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+      await loadAutoStatuses();
+      if (sessionsChanged) renderPanels(previousActive);
+      renderSessionButtons();
+      renderInfoPanel();
+      renderYoagentPanel();
+      refreshActivitySummary({silent: true});
+      for (const session of activeSessions.filter(isTmuxSession)) {
+        const meta = document.getElementById(`meta-${session}`);
+        const preview = document.getElementById(`transcript-${session}`);
+        const info = transcriptMeta.sessions?.[session];
+        const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
+        updatePanelHeader(session, info);
+        if (meta) {
+          meta.innerHTML = stripTitleAttrs(projectMetaHtml(session, info));
+          meta.removeAttribute('title');
+        }
+        renderSummaryContext(session, info, agent);
+        if (agent?.transcript) {
+          updateTranscriptPathRow(session, agent.transcript);
+          preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
+          refreshTranscriptPreview(session, preview, {preserveScroll: false});
+        } else if (agent?.error) {
+          updateTranscriptPathRow(session, '', agent.error);
+          preview.textContent = agent.error;
+        } else {
+          updateTranscriptPathRow(session, '', 'no agent transcript found');
+          preview.textContent = 'no agent transcript found';
+        }
       }
-      renderSummaryContext(session, info, agent);
-      if (agent?.transcript) {
-        updateTranscriptPathRow(session, agent.transcript);
-        preview.textContent = `session_id: ${agent.session_id || ''}\nstatus: ${agent.status || ''}\n\nloading recent transcript context...`;
-        refreshTranscriptPreview(session, preview, {preserveScroll: false});
-      } else if (agent?.error) {
-        updateTranscriptPathRow(session, '', agent.error);
-        preview.textContent = agent.error;
-      } else {
-        updateTranscriptPathRow(session, '', 'no agent transcript found');
-        preview.textContent = 'no agent transcript found';
+      renderPaneTabStrips();
+      scheduleFileExplorerActiveTabSync();
+      refreshWatchedFilesystem();
+      trackSessionStateChanges();
+      refreshOpenEventLogs();
+    } catch (error) {
+      transcriptMetaLoadError = String(error);
+      for (const session of activeSessions.filter(isTmuxSession)) {
+        const meta = document.getElementById(`meta-${session}`);
+        const preview = document.getElementById(`transcript-${session}`);
+        if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
+        updateTranscriptPathRow(session, '', 'transcript lookup failed');
+        if (preview) preview.textContent = `transcript lookup failed: ${error}`;
       }
+    } finally {
+      transcriptMetaLoading = false;
+      transcriptMetaRefreshPromise = null;
+      syncTranscriptMetaLoadingUi();
+      renderInfoPanel();
     }
-    renderPaneTabStrips();
-    scheduleFileExplorerActiveTabSync();
-    refreshWatchedFilesystem();
-    trackSessionStateChanges();
-    refreshOpenEventLogs();
-  } catch (error) {
-    for (const session of activeSessions.filter(isTmuxSession)) {
-      const meta = document.getElementById(`meta-${session}`);
-      const preview = document.getElementById(`transcript-${session}`);
-      if (meta) meta.innerHTML = `<span class="err">transcript lookup failed</span>`;
-      updateTranscriptPathRow(session, '', 'transcript lookup failed');
-      if (preview) preview.textContent = `transcript lookup failed: ${error}`;
-    }
-  }
+  })();
+  return transcriptMetaRefreshPromise;
 }
 
 function updatePanelHeader(session, info) {
@@ -20863,7 +21205,9 @@ async function showContext(session) {
   const modal = document.getElementById('modal');
   const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
+  modal.classList.remove('about-open');
   title.textContent = `${sessionLabel(session)} transcript tail`;
+  body.innerHTML = '';
   body.textContent = t('common.loading');
   modal.classList.add('open');
   const response = await apiFetch(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
@@ -20920,7 +21264,10 @@ if (tabMetaToggle) {
 }
 if (logoutButton) logoutButton.onclick = () => { window.location.href = '/logout'; };
 notifyToggle.onclick = toggleNotifications;
-document.getElementById('closeModal').onclick = () => document.getElementById('modal').classList.remove('open');
+document.getElementById('closeModal').onclick = () => {
+  const modal = document.getElementById('modal');
+  modal.classList.remove('open', 'about-open');
+};
 document.addEventListener('click', event => {
   if (event.target?.closest?.('.app-menu')) return;
   closeAppMenus();

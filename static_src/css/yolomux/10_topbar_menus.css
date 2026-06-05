@@ -443,9 +443,11 @@ body.theme-light .topbar-language {
 }
 .app-submenu-popover {
   display: none;
+  --app-submenu-inline-offset: 22px;
   width: var(--app-menu-fit-width, max-content);
-  max-width: var(--app-menu-max-inline-size);
-  margin: 2px 0 5px 22px;
+  max-width: calc(100% - var(--app-submenu-inline-offset));
+  margin-block: 2px 5px;
+  margin-inline: var(--app-submenu-inline-offset) 0;
   padding: 4px;
   color: #e7ecf3;
   background: #0d131b;
@@ -629,7 +631,7 @@ body.theme-light .topbar-language {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  max-width: 42ch;
+  max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
   color: #aeb8c7;
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }

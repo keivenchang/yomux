@@ -234,7 +234,7 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
 <section id="modal" class="modal">
   <div class="modal-head">
     <div id="modalTitle">Transcript</div>
-    <button id="closeModal">Close</button>
+    <button id="closeModal" title="Close" aria-label="Close">X</button>
   </div>
   <pre id="modalBody"></pre>
 </section>

@@ -76,9 +76,13 @@ function sessionFilesRefsQuery() {
 }
 
 const diffRefSuggestionLimit = 60;
-const diffRefDatalistCompactLimit = 40;
-const diffRefDatalistFullLimit = 80;
-let diffRefDatalistIdCounter = 0;
+const diffRefPopoverCompactLimit = 12;
+const diffRefPopoverFullLimit = 18;
+let diffRefPopover = null;
+let diffRefPopoverInput = null;
+let diffRefPopoverItemsCurrent = [];
+let diffRefPopoverActiveIndex = -1;
+let diffRefPopoverListenersInstalled = false;
 
 // C6: commit suggestions. With a `repo`, draw only from THAT repo's refs_by_repo so a picker never offers
 // a SHA from a sibling repo. With no repo (legacy/global callers), flatten every repo's refs as before.
@@ -142,8 +146,8 @@ function canonicalDiffRefValue(value, suggestions) {
 
 function diffRefOptionItems(value, options = {}) {
   const rawLimit = Number(options.maxItems);
-  const defaultLimit = options.compact ? diffRefDatalistCompactLimit : diffRefDatalistFullLimit;
-  const maxItems = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : defaultLimit, diffRefDatalistFullLimit));
+  const defaultLimit = options.compact ? diffRefPopoverCompactLimit : diffRefPopoverFullLimit;
+  const maxItems = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : defaultLimit, diffRefSuggestionLimit));
   const suggestions = Array.isArray(options.suggestions) ? options.suggestions : diffRefSuggestions();
   const items = suggestions.slice(0, maxItems);
   if (value && !items.some(item => diffRefOptionMatches(value, item))) {
@@ -159,12 +163,21 @@ function diffRefSelectOptionsHtml(value, options = {}) {
   }).join('');
 }
 
-function diffRefDatalistOptionsHtml(value, options = {}) {
-  return diffRefOptionItems(value, options).map(item => {
-    const label = diffRefOptionLabel(item);
-    const optionValue = diffRefOptionMatches(value, item) || !diffRefShaLike(item.ref) ? item.ref : (item.short || item.ref);
-    return `<option value="${esc(optionValue)}" label="${esc(label)}">${esc(label)}</option>`;
-  }).join('');
+function diffRefPopoverItems(value, options = {}) {
+  const rawLimit = Number(options.maxItems);
+  const defaultLimit = options.compact ? diffRefPopoverCompactLimit : diffRefPopoverFullLimit;
+  const maxItems = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : defaultLimit, diffRefSuggestionLimit));
+  const suggestions = Array.isArray(options.suggestions) ? options.suggestions : diffRefSuggestions();
+  const query = cleanDiffRef(value, '').toLowerCase();
+  const showAll = options.showAll === true || !query;
+  const matches = showAll
+    ? suggestions
+    : suggestions.filter(item => {
+      const label = diffRefOptionLabel(item).toLowerCase();
+      const search = [item?.ref, item?.short, item?.subject, label].filter(Boolean).join(' ').toLowerCase();
+      return diffRefOptionMatches(query, item) || search.includes(query);
+    });
+  return matches.slice(0, maxItems);
 }
 
 function diffRefFromSuggestions(repo) {
@@ -181,12 +194,6 @@ function diffRefToSuggestions(fromRef = diffRefFrom, repo) {
   return ordered.slice(0, Math.max(1, fromIndex));
 }
 
-function nextDiffRefDatalistId(repo, side) {
-  diffRefDatalistIdCounter += 1;
-  const normalized = String(repo || 'global').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 36) || 'repo';
-  return `diff-ref-${side}-${normalized}-${diffRefDatalistIdCounter}`;
-}
-
 function diffRefInputDisplayValue(value, suggestions) {
   const ref = cleanDiffRef(value, '');
   const match = (Array.isArray(suggestions) ? suggestions : []).find(item => diffRefOptionMatches(ref, item));
@@ -200,30 +207,178 @@ function diffRefInputHtml(options = {}) {
   const fallback = side === 'to' ? 'current' : 'HEAD';
   const value = cleanDiffRef(options.value, fallback);
   const suggestions = Array.isArray(options.suggestions) ? options.suggestions : (side === 'to' ? diffRefToSuggestions(diffRefFrom, repo) : diffRefFromSuggestions(repo));
-  const listId = nextDiffRefDatalistId(repo, side);
   const dataAttr = side === 'to' ? 'data-diff-ref-to' : 'data-diff-ref-from';
   const aria = options.aria || (side === 'to' ? t('diff.ref.to.aria') : t('diff.ref.from.aria'));
-  return `<input class="diff-ref-input" type="text" value="${esc(diffRefInputDisplayValue(value, suggestions))}" list="${esc(listId)}" ${dataAttr} data-diff-ref-input autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="${esc(aria)}"><datalist id="${esc(listId)}">${diffRefDatalistOptionsHtml(value, {compact, suggestions})}</datalist>`;
+  return `<input class="diff-ref-input" type="text" value="${esc(diffRefInputDisplayValue(value, suggestions))}" ${dataAttr} data-diff-ref-input autocomplete="off" autocapitalize="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="false" aria-label="${esc(aria)}">`;
 }
 
-function showDiffRefPicker(input) {
-  if (!input?.matches?.('[data-diff-ref-input]') || typeof input.showPicker !== 'function') return;
-  try {
-    input.showPicker();
-  } catch (_) {}
+function diffRefInputContext(input) {
+  const controls = input?.closest?.('[data-diff-ref-controls]');
+  const repo = controls?.dataset?.diffRefRepo || '';
+  const compact = controls?.classList?.contains('compact') === true;
+  const side = input?.matches?.('[data-diff-ref-to]') ? 'to' : 'from';
+  const fromInput = controls?.querySelector?.('[data-diff-ref-from]');
+  const fromValue = side === 'to'
+    ? (canonicalDiffRefValue(fromInput?.value, diffRefFromSuggestions(repo)) || fromInput?.value || repoDiffRefs(repo).from)
+    : repoDiffRefs(repo).from;
+  const suggestions = side === 'to' ? diffRefToSuggestions(fromValue, repo) : diffRefFromSuggestions(repo);
+  return {controls, repo, compact, side, suggestions};
+}
+
+function ensureDiffRefPopover() {
+  if (diffRefPopover) return diffRefPopover;
+  diffRefPopover = document.createElement('div');
+  diffRefPopover.className = 'diff-ref-suggestion-popover';
+  diffRefPopover.id = 'diff-ref-suggestion-popover';
+  diffRefPopover.role = 'listbox';
+  diffRefPopover.hidden = true;
+  diffRefPopover.addEventListener('pointerdown', event => {
+    event.preventDefault();
+  });
+  diffRefPopover.addEventListener('click', event => {
+    const option = event.target.closest?.('[data-diff-ref-option-index]');
+    if (!option || !diffRefPopover.contains(option)) return;
+    event.preventDefault();
+    chooseDiffRefPopoverOption(Number(option.dataset.diffRefOptionIndex));
+  });
+  document.body?.appendChild(diffRefPopover);
+  installDiffRefPopoverListeners();
+  return diffRefPopover;
+}
+
+function installDiffRefPopoverListeners() {
+  if (diffRefPopoverListenersInstalled) return;
+  document.addEventListener('pointerdown', event => {
+    const target = event.target;
+    if (target?.closest?.('[data-diff-ref-input]') || target?.closest?.('#diff-ref-suggestion-popover')) return;
+    hideDiffRefPopover();
+  });
+  window.addEventListener('resize', () => hideDiffRefPopover());
+  document.addEventListener('scroll', event => {
+    const target = event.target;
+    if (diffRefPopover && (target === diffRefPopover || diffRefPopover.contains(target))) return;
+    if (!diffRefPopoverInput || !diffRefPopover || diffRefPopover.hidden) return;
+    if (!diffRefPopoverInput.isConnected) {
+      hideDiffRefPopover();
+      return;
+    }
+    const context = diffRefInputContext(diffRefPopoverInput);
+    positionDiffRefPopover(diffRefPopoverInput, context.compact);
+  }, true);
+  diffRefPopoverListenersInstalled = true;
+}
+
+function positionDiffRefPopover(input, compact) {
+  const popover = ensureDiffRefPopover();
+  const rect = input?.getBoundingClientRect?.();
+  if (!rect) return;
+  const viewportWidth = Math.max(320, window.innerWidth || document.documentElement?.clientWidth || 1024);
+  const viewportHeight = Math.max(240, window.innerHeight || document.documentElement?.clientHeight || 720);
+  const minWidth = compact ? 420 : 520;
+  const maxWidth = compact ? 620 : 760;
+  const width = Math.min(maxWidth, viewportWidth - 16, Math.max(minWidth, rect.width));
+  const left = Math.max(8, Math.min(rect.left, viewportWidth - width - 8));
+  const top = Math.min(rect.bottom + 4, viewportHeight - 48);
+  popover.style.width = `${Math.round(width)}px`;
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(top)}px`;
+}
+
+function renderDiffRefPopover(input, options = {}) {
+  if (!input?.matches?.('[data-diff-ref-input]') || !document.body) return;
+  const popover = ensureDiffRefPopover();
+  const context = diffRefInputContext(input);
+  const items = diffRefPopoverItems(input.value, {
+    compact: context.compact,
+    suggestions: context.suggestions,
+    showAll: options.showAll === true,
+  });
+  diffRefPopoverInput = input;
+  diffRefPopoverItemsCurrent = items;
+  diffRefPopoverActiveIndex = items.findIndex(item => diffRefOptionMatches(input.value, item));
+  popover.classList.toggle('compact', context.compact);
+  if (!items.length) {
+    hideDiffRefPopover();
+    return;
+  }
+  popover.innerHTML = items.map((item, index) => {
+    const active = index === diffRefPopoverActiveIndex;
+    const ref = item?.short || item?.ref || '';
+    const subject = item?.subject || item?.ref || '';
+    const label = diffRefOptionLabel(item);
+    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span></button>`;
+  }).join('');
+  positionDiffRefPopover(input, context.compact);
+  popover.hidden = false;
+  input.setAttribute('aria-expanded', 'true');
+  input.setAttribute('aria-controls', popover.id);
+}
+
+function hideDiffRefPopover() {
+  if (diffRefPopover) diffRefPopover.hidden = true;
+  if (diffRefPopoverInput) {
+    diffRefPopoverInput.setAttribute('aria-expanded', 'false');
+    diffRefPopoverInput.removeAttribute('aria-controls');
+  }
+  diffRefPopoverInput = null;
+  diffRefPopoverItemsCurrent = [];
+  diffRefPopoverActiveIndex = -1;
+}
+
+function syncDiffRefPopoverActiveOption() {
+  if (!diffRefPopover || diffRefPopover.hidden) return;
+  diffRefPopover.querySelectorAll?.('[data-diff-ref-option-index]')?.forEach((button, index) => {
+    const active = index === diffRefPopoverActiveIndex;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+    if (active) button.scrollIntoView?.({block: 'nearest'});
+  });
+}
+
+function chooseDiffRefPopoverOption(index) {
+  const input = diffRefPopoverInput;
+  const item = diffRefPopoverItemsCurrent[index];
+  if (!input || !item) return false;
+  const context = diffRefInputContext(input);
+  input.value = diffRefInputDisplayValue(item.ref, context.suggestions);
+  hideDiffRefPopover();
+  commitDiffRefControls(context.controls || input.closest('[data-diff-ref-controls]'));
+  input.focus?.();
+  return true;
+}
+
+function handleDiffRefPopoverKeydown(event, input) {
+  if (!input?.matches?.('[data-diff-ref-input]')) return false;
+  const open = diffRefPopover && !diffRefPopover.hidden && diffRefPopoverInput === input;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (!open) renderDiffRefPopover(input, {showAll: true});
+    if (!diffRefPopoverItemsCurrent.length) return true;
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    diffRefPopoverActiveIndex = diffRefPopoverActiveIndex < 0
+      ? (delta > 0 ? 0 : diffRefPopoverItemsCurrent.length - 1)
+      : (diffRefPopoverActiveIndex + delta + diffRefPopoverItemsCurrent.length) % diffRefPopoverItemsCurrent.length;
+    syncDiffRefPopoverActiveOption();
+    return true;
+  }
+  if (event.key === 'Enter' && open && diffRefPopoverActiveIndex >= 0) {
+    event.preventDefault();
+    chooseDiffRefPopoverOption(diffRefPopoverActiveIndex);
+    return true;
+  }
+  return false;
+}
+
+function showDiffRefPicker(input, options = {}) {
+  if (!input?.matches?.('[data-diff-ref-input]')) return;
+  renderDiffRefPopover(input, {showAll: options.showAll !== false});
 }
 
 function refreshDiffRefToDatalist(controls) {
   if (!controls) return;
-  const repo = controls.dataset?.diffRefRepo || '';
-  const fromInput = controls.querySelector?.('[data-diff-ref-from]');
-  const toInput = controls.querySelector?.('[data-diff-ref-to]');
-  const toListId = toInput?.getAttribute?.('list') || '';
-  const toList = toListId ? controls.querySelector?.(`#${cssEscape(toListId)}`) : null;
-  if (!fromInput || !toInput || !toList) return;
-  const fromValue = canonicalDiffRefValue(fromInput.value, diffRefFromSuggestions(repo)) || fromInput.value;
-  const suggestions = diffRefToSuggestions(fromValue, repo);
-  toList.innerHTML = diffRefDatalistOptionsHtml(toInput.value, {compact: controls.classList?.contains('compact'), suggestions});
+  if (diffRefPopoverInput && controls.contains(diffRefPopoverInput)) {
+    renderDiffRefPopover(diffRefPopoverInput, {showAll: false});
+  }
 }
 
 // C6: FROM/TO controls scoped to one repo (data-diff-ref-repo). Options/selection come from that repo's
@@ -881,7 +1036,7 @@ function applyFileExplorerChangesHidden() {
   document.body.classList.toggle('file-explorer-changes-hidden', fileExplorerChangesHidden);
   document.querySelectorAll('[data-file-explorer-changes-toggle]').forEach(btn => {
     btn.setAttribute('aria-pressed', fileExplorerChangesHidden ? 'false' : 'true');
-    btn.title = fileExplorerChangesHidden ? 'Show modified files' : 'Hide modified files';
+    btn.title = fileExplorerChangesHidden ? t('changes.show') : t('changes.hide');
   });
 }
 
@@ -897,7 +1052,7 @@ function createChangesPanel() {
   panel.id = `panel-${changesItemId}`;
   panel.innerHTML = `
       <div class="panel-head changes-panel-head">
-        ${virtualPanelControlsHtml(changesItemId, 'Changes')}
+        ${virtualPanelControlsHtml(changesItemId, itemLabel(changesItemId))}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
@@ -999,28 +1154,32 @@ function bindChangesPanel(panel) {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
+    renderDiffRefPopover(diffRefInput, {showAll: false});
   });
   panel.addEventListener('focusin', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
-    showDiffRefPicker(diffRefInput);
+    showDiffRefPicker(diffRefInput, {showAll: true});
   });
   panel.addEventListener('pointerdown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
-    showDiffRefPicker(diffRefInput);
+    showDiffRefPicker(diffRefInput, {showAll: true});
   });
   panel.addEventListener('keydown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
+    if (handleDiffRefPopoverKeydown(event, diffRefInput)) return;
     if (event.key === 'Enter') {
       event.preventDefault();
+      hideDiffRefPopover();
       commitDiffRefControls(diffRefInput.closest('[data-diff-ref-controls]') || panel);
       diffRefInput.blur?.();
     } else if (event.key === 'Escape') {
       event.preventDefault();
+      hideDiffRefPopover();
       // C6: revert to THIS repo's current ref, not the global default.
       const escRefs = repoDiffRefs(diffRefInput.closest('[data-diff-ref-controls]')?.dataset?.diffRefRepo || '');
       diffRefInput.value = diffRefInput.matches('[data-diff-ref-from]')
@@ -1733,29 +1892,33 @@ function createFileEditorPanel(item) {
     const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!input) return;
     refreshDiffRefToDatalist(diffRefPanel);
+    renderDiffRefPopover(input, {showAll: false});
   });
   diffRefPanel?.addEventListener('focusin', event => {
     const input = event.target.closest('[data-diff-ref-input]');
     if (!input) return;
     refreshDiffRefToDatalist(diffRefPanel);
-    showDiffRefPicker(input);
+    showDiffRefPicker(input, {showAll: true});
   });
   diffRefPanel?.addEventListener('pointerdown', event => {
     const input = event.target.closest('[data-diff-ref-input]');
     if (!input) return;
     refreshDiffRefToDatalist(diffRefPanel);
-    showDiffRefPicker(input);
+    showDiffRefPicker(input, {showAll: true});
   });
   diffRefPanel?.addEventListener('keydown', event => {
     const input = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!input) return;
     event.stopPropagation();
+    if (handleDiffRefPopoverKeydown(event, input)) return;
     if (event.key === 'Enter') {
       event.preventDefault();
+      hideDiffRefPopover();
       commitDiffRefControls(diffRefPanel);
       input.blur?.();
     } else if (event.key === 'Escape') {
       event.preventDefault();
+      hideDiffRefPopover();
       // C6: revert to this file's repo refs, not the global default.
       const repo = diffRefPanel?.dataset?.diffRefRepoRendered || '';
       const escRefs = repoDiffRefs(repo);

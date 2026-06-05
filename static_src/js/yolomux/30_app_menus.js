@@ -25,6 +25,55 @@ function menuGroups(...groups) {
   return items;
 }
 
+const aboutLinkedInUrl = 'https://www.linkedin.com/in/keivenchang/';
+
+function aboutDateTimeText() {
+  if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;
+  try {
+    return new Date().toLocaleString([], {dateStyle: 'medium', timeStyle: 'medium'});
+  } catch (_) {
+    return new Date().toString();
+  }
+}
+
+function openAboutLinkedIn() {
+  window.open(aboutLinkedInUrl, '_blank', 'noopener,noreferrer');
+}
+
+function aboutCommitShaText() {
+  return bootstrap.versionCommit || bootstrap.commitSha || bootstrap.commit_sha || bootstrap.gitSha || bootstrap.git_sha || '';
+}
+
+function aboutBrandHtml() {
+  return `<span class="about-brand-yo" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}">${esc(t('brand.wordmark.yo'))}</span><span class="about-brand-lo">${esc(t('brand.wordmark.lo'))}</span><span class="about-brand-m">m</span><span class="about-brand-u">u</span><span class="about-brand-x">x</span>`;
+}
+
+function showAboutModal() {
+  const modal = document.getElementById('modal');
+  const title = document.getElementById('modalTitle');
+  const body = document.getElementById('modalBody');
+  const close = document.getElementById('closeModal');
+  if (!modal || !title || !body) return;
+  title.textContent = t('menu.help.about');
+  if (close) {
+    close.title = t('common.close');
+    close.setAttribute('aria-label', t('common.close'));
+  }
+  modal.classList.add('about-open');
+  const version = bootstrap.version || '';
+  const sha = aboutCommitShaText();
+  body.innerHTML = `<div class="about-modal">
+    <div class="about-brand-row">${aboutBrandHtml()}${version ? `<span class="about-version">${esc(version)}</span>` : ''}</div>
+    <dl class="about-details">
+      <div><dt>${esc(t('menu.help.about.datetime'))}</dt><dd>${esc(aboutDateTimeText())}</dd></div>
+      <div><dt>SHA</dt><dd>${esc(sha || t('common.unknown'))}</dd></div>
+      <div><dt>${esc(t('menu.help.about.version'))}</dt><dd>${esc(version || t('common.unknown'))}</dd></div>
+    </dl>
+    <a class="about-author" href="${esc(aboutLinkedInUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.author'))}</a>
+  </div>`;
+  modal.classList.add('open');
+}
+
 function currentActiveMenuItem() {
   if (focusedPanelItem && itemIsActivePaneTab(focusedPanelItem)) return focusedPanelItem;
   if (focusedTerminal && itemIsActivePaneTab(focusedTerminal)) return focusedTerminal;
@@ -62,9 +111,9 @@ function menuTabDetail(item) {
 function changesTabDetail() {
   const count = sessionFilesPayload.files?.length || 0;
   const session = sessionFilesPayload.session || sessionFilesTargetSession();
-  if (sessionFilesLoading) return 'loading AI-changed files';
-  if (count) return `${count} changed file${count === 1 ? '' : 's'}${session ? ` for ${sessionLabel(session)}` : ''}`;
-  return session ? `no AI-changed files loaded for ${sessionLabel(session)}` : 'AI-changed files';
+  if (sessionFilesLoading) return t('changes.loading');
+  if (count) return `${tPlural('changes.fileCount', count)}${session ? t('changes.inSession', {session: sessionLabel(session)}) : ''}`;
+  return session ? t('changes.emptyAi') : t('changes.title');
 }
 
 function menuTabRowHtml(item, options = {}) {
@@ -613,6 +662,9 @@ function appMenuTree() {
             disabled: !projectReadmePath(),
             detail: t('menu.help.localReadme'),
           }),
+        ],
+        [
+          menuCommand(t('menu.help.about'), showAboutModal),
         ]
       ),
     },
@@ -794,6 +846,12 @@ function measureAppMenuContentWidth(popover) {
   // C14: a standalone submenu popover (measured on its own, with no .open parent) matches the base
   // `.app-submenu-popover { display:none }` rule and would measure 0 — force it visible for measurement.
   if (clone.classList?.contains('app-submenu-popover')) clone.style.display = 'block';
+  clone.querySelectorAll('.app-submenu-popover').forEach(submenu => {
+    submenu.style.display = 'block';
+    submenu.style.width = 'max-content';
+    submenu.style.minWidth = '0';
+    submenu.style.maxWidth = 'none';
+  });
   clone.querySelectorAll('.app-menu-command').forEach(command => {
     command.style.width = 'max-content';
     command.style.minWidth = '0';

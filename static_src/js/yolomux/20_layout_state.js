@@ -803,9 +803,9 @@ const stateDefs = {
 
 function stateDef(key) {
   // #121: resolve the human label through t() on each access so a runtime language switch
-  // re-localizes it (stateDefs is frozen at load). The terse `short` badge codes stay as-is.
+  // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
   const resolvedKey = stateDefs[key] ? key : 'idle';
-  return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`)};
+  return {...stateDefs[resolvedKey], label: t(`state.${resolvedKey}`), short: t(`state.short.${resolvedKey}`)};
 }
 
 function terminalDisconnected(session) {
@@ -932,9 +932,28 @@ function runningAgentCount() {
   return sessions.filter(session => autoApproveScreenIsWorking(autoApproveStates.get(session))).length;
 }
 
+function documentTitleNowMs() {
+  const testNow = Number(window.__yolomuxDocumentTitleNowMs);
+  return Number.isFinite(testNow) ? testNow : Date.now();
+}
+
+function documentTitleIdleMinutes(now) {
+  if (documentTitleIdleSinceMs === null) return 0;
+  const elapsedMs = Math.max(0, now - documentTitleIdleSinceMs);
+  return elapsedMs >= documentTitleIdleThresholdMs ? Math.max(2, Math.floor(elapsedMs / 60000)) : 0;
+}
+
 function updateDocumentTitle() {
   const count = runningAgentCount();
-  document.title = count > 0 ? `YOLOmux [${count} running]` : 'YOLOmux [idle]';
+  if (count > 0) {
+    documentTitleIdleSinceMs = null;
+    document.title = `YOLOmux [${count} running]`;
+    return;
+  }
+  const now = documentTitleNowMs();
+  if (documentTitleIdleSinceMs === null) documentTitleIdleSinceMs = now;
+  const idleMinutes = documentTitleIdleMinutes(now);
+  document.title = idleMinutes ? `YOLOmux (idle for ${idleMinutes} min)` : 'YOLOmux [idle]';
 }
 
 // Cross-session "what's going on" rollup for the always-visible top-bar status line: how many tmux
@@ -1022,7 +1041,7 @@ function sessionStateHtml(state) {
   // DOIT.6: 'ready-review' is dropped — the dedicated #NNNN / CI / Approved PR chips already convey
   // "PR ready", so the standalone "PR" state pill is redundant on the tab.
   if (!state || ['working', 'tests-running', 'done', 'disconnected', 'yolo-approval', 'ready-review'].includes(state.key)) return '';
-  return stateBadgeHtml(state.key, state.short, `${state.label}: ${state.reason}`);
+  return stateBadgeHtml(state.key, state.short || stateDef(state.key).short, `${state.label}: ${state.reason}`);
 }
 
 function inactiveTabItems() {
@@ -1864,8 +1883,8 @@ function ensureToastShell(node, options = {}) {
       <div class="toast-header">
         <div class="toast-title"></div>
         <div class="toast-control-row">
-          <button type="button" class="toast-keep" data-toast-keep aria-label="${esc(options.keepLabel || 'Keep alert visible')}">Keep</button>
-          <button type="button" class="toast-close" data-toast-close aria-label="${esc(options.closeLabel || 'Close alert')}">x</button>
+          <button type="button" class="toast-keep" data-toast-keep aria-label="${esc(options.keepLabel || t('toast.keepAlert'))}">${esc(t('toast.keep'))}</button>
+          <button type="button" class="toast-close" data-toast-close aria-label="${esc(options.closeLabel || t('toast.closeAlert'))}">X</button>
         </div>
       </div>
       <div class="toast-body"></div>
@@ -1933,7 +1952,7 @@ function summarizeToastLines(lines, options = {}) {
   const hidden = normalized.slice(toastMaxLines - 1);
   const countdownValues = hidden.map(item => item.countdownMs).filter(Number.isFinite);
   visible.push({
-    text: `+${hidden.length} more`,
+    text: t('common.more', {count: hidden.length}),
     countdownMs: countdownValues.length ? Math.max(...countdownValues) : options.countdownMs,
   });
   return visible;
@@ -2037,13 +2056,13 @@ function removeAttentionAlert(id) {
 }
 
 function sendTestNotification() {
-  showToast(`YOLOmux - ${serverHostname}: notifications enabled`, 'YOLOmux in-page alerts are enabled.', {
+  showToast(t('notify.testTitle', {host: serverHostname}), t('notify.testBody'), {
     container: displayToastContainer(focusedPanelItem),
   });
   if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted') return;
   try {
-    sendBrowserNotification(`YOLOmux - ${serverHostname}: notifications enabled`, {
-      body: 'YOLOmux can send browser notifications from this server.',
+    sendBrowserNotification(t('notify.testTitle', {host: serverHostname}), {
+      body: t('notify.browserTestBody'),
       tag: `yolomux:test:${Date.now()}`,
     });
     postEvent(null, 'notification_test_sent', 'notification test sent', {hostname: serverHostname});

@@ -283,6 +283,8 @@ globalThis.__layoutTestApi = {
   appModifier,
   appMenuTree,
   appShortcutText,
+  aboutBrandHtml,
+  showAboutModal,
   t,
   tPlural,
   yoagentInlineMarkdown,
@@ -339,7 +341,7 @@ globalThis.__layoutTestApi = {
   projectMetaHtml,
   diffRefControlsHtml,
   diffRefSelectOptionsHtml,
-  diffRefDatalistOptionsHtml,
+  diffRefPopoverItems,
   diffRefParams,
   diffRefFromSuggestions,
   diffRefToSuggestions,
@@ -502,6 +504,7 @@ globalThis.__layoutTestApi = {
   keyboardShortcutsHtml,
   openFileEditorItems,
   pullRequestStatusLabel,
+  pullRequestStatusDisplay,
   pullRequestApprovalIndicatorHtml,
   pullRequestCompactBadgesHtml,
   pullRequestNumberIndicatorHtml,
@@ -672,6 +675,10 @@ globalThis.__layoutTestApi = {
   runningAgentCount,
   updateDocumentTitle,
   documentTitleForTest() { return document.title; },
+  setDocumentTitleNowForTest(value) { window.__yolomuxDocumentTitleNowMs = Number(value); },
+  modalClassForTest() { return document.getElementById('modal').className; },
+  modalTitleForTest() { return document.getElementById('modalTitle').textContent; },
+  modalBodyHtmlForTest() { return document.getElementById('modalBody').innerHTML; },
   serialize(slots) {
     return {
       tree: slots[layoutTreeKey],
@@ -1112,6 +1119,36 @@ function makeFileTree(paths) {
   assert.deepStrictEqual(canonical(api.codeMirrorHighlightExtension({})), [], 'missing highlight support falls back without crashing');
   assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), true, 'CodeMirror API validation accepts critical editor/search exports');
   assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}}, EditorView: {theme() {}}}), false, 'CodeMirror API validation rejects partial bundles');
+  const codeMirrorBundlePackage = JSON.parse(fs.readFileSync('prototypes/codemirror-bundle/package.json', 'utf8'));
+  const codeMirrorBundleLock = JSON.parse(fs.readFileSync('prototypes/codemirror-bundle/package-lock.json', 'utf8'));
+  const codeMirrorDirectVersions = {
+    '@codemirror/commands': '6.10.3',
+    '@codemirror/lang-css': '6.3.1',
+    '@codemirror/lang-html': '6.4.11',
+    '@codemirror/lang-javascript': '6.2.5',
+    '@codemirror/lang-json': '6.0.2',
+    '@codemirror/lang-markdown': '6.5.0',
+    '@codemirror/lang-python': '6.2.1',
+    '@codemirror/lang-rust': '6.0.2',
+    '@codemirror/lang-xml': '6.1.0',
+    '@codemirror/lang-yaml': '6.1.3',
+    '@codemirror/language': '6.12.3',
+    '@codemirror/legacy-modes': '6.5.3',
+    '@codemirror/merge': '6.12.1',
+    '@codemirror/search': '6.7.0',
+    '@codemirror/state': '6.6.0',
+    '@codemirror/view': '6.43.0',
+    'codemirror': '6.0.2',
+    'esbuild': '0.28.0',
+  };
+  assert.deepEqual(codeMirrorBundlePackage.dependencies, codeMirrorDirectVersions, 'vendored CodeMirror manifest records exact direct versions');
+  assert.deepEqual(codeMirrorBundleLock.packages[''].dependencies, codeMirrorDirectVersions, 'vendored CodeMirror lockfile root matches the exact direct versions');
+  assert.equal(codeMirrorBundleLock.packages['node_modules/@codemirror/autocomplete'].version, '6.20.2', 'CodeMirror transitive autocomplete version is recorded');
+  assert.equal(codeMirrorBundleLock.packages['node_modules/@codemirror/lint'].version, '6.9.6', 'CodeMirror transitive lint version is recorded');
+  assert.equal(codeMirrorBundleLock.packages['node_modules/@lezer/highlight'].version, '1.2.3', 'Lezer highlight version is recorded');
+  assert.equal(codeMirrorBundleLock.packages['node_modules/style-mod'].version, '4.1.3', 'style-mod version is recorded');
+  assert.equal(codeMirrorBundleLock.packages['node_modules/w3c-keyname'].version, '2.2.8', 'w3c-keyname version is recorded');
+  assert.ok(fs.readFileSync('prototypes/codemirror-entry.js', 'utf8').includes('cd prototypes/codemirror-bundle'), 'CodeMirror rebuild instructions use the checked-in bundle manifest');
   const parserCrashApi = {
     EditorState: {
       create(config) {
@@ -1331,6 +1368,10 @@ function makeFileTree(paths) {
   assert.ok(source.includes('if (current?.loadingPromise === loadingPromise) delete current.loadingPromise;'), 'editor file loading clears stale loading promises after failure or success');
   assert.ok(source.includes('let activitySummaryRequestId = 0;'), 'activity summary refreshes carry a stale-response request id');
   assert.ok(source.includes('if (activitySummaryRefreshing && options.force !== true) return;'), 'activity summary polling skips overlapping non-forced refreshes');
+  assert.ok(source.includes('let transcriptMetaRefreshPromise = null;'), 'metadata refreshes keep one in-flight promise');
+  assert.ok(source.includes('if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;'), 'metadata refreshes dedupe overlapping loads');
+  assert.ok(source.includes('transcriptMetaLoading = true;'), 'metadata refreshes expose a loading state');
+  assert.ok(source.includes('infoMetadataLoadingHtml()'), 'YO!info renders an explicit repo-metadata loading state');
   assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');
   assert.ok(source.includes('setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);'), 'notification signatures use the shared bounded-map helper');
   assert.ok(source.includes('existing?.delay === normalizedDelay'), 'runtime intervals keep their timer phase when refresh delays are unchanged');
@@ -1361,6 +1402,8 @@ function makeFileTree(paths) {
   // (the metadata table + the AI chat/summary) live in the single info panel and the active one is shown.
   assert.ok(/function createInfoPanel\(\)[\s\S]*?class="info-subtabs"[\s\S]*?data-info-subtab="info"[\s\S]*?data-info-subtab="yoagent"/.test(source), '#40: the merged info panel renders a YO!info/YO!agent sub-tab toggle');
   assert.ok(/function createInfoPanel\(\)[\s\S]*?data-info-subview="info"[\s\S]*?id="info-content"[\s\S]*?data-info-subview="yoagent"[\s\S]*?id="yoagent-content"/.test(source), '#40: the merged info panel hosts both the metadata and the YO!agent sub-views');
+  assert.ok(/function createInfoPanel\(\)[\s\S]*?class="info-subtab-actions"[\s\S]*?data-info-subtab-action="info"[\s\S]*?data-info-subtab-action="yoagent"/.test(source), '#40: refresh actions live in the YO!info/YO!agent sub-tab bar');
+  assert.equal(/class="transcript-head info-head"/.test(source), false, '#40: the duplicate sub-view title bar is gone');
   assert.ok(/function createInfoPanel\(\)[\s\S]*?renderInfoPanel\(\);\s*renderYoagentPanel\(\);/.test(source), '#40: the merged panel renders both sub-views on creation');
   assert.equal(source.includes('function createYoagentPanel('), false, '#40: the standalone YO!agent panel builder is gone');
   assert.ok(source.includes('function setInfoSubTab(') && source.includes('function applyInfoSubTab(') && source.includes('async function openInfoSubTab('), '#40: sub-tab switch + open helpers exist');
@@ -1387,6 +1430,10 @@ function makeFileTree(paths) {
   assert.ok(/\.info-subview\s*\{[\s\S]*?display:\s*none/.test(mergedInfoCss), '#40: inactive sub-views are hidden');
   assert.ok(/\.info-subview\.active\s*\{[\s\S]*?display:\s*flex/.test(mergedInfoCss), '#40: the active sub-view is shown');
   assert.ok(/\.info-subtab\.active\s*\{/.test(mergedInfoCss), '#40: the active sub-tab button is styled');
+  assert.ok(/\.info-subtabs\s*\{[\s\S]*?background:\s*var\(--pane-bar-bg/.test(mergedInfoCss), '#40: YO!info sub-tabs use the same active pane bar background token');
+  assert.ok(/\.info-subtab-actions\s*\{[\s\S]*?margin-inline-start:\s*auto/.test(mergedInfoCss), '#40: the active refresh action sits at the right side of the merged sub-tab bar');
+  assert.ok(/\.info-subtab\.active\s*\{[\s\S]*?background:\s*var\(--pane-tab-active-bg/.test(mergedInfoCss), '#40: active YO!info sub-tab uses the pane active-tab color token');
+  assert.ok(/\.info-subtab \.session-button-dir\s*\{[\s\S]*?color:\s*inherit/.test(mergedInfoCss), '#40: YO!info/YO!agent sub-tab labels inherit button contrast instead of forcing white text');
   // #48: the merged info panel gets its own 4-row grid so the YO!info|YO!agent sub-tab row is always
   // visible (a real track), including when the detail header is collapsed.
   assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the info panel reserves a row for the sub-tab toggle');
@@ -1873,8 +1920,10 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('data-diff-ref-from'), 'Changes pane exposes FROM ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-to'), 'Changes pane exposes TO ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-input'), 'Changes pane exposes text ref pickers');
-  assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*list=")[^>]*>/.test(changesHtml), 'Changes pane FROM ref picker is a text input with a dropdown list');
-  assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*list=")[^>]*>/.test(changesHtml), 'Changes pane TO ref picker is a text input with a dropdown list');
+  assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(changesHtml), 'Changes pane FROM ref picker is a text input with the compact suggestion popup');
+  assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(changesHtml), 'Changes pane TO ref picker is a text input with the compact suggestion popup');
+  assert.equal(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*list=)[^>]*>/.test(changesHtml), false, 'FROM ref picker does not use the browser-native datalist popup');
+  assert.equal(/<datalist/.test(changesHtml), false, 'diff ref pickers render no native datalist menu');
   // C6: the FROM/TO controls are now scoped to each repo header (data-diff-ref-repo), not one global pair.
   assert.ok(changesHtml.includes('data-diff-ref-repo="/repo/app"'), 'C6: each repo header carries its own scoped FROM/TO controls');
   const toolbarSlice = changesHtml.slice(changesHtml.indexOf('changes-toolbar'), changesHtml.indexOf('</div>', changesHtml.indexOf('changes-toolbar')));
@@ -1884,16 +1933,20 @@ function makeFileTree(paths) {
   assert.equal(api.diffRefFromSuggestions('/no/such/repo').length, 1, 'C6: an unknown repo offers only HEAD as a FROM base');
   assert.equal(/<select[^>]*data-diff-ref-from/.test(changesHtml), false, 'FROM control is a text input, not a select');
   assert.equal(/<select[^>]*data-diff-ref-to/.test(changesHtml), false, 'TO control is a text input, not a select');
-  assert.ok(changesHtml.includes('older base commit'), 'Changes pane FROM picker includes recent commit subjects');
+  assert.ok(api.diffRefFromSuggestions('/repo/app').some(item => item.subject === 'older base commit'), 'Changes pane FROM picker has recent commit subjects available to the popup');
   assert.equal(api.diffRefFromSuggestions().some(item => item.ref === 'current'), false, 'FROM picker does not suggest current as the older base');
   assert.equal(api.diffRefToSuggestions('HEAD').map(item => item.ref).join(','), 'current', 'TO picker only offers refs newer than the selected FROM base');
   const duplicateShaOptions = api.diffRefSelectOptionsHtml('abc123def4567890', {suggestions: [{ref: 'abc123d', short: 'abc123d', subject: 'same commit'}]});
   assert.equal((duplicateShaOptions.match(/<option/g) || []).length, 1, 'diff ref picker dedupes full SHA and short SHA for the same commit');
   assert.equal(duplicateShaOptions.includes('selected ref'), false, 'diff ref picker does not add a synthetic duplicate for a selected SHA already in suggestions');
   const manyDiffRefs = Array.from({length: 120}, (_, index) => ({ref: `${String(index).padStart(7, 'a')}abcdef`, short: `r${index}`, subject: `commit ${index}`}));
-  assert.equal((api.diffRefDatalistOptionsHtml('', {compact: true, suggestions: manyDiffRefs}).match(/<option/g) || []).length, 40, 'compact diff-ref datalists are capped to avoid huge DOM menus');
-  assert.equal((api.diffRefDatalistOptionsHtml('', {compact: false, suggestions: manyDiffRefs}).match(/<option/g) || []).length, 80, 'full diff-ref datalists are capped to a reasonable menu size');
   const changedFilesSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.equal(api.diffRefPopoverItems('', {compact: true, suggestions: manyDiffRefs, showAll: true}).length, 12, 'compact diff-ref popups are capped to avoid huge menus');
+  assert.equal(api.diffRefPopoverItems('', {compact: false, suggestions: manyDiffRefs, showAll: true}).length, 18, 'full diff-ref popups are capped to a compact menu size');
+  assert.deepEqual(api.diffRefPopoverItems('commit 117', {compact: true, suggestions: manyDiffRefs}).map(item => item.subject), ['commit 117'], 'typing filters the diff-ref popup to matching refs/subjects');
+  assert.ok(changedFilesSource.includes('showDiffRefPicker(diffRefInput, {showAll: true})'), 'clicking/focusing a filled ref input still shows available options');
+  assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*positionDiffRefPopover\(diffRefPopoverInput, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
+  assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
   assert.ok(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), 'modified-file rows open from a double-click handler');
   const compactChangeHtml = api.changeFileRowHtml(
     {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
@@ -1995,8 +2048,9 @@ function makeFileTree(paths) {
   assert.equal(/changes-sort-compact|<select data-session-files-sort/.test(finderSortPanel), false, 'C13: the labeled Sort dropdown is gone from the Finder header');
   assert.ok(finderSortPanel.includes('changes-sort-divider'), 'C13: the toggle segments are separated by a | divider');
   assert.ok(/class="changes-refresh"[^>]*>Reload<\/button>/.test(finderSortPanel), 'C13: the Reload button reads "Reload" (via i18n, not hardcoded)');
-  assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*list=")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the FROM text picker');
-  assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*list=")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the TO text picker');
+  assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the FROM text picker with the compact popup');
+  assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the TO text picker with the compact popup');
+  assert.equal(/<datalist/.test(api.fileExplorerChangesPanelHtml()), false, 'Finder compact diff refs do not render native datalists');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), false, '#41: the modified-files density toggle is removed');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row compact'), '#41: the Finder modified-files panel is always compact');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-file-explorer-changes-close'), '#44: the Modified-files header has a close (X) button to hide the section');
@@ -2250,6 +2304,11 @@ function makeFileTree(paths) {
   assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'YOsearch uses the normal UI font, not condensed tab text');
   assert.ok(preferencesCss.includes('--file-explorer-changes-min-block-size: 96px'), 'modified-files resizer shares a stable min-size token');
   assert.ok(preferencesCss.includes('--drop-outline: #ffffff'), '#40: dark-mode drag preview/outline is white (light mode stays blue, asserted below)');
+  assert.ok(preferencesCss.includes('--text-selection-bg: #2563eb'), 'dark mode browser text selection uses a prominent blue fill');
+  assert.ok(/body\.theme-light\s*\{[\s\S]*?--text-selection-bg:\s*#93c5fd/.test(preferencesCss), 'light mode browser text selection uses a visible blue fill');
+  assert.ok(/::selection\s*\{(?=[^}]*background:\s*var\(--text-selection-bg\))(?![^}]*color:)[^}]*\}/.test(preferencesCss), 'browser text selection paints background only, preserving text color');
+  assert.ok(/::-moz-selection\s*\{(?=[^}]*background:\s*var\(--text-selection-bg\))(?![^}]*color:)[^}]*\}/.test(preferencesCss), 'Firefox text selection paints background only, preserving text color');
+  assert.equal(preferencesCss.includes('--text-selection-text'), false, 'global selection no longer defines selected-text color');
   assert.ok(/\.file-tree-repo-meta\s*\{[^}]*font-size: var\(--ui-font-size-2xs\)/.test(preferencesCss), '#37: the Finder repo/branch label is condensed to a smaller font so more files fit');
   assert.ok(preferencesCss.includes('--file-explorer-changes-size: 40%'), '#44: the Modified-files section defaults to 40% (2/5) of the Finder height');
   assert.ok(/body\.file-explorer-changes-hidden \.file-explorer-changes-panel/.test(preferencesCss), '#44: hiding the Modified-files section collapses both the panel and its resizer');
@@ -2298,6 +2357,15 @@ function makeFileTree(paths) {
   assert.ok(/\.file-explorer-changes-panel:hover,\s*\.file-explorer-changes-panel:focus-within\s*\{[^}]*--pane-bar-bg:\s*var\(--pane-tab-strip-bg\)/.test(preferencesCss), 'embedded Finder Modified-files section uses the green pane bar on hover/focus');
   assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*--pane-bar-bg:\s*var\(--panel2\)/.test(preferencesCss), 'embedded Finder Modified-files header stays neutral unless its own section is hovered/focused');
   assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files header reads the shared pane bar background when focused/hovered');
+  assert.ok(/\.file-explorer-changes-panel\s*\{[^}]*isolation:\s*isolate/.test(preferencesCss), 'Finder Modified-files section isolates its sticky header/content layers');
+  assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*padding:\s*0 5px 5px/.test(preferencesCss), 'Finder Modified-files panel has no top padding before its header');
+  assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*z-index:\s*6[\s\S]*box-shadow:\s*0 2px 0 var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files sticky header covers content below without adding a top band');
+  assert.ok(/\.diff-ref-suggestion-popover\s*\{[\s\S]*max-height:\s*min\(320px,\s*42vh\)/.test(preferencesCss), 'diff-ref suggestions use a compact custom popup, not the browser-native datalist');
+  assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*height:\s*24px/.test(preferencesCss), 'diff-ref popup rows are compact one-line options');
+  assert.ok(changedFilesSource.includes('const minWidth = compact ? 420 : 520'), 'diff-ref popup reserves width for commit subjects');
+  assert.ok(changedFilesSource.includes('const maxWidth = compact ? 620 : 760'), 'diff-ref popup width is capped for the viewport');
+  assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*#dc2626[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button is red in dark mode');
+  assert.ok(/body\.theme-light \.server-update-banner-reload\s*\{[\s\S]*background:\s*#dc2626[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button is red in light mode');
   assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
   assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder or Changes panes');
   assert.ok(preferencesCss.includes('--pane-split-gap: 0px'), 'pane split layout collapses gap through a shared token');
@@ -2391,8 +2459,8 @@ function makeFileTree(paths) {
   assert.ok(/\.file-editor-cross-split-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'side preview button shares the compact editor toolbar button sizing rule');
   assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
   assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
-  assert.ok(preferencesCss.includes('--code-diff-add: #3fb950'), 'dark diff add base is vivid green');
-  assert.ok(preferencesCss.includes('--code-diff-remove: #f85149'), 'dark diff remove base is vivid red');
+  assert.ok(preferencesCss.includes('--code-diff-add: #56d364'), 'dark diff add base is a brighter vivid green');
+  assert.ok(preferencesCss.includes('--code-diff-remove: #ff7b72'), 'dark diff remove base is a brighter vivid red');
   assert.equal(preferencesCss.includes('--code-diff-add: #98c379'), false, 'muted one-dark diff green must not return as the YOLOmux dark default');
   assert.equal(preferencesCss.includes('--code-diff-remove: #e06c75'), false, 'muted one-dark diff red must not return as the YOLOmux dark default');
   assert.ok(preferencesCss.includes('var(--code-diff-remove) 32%'), '#250: dark diff removed-line fill is a muted soft tint (not the old saturated 76% block)');
@@ -2540,6 +2608,8 @@ function makeFileTree(paths) {
   api.setTerminalThemeModeForTest('light');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'terminal light theme is explicit opt-in');
   assert.equal(api.terminalThemeForGlobalTheme('dark').blue, '#0451a5');
+  assert.equal(api.terminalThemeForGlobalTheme('dark').selectionBackground, '#93c5fd', 'light terminal selection uses a visible blue fill');
+  assert.equal(api.terminalThemeForGlobalTheme('dark').selectionForeground, '#071327', 'light terminal selection forces readable selected text');
   // DOIT.6 #32: a white terminal auto-darkens faint 24-bit agent text via minimumContrastRatio.
   assert.equal(api.terminalMinimumContrastRatio('dark'), 4.5, '#32: light terminal raises the minimum contrast ratio');
   api.setTerminalThemeModeForTest('dark');
@@ -2549,6 +2619,8 @@ function makeFileTree(paths) {
   assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app maps to the resolved app theme');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#11151d');
   api.setTerminalThemeModeForTest('dark');
+  assert.equal(api.terminalThemeForGlobalTheme('dark').selectionBackground, '#2563eb', 'dark terminal selection uses a prominent blue fill');
+  assert.equal(api.terminalThemeForGlobalTheme('dark').selectionForeground, '#ffffff', 'dark terminal selection forces readable selected text');
   api.setGlobalThemeModeForTest('light');
   api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
   assert.ok(api.bodyClassListForTest().contains('theme-light'), 'global light theme marks the body');
@@ -2561,14 +2633,32 @@ function makeFileTree(paths) {
   assert.equal(api.fileEditorThemeModeForTest(), 'inherit');
   assert.equal(api.activeEditorSchemeForTest().label, 'YOLOmux Dark');
   assert.equal(api.activeEditorSchemeForTest().activeLine, 'rgba(255, 255, 255, 0.04)');
-  assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(87, 112, 148, 0.46)');
-  assert.equal(api.activeEditorSchemeForTest().diff.addFg, '#3fb950');
-  assert.equal(api.activeEditorSchemeForTest().diff.removeFg, '#f85149');
+  assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(96, 165, 250, 0.38)');
+  assert.equal(api.activeEditorSchemeForTest().diff.addFg, '#56d364');
+  assert.equal(api.activeEditorSchemeForTest().diff.removeFg, '#ff7b72');
   assert.equal(api.activeEditorSchemeForTest().activeLine.includes('118, 185, 0'), false, 'YOLOmux dark active line is no longer green');
   assert.equal(api.activeEditorSchemeForTest().selection.includes('118, 185, 0'), false, 'YOLOmux dark selection is no longer green');
+  const editorSelectionSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  const editorSelectionCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(editorSelectionSource.includes("&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground"), 'editor selection theme beats CodeMirror focused selection defaults');
+  assert.ok(editorSelectionSource.includes("boxShadow: scheme.dark ? 'inset 0 0 0 1px rgba(191, 219, 254, 0.42)' : 'inset 0 0 0 1px rgba(29, 78, 216, 0.24)'"), 'editor selections get a visible edge without an opaque fill');
+  assert.ok(editorSelectionSource.includes("}, {dark: scheme.dark});"), 'CodeMirror receives the active light/dark theme flag');
+  assert.ok(editorSelectionSource.includes("backgroundColor: 'transparent !important'"), 'CodeMirror native editor selection background is suppressed so drawSelection owns the fill');
+  assert.ok(/\.file-editor-codemirror \.cm-content ::selection,[\s\S]*?background:\s*transparent !important[\s\S]*?color:\s*inherit !important/.test(editorSelectionCss), 'static CSS keeps global browser selection colors out of CodeMirror');
+  assert.equal(/body\.editor-theme-light \.file-editor-codemirror \.cm-content,[\s\S]*?background:\s*var\(--editor-bg\) !important/.test(editorSelectionCss), false, 'light CodeMirror content stays transparent so the selection layer remains visible');
+  for (const scheme of ['one-dark', 'dracula', 'monokai', 'vscode-dark-plus', 'nord']) {
+    api.setFileEditorThemeMode(scheme);
+    assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(96, 165, 250, 0.38)', `${scheme} uses the audited dark editor selection fill`);
+  }
   api.setFileEditorThemeMode('github-light');
   assert.equal(api.fileEditorThemeModeForTest(), 'github-light');
   assert.equal(api.activeEditorSchemeForTest().label, 'GitHub Light');
+  assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(37, 99, 235, 0.34)', 'light editor schemes use a visible blue selection fill');
+  for (const scheme of ['yolomux-light', 'vscode-light-plus', 'one-light', 'solarized-light']) {
+    api.setFileEditorThemeMode(scheme);
+    assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(37, 99, 235, 0.34)', `${scheme} uses the audited light editor selection fill`);
+  }
+  api.setFileEditorThemeMode('github-light');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--editor-scheme-bg'), '#ffffff');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--code-keyword'), '#cf222e');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-markdown-heading'), '#6f42c1');
@@ -2739,7 +2829,11 @@ function makeFileTree(paths) {
   assert.ok(measureBody.includes(".app-menu-label'"), 'C14: the measurer neutralizes .app-menu-label truncation');
   assert.ok(measureBody.includes(".app-menu-detail'"), 'C14: the measurer neutralizes .app-menu-detail truncation');
   assert.ok(measureBody.includes("clone.classList?.contains('app-submenu-popover')"), 'C14: a standalone submenu clone is forced visible for measurement');
+  assert.ok(measureBody.includes("querySelectorAll('.app-submenu-popover')"), 'C14: nested submenu widths are included in parent menu measurement');
   assert.ok(appMenuMeasureSrc.includes('_appMenuFontsRefit'), 'C14: a one-time fonts.ready re-fit corrects a cold first measurement');
+  const topbarMenuCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.app-submenu-popover\s*\{[\s\S]*?max-width:\s*calc\(100% - var\(--app-submenu-inline-offset\)\)/.test(topbarMenuCss), 'C14: nested submenus clamp to the parent menu instead of clipping under overflow');
+  assert.ok(/\.app-menu-detail\s*\{[\s\S]*?max-width:\s*min\(58ch/.test(topbarMenuCss), 'C14: app menu detail rows get enough width before ellipsizing');
   const tabMenuCommand = api.menuTabCommand('1', {detail: 'Minimized'});
   assert.equal(tabMenuCommand.title, undefined);
   assert.equal(tabMenuCommand.detail, '');
@@ -2781,11 +2875,44 @@ function makeFileTree(paths) {
   const menus = api.appMenuTree();
   assert.equal(menus.map(menu => menu.label).join(','), 'File,View,tmux,Tabs,Help');
   assert.equal(menus.some(menu => menu.id === 'yolo'), false);
+  const aboutHelpMenu = menus.find(menu => menu.id === 'help');
+  assert.equal(aboutHelpMenu.items.some(item => item.type === 'submenu' && item.label === 'About'), false, 'Help menu no longer nests About as a submenu');
+  const aboutCommand = aboutHelpMenu.items[aboutHelpMenu.items.length - 1];
+  assert.equal(aboutCommand.type, 'command', 'Help menu ends with an About command');
+  assert.equal(aboutCommand.label, 'About', 'About stays at the bottom of Help');
+  assert.equal(aboutCommand.action, api.showAboutModal, 'About command opens the modal');
+  assert.ok(api.aboutBrandHtml().includes('about-brand-yo'), 'About brand includes the large YO segment');
+  assert.ok(api.aboutBrandHtml().includes('about-brand-lo'), 'About brand includes the large LO segment');
+  assert.ok(api.aboutBrandHtml().includes('about-brand-x'), 'About brand includes the large x segment');
+  api.showAboutModal();
+  assert.ok(api.modalClassForTest().includes('open'), 'About opens the shared modal');
+  assert.ok(api.modalClassForTest().includes('about-open'), 'About modal gets its compact layout class');
+  assert.equal(api.modalTitleForTest(), api.t('menu.help.about'), 'About modal title is localized');
+  assert.ok(api.modalBodyHtmlForTest().includes('about-brand-row'), 'About modal renders the large YOLOmux mark');
+  assert.ok(api.modalBodyHtmlForTest().includes(`<dt>${api.t('menu.help.about.datetime')}</dt>`), 'About modal contains localized date metadata');
+  assert.ok(api.modalBodyHtmlForTest().includes('<dt>SHA</dt>'), 'About modal contains SHA metadata');
+  assert.ok(api.modalBodyHtmlForTest().includes(`<dt>${api.t('menu.help.about.version')}</dt>`), 'About modal contains localized version metadata');
+  assert.ok(api.modalBodyHtmlForTest().includes('Keiven Chang'), 'About modal contains Keiven Chang');
+  assert.ok(api.modalBodyHtmlForTest().includes('https://www.linkedin.com/in/keivenchang/'), 'Keiven Chang entry links to LinkedIn');
+  assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('https://www.linkedin.com/in/keivenchang/'), 'About LinkedIn URL is bundled');
+  assert.ok(preferencesCss.includes('.modal.about-open'), 'About modal has compact modal chrome');
+  assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
+  assert.ok(/\.about-brand-yo\s*\{[\s\S]*animation:\s*yolo-marker-rotate/.test(preferencesCss), 'About YO glyph spins with the shared YOLO marker animation');
+  assert.equal(api.testElementForId('closeModal').textContent || 'X', 'X', 'About modal close button is an X');
+  assert.ok(fs.readFileSync('yolomux_lib/web.py', 'utf8').includes('<button id="closeModal" title="Close" aria-label="Close">X</button>'), 'HTML shell renders the modal close button as X');
   // DOIT.8: File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
   const zhHantMenu = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
   api.i18nSetCatalogForTest('zh-Hant', zhHantMenu);
   api.setActiveLocaleForTest('zh-Hant');
   assert.equal(api.appMenuTree().map(menu => menu.label).join(','), '檔案,檢視,tmux,分頁,說明', 'menu bar localizes (tmux unchanged)');
+  api.showAboutModal();
+  assert.equal(api.modalTitleForTest(), zhHantMenu['menu.help.about'], 'About modal title localizes to Chinese');
+  assert.ok(api.modalBodyHtmlForTest().includes('about-brand-yo') && api.modalBodyHtmlForTest().includes('>優<'), 'Traditional Chinese About brand uses 優');
+  assert.ok(api.modalBodyHtmlForTest().includes('>樂<'), 'Traditional Chinese About brand uses 樂');
+  assert.ok(api.modalBodyHtmlForTest().includes(`<dt>${zhHantMenu['menu.help.about.datetime']}</dt>`), 'Traditional Chinese About date label is localized');
+  assert.ok(api.modalBodyHtmlForTest().includes('<dt>SHA</dt>'), 'SHA remains literal in Chinese About');
+  assert.ok(api.modalBodyHtmlForTest().includes(`<dt>${zhHantMenu['menu.help.about.version']}</dt>`), 'Traditional Chinese About version label is localized');
+  assert.equal(api.testElementForId('closeModal').getAttribute('aria-label'), zhHantMenu['common.close'], 'About close button aria-label localizes');
   api.setActiveLocaleForTest('en');
   assert.equal(menus.some(menu => menu.id === 'settings'), false);
   const fileMenu = menus.find(menu => menu.id === 'file');
@@ -2998,9 +3125,8 @@ function makeFileTree(paths) {
   api.setFileExplorerIndexStatusForTest('/home/test/dynamo', 'ready');
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), 'indexed', '#31: a ready index renders a steady "indexed" badge');
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/not-indexed'), '', '#31: a non-indexed directory renders no badge');
-  // C11 #1: a directory INSIDE an indexed root reads "covered" (not blank, so it no longer looks un-indexed);
-  // an unrelated directory stays blank.
-  assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/lib'), 'covered', 'C11: a descendant of an indexed root shows "covered"');
+  // Descendants of an indexed root stay visually quiet; the root's INDEXED badge is the only repeated signal.
+  assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/lib'), '', 'indexed-root descendants do not show a noisy repeated badge');
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/elsewhere'), '', 'C11: an unrelated directory shows no badge');
   // #23: the topbar universal search renders a launcher button (opens the unified palette on click).
   const topbarSearch = api.createTopbarSearch();
@@ -4019,8 +4145,18 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux();
+  api.setDocumentTitleNowForTest(0);
   api.updateDocumentTitle();
   assert.equal(api.documentTitleForTest(), 'YOLOmux [idle]');
+  api.setDocumentTitleNowForTest(119000);
+  api.updateDocumentTitle();
+  assert.equal(api.documentTitleForTest(), 'YOLOmux [idle]', 'idle title stays compact before two minutes');
+  api.setDocumentTitleNowForTest(121000);
+  api.updateDocumentTitle();
+  assert.equal(api.documentTitleForTest(), 'YOLOmux (idle for 2 min)', 'idle title shows elapsed minutes after two minutes');
+  api.setDocumentTitleNowForTest(181000);
+  api.updateDocumentTitle();
+  assert.equal(api.documentTitleForTest(), 'YOLOmux (idle for 3 min)', 'idle title minute count advances while idle');
   api.setAutoApproveStateForTest('1', {screen: {key: 'working'}});
   api.setAutoApproveStateForTest('2', {screen: {key: 'working'}});
   api.setAutoApproveStateForTest('3', {screen: {key: 'idle'}});
@@ -4030,7 +4166,7 @@ function makeFileTree(paths) {
   api.setAutoApproveStateForTest('1', {screen: {key: 'idle'}});
   api.setAutoApproveStateForTest('2', {screen: {key: 'idle'}});
   api.updateDocumentTitle();
-  assert.equal(api.documentTitleForTest(), 'YOLOmux [idle]');
+  assert.equal(api.documentTitleForTest(), 'YOLOmux [idle]', 'idle timer resets after a running period');
 }
 
 {
@@ -4152,10 +4288,11 @@ function makeFileTree(paths) {
   assert.ok(searchFields.includes('9981'), 'tab search fields include bare PR number');
   assert.ok(detail.includes('GH-2132__reasoning-dangling-end-marker'), 'tab menu detail includes fuller branch name');
   assert.ok(detail.includes('~/project/project3'), 'tab menu detail includes compact path');
-  assert.ok(detail.includes('#9981 CI failing'), 'tab menu detail includes PR and status');
+  const prFailingLabel = api.t('pr.status.failing');
+  assert.ok(detail.includes(`#9981 ${prFailingLabel}`), 'tab menu detail includes localized PR and status');
   assert.ok(detail.includes('GH-2132'), 'tab menu detail includes Linear identifier');
   const linearIndex = detail.indexOf('GH-2132', detail.indexOf('~/project/project3'));
-  assert.ok(linearIndex < detail.indexOf('#9981 CI failing'), 'tab menu detail lists Linear before PR');
+  assert.ok(linearIndex < detail.indexOf(`#9981 ${prFailingLabel}`), 'tab menu detail lists Linear before PR');
 
   const slots = api.emptyLayoutSlots();
   slots[api.layoutTreeKey] = api.leafNode('left');
@@ -4572,6 +4709,9 @@ function makeFileTree(paths) {
   assert.ok(/\.yoagent-backend-pill\s*\{/.test(css), 'backend pill is styled as a pill');
   assert.ok(/\.yoagent-chat \.markdown-body pre[\s\S]*?border-radius:\s*8px/.test(css), 'YO!agent code blocks are soft rounded boxes');
   assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre/.test(css), 'YO!agent code blocks get a light box + dark text in light mode');
+  assert.ok(/body\.theme-light \.yoagent-message-body\.markdown-body,[\s\S]*?\.yoagent-session-summary-body\.markdown-body\s*\{[^}]*color:\s*#111827/.test(css), 'YO!agent light-mode markdown bodies use dark app text instead of editor markdown colors');
+  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body strong,[\s\S]*?\.yoagent-session-summary \.markdown-body strong\s*\{[^}]*color:\s*#111827/.test(css), 'YO!agent light-mode bold text is readable, not white-on-light');
+  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body :not\(pre\) > code,[\s\S]*?\.yoagent-session-summary \.markdown-body :not\(pre\) > code\s*\{[^}]*color:\s*#0f4c81/.test(css), 'YO!agent light-mode inline code uses a readable app-blue chip');
   // Rendered-markdown chat bodies drop pre-wrap so bullet lists are tightly spaced (the preserved
   // newlines between/inside the generated <ul><li> HTML were widening them).
   assert.ok(/\.yoagent-message-body\.markdown-body\s*\{[^}]*white-space:\s*normal/.test(css), 'rendered markdown chat bodies use white-space:normal so bullets are not widely spaced');

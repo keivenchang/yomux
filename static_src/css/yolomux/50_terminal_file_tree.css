@@ -527,9 +527,6 @@
 .info-subview.active {
   display: flex;
 }
-.info-subview .info-head {
-  flex: 0 0 auto;
-}
 .info-subview .info-list {
   flex: 1;
 }
@@ -545,20 +542,37 @@
 /* The segmented sub-tab toggle that switches between YO!info and YO!agent (its own row under the tabs). */
 .info-subtabs {
   display: flex;
-  gap: 0;
-  padding: 6px 10px 4px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
   /* DOIT.28 C1: route through a theme token so it flips light/dark — the hardcoded near-black slab
      was a black band on the light pane. */
-  background: var(--panel2);
+  background: var(--pane-bar-bg, var(--panel2));
+  border-block-end: 1px solid var(--line);
+}
+.info-subtab-group {
+  display: flex;
+  min-width: 0;
+}
+.info-subtab-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline-start: auto;
 }
 .info-subtab {
   flex: 0 0 auto;
-  padding: 4px 14px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--muted);
+  min-height: var(--pane-tab-height);
+  padding: 0 14px;
+  border: 1px solid var(--pane-inactive-tab-border);
+  background: var(--pane-inactive-tab-bg);
+  color: var(--pane-tab-text);
   font: inherit;
+  font-weight: 700;
   cursor: pointer;
+}
+.info-subtab .session-button-dir {
+  color: inherit;
 }
 .info-subtab:first-child {
   border-radius: 6px 0 0 6px;
@@ -569,13 +583,13 @@
 }
 .info-subtab.active {
   color: var(--pane-tab-active-text);
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  background: var(--pane-tab-active-bg);
+  border-color: var(--pane-tab-active-border);
 }
 .info-subtab:not(.active):hover {
-  color: var(--text);
+  color: var(--pane-tab-text);
   /* DOIT.28 C1: a token-based hover tint (the white tint was invisible on a light band). */
-  background: color-mix(in srgb, var(--text) 8%, transparent);
+  background: var(--pane-inactive-tab-bg-hover);
 }
 .info-list {
   min-height: 0;
@@ -913,10 +927,41 @@ body.theme-light .yoagent-global {
   background: #ffffff;
   border-color: var(--line);
 }
+body.theme-light .yoagent-chat,
+body.theme-light .yoagent-session-summary,
+body.theme-light .yoagent-message {
+  color: #111827;
+  background: #ffffff;
+  border-color: #cbd5e1;
+}
 body.theme-light .yoagent-global-head,
 body.theme-light .yoagent-headline,
 body.theme-light .yoagent-line {
   color: var(--text);
+}
+body.theme-light .yoagent-generated,
+body.theme-light .yoagent-empty,
+body.theme-light .yoagent-session-summary-head,
+body.theme-light .yoagent-message-role {
+  color: #475569;
+}
+body.theme-light .yoagent-message-body.markdown-body,
+body.theme-light .yoagent-session-summary-body.markdown-body {
+  color: #111827;
+}
+body.theme-light .yoagent-chat .markdown-body strong,
+body.theme-light .yoagent-session-summary .markdown-body strong {
+  color: #111827;
+}
+body.theme-light .yoagent-chat .markdown-body em,
+body.theme-light .yoagent-session-summary .markdown-body em {
+  color: #374151;
+}
+body.theme-light .yoagent-chat .markdown-body :not(pre) > code,
+body.theme-light .yoagent-session-summary .markdown-body :not(pre) > code {
+  color: #0f4c81;
+  background: #eef6ff;
+  border-color: #8ab4f8;
 }
 /* Light mode: the composer + pills adapt via theme tokens; the rendered code blocks need an explicit
    light box + dark text (the shared `.markdown-body pre` is dark-only and only the file editor had a
@@ -1077,6 +1122,22 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   color: var(--muted);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
+.info-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.info-loading-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--muted) 28%, transparent);
+  border-top-color: var(--pane-tab-active-bg);
+  border-radius: 50%;
+  animation: metadata-refresh-spin 0.9s linear infinite;
+}
+.info-error {
+  color: var(--bad);
+}
 /* DOIT.29: the Watched PRs section of YO!info (PRs tracked independent of any open session). Its own
    container below the branch table, separated by a rule; rows reuse .info-cell but a tighter 4-col grid. */
 .info-watched {
@@ -1170,13 +1231,19 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .server-update-banner-reload {
   cursor: pointer;
-  border: 1px solid var(--accent-gold, #f0b85d);
+  border: 1px solid #b91c1c;
   border-radius: 4px;
-  background: var(--accent-gold, #f0b85d);
-  color: #1b2230;
+  background: #dc2626;
+  color: #ffffff;
   font: inherit;
   font-weight: 800;
   padding: 2px 10px;
+}
+.server-update-banner-reload:hover,
+.server-update-banner-reload:focus-visible {
+  border-color: #991b1b;
+  background: #b91c1c;
+  color: #ffffff;
 }
 .server-update-banner-dismiss {
   cursor: pointer;
@@ -1206,6 +1273,16 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   justify-content: space-between;
   align-items: center;
 }
+#closeModal {
+  inline-size: 32px;
+  block-size: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  font: 900 var(--ui-font-size-lg)/1 var(--ui-font);
+}
 .modal pre {
   margin: 0;
   padding: 12px;
@@ -1213,6 +1290,94 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
+}
+.modal.about-open {
+  inset: 18vh auto auto 50%;
+  width: min(520px, calc(100vw - 28px));
+  min-height: 0;
+  transform: translateX(-50%);
+  background: var(--panel);
+  box-shadow: var(--shadow-elevated);
+}
+.modal.about-open #modalBody {
+  white-space: normal;
+  font-family: var(--ui-font);
+}
+.about-modal {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+}
+.about-brand-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+.about-brand-row [class^="about-brand-"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 46px;
+  line-height: 0.9;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+.about-brand-yo {
+  padding: 3px 6px 5px;
+  color: #071000;
+  background: var(--brand-green);
+  border-radius: 4px;
+  transform-origin: center;
+  animation: yolo-marker-rotate var(--yolo-rotation-duration, 20s) linear infinite;
+  animation-delay: var(--yolo-rotate-delay, 0s);
+}
+.about-brand-lo {
+  color: var(--brand-green);
+}
+.about-brand-m {
+  color: #3b82f6;
+}
+.about-brand-u {
+  color: #ef4444;
+}
+.about-brand-x {
+  color: #f59e0b;
+}
+.about-version {
+  color: var(--muted);
+  font: 900 var(--ui-font-size-xl)/1 var(--mono-font);
+}
+.about-details {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+.about-details div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+}
+.about-details dt {
+  color: var(--muted);
+  font-weight: 800;
+}
+.about-details dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--mono-font);
+}
+.about-author {
+  justify-self: start;
+  color: var(--markdown-link);
+  font-size: var(--ui-font-size-sm);
+  font-weight: 800;
+  text-decoration: underline;
+}
+body.theme-light .modal.about-open {
+  background: #ffffff;
 }
 @media (max-width: 1500px) {
   .topbar {
@@ -1665,9 +1830,8 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   letter-spacing: 0;
   text-transform: uppercase;
 }
-/* C11 #1: a directory covered by an indexed ancestor — a quiet muted marker (not the bright indexed
-   green), so it reads as "already handled, don't index separately". Token-based: flips with the theme. */
-.file-tree-row.covered-directory:not(.selected) .file-tree-git-status {
+/* A directory under an indexed ancestor stays visually quiet; only the indexed root carries the badge. */
+.file-tree-row.indexed-descendant-directory:not(.selected) .file-tree-git-status {
   color: var(--muted);
   font-style: italic;
   letter-spacing: 0;
@@ -1703,6 +1867,17 @@ body.theme-light .server-update-banner {
 }
 body.theme-light .server-update-banner-dismiss {
   color: #586072;
+}
+body.theme-light .server-update-banner-reload {
+  border-color: #b91c1c;
+  background: #dc2626;
+  color: #ffffff;
+}
+body.theme-light .server-update-banner-reload:hover,
+body.theme-light .server-update-banner-reload:focus-visible {
+  border-color: #991b1b;
+  background: #b91c1c;
+  color: #ffffff;
 }
 body.theme-light .file-tree-row.selected {
   box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
