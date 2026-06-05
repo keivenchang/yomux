@@ -626,6 +626,46 @@ def git_tracks_path(path: Path) -> bool:
     return result.returncode == 0
 
 
+def git_file_history(path: Path, limit: int = 60) -> list[dict[str, Any]]:
+    if path.is_dir():
+        return []
+    repo_root = git_root_for_path(path)
+    if not repo_root:
+        return []
+    repo = Path(repo_root)
+    try:
+        rel_path = path.relative_to(repo).as_posix()
+    except ValueError:
+        return []
+    result = git([
+        "log",
+        "--follow",
+        f"--max-count={max(1, min(int(limit), 100))}",
+        "--format=%H%x1f%h%x1f%s%x1f%ct%x1f%an",
+        "--",
+        rel_path,
+    ], cwd=str(repo), timeout=3.0)
+    if result.returncode != 0:
+        return []
+    history: list[dict[str, Any]] = []
+    for line in (result.stdout or "").splitlines():
+        full, short, subject, date, author = (line.split("\x1f") + ["", "", "", "", ""])[:5]
+        if not full:
+            continue
+        try:
+            date_value = int(date)
+        except ValueError:
+            date_value = 0
+        history.append({
+            "ref": full,
+            "short": short or full[:9],
+            "subject": subject,
+            "date": date_value,
+            "author": author,
+        })
+    return history
+
+
 def read_file(raw_path: str) -> dict[str, Any]:
     path = _validated_path(raw_path)
     if not path.exists():
@@ -648,6 +688,8 @@ def read_file(raw_path: str) -> dict[str, Any]:
         content = raw.decode("utf-8")
     except UnicodeDecodeError:
         content = raw.decode("utf-8", errors="replace")
+    git_tracked = git_tracks_path(path)
+    git_history = git_file_history(path) if git_tracked else []
     return {
         "path": str(path),
         "size": int(size),
@@ -656,7 +698,9 @@ def read_file(raw_path: str) -> dict[str, Any]:
         "content": content,
         "extension": path.suffix.lower(),
         "is_text_extension": path.suffix.lower() in TEXT_EXTENSIONS,
-        "git_tracked": git_tracks_path(path),
+        "git_tracked": git_tracked,
+        "git_history": git_history,
+        "git_has_history": len(git_history) > 1,
     }
 
 

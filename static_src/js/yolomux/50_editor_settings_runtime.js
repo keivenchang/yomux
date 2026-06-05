@@ -238,18 +238,35 @@ function updateEditorFindButton(button, state) {
   setFileEditorIcon(button, 'file-editor-icon-find');
 }
 
+function fileEditorGitActionControlsVisible(path, state, item = null) {
+  if (isFilePreviewItem(item) || state?.kind !== 'text' || !fileStateHasUsefulGitHistory(state)) return false;
+  const active = editorViewModeFor(path, item) === 'diff';
+  const confirmedNoDiff = state?.diffLoaded === true && !openFileDiffAvailable(state);
+  return active || !confirmedNoDiff;
+}
+
+function updateFileEditorBlameButton(button, path, state, item = null) {
+  if (!button) return;
+  const visible = fileEditorGitActionControlsVisible(path, state, item);
+  button.hidden = !visible;
+  button.disabled = !visible;
+  syncPressedButton(button, fileEditorBlameEnabled, {
+    labelOn: t('editor.blame.toggle'),
+    labelOff: t('editor.blame.toggle'),
+  });
+  setFileEditorIcon(button, 'file-editor-icon-blame');
+}
+
 function updateFileEditorDiffButton(button, path, state, item = null) {
   if (!button) return;
   const active = editorViewModeFor(path, item) === 'diff';
-  const available = openFileDiffAvailable(state);
   const loading = state?.diffLoading === true;
   // Keep the diff toggle on ANY text file (not just md/html) so .py/.js/.rs can switch edit<->diff.
   // The diff loads lazily on click (refreshOpenFileDiff); only hide the button once a load has
-  // confirmed there is nothing to diff (diffLoaded && !available), and never while in diff mode.
-  const confirmedNoDiff = state?.diffLoaded === true && !available;
-  // Hide the diff toggle for files git doesn't track (untracked / outside any repo): there is no
-  // committed version to diff against. A deleted tracked file keeps gitTracked=true so it still shows.
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || state?.gitTracked !== true || (confirmedNoDiff && !active);
+  // confirmed there is nothing to diff, and never while in diff mode.
+  // Hide the git action pair for files with no useful file history (outside git, untracked, or only
+  // the creation commit): there is no meaningful older file version to diff/blame against.
+  button.hidden = !fileEditorGitActionControlsVisible(path, state, item);
   button.disabled = !active && loading;
   const label = !active && loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
@@ -291,9 +308,15 @@ function applyEditorWrapPreference() {
     const path = panel.dataset.filePath;
     const state = openFiles.get(path);
     if (path && state?.kind === 'text') {
+      const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
+      if (liveText !== null && state.content !== liveText) state.content = liveText;
       renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
+        return;
+      }
       // Re-render each panel with its OWN layout item (DOIT.16 C1): passing the editor item flipped
-      // a preview/diff pane into an editor on any appearance change (e.g. font-size).
+      // a preview/diff pane into an editor on any appearance change (e.g. font-size). This is a fallback
+      // for raw/preview panels or browsers without CodeMirror compartments.
       renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
     }
   });
@@ -310,12 +333,13 @@ function setEditorWrapEnabled(enabled) {
 async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
     const blameButton = panel.querySelector('.file-editor-blame-panel');
-    if (blameButton) blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
     const path = panel.dataset.filePath;
     const state = openFiles.get(path);
+    const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
-    if (fileEditorBlameEnabled && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
-    renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+    if (fileEditorBlameEnabled && fileEditorGitActionControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
+    renderFileEditorPanel(panel, item);
   }
 }
 
@@ -405,9 +429,11 @@ function applyCssSettings() {
   // (--pane-tab-panel-ring-width, unchanged) so it stays visible even at spacing 0.
   const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 4)));
   root.setProperty('--pane-split-gap', `${paneSpacing}px`);
-  // DOIT.20: opacity (20-100%) of the translucent green/red pane ring drawn over the content edge.
-  const paneRingOpacity = Math.max(20, Math.min(100, numberSetting('appearance.pane_ring_opacity', 50)));
+  // Opacity (20-100%) of the translucent pane ring. Active green panes keep a stronger floor so focus
+  // remains obvious in both dark and light themes, while the setting can still raise it up to 100%.
+  const paneRingOpacity = Math.max(20, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)));
   root.setProperty('--pane-ring-opacity', `${paneRingOpacity}%`);
+  root.setProperty('--pane-active-ring-opacity', `${Math.max(75, paneRingOpacity)}%`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);

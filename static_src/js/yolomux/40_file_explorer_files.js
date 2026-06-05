@@ -938,6 +938,24 @@ function reconcileChildNodes(parent, nextNodes, options = {}) {
   while (parent.children.length > arranged.length) parent.lastElementChild?.remove();
 }
 
+function setClassNameIfChanged(node, className) {
+  if (node && node.className !== className) node.className = className;
+}
+
+function setHiddenIfChanged(node, hidden) {
+  if (node && node.hidden !== hidden) node.hidden = hidden;
+}
+
+function syncFileTreeRowKindClass(row, kind) {
+  row.classList.add('file-tree-row');
+  const nextKindClass = `kind-${kind}`;
+  if (row.dataset.kind === kind && row.classList.contains(nextKindClass)) return;
+  for (const className of Array.from(row.classList || [])) {
+    if (className.startsWith('kind-')) row.classList.remove(className);
+  }
+  row.classList.add(nextKindClass);
+}
+
 function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   let icon = row.querySelector(':scope > .file-tree-icon');
   if (!icon) {
@@ -987,7 +1005,7 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   if (agent.nextSibling !== diff) row.insertBefore(diff, agent.nextSibling);
   if (diff.nextSibling !== status) row.insertBefore(status, diff.nextSibling);
   if (status.nextSibling !== date) row.insertBefore(date, status.nextSibling);
-  icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
+  setClassNameIfChanged(icon, ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' '));
   if (icon.textContent !== iconText) icon.textContent = iconText;
   if (options.nameHtml) {
     if (name.innerHTML !== options.nameHtml) name.innerHTML = options.nameHtml;
@@ -998,19 +1016,24 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   }
   const agentHtml = options.agentHtml || '';
   if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
-  agent.hidden = !agentHtml;
+  setHiddenIfChanged(agent, !agentHtml);
   row.classList.toggle('has-agent', Boolean(agentHtml));
   const dirCountText = options.dirCountText || '';
-  dirCount.textContent = dirCountText;
-  dirCount.hidden = !dirCountText;
+  if (dirCount.textContent !== dirCountText) dirCount.textContent = dirCountText;
+  setHiddenIfChanged(dirCount, !dirCountText);
   const diffParts = options.diffParts || [];
   const diffHtml = diffParts.map(p => `<span class="changes-diff-${esc(p.kind)}">${esc(p.text)}</span>`).join(' ');
   if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
-  diff.hidden = !diffParts.length;
-  status.textContent = options.gitStatus || '';
-  status.hidden = !options.gitStatus;
-  date.textContent = options.dateText || '';
-  date.hidden = !options.dateText;
+  setHiddenIfChanged(diff, !diffParts.length);
+  const statusText = options.gitStatus || '';
+  if (status.textContent !== statusText) status.textContent = statusText;
+  const statusTitle = options.gitStatusTitle || '';
+  if (statusTitle) status.title = statusTitle;
+  else status.removeAttribute('title');
+  setHiddenIfChanged(status, !statusText);
+  const dateText = options.dateText || '';
+  if (date.textContent !== dateText) date.textContent = dateText;
+  setHiddenIfChanged(date, !dateText);
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
@@ -1022,14 +1045,16 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     ? !changesFolderCollapsed.has(fullPath)
     : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
-  row.className = `file-tree-row kind-${entry.kind}`;
+  const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
+  syncFileTreeRowKindClass(row, entry.kind);
   row.classList.toggle('compact', compact);
   row.dataset.path = fullPath;
   row.dataset.kind = entry.kind;
   row.dataset.name = entry.name;
   row.dataset.isRepo = entry.is_repo === true ? 'true' : 'false';
   row.dataset.indexed = indexedDirectory ? 'true' : 'false';
-  row.style.paddingLeft = `${(compact ? 4 : 8) + depth * 14}px`;
+  const paddingLeft = `${(compact ? 4 : 8) + depth * 14}px`;
+  if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
   row.setAttribute('role', 'treeitem');
   row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
   if (entry.kind === 'dir') row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
@@ -1041,6 +1066,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
+  row.classList.toggle('indexed-descendant-directory', indexedDescendantDirectory);
   // DOIT.31: flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
@@ -1051,6 +1077,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const gitStatus = entry.kind === 'file'
     ? (options.sessionFilesMap ? (changedFile ? String(changedFile.status || 'M').toUpperCase() : '') : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
+  const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : '';
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
     row.classList.toggle(className, className === gitClass);
@@ -1116,6 +1143,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   }
   updateFileTreeRowContents(row, icon, displayName.text, {
     gitStatus,
+    gitStatusTitle,
     iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
     nameHtml: differMode ? null : displayName.html,
     dateText: fileTreeMtimeText(entry),
@@ -1426,23 +1454,26 @@ function fileExplorerDirectoryIsIndexed(path) {
   return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
 }
 
-// Badge text for an indexed directory: "indexing…" while the backend persistent index is still
-// building, otherwise the steady "indexed". Reads the cached per-root status so it stays stable
-// across fs-poll re-renders (and a background TTL rebuild keeps the backend `ready`, so it never
-// flips back to "indexing").
+// Compact badge text for an indexed directory. When Date/Ago is visible, the directory icon is the only
+// index marker; the status column must stay empty so it cannot compete with the date column.
 function fileExplorerIndexBadgeText(path) {
+  if (fileExplorerTreeDateMode !== 'none') return '';
   if (fileExplorerDirectoryIsIndexed(path)) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
-    return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+    return fileExplorerIndexStatus.get(normalized) === 'building' ? '…' : 'I';
   }
-  // A directory inside an indexed root is already handled by that root. Do not repeat a badge on every
-  // descendant row; the root's INDEXED badge is enough signal.
   if (fileExplorerIndexedAncestor(path)) return '';
   return '';
 }
 
+function fileExplorerIndexBadgeTitle(path) {
+  if (!fileExplorerDirectoryIsIndexed(path)) return '';
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+}
+
 // Warm the backend index for a root (kicks the build) and track building/ready; polls while
-// building so the badge transitions indexing… -> indexed exactly once.
+// building so the badge title transitions indexing… -> indexed exactly once.
 async function refreshFileIndexStatus(root) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
@@ -1521,7 +1552,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
     fileExplorerIndexedDirs.add(normalized);
     fileExplorerIndexedDirs = new Set(compactNestedPaths(Array.from(fileExplorerIndexedDirs)));
     // Eagerly build the backend index now (warm) so the first quick-open query hits a warm index,
-    // and show "indexing…" immediately until the build reports ready.
+    // and expose the building title immediately until the build reports ready.
     fileExplorerIndexStatus.set(normalized, 'building');
     refreshFileIndexStatus(normalized);
   } else {
@@ -1617,13 +1648,16 @@ function updateFileExplorerIndexedDirectoryRows() {
     if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
     const icon = row.querySelector(':scope > .file-tree-icon');
     if (icon) {
-      icon.className = ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' ');
+      setClassNameIfChanged(icon, ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '));
     }
     const status = row.querySelector(':scope > .file-tree-git-status');
     if (status) {
       const badge = fileExplorerIndexBadgeText(path);
-      status.textContent = badge;
-      status.hidden = !badge;
+      if (status.textContent !== badge) status.textContent = badge;
+      const title = fileExplorerIndexBadgeTitle(path);
+      if (title) status.title = title;
+      else status.removeAttribute('title');
+      setHiddenIfChanged(status, !badge);
     }
   });
 }
@@ -2746,6 +2780,26 @@ async function refreshOpenFileDiff(path, options = {}) {
   return state._diffLoadingPromise;
 }
 
+async function refreshOpenFileGitMetadata(path) {
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return false;
+  try {
+    const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
+    const current = openFiles.get(path);
+    if (!current || current.kind !== 'text') return false;
+    applyFileGitMetadata(current, payload);
+    return true;
+  } catch (_error) {
+    const current = openFiles.get(path);
+    if (current && current.kind === 'text') {
+      current.gitTracked = false;
+      current.gitHistory = [];
+      current.gitHasHistory = false;
+    }
+    return false;
+  }
+}
+
 async function openFileInEditor(fullPath, entryOrName, options = {}) {
   const entry = typeof entryOrName === 'object' && entryOrName ? entryOrName : null;
   const name = entry?.name || String(entryOrName || basenameOf(fullPath));
@@ -2765,8 +2819,9 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
   recordEditorNav(item);   // DOIT.21: push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
+    await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
-    if (options.viewMode) renderOpenFilePath(fullPath);
+    renderOpenFilePath(fullPath);
     return item;
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
@@ -2781,15 +2836,15 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   }
   try {
     const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
-    await openFilesSetAndShow(fullPath, {
+    const state = applyFileGitMetadata({
       mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
       content: payload.content,
       dirty: false,
-      gitTracked: payload.git_tracked === true,
-    }, openOptions);
+    }, payload);
+    await openFilesSetAndShow(fullPath, state, openOptions);
     return item;
   } catch (err) {
     const status = Number(err?.status) || 0;
@@ -2869,15 +2924,14 @@ async function openFileStateFromDisk(path, entry = null) {
   }
   try {
     const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
-    return {state: {
+    return {state: applyFileGitMetadata({
       mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
       content: payload.content,
       dirty: false,
-      gitTracked: payload.git_tracked === true,
-    }};
+    }, payload)};
   } catch (error) {
     const status = Number(error?.status) || 0;
     if (status) {
@@ -3143,6 +3197,7 @@ function codeMirrorApiIsUsable(api) {
     && api?.EditorState?.readOnly?.of
     && api?.EditorView?.theme
     && api?.EditorView?.editable?.of
+    && (api?.EditorView?.lineWrapping || api?.EditorView?.contentAttributes?.of)
     && api?.keymap?.of
     && api?.drawSelection
     && api?.highlightActiveLine
@@ -3357,6 +3412,7 @@ function codeMirrorThemeExtension(api) {
 
 function codeMirrorWrapMarkerExtension(api) {
   if (!api.ViewPlugin) return [];
+  const scheme = activeEditorScheme();
   return api.ViewPlugin.fromClass(class {
     constructor(view) {
       this.view = view;
@@ -3466,6 +3522,7 @@ function blameHoverText(info) {
 // scheme's --code-comment token (theme-aware), and the full commit is the line's native title tooltip.
 function codeMirrorBlameExtension(api, path) {
   if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
+  if (!fileStateHasUsefulGitHistory(fileStateFor(path))) return [];
   const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
   const build = view => {
     const blame = editorBlameForPath(path);
@@ -3761,7 +3818,6 @@ function updateCodeMirrorCursorStatus(panel) {
 
 function codeMirrorExtensions(api, panel, path, options = {}) {
   const save = options.save || (() => saveFileEditor(path, panel));
-  const wrapEnabled = options.wrap !== false && fileEditorWrapEnabled;
   const saveKeymap = api.keymap.of([{
     key: 'Mod-s',
     run() {
@@ -3817,7 +3873,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     api.bracketMatching(),
     api.foldGutter(),
     api.highlightActiveLine(),
-    ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
+    codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
     codeMirrorSearchScrollFix(api),
@@ -3826,7 +3882,6 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     findKeymap,
     powerKeymap,
     api.keymap.of([api.indentWithTab, ...api.defaultKeymap, ...api.historyKeymap, ...api.searchKeymap]),
-    ...(wrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
     codeMirrorBlameExtension(api, path),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),

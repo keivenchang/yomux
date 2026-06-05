@@ -291,9 +291,15 @@ def codemirror_editor_controls_fixture_html():
                 <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
                 <button type="button" class="file-editor-cross-split-panel"><span class="file-editor-icon file-editor-icon-side-split"></span></button>
               </div>
+              <button type="button" class="file-editor-gutter-panel active">#</button>
               <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
               <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
+              <button type="button" class="file-editor-blame-panel" aria-pressed="true"><span class="file-editor-icon file-editor-icon-blame"></span></button>
+              <button type="button" class="file-editor-diff-panel active"><span class="file-editor-icon file-editor-icon-diff"></span></button>
+              <button type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
               <button type="button" class="file-editor-theme-panel theme-light" data-editor-theme="light"><span class="file-editor-icon file-editor-icon-theme"></span></button>
+              <button type="button" class="file-editor-reload-panel">Reload</button>
+              <button type="button" class="file-editor-save-panel"><span class="file-editor-icon file-editor-icon-save"></span></button>
               <div class="tabs pane-frame-controls file-editor-frame-controls">
                 <button class="tab pane-minimize pc-window-control pc-minimize"></button>
                 <button class="tab pane-expand pc-window-control pc-zoom"></button>
@@ -350,6 +356,40 @@ def codemirror_editor_controls_fixture_html():
     """
 
 
+def editor_diff_ref_toolbar_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          .file-editor-panel {{ width: 520px; height: 120px; }}
+        </style>
+      </head>
+      <body>
+        <article class="panel file-editor-panel active-pane">
+          <div class="file-editor-toolbar" role="toolbar">
+            <span id="diff-ref-panel" class="file-editor-diff-ref-panel">
+              <span class="diff-ref-controls compact" data-diff-ref-controls data-diff-ref-repo="/repo/app">
+                <label class="diff-ref-control">FROM <input id="from-ref" class="diff-ref-input" data-diff-ref-from value="abcdef123"></label>
+                <label class="diff-ref-control">TO <input id="to-ref" class="diff-ref-input" data-diff-ref-to value="current"></label>
+                <button id="reset-ref" type="button" class="diff-ref-reset" data-diff-ref-reset title="Reset" aria-label="Reset">↺</button>
+              </span>
+            </span>
+            <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
+            <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
+            <button type="button" class="file-editor-theme-panel"><span class="file-editor-icon file-editor-icon-theme"></span></button>
+            <button type="button" class="file-editor-save-panel"><span class="file-editor-icon file-editor-icon-save"></span></button>
+          </div>
+        </article>
+      </body>
+    </html>
+    """
+
+
 def codemirror_bundle_fixture_html():
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
     return f"""
@@ -360,6 +400,144 @@ def codemirror_bundle_fixture_html():
         <script src="{bundle_uri}"></script>
       </head>
       <body></body>
+    </html>
+    """
+
+
+def app_bundle_before_boot_script():
+    source = (REPO_ROOT / "static" / "yolomux.js").read_text(encoding="utf-8")
+    boot_start = source.index("if (refreshMeta) {")
+    return source[:boot_start].replace("</script", "<\\/script")
+
+
+def codemirror_wrap_toggle_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": "/home/test/yolomux.dev",
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        }
+    )
+    app_script = app_bundle_before_boot_script()
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <script src="{bundle_uri}"></script>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; }}
+          #wrap-regression-mount {{ width: 760px; height: 360px; }}
+          .file-editor-panel {{ width: 760px; height: 360px; }}
+        </style>
+      </head>
+      <body class="theme-dark editor-theme-dark">
+        <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+        <div id="wrap-regression-mount"></div>
+        <script>try {{ localStorage.removeItem('yolomux.editorWrap'); }} catch (_) {{}}</script>
+        <script>
+          window.__wrapRegressionErrors = [];
+          window.addEventListener('error', event => {{
+            window.__wrapRegressionErrors.push(event.message || String(event.error || event));
+          }});
+          window.addEventListener('unhandledrejection', event => {{
+            window.__wrapRegressionErrors.push(String(event.reason || event));
+          }});
+        </script>
+        <script>{app_script}</script>
+        <script>
+          (function() {{
+            const path = '/home/test/yolomux.dev/wrap-regression.txt';
+            const doc = [
+              'Word wrap regression',
+              '',
+              'This line must stay visible after clicking Enable Word Wrap in the editor toolbar.',
+              'A second line makes an empty CodeMirror document obvious.'
+            ].join('\\n');
+            const item = fileEditorItemFor(path);
+            setFileState(path, {{
+              kind: 'text',
+              content: doc,
+              original: doc,
+              dirty: false,
+              language: 'markdown',
+              gitTracked: false,
+              gitHasHistory: false,
+              gitHistory: []
+            }});
+            setFileEditorViewMode(path, 'edit', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.id = 'wrap-regression-panel';
+            panel.classList.add('active-pane');
+            document.getElementById('wrap-regression-mount').append(panel);
+            renderFileEditorPanel(panel, item);
+            window.__wrapRegressionReady = new Promise((resolve, reject) => {{
+              let attempts = 0;
+              const wait = () => {{
+                const viewText = panel._cmView?.state?.doc?.toString?.() || '';
+                const contentText = panel.querySelector('.cm-content')?.textContent || '';
+                if (panel._cmView && viewText.includes('This line must stay visible') && contentText) {{
+                  window.__wrapRegressionInitialView = panel._cmView;
+                  window.__wrapRegressionRenderCalls = 0;
+                  const originalRender = renderFileEditorPanel;
+                  renderFileEditorPanel = function(...args) {{
+                    window.__wrapRegressionRenderCalls += 1;
+                    return originalRender.apply(this, args);
+                  }};
+                  window.__wrapRegressionReconfigCalls = [];
+                  const originalReconfigure = reconfigureCodeMirrorPanelEditorOptions;
+                  reconfigureCodeMirrorPanelEditorOptions = function(targetPanel) {{
+                    const result = originalReconfigure(targetPanel);
+                    const view = targetPanel?._cmView;
+                    const contentFacet = view
+                      ? view.state.facet(window.YOLOmuxCodeMirror.EditorView.contentAttributes)
+                      : [];
+                    window.__wrapRegressionReconfigCalls.push({{
+                      result,
+                      targetId: targetPanel?.id || '',
+                      path: targetPanel?.dataset?.filePath || '',
+                      stateKind: fileStateFor(targetPanel?.dataset?.filePath || '')?.kind || '',
+                      classes: contentFacet.map(item => item.class || '').join('|'),
+                    }});
+                    return result;
+                  }};
+                  resolve(true);
+                  return;
+                }}
+                attempts += 1;
+                if (attempts > 120) {{
+                  const status = panel.querySelector('.file-editor-status-panel')?.textContent || '';
+                  const cmPane = panel.querySelector('.file-editor-codemirror-panel');
+                  const rawPane = panel.querySelector('.file-editor-raw-panel');
+                  const cmKeys = Object.keys(window.YOLOmuxCodeMirror || {{}}).slice(0, 20).join(',');
+                  reject(new Error([
+                    'CodeMirror editor did not render test document',
+                    `status=${{status}}`,
+                    `cmHidden=${{cmPane?.hidden}}`,
+                    `cmText=${{cmPane?.textContent || ''}}`,
+                    `rawHidden=${{rawPane?.hidden}}`,
+                    `rawText=${{rawPane?.textContent || ''}}`,
+                    `cmKeys=${{cmKeys}}`
+                  ].join(' | ')));
+                  return;
+                }}
+                requestAnimationFrame(wait);
+              }};
+              wait();
+            }});
+          }})();
+        </script>
+      </body>
     </html>
     """
 
@@ -701,6 +879,18 @@ def load_pc_controls_fixture(browser, tmp_path):
 def load_topbar_font_fixture(browser, tmp_path):
     page = tmp_path / "topbar-font.html"
     page.write_text(topbar_font_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_editor_diff_ref_toolbar_fixture(browser, tmp_path):
+    page = tmp_path / "editor-diff-ref-toolbar.html"
+    page.write_text(editor_diff_ref_toolbar_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_codemirror_wrap_toggle_fixture(browser, tmp_path):
+    page = tmp_path / "cm-wrap-toggle.html"
+    page.write_text(codemirror_wrap_toggle_fixture_html(), encoding="utf-8")
     browser.get(page.as_uri())
 
 
@@ -1292,11 +1482,34 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
         const wrapControl = document.querySelector('.file-editor-wrap-panel').getBoundingClientRect();
         const modeControl = document.querySelector('[data-editor-mode="preview"]').getBoundingClientRect();
         const modeButtonRects = Array.from(document.querySelectorAll('.file-editor-mode-control button')).map(button => button.getBoundingClientRect());
+        const toolbarButtons = Array.from(document.querySelectorAll([
+          '.file-editor-gutter-panel',
+          '.file-editor-wrap-panel',
+          '.file-editor-find-panel',
+          '.file-editor-blame-panel',
+          '.file-editor-diff-panel',
+          '.file-editor-diff-expand-panel',
+          '.file-editor-theme-panel',
+          '.file-editor-reload-panel',
+          '.file-editor-save-panel',
+        ].join(',')));
         const modeIconDeltas = Array.from(document.querySelectorAll('.file-editor-mode-control button')).map(button => {
           const buttonRect = button.getBoundingClientRect();
           const iconRect = button.querySelector('.file-editor-icon').getBoundingClientRect();
           return Math.abs((buttonRect.top + buttonRect.height / 2) - (iconRect.top + iconRect.height / 2));
         });
+        const toolbarIconDeltas = toolbarButtons
+          .filter(button => button.querySelector('.file-editor-icon'))
+          .map(button => {
+            const buttonRect = button.getBoundingClientRect();
+            const iconRect = button.querySelector('.file-editor-icon').getBoundingClientRect();
+            return {
+              cls: button.className,
+              dx: Math.abs((buttonRect.left + buttonRect.width / 2) - (iconRect.left + iconRect.width / 2)),
+              dy: Math.abs((buttonRect.top + buttonRect.height / 2) - (iconRect.top + iconRect.height / 2)),
+            };
+          });
+        const toolbarButtonRects = toolbarButtons.map(button => button.getBoundingClientRect());
         const elementAtCenter = rect => document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
         const tabRows = [];
         for (const tab of Array.from(document.querySelectorAll('.pane-tab'))) {
@@ -1366,6 +1579,11 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
           modeButtonTopSpread: Math.max(...modeButtonRects.map(rect => rect.top)) - Math.min(...modeButtonRects.map(rect => rect.top)),
           modeButtonHeightSpread: Math.max(...modeButtonRects.map(rect => rect.height)) - Math.min(...modeButtonRects.map(rect => rect.height)),
           modeIconCenterMaxDelta: Math.max(...modeIconDeltas),
+          toolbarButtonTopSpread: Math.max(...toolbarButtonRects.map(rect => rect.top)) - Math.min(...toolbarButtonRects.map(rect => rect.top)),
+          toolbarButtonHeightSpread: Math.max(...toolbarButtonRects.map(rect => rect.height)) - Math.min(...toolbarButtonRects.map(rect => rect.height)),
+          toolbarIconCenterMaxDx: Math.max(...toolbarIconDeltas.map(item => item.dx)),
+          toolbarIconCenterMaxDy: Math.max(...toolbarIconDeltas.map(item => item.dy)),
+          toolbarIconDeltas,
           tabRowCount: tabRows.length,
           lowerTabRowsUseFullWidth: tabRows.slice(1).some(row => Math.max(...row.rights) > actions.left + 20),
         };
@@ -1433,6 +1651,137 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["modeButtonTopSpread"] <= 1
     assert metrics["modeButtonHeightSpread"] <= 1
     assert metrics["modeIconCenterMaxDelta"] <= 1.5
+    assert metrics["toolbarButtonTopSpread"] <= 1
+    assert metrics["toolbarButtonHeightSpread"] <= 1
+    assert metrics["toolbarIconCenterMaxDx"] <= 1.5, metrics["toolbarIconDeltas"]
+    assert metrics["toolbarIconCenterMaxDy"] <= 1.5, metrics["toolbarIconDeltas"]
+
+
+def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
+    load_editor_diff_ref_toolbar_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const toolbar = document.querySelector('.file-editor-toolbar').getBoundingClientRect();
+        const panel = document.getElementById('diff-ref-panel').getBoundingClientRect();
+        const controls = document.querySelector('[data-diff-ref-controls]').getBoundingClientRect();
+        const to = document.getElementById('to-ref').getBoundingClientRect();
+        const reset = document.getElementById('reset-ref').getBoundingClientRect();
+        const resetStyle = getComputedStyle(document.getElementById('reset-ref'));
+        const panelStyle = getComputedStyle(document.getElementById('diff-ref-panel'));
+        const hit = document.elementFromPoint(reset.left + reset.width / 2, reset.top + reset.height / 2);
+        return {
+          toolbarRight: toolbar.right,
+          panelRight: panel.right,
+          controlsRight: controls.right,
+          toRight: to.right,
+          resetLeft: reset.left,
+          resetRight: reset.right,
+          resetWidth: reset.width,
+          resetDisplay: resetStyle.display,
+          panelOverflow: panelStyle.overflow,
+          hitReset: Boolean(hit?.closest?.('#reset-ref')),
+        };
+        """
+    )
+    assert metrics["resetDisplay"] != "none"
+    assert metrics["resetWidth"] >= 18
+    assert metrics["panelOverflow"] == "visible"
+    assert 0 <= metrics["resetLeft"] - metrics["toRight"] <= 5
+    assert metrics["resetRight"] <= metrics["panelRight"] + 1
+    assert metrics["controlsRight"] <= metrics["panelRight"] + 1
+    assert metrics["panelRight"] <= metrics["toolbarRight"] + 1
+    assert metrics["hitReset"]
+
+
+def test_codemirror_word_wrap_toggle_keeps_existing_content_visible(browser, tmp_path):
+    load_codemirror_wrap_toggle_fixture(browser, tmp_path)
+    ready = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__wrapRegressionReady.then(
+          () => done({ok: true}),
+          error => done({ok: false, message: String(error)})
+        );
+        """
+    )
+    assert ready["ok"], ready
+    before = browser.execute_script(
+        """
+        const panel = document.getElementById('wrap-regression-panel');
+        const content = panel.querySelector('.cm-content');
+        return {
+          sameView: panel._cmView === window.__wrapRegressionInitialView,
+          renderCalls: window.__wrapRegressionRenderCalls,
+          doc: panel._cmView.state.doc.toString(),
+          visibleText: content.textContent,
+          lineWrapping: content.classList.contains('cm-lineWrapping'),
+          buttonActive: panel.querySelector('.file-editor-wrap-panel').classList.contains('active'),
+          contentHeight: content.getBoundingClientRect().height,
+        };
+        """
+    )
+    assert before["sameView"]
+    assert before["renderCalls"] == 0
+    assert "This line must stay visible" in before["doc"]
+    assert "This line must stay visible" in before["visibleText"]
+    assert before["lineWrapping"] is False
+    assert before["buttonActive"] is False
+    assert before["contentHeight"] > 0
+
+    after = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const panel = document.getElementById('wrap-regression-panel');
+        panel.querySelector('.file-editor-wrap-panel').click();
+        let attempts = 0;
+        const finish = () => {
+          const content = panel.querySelector('.cm-content');
+          const metrics = {
+            sameView: panel._cmView === window.__wrapRegressionInitialView,
+            renderCalls: window.__wrapRegressionRenderCalls,
+            doc: panel._cmView.state.doc.toString(),
+            visibleText: content.textContent,
+            lineWrapping: Boolean(panel.querySelector('.cm-lineWrapping')),
+            panelWrap: panel.classList.contains('editor-wrap'),
+            buttonActive: panel.querySelector('.file-editor-wrap-panel').classList.contains('active'),
+            contentHeight: content.getBoundingClientRect().height,
+            editorClass: panel.querySelector('.cm-editor')?.className || '',
+            scrollerClass: panel.querySelector('.cm-scroller')?.className || '',
+            contentClass: content.className,
+            contentWhiteSpace: getComputedStyle(content).whiteSpace,
+            reconfigCalls: window.__wrapRegressionReconfigCalls,
+            errors: window.__wrapRegressionErrors,
+            optionViews: panel._cmEditorOptionViews?.length || 0,
+            loadingText: panel.querySelector('.file-editor-codemirror-panel').textContent,
+          };
+          if (metrics.lineWrapping || attempts > 20) done(metrics);
+          else {
+            attempts += 1;
+            requestAnimationFrame(finish);
+          }
+        };
+        requestAnimationFrame(finish);
+        """
+    )
+    assert after["sameView"], after
+    assert after["renderCalls"] == 0, after
+    assert "This line must stay visible" in after["doc"]
+    assert "This line must stay visible" in after["visibleText"]
+    assert after["lineWrapping"] is True, (
+        f"contentClass={after['contentClass']} "
+        f"contentWhiteSpace={after['contentWhiteSpace']} "
+        f"reconfigCalls={after['reconfigCalls']} "
+        f"errors={after['errors']} "
+        f"optionViews={after['optionViews']}"
+    )
+    assert after["panelWrap"] is True
+    assert after["buttonActive"] is True
+    assert after["contentHeight"] > 0
+    assert after["reconfigCalls"], after
+    assert after["reconfigCalls"][-1]["result"] is True, after
+    assert "cm-lineWrapping" in after["reconfigCalls"][-1]["classes"]
+    assert after["errors"] == []
+    assert "loading CodeMirror" not in after["loadingText"]
 
 
 def test_codemirror_bundle_exports_decoration_for_html_semantic_marks(browser, tmp_path):

@@ -629,10 +629,9 @@ function activatePaneTab(side, session, options = {}) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  // DOIT.21: a user-initiated tab switch IS navigation — record EVERY tab kind (file, terminal, Finder,
-  // Prefs, …) so Back returns to the previous tab worked on, not just files. (No-op while navigating.)
-  if (options.userInitiated === true) recordEditorNav(session);
-  setFocusedPanelItem(session);
+  // DOIT.21: a user-initiated tab switch IS navigation. setFocusedPanelItem records the previous
+  // focused item plus the newly activated tab so Back returns to the pane the user just left.
+  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (activeItemForSide(side) === session) {
     focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
@@ -1341,7 +1340,7 @@ function focusPanel(session, options = {}) {
   }
   if (isFileEditorItem(session)) {
     focusedTerminal = null;
-    setFocusedPanelItem(session);
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
     if (autoFocusEnabled) {
       requestFileEditorPanelFocus(session);
       focusFileEditorPanelIfReady(panel, session);
@@ -1350,7 +1349,7 @@ function focusPanel(session, options = {}) {
   }
   if (isVirtualItem(session)) {
     focusedTerminal = null;
-    setFocusedPanelItem(session);
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
     if (isPreferencesItem(session) && options.userInitiated === true && autoFocusEnabled) {
       focusFreshPreferencesSearchSoon(panel);
     }

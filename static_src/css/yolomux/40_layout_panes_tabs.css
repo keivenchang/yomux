@@ -258,7 +258,7 @@ body.theme-light .drop-slot.drag-over {
      only the 1px resizer between them — they TOUCH (image 038). Inactive = transparent (--panel-ring-color
      default). At spacing 0 the border is 0px (panes flush). This puts the ring back at the seam after
      DOIT.20's content-edge overlay made adjacent rings sit a gutter apart. */
-  border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--pane-ring-opacity, 50%), transparent);
+  border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity, var(--pane-ring-opacity, 75%)), transparent);
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
   display: grid;
@@ -424,6 +424,7 @@ body.theme-light .drop-slot.drag-over {
 }
 .panel.active-pane {
   --panel-ring-color: var(--pane-tab-panel-ring);
+  --panel-ring-opacity: var(--pane-active-ring-opacity);
   background: var(--panel);
 }
 /* DOIT.20 + DOIT.24 C1: the green/red/white pane ring is the translucent --pane-split-gap GUTTER BORDER
@@ -453,6 +454,7 @@ body.theme-light .drop-slot.drag-over {
   /* a hover-selected/typing-ready pane shows the same green focus ring as the active pane (it did
      before this refactor, when both colored their real border green). */
   --panel-ring-color: var(--pane-tab-panel-ring);
+  --panel-ring-opacity: var(--pane-active-ring-opacity);
 }
 .panel.typing-ready-pane.yolo-ready-pane {
   --panel-ring-color: var(--brand-green);

@@ -41,7 +41,7 @@
   --pr-status-closed: #aeb8c7;
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
-  --inactive-pane-overlay: rgba(178, 190, 210, 0.14);
+  --inactive-pane-overlay: rgba(178, 190, 210, 0.18);
   --inactive-tab-bg: #293240;
   --inactive-tab-bg-hover: #354052;
   --inactive-tab-border: #667286;
@@ -65,6 +65,8 @@
   --pane-tab-panel-ring: #76b900;
   --pane-tab-panel-ring-shadow: rgba(118, 185, 0, 0.95);
   --pane-tab-panel-ring-width: 4px;
+  --pane-ring-opacity: 75%;
+  --pane-active-ring-opacity: 75%;
   --pane-tab-panel-head-bg: #3f6f00;
   --pane-tab-panel-head-text: #f4ffe8;
   --pane-tab-panel-detail-bg: #1f3026;
@@ -338,10 +340,9 @@ body.theme-light {
   --bad: #b91c1c;
   --inactive-gray: rgba(91, 101, 115, 0.42);
   --inactive-gray-hover: rgba(91, 101, 115, 0.54);
-  /* #254/#259: in light mode dim inactive panes more (was a faint cool rgba(91,101,115,0.14)) — a
-     NEUTRAL gray at that darkness, no red cast (user superseded the earlier warm value). Dark-mode
-     token (top of file) is left as-is. */
-  --inactive-pane-overlay: rgba(90, 96, 105, 0.16);
+  /* #254/#259 follow-up: keep the neutral gray dim, but back off the light-mode alpha so inactive panes
+     are only a touch quieter than focused panes. Dark-mode token (top of file) is left as-is. */
+  --inactive-pane-overlay: rgba(90, 96, 105, 0.09);
   --inactive-tab-bg: #e3e8f0;
   --inactive-tab-bg-hover: #d7deea;
   --inactive-tab-border: #9aa6b6;
@@ -368,7 +369,6 @@ body.theme-light {
 .info-refresh,
 .info-sort-button,
 .changes-repo-head,
-.file-explorer-changes-head .changes-sort-seg,
 .file-editor-mode-control button,
 .file-editor-preview-font-panel button,
 .file-editor-toolbar button,

@@ -363,17 +363,17 @@ function updatePaneTabStrip(panel, side) {
   const activeItem = activeItemForSide(side);
   const items = stack.slice();
   if (activeItem && !items.includes(activeItem)) items.push(activeItem);
-  reconcilePaneTabChildren(strip, side, items);
+  reconcilePaneTabChildren(strip, side, items, paneTabDisplayContext(items));
   bindPaneTabStrip(strip, side);
   restorePaneTabPopover(strip, restorePopoverItem);
   scheduleTabStripOverflowCheck(strip);
 }
 
-function reconcilePaneTabChildren(strip, side, items) {
+function reconcilePaneTabChildren(strip, side, items, displayContext = {}) {
   const existingByItem = new Map(Array.from(strip.querySelectorAll(':scope > .pane-tab')).map(tab => [tab.dataset.paneTab || '', tab]));
   const nextNodes = [];
   for (const item of items) {
-    const fresh = createPaneTab(side, item);
+    const fresh = createPaneTab(side, item, displayContext);
     const existing = existingByItem.get(item);
     if (existing && paneTabShouldPreserve(existing)) {
       syncPreservedPaneTab(existing, fresh);
@@ -385,6 +385,43 @@ function reconcilePaneTabChildren(strip, side, items) {
   }
   for (const leftover of existingByItem.values()) leftover.remove();
   reconcileChildNodes(strip, nextNodes, {lockedNodes: nextNodes.filter(paneTabShouldPreserve)});
+}
+
+function paneTabDisplayContext(items) {
+  return {fileParentLabels: fileTabParentDisambiguators(items)};
+}
+
+function fileTabParentDisambiguators(items) {
+  const byName = new Map();
+  for (const item of items) {
+    if (!isFileEditorItem(item)) continue;
+    const path = fileItemPath(item);
+    if (!path) continue;
+    const name = basenameOf(path);
+    if (!byName.has(name)) byName.set(name, new Map());
+    byName.get(name).set(path, item);
+  }
+  const labels = new Map();
+  for (const pathsByName of byName.values()) {
+    const paths = Array.from(pathsByName.keys());
+    if (paths.length <= 1) continue;
+    const parentSegments = paths.map(path => dirnameOf(path).split('/').filter(Boolean));
+    const maxDepth = Math.max(1, ...parentSegments.map(parts => parts.length));
+    let depth = 1;
+    for (; depth <= maxDepth; depth++) {
+      const seen = new Set(parentSegments.map(parts => fileTabParentSuffix(parts, depth)));
+      if (seen.size === paths.length) break;
+    }
+    for (let index = 0; index < paths.length; index++) {
+      labels.set(paths[index], fileTabParentSuffix(parentSegments[index], depth));
+    }
+  }
+  return labels;
+}
+
+function fileTabParentSuffix(segments, depth) {
+  if (!segments.length) return '/';
+  return segments.slice(Math.max(0, segments.length - depth)).join('/');
 }
 
 function paneTabShouldPreserve(tab) {
@@ -447,7 +484,7 @@ function restorePaneTabPopover(strip, item) {
   tab.classList.add('popover-open');
 }
 
-function createPaneTab(side, item) {
+function createPaneTab(side, item, displayContext = {}) {
   const type = tabTypeForItem(item);
   const isFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
@@ -466,7 +503,8 @@ function createPaneTab(side, item) {
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
-  if (type?.rowHtml) tab.innerHTML = type.rowHtml(item);
+  const rowOptions = isEditor ? {parentLabel: displayContext.fileParentLabels?.get(fileItemPath(item)) || ''} : {};
+  if (type?.rowHtml) tab.innerHTML = type.rowHtml(item, rowOptions);
   else tab.innerHTML = tmuxPaneTabHtml(item, info, state, auto);
   if (!isFiles) {
     const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
@@ -482,7 +520,9 @@ function createPaneTab(side, item) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', type ? itemLabel(item) : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isEditor
+    ? `${itemLabel(item)} ${fileItemPath(item)}${missingFileClass ? ' missing on disk' : ''}`
+    : type ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
@@ -579,10 +619,12 @@ function beginFileTabRename(tab, item) {
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
   if (!popover) return;
-  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab));
+  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab), {
+    onOpen: () => maybeLoadFileTabForPopover(tab, session),
+  });
 }
 
-function bindDelayedSessionPopover(anchor, popover, position) {
+function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
   createHoverPopover({
     anchor,
     popover,
@@ -590,9 +632,61 @@ function bindDelayedSessionPopover(anchor, popover, position) {
     hideDelay: () => popoverHideDelayMs,
     canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
     onQueue: position,
+    onOpen: options.onOpen,
     position,
     closeOthers: () => closeOtherSessionPopovers(anchor),
   });
+}
+
+function maybeLoadFileTabForPopover(tab, item) {
+  if (!isFileEditorItem(item)) return;
+  const state = ensureFileTabStateForItem(item);
+  refreshFileTabPopover(tab, item);
+  if (!state?.loading) return;
+  const path = fileItemPath(item);
+  if (!state.loadingPromise) loadFileEditorState(path, panelNodes.get(item), item);
+  const pending = openFiles.get(path)?.loadingPromise;
+  pending?.finally?.(() => refreshFilePopoversForPath(path));
+}
+
+function ensureFileTabStateForItem(item) {
+  const path = fileItemPath(item);
+  if (!path) return null;
+  if (isFilePreviewItem(item)) addFilePreviewTabItem(path, item);
+  else if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
+  let state = fileStateFor(path);
+  if (!state || !state.kind) {
+    state = ensureFileState(path, {
+      mtime: 0,
+      kind: isImageViewerItem(item) ? 'image' : 'file',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+  }
+  return state;
+}
+
+function refreshFilePopoversForPath(path) {
+  for (const item of [imageViewerItemFor(path), fileEditorItemFor(path), filePreviewItemFor(path)]) {
+    document.querySelectorAll(`.pane-tab[data-pane-tab="${cssEscape(item)}"]`).forEach(tab => refreshFileTabPopover(tab, item));
+  }
+}
+
+function refreshFileTabPopover(tab, item) {
+  const popover = tab?.querySelector?.(':scope > .file-popover');
+  if (!popover) return;
+  const path = fileItemPath(item);
+  const rows = filePopoverRows(path, fileStateFor(path) || {});
+  popover.innerHTML = `
+    <div class="popover-head">
+      <div>
+        <div class="popover-title">${esc(basenameOf(path))}</div>
+      </div>
+    </div>
+    ${rows.join('')}`;
+  bindFilePopoverActions(popover);
 }
 
 function positionPaneTabPopover(tab) {
@@ -651,7 +745,8 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('filetab.modified'))}" aria-label="${esc(t('filetab.modified'))}"></span>` : '';
   const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
   const kind = isFilePreviewItem(item) ? `<span class="file-tab-kind" title="${esc(t('tab.previewOnly'))}">${esc(t('tab.preview'))}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}${kind}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
+  const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}${kind}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
 }
 
 function tmuxPaneTabHtml(session, info, state, auto) {
@@ -849,8 +944,10 @@ function bindPanelShell(panel, session) {
   panel.addEventListener('pointerdown', event => {
     if (isTmuxSession(session)) {
       noteFileExplorerChangesSessionInteraction(session);
+      setFocusedTerminal(session, {userInitiated: true});
     } else {
       setFocusedPanelItem(session, {
+        userInitiated: true,
         focusPreferencesSearch: !preferenceFocusTargetIsInteractive(event.target),
       });
     }

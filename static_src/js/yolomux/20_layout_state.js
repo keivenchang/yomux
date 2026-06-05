@@ -714,7 +714,7 @@ function registerFileEditorLayoutItem(path) {
   }
   ensureFileState(path, {
       mtime: 0,
-      kind: 'loading',
+      kind: 'file',
       original: '',
       content: '',
       dirty: false,
@@ -734,7 +734,7 @@ function registerFilePreviewLayoutItem(path) {
   }
   ensureFileState(path, {
       mtime: 0,
-      kind: 'loading',
+      kind: 'file',
       original: '',
       content: '',
       dirty: false,

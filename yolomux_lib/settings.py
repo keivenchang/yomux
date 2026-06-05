@@ -49,7 +49,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "file_explorer_font_size": 13,
         "tab_width": 180,
         "pane_spacing": 4,
-        "pane_ring_opacity": 50,
+        "pane_ring_opacity": 75,
         "max_tabs_per_pane": 10,
         "red_reminder_ms": 1550,
         "yolo_rotate_ms": 20000,

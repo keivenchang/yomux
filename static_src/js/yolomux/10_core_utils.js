@@ -80,6 +80,26 @@ function normalizeFileStateRecord(state) {
   return state;
 }
 
+function normalizedFileGitHistory(value) {
+  return Array.isArray(value) ? value.filter(item => item && typeof item === 'object' && item.ref) : [];
+}
+
+function applyFileGitMetadata(state, payload) {
+  if (!state || typeof state !== 'object' || !payload || typeof payload !== 'object') return state;
+  const gitHistory = normalizedFileGitHistory(payload.git_history);
+  state.gitTracked = payload.git_tracked === true;
+  state.gitHistory = gitHistory;
+  state.gitHasHistory = payload.git_has_history === true && gitHistory.length > 1;
+  return state;
+}
+
+function fileStateHasUsefulGitHistory(state) {
+  return state?.gitTracked === true
+    && state?.gitHasHistory === true
+    && Array.isArray(state.gitHistory)
+    && state.gitHistory.length > 1;
+}
+
 function ensureFileState(path, defaults = null) {
   if (!path) return null;
   let state = fileState.get(path);
@@ -318,6 +338,12 @@ function readStoredFileExplorerTreeDateMode() {
 
 function writeStoredFileExplorerTreeDateMode(value) {
   storageSet(fileExplorerTreeDateModeStorageKey, normalizeFileExplorerTreeDateMode(value));
+}
+
+function normalizeSessionFilesSortMode(value) {
+  if (value === 'mtime') return 'newest';
+  if (value === 'name') return 'az';
+  return ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'newest';
 }
 
 function readStoredFileExplorerTreeSortMode() {
@@ -588,7 +614,14 @@ function toggleTabMetadata() {
   scheduleTopbarMetricsUpdate();
 }
 
-function setFocusedTerminal(session) {
+function recordFocusNavTransition(previousItem, nextItem) {
+  if (!nextItem) return;
+  if (previousItem && previousItem !== nextItem) recordEditorNav(previousItem);
+  recordEditorNav(nextItem);
+}
+
+function setFocusedTerminal(session, options = {}) {
+  const previousItem = focusedPanelItem;
   focusedTerminal = session;
   focusedPanelItem = session;
   clearPendingFileEditorFocusExcept(session);
@@ -598,6 +631,8 @@ function setFocusedTerminal(session) {
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
   scheduleFileExplorerActiveTabSync(session);
+  if (options.userInitiated === true) recordFocusNavTransition(previousItem, session);
+  else recordAutoFocusNav(session, previousItem);
 }
 
 function clearFocusedTerminal(session) {
@@ -610,6 +645,7 @@ function clearFocusedTerminal(session) {
 }
 
 function setFocusedPanelItem(item, options = {}) {
+  const previousItem = focusedPanelItem;
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   clearPendingFileEditorFocusExcept(item);
@@ -624,7 +660,8 @@ function setFocusedPanelItem(item, options = {}) {
   if (isPreferencesItem(item) && options.focusPreferencesSearch !== false) {
     focusFreshPreferencesSearchSoon();
   }
-  recordAutoFocusNav(item);
+  if (options.userInitiated === true) recordFocusNavTransition(previousItem, item);
+  else recordAutoFocusNav(item, previousItem);
 }
 
 let autoFocusNavTimer = null;
@@ -633,12 +670,12 @@ let autoFocusNavTimer = null;
 // needs-attention) records only the focus that LANDS, not every transient flip. User clicks already
 // record immediately (activatePaneTab userInitiated); a back/forward re-activation lands on the item
 // already at the stack head, so recordEditorNav's consecutive-dedupe makes this a no-op there.
-function recordAutoFocusNav(item) {
+function recordAutoFocusNav(item, previousItem = null) {
   if (!autoFocusEnabled || !item) return;
   if (autoFocusNavTimer) clearTimeout(autoFocusNavTimer);
   autoFocusNavTimer = setTimeout(() => {
     autoFocusNavTimer = null;
-    if (focusedPanelItem === item) recordEditorNav(item);
+    if (focusedPanelItem === item) recordFocusNavTransition(previousItem, item);
   }, 500);
 }
 
@@ -655,7 +692,7 @@ function focusTerminalWhenAutoFocus(session, delay = 0) {
 
 function focusTerminalFromUserAction(session, delay = 0) {
   noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session);
+  setFocusedTerminal(session, {userInitiated: true});
   const run = () => terminals.get(session)?.term?.focus?.();
   if (delay > 0) setTimeout(run, delay);
   else run();

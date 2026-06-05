@@ -1796,11 +1796,15 @@ body.theme-light .modal.about-open {
   word-break: break-all;
 }
 .file-tree-icon {
-  display: inline-block;
-  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 max(20px, calc(var(--file-explorer-font-size) + 2px));
+  width: max(20px, calc(var(--file-explorer-font-size) + 2px));
+  height: max(18px, calc(var(--file-explorer-font-size) + 2px));
   text-align: center;
-  font-size: var(--ui-font-size-xs);
-  flex: 0 0 20px;
+  font-size: max(var(--ui-font-size-xs), calc(var(--file-explorer-font-size) - 2px));
+  line-height: 1;
   border-radius: 3px;
 }
 /* DOIT.31: symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
@@ -1852,7 +1856,7 @@ body.theme-light .modal.about-open {
 .file-tree-row.kind-dir > .file-tree-icon {
   font-size: 1.28em;
   font-weight: 800;
-  line-height: 0.9;
+  line-height: 1;
   color: #8b95a5;
 }
 .file-tree-row.kind-dir.expanded > .file-tree-icon,
@@ -1981,23 +1985,31 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
-  min-width: 13px;
-  height: 18px;
-  padding: 0 1px;
+  flex: 0 0 max(18px, calc(var(--file-explorer-font-size) + 1px));
+  min-width: max(18px, calc(var(--file-explorer-font-size) + 1px));
+  height: max(18px, calc(var(--file-explorer-font-size) + 1px));
+  padding: 0;
   border-radius: 3px;
   color: #061207;
   font-family: var(--mono-font);
-  font-size: var(--ui-font-size-xs);
+  font-size: max(var(--ui-font-size-xs), calc(var(--file-explorer-font-size) - 2px));
   font-weight: 700;
+  line-height: 1;
   letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
 }
 .file-tree-date {
+  display: inline-flex;
+  align-items: center;
   flex-shrink: 0;
+  min-height: max(18px, calc(var(--file-explorer-font-size) + 1px));
   padding-inline-start: 4px;
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-3xs);
+  line-height: 1;
   font-stretch: condensed;
   letter-spacing: 0;
   white-space: nowrap;
@@ -2114,7 +2126,7 @@ body.theme-light .file-tree-children::before {
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: 18px;
+  height: 20px;
   flex: 0 0 30px;
   padding: 0 4px;
   border: 1px solid var(--line);
@@ -2147,7 +2159,7 @@ body.theme-light .file-tree-children::before {
 }
 .file-explorer-sort-select {
   width: 50px;
-  height: 18px;
+  height: 20px;
   flex: 0 0 50px;
   padding: 0 2px;
   color: var(--muted);

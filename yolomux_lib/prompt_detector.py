@@ -393,6 +393,9 @@ _WORKING_LINE_RE = re.compile(
     rf"^\s*{_WORKING_LEADING_SYMBOL_RE}\s+\S.*(?:…|\.{{3}}).*"
     r"(?:\([^)]*(?:thinking|tokens|effort|esc\s+to\s+interrupt|[↑↓]|\b\d+(?:\.\d+)?\s*[smh]\b)[^)]*\)|\b\d+(?:\.\d+)?\s*[smh]\b)"
     r"|^[^\n]*\([^)]*\besc\s+to\s+interrupt\b[^)]*\)"
+    # Claude Code auto-compact progress line: "Compacting conversation... (Nm Ns → Nk tokens) NN%"
+    # Starts with a capital letter (no leading symbol), so the symbol-gated branch above misses it.
+    r"|^\s*Compacting\s+conversation\.{3}.*\([^)]*(?:tokens|→)[^)]*\)"
     r")",
     re.IGNORECASE,
 )
@@ -624,6 +627,9 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if re.fullmatch(r"[❯›>][\s█▉▊▋▌▍▎▏]*", stripped):
         return True
     if re.search(r"\b(?:bypass\s+permissions|esc\s+to\s+interrupt|\d+\s+shells?\b)", stripped, re.IGNORECASE):
+        return True
+    # Claude Code auto-compact countdown footer: "Ns until auto-compact · /model sonnet[Nm"
+    if re.search(r"\buntil\s+auto-compact\b", stripped, re.IGNORECASE):
         return True
     return False
 

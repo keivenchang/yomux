@@ -336,6 +336,7 @@ globalThis.__layoutTestApi = {
   fileQuickOpenScopeLabel,
   fileExplorerDirectoryIsIndexed,
   fileExplorerIndexBadgeText,
+  fileEditorGitActionControlsVisible,
   setFileExplorerIndexedDirsForTest(paths) { setFileExplorerIndexedDirs(paths); },
   setFileExplorerIndexStatusForTest(root, status) { fileExplorerIndexStatus.set(normalizeStoredFileExplorerIndexedDir(root), status); },
   createTopbarSearch,
@@ -355,11 +356,13 @@ globalThis.__layoutTestApi = {
   changeFileRowHtml,
   projectMetaHtml,
   diffRefControlsHtml,
+  diffRefResetButtonHtml,
   diffRefSelectOptionsHtml,
   diffRefPopoverItems,
   diffRefParams,
   diffRefFromSuggestions,
   diffRefToSuggestions,
+  fileDiffRefHistoryItems,
   fileRepoForPath,
   setDiffRefsByRepoForTest(repo, refs) {
     if (!repo) return;
@@ -565,6 +568,9 @@ globalThis.__layoutTestApi = {
   markOpenFileDiffUnavailable,
   focusPreferencesSearch,
   renderPaneTabStrips,
+  paneTabDisplayContext,
+  fileTabParentDisambiguators,
+  ensureFileTabStateForItem,
   setDragSessionForTest(session) { dragSession = session; },
   pendingTabStripRenderForTest() { return pendingTabStripRender; },
   renderPanels,
@@ -702,8 +708,9 @@ globalThis.__layoutTestApi = {
     fileExplorerSessionFilesPayload = payload;
   },
   setSessionFilesSortModeForTest(mode) {
-    sessionFilesSortMode = mode;
+    sessionFilesSortMode = normalizeSessionFilesSortMode(mode);
   },
+  sortedSessionFiles,
   runningAgentCount,
   updateDocumentTitle,
   documentTitleForTest() { return document.title; },
@@ -1075,6 +1082,27 @@ function makeFileTree(paths) {
   api.setOpenFileOwner('/home/keivenc/review.json', item, {ownerSession: '2'});
   assert.ok(api.fileEditorPaneTabHtml(item).includes('>multi</span>'), 'multi-session file tabs distinguish duplicate names');
   assert.ok(api.fileEditorPaneTabHtml('file-preview:/home/keivenc/review.json').includes('file-tab-kind'), 'preview tabs are visually distinguishable from same-path editor tabs');
+  const duplicateParents = api.fileTabParentDisambiguators([
+    api.fileEditorItemFor('/repo/app/src/config.json'),
+    api.fileEditorItemFor('/repo/lib/src/config.json'),
+    api.fileEditorItemFor('/repo/app/README.md'),
+  ]);
+  assert.deepStrictEqual([...duplicateParents.entries()].map(entry => entry.join('=')).sort(), [
+    '/repo/app/src/config.json=app/src',
+    '/repo/lib/src/config.json=lib/src',
+  ], 'duplicate file tabs use the shortest unique parent suffix');
+  const displayContext = api.paneTabDisplayContext([
+    api.fileEditorItemFor('/repo/app/src/config.json'),
+    api.fileEditorItemFor('/repo/lib/src/config.json'),
+  ]);
+  assert.equal(displayContext.fileParentLabels.get('/repo/app/src/config.json'), 'app/src');
+  assert.ok(api.fileEditorPaneTabHtml(api.fileEditorItemFor('/repo/app/src/config.json'), {parentLabel: 'app/src'}).includes('file-tab-parent'), 'duplicate file tabs render the parent suffix in a muted slot');
+  const loadingState = api.ensureFileTabStateForItem(api.fileEditorItemFor('/repo/app/src/pending.txt'));
+  assert.equal(loadingState.kind, 'file', 'path-backed tabs use a file placeholder type, not literal "loading"');
+  assert.equal(loadingState.loading, true, 'path-backed tabs still expose loading status until the file is fetched');
+  const paneTabSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/bindDelayedSessionPopover\(tab, popover[\s\S]*maybeLoadFileTabForPopover\(tab, session\)/.test(paneTabSource), 'file tab popovers load stale/missing file state through the shared hover popover onOpen hook');
+  assert.ok(/function loadFileEditorState[\s\S]*if \(panel\) renderFileEditorPanel\(panel, item\)/.test(paneTabSource), 'inactive file-tab hover loads can fetch without a mounted editor panel');
 
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-heading-1'));
   assert.ok(api.markdownSyntaxHtml('# TITLE\n**bold**').includes('md-bold'));
@@ -1149,7 +1177,8 @@ function makeFileTree(paths) {
   assert.deepStrictEqual(canonical(api.codeMirrorLanguageExtension(brokenLanguageApi, '/home/test/README.md')), [], 'broken Markdown language support falls back to editable plain text');
   assert.deepStrictEqual(canonical(api.codeMirrorMarkdownCodeLanguages(brokenLanguageApi)), [], 'broken fenced-code language descriptions are skipped');
   assert.deepStrictEqual(canonical(api.codeMirrorHighlightExtension({})), [], 'missing highlight support falls back without crashing');
-  assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), true, 'CodeMirror API validation accepts critical editor/search exports');
+  assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}, contentAttributes: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), true, 'CodeMirror API validation accepts critical editor/search exports');
+  assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), false, 'CodeMirror API validation rejects bundles without line-wrapping support');
   assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}}, EditorView: {theme() {}}}), false, 'CodeMirror API validation rejects partial bundles');
   const codeMirrorBundlePackage = JSON.parse(fs.readFileSync('prototypes/codemirror-bundle/package.json', 'utf8'));
   const codeMirrorBundleLock = JSON.parse(fs.readFileSync('prototypes/codemirror-bundle/package-lock.json', 'utf8'));
@@ -1312,33 +1341,44 @@ function makeFileTree(paths) {
   assert.equal(unavailableDiffState.diff, '');
   assert.equal(api.openFileDiffAvailable(unavailableDiffState), false);
   const diffButton = new TestElement('diff-button');
+  const fileHistory = [
+    {ref: 'abc123def456', short: 'abc123d', subject: 'update file'},
+    {ref: '987654321000', short: '9876543', subject: 'create file'},
+  ];
+  const trackedHistoryState = extra => ({kind: 'text', gitTracked: true, gitHasHistory: true, gitHistory: fileHistory, ...extra});
   api.setFileEditorViewMode(changedPath, 'edit', changedItem);
-  api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', gitTracked: true, diffLoaded: true, diff: ''}, changedItem);
+  api.updateFileEditorDiffButton(diffButton, changedPath, trackedHistoryState({diffLoaded: true, diff: ''}), changedItem);
   assert.equal(diffButton.hidden, true, 'unchanged files do not show a Diff button');
-  api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', gitTracked: true, diffLoaded: true, diff: 'diff --git a/a b/a'}, changedItem);
+  api.updateFileEditorDiffButton(diffButton, changedPath, trackedHistoryState({diffLoaded: true, diff: 'diff --git a/a b/a'}), changedItem);
   assert.equal(diffButton.hidden, false, 'changed repo files show a Diff button');
   assert.equal(diffButton.disabled, false, 'changed repo Diff button is clickable');
   api.setFileEditorViewMode(changedPath, 'diff', changedItem);
-  api.updateFileEditorDiffButton(diffButton, changedPath, {kind: 'text', gitTracked: true, diffLoading: true}, changedItem);
+  api.updateFileEditorDiffButton(diffButton, changedPath, trackedHistoryState({diffLoading: true}), changedItem);
   assert.equal(diffButton.hidden, false, 'active diff view keeps a loading Diff button while refs load');
   assert.equal(diffButton.disabled, false, 'active diff view keeps Exit diff clickable while refs load');
   const codePath = '/repo/app/app.py';
   const codeItem = api.fileEditorItemFor(codePath);
   api.setFileEditorViewMode(codePath, 'diff', codeItem);
-  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: true, diffLoaded: true, diff: ''}, codeItem);
+  api.updateFileEditorDiffButton(diffButton, codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem);
   assert.equal(diffButton.hidden, false, 'code files stuck in diff still show an Exit diff button');
   assert.equal(diffButton.disabled, false, 'Exit diff stays clickable even when no code-file diff is available');
   // #25: a .py (non-md/html) in NORMAL mode with no diff loaded yet still offers a clickable Diff
   // toggle, which lazily loads the diff on click (it only hides once a load confirms there is none).
   api.setFileEditorViewMode(codePath, 'edit', codeItem);
-  api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: true}, codeItem);
+  api.updateFileEditorDiffButton(diffButton, codePath, trackedHistoryState({}), codeItem);
   assert.equal(diffButton.hidden, false, '#25: a code file with no diff loaded yet still offers a Diff toggle');
   assert.equal(diffButton.disabled, false, '#25: the Diff toggle is clickable so it can lazily load the diff');
   // A file git does not track (untracked / outside any repo) has no committed version to diff against,
   // so the Diff button stays hidden regardless of view mode (gitTracked falsey).
   api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: false}, codeItem);
   assert.equal(diffButton.hidden, true, 'untracked files never show a Diff button');
+  assert.equal(api.fileEditorGitActionControlsVisible(codePath, {kind: 'text', gitTracked: false}, codeItem), false, 'non-git files show neither Diff nor Blame');
+  assert.equal(api.fileEditorGitActionControlsVisible(codePath, {kind: 'text', gitTracked: true, gitHasHistory: false}, codeItem), false, 'creation-only files show neither Diff nor Blame');
+  assert.equal(api.fileEditorGitActionControlsVisible(codePath, {kind: 'text', gitTracked: true, gitHasHistory: true}, codeItem), false, 'stale history booleans without file-level history show neither Diff nor Blame');
+  assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), false, 'files with history but no diff show neither Diff nor Blame after the no-diff result is known');
+  assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({}), codeItem), true, 'files with history and unknown diff state show the Diff/Blame pair');
   api.setFileEditorViewMode(codePath, 'diff', codeItem);
+  assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), true, 'active diff mode keeps the paired git controls visible so Exit diff remains available');
   api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: false, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem);
   assert.equal(diffButton.hidden, true, 'untracked files stay diff-button-free even in diff mode');
   const diffExpandButton = new TestElement('diff-expand-button');
@@ -1354,11 +1394,32 @@ function makeFileTree(paths) {
   assert.equal(diffExpandButton.hidden, false, 'Expand unchanged is shown only for an active loaded diff');
   assert.equal(diffExpandButton.disabled, false, 'Expand unchanged is clickable for an active loaded diff');
   assert.equal(diffExpandButton.attributes['aria-pressed'], 'false', 'Expand unchanged reflects the persisted toggle state');
+  const noHistoryPath = '/repo/app/DOIT.37.md';
+  api.setOpenFileStateForTest(noHistoryPath, {kind: 'text', gitTracked: true, gitHasHistory: false, gitHistory: []});
+  assert.deepStrictEqual([...api.fileDiffRefHistoryItems(noHistoryPath)], [], 'file editor ref history is empty when the file has no file-level history');
+  assert.deepStrictEqual([...api.diffRefFromSuggestions('/repo/app', noHistoryPath)], [], 'file editor FROM picker does not show unrelated repo history for a no-history file');
+  const historyPath = '/repo/app/src/history.md';
+  api.setOpenFileStateForTest(historyPath, {
+    kind: 'text',
+    gitTracked: true,
+    gitHasHistory: true,
+    gitHistory: [
+      {ref: 'abc123def456', short: 'abc123d', subject: 'touch history.md'},
+      {ref: '987654321000', short: '9876543', subject: 'create history.md'},
+    ],
+  });
+  assert.deepStrictEqual(Array.from(api.diffRefFromSuggestions('/repo/app', historyPath)).map(item => item.short), ['HEAD', 'abc123d', '9876543'], 'file editor FROM picker uses file-specific history when it exists');
+  assert.ok(api.diffRefControlsHtml({compact: true, repo: '/repo/app', path: historyPath}).includes(`data-diff-ref-path="${historyPath}"`), 'editor FROM/TO controls carry the file path for file-scoped history');
   assert.notEqual(
     api.codeMirrorConfigSignature(codePath, {mode: 'diff', expand: false}),
     api.codeMirrorConfigSignature(codePath, {mode: 'diff', expand: true}),
     'Diff expand/collapse changes the CodeMirror signature so the merge view rebuilds',
   );
+  const editConfigSignature = JSON.parse(api.codeMirrorConfigSignature(codePath, {mode: 'edit'}));
+  const diffConfigSignature = JSON.parse(api.codeMirrorConfigSignature(codePath, {mode: 'diff'}));
+  assert.equal(Object.prototype.hasOwnProperty.call(editConfigSignature, 'wrap'), false, 'word wrap is live-reconfigured, not part of the CodeMirror rebuild signature');
+  assert.equal(Object.prototype.hasOwnProperty.call(editConfigSignature, 'lineNumbers'), false, 'line numbers are live-reconfigured, not part of the CodeMirror rebuild signature');
+  assert.equal(Object.prototype.hasOwnProperty.call(diffConfigSignature, 'wrap'), false, 'word wrap cannot force a diff editor rebuild');
   api.setFileEditorViewMode(codePath, 'edit', codeItem);
 }
 
@@ -1517,7 +1578,9 @@ function makeFileTree(paths) {
   assert.ok(/function createTopbarSearch[\s\S]*openFileQuickOpen\(\)/.test(source), 'the topbar universal search opens the unified quick-open/command palette (no forked logic)');
   assert.ok(/renderSessionButtons[\s\S]*appendChild\(createTopbarSearch\(\)\)/.test(source), 'the topbar search is mounted in the menubar middle area');
   assert.ok(/refreshFileIndexStatus[\s\S]{0,400}\/api\/fs\/index-status\?root=/.test(source), '#30/#31: the client warms the backend index and tracks build status via /api/fs/index-status');
-  assert.ok(source.includes("=== 'building' ? 'indexing…' : 'indexed'"), '#31: the indexed badge shows "indexing…" while building, then a steady "indexed"');
+  assert.ok(source.includes("=== 'building' ? '…' : 'I'"), '#31: the indexed badge is compact when the date column is off');
+  assert.ok(/function fileExplorerIndexBadgeText\(path\) \{[\s\S]*?fileExplorerTreeDateMode !== 'none'[\s\S]*?return ''/.test(source), '#31: Date/Ago rows hide the indexed status badge so it cannot overlap the date');
+  assert.ok(source.includes("=== 'building' ? 'indexing…' : 'indexed'"), '#31: the indexed badge title keeps the full status text');
   assert.ok(/payload && payload\.ready \? 'ready' : 'building'/.test(source), '#31: a ready index (incl. during a background TTL rebuild that keeps ready=true) stays "indexed", not "indexing"');
   assert.ok(/fileExplorerIndexStatus\.set\(normalized, 'building'\);\s*refreshFileIndexStatus\(normalized\)/.test(source), '#30: indexing a directory eagerly warms its backend index (no cold first-query live walk)');
   const loadAutoStatusesFn = source.slice(source.indexOf('async function loadAutoStatuses'), source.indexOf('async function loadAutoStatuses') + 1700);
@@ -1779,6 +1842,10 @@ function makeFileTree(paths) {
   const sharedTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.file-tree-row\.has-agent \.file-tree-name\s*\{[^}]*flex:\s*0 1 auto/.test(sharedTreeCss), 'file-tree rows with agent metadata keep the agent directly after the filename');
   assert.ok(/\.file-tree-row\.has-agent \.file-tree-agent\s*\{[^}]*margin-inline-end:\s*auto/.test(sharedTreeCss), 'file-tree rows with agent metadata push diff/status/date after the inline agent');
+  assert.ok(/\.file-tree-icon\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ file icons use a centered fixed box');
+  assert.ok(/\.file-tree-git-status\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ git status badges use the same centered box');
+  assert.ok(/\.file-tree-git-status\s*\{[^}]*overflow:\s*hidden[\s\S]*white-space:\s*nowrap/.test(sharedTreeCss), 'Finder/Differ status badges cannot spill into the date column');
+  assert.ok(/\.file-tree-date\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ date cells align to the icon/status centerline');
   assert.ok(source.includes("refreshActivitySummary({force: true})"), 'YO!agent Refresh summary forces cached summaries to rebuild');
   assert.ok(source.includes("params.set('force', '1')"), 'YO!agent summary API supports a force refresh query');
   assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent summary API carries the active locale query');
@@ -1991,7 +2058,7 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('file-tree-icon'), 'changed-file rows show a file-type icon slot');
   assert.ok(changesHtml.includes('file-tree-date'), 'changed-file rows wrap the date for skinny styling');
   assert.ok(/class="file-tree-row kind-dir[^"]*"[^>]*data-path="\/repo\/app\/src"[\s\S]*<span class="file-tree-date"[^>]*>[^<]+<\/span>/.test(changesHtml), 'Differ directory rows show the same non-empty date slot as Finder');
-  assert.ok(/class="[^"]*changes-date-toggle[^"]*"[^>]*data-file-explorer-tree-dates[^>]*>Date<\/button>/.test(changesHtml), 'standalone Differ toolbar exposes the shared Finder date-mode button');
+  assert.ok(/class="[^"]*file-explorer-date-toggle[^"]*changes-date-toggle[^"]*active[^"]*"[^>]*data-file-explorer-tree-dates[^>]*>Date<\/button>/.test(changesHtml), 'standalone Differ toolbar exposes the active-colored shared Finder date-mode button');
   api.setChangesFolderCollapsedForTest(['/repo/app/src']);
   const collapsedChangesHtml = api.changesPanelHtml();
   assert.ok(collapsedChangesHtml.includes('file-tree-row kind-dir collapsed'), 'collapsed changed-file folders keep their state');
@@ -2000,6 +2067,8 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('data-diff-ref-from'), 'Changes pane exposes FROM ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-to'), 'Changes pane exposes TO ref picker');
   assert.ok(changesHtml.includes('data-diff-ref-input'), 'Changes pane exposes text ref pickers');
+  assert.ok(changesHtml.includes('data-diff-ref-reset'), 'Changes pane exposes the shared FROM/TO reset button');
+  assert.ok(changesHtml.includes(`aria-label="${api.t('diff.ref.reset')}"`), 'Diff reset buttons carry an aria-label');
   assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(changesHtml), 'Changes pane FROM ref picker is a text input with the compact suggestion popup');
   assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(changesHtml), 'Changes pane TO ref picker is a text input with the compact suggestion popup');
   assert.equal(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*list=)[^>]*>/.test(changesHtml), false, 'FROM ref picker does not use the browser-native datalist popup');
@@ -2034,6 +2103,12 @@ function makeFileTree(paths) {
   assert.equal(api.diffRefPopoverItems('', {compact: true, suggestions: manyDiffRefs, showAll: true}).length, 12, 'compact diff-ref popups are capped to avoid huge menus');
   assert.equal(api.diffRefPopoverItems('', {compact: false, suggestions: manyDiffRefs, showAll: true}).length, 18, 'full diff-ref popups are capped to a compact menu size');
   assert.deepEqual(api.diffRefPopoverItems('commit 117', {compact: true, suggestions: manyDiffRefs}).map(item => item.subject), ['commit 117'], 'typing filters the diff-ref popup to matching refs/subjects');
+  assert.ok(/function diffRefComparisonLineHtml[\s\S]*diffRefResetButtonHtml\(refs\)/.test(changedFilesSource), 'Editor and Differ FROM/TO rows share the same reset button helper');
+  assert.ok(/function diffRefControlsHtml[\s\S]*diffRefResetButtonHtml\(refs\)/.test(changedFilesSource), 'compact Editor FROM/TO controls use the shared reset button helper');
+  assert.ok(/function commitDiffRefControls[\s\S]*dataset\?\.diffRefPath[\s\S]*setRepoDiffRefs\(repo, fromInput\?\.value, toInput\?\.value, \{path\}\)/.test(changedFilesSource), 'editor diff ref commits carry the file path so no-history files do not fall back to repo history');
+  assert.ok(/function syncDiffRefControlValues[\s\S]*dataset\?\.diffRefPath[\s\S]*diffRefFromSuggestions\(repo, path\)[\s\S]*diffRefToSuggestions\(refs\.from, repo, path\)/.test(changedFilesSource), 'editor diff ref sync keeps using file-scoped history after rerenders');
+  assert.ok(/status\.textContent !== statusText[\s\S]*date\.textContent !== dateText/.test(changedFilesSource), 'Differ/Finder metadata slots avoid rewriting unchanged status/date text');
+  assert.ok(/setClassNameIfChanged\(icon,[\s\S]*file-icon-dir-indexed/.test(changedFilesSource), 'indexed directory icon class is not rewritten when unchanged');
   assert.ok(changedFilesSource.includes('showDiffRefPicker(diffRefInput, {showAll: true})'), 'clicking/focusing a filled ref input still shows available options');
   assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*positionDiffRefPopover\(diffRefPopoverInput, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
   assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
@@ -2149,15 +2224,36 @@ function makeFileTree(paths) {
   assert.equal(compactFinderPanel.includes('Behind 0 commit'), false, 'C15: 0-commit ahead/behind is not printed');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
-  // C8/C13: the Finder header exposes an inline Recent|name sort TOGGLE (no "Sort" label, no <select>),
-  // defaulting to date/recent (the mtime segment active).
+  // C8/C13 follow-up: Finder embedded Differ now uses the same compact select control pattern as Finder's
+  // own A-Z/Z-A/New/Old sort control, defaulting to New.
   const finderSortPanel = api.fileExplorerChangesPanelHtml();
-  assert.ok(finderSortPanel.includes('changes-sort-toggle'), 'C13: Finder modified-files header has an inline segmented sort toggle');
-  assert.ok(/changes-sort-seg active[^>]*data-sort-value="mtime"|data-sort-value="mtime"[^>]*aria-pressed="true"/.test(finderSortPanel), 'C8/C13: the Finder sort defaults to date/recent (mtime segment active)');
-  assert.ok(finderSortPanel.includes('data-sort-value="name"'), 'C13: the toggle offers a Name segment');
-  assert.equal(/changes-sort-compact|<select data-session-files-sort/.test(finderSortPanel), false, 'C13: the labeled Sort dropdown is gone from the Finder header');
-  assert.ok(finderSortPanel.includes('changes-sort-divider'), 'C13: the toggle segments are separated by a | divider');
-  assert.ok(/class="[^"]*changes-date-toggle[^"]*"[^>]*data-file-explorer-tree-dates[^>]*>Date<\/button>/.test(finderSortPanel), 'Finder embedded Differ header exposes the shared date-mode button');
+  assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-session-files-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
+  const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'finder.sort.newest', oldest: 'finder.sort.oldest'};
+  for (const [value, key] of Object.entries(sortLabels)) {
+    const label = api.t(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.ok(new RegExp(`<option value="${value}"[^>]*>${label}</option>`).test(finderSortPanel), `Finder embedded Differ sort offers ${value}`);
+  }
+  assert.ok(new RegExp(`<option value="newest"[^>]* selected[^>]*>${api.t('finder.sort.newest')}</option>`).test(finderSortPanel), 'Finder embedded Differ sort defaults to New');
+  assert.equal(/changes-sort-toggle|changes-sort-seg|changes-sort-divider/.test(finderSortPanel), false, 'Finder embedded Differ no longer uses a separate segmented sort control');
+  const sortItems = [
+    {path: 'b.txt', repo: '/repo/app', mtime: 100},
+    {path: 'a.txt', repo: '/repo/app', mtime: 200},
+    {path: 'c.txt', repo: '/repo/app', mtime: 50},
+  ];
+  api.setSessionFilesSortModeForTest('az');
+  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['a.txt', 'b.txt', 'c.txt'], 'Differ A-Z sorts by path ascending');
+  api.setSessionFilesSortModeForTest('za');
+  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['c.txt', 'b.txt', 'a.txt'], 'Differ Z-A sorts by path descending');
+  api.setSessionFilesSortModeForTest('newest');
+  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['a.txt', 'b.txt', 'c.txt'], 'Differ New sorts by newest mtime first');
+  api.setSessionFilesSortModeForTest('oldest');
+  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['c.txt', 'b.txt', 'a.txt'], 'Differ Old sorts by oldest mtime first');
+  api.setSessionFilesSortModeForTest('mtime');
+  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['a.txt', 'b.txt', 'c.txt'], 'legacy Differ mtime value maps to New');
+  api.setSessionFilesSortModeForTest('name');
+  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['a.txt', 'b.txt', 'c.txt'], 'legacy Differ name value maps to A-Z');
+  api.setSessionFilesSortModeForTest('newest');
+  assert.ok(/class="[^"]*file-explorer-date-toggle[^"]*changes-date-toggle[^"]*active[^"]*"[^>]*data-file-explorer-tree-dates[^>]*>Date<\/button>/.test(finderSortPanel), 'Finder embedded Differ header exposes the active-colored shared date-mode button');
   assert.ok(/class="changes-refresh"[^>]*>Reload<\/button>/.test(finderSortPanel), 'C13: the Reload button reads "Reload" (via i18n, not hardcoded)');
   assert.ok(/<input(?=[^>]*data-diff-ref-from)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the FROM text picker with the compact popup');
   assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the TO text picker with the compact popup');
@@ -2250,6 +2346,16 @@ function makeFileTree(paths) {
   assert.ok(appSource.includes("const editorViewModes = new Set(['edit', 'preview', 'split', 'diff'])"), 'file editor registers diff as a real view mode');
   assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
   assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
+  assert.ok(appSource.includes('function reconfigureCodeMirrorPanelEditorOptions'), 'word wrap and line-number toggles live-reconfigure CodeMirror instead of rebuilding');
+  assert.ok(appSource.includes('function codeMirrorLineWrappingExtension'), 'word wrap has an explicit CodeMirror line-wrapping helper');
+  assert.ok(appSource.includes("api.EditorView?.contentAttributes?.of?.({class: 'cm-lineWrapping'})"), 'word wrap falls back to CodeMirror contentAttributes when EditorView.lineWrapping is not exported');
+  assert.ok(appSource.includes("&& (api?.EditorView?.lineWrapping || api?.EditorView?.contentAttributes?.of)"), 'CodeMirror API validation requires a usable wrapping extension path');
+  assert.ok(/function codeMirrorWrapMarkerExtension\(api\)[\s\S]{0,140}const scheme = activeEditorScheme\(\)/.test(appSource), 'wrap marker plugin defines its active editor scheme before using scheme.dark');
+  const wrapApplyStart = appSource.indexOf('function applyEditorWrapPreference');
+  const wrapApplyBody = appSource.slice(wrapApplyStart, appSource.indexOf('function setEditorWrapEnabled', wrapApplyStart));
+  assert.ok(wrapApplyBody.includes('codeMirrorCurrentText(panel)'), 'wrap toggles capture the live CodeMirror document before any fallback render');
+  assert.ok(wrapApplyBody.indexOf('reconfigureCodeMirrorPanelEditorOptions(panel)') > 0, 'wrap toggles try the live CodeMirror reconfigure path');
+  assert.ok(wrapApplyBody.indexOf('reconfigureCodeMirrorPanelEditorOptions(panel)') < wrapApplyBody.indexOf('renderFileEditorPanel(panel'), 'wrap toggles reconfigure before falling back to a full render');
   assert.equal(appSource.includes('allowInlineDiffs: true'), false, 'unified diff uses native deleted chunks so removed lines are not editable doc lines');
   // #17: deleted rows carry NO line number and stay read-only — done structurally, not via a CSS
   // transparent-text hack. The unified diff edits the MODIFIED document and overlays the original
@@ -2286,6 +2392,8 @@ function makeFileTree(paths) {
   assert.equal(api.codeMirrorDiffLayout({getBoundingClientRect: () => ({width: 300})}), 'inline', '#33: a narrow pane also uses the unified diff');
   assert.ok(/if \(state\.diffLoading && state\._diffLoadingPromise\) return state\._diffLoadingPromise/.test(appSource), '#43: concurrent diff loads are deduped (callers await one in-flight load), so the panel never renders against an un-loaded original');
   assert.ok(/if \(!state\.diffLoaded && !state\.diffUnavailable\) await refreshOpenFileDiff/.test(appSource), '#43: the diff panel awaits the load before rendering, so an untracked/all-added file resolves to diffUnavailable and falls back to the plain editor instead of flashing all-green');
+  assert.equal(appSource.includes("fileEditorEmptyState('No diff'"), false, 'clean selected refs render the normal editor instead of a No diff empty state');
+  assert.ok(/if \(!openFileDiffAvailable\(state\)\)[\s\S]{0,360}return ensureCodeMirrorPanel\(panel, item, path, state, \{forceMode: 'edit'\}\)/.test(appSource), 'clean selected refs fall back to the normal editable CodeMirror view');
   const refreshDiffStart = appSource.indexOf('async function refreshOpenFileDiff(');
   const openFileEditorStart = appSource.indexOf('async function openFileInEditor(', refreshDiffStart);
   assert.ok(refreshDiffStart > 0 && openFileEditorStart > refreshDiffStart, '#43: refreshOpenFileDiff body is locatable');
@@ -2451,6 +2559,7 @@ function makeFileTree(paths) {
   );
   assert.ok(/<input class="file-explorer-path-inline"[\s\S]*file-explorer-path-copy-panel[\s\S]*file-explorer-hidden-toggle/.test(finderPanelSource), 'Finder panel toolbar renders path first, then copy, then action controls');
   assert.ok(finderPanelSource.includes('fileExplorerTreeDateButtonHtml()'), 'Finder panel toolbar uses the shared date-mode button helper');
+  assert.ok(/file-explorer-sort-select[\s\S]*file-explorer-repo-summary[\s\S]*fileExplorerTreeDateButtonHtml\(\)[\s\S]*file-explorer-panel-close/.test(finderPanelSource), 'Finder date-mode button sits immediately before the pane close control group');
   assert.ok(preferencesCss.includes('--file-explorer-changes-size: 40%'), '#44: the Modified-files section defaults to 40% (2/5) of the Finder height');
   assert.ok(/body\.file-explorer-changes-hidden \.file-explorer-changes-panel/.test(preferencesCss), '#44: hiding the Modified-files section collapses both the panel and its resizer');
   assert.ok(/\.file-explorer-changes-panel \.changes-comparison-head\s*\{[^}]*flex-wrap: nowrap/.test(preferencesCss), '#44(d): the Finder comparison header is compacted to one tight line (header chrome takes less height)');
@@ -2485,6 +2594,8 @@ function makeFileTree(paths) {
   assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (DOIT.6 #6 + images 003/004: undimmed, un-lightened per-pane highlight)');
   assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
   assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 4px'), 'the pane ring uses the 4px width token (DOIT.20)');
+  assert.ok(preferencesCss.includes('--pane-ring-opacity: 75%'), 'the pane ring default opacity is prominent enough in both themes');
+  assert.ok(preferencesCss.includes('--pane-active-ring-opacity: 75%'), 'active panes have a stronger green-ring floor');
   // Light mode uses a BLUE pane separator (dark mode keeps amber/yellow).
   assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-resizer-bg:\s*rgba\(37, 99, 235/.test(preferencesCss), 'light mode uses a blue pane separator');
   // Pane chrome bars (strip, detail row, editor toolbar, find) all read the shared --pane-bar-bg, which is
@@ -2529,10 +2640,12 @@ function makeFileTree(paths) {
   // DOIT.24 C1: the state ring IS the --pane-split-gap gutter border, colored per state via the unified
   // --panel-ring-color and faded by --pane-ring-opacity (transparent on a plain inactive pane). Sitting at
   // the seam edge, an active (green) pane and a needs (red) pane touch across the 1px resizer.
-  assert.ok(/\.panel\s*\{[^}]*border:\s*var\(--pane-split-gap\) solid color-mix\(in srgb, var\(--panel-ring-color\) var\(--pane-ring-opacity/.test(preferencesCss), 'the pane ring is the --pane-split-gap gutter border, colored by --panel-ring-color at --pane-ring-opacity (touches the neighbor at the seam)');
+  assert.ok(/\.panel\s*\{[^}]*border:\s*var\(--pane-split-gap\) solid color-mix\(in srgb, var\(--panel-ring-color\) var\(--panel-ring-opacity,\s*var\(--pane-ring-opacity/.test(preferencesCss), 'the pane ring is the --pane-split-gap gutter border, colored by --panel-ring-color at per-state opacity (touches the neighbor at the seam)');
   // DOIT.20: every focused pane (active or typing-ready) drives the SAME green ring via --panel-ring-color.
   assert.ok(/\.panel\.active-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'the active pane sets the green ring color');
+  assert.ok(/\.panel\.active-pane\s*\{[^}]*--panel-ring-opacity:\s*var\(--pane-active-ring-opacity\)/.test(preferencesCss), 'the active pane uses the stronger green-ring opacity');
   assert.ok(/\.panel\.typing-ready-pane\s*\{[^}]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'a typing-ready pane sets the SAME green ring color as active');
+  assert.ok(/\.panel\.typing-ready-pane\s*\{[^}]*--panel-ring-opacity:\s*var\(--pane-active-ring-opacity\)/.test(preferencesCss), 'typing-ready panes use the same stronger green-ring opacity as active panes');
   assert.equal(/\.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#465267/.test(preferencesCss), false, 'no gray focus border — focused panes are green, not the old typing-ready gray');
   assert.equal(/body\.theme-light \.panel\.typing-ready-pane\s*\{[^}]*border-color:\s*#9aa6b6/.test(preferencesCss), false, 'no LIGHT-mode gray focus border on terminals (the #465267 twin) — focused terminals stay green in light mode too');
   // DOIT.24 C1: no content-edge overlay ring — the ring is the gutter border (asserted above). The
@@ -2556,8 +2669,8 @@ function makeFileTree(paths) {
   assert.ok(/\.panel:not\(\.active-pane\):not\(\.typing-ready-pane\) \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'an inactive pane\'s inactive tabs follow the gray bar (--pane-bar-bg)');
   assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), "an inactive pane's active tab is full green (unfocused-active aliases the focused token)");
   assert.equal(/--pane-tab-unfocused-active-bg:\s*#d2ecc2/.test(preferencesCss), false, 'no lightened light-mode unfocused-active green remains');
-  assert.ok(/--inactive-pane-overlay:\s*rgba\(178, 190, 210, 0\.14\)/.test(preferencesCss), 'inactive-pane dim brightened (dark overlay alpha 0.14)');
-  assert.ok(/--inactive-pane-overlay:\s*rgba\(90, 96, 105, 0\.16\)/.test(preferencesCss), 'inactive-pane dim brightened (light overlay alpha 0.16)');
+  assert.ok(/--inactive-pane-overlay:\s*rgba\(178, 190, 210, 0\.18\)/.test(preferencesCss), 'inactive-pane dim brightened (dark overlay alpha 0.18)');
+  assert.ok(/--inactive-pane-overlay:\s*rgba\(90, 96, 105, 0\.09\)/.test(preferencesCss), 'inactive-pane dim lightly softens inactive panes in light mode');
   {
     // #261: a 0-20px pane spacing setting drives the inter-pane gap; the active pane's green box width
     // == that gap (--pane-split-gap), so it's 0 at spacing 0 and fills the active side up to the line.
@@ -3294,13 +3407,21 @@ function makeFileTree(paths) {
   assert.equal(api.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 indexed', 'file quick-open placeholder summarizes indexed search scope');
   api.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
   assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test')), ['/home/test', '/home/test/dynamo'], 'an indexed child under the default root is still searched recursively');
-  // #31: the Finder indexed badge reflects the cached build status (renders "indexing…" then a steady "indexed").
+  // #31: the Finder indexed badge reflects the cached build status without writing a long label into
+  // the one-letter status column. Date/Ago mode hides the badge entirely because the date slot owns
+  // the right side of the row.
+  api.setFileExplorerTreeDateModeForTest('none');
   api.setFileExplorerIndexStatusForTest('/home/test/dynamo', 'building');
-  assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), 'indexing…', '#31: a building index renders the "indexing…" badge');
+  assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), '…', '#31: a building index renders a compact building badge');
   api.setFileExplorerIndexStatusForTest('/home/test/dynamo', 'ready');
-  assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), 'indexed', '#31: a ready index renders a steady "indexed" badge');
+  assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), 'I', '#31: a ready index renders a compact indexed badge');
+  api.setFileExplorerTreeDateModeForTest('date');
+  assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), '', '#31: Date mode hides the indexed badge instead of stacking it next to the date');
+  api.setFileExplorerTreeDateModeForTest('relative');
+  assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo'), '', '#31: Ago mode hides the indexed badge instead of stacking it next to the age');
+  api.setFileExplorerTreeDateModeForTest('none');
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/not-indexed'), '', '#31: a non-indexed directory renders no badge');
-  // Descendants of an indexed root stay visually quiet; the root's INDEXED badge is the only repeated signal.
+  // Descendants of an indexed root stay visually quiet; the root's compact indexed badge is the only repeated signal.
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/dynamo/lib'), '', 'indexed-root descendants do not show a noisy repeated badge');
   assert.equal(api.fileExplorerIndexBadgeText('/home/test/elsewhere'), '', 'C11: an unrelated directory shows no badge');
   // #23: the topbar universal search renders a launcher button (opens the unified palette on click).
@@ -4923,6 +5044,8 @@ function makeFileTree(paths) {
 // title, and the CSS overlays an arrow badge (red + struck-through for broken).
 {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.equal(source.includes('row.className = `file-tree-row kind-${entry.kind}`'), false, 'Finder row refresh does not drop and re-add symlink/indexed classes');
+  assert.ok(source.includes('syncFileTreeRowKindClass(row, entry.kind)'), 'Finder row kind classes update through stable toggles');
   assert.ok(source.includes("row.classList.toggle('is-symlink', entry.is_symlink === true)"), 'DOIT.31: rows flag symlinks');
   assert.ok(source.includes("row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken')"), 'DOIT.31: rows flag broken symlinks');
   assert.ok(/entry\.is_symlink === true && entry\.symlink_target[\s\S]{0,160}→ \$\{entry\.symlink_target\}/.test(source), 'DOIT.31: a symlink row title shows name → target');
@@ -5203,8 +5326,8 @@ function makeFileTree(paths) {
   {
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.equal(/\.topbar-theme\s*\{/.test(css), false, '#257: the .topbar-theme CSS is removed with the switcher');
-    // #254: light-mode inactive-pane dim is darker + warm (not the old faint cool 0.14 overlay).
-    assert.ok(css.includes('--inactive-pane-overlay: rgba(90, 96, 105, 0.16)'), '#259: light-mode inactive panes dim a neutral gray (no red cast); images 003/004 brightened the alpha to 0.16');
+    // #254/#259 follow-up: light-mode inactive-pane dim stays neutral gray, with a softer alpha.
+    assert.ok(css.includes('--inactive-pane-overlay: rgba(90, 96, 105, 0.09)'), '#259: light-mode inactive panes dim a softer neutral gray (no red cast)');
     // Light-mode pane header (image 043): greenish-light tab-strip container + light frame-control
     // buttons (the minimize/zoom squares used to render dark/"black" with no light values).
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-strip-bg:\s*#dce8d2/.test(css), 'light mode: the pane tab-strip container is greenish-light');
@@ -5212,8 +5335,13 @@ function makeFileTree(paths) {
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-zoom-bg:\s*#4f9e3a/.test(css), 'light mode: the pane zoom button is green (readable with its light glyph), not a dark square');
     assert.equal(css.includes('--inactive-pane-overlay: rgba(124, 82, 88, 0.24)'), false, '#259: the earlier warm/red tint is gone (superseded by gray)');
     assert.equal(css.includes('--inactive-pane-overlay: rgba(91, 101, 115, 0.14)'), false, '#254: the old faint cool light overlay is gone');
+    assert.equal(css.includes('--inactive-pane-overlay: rgba(90, 96, 105, 0.16)'), false, '#259 follow-up: the too-dark light overlay alpha is gone');
+    assert.equal(css.includes('--inactive-pane-overlay: rgba(90, 96, 105, 0.13)'), false, '#259 follow-up: the still-too-dark light overlay alpha is gone');
     // #258: the editor diff FROM/TO group is pushed to the right edge of the toolbar.
     assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*order:\s*-1[^}]*margin-inline-end:\s*auto/.test(css), 'editor info bar: FROM/TO sits left (order:-1) and pushes all buttons right (margin-inline-end:auto)');
+    assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*min-width:\s*max-content[^}]*overflow:\s*visible/.test(css), 'editor info bar: FROM/TO/reset is intrinsic-width and not clipped');
+    assert.equal(css.includes('max-width: min(32vw, 190px)'), false, 'editor info bar: the old too-narrow 190px clipping cap is gone');
+    assert.ok(/\.file-tab-parent\s*\{[^}]*text-overflow:\s*ellipsis/.test(css), 'duplicate file-tab parent suffix is styled as compact muted metadata');
     assert.ok(/\.preferences-setting-control\.setting-type-select,\s*\.preferences-setting-control\.setting-type-text\s*\{[^}]*justify-content:\s*start/.test(css), 'Preferences selects/text inputs are left-aligned from the shared inset');
     assert.ok(/\.preferences-setting-control\.setting-type-number input\[type="number"\]\s*\{[^}]*margin-inline-start:\s*var\(--preferences-control-left-indent\)/.test(css), 'Preferences number inputs are left-aligned from the shared inset');
     // #258 (toast): the toast stack clears the topbar (z-index above 180) and messages wrap, not clip.
@@ -5853,6 +5981,29 @@ function makeFileTree(paths) {
   api.recordEditorNav('5');                 // a terminal session tab
   api.recordEditorNav('file-explorer');     // the Finder dock
   assert.deepEqual(api.editorNav.stack.slice(-2), ['5', 'file-explorer'], 'tab back/forward records any tab kind, not just files');
+  api.editorNav.stack = [];
+  api.editorNav.index = -1;
+  api.recordEditorNav('A');
+  api.recordEditorNav('B');
+  api.recordEditorNav('A');
+  api.recordEditorNav('B');
+  assert.deepEqual(api.editorNav.stack, ['A', 'B'], 'A->B->A->B collapses to the useful two-pane history');
+  assert.equal(api.editorNav.index, 1, 'the collapsed ping-pong stack still points at the current pane');
+}
+
+// A user click/type focus transition records the pane being left and the pane being entered, so Back
+// becomes active even when the previous pane was only focused, not already present in the nav stack.
+{
+  const api = loadYolomux();
+  const back = api.testElementForId('topbarNavBack');
+  api.editorNav.stack = [];
+  api.editorNav.index = -1;
+  back.disabled = true;
+  api.setFocusedPanelItem('1');
+  api.focusTerminalFromUserAction('2');
+  assert.deepEqual(api.editorNav.stack, ['1', '2'], 'user focus transition records previous pane then target pane');
+  assert.equal(api.editorNav.index, 1, 'user focus transition points history at the target pane');
+  assert.equal(back.disabled, false, 'Back is active after clicking/typing into another pane');
 }
 
 // Tab history is bounded — the oldest entries drop past the cap so it can't grow without limit.
@@ -5897,14 +6048,14 @@ function makeFileTree(paths) {
   assert.ok(/topbarNavBack[\s\S]{0,400}?editorNavBack\(\)/.test(source), 'the back button is wired to editorNavBack()');
   assert.ok(/topbarNavForward[\s\S]{0,400}?editorNavForward\(\)/.test(source), 'the forward button is wired to editorNavForward()');
   assert.ok(/getElementById\('topbarNavBack'\)[\s\S]{0,200}?editorNav\.index <= 0/.test(source), 'updateEditorNavButtons disables Back at the start of the stack');
-  assert.ok(source.includes('if (options.userInitiated === true) recordEditorNav(session);'), 'a user-initiated tab switch of ANY tab kind records as navigation (back/forward walks all visited tabs)');
+  assert.ok(source.includes('setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});'), 'a user-initiated tab switch of ANY tab kind records through the shared focus path');
   // DOIT.21: keyboard chords — Mod+Alt+[ / Mod+Alt+] drive editor back/forward (Mod+[ / ] stay with CM indent).
   assert.ok(/event\.altKey && \(event\.code === 'BracketLeft' \|\| event\.code === 'BracketRight'\)/.test(source), 'editor nav has a Mod+Alt+bracket keyboard chord');
   assert.ok(/BracketLeft'\) editorNavBack\(\)/.test(source) && source.includes('else editorNavForward()'), 'the bracket chord maps [ to back and ] to forward');
   // DOIT.35 C2: an auto-focus-driven focus change records nav history (debounced, gated on autoFocusEnabled).
-  assert.ok(source.includes('function recordAutoFocusNav(item)'), 'DOIT.35: auto-focus nav recorder exists');
-  assert.ok(source.includes('recordAutoFocusNav(item);'), 'DOIT.35: setFocusedPanelItem records auto-focus nav');
-  assert.ok(/recordAutoFocusNav[\s\S]{0,200}?if \(!autoFocusEnabled[\s\S]{0,200}?focusedPanelItem === item\) recordEditorNav\(item\)/.test(source), 'DOIT.35: it is gated on autoFocusEnabled and debounced to the landed focus');
+  assert.ok(source.includes('function recordAutoFocusNav(item, previousItem = null)'), 'DOIT.35: auto-focus nav recorder exists');
+  assert.ok(source.includes('recordAutoFocusNav(item, previousItem);'), 'DOIT.35: setFocusedPanelItem records auto-focus nav with the previous focus');
+  assert.ok(/recordAutoFocusNav[\s\S]{0,240}?if \(!autoFocusEnabled[\s\S]{0,240}?focusedPanelItem === item\) recordFocusNavTransition\(previousItem, item\)/.test(source), 'DOIT.35: it is gated on autoFocusEnabled and debounced to the landed focus');
   assert.ok(!source.includes('file-editor-nav-control'), 'the per-pane editor nav group is fully removed (relocated to the topbar)');
 }
 
@@ -5912,6 +6063,10 @@ function makeFileTree(paths) {
 {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes('file-editor-blame-panel'), 'DOIT.26: the editor toolbar has a blame toggle button');
+  assert.ok(source.includes('file-editor-icon-blame'), 'DOIT.26: the blame toggle uses the shared editor icon box, not an unaligned text glyph');
+  const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.file-editor-icon-blame::before\s*\{[^}]*top:\s*50%[^}]*left:\s*50%[^}]*transform:\s*translate\(-50%, -50%\)/.test(editorCss), 'Blame outer circle is explicitly centered inside the editor icon box');
+  assert.ok(/\.file-editor-icon-blame::after\s*\{[^}]*top:\s*50%[^}]*left:\s*50%[^}]*transform:\s*translate\(-50%, -50%\)/.test(editorCss), 'Blame center dot is explicitly centered inside the editor icon box');
   assert.ok(source.includes('function codeMirrorBlameExtension(api, path)'), 'DOIT.26: a CodeMirror blame extension decorates the cursor line');
   assert.ok(source.includes("'data-blame': blameAnnotationText(info)"), 'DOIT.26: the cursor line gets the dim blame annotation via data-blame (CSS ::after)');
   assert.ok(source.includes('codeMirrorBlameExtension(api, path)'), 'DOIT.26: the blame extension is wired into the editable editor extensions');
@@ -5925,10 +6080,13 @@ function makeFileTree(paths) {
   assert.ok(source.includes('blameAllLines: fileEditorBlameAllLines'), 'DOIT.26: blame-all-lines is in the editor config signature');
   assert.ok(/if \(fileEditorBlameAllLines\)[\s\S]{0,260}view\.visibleRanges/.test(source), 'DOIT.26: all-lines blame decorates every visible line');
   assert.ok(source.includes('data-setting-path="editor.blame_all_lines"') || source.includes("path: 'editor.blame_all_lines'"), 'DOIT.26: Preferences exposes the all-lines blame toggle');
-  // Blame + Diff buttons hide for files git doesn't track (untracked / outside any repo) — no history.
-  assert.ok(/blameButton\.hidden =[^;]*state\.gitTracked !== true/.test(source), 'blame button hides for non-git-tracked files');
-  assert.ok(/button\.hidden =[^;]*state\?\.gitTracked !== true/.test(source), 'diff button hides for non-git-tracked files');
-  assert.ok(source.includes('gitTracked: payload.git_tracked === true'), 'editor state carries the git_tracked flag from /api/fs/read');
+  // Blame + Diff buttons are a single git-history pair: adjacent in markup, same visibility predicate.
+  assert.ok(/file-editor-blame-panel[\s\S]{0,260}file-editor-diff-panel/.test(source), 'Blame and Diff buttons are adjacent toolbar controls');
+  assert.ok(/function fileStateHasUsefulGitHistory[\s\S]*state\?\.gitTracked === true[\s\S]*state\?\.gitHasHistory === true[\s\S]*state\.gitHistory\.length > 1/.test(source), 'file-history metadata requires an actual multi-commit file history');
+  assert.ok(/function fileEditorGitActionControlsVisible[\s\S]*fileStateHasUsefulGitHistory\(state\)[\s\S]*confirmedNoDiff/.test(source), 'shared git-action predicate hides both controls for non-git, creation-only, stale-history, or confirmed-clean files');
+  assert.ok(source.includes('updateFileEditorBlameButton(blameButton, path, state, item);'), 'blame button uses the shared git-action visibility helper');
+  assert.ok(source.includes('button.hidden = !fileEditorGitActionControlsVisible(path, state, item);'), 'diff button uses the shared git-action visibility predicate');
+  assert.ok(source.includes('state.gitTracked = payload.git_tracked === true'), 'editor state carries the git_tracked flag from /api/fs/read through the shared normalizer');
 }
 
 // Search scroll fix: navigating matches re-centers the match horizontally, so a short-line match in a

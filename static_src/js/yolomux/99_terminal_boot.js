@@ -1151,7 +1151,7 @@ function syncPanelVisibility(previousActive = []) {
 }
 
 function activateTab(session, name, options = {}) {
-  setFocusedPanelItem(session);
+  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (name !== 'transcript') stopTranscriptStream(session);
   if (name !== 'summary') stopSummaryStream(session);
   document.querySelectorAll(`[data-tab="${session}"]`).forEach(button => {
@@ -1328,6 +1328,7 @@ function startTerminal(session) {
       const filtered = stripTerminalQueryResponses(data);
       if (filtered) {
         noteFileExplorerChangesSessionInteraction(session);
+        setFocusedTerminal(session, {userInitiated: true});
         socket.send(JSON.stringify({type: 'input', data: filtered}));
       }
     }

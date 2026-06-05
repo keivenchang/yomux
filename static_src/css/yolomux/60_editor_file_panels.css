@@ -67,132 +67,188 @@
   position: relative;
   display: inline-grid;
   place-items: center;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
   color: currentColor;
+  line-height: 1;
+  overflow: visible;
 }
 .file-editor-icon-wrap::before {
   content: "↪";
-  position: static;
+  position: absolute;
+  top: 50%;
+  left: 50%;
   display: block;
-  font-size: var(--ui-font-size-xl);
+  font-size: 15px;
   line-height: 1;
-  transform: translateY(-1px);
+  transform: translate(-50%, -55%);
 }
 .file-editor-icon-find::before {
   content: "";
   position: absolute;
+  top: 43%;
+  left: 43%;
   width: 8px;
   height: 8px;
   border: 1.6px solid currentColor;
   border-radius: 50%;
-  transform: translate(-1px, -1px);
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-find::after {
   content: "";
   position: absolute;
+  top: 66%;
+  left: 66%;
   width: 6px;
   height: 1.6px;
   border-radius: 999px;
   background: currentColor;
-  transform: translate(4px, 4px) rotate(45deg);
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.file-editor-icon-blame::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+}
+.file-editor-icon-blame::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-diff::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 12px;
   height: 10px;
   border: 1.5px solid currentColor;
   border-radius: 2px;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-diff::after {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 8px;
   height: 1.5px;
   border-radius: 999px;
   background: currentColor;
   box-shadow: 0 4px 0 currentColor;
-  transform: rotate(-35deg);
+  transform: translate(-50%, -50%) rotate(-35deg);
 }
 .file-editor-icon-edit::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 11px;
   height: 3px;
   border-radius: 2px;
   border: 1.5px solid currentColor;
-  transform: rotate(-35deg);
+  transform: translate(-50%, -50%) rotate(-35deg);
 }
 .file-editor-icon-eye::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 13px;
   height: 8px;
   border: 1.5px solid currentColor;
   border-radius: 50% / 60%;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-eye::after {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 3.5px;
   height: 3.5px;
   border-radius: 50%;
   background: currentColor;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-split::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 13px;
   height: 10px;
   border: 1.5px solid currentColor;
   border-radius: 2px;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-split::after {
   content: "";
   position: absolute;
-  top: 2px;
-  bottom: 2px;
+  top: 50%;
+  left: 50%;
   width: 1.5px;
+  height: 8px;
   background: currentColor;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-side-split::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 13px;
   height: 10px;
   border: 1.5px solid currentColor;
   border-radius: 2px;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-side-split::after {
   content: "";
   position: absolute;
-  right: 2px;
+  top: 50%;
+  left: calc(50% + 3px);
   width: 4px;
   height: 6px;
   border: 1.5px solid currentColor;
   border-inline-start: 0;
-}
-.file-editor-icon-side-split {
-  overflow: visible;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-theme::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 12px;
   height: 12px;
   border: 1.5px solid currentColor;
   border-radius: 50%;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-theme::after {
   content: "";
   position: absolute;
-  right: 1px;
+  top: 50%;
+  left: calc(50% + 3px);
   width: 6px;
   height: 10px;
   border-radius: 0 999px 999px 0;
   background: currentColor;
   opacity: 0.75;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-save {
   border: 1.5px solid currentColor;
@@ -419,6 +475,19 @@ body.editor-theme-light .file-editor-image {
   font-weight: 850;
   line-height: 1.1;
 }
+.file-tab-parent {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-3xs);
+  font-weight: 700;
+}
+.pane-tab.active .file-tab-parent {
+  color: color-mix(in srgb, var(--pane-tab-active-text) 82%, transparent);
+}
 
 .file-editor-mode-control {
   display: inline-flex;
@@ -620,8 +689,8 @@ body.theme-light .file-tree-rename-input {
 .path-copy-button {
   position: relative;
   flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -643,12 +712,12 @@ body.theme-light .file-tree-rename-input {
   border-radius: 1px;
 }
 .path-copy-button::before {
-  left: 6px;
+  left: 5px;
   top: 7px;
   opacity: 0.7;
 }
 .path-copy-button::after {
-  left: 9px;
+  left: 8px;
   top: 4px;
   background: inherit;
 }
@@ -812,33 +881,11 @@ body.theme-light .file-explorer-changes-head {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* C8/C13: inline Recent|name sort toggle in the Finder Modified-files header (no "Sort" label). The
-   active segment uses the accent green, the inactive is muted, and the divider uses the line token — all
-   flip with the theme. Reuses the shared sort handler/state. */
-.file-explorer-changes-head .changes-sort-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  white-space: nowrap;
-  font-size: var(--ui-font-size-xs);
-}
-.file-explorer-changes-head .changes-sort-seg {
-  padding: 0 2px;
-  font: inherit;
-  color: var(--muted);
-}
-.file-explorer-changes-head .changes-sort-seg.active {
-  color: var(--brand-green);
-  font-weight: 700;
-}
-.file-explorer-changes-head .changes-sort-seg:hover,
-.file-explorer-changes-head .changes-sort-seg:focus-visible {
-  color: var(--brand-green);
-  outline: none;
-}
-.file-explorer-changes-head .changes-sort-divider {
-  color: var(--line);
+.file-explorer-changes-head .changes-sort-select {
+  min-width: 8ch;
+  width: auto;
+  flex: 0 0 auto;
+  align-self: center;
 }
 /* FROM hugs the left edge of the refs area, TO hugs the right (user: "FROM left, TO right indented").
    The controls span the full width of their cell/row and push apart instead of bunching together. */
@@ -896,6 +943,9 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   font-size: var(--ui-font-size-xs);
 }
 .file-explorer-changes-head .changes-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: 20px;
   width: 20px;
   padding: 0;
@@ -913,12 +963,16 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   border-color: var(--brand-green);
 }
 .file-explorer-changes-panel .changes-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: 20px;
   padding: 0 6px;
   font-size: var(--ui-font-size-2xs);
 }
 .file-explorer-changes-head .changes-date-toggle {
   height: 20px;
+  align-self: center;
 }
 .file-explorer-changes-panel .changes-summary {
   justify-self: end;
@@ -938,7 +992,7 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   .file-explorer-changes-head .changes-title {
     grid-area: title;
   }
-  .file-explorer-changes-head .changes-sort-toggle {
+  .file-explorer-changes-head .changes-sort-select {
     grid-area: sort;
   }
   .file-explorer-changes-head .changes-date-toggle {
@@ -1297,16 +1351,17 @@ body.editor-theme-light .file-editor-content {
   margin-inline-end: auto;
   display: inline-flex;
   align-items: center;
-  min-width: 0;
-  max-width: min(32vw, 190px);
-  overflow: hidden;
+  flex: 0 1 auto;
+  min-width: max-content;
+  max-width: min(56vw, 340px);
+  overflow: visible;
 }
 .file-editor-diff-ref-panel[hidden] {
   display: none;
 }
 .file-editor-diff-ref-panel .diff-ref-input,
 .file-editor-diff-ref-panel .diff-ref-control input {
-  width: clamp(42px, 6vw, 76px);
+  width: clamp(44px, 7vw, 88px);
 }
 .file-editor-toolbar-separator {
   width: 1px;
@@ -1374,23 +1429,33 @@ body.editor-theme-light .file-editor-content {
 .file-editor-save-panel {
   min-width: 20px;
   width: 20px;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0;
   color: var(--good);
 }
 .file-editor-wrap-panel,
 .file-editor-gutter-panel,
 .file-editor-find-panel,
+.file-editor-diff-panel,
 .file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
 .file-editor-blame-panel,
 .file-editor-theme-panel {
   min-width: 20px;
   width: 20px;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0;
+  line-height: 1;
+}
+.file-editor-reload-panel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 /* DOIT.26: blame toggle goes green when ON (like the other pressed toggles), and the inline annotation
    is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token

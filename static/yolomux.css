@@ -42,7 +42,7 @@
   --pr-status-closed: #aeb8c7;
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
-  --inactive-pane-overlay: rgba(178, 190, 210, 0.14);
+  --inactive-pane-overlay: rgba(178, 190, 210, 0.18);
   --inactive-tab-bg: #293240;
   --inactive-tab-bg-hover: #354052;
   --inactive-tab-border: #667286;
@@ -66,6 +66,8 @@
   --pane-tab-panel-ring: #76b900;
   --pane-tab-panel-ring-shadow: rgba(118, 185, 0, 0.95);
   --pane-tab-panel-ring-width: 4px;
+  --pane-ring-opacity: 75%;
+  --pane-active-ring-opacity: 75%;
   --pane-tab-panel-head-bg: #3f6f00;
   --pane-tab-panel-head-text: #f4ffe8;
   --pane-tab-panel-detail-bg: #1f3026;
@@ -339,10 +341,9 @@ body.theme-light {
   --bad: #b91c1c;
   --inactive-gray: rgba(91, 101, 115, 0.42);
   --inactive-gray-hover: rgba(91, 101, 115, 0.54);
-  /* #254/#259: in light mode dim inactive panes more (was a faint cool rgba(91,101,115,0.14)) — a
-     NEUTRAL gray at that darkness, no red cast (user superseded the earlier warm value). Dark-mode
-     token (top of file) is left as-is. */
-  --inactive-pane-overlay: rgba(90, 96, 105, 0.16);
+  /* #254/#259 follow-up: keep the neutral gray dim, but back off the light-mode alpha so inactive panes
+     are only a touch quieter than focused panes. Dark-mode token (top of file) is left as-is. */
+  --inactive-pane-overlay: rgba(90, 96, 105, 0.09);
   --inactive-tab-bg: #e3e8f0;
   --inactive-tab-bg-hover: #d7deea;
   --inactive-tab-border: #9aa6b6;
@@ -369,7 +370,6 @@ body.theme-light {
 .info-refresh,
 .info-sort-button,
 .changes-repo-head,
-.file-explorer-changes-head .changes-sort-seg,
 .file-editor-mode-control button,
 .file-editor-preview-font-panel button,
 .file-editor-toolbar button,
@@ -3722,7 +3722,7 @@ body.theme-light .drop-slot.drag-over {
      only the 1px resizer between them — they TOUCH (image 038). Inactive = transparent (--panel-ring-color
      default). At spacing 0 the border is 0px (panes flush). This puts the ring back at the seam after
      DOIT.20's content-edge overlay made adjacent rings sit a gutter apart. */
-  border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--pane-ring-opacity, 50%), transparent);
+  border: var(--pane-split-gap) solid color-mix(in srgb, var(--panel-ring-color) var(--panel-ring-opacity, var(--pane-ring-opacity, 75%)), transparent);
   border-radius: var(--pane-tile-radius);
   background: var(--panel-inactive);
   display: grid;
@@ -3888,6 +3888,7 @@ body.theme-light .drop-slot.drag-over {
 }
 .panel.active-pane {
   --panel-ring-color: var(--pane-tab-panel-ring);
+  --panel-ring-opacity: var(--pane-active-ring-opacity);
   background: var(--panel);
 }
 /* DOIT.20 + DOIT.24 C1: the green/red/white pane ring is the translucent --pane-split-gap GUTTER BORDER
@@ -3917,6 +3918,7 @@ body.theme-light .drop-slot.drag-over {
   /* a hover-selected/typing-ready pane shows the same green focus ring as the active pane (it did
      before this refactor, when both colored their real border green). */
   --panel-ring-color: var(--pane-tab-panel-ring);
+  --panel-ring-opacity: var(--pane-active-ring-opacity);
 }
 .panel.typing-ready-pane.yolo-ready-pane {
   --panel-ring-color: var(--brand-green);
@@ -6588,11 +6590,15 @@ body.theme-light .modal.about-open {
   word-break: break-all;
 }
 .file-tree-icon {
-  display: inline-block;
-  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 max(20px, calc(var(--file-explorer-font-size) + 2px));
+  width: max(20px, calc(var(--file-explorer-font-size) + 2px));
+  height: max(18px, calc(var(--file-explorer-font-size) + 2px));
   text-align: center;
-  font-size: var(--ui-font-size-xs);
-  flex: 0 0 20px;
+  font-size: max(var(--ui-font-size-xs), calc(var(--file-explorer-font-size) - 2px));
+  line-height: 1;
   border-radius: 3px;
 }
 /* DOIT.31: symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
@@ -6644,7 +6650,7 @@ body.theme-light .modal.about-open {
 .file-tree-row.kind-dir > .file-tree-icon {
   font-size: 1.28em;
   font-weight: 800;
-  line-height: 0.9;
+  line-height: 1;
   color: #8b95a5;
 }
 .file-tree-row.kind-dir.expanded > .file-tree-icon,
@@ -6773,23 +6779,31 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
-  min-width: 13px;
-  height: 18px;
-  padding: 0 1px;
+  flex: 0 0 max(18px, calc(var(--file-explorer-font-size) + 1px));
+  min-width: max(18px, calc(var(--file-explorer-font-size) + 1px));
+  height: max(18px, calc(var(--file-explorer-font-size) + 1px));
+  padding: 0;
   border-radius: 3px;
   color: #061207;
   font-family: var(--mono-font);
-  font-size: var(--ui-font-size-xs);
+  font-size: max(var(--ui-font-size-xs), calc(var(--file-explorer-font-size) - 2px));
   font-weight: 700;
+  line-height: 1;
   letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
 }
 .file-tree-date {
+  display: inline-flex;
+  align-items: center;
   flex-shrink: 0;
+  min-height: max(18px, calc(var(--file-explorer-font-size) + 1px));
   padding-inline-start: 4px;
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-3xs);
+  line-height: 1;
   font-stretch: condensed;
   letter-spacing: 0;
   white-space: nowrap;
@@ -6906,7 +6920,7 @@ body.theme-light .file-tree-children::before {
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: 18px;
+  height: 20px;
   flex: 0 0 30px;
   padding: 0 4px;
   border: 1px solid var(--line);
@@ -6939,7 +6953,7 @@ body.theme-light .file-tree-children::before {
 }
 .file-explorer-sort-select {
   width: 50px;
-  height: 18px;
+  height: 20px;
   flex: 0 0 50px;
   padding: 0 2px;
   color: var(--muted);
@@ -7082,132 +7096,188 @@ body.theme-light .file-tree-children::before {
   position: relative;
   display: inline-grid;
   place-items: center;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
   color: currentColor;
+  line-height: 1;
+  overflow: visible;
 }
 .file-editor-icon-wrap::before {
   content: "↪";
-  position: static;
+  position: absolute;
+  top: 50%;
+  left: 50%;
   display: block;
-  font-size: var(--ui-font-size-xl);
+  font-size: 15px;
   line-height: 1;
-  transform: translateY(-1px);
+  transform: translate(-50%, -55%);
 }
 .file-editor-icon-find::before {
   content: "";
   position: absolute;
+  top: 43%;
+  left: 43%;
   width: 8px;
   height: 8px;
   border: 1.6px solid currentColor;
   border-radius: 50%;
-  transform: translate(-1px, -1px);
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-find::after {
   content: "";
   position: absolute;
+  top: 66%;
+  left: 66%;
   width: 6px;
   height: 1.6px;
   border-radius: 999px;
   background: currentColor;
-  transform: translate(4px, 4px) rotate(45deg);
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.file-editor-icon-blame::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+}
+.file-editor-icon-blame::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-diff::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 12px;
   height: 10px;
   border: 1.5px solid currentColor;
   border-radius: 2px;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-diff::after {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 8px;
   height: 1.5px;
   border-radius: 999px;
   background: currentColor;
   box-shadow: 0 4px 0 currentColor;
-  transform: rotate(-35deg);
+  transform: translate(-50%, -50%) rotate(-35deg);
 }
 .file-editor-icon-edit::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 11px;
   height: 3px;
   border-radius: 2px;
   border: 1.5px solid currentColor;
-  transform: rotate(-35deg);
+  transform: translate(-50%, -50%) rotate(-35deg);
 }
 .file-editor-icon-eye::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 13px;
   height: 8px;
   border: 1.5px solid currentColor;
   border-radius: 50% / 60%;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-eye::after {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 3.5px;
   height: 3.5px;
   border-radius: 50%;
   background: currentColor;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-split::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 13px;
   height: 10px;
   border: 1.5px solid currentColor;
   border-radius: 2px;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-split::after {
   content: "";
   position: absolute;
-  top: 2px;
-  bottom: 2px;
+  top: 50%;
+  left: 50%;
   width: 1.5px;
+  height: 8px;
   background: currentColor;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-side-split::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 13px;
   height: 10px;
   border: 1.5px solid currentColor;
   border-radius: 2px;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-side-split::after {
   content: "";
   position: absolute;
-  right: 2px;
+  top: 50%;
+  left: calc(50% + 3px);
   width: 4px;
   height: 6px;
   border: 1.5px solid currentColor;
   border-inline-start: 0;
-}
-.file-editor-icon-side-split {
-  overflow: visible;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-theme::before {
   content: "";
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 12px;
   height: 12px;
   border: 1.5px solid currentColor;
   border-radius: 50%;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-theme::after {
   content: "";
   position: absolute;
-  right: 1px;
+  top: 50%;
+  left: calc(50% + 3px);
   width: 6px;
   height: 10px;
   border-radius: 0 999px 999px 0;
   background: currentColor;
   opacity: 0.75;
+  transform: translate(-50%, -50%);
 }
 .file-editor-icon-save {
   border: 1.5px solid currentColor;
@@ -7434,6 +7504,19 @@ body.editor-theme-light .file-editor-image {
   font-weight: 850;
   line-height: 1.1;
 }
+.file-tab-parent {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-3xs);
+  font-weight: 700;
+}
+.pane-tab.active .file-tab-parent {
+  color: color-mix(in srgb, var(--pane-tab-active-text) 82%, transparent);
+}
 
 .file-editor-mode-control {
   display: inline-flex;
@@ -7635,8 +7718,8 @@ body.theme-light .file-tree-rename-input {
 .path-copy-button {
   position: relative;
   flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -7658,12 +7741,12 @@ body.theme-light .file-tree-rename-input {
   border-radius: 1px;
 }
 .path-copy-button::before {
-  left: 6px;
+  left: 5px;
   top: 7px;
   opacity: 0.7;
 }
 .path-copy-button::after {
-  left: 9px;
+  left: 8px;
   top: 4px;
   background: inherit;
 }
@@ -7827,33 +7910,11 @@ body.theme-light .file-explorer-changes-head {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* C8/C13: inline Recent|name sort toggle in the Finder Modified-files header (no "Sort" label). The
-   active segment uses the accent green, the inactive is muted, and the divider uses the line token — all
-   flip with the theme. Reuses the shared sort handler/state. */
-.file-explorer-changes-head .changes-sort-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  white-space: nowrap;
-  font-size: var(--ui-font-size-xs);
-}
-.file-explorer-changes-head .changes-sort-seg {
-  padding: 0 2px;
-  font: inherit;
-  color: var(--muted);
-}
-.file-explorer-changes-head .changes-sort-seg.active {
-  color: var(--brand-green);
-  font-weight: 700;
-}
-.file-explorer-changes-head .changes-sort-seg:hover,
-.file-explorer-changes-head .changes-sort-seg:focus-visible {
-  color: var(--brand-green);
-  outline: none;
-}
-.file-explorer-changes-head .changes-sort-divider {
-  color: var(--line);
+.file-explorer-changes-head .changes-sort-select {
+  min-width: 8ch;
+  width: auto;
+  flex: 0 0 auto;
+  align-self: center;
 }
 /* FROM hugs the left edge of the refs area, TO hugs the right (user: "FROM left, TO right indented").
    The controls span the full width of their cell/row and push apart instead of bunching together. */
@@ -7911,6 +7972,9 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   font-size: var(--ui-font-size-xs);
 }
 .file-explorer-changes-head .changes-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: 20px;
   width: 20px;
   padding: 0;
@@ -7928,12 +7992,16 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   border-color: var(--brand-green);
 }
 .file-explorer-changes-panel .changes-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: 20px;
   padding: 0 6px;
   font-size: var(--ui-font-size-2xs);
 }
 .file-explorer-changes-head .changes-date-toggle {
   height: 20px;
+  align-self: center;
 }
 .file-explorer-changes-panel .changes-summary {
   justify-self: end;
@@ -7953,7 +8021,7 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   .file-explorer-changes-head .changes-title {
     grid-area: title;
   }
-  .file-explorer-changes-head .changes-sort-toggle {
+  .file-explorer-changes-head .changes-sort-select {
     grid-area: sort;
   }
   .file-explorer-changes-head .changes-date-toggle {
@@ -8312,16 +8380,17 @@ body.editor-theme-light .file-editor-content {
   margin-inline-end: auto;
   display: inline-flex;
   align-items: center;
-  min-width: 0;
-  max-width: min(32vw, 190px);
-  overflow: hidden;
+  flex: 0 1 auto;
+  min-width: max-content;
+  max-width: min(56vw, 340px);
+  overflow: visible;
 }
 .file-editor-diff-ref-panel[hidden] {
   display: none;
 }
 .file-editor-diff-ref-panel .diff-ref-input,
 .file-editor-diff-ref-panel .diff-ref-control input {
-  width: clamp(42px, 6vw, 76px);
+  width: clamp(44px, 7vw, 88px);
 }
 .file-editor-toolbar-separator {
   width: 1px;
@@ -8389,23 +8458,33 @@ body.editor-theme-light .file-editor-content {
 .file-editor-save-panel {
   min-width: 20px;
   width: 20px;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0;
   color: var(--good);
 }
 .file-editor-wrap-panel,
 .file-editor-gutter-panel,
 .file-editor-find-panel,
+.file-editor-diff-panel,
 .file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
 .file-editor-blame-panel,
 .file-editor-theme-panel {
   min-width: 20px;
   width: 20px;
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0;
+  line-height: 1;
+}
+.file-editor-reload-panel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 /* DOIT.26: blame toggle goes green when ON (like the other pressed toggles), and the inline annotation
    is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token

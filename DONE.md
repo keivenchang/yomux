@@ -4,6 +4,19 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 detail (file/symbol, fix, tests) lives in the git commit history on `main`. Each item shipped to
 dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 
+## 2026-06-05
+
+### DOIT.37 GUI consistency batch archived
+- Completed the DOIT.37 cleanup/refactor batch and removed `DOIT.37.md`. The shipped work covers timing/token consolidation, fetch/storage helpers, file-state helpers, split-pane tokens, shared button bases, transcript normalization, duplicate-function linting, typed payload schemas, compact notifications, and TLS redirect cleanup.
+- Brought Finder, Differ, and Modified-files closer to one behavior model: shared date-cycle vocabulary (`None`, `Date`, `Ago`), shared sort vocabulary (`A-Z`, `Z-A`, `new`, `old`), stable status/date placement, aligned tree-row icon columns, and Finder/Differ toolbar controls using the same visual rules.
+- Tightened git editor affordances: blame and diff controls now appear together only when useful git history exists; untracked/no-history files such as `DOIT.37.md` do not show misleading blame/diff actions; same-ref/no-diff views render the file normally instead of a dead "No diff" pane.
+- Fixed pane-focus and editor regressions from the live GUI audit: active green borders are stronger in both themes, dark inactive panes are lighter without changing the accepted light-mode dim, tab back-history collapses A→B→A→B into A→B, and CodeMirror Word Wrap reconfigures live without blanking the editor.
+
+### TODO and docs cleanup
+- Updated `README.md` for the current editor/git-action behavior and the universal Finder/Differ date and sort controls.
+- Moved completed checkbox work out of `TODO.md`; it now carries only open items plus roadmap/reference context. The one open nested follow-up under the completed session-roster item was preserved as an explicit optional event-driven session-prune item.
+- Added the 2026-06-05 AGENTS.md learnings around visual consistency, shared helpers, runtime browser checks, and git-action gating.
+
 ## 2026-06-04
 
 ### DOIT.36 audit batch archived

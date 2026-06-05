@@ -306,8 +306,35 @@ def test_read_file_reports_git_tracked(tmp_path):
     )
     untracked = tmp_path / "untracked.txt"
     untracked.write_text("new\n", encoding="utf-8")
-    assert filesystem.read_file(str(tracked))["git_tracked"] is True
+    tracked_payload = filesystem.read_file(str(tracked))
+    assert tracked_payload["git_tracked"] is True
+    assert tracked_payload["git_has_history"] is False
+    assert len(tracked_payload["git_history"]) == 1
     assert filesystem.read_file(str(untracked))["git_tracked"] is False
+
+
+def test_read_file_reports_file_level_git_history(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(tmp_path), "commit", "-q", "-m", "add tracked"],
+        check=True,
+    )
+    tracked.write_text("two\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(tmp_path), "commit", "-q", "-m", "update tracked"],
+        check=True,
+    )
+
+    payload = filesystem.read_file(str(tracked))
+
+    assert payload["git_tracked"] is True
+    assert payload["git_has_history"] is True
+    assert [item["subject"] for item in payload["git_history"]] == ["update tracked", "add tracked"]
+    assert all(item["ref"] and item["short"] for item in payload["git_history"])
 
 
 def test_read_file_outside_repo_is_not_tracked(tmp_path):

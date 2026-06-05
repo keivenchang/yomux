@@ -287,7 +287,7 @@ let sessionFilesRequestId = 0;
 let fileExplorerSessionFilesRequestId = 0;
 let fileExplorerLastInteractionAt = 0;
 let fileExplorerRefreshDeferred = false;
-let sessionFilesSortMode = 'mtime';
+let sessionFilesSortMode = 'newest';
 let sessionFilesSelectedSession = '';
 let changesSelectedPath = '';  // C5: the currently highlighted Modified-files row (persists across re-renders)
 let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
@@ -1056,6 +1056,26 @@ function normalizeFileStateRecord(state) {
   return state;
 }
 
+function normalizedFileGitHistory(value) {
+  return Array.isArray(value) ? value.filter(item => item && typeof item === 'object' && item.ref) : [];
+}
+
+function applyFileGitMetadata(state, payload) {
+  if (!state || typeof state !== 'object' || !payload || typeof payload !== 'object') return state;
+  const gitHistory = normalizedFileGitHistory(payload.git_history);
+  state.gitTracked = payload.git_tracked === true;
+  state.gitHistory = gitHistory;
+  state.gitHasHistory = payload.git_has_history === true && gitHistory.length > 1;
+  return state;
+}
+
+function fileStateHasUsefulGitHistory(state) {
+  return state?.gitTracked === true
+    && state?.gitHasHistory === true
+    && Array.isArray(state.gitHistory)
+    && state.gitHistory.length > 1;
+}
+
 function ensureFileState(path, defaults = null) {
   if (!path) return null;
   let state = fileState.get(path);
@@ -1294,6 +1314,12 @@ function readStoredFileExplorerTreeDateMode() {
 
 function writeStoredFileExplorerTreeDateMode(value) {
   storageSet(fileExplorerTreeDateModeStorageKey, normalizeFileExplorerTreeDateMode(value));
+}
+
+function normalizeSessionFilesSortMode(value) {
+  if (value === 'mtime') return 'newest';
+  if (value === 'name') return 'az';
+  return ['az', 'za', 'newest', 'oldest'].includes(value) ? value : 'newest';
 }
 
 function readStoredFileExplorerTreeSortMode() {
@@ -1564,7 +1590,14 @@ function toggleTabMetadata() {
   scheduleTopbarMetricsUpdate();
 }
 
-function setFocusedTerminal(session) {
+function recordFocusNavTransition(previousItem, nextItem) {
+  if (!nextItem) return;
+  if (previousItem && previousItem !== nextItem) recordEditorNav(previousItem);
+  recordEditorNav(nextItem);
+}
+
+function setFocusedTerminal(session, options = {}) {
+  const previousItem = focusedPanelItem;
   focusedTerminal = session;
   focusedPanelItem = session;
   clearPendingFileEditorFocusExcept(session);
@@ -1574,6 +1607,8 @@ function setFocusedTerminal(session) {
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
   scheduleFileExplorerActiveTabSync(session);
+  if (options.userInitiated === true) recordFocusNavTransition(previousItem, session);
+  else recordAutoFocusNav(session, previousItem);
 }
 
 function clearFocusedTerminal(session) {
@@ -1586,6 +1621,7 @@ function clearFocusedTerminal(session) {
 }
 
 function setFocusedPanelItem(item, options = {}) {
+  const previousItem = focusedPanelItem;
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
   clearPendingFileEditorFocusExcept(item);
@@ -1600,7 +1636,8 @@ function setFocusedPanelItem(item, options = {}) {
   if (isPreferencesItem(item) && options.focusPreferencesSearch !== false) {
     focusFreshPreferencesSearchSoon();
   }
-  recordAutoFocusNav(item);
+  if (options.userInitiated === true) recordFocusNavTransition(previousItem, item);
+  else recordAutoFocusNav(item, previousItem);
 }
 
 let autoFocusNavTimer = null;
@@ -1609,12 +1646,12 @@ let autoFocusNavTimer = null;
 // needs-attention) records only the focus that LANDS, not every transient flip. User clicks already
 // record immediately (activatePaneTab userInitiated); a back/forward re-activation lands on the item
 // already at the stack head, so recordEditorNav's consecutive-dedupe makes this a no-op there.
-function recordAutoFocusNav(item) {
+function recordAutoFocusNav(item, previousItem = null) {
   if (!autoFocusEnabled || !item) return;
   if (autoFocusNavTimer) clearTimeout(autoFocusNavTimer);
   autoFocusNavTimer = setTimeout(() => {
     autoFocusNavTimer = null;
-    if (focusedPanelItem === item) recordEditorNav(item);
+    if (focusedPanelItem === item) recordFocusNavTransition(previousItem, item);
   }, 500);
 }
 
@@ -1631,7 +1668,7 @@ function focusTerminalWhenAutoFocus(session, delay = 0) {
 
 function focusTerminalFromUserAction(session, delay = 0) {
   noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session);
+  setFocusedTerminal(session, {userInitiated: true});
   const run = () => terminals.get(session)?.term?.focus?.();
   if (delay > 0) setTimeout(run, delay);
   else run();
@@ -3002,7 +3039,7 @@ function registerFileEditorLayoutItem(path) {
   }
   ensureFileState(path, {
       mtime: 0,
-      kind: 'loading',
+      kind: 'file',
       original: '',
       content: '',
       dirty: false,
@@ -3022,7 +3059,7 @@ function registerFilePreviewLayoutItem(path) {
   }
   ensureFileState(path, {
       mtime: 0,
-      kind: 'loading',
+      kind: 'file',
       original: '',
       content: '',
       dirty: false,
@@ -6803,6 +6840,24 @@ function reconcileChildNodes(parent, nextNodes, options = {}) {
   while (parent.children.length > arranged.length) parent.lastElementChild?.remove();
 }
 
+function setClassNameIfChanged(node, className) {
+  if (node && node.className !== className) node.className = className;
+}
+
+function setHiddenIfChanged(node, hidden) {
+  if (node && node.hidden !== hidden) node.hidden = hidden;
+}
+
+function syncFileTreeRowKindClass(row, kind) {
+  row.classList.add('file-tree-row');
+  const nextKindClass = `kind-${kind}`;
+  if (row.dataset.kind === kind && row.classList.contains(nextKindClass)) return;
+  for (const className of Array.from(row.classList || [])) {
+    if (className.startsWith('kind-')) row.classList.remove(className);
+  }
+  row.classList.add(nextKindClass);
+}
+
 function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   let icon = row.querySelector(':scope > .file-tree-icon');
   if (!icon) {
@@ -6852,7 +6907,7 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   if (agent.nextSibling !== diff) row.insertBefore(diff, agent.nextSibling);
   if (diff.nextSibling !== status) row.insertBefore(status, diff.nextSibling);
   if (status.nextSibling !== date) row.insertBefore(date, status.nextSibling);
-  icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
+  setClassNameIfChanged(icon, ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' '));
   if (icon.textContent !== iconText) icon.textContent = iconText;
   if (options.nameHtml) {
     if (name.innerHTML !== options.nameHtml) name.innerHTML = options.nameHtml;
@@ -6863,19 +6918,24 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   }
   const agentHtml = options.agentHtml || '';
   if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
-  agent.hidden = !agentHtml;
+  setHiddenIfChanged(agent, !agentHtml);
   row.classList.toggle('has-agent', Boolean(agentHtml));
   const dirCountText = options.dirCountText || '';
-  dirCount.textContent = dirCountText;
-  dirCount.hidden = !dirCountText;
+  if (dirCount.textContent !== dirCountText) dirCount.textContent = dirCountText;
+  setHiddenIfChanged(dirCount, !dirCountText);
   const diffParts = options.diffParts || [];
   const diffHtml = diffParts.map(p => `<span class="changes-diff-${esc(p.kind)}">${esc(p.text)}</span>`).join(' ');
   if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
-  diff.hidden = !diffParts.length;
-  status.textContent = options.gitStatus || '';
-  status.hidden = !options.gitStatus;
-  date.textContent = options.dateText || '';
-  date.hidden = !options.dateText;
+  setHiddenIfChanged(diff, !diffParts.length);
+  const statusText = options.gitStatus || '';
+  if (status.textContent !== statusText) status.textContent = statusText;
+  const statusTitle = options.gitStatusTitle || '';
+  if (statusTitle) status.title = statusTitle;
+  else status.removeAttribute('title');
+  setHiddenIfChanged(status, !statusText);
+  const dateText = options.dateText || '';
+  if (date.textContent !== dateText) date.textContent = dateText;
+  setHiddenIfChanged(date, !dateText);
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
@@ -6887,14 +6947,16 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     ? !changesFolderCollapsed.has(fullPath)
     : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
   const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
-  row.className = `file-tree-row kind-${entry.kind}`;
+  const indexedDescendantDirectory = !differMode && entry.kind === 'dir' && !indexedDirectory && Boolean(fileExplorerIndexedAncestor(fullPath));
+  syncFileTreeRowKindClass(row, entry.kind);
   row.classList.toggle('compact', compact);
   row.dataset.path = fullPath;
   row.dataset.kind = entry.kind;
   row.dataset.name = entry.name;
   row.dataset.isRepo = entry.is_repo === true ? 'true' : 'false';
   row.dataset.indexed = indexedDirectory ? 'true' : 'false';
-  row.style.paddingLeft = `${(compact ? 4 : 8) + depth * 14}px`;
+  const paddingLeft = `${(compact ? 4 : 8) + depth * 14}px`;
+  if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
   row.setAttribute('role', 'treeitem');
   row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
   if (entry.kind === 'dir') row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
@@ -6906,6 +6968,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
+  row.classList.toggle('indexed-descendant-directory', indexedDescendantDirectory);
   // DOIT.31: flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
@@ -6916,6 +6979,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const gitStatus = entry.kind === 'file'
     ? (options.sessionFilesMap ? (changedFile ? String(changedFile.status || 'M').toUpperCase() : '') : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
+  const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : '';
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
     row.classList.toggle(className, className === gitClass);
@@ -6981,6 +7045,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   }
   updateFileTreeRowContents(row, icon, displayName.text, {
     gitStatus,
+    gitStatusTitle,
     iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
     nameHtml: differMode ? null : displayName.html,
     dateText: fileTreeMtimeText(entry),
@@ -7291,23 +7356,26 @@ function fileExplorerDirectoryIsIndexed(path) {
   return Boolean(normalized && fileExplorerIndexedDirs.has(normalized));
 }
 
-// Badge text for an indexed directory: "indexing…" while the backend persistent index is still
-// building, otherwise the steady "indexed". Reads the cached per-root status so it stays stable
-// across fs-poll re-renders (and a background TTL rebuild keeps the backend `ready`, so it never
-// flips back to "indexing").
+// Compact badge text for an indexed directory. When Date/Ago is visible, the directory icon is the only
+// index marker; the status column must stay empty so it cannot compete with the date column.
 function fileExplorerIndexBadgeText(path) {
+  if (fileExplorerTreeDateMode !== 'none') return '';
   if (fileExplorerDirectoryIsIndexed(path)) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
-    return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+    return fileExplorerIndexStatus.get(normalized) === 'building' ? '…' : 'I';
   }
-  // A directory inside an indexed root is already handled by that root. Do not repeat a badge on every
-  // descendant row; the root's INDEXED badge is enough signal.
   if (fileExplorerIndexedAncestor(path)) return '';
   return '';
 }
 
+function fileExplorerIndexBadgeTitle(path) {
+  if (!fileExplorerDirectoryIsIndexed(path)) return '';
+  const normalized = normalizeStoredFileExplorerIndexedDir(path);
+  return fileExplorerIndexStatus.get(normalized) === 'building' ? 'indexing…' : 'indexed';
+}
+
 // Warm the backend index for a root (kicks the build) and track building/ready; polls while
-// building so the badge transitions indexing… -> indexed exactly once.
+// building so the badge title transitions indexing… -> indexed exactly once.
 async function refreshFileIndexStatus(root) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
@@ -7386,7 +7454,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
     fileExplorerIndexedDirs.add(normalized);
     fileExplorerIndexedDirs = new Set(compactNestedPaths(Array.from(fileExplorerIndexedDirs)));
     // Eagerly build the backend index now (warm) so the first quick-open query hits a warm index,
-    // and show "indexing…" immediately until the build reports ready.
+    // and expose the building title immediately until the build reports ready.
     fileExplorerIndexStatus.set(normalized, 'building');
     refreshFileIndexStatus(normalized);
   } else {
@@ -7482,13 +7550,16 @@ function updateFileExplorerIndexedDirectoryRows() {
     if (indexed) ensureFileIndexStatus(path);  // warm + learn building/ready for the badge
     const icon = row.querySelector(':scope > .file-tree-icon');
     if (icon) {
-      icon.className = ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' ');
+      setClassNameIfChanged(icon, ['file-tree-icon', 'file-icon-dir', indexed ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '));
     }
     const status = row.querySelector(':scope > .file-tree-git-status');
     if (status) {
       const badge = fileExplorerIndexBadgeText(path);
-      status.textContent = badge;
-      status.hidden = !badge;
+      if (status.textContent !== badge) status.textContent = badge;
+      const title = fileExplorerIndexBadgeTitle(path);
+      if (title) status.title = title;
+      else status.removeAttribute('title');
+      setHiddenIfChanged(status, !badge);
     }
   });
 }
@@ -8611,6 +8682,26 @@ async function refreshOpenFileDiff(path, options = {}) {
   return state._diffLoadingPromise;
 }
 
+async function refreshOpenFileGitMetadata(path) {
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return false;
+  try {
+    const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
+    const current = openFiles.get(path);
+    if (!current || current.kind !== 'text') return false;
+    applyFileGitMetadata(current, payload);
+    return true;
+  } catch (_error) {
+    const current = openFiles.get(path);
+    if (current && current.kind === 'text') {
+      current.gitTracked = false;
+      current.gitHistory = [];
+      current.gitHasHistory = false;
+    }
+    return false;
+  }
+}
+
 async function openFileInEditor(fullPath, entryOrName, options = {}) {
   const entry = typeof entryOrName === 'object' && entryOrName ? entryOrName : null;
   const name = entry?.name || String(entryOrName || basenameOf(fullPath));
@@ -8630,8 +8721,9 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
   recordEditorNav(item);   // DOIT.21: push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
+    await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
-    if (options.viewMode) renderOpenFilePath(fullPath);
+    renderOpenFilePath(fullPath);
     return item;
   }
   if (Number(entry?.size) > MAX_FILE_PREVIEW_BYTES) {
@@ -8646,15 +8738,15 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   }
   try {
     const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
-    await openFilesSetAndShow(fullPath, {
+    const state = applyFileGitMetadata({
       mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
       content: payload.content,
       dirty: false,
-      gitTracked: payload.git_tracked === true,
-    }, openOptions);
+    }, payload);
+    await openFilesSetAndShow(fullPath, state, openOptions);
     return item;
   } catch (err) {
     const status = Number(err?.status) || 0;
@@ -8734,15 +8826,14 @@ async function openFileStateFromDisk(path, entry = null) {
   }
   try {
     const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
-    return {state: {
+    return {state: applyFileGitMetadata({
       mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
       content: payload.content,
       dirty: false,
-      gitTracked: payload.git_tracked === true,
-    }};
+    }, payload)};
   } catch (error) {
     const status = Number(error?.status) || 0;
     if (status) {
@@ -9008,6 +9099,7 @@ function codeMirrorApiIsUsable(api) {
     && api?.EditorState?.readOnly?.of
     && api?.EditorView?.theme
     && api?.EditorView?.editable?.of
+    && (api?.EditorView?.lineWrapping || api?.EditorView?.contentAttributes?.of)
     && api?.keymap?.of
     && api?.drawSelection
     && api?.highlightActiveLine
@@ -9222,6 +9314,7 @@ function codeMirrorThemeExtension(api) {
 
 function codeMirrorWrapMarkerExtension(api) {
   if (!api.ViewPlugin) return [];
+  const scheme = activeEditorScheme();
   return api.ViewPlugin.fromClass(class {
     constructor(view) {
       this.view = view;
@@ -9331,6 +9424,7 @@ function blameHoverText(info) {
 // scheme's --code-comment token (theme-aware), and the full commit is the line's native title tooltip.
 function codeMirrorBlameExtension(api, path) {
   if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
+  if (!fileStateHasUsefulGitHistory(fileStateFor(path))) return [];
   const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
   const build = view => {
     const blame = editorBlameForPath(path);
@@ -9626,7 +9720,6 @@ function updateCodeMirrorCursorStatus(panel) {
 
 function codeMirrorExtensions(api, panel, path, options = {}) {
   const save = options.save || (() => saveFileEditor(path, panel));
-  const wrapEnabled = options.wrap !== false && fileEditorWrapEnabled;
   const saveKeymap = api.keymap.of([{
     key: 'Mod-s',
     run() {
@@ -9682,7 +9775,7 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     api.bracketMatching(),
     api.foldGutter(),
     api.highlightActiveLine(),
-    ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
+    codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
     api.search({top: true}),
     codeMirrorSearchPanelEnhancementExtension(api),
     codeMirrorSearchScrollFix(api),
@@ -9691,7 +9784,6 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
     findKeymap,
     powerKeymap,
     api.keymap.of([api.indentWithTab, ...api.defaultKeymap, ...api.historyKeymap, ...api.searchKeymap]),
-    ...(wrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
     codeMirrorBlameExtension(api, path),
     api.EditorState.readOnly.of(readOnlyMode),
     api.EditorView.editable.of(!readOnlyMode),
@@ -10047,18 +10139,35 @@ function updateEditorFindButton(button, state) {
   setFileEditorIcon(button, 'file-editor-icon-find');
 }
 
+function fileEditorGitActionControlsVisible(path, state, item = null) {
+  if (isFilePreviewItem(item) || state?.kind !== 'text' || !fileStateHasUsefulGitHistory(state)) return false;
+  const active = editorViewModeFor(path, item) === 'diff';
+  const confirmedNoDiff = state?.diffLoaded === true && !openFileDiffAvailable(state);
+  return active || !confirmedNoDiff;
+}
+
+function updateFileEditorBlameButton(button, path, state, item = null) {
+  if (!button) return;
+  const visible = fileEditorGitActionControlsVisible(path, state, item);
+  button.hidden = !visible;
+  button.disabled = !visible;
+  syncPressedButton(button, fileEditorBlameEnabled, {
+    labelOn: t('editor.blame.toggle'),
+    labelOff: t('editor.blame.toggle'),
+  });
+  setFileEditorIcon(button, 'file-editor-icon-blame');
+}
+
 function updateFileEditorDiffButton(button, path, state, item = null) {
   if (!button) return;
   const active = editorViewModeFor(path, item) === 'diff';
-  const available = openFileDiffAvailable(state);
   const loading = state?.diffLoading === true;
   // Keep the diff toggle on ANY text file (not just md/html) so .py/.js/.rs can switch edit<->diff.
   // The diff loads lazily on click (refreshOpenFileDiff); only hide the button once a load has
-  // confirmed there is nothing to diff (diffLoaded && !available), and never while in diff mode.
-  const confirmedNoDiff = state?.diffLoaded === true && !available;
-  // Hide the diff toggle for files git doesn't track (untracked / outside any repo): there is no
-  // committed version to diff against. A deleted tracked file keeps gitTracked=true so it still shows.
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || state?.gitTracked !== true || (confirmedNoDiff && !active);
+  // confirmed there is nothing to diff, and never while in diff mode.
+  // Hide the git action pair for files with no useful file history (outside git, untracked, or only
+  // the creation commit): there is no meaningful older file version to diff/blame against.
+  button.hidden = !fileEditorGitActionControlsVisible(path, state, item);
   button.disabled = !active && loading;
   const label = !active && loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
@@ -10100,9 +10209,15 @@ function applyEditorWrapPreference() {
     const path = panel.dataset.filePath;
     const state = openFiles.get(path);
     if (path && state?.kind === 'text') {
+      const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
+      if (liveText !== null && state.content !== liveText) state.content = liveText;
       renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
+        return;
+      }
       // Re-render each panel with its OWN layout item (DOIT.16 C1): passing the editor item flipped
-      // a preview/diff pane into an editor on any appearance change (e.g. font-size).
+      // a preview/diff pane into an editor on any appearance change (e.g. font-size). This is a fallback
+      // for raw/preview panels or browsers without CodeMirror compartments.
       renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
     }
   });
@@ -10119,12 +10234,13 @@ function setEditorWrapEnabled(enabled) {
 async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
     const blameButton = panel.querySelector('.file-editor-blame-panel');
-    if (blameButton) blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
     const path = panel.dataset.filePath;
     const state = openFiles.get(path);
+    const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
-    if (fileEditorBlameEnabled && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
-    renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+    if (fileEditorBlameEnabled && fileEditorGitActionControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
+    renderFileEditorPanel(panel, item);
   }
 }
 
@@ -10214,9 +10330,11 @@ function applyCssSettings() {
   // (--pane-tab-panel-ring-width, unchanged) so it stays visible even at spacing 0.
   const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 4)));
   root.setProperty('--pane-split-gap', `${paneSpacing}px`);
-  // DOIT.20: opacity (20-100%) of the translucent green/red pane ring drawn over the content edge.
-  const paneRingOpacity = Math.max(20, Math.min(100, numberSetting('appearance.pane_ring_opacity', 50)));
+  // Opacity (20-100%) of the translucent pane ring. Active green panes keep a stronger floor so focus
+  // remains obvious in both dark and light themes, while the setting can still raise it up to 100%.
+  const paneRingOpacity = Math.max(20, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)));
   root.setProperty('--pane-ring-opacity', `${paneRingOpacity}%`);
+  root.setProperty('--pane-active-ring-opacity', `${Math.max(75, paneRingOpacity)}%`);
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
@@ -12124,10 +12242,9 @@ function activatePaneTab(side, session, options = {}) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  // DOIT.21: a user-initiated tab switch IS navigation — record EVERY tab kind (file, terminal, Finder,
-  // Prefs, …) so Back returns to the previous tab worked on, not just files. (No-op while navigating.)
-  if (options.userInitiated === true) recordEditorNav(session);
-  setFocusedPanelItem(session);
+  // DOIT.21: a user-initiated tab switch IS navigation. setFocusedPanelItem records the previous
+  // focused item plus the newly activated tab so Back returns to the pane the user just left.
+  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (activeItemForSide(side) === session) {
     focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
@@ -12836,7 +12953,7 @@ function focusPanel(session, options = {}) {
   }
   if (isFileEditorItem(session)) {
     focusedTerminal = null;
-    setFocusedPanelItem(session);
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
     if (autoFocusEnabled) {
       requestFileEditorPanelFocus(session);
       focusFileEditorPanelIfReady(panel, session);
@@ -12845,7 +12962,7 @@ function focusPanel(session, options = {}) {
   }
   if (isVirtualItem(session)) {
     focusedTerminal = null;
-    setFocusedPanelItem(session);
+    setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
     if (isPreferencesItem(session) && options.userInitiated === true && autoFocusEnabled) {
       focusFreshPreferencesSearchSoon(panel);
     }
@@ -13774,17 +13891,17 @@ function updatePaneTabStrip(panel, side) {
   const activeItem = activeItemForSide(side);
   const items = stack.slice();
   if (activeItem && !items.includes(activeItem)) items.push(activeItem);
-  reconcilePaneTabChildren(strip, side, items);
+  reconcilePaneTabChildren(strip, side, items, paneTabDisplayContext(items));
   bindPaneTabStrip(strip, side);
   restorePaneTabPopover(strip, restorePopoverItem);
   scheduleTabStripOverflowCheck(strip);
 }
 
-function reconcilePaneTabChildren(strip, side, items) {
+function reconcilePaneTabChildren(strip, side, items, displayContext = {}) {
   const existingByItem = new Map(Array.from(strip.querySelectorAll(':scope > .pane-tab')).map(tab => [tab.dataset.paneTab || '', tab]));
   const nextNodes = [];
   for (const item of items) {
-    const fresh = createPaneTab(side, item);
+    const fresh = createPaneTab(side, item, displayContext);
     const existing = existingByItem.get(item);
     if (existing && paneTabShouldPreserve(existing)) {
       syncPreservedPaneTab(existing, fresh);
@@ -13796,6 +13913,43 @@ function reconcilePaneTabChildren(strip, side, items) {
   }
   for (const leftover of existingByItem.values()) leftover.remove();
   reconcileChildNodes(strip, nextNodes, {lockedNodes: nextNodes.filter(paneTabShouldPreserve)});
+}
+
+function paneTabDisplayContext(items) {
+  return {fileParentLabels: fileTabParentDisambiguators(items)};
+}
+
+function fileTabParentDisambiguators(items) {
+  const byName = new Map();
+  for (const item of items) {
+    if (!isFileEditorItem(item)) continue;
+    const path = fileItemPath(item);
+    if (!path) continue;
+    const name = basenameOf(path);
+    if (!byName.has(name)) byName.set(name, new Map());
+    byName.get(name).set(path, item);
+  }
+  const labels = new Map();
+  for (const pathsByName of byName.values()) {
+    const paths = Array.from(pathsByName.keys());
+    if (paths.length <= 1) continue;
+    const parentSegments = paths.map(path => dirnameOf(path).split('/').filter(Boolean));
+    const maxDepth = Math.max(1, ...parentSegments.map(parts => parts.length));
+    let depth = 1;
+    for (; depth <= maxDepth; depth++) {
+      const seen = new Set(parentSegments.map(parts => fileTabParentSuffix(parts, depth)));
+      if (seen.size === paths.length) break;
+    }
+    for (let index = 0; index < paths.length; index++) {
+      labels.set(paths[index], fileTabParentSuffix(parentSegments[index], depth));
+    }
+  }
+  return labels;
+}
+
+function fileTabParentSuffix(segments, depth) {
+  if (!segments.length) return '/';
+  return segments.slice(Math.max(0, segments.length - depth)).join('/');
 }
 
 function paneTabShouldPreserve(tab) {
@@ -13858,7 +14012,7 @@ function restorePaneTabPopover(strip, item) {
   tab.classList.add('popover-open');
 }
 
-function createPaneTab(side, item) {
+function createPaneTab(side, item, displayContext = {}) {
   const type = tabTypeForItem(item);
   const isFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
@@ -13877,7 +14031,8 @@ function createPaneTab(side, item) {
   applySessionStateClasses(tab, state);
   tab.draggable = true;
   tab.dataset.paneTab = item;
-  if (type?.rowHtml) tab.innerHTML = type.rowHtml(item);
+  const rowOptions = isEditor ? {parentLabel: displayContext.fileParentLabels?.get(fileItemPath(item)) || ''} : {};
+  if (type?.rowHtml) tab.innerHTML = type.rowHtml(item, rowOptions);
   else tab.innerHTML = tmuxPaneTabHtml(item, info, state, auto);
   if (!isFiles) {
     const closeTitle = isEditor ? `Close ${itemLabel(item)}` : `hide ${itemLabel(item)} from layout`;
@@ -13893,7 +14048,9 @@ function createPaneTab(side, item) {
     tab.insertAdjacentHTML('beforeend', sessionPopoverHtml(item, info, agentKind, auto, state));
     bindPaneTabPopover(tab, item);
   }
-  tab.setAttribute('aria-label', type ? itemLabel(item) : isEditor ? `${itemLabel(item)}${missingFileClass ? ' missing on disk' : ''}` : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
+  tab.setAttribute('aria-label', isEditor
+    ? `${itemLabel(item)} ${fileItemPath(item)}${missingFileClass ? ' missing on disk' : ''}`
+    : type ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
@@ -13990,10 +14147,12 @@ function beginFileTabRename(tab, item) {
 function bindPaneTabPopover(tab, session) {
   const popover = tab.querySelector?.(':scope > .session-popover');
   if (!popover) return;
-  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab));
+  bindDelayedSessionPopover(tab, popover, () => positionPaneTabPopover(tab), {
+    onOpen: () => maybeLoadFileTabForPopover(tab, session),
+  });
 }
 
-function bindDelayedSessionPopover(anchor, popover, position) {
+function bindDelayedSessionPopover(anchor, popover, position, options = {}) {
   createHoverPopover({
     anchor,
     popover,
@@ -14001,9 +14160,61 @@ function bindDelayedSessionPopover(anchor, popover, position) {
     hideDelay: () => popoverHideDelayMs,
     canOpen: () => !appMenuIsOpen() && !topbar?.matches?.(':hover'),
     onQueue: position,
+    onOpen: options.onOpen,
     position,
     closeOthers: () => closeOtherSessionPopovers(anchor),
   });
+}
+
+function maybeLoadFileTabForPopover(tab, item) {
+  if (!isFileEditorItem(item)) return;
+  const state = ensureFileTabStateForItem(item);
+  refreshFileTabPopover(tab, item);
+  if (!state?.loading) return;
+  const path = fileItemPath(item);
+  if (!state.loadingPromise) loadFileEditorState(path, panelNodes.get(item), item);
+  const pending = openFiles.get(path)?.loadingPromise;
+  pending?.finally?.(() => refreshFilePopoversForPath(path));
+}
+
+function ensureFileTabStateForItem(item) {
+  const path = fileItemPath(item);
+  if (!path) return null;
+  if (isFilePreviewItem(item)) addFilePreviewTabItem(path, item);
+  else if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
+  let state = fileStateFor(path);
+  if (!state || !state.kind) {
+    state = ensureFileState(path, {
+      mtime: 0,
+      kind: isImageViewerItem(item) ? 'image' : 'file',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+  }
+  return state;
+}
+
+function refreshFilePopoversForPath(path) {
+  for (const item of [imageViewerItemFor(path), fileEditorItemFor(path), filePreviewItemFor(path)]) {
+    document.querySelectorAll(`.pane-tab[data-pane-tab="${cssEscape(item)}"]`).forEach(tab => refreshFileTabPopover(tab, item));
+  }
+}
+
+function refreshFileTabPopover(tab, item) {
+  const popover = tab?.querySelector?.(':scope > .file-popover');
+  if (!popover) return;
+  const path = fileItemPath(item);
+  const rows = filePopoverRows(path, fileStateFor(path) || {});
+  popover.innerHTML = `
+    <div class="popover-head">
+      <div>
+        <div class="popover-title">${esc(basenameOf(path))}</div>
+      </div>
+    </div>
+    ${rows.join('')}`;
+  bindFilePopoverActions(popover);
 }
 
 function positionPaneTabPopover(tab) {
@@ -14062,7 +14273,8 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('filetab.modified'))}" aria-label="${esc(t('filetab.modified'))}"></span>` : '';
   const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
   const kind = isFilePreviewItem(item) ? `<span class="file-tab-kind" title="${esc(t('tab.previewOnly'))}">${esc(t('tab.preview'))}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}${kind}<span class="session-button-dir">${esc(basenameOf(path))}</span></span></span>`;
+  const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}${kind}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
 }
 
 function tmuxPaneTabHtml(session, info, state, auto) {
@@ -14260,8 +14472,10 @@ function bindPanelShell(panel, session) {
   panel.addEventListener('pointerdown', event => {
     if (isTmuxSession(session)) {
       noteFileExplorerChangesSessionInteraction(session);
+      setFocusedTerminal(session, {userInitiated: true});
     } else {
       setFocusedPanelItem(session, {
+        userInitiated: true,
         focusPreferencesSearch: !preferenceFocusTargetIsInteractive(event.target),
       });
     }
@@ -15827,6 +16041,34 @@ function diffRefSuggestions(repo) {
   return suggestions;
 }
 
+function fileDiffRefHistoryItems(path) {
+  const state = openFiles.get(path);
+  if (!path || !fileStateHasUsefulGitHistory(state)) return [];
+  const suggestions = [
+    {ref: 'HEAD', short: 'HEAD', subject: 'base commit'},
+    {ref: 'current', short: 'current', subject: 'working tree'},
+  ];
+  const seen = new Set(suggestions.map(item => item.ref));
+  for (const item of state.gitHistory) {
+    const ref = cleanDiffRef(item?.ref || '', '');
+    if (!ref || seen.has(ref)) continue;
+    suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || ''});
+    seen.add(ref);
+    if (suggestions.length >= diffRefSuggestionLimit) break;
+  }
+  return suggestions;
+}
+
+function scopedDiffRefSuggestions(repo, path) {
+  return path ? fileDiffRefHistoryItems(path) : diffRefSuggestions(repo);
+}
+
+function fileDiffRefHistorySignature(path) {
+  const state = openFiles.get(path);
+  if (!path || !fileStateHasUsefulGitHistory(state)) return 'none';
+  return state.gitHistory.map(item => `${item?.ref || ''}:${item?.date || ''}`).join('|');
+}
+
 function diffRefOptionLabel(item, separator = ' - ') {
   return [item?.short || '', item?.subject || ''].filter(Boolean).join(separator) || item?.ref || '';
 }
@@ -15903,12 +16145,12 @@ function diffRefPopoverItems(value, options = {}) {
   return matches.slice(0, maxItems);
 }
 
-function diffRefFromSuggestions(repo) {
-  return diffRefSuggestions(repo).filter(item => item.ref !== 'current');
+function diffRefFromSuggestions(repo, path = '') {
+  return scopedDiffRefSuggestions(repo, path).filter(item => item.ref !== 'current');
 }
 
-function diffRefToSuggestions(fromRef = diffRefFrom, repo) {
-  const suggestions = diffRefSuggestions(repo);
+function diffRefToSuggestions(fromRef = diffRefFrom, repo, path = '') {
+  const suggestions = scopedDiffRefSuggestions(repo, path);
   const current = suggestions.find(item => item.ref === 'current') || {ref: 'current', short: 'current', subject: 'working tree'};
   const ordered = [current, ...suggestions.filter(item => item.ref !== 'current')];
   const from = cleanDiffRef(fromRef, '');
@@ -15925,11 +16167,12 @@ function diffRefInputDisplayValue(value, suggestions) {
 
 function diffRefInputHtml(options = {}) {
   const repo = options.repo || '';
+  const path = options.path || '';
   const side = options.side === 'to' ? 'to' : 'from';
   const compact = options.compact === true;
   const fallback = side === 'to' ? 'current' : 'HEAD';
   const value = cleanDiffRef(options.value, fallback);
-  const suggestions = Array.isArray(options.suggestions) ? options.suggestions : (side === 'to' ? diffRefToSuggestions(diffRefFrom, repo) : diffRefFromSuggestions(repo));
+  const suggestions = Array.isArray(options.suggestions) ? options.suggestions : (side === 'to' ? diffRefToSuggestions(diffRefFrom, repo, path) : diffRefFromSuggestions(repo, path));
   const dataAttr = side === 'to' ? 'data-diff-ref-to' : 'data-diff-ref-from';
   const aria = options.aria || (side === 'to' ? t('diff.ref.to.aria') : t('diff.ref.from.aria'));
   return `<input class="diff-ref-input" type="text" value="${esc(diffRefInputDisplayValue(value, suggestions))}" ${dataAttr} data-diff-ref-input autocomplete="off" autocapitalize="off" spellcheck="false" aria-haspopup="listbox" aria-expanded="false" aria-label="${esc(aria)}">`;
@@ -15938,14 +16181,15 @@ function diffRefInputHtml(options = {}) {
 function diffRefInputContext(input) {
   const controls = input?.closest?.('[data-diff-ref-controls]');
   const repo = controls?.dataset?.diffRefRepo || '';
+  const path = controls?.dataset?.diffRefPath || '';
   const compact = controls?.classList?.contains('compact') === true;
   const side = input?.matches?.('[data-diff-ref-to]') ? 'to' : 'from';
   const fromInput = controls?.querySelector?.('[data-diff-ref-from]');
   const fromValue = side === 'to'
-    ? (canonicalDiffRefValue(fromInput?.value, diffRefFromSuggestions(repo)) || fromInput?.value || repoDiffRefs(repo).from)
+    ? (canonicalDiffRefValue(fromInput?.value, diffRefFromSuggestions(repo, path)) || fromInput?.value || repoDiffRefs(repo).from)
     : repoDiffRefs(repo).from;
-  const suggestions = side === 'to' ? diffRefToSuggestions(fromValue, repo) : diffRefFromSuggestions(repo);
-  return {controls, repo, compact, side, suggestions};
+  const suggestions = side === 'to' ? diffRefToSuggestions(fromValue, repo, path) : diffRefFromSuggestions(repo, path);
+  return {controls, repo, path, compact, side, suggestions};
 }
 
 function ensureDiffRefPopover() {
@@ -16111,25 +16355,33 @@ function refreshDiffRefToDatalist(controls) {
 function diffRefControlsHtml(options = {}) {
   const compact = options.compact === true;
   const repo = options.repo || '';
+  const path = options.path || '';
   const refs = repoDiffRefs(repo);
   const className = compact ? 'diff-ref-controls compact' : 'diff-ref-controls';
   const repoAttr = repo ? ` data-diff-ref-repo="${esc(repo)}"` : '';
-  const fromInput = diffRefInputHtml({repo, compact, side: 'from', value: refs.from, suggestions: diffRefFromSuggestions(repo), aria: t('diff.ref.from.aria')});
-  const toInput = diffRefInputHtml({repo, compact, side: 'to', value: refs.to, suggestions: diffRefToSuggestions(refs.from, repo), aria: t('diff.ref.to.aria')});
-  const isDefault = refs.from === 'HEAD' && refs.to === 'current';
-  const resetHidden = isDefault ? ' hidden' : '';
-  return `<span class="${className}" data-diff-ref-controls${repoAttr}>
+  const pathAttr = path ? ` data-diff-ref-path="${esc(path)}"` : '';
+  const fromInput = diffRefInputHtml({repo, path, compact, side: 'from', value: refs.from, suggestions: diffRefFromSuggestions(repo, path), aria: t('diff.ref.from.aria')});
+  const toInput = diffRefInputHtml({repo, path, compact, side: 'to', value: refs.to, suggestions: diffRefToSuggestions(refs.from, repo, path), aria: t('diff.ref.to.aria')});
+  return `<span class="${className}" data-diff-ref-controls${repoAttr}${pathAttr}>
     <label class="diff-ref-control">${esc(t('diff.ref.from'))} ${fromInput}</label>
     <label class="diff-ref-control">${esc(t('diff.ref.to'))} ${toInput}</label>
-    <button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${esc(t('diff.ref.reset'))}">↺</button>
+    ${diffRefResetButtonHtml(refs)}
   </span>`;
+}
+
+function diffRefResetButtonHtml(refs = repoDiffRefs('')) {
+  const isDefault = refs.from === 'HEAD' && refs.to === 'current';
+  const resetHidden = isDefault ? ' hidden' : '';
+  const label = esc(t('diff.ref.reset'));
+  return `<button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">↺</button>`;
 }
 
 // C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
 // state for other repos is untouched, so picking a SHA for repo A never disturbs repo B.
 function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
-  const nextFrom = canonicalDiffRefValue(cleanDiffRef(fromRef, 'HEAD'), diffRefFromSuggestions(repo)) || 'HEAD';
-  const toSuggestions = diffRefToSuggestions(nextFrom, repo);
+  const path = options.path || '';
+  const nextFrom = canonicalDiffRefValue(cleanDiffRef(fromRef, 'HEAD'), diffRefFromSuggestions(repo, path)) || 'HEAD';
+  const toSuggestions = diffRefToSuggestions(nextFrom, repo, path);
   let nextTo = canonicalDiffRefValue(cleanDiffRef(toRef, 'current'), toSuggestions) || 'current';
   if (!toSuggestions.some(item => diffRefOptionMatches(nextTo, item))) nextTo = 'current';
   const current = repoDiffRefs(repo);
@@ -16159,9 +16411,10 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
 function commitDiffRefControls(container) {
   const controls = container?.matches?.('[data-diff-ref-controls]') ? container : container?.querySelector?.('[data-diff-ref-controls]');
   const repo = controls?.dataset?.diffRefRepo || '';
+  const path = controls?.dataset?.diffRefPath || '';
   const fromInput = container?.querySelector?.('[data-diff-ref-from]');
   const toInput = container?.querySelector?.('[data-diff-ref-to]');
-  return setRepoDiffRefs(repo, fromInput?.value, toInput?.value);
+  return setRepoDiffRefs(repo, fromInput?.value, toInput?.value, {path});
 }
 
 function syncDiffRefControlValues(container) {
@@ -16169,11 +16422,12 @@ function syncDiffRefControlValues(container) {
   const active = document.activeElement;
   const controls = container.matches?.('[data-diff-ref-controls]') ? container : container.querySelector?.('[data-diff-ref-controls]');
   const repo = controls?.dataset?.diffRefRepo || '';
+  const path = controls?.dataset?.diffRefPath || '';
   const refs = repoDiffRefs(repo);
   const fromInput = container.querySelector?.('[data-diff-ref-from]');
   const toInput = container.querySelector?.('[data-diff-ref-to]');
-  if (fromInput && fromInput !== active) fromInput.value = diffRefInputDisplayValue(refs.from, diffRefFromSuggestions(repo));
-  if (toInput && toInput !== active) toInput.value = diffRefInputDisplayValue(refs.to, diffRefToSuggestions(refs.from, repo));
+  if (fromInput && fromInput !== active) fromInput.value = diffRefInputDisplayValue(refs.from, diffRefFromSuggestions(repo, path));
+  if (toInput && toInput !== active) toInput.value = diffRefInputDisplayValue(refs.to, diffRefToSuggestions(refs.from, repo, path));
   refreshDiffRefToDatalist(controls);
   const resetBtn = controls?.querySelector?.('[data-diff-ref-reset]');
   if (resetBtn) resetBtn.hidden = refs.from === 'HEAD' && refs.to === 'current';
@@ -16405,18 +16659,20 @@ function sessionFileDiffText(item) {
 function sortedSessionFiles(files) {
   const items = Array.isArray(files) ? files.slice() : [];
   const uploadOrder = item => item?.uploaded === true ? 1 : 0;
-  if (sessionFilesSortMode === 'name') {
+  const mode = normalizeSessionFilesSortMode(sessionFilesSortMode);
+  const nameCompare = (left, right) => String(left.path || '').localeCompare(String(right.path || ''), undefined, {numeric: true, sensitivity: 'base'})
+    || String(left.repo || '').localeCompare(String(right.repo || ''), undefined, {numeric: true, sensitivity: 'base'});
+  if (mode === 'az' || mode === 'za') {
     return items.sort((left, right) => uploadOrder(left) - uploadOrder(right)
-      || String(left.path || '').localeCompare(String(right.path || ''))
-      || String(left.repo || '').localeCompare(String(right.repo || '')));
+      || nameCompare(left, right) * (mode === 'za' ? -1 : 1));
   }
   return items.sort((left, right) => {
     const uploadResult = uploadOrder(left) - uploadOrder(right);
     if (uploadResult !== 0) return uploadResult;
     const leftMtime = Number(left.mtime || 0);
     const rightMtime = Number(right.mtime || 0);
-    const mtimeResult = left?.uploaded === true ? leftMtime - rightMtime : rightMtime - leftMtime;
-    return mtimeResult || String(left.path || '').localeCompare(String(right.path || ''));
+    const mtimeResult = mode === 'oldest' ? leftMtime - rightMtime : rightMtime - leftMtime;
+    return mtimeResult || nameCompare(left, right);
   });
 }
 
@@ -16521,10 +16777,7 @@ function diffRefComparisonLineHtml(repo) {
   const body = esc(t('diff.comparing', {from: '{{FROM}}', to: '{{TO}}'}))
     .replace('{{FROM}}', fromInput)
     .replace('{{TO}}', toInput);
-  const isDefault = refs.from === 'HEAD' && refs.to === 'current';
-  const resetHidden = isDefault ? ' hidden' : '';
-  const resetBtn = `<button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${esc(t('diff.ref.reset'))}">↺</button>`;
-  return `<span class="changes-repo-compare-title diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}${resetBtn}</span>`;
+  return `<span class="changes-repo-compare-title diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}${diffRefResetButtonHtml(refs)}</span>`;
 }
 
 // C6: per-repo comparison title (from the repo payload's own effective refs), shown beside that repo's
@@ -16785,8 +17038,19 @@ function renderChangesGroups(groupsEl, files, options = {}) {
 function fileExplorerTreeDateButtonHtml(extraClass = '') {
   const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
   const active = mode !== 'none';
-  const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass].filter(Boolean).join(' ');
+  const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass, active ? 'active' : ''].filter(Boolean).join(' ');
   return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeLabel(mode))}</button>`;
+}
+
+function sessionFilesSortSelectHtml(extraClass = '') {
+  const classes = ['file-explorer-sort-select', 'changes-sort-select', extraClass].filter(Boolean).join(' ');
+  const mode = normalizeSessionFilesSortMode(sessionFilesSortMode);
+  return `<select class="${esc(classes)}" data-session-files-sort title="${esc(t('changes.sort'))}" aria-label="${esc(t('changes.sort'))}">
+        <option value="az"${mode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
+        <option value="za"${mode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
+        <option value="newest"${mode === 'newest' ? ' selected' : ''}>${esc(t('finder.sort.newest'))}</option>
+        <option value="oldest"${mode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
+      </select>`;
 }
 
 function changesPanelStaticHtml() {
@@ -16800,12 +17064,9 @@ function changesPanelStaticHtml() {
   return `
     <div class="changes-toolbar">
       <label class="changes-control">${esc(t('changes.session'))} <select data-session-files-session>${options}</select></label>
-      <label class="changes-control">${esc(t('changes.sort'))} <select data-session-files-sort>
-        <option value="mtime"${sessionFilesSortMode === 'mtime' ? ' selected' : ''}>${esc(t('changes.sort.recent'))}</option>
-        <option value="name"${sessionFilesSortMode === 'name' ? ' selected' : ''}>${esc(t('changes.sort.name'))}</option>
-      </select></label>
+      <label class="changes-control">${esc(t('changes.sort'))} ${sessionFilesSortSelectHtml()}</label>
       ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
-      <button type="button" class="changes-refresh" data-session-files-refresh>${esc(t('changes.refresh'))}</button>
+      <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
     </div>
     ${comparison}
     ${errorHtml}
@@ -16825,13 +17086,9 @@ function fileExplorerChangesPanelStaticHtml() {
   return `
     <div class="file-explorer-changes-head">
       <span class="changes-title">${esc(titleText)}</span>
-      <span class="changes-sort-toggle" role="group" aria-label="${esc(t('changes.sort'))}">
-        <button type="button" class="changes-sort-seg${sessionFilesSortMode === 'mtime' ? ' active' : ''}" data-session-files-sort data-sort-value="mtime" aria-pressed="${sessionFilesSortMode === 'mtime' ? 'true' : 'false'}">${esc(t('changes.sort.recent'))}</button>
-        <span class="changes-sort-divider" aria-hidden="true">|</span>
-        <button type="button" class="changes-sort-seg${sessionFilesSortMode === 'name' ? ' active' : ''}" data-session-files-sort data-sort-value="name" aria-pressed="${sessionFilesSortMode === 'name' ? 'true' : 'false'}">${esc(t('changes.sort.name'))}</button>
-      </span>
+      ${sessionFilesSortSelectHtml('changes-sort-select-compact')}
       ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
-      <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
+      <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
       <button type="button" class="changes-close" data-file-explorer-changes-close title="${esc(t('changes.hide'))}" aria-label="${esc(t('changes.hide'))}">×</button>
     </div>
     ${changesComparisonHeaderHtml(payload, files, {loading, compact: true})}
@@ -17056,7 +17313,7 @@ function bindChangesPanel(panel) {
     }
     const sortSelect = event.target.closest('[data-session-files-sort]');
     if (sortSelect && panel.contains(sortSelect)) {
-      sessionFilesSortMode = sortSelect.value === 'name' ? 'name' : 'mtime';
+      sessionFilesSortMode = normalizeSessionFilesSortMode(sortSelect.value);
       renderChangesPanels({force: true});
       renderFileExplorerChangesPanels({force: true});
       return;
@@ -17100,24 +17357,17 @@ function bindChangesPanel(panel) {
       event.preventDefault();
       hideDiffRefPopover();
       // C6: revert to THIS repo's current ref, not the global default.
-      const escRefs = repoDiffRefs(diffRefInput.closest('[data-diff-ref-controls]')?.dataset?.diffRefRepo || '');
+      const controls = diffRefInput.closest('[data-diff-ref-controls]');
+      const repo = controls?.dataset?.diffRefRepo || '';
+      const path = controls?.dataset?.diffRefPath || '';
+      const escRefs = repoDiffRefs(repo);
       diffRefInput.value = diffRefInput.matches('[data-diff-ref-from]')
-        ? diffRefInputDisplayValue(escRefs.from, diffRefFromSuggestions(diffRefInput.closest('[data-diff-ref-controls]')?.dataset?.diffRefRepo || ''))
-        : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, diffRefInput.closest('[data-diff-ref-controls]')?.dataset?.diffRefRepo || ''));
+        ? diffRefInputDisplayValue(escRefs.from, diffRefFromSuggestions(repo, path))
+        : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, repo, path));
       diffRefInput.blur?.();
     }
   });
   panel.addEventListener('click', async event => {
-    // C13: the embedded Finder header sort is a segmented Recent|name toggle (buttons), not a <select>;
-    // a clicked segment carries data-sort-value. (The standalone Changes <select> still fires `change`.)
-    const sortSeg = event.target.closest('[data-session-files-sort][data-sort-value]');
-    if (sortSeg && panel.contains(sortSeg)) {
-      event.preventDefault();
-      sessionFilesSortMode = sortSeg.dataset.sortValue === 'name' ? 'name' : 'mtime';
-      renderChangesPanels({force: true});
-      renderFileExplorerChangesPanels({force: true});
-      return;
-    }
     const uploadedToggle = event.target.closest('[data-uploaded-files-toggle]');
     if (uploadedToggle && panel.contains(uploadedToggle)) {
       event.preventDefault();
@@ -17154,7 +17404,8 @@ function bindChangesPanel(panel) {
       event.preventDefault();
       const controls = diffRefReset.closest('[data-diff-ref-controls]');
       const repo = controls?.dataset?.diffRefRepo || '';
-      setRepoDiffRefs(repo, 'HEAD', 'current');
+      const path = controls?.dataset?.diffRefPath || '';
+      setRepoDiffRefs(repo, 'HEAD', 'current', {path});
       return;
     }
     const refresh = event.target.closest('[data-session-files-refresh]');
@@ -17547,8 +17798,7 @@ function createFileExplorerPanel() {
           <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}">▣</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="${esc(t('finder.toolbar.refresh'))}" aria-label="${esc(t('finder.toolbar.refresh'))}">↻</button>
           <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
-          ${fileExplorerTreeDateButtonHtml()}
-          <button type="button" class="file-explorer-header-action file-explorer-changes-toggle" data-file-explorer-changes-toggle title="${esc(fileExplorerChangesHidden ? t('changes.show') : t('changes.hide'))}" aria-pressed="${fileExplorerChangesHidden ? 'false' : 'true'}">Δ</button>
+          <button type="button" class="file-explorer-header-action file-explorer-changes-toggle" data-file-explorer-changes-toggle title="${esc(fileExplorerChangesHidden ? t('changes.show') : t('changes.hide'))}" aria-label="${esc(fileExplorerChangesHidden ? t('changes.show') : t('changes.hide'))}" aria-pressed="${fileExplorerChangesHidden ? 'false' : 'true'}">Δ</button>
           <select class="file-explorer-sort-select" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
             <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
             <option value="za"${fileExplorerTreeSortMode === 'za' ? ' selected' : ''}>${esc(t('finder.sort.za'))}</option>
@@ -17556,6 +17806,7 @@ function createFileExplorerPanel() {
             <option value="oldest"${fileExplorerTreeSortMode === 'oldest' ? ' selected' : ''}>${esc(t('finder.sort.oldest'))}</option>
           </select>
           <span class="file-explorer-repo-summary" hidden></span>
+          ${fileExplorerTreeDateButtonHtml()}
           ${paneFrameControlsGroupHtml(fileExplorerItemId, {
             groupClass: 'file-explorer-frame-controls',
             actions: false,
@@ -17779,13 +18030,13 @@ function createFileEditorPanel(item) {
         <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
         <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden>⊙</button>
+        <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden><span class="file-editor-icon file-editor-icon-blame" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${diffExpandUnchanged ? 'true' : 'false'}" hidden>↕</button>
         <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
         <button type="button" class="file-editor-theme-panel" title="${esc(t('editor.theme'))}" aria-label="${esc(t('editor.theme'))}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-reload-panel" title="${esc(t('editor.reloadFromDisk'))}" hidden>${esc(t('editor.reload'))}</button>
+        <button type="button" class="file-editor-reload-panel" title="${esc(t('editor.reloadFromDisk'))}" aria-label="${esc(t('editor.reloadFromDisk'))}" hidden>${esc(t('editor.reload'))}</button>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
         <button type="button" class="file-editor-save-panel" title="${esc(t('editor.save'))}" aria-label="${esc(t('editor.saveFile'))}" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
       </div>
@@ -17903,10 +18154,11 @@ function createFileEditorPanel(item) {
       hideDiffRefPopover();
       // C6: revert to this file's repo refs, not the global default.
       const repo = diffRefPanel?.dataset?.diffRefRepoRendered || '';
+      const path = diffRefPanel?.dataset?.diffRefPathRendered || '';
       const escRefs = repoDiffRefs(repo);
       input.value = input.matches('[data-diff-ref-from]')
-        ? diffRefInputDisplayValue(escRefs.from, diffRefFromSuggestions(repo))
-        : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, repo));
+        ? diffRefInputDisplayValue(escRefs.from, diffRefFromSuggestions(repo, path))
+        : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, repo, path));
       input.blur?.();
     }
   });
@@ -17916,7 +18168,8 @@ function createFileEditorPanel(item) {
     event.stopPropagation();
     const controls = event.target.closest('[data-diff-ref-controls]');
     const repo = controls?.dataset?.diffRefRepo || '';
-    setRepoDiffRefs(repo, 'HEAD', 'current');
+    const path = controls?.dataset?.diffRefPath || '';
+    setRepoDiffRefs(repo, 'HEAD', 'current', {path});
   });
   panel.querySelector('.file-editor-cross-split-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -18143,6 +18396,9 @@ function destroyCodeMirrorPanel(panel) {
     panel._cmApi = null;
     panel._cmThemeCompartment = null;
     panel._cmThemeViews = [];
+    panel._cmEditorOptionCompartment = null;
+    panel._cmEditorOptionViews = [];
+    panel._cmEditorOptionConfig = null;
     panel._cmPath = '';
     panel._cmSignature = '';
     panel._cmMode = '';
@@ -18172,8 +18428,6 @@ function codeMirrorConfigSignature(path, options = {}) {
     to: options.to || '',
     expand: options.expand === true,
     language: codeMirrorLanguageName(path),
-    wrap: fileEditorWrapEnabled,
-    lineNumbers: fileEditorLineNumbersEnabled,
     readOnly: readOnlyMode,
     // DOIT.26 fix: the blame ViewPlugin is added/removed only at editor build time, so blame state must
     // be in the signature — otherwise toggling blame OFF reuses the existing view and the annotations
@@ -18193,12 +18447,10 @@ function codeMirrorDiffLayout(_container) {
 }
 
 function codeMirrorReadOnlyExtensions(api, path, panel = null, options = {}) {
-  const wrapEnabled = options.wrap !== false && fileEditorWrapEnabled;
   return [
     api.drawSelection(),
     api.highlightActiveLine(),
-    ...(fileEditorLineNumbersEnabled ? [api.lineNumbers(), api.highlightActiveLineGutter()] : []),
-    ...(wrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
+    codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
     api.EditorState.readOnly.of(true),
     api.EditorView.editable.of(false),
     codeMirrorLanguageExtension(api, path),
@@ -18293,22 +18545,57 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     safeCodeMirrorExtension('selection drawing', () => api.drawSelection()),
     safeCodeMirrorExtension('drop cursor', () => api.dropCursor?.()),
     safeCodeMirrorExtension('active line', () => api.highlightActiveLine()),
-    ...(fileEditorLineNumbersEnabled ? [
-      safeCodeMirrorExtension('line numbers', () => api.lineNumbers?.()),
-      safeCodeMirrorExtension('active line gutter', () => api.highlightActiveLineGutter?.()),
-    ] : []),
+    codeMirrorEditorOptionCompartmentExtensions(api, panel, options),
     safeCodeMirrorExtension('search', () => api.search({top: true})),
     codeMirrorSearchPanelEnhancementExtension(api),
     safeCodeMirrorExtension('search matches', () => api.highlightSelectionMatches?.()),
     saveKeymap,
     findKeymap,
     defaultKeymap,
-    ...(fileEditorWrapEnabled ? [api.EditorView.lineWrapping, codeMirrorWrapMarkerExtension(api)] : []),
     safeCodeMirrorExtension('read only', () => api.EditorState.readOnly.of(readOnlyMode)),
     safeCodeMirrorExtension('editable', () => api.EditorView.editable.of(!readOnlyMode)),
     codeMirrorThemeOnlyExtensions(api, panel),
     codeMirrorWorkingUpdateExtension(api, panel, path),
   ];
+}
+
+function codeMirrorEditorOptionExtensions(api, options = {}) {
+  const extensions = [];
+  if (options.lineNumbers !== false && fileEditorLineNumbersEnabled) {
+    const lineNumbers = safeCodeMirrorExtension('line numbers', () => api.lineNumbers?.());
+    const activeLineGutter = safeCodeMirrorExtension('active line gutter', () => api.highlightActiveLineGutter?.());
+    extensions.push(...[lineNumbers, activeLineGutter].flat().filter(Boolean));
+  }
+  if (options.wrap !== false && fileEditorWrapEnabled) {
+    extensions.push(...[codeMirrorLineWrappingExtension(api), codeMirrorWrapMarkerExtension(api)].flat().filter(Boolean));
+  }
+  return extensions;
+}
+
+function codeMirrorLineWrappingExtension(api) {
+  if (api.EditorView?.lineWrapping) return api.EditorView.lineWrapping;
+  return [
+    safeCodeMirrorExtension('line wrapping content attributes', () => api.EditorView?.contentAttributes?.of?.({class: 'cm-lineWrapping'})),
+    safeCodeMirrorExtension('line wrapping theme', () => api.EditorView?.theme?.({
+      '.cm-content.cm-lineWrapping': {
+        whiteSpace: 'break-spaces',
+        wordBreak: 'break-word',
+        overflowWrap: 'anywhere',
+        flexShrink: '1',
+      },
+    })),
+  ].flat().filter(Boolean);
+}
+
+function codeMirrorEditorOptionCompartmentExtensions(api, panel, options = {}) {
+  const extensions = codeMirrorEditorOptionExtensions(api, options);
+  if (!panel || !api.Compartment) return extensions;
+  panel._cmEditorOptionCompartment = panel._cmEditorOptionCompartment || new api.Compartment();
+  panel._cmEditorOptionConfig = {
+    wrap: options.wrap !== false,
+    lineNumbers: options.lineNumbers !== false,
+  };
+  return panel._cmEditorOptionCompartment.of(extensions);
 }
 
 function createEditableCodeMirrorState(api, panel, path, doc) {
@@ -18337,7 +18624,9 @@ function createEditableCodeMirrorState(api, panel, path, doc) {
 function trackCodeMirrorThemeViews(panel, api, views) {
   if (!panel) return;
   panel._cmApi = api;
-  panel._cmThemeViews = views.filter(Boolean);
+  const liveViews = views.filter(Boolean);
+  panel._cmThemeViews = liveViews;
+  panel._cmEditorOptionViews = liveViews;
 }
 
 function reconfigureCodeMirrorPanelTheme(panel) {
@@ -18351,6 +18640,19 @@ function reconfigureCodeMirrorPanelTheme(panel) {
   for (const view of views) {
     try { view.dispatch({effects: effect}); } catch (_) {}
   }
+  return true;
+}
+
+function reconfigureCodeMirrorPanelEditorOptions(panel) {
+  const api = panel?._cmApi;
+  const compartment = panel?._cmEditorOptionCompartment;
+  const views = Array.isArray(panel?._cmEditorOptionViews) ? panel._cmEditorOptionViews : [];
+  if (!api || !compartment || !views.length) return false;
+  const effect = compartment.reconfigure(codeMirrorEditorOptionExtensions(api, panel._cmEditorOptionConfig || {}));
+  for (const view of views) {
+    try { view.dispatch({effects: effect}); } catch (_) {}
+  }
+  updateCodeMirrorCursorStatus(panel);
   return true;
 }
 
@@ -18552,12 +18854,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       setFileEditorPanelStatus(panel, msg, 'warn');
       return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
     }
-    // Diff loaded but empty — file matches selected refs. Stay in diff mode so the user
-    // can use the FROM/TO picker to compare against a different ref.
-    setFileEditorPanelStatus(panel, 'No changes vs selected refs', '');
-    destroyCodeMirrorPanel(panel);
-    container.replaceChildren(fileEditorEmptyState('No diff', 'File matches the selected refs. Use the ref picker to compare against a different commit.'));
-    return true;
+    return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
   }
   const original = String(state.diffOriginal || '');
   const api = await loadCodeMirrorApi();
@@ -18644,7 +18941,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
           ...(diffExpandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
         }),
-        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path) : codeMirrorReadOnlyExtensions(api, path, panel)),
+        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path, {wrap: false}) : codeMirrorReadOnlyExtensions(api, path, panel, {wrap: false})),
         codeMirrorDiffOverviewListener(api, panel),  // B3: rebuild overview ticks on fold/geometry change
       ],
     });
@@ -18838,12 +19135,9 @@ function renderFileEditorPanel(panel, item) {
   }
   updateEditorFindButton(findButton, state);
   if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
-  if (blameButton) {
-    // DOIT.26: blame is edit-mode only (not preview/diff/image/non-text). Also hide it for files
-    // git doesn't track (untracked / outside any repo) — they have no history to blame.
-    blameButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || state.gitTracked !== true || editorViewModeFor(path, item) !== 'edit';
-    blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
-  }
+  // Blame and Diff are one git-backed toolbar pair: show both together for files with real file history,
+  // or hide both for files outside git / untracked / creation-only / confirmed-clean.
+  updateFileEditorBlameButton(blameButton, path, state, item);
   updateFileEditorDiffButton(diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
   if (crossSplitButton) {
@@ -18854,9 +19148,16 @@ function renderFileEditorPanel(panel, item) {
     // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
     // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
     const diffRepo = fileRepoForPath(path);
-    if (!diffRefPanel.hidden && diffRefPanel.dataset.diffRefRepoRendered !== diffRepo && !diffRefPanel.contains(document.activeElement)) {
-      diffRefPanel.innerHTML = diffRefControlsHtml({compact: true, repo: diffRepo});
+    const historySignature = fileDiffRefHistorySignature(path);
+    if (!diffRefPanel.hidden
+      && (diffRefPanel.dataset.diffRefRepoRendered !== diffRepo
+        || diffRefPanel.dataset.diffRefPathRendered !== path
+        || diffRefPanel.dataset.diffRefHistoryRendered !== historySignature)
+      && !diffRefPanel.contains(document.activeElement)) {
+      diffRefPanel.innerHTML = diffRefControlsHtml({compact: true, repo: diffRepo, path});
       diffRefPanel.dataset.diffRefRepoRendered = diffRepo;
+      diffRefPanel.dataset.diffRefPathRendered = path;
+      diffRefPanel.dataset.diffRefHistoryRendered = historySignature;
     }
     syncDiffRefControlValues(diffRefPanel);
   }
@@ -18930,22 +19231,21 @@ function loadFileEditorState(path, panel, item) {
       } else {
         setFileState(path, {mtime: fileEntryMtime(entry), kind: 'image', original: '', content: '', dirty: false, size: entry?.size ?? null});
       }
-      renderFileEditorPanel(panel, item);
+      if (panel) renderFileEditorPanel(panel, item);
       renderSessionButtons();
       renderPaneTabStrips();
       return;
     }
     try {
       const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
-      setFileState(path, {
+      setFileState(path, applyFileGitMetadata({
         mtime: filePayloadMtime(payload),
         size: payload.size,
         kind: 'text',
         original: payload.content,
         content: payload.content,
         dirty: false,
-        gitTracked: payload.git_tracked === true,
-      });
+      }, payload));
     } catch (err) {
       const status = Number(err?.status) || 0;
       if (status) {
@@ -18959,7 +19259,7 @@ function loadFileEditorState(path, panel, item) {
         setFileState(path, fileErrorState(err));
       }
     }
-    renderFileEditorPanel(panel, item);
+    if (panel) renderFileEditorPanel(panel, item);
     renderSessionButtons();
     renderPaneTabStrips();
   })().finally(() => {
@@ -19011,11 +19311,22 @@ function recordEditorNav(item) {
   if (editorNav.stack[editorNav.index] === item) return;   // dedupe consecutive same-tab activations
   editorNav.stack = editorNav.stack.slice(0, editorNav.index + 1);   // a new activation after Back drops the forward tail
   editorNav.stack.push(item);
+  collapseEditorNavPingPong();
   if (editorNav.stack.length > NAV_STACK_LIMIT) {
     editorNav.stack = editorNav.stack.slice(editorNav.stack.length - NAV_STACK_LIMIT);
   }
   editorNav.index = editorNav.stack.length - 1;
   updateEditorNavButtons();
+}
+
+function collapseEditorNavPingPong() {
+  while (editorNav.stack.length >= 4) {
+    const end = editorNav.stack.length;
+    const first = editorNav.stack[end - 4];
+    const second = editorNav.stack[end - 3];
+    if (first !== editorNav.stack[end - 2] || second !== editorNav.stack[end - 1]) return;
+    editorNav.stack.splice(end - 2, 2);
+  }
 }
 
 // Re-activate a history item: focus its tab if still open; if it's a closed file editor/preview, re-open
@@ -21115,7 +21426,7 @@ function syncPanelVisibility(previousActive = []) {
 }
 
 function activateTab(session, name, options = {}) {
-  setFocusedPanelItem(session);
+  setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
   if (name !== 'transcript') stopTranscriptStream(session);
   if (name !== 'summary') stopSummaryStream(session);
   document.querySelectorAll(`[data-tab="${session}"]`).forEach(button => {
@@ -21292,6 +21603,7 @@ function startTerminal(session) {
       const filtered = stripTerminalQueryResponses(data);
       if (filtered) {
         noteFileExplorerChangesSessionInteraction(session);
+        setFocusedTerminal(session, {userInitiated: true});
         socket.send(JSON.stringify({type: 'input', data: filtered}));
       }
     }
