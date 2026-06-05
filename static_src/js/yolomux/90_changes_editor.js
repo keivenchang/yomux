@@ -884,8 +884,14 @@ function changesFolderHtml(node, context, depth) {
   const collapsed = changesFolderCollapsed.has(key);
   const count = changeTreeFileCount(folder.node);
   const children = collapsed ? '' : changesTreeChildrenHtml(folder.node, context, depth + 1);
+  const folderRel = folder.path || '';
+  const repo = context.repo || '';
+  const folderAbs = repo && repo !== 'Outside repo' && folderRel ? childPath(repo, folderRel) : '';
+  const directoryAttrs = folderAbs
+    ? ` data-open-change-directory="${esc(folderAbs)}" data-change-rel="${esc(folderRel)}"`
+    : ` data-change-rel="${esc(folderRel)}"`;
   return `<div class="changes-tree-folder${collapsed ? ' collapsed' : ''}" style="--changes-tree-depth:${depth}">
-    <button type="button" class="changes-tree-folder-row" data-changes-folder-toggle="${esc(key)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+    <button type="button" class="changes-tree-folder-row" data-changes-folder-toggle="${esc(key)}"${directoryAttrs} aria-expanded="${collapsed ? 'false' : 'true'}">
       <span class="changes-tree-caret">${collapsed ? '▸' : '▾'}</span>
       <span class="changes-tree-folder-icon">▸</span>
       <span class="changes-tree-folder-name">${esc(folder.label)}/</span>
@@ -1290,10 +1296,16 @@ function bindChangesPanel(panel) {
   // C5: Finder-like right-click menu with the SAFE read actions only (no Rename/Delete on Modified files).
   panel.addEventListener('contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
-    if (!fileRow || !panel.contains(fileRow)) return;
+    if (fileRow && panel.contains(fileRow)) {
+      event.preventDefault();
+      selectChangedFileRow(fileRow.dataset.openChangeFile || '');
+      showChangedFileContextMenu(fileRow, event.clientX, event.clientY);
+      return;
+    }
+    const directoryRow = event.target.closest('[data-open-change-directory]');
+    if (!directoryRow || !panel.contains(directoryRow)) return;
     event.preventDefault();
-    selectChangedFileRow(fileRow.dataset.openChangeFile || '');
-    showChangedFileContextMenu(fileRow, event.clientX, event.clientY);
+    showChangedDirectoryContextMenu(directoryRow, event.clientX, event.clientY);
   });
 }
 
@@ -1309,9 +1321,9 @@ function selectChangedFileRow(path) {
     .forEach(row => row.classList.add('selected'));
 }
 
-// C5: open the safe Finder-style context menu for a Modified-files row — Copy full/raw/relative path,
-// Open image in new tab (images only), Download. Reuses the shared file context-menu controller and the
-// Finder action helpers; deliberately omits Rename/Delete (Modified files is a read surface).
+// C5: open the safe Finder-style context menu for a Modified-files row — copy row/absolute paths,
+// optionally open image files, and download. Deliberately omits Rename/Delete because Modified files is a
+// read surface.
 function showChangedFileContextMenu(row, x, y) {
   closeFileContextMenu();
   closeFileImagePreview();
@@ -1324,12 +1336,57 @@ function showChangedFileContextMenu(row, x, y) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu file-context-menu';
   menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, 'Copy full path', () => copyFilePath(path, 'full'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy raw path', () => copyFilePath(path, 'full', {raw: true}), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy relative path', () => copyFilePath(rel, 'relative'), closeFileContextMenu, {disabled: !rel});
-  appendContextMenuButton(menu, 'Open image in new tab', () => openFileInEditor(path, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: !isImage || readOnlyMode});
+  appendContextMenuButton(menu, 'Copy relative path', () => copyChangedPath(rel || path, 'relative path'), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Copy full path', () => copyChangedPath(path, 'full path'), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(path, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: !isImage || readOnlyMode});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(path), closeFileContextMenu, {disabled: readOnlyMode});
   fileContextMenu.open(menu, x, y);
+}
+
+function showChangedDirectoryContextMenu(row, x, y) {
+  closeFileContextMenu();
+  closeFileImagePreview();
+  const path = row.dataset.openChangeDirectory || '';
+  if (!path) return;
+  const rel = row.dataset.changeRel || '';
+  const displayName = rel || basenameOf(path) || path;
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu file-context-menu';
+  menu.setAttribute('role', 'menu');
+  appendContextMenuButton(menu, 'Copy relative path', () => copyChangedPath(rel || path, 'relative path'), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Copy full path', () => copyChangedPath(path, 'full path'), closeFileContextMenu);
+  appendContextMenuButton(menu, `Expand ${displayName} in ${fileExplorerLabel()}`, () => openChangedDirectoryInFinder(path), closeFileContextMenu);
+  fileContextMenu.open(menu, x, y);
+}
+
+async function copyChangedPath(path, label) {
+  try {
+    await copyTextToClipboard(path);
+    statusEl.textContent = `copied ${label}`;
+  } catch (error) {
+    statusErr(`copy failed: ${esc(error)}`);
+  }
+}
+
+async function openChangedDirectoryInFinder(path) {
+  try {
+    await openFileExplorerPane();
+    const root = currentFileExplorerRoot();
+    if (root && pathIsInsideDirectory(path, root)) {
+      const expanded = await expandFileExplorerTreesToPath(path);
+      if (expanded) {
+        selectFileTreePath(path);
+        statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
+        return;
+      }
+    }
+    const opened = await openFileExplorerAt(path);
+    if (!opened) return;
+    selectFileTreePath(path);
+    statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
+  } catch (error) {
+    statusErr(`expand directory failed: ${esc(error)}`);
+  }
 }
 
 // C5: per-render binding for Modified-files rows (rows are recreated each render). Binds the Finder image

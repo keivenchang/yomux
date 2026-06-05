@@ -1548,10 +1548,18 @@ function commandPaletteItemScore(item, query) {
   // C15 follow-up: the path-mode "Open this folder in Finder" row always sorts to the top (and survives
   // any filter text) so it is the default Enter action while a directory path is typed.
   if (item.pinTop) return 1e9;
-  const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item);
+  const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item) + commandPaletteFinderAliasBonus(item, query);
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
   return Number.isFinite(base) ? base + bonus : base;
+}
+
+function commandPaletteFinderAliasBonus(item, query) {
+  if (item?.targetItem !== fileExplorerItemId) return 0;
+  const text = String(query || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (text.length < 3) return 0;
+  const aliases = ['file', 'files', 'finder', 'file explorer'];
+  return aliases.some(alias => alias === text || alias.startsWith(text)) ? 10000 : 0;
 }
 
 function commandPaletteRecentBonus(item) {

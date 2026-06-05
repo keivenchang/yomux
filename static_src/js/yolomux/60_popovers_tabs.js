@@ -56,7 +56,7 @@ function bindFilePopoverActions(container) {
     button.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
-      copyFilePath(button.dataset.copyPopoverPath || '', 'full');
+      copyFilePath(button.dataset.copyPopoverPath || '', 'path');
     });
   });
 }

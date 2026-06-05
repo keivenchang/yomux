@@ -1609,9 +1609,8 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   const relativePaths = infos.map(info => info?.relative_path || '').filter(Boolean);
   const menuState = fileContextMenuState(entry, selectedPaths, relativePaths);
   const multiple = selectedPaths.length > 1;
-  appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'full'), closeFileContextMenu);
-  appendContextMenuButton(menu, multiple ? 'Copy raw paths' : 'Copy raw path', () => copyFilePath(selectedPaths.join('\n'), 'full', {raw: true}), closeFileContextMenu);
   appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
+  appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
   appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(fullPath, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: menuState.openInNewTabDisabled});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
@@ -1639,20 +1638,11 @@ function entryIsImageFile(entry) {
   return entry?.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name || entry.path || ''));
 }
 
-function shellQuotePathText(pathText) {
-  return String(pathText || '')
-    .split('\n')
-    .filter(path => path.length > 0)
-    .map(shellQuote)
-    .join('\n');
-}
-
-async function copyFilePath(path, label, options = {}) {
-  const text = options.raw === true ? path : shellQuotePathText(path);
+async function copyFilePath(path, label) {
+  const text = String(path || '');
   try {
     await copyTextToClipboard(text);
-    const prefix = options.raw === true ? 'raw ' : '';
-    statusEl.textContent = label === 'relative' ? `copied ${prefix}relative path` : `copied ${prefix}full path`;
+    statusEl.textContent = label === 'relative' ? 'copied relative path' : 'copied path';
   } catch (error) {
     statusErr(`copy failed: ${esc(error)}`);
   }
@@ -1675,7 +1665,7 @@ function triggerFileDownload(path) {
 }
 
 function copyCurrentFileExplorerPath() {
-  copyFilePath(fileExplorerRoot || homePath || '/', 'full');
+  copyFilePath(fileExplorerRoot || homePath || '/', 'path');
 }
 
 function childNameToPath(root, name) {

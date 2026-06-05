@@ -1953,6 +1953,8 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('Ahead 2 commits'), 'Changes pane shows ahead count');
   assert.ok(changesHtml.includes('changes-tree-folder-name">src/'), 'Changes pane groups nested paths under folders');
   assert.ok(changesHtml.includes('data-changes-folder-toggle="1|/repo/app|src"'), 'Changes tree folders are collapsible by a stable key');
+  assert.ok(changesHtml.includes('data-open-change-directory="/repo/app/src"'), 'Changes tree folders carry the absolute directory path for the context menu');
+  assert.ok(changesHtml.includes('data-change-rel="src"'), 'Changes tree folders carry the relative directory path for copy');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'), 'file leaves keep the open-file action');
   assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
   assert.ok(changesHtml.includes('changes-file-agent'), 'changed-file rows show the agent icon slot');
@@ -2034,7 +2036,7 @@ function makeFileTree(paths) {
   // non-image rows keep the full-path title.
   const imageRow = api.changeFileRowHtml({session: '1', agents: [], status: 'A', repo: '/repo/app', path: 'pic.png', abs_path: '/repo/app/pic.png', mtime: 1, size: 4096}, {});
   assert.ok(imageRow.includes('data-change-size="4096"'), 'C5: image rows carry the file size for preview gating');
-  assert.ok(imageRow.includes('data-change-rel="pic.png"'), 'C5: rows carry the relative path for Copy relative path');
+  assert.ok(imageRow.includes('data-change-rel="pic.png"'), 'C5: rows carry the relative path for Copy path');
   assert.equal(/title="[^"]*pic\.png"/.test(imageRow), false, 'C5: image rows drop the native title so it does not duplicate the hover preview');
   const textRow = api.changeFileRowHtml({session: '1', agents: [], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1, size: 10}, {});
   assert.ok(textRow.includes('title="/repo/app/a.txt"'), 'C5: non-image rows keep the full-path title');
@@ -2044,10 +2046,26 @@ function makeFileTree(paths) {
   assert.ok(changedFilesSource.includes('function showChangedFileContextMenu('), 'C5: Modified-files rows have a right-click menu');
   const ctxStart = changedFilesSource.indexOf('function showChangedFileContextMenu(');
   const ctxBody = changedFilesSource.slice(ctxStart, changedFilesSource.indexOf('\nfunction ', ctxStart + 1));
-  for (const action of ['Copy full path', 'Copy raw path', 'Copy relative path', 'Open image in new tab', 'Download']) {
+  for (const action of ['Copy relative path', 'Copy full path', 'Open in new tab', 'Download']) {
     assert.ok(ctxBody.includes(action), `C5: the changed-file menu offers "${action}"`);
   }
+  assert.ok(ctxBody.includes('copyChangedPath(rel || path'), 'C5: Copy relative path uses the row path when present');
+  assert.ok(ctxBody.includes("copyChangedPath(path, 'full path')"), 'C5: Copy full path uses the full filesystem path');
+  assert.equal(ctxBody.includes('Open directory in '), false, 'C5: file rows do not offer a directory jump');
   assert.equal(/'Rename'|'Delete'|"Rename"|"Delete"/.test(ctxBody), false, 'C5: the Modified-files menu omits destructive Rename/Delete');
+  assert.ok(changedFilesSource.includes('function showChangedDirectoryContextMenu('), 'C5: Modified-files folder rows have a right-click menu');
+  const dirCtxStart = changedFilesSource.indexOf('function showChangedDirectoryContextMenu(');
+  const dirCtxBody = changedFilesSource.slice(dirCtxStart, changedFilesSource.indexOf('\nfunction ', dirCtxStart + 1));
+  for (const action of ['Copy relative path', 'Copy full path', 'Expand ']) {
+    assert.ok(dirCtxBody.includes(action), `C5: the changed-directory menu offers "${action}"`);
+  }
+  assert.ok(dirCtxBody.includes('copyChangedPath(rel || path'), 'C5: directory Copy relative path uses the folder-relative path when present');
+  assert.ok(/function openChangedDirectoryInFinder\([\s\S]*?openFileExplorerPane\(\)[\s\S]*?expandFileExplorerTreesToPath\(path\)[\s\S]*?selectFileTreePath\(path\)/.test(changedFilesSource), 'C5: Modified-files folder menu expands the directory in-place');
+  assert.equal(/'Open in new tab'|'Download'|'Rename'|'Delete'|"Open in new tab"|"Download"|"Rename"|"Delete"/.test(dirCtxBody), false, 'C5: the Modified-files folder menu stays directory-only and non-destructive');
+  assert.ok(/contextmenu'[\s\S]*?data-open-change-file[\s\S]*?showChangedFileContextMenu[\s\S]*?data-open-change-directory[\s\S]*?showChangedDirectoryContextMenu/.test(changedFilesSource), 'C5: right-click dispatches file and folder rows through separate menus');
+  assert.ok(changedFilesSource.includes("multiple ? 'Copy full paths' : 'Copy full path'"), 'Finder context menu uses Copy full path label');
+  const fileExplorerSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+  assert.equal(/Copy raw paths?/.test(fileExplorerSource), false, 'Finder context menu no longer exposes a duplicate raw path action');
   api.setUploadedFilesCollapsedForTest(true);
   api.setSessionFilesPayloadForTest({
     session: '1',
@@ -3186,6 +3204,12 @@ function makeFileTree(paths) {
   // YO!agent survives as a File-menu command that opens the merged pane on its sub-tab.
   assert.ok(paletteItems.some(item => item.group === 'Menu' && /YO!agent$/.test(item.label)), 'command palette offers a YO!agent command (opens the merged pane on its sub-tab)');
   assert.equal(paletteItems.some(item => item.group === 'Tabs' && item.label === 'YO!agent'), false, 'YO!agent is not a standalone palette tab anymore');
+  const finderPaletteItem = paletteItems.find(item => item.targetItem === api.fileExplorerItemId);
+  assert.ok(finderPaletteItem, 'command palette has a Finder/File Explorer tab row');
+  assert.ok(
+    api.commandPaletteItemScore(finderPaletteItem, 'File') > api.commandPaletteItemScore(api.fileQuickOpenItem('/repo/app/File.md'), 'File'),
+    'typing File in the command palette promotes Finder/File Explorer above ordinary file matches'
+  );
   api.setFileQuickOpenCandidatesForTest('/repo/app', [
     {name: 'helloXandYyy.py', path: '/repo/app/src/helloXandYyy.py', relative_path: 'src/helloXandYyy.py'},
   ]);

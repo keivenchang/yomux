@@ -3647,10 +3647,18 @@ function commandPaletteItemScore(item, query) {
   // C15 follow-up: the path-mode "Open this folder in Finder" row always sorts to the top (and survives
   // any filter text) so it is the default Enter action while a directory path is typed.
   if (item.pinTop) return 1e9;
-  const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item);
+  const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item) + commandPaletteFinderAliasBonus(item, query);
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
   return Number.isFinite(base) ? base + bonus : base;
+}
+
+function commandPaletteFinderAliasBonus(item, query) {
+  if (item?.targetItem !== fileExplorerItemId) return 0;
+  const text = String(query || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (text.length < 3) return 0;
+  const aliases = ['file', 'files', 'finder', 'file explorer'];
+  return aliases.some(alias => alias === text || alias.startsWith(text)) ? 10000 : 0;
 }
 
 function commandPaletteRecentBonus(item) {
@@ -7263,9 +7271,8 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y) {
   const relativePaths = infos.map(info => info?.relative_path || '').filter(Boolean);
   const menuState = fileContextMenuState(entry, selectedPaths, relativePaths);
   const multiple = selectedPaths.length > 1;
-  appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'full'), closeFileContextMenu);
-  appendContextMenuButton(menu, multiple ? 'Copy raw paths' : 'Copy raw path', () => copyFilePath(selectedPaths.join('\n'), 'full', {raw: true}), closeFileContextMenu);
   appendContextMenuButton(menu, multiple ? 'Copy relative paths' : 'Copy relative path', () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
+  appendContextMenuButton(menu, multiple ? 'Copy full paths' : 'Copy full path', () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
   appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(fullPath, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: menuState.openInNewTabDisabled});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   appendContextMenuButton(menu, fileExplorerDirectoryIsIndexed(fullPath) ? 'Disallow index' : 'Allow index', () => toggleFileExplorerDirectoryIndexed(fullPath), closeFileContextMenu, {disabled: menuState.indexToggleDisabled, checked: entry?.kind === 'dir' ? fileExplorerDirectoryIsIndexed(fullPath) : undefined});
@@ -7293,20 +7300,11 @@ function entryIsImageFile(entry) {
   return entry?.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name || entry.path || ''));
 }
 
-function shellQuotePathText(pathText) {
-  return String(pathText || '')
-    .split('\n')
-    .filter(path => path.length > 0)
-    .map(shellQuote)
-    .join('\n');
-}
-
-async function copyFilePath(path, label, options = {}) {
-  const text = options.raw === true ? path : shellQuotePathText(path);
+async function copyFilePath(path, label) {
+  const text = String(path || '');
   try {
     await copyTextToClipboard(text);
-    const prefix = options.raw === true ? 'raw ' : '';
-    statusEl.textContent = label === 'relative' ? `copied ${prefix}relative path` : `copied ${prefix}full path`;
+    statusEl.textContent = label === 'relative' ? 'copied relative path' : 'copied path';
   } catch (error) {
     statusErr(`copy failed: ${esc(error)}`);
   }
@@ -7329,7 +7327,7 @@ function triggerFileDownload(path) {
 }
 
 function copyCurrentFileExplorerPath() {
-  copyFilePath(fileExplorerRoot || homePath || '/', 'full');
+  copyFilePath(fileExplorerRoot || homePath || '/', 'path');
 }
 
 function childNameToPath(root, name) {
@@ -10251,7 +10249,7 @@ function bindFilePopoverActions(container) {
     button.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
-      copyFilePath(button.dataset.copyPopoverPath || '', 'full');
+      copyFilePath(button.dataset.copyPopoverPath || '', 'path');
     });
   });
 }
@@ -16330,8 +16328,14 @@ function changesFolderHtml(node, context, depth) {
   const collapsed = changesFolderCollapsed.has(key);
   const count = changeTreeFileCount(folder.node);
   const children = collapsed ? '' : changesTreeChildrenHtml(folder.node, context, depth + 1);
+  const folderRel = folder.path || '';
+  const repo = context.repo || '';
+  const folderAbs = repo && repo !== 'Outside repo' && folderRel ? childPath(repo, folderRel) : '';
+  const directoryAttrs = folderAbs
+    ? ` data-open-change-directory="${esc(folderAbs)}" data-change-rel="${esc(folderRel)}"`
+    : ` data-change-rel="${esc(folderRel)}"`;
   return `<div class="changes-tree-folder${collapsed ? ' collapsed' : ''}" style="--changes-tree-depth:${depth}">
-    <button type="button" class="changes-tree-folder-row" data-changes-folder-toggle="${esc(key)}" aria-expanded="${collapsed ? 'false' : 'true'}">
+    <button type="button" class="changes-tree-folder-row" data-changes-folder-toggle="${esc(key)}"${directoryAttrs} aria-expanded="${collapsed ? 'false' : 'true'}">
       <span class="changes-tree-caret">${collapsed ? '▸' : '▾'}</span>
       <span class="changes-tree-folder-icon">▸</span>
       <span class="changes-tree-folder-name">${esc(folder.label)}/</span>
@@ -16736,10 +16740,16 @@ function bindChangesPanel(panel) {
   // C5: Finder-like right-click menu with the SAFE read actions only (no Rename/Delete on Modified files).
   panel.addEventListener('contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
-    if (!fileRow || !panel.contains(fileRow)) return;
+    if (fileRow && panel.contains(fileRow)) {
+      event.preventDefault();
+      selectChangedFileRow(fileRow.dataset.openChangeFile || '');
+      showChangedFileContextMenu(fileRow, event.clientX, event.clientY);
+      return;
+    }
+    const directoryRow = event.target.closest('[data-open-change-directory]');
+    if (!directoryRow || !panel.contains(directoryRow)) return;
     event.preventDefault();
-    selectChangedFileRow(fileRow.dataset.openChangeFile || '');
-    showChangedFileContextMenu(fileRow, event.clientX, event.clientY);
+    showChangedDirectoryContextMenu(directoryRow, event.clientX, event.clientY);
   });
 }
 
@@ -16755,9 +16765,9 @@ function selectChangedFileRow(path) {
     .forEach(row => row.classList.add('selected'));
 }
 
-// C5: open the safe Finder-style context menu for a Modified-files row — Copy full/raw/relative path,
-// Open image in new tab (images only), Download. Reuses the shared file context-menu controller and the
-// Finder action helpers; deliberately omits Rename/Delete (Modified files is a read surface).
+// C5: open the safe Finder-style context menu for a Modified-files row — copy row/absolute paths,
+// optionally open image files, and download. Deliberately omits Rename/Delete because Modified files is a
+// read surface.
 function showChangedFileContextMenu(row, x, y) {
   closeFileContextMenu();
   closeFileImagePreview();
@@ -16770,12 +16780,57 @@ function showChangedFileContextMenu(row, x, y) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu file-context-menu';
   menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, 'Copy full path', () => copyFilePath(path, 'full'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy raw path', () => copyFilePath(path, 'full', {raw: true}), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy relative path', () => copyFilePath(rel, 'relative'), closeFileContextMenu, {disabled: !rel});
-  appendContextMenuButton(menu, 'Open image in new tab', () => openFileInEditor(path, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: !isImage || readOnlyMode});
+  appendContextMenuButton(menu, 'Copy relative path', () => copyChangedPath(rel || path, 'relative path'), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Copy full path', () => copyChangedPath(path, 'full path'), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(path, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: !isImage || readOnlyMode});
   appendContextMenuButton(menu, 'Download', () => triggerFileDownload(path), closeFileContextMenu, {disabled: readOnlyMode});
   fileContextMenu.open(menu, x, y);
+}
+
+function showChangedDirectoryContextMenu(row, x, y) {
+  closeFileContextMenu();
+  closeFileImagePreview();
+  const path = row.dataset.openChangeDirectory || '';
+  if (!path) return;
+  const rel = row.dataset.changeRel || '';
+  const displayName = rel || basenameOf(path) || path;
+  const menu = document.createElement('div');
+  menu.className = 'terminal-context-menu file-context-menu';
+  menu.setAttribute('role', 'menu');
+  appendContextMenuButton(menu, 'Copy relative path', () => copyChangedPath(rel || path, 'relative path'), closeFileContextMenu);
+  appendContextMenuButton(menu, 'Copy full path', () => copyChangedPath(path, 'full path'), closeFileContextMenu);
+  appendContextMenuButton(menu, `Expand ${displayName} in ${fileExplorerLabel()}`, () => openChangedDirectoryInFinder(path), closeFileContextMenu);
+  fileContextMenu.open(menu, x, y);
+}
+
+async function copyChangedPath(path, label) {
+  try {
+    await copyTextToClipboard(path);
+    statusEl.textContent = `copied ${label}`;
+  } catch (error) {
+    statusErr(`copy failed: ${esc(error)}`);
+  }
+}
+
+async function openChangedDirectoryInFinder(path) {
+  try {
+    await openFileExplorerPane();
+    const root = currentFileExplorerRoot();
+    if (root && pathIsInsideDirectory(path, root)) {
+      const expanded = await expandFileExplorerTreesToPath(path);
+      if (expanded) {
+        selectFileTreePath(path);
+        statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
+        return;
+      }
+    }
+    const opened = await openFileExplorerAt(path);
+    if (!opened) return;
+    selectFileTreePath(path);
+    statusEl.textContent = `expanded ${path} in ${fileExplorerLabel()}`;
+  } catch (error) {
+    statusErr(`expand directory failed: ${esc(error)}`);
+  }
 }
 
 // C5: per-render binding for Modified-files rows (rows are recreated each render). Binds the Finder image
