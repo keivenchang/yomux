@@ -22,7 +22,7 @@ def test_pane_spacing_default_is_4px():
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
-            "appearance": {"theme": "neon", "terminal_theme": "neon", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "purple", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50},
+            "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "purple", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_ms": 3000},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "performance": {"metadata_refresh_ms": 15000, "pane_state_refresh_ms": 1200},
@@ -36,6 +36,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
 
     assert settings["appearance"]["theme"] == "dark"
     assert settings["appearance"]["terminal_theme"] == "follow-app"
+    assert settings["appearance"]["date_time_hour_cycle"] == "24"
     assert settings["appearance"]["ui_font_size"] == 8
     assert settings["appearance"]["terminal_font_size"] == 28
     assert settings["appearance"]["editor_font_size"] == 28
@@ -75,6 +76,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"] == default_settings()
     assert payload["settings"]["general"]["auto_focus"] is False
     assert payload["settings"]["appearance"]["terminal_theme"] == "follow-app"
+    assert payload["settings"]["appearance"]["date_time_hour_cycle"] == "24"
     assert payload["settings"]["appearance"]["tab_width"] == 180
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "auto"
@@ -85,8 +87,9 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert path.exists()
     assert "YOLOmux user preferences" in path.read_text()
 
-    updated = save_settings({"appearance": {"terminal_font_size": 17}, "file_explorer": {"quick_access_paths": ["/tmp", ""]}}, path)
+    updated = save_settings({"appearance": {"terminal_font_size": 17, "date_time_hour_cycle": "12"}, "file_explorer": {"quick_access_paths": ["/tmp", ""]}}, path)
     assert updated["settings"]["appearance"]["terminal_font_size"] == 17
+    assert updated["settings"]["appearance"]["date_time_hour_cycle"] == "12"
     assert updated["settings"]["file_explorer"]["quick_access_paths"] == ["/tmp"]
 
     loaded, error = read_settings_file(path)

@@ -370,6 +370,7 @@ def session_file_entry(
     source: str,
     added: int | None = None,
     removed: int | None = None,
+    mtime: float | None = None,
 ) -> dict[str, Any]:
     rel_path = repo_relative_path(path, repo) if repo else None
     agent_list = [a for a in agents if a]
@@ -383,7 +384,7 @@ def session_file_entry(
         "repo": str(repo) if repo else "",
         "path": rel_path or str(path),
         "abs_path": str(path),
-        "mtime": file_mtime(path),
+        "mtime": file_mtime(path) if mtime is None else mtime,
         "size": file_size(path),
         "source": source,
         "added": added,
@@ -423,15 +424,17 @@ def session_files_payload_for_info(
                 errors.append(agent.error)
             continue
         transcript = Path(agent.transcript).expanduser()
-        if file_mtime(transcript) < cutoff:
+        transcript_mtime = file_mtime(transcript)
+        if transcript_mtime < cutoff:
             continue
         for path_text, markers in scan_agent_changes(agent).items():
             # C5: accumulate every agent that touched this path instead of overwriting, so a file edited
             # by both Claude and Codex keeps both attributions (rendered as two icons).
-            entry = touched.setdefault(path_text, {"agents": [], "status": ""})
+            entry = touched.setdefault(path_text, {"agents": [], "status": "", "mtime": 0.0})
             if agent.kind and agent.kind not in entry["agents"]:
                 entry["agents"].append(agent.kind)
             entry["status"] = classify_change(markers)
+            entry["mtime"] = max(float(entry.get("mtime") or 0.0), transcript_mtime)
 
     repos: dict[str, set[str]] = {}
     for path_text, metadata in touched.items():
@@ -472,6 +475,11 @@ def session_files_payload_for_info(
             numstat = {}
         else:
             numstat = git_numstat(repo, diff_base or None, sel_from or None, sel_to or None)
+        touched_by_rel: dict[str, dict[str, Any]] = {}
+        for touched_path, metadata in touched.items():
+            rel_path = repo_relative_path(Path(touched_path), repo)
+            if rel_path:
+                touched_by_rel[rel_path] = metadata
         repo_entries: list[dict[str, Any]] = []
         for rel_path, status in statuses.items():
             path = (repo / rel_path).resolve(strict=False)
@@ -483,11 +491,21 @@ def session_files_payload_for_info(
                 removed = 0
             # C5: attribute the file to exactly the agents the transcripts say touched it — no fallback.
             # A repo-only change with no transcript attribution gets an empty list (zero agent icons).
-            agents = next(
-                (metadata["agents"] for touched_path, metadata in touched.items() if repo_relative_path(Path(touched_path), repo) == rel_path),
-                [],
-            )
+            agents = touched_by_rel.get(rel_path, {}).get("agents", [])
             repo_entries.append(session_file_entry(info.session, agents, status, path, repo, "git", added, removed))
+        for rel_path, metadata in touched_by_rel.items():
+            if rel_path in statuses:
+                continue
+            path = (repo / rel_path).resolve(strict=False)
+            repo_entries.append(session_file_entry(
+                info.session,
+                metadata.get("agents", []),
+                "T",
+                path,
+                repo,
+                "transcript",
+                mtime=float(metadata.get("mtime") or 0.0),
+            ))
         repo_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
         files.extend(repo_entries)
         repo_payload = {

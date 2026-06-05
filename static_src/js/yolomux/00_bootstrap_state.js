@@ -348,6 +348,7 @@ let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
 let terminalThemeMode = initialSetting('appearance.terminal_theme', defaultTerminalTheme);
+let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle', '24') === '12' ? '12' : '24';
 fileEditorThemeMode = readConfiguredEditorScheme();
 fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
 fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);

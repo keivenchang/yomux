@@ -102,6 +102,47 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2, "added": 2, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
 
 
+def test_session_files_payload_keeps_transcript_paths_when_branch_is_clean(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    git(repo, "branch", "-M", "main")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    tracked.write_text("merged\n", encoding="utf-8")
+    git(repo, "commit", "-am", "merged change")
+
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text('{"msg":"*** Begin Patch\\n*** Update File: tracked.txt\\n"}\n', encoding="utf-8")
+    os.utime(rollout, (1500, 1500))
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("codex", rollout, repo)])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=2000)
+
+    assert payload["files"] == [
+        {
+            "session": "s1",
+            "agents": ["codex"],
+            "agent": "codex",
+            "status": "T",
+            "repo": str(repo),
+            "path": "tracked.txt",
+            "abs_path": str(tracked),
+            "mtime": 1500,
+            "size": tracked.stat().st_size,
+            "source": "transcript",
+            "added": None,
+            "removed": None,
+            "uploaded": False,
+        }
+    ]
+    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 1, "added": 0, "removed": 0, "from_ref": "default", "to_ref": "base", "error": ""}]
+
+
 def test_session_files_payload_collects_multiple_agents_for_one_file(tmp_path):
     # C5: when both Claude and Codex touch the same file, the entry lists BOTH (no overwrite), so the UI
     # can render two agent icons.

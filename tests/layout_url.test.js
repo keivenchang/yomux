@@ -463,6 +463,10 @@ globalThis.__layoutTestApi = {
   updateFileEditorDiffExpandButton,
   codeMirrorConfigSignature,
   openFileDiffAvailable,
+  localizedDateTimeFormat,
+  sessionFileTimeText,
+  dateTimeHourCycleForTest() { return dateTimeHourCycle; },
+  setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
   activeEditorSchemeForTest() { return activeEditorScheme(); },
   configuredEditorSchemeForMode,
   editorSchemeCssVariables,
@@ -1987,7 +1991,11 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   assert.ok(changesHtml.includes('data-open-change-status="A"'), 'changed-file clicks carry status for deleted-file diff opens');
   assert.ok(changedFilesSource.includes("const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';"), 'added/untracked changed files open through editable mode first');
-  assert.ok(changedFilesSource.includes("viewMode: isAddedChange ? 'edit' : 'diff'"), 'added changed files fall back to normal editor mode instead of forcing diff');
+  assert.ok(changedFilesSource.includes("const isTouchedOnly = normalizedStatus === 'T';"), 'touched-only transcript rows are recognized separately from diffable rows');
+  assert.ok(changedFilesSource.includes("const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';"), 'added/untracked/touched rows open through editable mode first');
+  assert.ok(changedFilesSource.includes("viewMode: initialMode"), 'non-diff rows fall back to normal editor mode instead of forcing diff');
+  const touchedOnlyHtml = api.changeFileRowHtml({session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/merged.py', abs_path: '/repo/app/src/merged.py', mtime: 100, source: 'transcript'}, {compact: true});
+  assert.ok(touchedOnlyHtml.includes('changes-status-t') && touchedOnlyHtml.includes('>T</span>'), 'touched-only transcript rows carry a neutral T status badge');
   // C5: agent attribution renders 0-to-N icons from item.agents (Claude before Codex), with a screen-
   // reader label when more than one appears.
   const zeroAgentRow = api.changeFileRowHtml({session: '1', agents: [], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
@@ -2132,6 +2140,7 @@ function makeFileTree(paths) {
   assert.ok(/body\.theme-light \.changes-body,[\s\S]*?--changes-indent-line:\s*rgba\(100,\s*116,\s*139,\s*0\.12\)/.test(changedFilesCss), 'light-mode Modified-files folder connector lines are subdued');
   assert.ok(/body\.theme-light \.changes-file-row\s*\{[\s\S]*border-top-color:\s*rgba\(100,\s*116,\s*139,\s*0\.13\)/.test(changedFilesCss), 'light-mode Modified-files row dividers are subdued');
   assert.ok(changedFilesCss.includes('.changes-status-r,'), 'modified-file rename/copy statuses get distinct colors');
+  assert.ok(/\.changes-status-t\s*\{[^}]*background:\s*#94a3b8/.test(changedFilesCss), 'touched-only transcript rows get a neutral status color');
   // Purple is RESERVED for MERGED PR status: the untracked/unknown change badge must NOT be purple
   // (it was #a78bfa, reading as a merged indicator next to the PR badges); the merged PR status keeps it.
   assert.ok(/\.changes-status-u,\s*\.changes-status-unknown\s*\{[^}]*background:\s*#2dd4bf/.test(changedFilesCss), 'untracked/unknown badge is teal, not purple (purple is reserved for MERGED PR status)');
@@ -2591,6 +2600,7 @@ function makeFileTree(paths) {
   assert.equal(preferencesHtml.includes('Auto-focus terminals'), false, 'auto-focus setting is not terminal-only');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.theme"'), 'preferences expose the global app theme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.terminal_theme"'), 'preferences expose the terminal color theme setting');
+  assert.ok(preferencesHtml.includes('data-setting-path="appearance.date_time_hour_cycle"'), 'preferences expose the date/time clock setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_dark_color_scheme"'), 'preferences expose the dark editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_light_color_scheme"'), 'preferences expose the light editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_cursor_style"'), 'preferences expose the editor cursor style setting');
@@ -2620,6 +2630,7 @@ function makeFileTree(paths) {
     ['general.default_layout', ['single', 'grid', 'wall']],
     ['appearance.theme', ['system', 'dark', 'light']],
     ['appearance.terminal_theme', ['follow-app', 'dark', 'light']],
+    ['appearance.date_time_hour_cycle', ['24', '12']],
     ['appearance.editor_cursor_style', ['line', 'block']],
     ['appearance.editor_cursor_color', ['yellow', 'theme']],
     ['yolo.prompt_source', ['hybrid', 'pane']],
@@ -2655,6 +2666,18 @@ function makeFileTree(paths) {
   assert.equal(api.nextGlobalThemeMode(), 'light');
   assert.equal(api.terminalThemeModeForTest(), 'follow-app', 'terminal theme defaults to follow-app (matches the global app theme)');
   assert.equal(api.terminalThemeForGlobalTheme('light').background, '#ffffff', 'follow-app default gives a light terminal in light app mode');
+  assert.equal(api.dateTimeHourCycleForTest(), '24', 'date/time clock defaults to 24-hour');
+  {
+    const timestamp = Date.UTC(2026, 5, 4, 19, 17) / 1000;
+    const hour24Text = api.sessionFileTimeText(timestamp);
+    assert.equal(/[AP]\.?M\.?/i.test(hour24Text), false, '24-hour file dates do not show AM/PM');
+    assert.ok(/\b\d{2}:\d{2}\b/.test(hour24Text), '24-hour file dates render a two-digit clock');
+    api.setDateTimeHourCycleForTest('12');
+    const hour12Text = api.sessionFileTimeText(timestamp);
+    assert.ok(/[AP]\.?M\.?/i.test(hour12Text), '12-hour file dates show AM/PM');
+    api.setDateTimeHourCycleForTest('bogus');
+    assert.equal(api.dateTimeHourCycleForTest(), '24', 'invalid date/time clock values normalize to 24-hour');
+  }
   api.setTerminalThemeModeForTest('light');
   assert.equal(api.terminalThemeForGlobalTheme('dark').background, '#ffffff', 'terminal light theme is explicit opt-in');
   assert.equal(api.terminalThemeForGlobalTheme('dark').blue, '#0451a5');
@@ -5115,6 +5138,7 @@ function makeFileTree(paths) {
   // pseudo-locale accents them and NO plain-English label/help from any section leaks through.
   for (const key of [
     'pref.appearance.theme.label', 'pref.appearance.terminal_theme.help',
+    'pref.appearance.date_time_hour_cycle.label',
     'pref.performance.metadata_refresh_ms.label', 'pref.notifications.throttle_seconds.label',
     'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',
     'pref.yoagent.backend.label', 'pref.yolo.dry_run.label',
@@ -5147,6 +5171,7 @@ function makeFileTree(paths) {
     api.setActiveLocaleForTest(locale);
     const zhHtml = api.preferencesPanelHtmlForTest('');
     assert.ok(zhHtml.includes(catalog['pref.appearance.theme.label']), `${locale} renders the localized global-theme label`);
+    assert.ok(zhHtml.includes(catalog['pref.appearance.date_time_hour_cycle.label']), `${locale} renders the localized date/time clock label`);
     assert.ok(zhHtml.includes(catalog['pref.section.yoagent']), `${locale} renders the localized YO!agent section title`);
     // Brand glyph: YO!agent localizes to 優agent / 优agent (no plain "YO!agent" section title leak).
     assert.ok(catalog['pref.section.yoagent'].includes(locale === 'zh-Hant' ? '優agent' : '优agent'), `${locale} applies the YO!agent brand glyph`);
@@ -5158,6 +5183,11 @@ function makeFileTree(paths) {
     // The user's request: YO!info -> 優!資料 / 优!资料, YO!agent -> 優!助手 / 优!助手.
     assert.equal(catalog['brand.tab.info'], locale === 'zh-Hant' ? '優!資料' : '优!资料', `${locale} YO!info tab label`);
     assert.equal(catalog['brand.tab.agent'], locale === 'zh-Hant' ? '優!助手' : '优!助手', `${locale} YO!agent tab label`);
+    const localizedDate = api.sessionFileTimeText(Date.UTC(2026, 5, 4, 19, 17) / 1000);
+    assert.equal(localizedDate.includes('Jun'), false, `${locale} Finder date does not leak the English month name`);
+    assert.ok(/[年月日]/.test(localizedDate), `${locale} Finder date uses Chinese date wording`);
+    assert.equal(/上午|下午|[AP]\.?M\.?/i.test(localizedDate), false, `${locale} Finder date defaults to a 24-hour clock`);
+    assert.ok(/\d{2}:\d{2}/.test(localizedDate), `${locale} Finder date includes a two-digit clock`);
     // The YOLO-toggle menu labels + the YOLO submenu header use the localized brand glyph (優/优 and
     // 優樂/优乐), not a Latin "YO"/"YOLO" (images #57 / #59).
     const glyph = locale === 'zh-Hant' ? '優' : '优';
@@ -5317,6 +5347,8 @@ function makeFileTree(paths) {
   assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme change re-themes open editors');
   // #12: Preferences field renamed. (DOIT.8 Phase 0: the label is now i18n-keyed; en.json holds the text.)
   assert.ok(source.includes("label: t('pref.appearance.theme.label')"), '#12: the global theme field is i18n-keyed');
+  assert.ok(source.includes("initialSetting('appearance.date_time_hour_cycle', '24')"), 'date/time clock defaults to 24-hour in the client');
+  assert.ok(source.includes("label: t('pref.appearance.date_time_hour_cycle.label')"), 'date/time clock Preferences field is i18n-keyed');
   const enThemeCatalog = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
   assert.equal(enThemeCatalog['pref.appearance.theme.label'], 'Global color theme', '#12: the Preferences field reads "Global color theme"');
   assert.equal(enThemeCatalog['pref.appearance.theme.label'] === 'Global app theme', false, '#12: no stale "Global app theme" label remains');

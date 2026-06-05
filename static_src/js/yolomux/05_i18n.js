@@ -72,6 +72,36 @@ function relativeTimeFormat(secondsAgo) {
   }
 }
 
+function normalizeDateTimeHourCycle(value) {
+  return String(value || '') === '12' ? '12' : '24';
+}
+
+function dateTimeFormatOptionsForHourCycle(options = {}) {
+  const next = {...(options || {})};
+  if (!Object.prototype.hasOwnProperty.call(next, 'hour')) return next;
+  if (Object.prototype.hasOwnProperty.call(next, 'hour12')) return next;
+  if (Object.prototype.hasOwnProperty.call(next, 'hourCycle')) return next;
+  if (normalizeDateTimeHourCycle(dateTimeHourCycle) === '12') next.hour12 = true;
+  else next.hourCycle = 'h23';
+  return next;
+}
+
+function localizedDateTimeFormat(timestampSeconds, options = {}) {
+  const value = Number(timestampSeconds || 0);
+  if (!value) return '';
+  const date = new Date(value * 1000);
+  const dateTimeOptions = dateTimeFormatOptionsForHourCycle(options);
+  try {
+    return new Intl.DateTimeFormat(i18nActiveLocale, dateTimeOptions).format(date);
+  } catch (_) {
+    try {
+      return new Intl.DateTimeFormat(i18nFallbackLocale, dateTimeOptions).format(date);
+    } catch (_) {
+      return '';
+    }
+  }
+}
+
 function i18nSetCatalogForTest(locale, catalog) {
   i18nCatalogs.set(locale, catalog || {});
 }

@@ -2372,6 +2372,9 @@ body.theme-light .branch-link {
 .changes-status-c {
   background: #38bdf8;
 }
+.changes-status-t {
+  background: #94a3b8;
+}
 .changes-status-u,
 .changes-status-unknown {
   /* Untracked/unknown = teal (a vibrant "new content" color). Purple is RESERVED for MERGED PR status

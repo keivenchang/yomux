@@ -349,6 +349,7 @@ let clientSettingsDefaults = clientSettingsPayload.defaults || {};
 let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
 let terminalThemeMode = initialSetting('appearance.terminal_theme', defaultTerminalTheme);
+let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle', '24') === '12' ? '12' : '24';
 fileEditorThemeMode = readConfiguredEditorScheme();
 fileEditorAutosaveEnabled = boolSetting('editor.autosave', true);
 fileEditorAutosaveDelaySeconds = numberSetting('editor.autosave_delay_seconds', 2.5);
@@ -851,6 +852,36 @@ function relativeTimeFormat(secondsAgo) {
     return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always'}).format(-value, unit);
   } catch (_) {
     return t(`relative.${unit}`, {count: value});
+  }
+}
+
+function normalizeDateTimeHourCycle(value) {
+  return String(value || '') === '12' ? '12' : '24';
+}
+
+function dateTimeFormatOptionsForHourCycle(options = {}) {
+  const next = {...(options || {})};
+  if (!Object.prototype.hasOwnProperty.call(next, 'hour')) return next;
+  if (Object.prototype.hasOwnProperty.call(next, 'hour12')) return next;
+  if (Object.prototype.hasOwnProperty.call(next, 'hourCycle')) return next;
+  if (normalizeDateTimeHourCycle(dateTimeHourCycle) === '12') next.hour12 = true;
+  else next.hourCycle = 'h23';
+  return next;
+}
+
+function localizedDateTimeFormat(timestampSeconds, options = {}) {
+  const value = Number(timestampSeconds || 0);
+  if (!value) return '';
+  const date = new Date(value * 1000);
+  const dateTimeOptions = dateTimeFormatOptionsForHourCycle(options);
+  try {
+    return new Intl.DateTimeFormat(i18nActiveLocale, dateTimeOptions).format(date);
+  } catch (_) {
+    try {
+      return new Intl.DateTimeFormat(i18nFallbackLocale, dateTimeOptions).format(date);
+    } catch (_) {
+      return '';
+    }
   }
 }
 
@@ -10007,6 +10038,7 @@ function applySettingsPayload(payload, options = {}) {
   const nextMtime = Number(payload.mtime_ns || 0);
   if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
   const previousLocale = i18nActiveLocaleId();
+  const previousDateTimeHourCycle = dateTimeHourCycle;
   clientSettingsPayload = payload;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
@@ -10047,6 +10079,7 @@ function applySettingsPayload(payload, options = {}) {
   const previousEditorSchemeId = activeEditorScheme().id;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
+  dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle', '24'));
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'block'));
   fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', 'yellow'));
   fileEditorThemeMode = readConfiguredEditorScheme();
@@ -10068,6 +10101,11 @@ function applySettingsPayload(payload, options = {}) {
   renderSessionButtons();
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
+  if (previousDateTimeHourCycle !== dateTimeHourCycle) {
+    if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
+    if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
+    if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
+  }
   if (previousEditorSchemeId !== activeEditorScheme().id) {
     // DOIT.6: re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
     // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the
@@ -14700,6 +14738,10 @@ function preferenceSections() {
         {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
         {value: 'light', label: t('pref.appearance.terminal_theme.light')},
       ], help: t('pref.appearance.terminal_theme.help')},
+      {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
+        {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
+        {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
+      ], help: t('pref.appearance.date_time_hour_cycle.help')},
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
       {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
@@ -14878,6 +14920,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
+  if (path === 'appearance.date_time_hour_cycle') add(['date', 'time', 'clock', 'hour', 'hours', '12', '24', 'am', 'pm']);
   if (path === 'terminal_editor.scrollback' || path === 'appearance.terminal_font_size' || path === 'appearance.terminal_theme') add(['shell', 'history', 'buffer', 'backlog', 'lines', 'terminal', 'tui', 'ansi', 'xterm', 'codex', 'claude']);
   if (path.startsWith('editor.') || path.includes('editor_') || path.startsWith('terminal_editor.')) add(['code', 'edit', 'codemirror', 'monaco']);
   if (path === 'terminal_editor.word_wrap') add(['softwrap', 'wrapping']);
@@ -15936,11 +15979,7 @@ async function fetchSessionFiles(options = {}) {
 function sessionFileTimeText(mtime) {
   const value = Number(mtime || 0);
   if (!value) return '';
-  try {
-    return new Date(value * 1000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
-  } catch (_) {
-    return '';
-  }
+  return localizedDateTimeFormat(value, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 }
 
 function sessionFileDiffText(item) {
@@ -16410,7 +16449,9 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '') {
   const item = fileEditorItemFor(path);
   const normalizedStatus = String(status || '').toUpperCase();
   const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';
-  setFileEditorViewMode(path, isAddedChange ? 'edit' : 'diff', item);
+  const isTouchedOnly = normalizedStatus === 'T';
+  const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';
+  setFileEditorViewMode(path, initialMode, item);
   if (normalizedStatus === 'D') {
     await openFilesSetAndShow(path, {
       mtime: 0,
@@ -16423,11 +16464,11 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '') {
       gitTracked: true,
     }, {item, ownerSession});
   } else {
-    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: isAddedChange ? 'edit' : 'diff'});
+    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: initialMode});
   }
   const diffReady = await refreshOpenFileDiff(path, {silent: true});
-  if (diffReady && !isAddedChange) setFileEditorViewMode(path, 'diff', item);
-  if (!diffReady && isAddedChange) setFileEditorViewMode(path, 'edit', item);
+  if (diffReady && !isAddedChange && !isTouchedOnly) setFileEditorViewMode(path, 'diff', item);
+  if (!diffReady && (isAddedChange || isTouchedOnly)) setFileEditorViewMode(path, 'edit', item);
   renderOpenFilePath(path);
 }
 

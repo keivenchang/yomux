@@ -1683,6 +1683,10 @@ function preferenceSections() {
         {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
         {value: 'light', label: t('pref.appearance.terminal_theme.light')},
       ], help: t('pref.appearance.terminal_theme.help')},
+      {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
+        {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
+        {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
+      ], help: t('pref.appearance.date_time_hour_cycle.help')},
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
       {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
@@ -1861,6 +1865,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
+  if (path === 'appearance.date_time_hour_cycle') add(['date', 'time', 'clock', 'hour', 'hours', '12', '24', 'am', 'pm']);
   if (path === 'terminal_editor.scrollback' || path === 'appearance.terminal_font_size' || path === 'appearance.terminal_theme') add(['shell', 'history', 'buffer', 'backlog', 'lines', 'terminal', 'tui', 'ansi', 'xterm', 'codex', 'claude']);
   if (path.startsWith('editor.') || path.includes('editor_') || path.startsWith('terminal_editor.')) add(['code', 'edit', 'codemirror', 'monaco']);
   if (path === 'terminal_editor.word_wrap') add(['softwrap', 'wrapping']);

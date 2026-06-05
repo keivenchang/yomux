@@ -630,11 +630,7 @@ async function fetchSessionFiles(options = {}) {
 function sessionFileTimeText(mtime) {
   const value = Number(mtime || 0);
   if (!value) return '';
-  try {
-    return new Date(value * 1000).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
-  } catch (_) {
-    return '';
-  }
+  return localizedDateTimeFormat(value, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 }
 
 function sessionFileDiffText(item) {
@@ -1104,7 +1100,9 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '') {
   const item = fileEditorItemFor(path);
   const normalizedStatus = String(status || '').toUpperCase();
   const isAddedChange = normalizedStatus === 'A' || normalizedStatus === 'U' || normalizedStatus === '?';
-  setFileEditorViewMode(path, isAddedChange ? 'edit' : 'diff', item);
+  const isTouchedOnly = normalizedStatus === 'T';
+  const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';
+  setFileEditorViewMode(path, initialMode, item);
   if (normalizedStatus === 'D') {
     await openFilesSetAndShow(path, {
       mtime: 0,
@@ -1117,11 +1115,11 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '') {
       gitTracked: true,
     }, {item, ownerSession});
   } else {
-    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: isAddedChange ? 'edit' : 'diff'});
+    await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, {item, ownerSession, viewMode: initialMode});
   }
   const diffReady = await refreshOpenFileDiff(path, {silent: true});
-  if (diffReady && !isAddedChange) setFileEditorViewMode(path, 'diff', item);
-  if (!diffReady && isAddedChange) setFileEditorViewMode(path, 'edit', item);
+  if (diffReady && !isAddedChange && !isTouchedOnly) setFileEditorViewMode(path, 'diff', item);
+  if (!diffReady && (isAddedChange || isTouchedOnly)) setFileEditorViewMode(path, 'edit', item);
   renderOpenFilePath(path);
 }
 

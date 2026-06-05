@@ -498,6 +498,7 @@ function applySettingsPayload(payload, options = {}) {
   const nextMtime = Number(payload.mtime_ns || 0);
   if (!options.force && nextMtime && nextMtime === clientSettingsMtimeNs) return false;
   const previousLocale = i18nActiveLocaleId();
+  const previousDateTimeHourCycle = dateTimeHourCycle;
   clientSettingsPayload = payload;
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
@@ -538,6 +539,7 @@ function applySettingsPayload(payload, options = {}) {
   const previousEditorSchemeId = activeEditorScheme().id;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
+  dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle', '24'));
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'block'));
   fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', 'yellow'));
   fileEditorThemeMode = readConfiguredEditorScheme();
@@ -559,6 +561,11 @@ function applySettingsPayload(payload, options = {}) {
   renderSessionButtons();
   renderPaneTabStrips();
   rescheduleAllFileAutosaves();
+  if (previousDateTimeHourCycle !== dateTimeHourCycle) {
+    if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
+    if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
+    if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
+  }
   if (previousEditorSchemeId !== activeEditorScheme().id) {
     // DOIT.6: re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
     // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the

@@ -36,6 +36,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "appearance": {
         "theme": "dark",
         "terminal_theme": "follow-app",
+        "date_time_hour_cycle": "24",
         "ui_font_size": 13,
         "terminal_font_size": 13,
         "editor_font_size": 13,
@@ -185,6 +186,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("general", "language"): {"system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr", "pt-BR", "ru", "ko", "hi", "ar", "he", "en-XA"},
     ("appearance", "theme"): {"system", "dark", "light"},
     ("appearance", "terminal_theme"): {"dark", "light", "follow-app"},
+    ("appearance", "date_time_hour_cycle"): {"24", "12"},
     ("appearance", "editor_color_scheme"): {
         "dark",
         "one-dark",
@@ -235,6 +237,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("github", "watched_prs"): "Pull requests to watch independently of any open session, one per line. Each is 'owner/repo#N' or a full https://github.com/owner/repo/pull/N URL. They show in YO!info and can notify on merge / CI / review changes (see notifications.notify_transitions).",
     ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Modified files, and editor defaults.",
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
+    ("appearance", "date_time_hour_cycle"): "24 | 12. Controls date/time displays in Finder/File Explorer and Modified files. Default 24.",
     ("appearance", "ui_font_size"): "Pixels, 8-20. Drives tab and compact UI text.",
     ("appearance", "terminal_font_size"): "Pixels, 8-28. Applied live to xterm.js terminals.",
     ("appearance", "editor_font_size"): "Pixels, 8-28. Applied live to editor and preview panes.",
