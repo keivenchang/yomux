@@ -396,6 +396,16 @@
 .changes-file-list {
   display: grid;
 }
+/* Directory changed-file count badge */
+.file-tree-dir-count {
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  flex-shrink: 0;
+  margin-inline-start: 4px;
+}
 .changes-tree {
   padding: 2px 0;
 }
@@ -450,7 +460,7 @@
 }
 .changes-file-row {
   display: grid;
-  grid-template-columns: 16px 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
   width: 100%;
@@ -458,7 +468,7 @@
   border: 0;
   border-top: 1px solid rgba(148, 163, 184, 0.18);
   background: transparent;
-  color: var(--text);
+  color: var(--muted);
   text-align: start;
   font-family: var(--ui-font);
   /* DOIT.6 #46: Modified-files rows read like the Finder file tree (same font size + line-height). */
@@ -467,16 +477,34 @@
   cursor: pointer;
 }
 .changes-file-row.compact {
-  grid-template-columns: 14px 16px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   gap: 5px;
   padding: 2px 4px 2px calc(4px + (var(--changes-tree-depth, 0) * 14px));
   line-height: 1.05;
 }
 .changes-file-row.compact .changes-file-meta {
-  grid-column: 4;
+  grid-column: 3;
 }
 .changes-file-row.compact .changes-file-path {
   display: none;
+}
+/* Row tinting: match Finder git-* name colors */
+.changes-file-row.git-modified:not(.selected) .changes-file-name {
+  color: #f5c542;
+}
+.changes-file-row.git-untracked:not(.selected) .changes-file-name {
+  color: #7ee787;
+}
+.changes-file-row.git-deleted:not(.selected) .changes-file-name {
+  color: #ff8585;
+  text-decoration: line-through;
+}
+.changes-file-row.git-staged:not(.selected) .changes-file-name {
+  color: #c4f970;
+  font-weight: 700;
+}
+.changes-file-row.git-transcript:not(.selected) .changes-file-name {
+  color: var(--muted);
 }
 .changes-file-row:hover {
   background: var(--changes-row-hover-bg);
@@ -1195,8 +1223,20 @@ body.theme-light .changes-repo-title {
   color: var(--accent-gold);
 }
 body.theme-light .changes-file-row {
-  color: var(--text);
+  color: var(--muted);
   border-top-color: rgba(100, 116, 139, 0.13);
+}
+body.theme-light .changes-file-row.git-modified:not(.selected) .changes-file-name {
+  color: #8a5a00;
+}
+body.theme-light .changes-file-row.git-untracked:not(.selected) .changes-file-name {
+  color: #166534;
+}
+body.theme-light .changes-file-row.git-deleted:not(.selected) .changes-file-name {
+  color: #b91c1c;
+}
+body.theme-light .changes-file-row.git-staged:not(.selected) .changes-file-name {
+  color: #2f7d20;
 }
 body.theme-light .changes-file-row:hover {
   background: rgba(95, 152, 0, 0.10);

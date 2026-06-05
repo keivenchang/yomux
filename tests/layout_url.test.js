@@ -56,8 +56,10 @@ class TestStyle {
 }
 
 class TestElement {
-  constructor(id = '') {
+  constructor(id = '', tagName = 'div') {
     this.id = id;
+    this.localName = tagName;
+    this.tagName = String(tagName || 'div').toUpperCase();
     this.children = [];
     this.dataset = {};
     this.attributes = {};
@@ -89,6 +91,11 @@ class TestElement {
     this.listeners.set(type, items.filter(item => item !== listener));
   }
   append(...nodes) { nodes.forEach(node => this.appendChild(node)); }
+  prepend(...nodes) {
+    for (const node of nodes.reverse()) {
+      this.insertBefore(node, this.children[0] || null);
+    }
+  }
   appendChild(node) {
     node.parentElement = this;
     this.children.push(node);
@@ -113,6 +120,14 @@ class TestElement {
     siblings.splice(index + 1, 0, node);
     return node;
   }
+  after(...nodes) {
+    if (!this.parentElement) return;
+    let before = this.nextElementSibling;
+    for (const node of nodes) {
+      this.parentElement.insertBefore(node, before || null);
+      before = node.nextElementSibling;
+    }
+  }
   get lastElementChild() {
     return this.children[this.children.length - 1] || null;
   }
@@ -122,7 +137,7 @@ class TestElement {
     return index >= 0 ? siblings[index + 1] || null : null;
   }
   cloneNode() {
-    const clone = new TestElement(`${this.id}-clone`);
+    const clone = new TestElement(`${this.id}-clone`, this.localName);
     clone.dataset = {...this.dataset};
     clone.attributes = {...this.attributes};
     clone.innerHTML = this.innerHTML;
@@ -247,7 +262,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     document: {
       addEventListener() {},
       body: element('body'),
-      createElement: tag => new TestElement(tag),
+      createElement: tag => new TestElement('', tag),
       documentElement: element('html'),
       getElementById: element,
       querySelector: () => null,
@@ -1746,6 +1761,10 @@ function makeFileTree(paths) {
   assert.ok(start > 0 && end > start, 'could not locate renderTreeChildren body');
   const body = source.slice(start, end);
   assert.equal(body.includes('replaceChildren(...nextNodes)'), false, 'Finder refresh must reconcile existing rows instead of rebuilding them');
+  assert.equal(source.includes('function differFileTreeHtmlStr'), false, 'Differ must not maintain a parallel file-tree HTML renderer');
+  assert.equal(source.includes('function changesGroupsHtmlStr'), false, 'Differ groups must render through the shared DOM renderer, not a duplicate HTML renderer');
+  assert.ok(/function renderChangesPanels[\s\S]*renderChangesRoot\(/.test(source), 'Changes panel refreshes through the shared incremental render root');
+  assert.ok(/function renderFileExplorerChangesPanel[\s\S]*renderChangesRoot\(/.test(source), 'Finder embedded Differ refreshes through the shared incremental render root');
   assert.ok(source.includes('function updateFileTreeRowContents('), 'Finder row text/icon updates are localized');
   const updateStart = source.indexOf('function updateFileTreeRowContents(');
   const updateEnd = source.indexOf('function updateFileTreeRow(', updateStart);
@@ -1753,6 +1772,9 @@ function makeFileTree(paths) {
   const updateBody = source.slice(updateStart, updateEnd);
   assert.equal(updateBody.includes("name.textContent = nameText;\n    name.innerHTML = '';"), false, 'Finder row text must not be cleared after being written');
   assert.ok(updateBody.includes("name.innerHTML = '';\n    name.textContent = nameText;"), 'Finder row clears stale HTML before writing plain text');
+  const sharedTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
+  assert.ok(/\.file-tree-row\.has-agent \.file-tree-name\s*\{[^}]*flex:\s*0 1 auto/.test(sharedTreeCss), 'file-tree rows with agent metadata keep the agent directly after the filename');
+  assert.ok(/\.file-tree-row\.has-agent \.file-tree-agent\s*\{[^}]*margin-inline-end:\s*auto/.test(sharedTreeCss), 'file-tree rows with agent metadata push diff/status/date after the inline agent');
   assert.ok(source.includes("refreshActivitySummary({force: true})"), 'YO!agent Refresh summary forces cached summaries to rebuild');
   assert.ok(source.includes("params.set('force', '1')"), 'YO!agent summary API supports a force refresh query');
   assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent summary API carries the active locale query');
@@ -1933,7 +1955,7 @@ function makeFileTree(paths) {
     refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
     repos: [{repo: '/repo/app', count: 2, touched_count: 2, added: 10, removed: 1, behind: 0, ahead: 2}],
     files: [
-      {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
+      {session: '1', agent: 'codex', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
       {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200, added: 8, removed: 0},
     ],
   });
@@ -1951,18 +1973,21 @@ function makeFileTree(paths) {
   assert.ok(changesHtml.includes('class="changes-comparison-summary"'), '#24: the summary lives in the comparison card');
   assert.ok(changesHtml.includes('Behind 0 commits'), 'Changes pane shows behind count');
   assert.ok(changesHtml.includes('Ahead 2 commits'), 'Changes pane shows ahead count');
-  assert.ok(changesHtml.includes('changes-tree-folder-name">src/'), 'Changes pane groups nested paths under folders');
-  assert.ok(changesHtml.includes('data-changes-folder-toggle="1|/repo/app|src"'), 'Changes tree folders are collapsible by a stable key');
+  assert.ok(changesHtml.includes('file-tree-name">src'), 'Changes pane groups nested paths under folders');
+  assert.ok(changesHtml.includes('data-changes-folder-toggle="/repo/app/src"'), 'Changes tree folders are collapsible by a stable key');
   assert.ok(changesHtml.includes('data-open-change-directory="/repo/app/src"'), 'Changes tree folders carry the absolute directory path for the context menu');
   assert.ok(changesHtml.includes('data-change-rel="src"'), 'Changes tree folders carry the relative directory path for copy');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'), 'file leaves keep the open-file action');
   assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
   assert.ok(changesHtml.includes('changes-file-agent'), 'changed-file rows show the agent icon slot');
-  assert.ok(changesHtml.includes('changes-file-icon'), 'changed-file rows show a file-type icon slot');
-  assert.ok(changesHtml.includes('changes-file-date'), 'changed-file rows wrap the date for skinny styling');
-  api.setChangesFolderCollapsedForTest(['1|/repo/app|src']);
+  assert.ok(changesHtml.includes('file-tree-row kind-file git-modified has-agent'), 'changed-file rows use the shared file-tree row renderer and inline-agent layout');
+  assert.ok(changesHtml.includes('file-tree-git-status">M</span>'), 'changed-file rows show the M/T status badge in the shared file-tree status slot');
+  assert.ok(changesHtml.includes('file-tree-dir-count">1</span>'), 'changed-file folders show a recursive changed-file count from the shared row renderer');
+  assert.ok(changesHtml.includes('file-tree-icon'), 'changed-file rows show a file-type icon slot');
+  assert.ok(changesHtml.includes('file-tree-date'), 'changed-file rows wrap the date for skinny styling');
+  api.setChangesFolderCollapsedForTest(['/repo/app/src']);
   const collapsedChangesHtml = api.changesPanelHtml();
-  assert.ok(collapsedChangesHtml.includes('changes-tree-folder collapsed'), 'collapsed changed-file folders keep their state');
+  assert.ok(collapsedChangesHtml.includes('file-tree-row kind-dir collapsed'), 'collapsed changed-file folders keep their state');
   assert.equal(collapsedChangesHtml.includes('data-open-change-file="/repo/app/src/new.py"'), false, 'collapsed changed-file folders hide file leaves');
   api.setChangesFolderCollapsedForTest([]);
   assert.ok(changesHtml.includes('data-diff-ref-from'), 'Changes pane exposes FROM ref picker');
@@ -2010,7 +2035,7 @@ function makeFileTree(paths) {
     {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
     {compact: true},
   );
-  assert.ok(/changes-status[^>]*>M<\/span>[\s\S]*changes-file-name[^>]*>README\.md<\/span>[\s\S]*changes-file-agent[\s\S]*changes-file-meta[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-file-date/.test(compactChangeHtml), 'compact changed-file row order is status, file, AI icon, counts, date');
+  assert.ok(/changes-file-name[^>]*>README\.md<\/span>[\s\S]*changes-file-agent[\s\S]*changes-file-meta[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-status[^>]*>M<\/span>[\s\S]*changes-file-date/.test(compactChangeHtml), 'compact changed-file row order is file, AI icon, counts, status, date');
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   assert.ok(changesHtml.includes('data-open-change-status="A"'), 'changed-file clicks carry status for deleted-file diff opens');
@@ -2130,7 +2155,7 @@ function makeFileTree(paths) {
   assert.ok(/<input(?=[^>]*data-diff-ref-to)(?=[^>]*aria-haspopup="listbox")[^>]*>/.test(api.fileExplorerChangesPanelHtml()), 'Finder compact modified-files header exposes the TO text picker with the compact popup');
   assert.equal(/<datalist/.test(api.fileExplorerChangesPanelHtml()), false, 'Finder compact diff refs do not render native datalists');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('data-session-files-display-toggle'), false, '#41: the modified-files density toggle is removed');
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-file-row compact'), '#41: the Finder modified-files panel is always compact');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('file-tree-row kind-file compact'), '#41: the Finder modified-files panel is always compact');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('data-file-explorer-changes-close'), '#44: the Modified-files header has a close (X) button to hide the section');
   assert.equal(api.fileExplorerChangesPanelHtml().includes('>Compact</button>'), false, 'Finder density toggle is an icon, not paired text buttons');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('changes-diff-add">+2</span>'), 'Finder modified-files panel shows green added counts');
@@ -2171,7 +2196,7 @@ function makeFileTree(paths) {
   // #46: Modified-files rows match the Finder file tree — the row uses the file-explorer font size and
   // the filename carries no semibold/bold weight (regular, not big bold white).
   assert.ok(/\.changes-file-row\s*\{[\s\S]*font-size:\s*var\(--file-explorer-font-size\)/.test(changedFilesCss), '#46: modified-file rows use the Finder file-tree font size');
-  assert.equal(/\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
+  assert.equal(/(?:^|\n)\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
   assert.ok(/\.changes-tree-folder-row\s*\{[\s\S]*grid-template-columns:\s*12px 16px minmax\(0, 1fr\) auto/.test(changedFilesCss), 'modified-file folders use a compact GitLens-style tree row');
   assert.ok(/\.changes-repo-title\s*\{[\s\S]*color:\s*var\(--accent-gold\)[\s\S]*font-weight:\s*800/.test(changedFilesCss), 'Modified-files repo names are gold and bold');
   assert.ok(/\.changes-repo-totals\s*\{[\s\S]*margin-inline-start:\s*auto/.test(changedFilesCss), 'Modified-files repo totals are pinned to the right side of the disclosure header');
@@ -3439,7 +3464,7 @@ function makeFileTree(paths) {
     loaded: true,
     repos: [{repo: '/repo/app', count: 1, touched_count: 1, added: 5, removed: 3}],
     files: [
-      {abs_path: '/repo/README.md', status: 'M', added: 5, removed: 3},
+      {abs_path: '/repo/README.md', agent: 'codex', status: 'M', added: 5, removed: 3},
       {abs_path: '/repo/app/a.py', repo: '/repo/app', status: 'M', added: 5, removed: 3},
     ],
   });
@@ -3456,6 +3481,8 @@ function makeFileTree(paths) {
   assert.equal(gitTree.children[0].classList.contains('repo-non-main'), true, 'non-main repo rows stand out');
   assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-name').textContent, 'README.md', 'changed file name has no inline numstat');
   assert.ok(gitTree.children[1].querySelector(':scope > .file-tree-diff').innerHTML.includes('changes-diff-add') && gitTree.children[1].querySelector(':scope > .file-tree-diff').innerHTML.includes('changes-diff-remove'), 'changed file diff stats in separate diff element with colored spans');
+  assert.equal(gitTree.children[1].classList.contains('has-agent'), true, 'changed Finder rows with agent attribution use the inline-agent file-tree layout');
+  assert.ok(gitTree.children[1].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'changed Finder rows render the same agent icon slot as Differ rows');
   assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-git-status').textContent, 'M');
 
   const slots = api.emptyLayoutSlots();
@@ -5783,7 +5810,7 @@ function makeFileTree(paths) {
 // DOIT.23: the Modified-files repo header is a collapse toggle (button + caret), per-repo state.
 {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.ok(source.includes('data-changes-repo-toggle="${esc(repo)}"'), 'DOIT.23: the repo header is a collapse toggle keyed by repo path');
+  assert.ok(source.includes('head.dataset.changesRepoToggle = repo'), 'DOIT.23: the repo header is a collapse toggle keyed by repo path');
   assert.ok(source.includes('changesRepoCollapsed.has(repo)'), 'DOIT.23: the repo head reads per-repo collapse state');
   assert.ok(source.includes('changes-repo-caret'), 'DOIT.23: the repo head shows a collapse caret');
 }

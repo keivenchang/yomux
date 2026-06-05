@@ -956,6 +956,18 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     name.className = 'file-tree-name';
     row.appendChild(name);
   }
+  let dirCount = row.querySelector(':scope > .file-tree-dir-count');
+  if (!dirCount) {
+    dirCount = document.createElement('span');
+    dirCount.className = 'file-tree-dir-count';
+    row.appendChild(dirCount);
+  }
+  let agent = row.querySelector(':scope > .file-tree-agent');
+  if (!agent) {
+    agent = document.createElement('span');
+    agent.className = 'file-tree-agent';
+    row.appendChild(agent);
+  }
   let diff = row.querySelector(':scope > .file-tree-diff');
   if (!diff) {
     diff = document.createElement('span');
@@ -971,11 +983,13 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   let date = row.querySelector(':scope > .file-tree-date');
   if (!date) {
     date = document.createElement('span');
-    date.className = 'file-tree-date changes-file-date';
+    date.className = 'file-tree-date';
     row.appendChild(date);
   }
-  // Keep DOM order: icon → name → diff → status → date
-  if (name.nextSibling !== diff) row.insertBefore(diff, name.nextSibling);
+  // Keep DOM order: icon → name → dir-count → agent → diff → status → date
+  if (name.nextSibling !== dirCount) row.insertBefore(dirCount, name.nextSibling);
+  if (dirCount.nextSibling !== agent) row.insertBefore(agent, dirCount.nextSibling);
+  if (agent.nextSibling !== diff) row.insertBefore(diff, agent.nextSibling);
   if (diff.nextSibling !== status) row.insertBefore(status, diff.nextSibling);
   if (status.nextSibling !== date) row.insertBefore(date, status.nextSibling);
   icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
@@ -987,6 +1001,13 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     name.innerHTML = '';
     name.textContent = nameText;
   }
+  const agentHtml = options.agentHtml || '';
+  if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
+  agent.hidden = !agentHtml;
+  row.classList.toggle('has-agent', Boolean(agentHtml));
+  const dirCountText = options.dirCountText || '';
+  dirCount.textContent = dirCountText;
+  dirCount.hidden = !dirCountText;
   const diffParts = options.diffParts || [];
   const diffHtml = diffParts.map(p => `<span class="changes-diff-${esc(p.kind)}">${esc(p.text)}</span>`).join(' ');
   if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
@@ -997,18 +1018,23 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   date.hidden = !options.dateText;
 }
 
-function updateFileTreeRow(row, parentPath, entry, depth) {
+function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
+  const differMode = options.differMode === true;
+  const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
-  const expanded = entry.kind === 'dir' && fileExplorerExpanded.has(fullPath);
-  const indexedDirectory = entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
+  const expanded = entry.kind === 'dir' && (differMode
+    ? !changesFolderCollapsed.has(fullPath)
+    : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
+  const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   row.className = `file-tree-row kind-${entry.kind}`;
+  row.classList.toggle('compact', compact);
   row.dataset.path = fullPath;
   row.dataset.kind = entry.kind;
   row.dataset.name = entry.name;
   row.dataset.isRepo = entry.is_repo === true ? 'true' : 'false';
   row.dataset.indexed = indexedDirectory ? 'true' : 'false';
-  row.style.paddingLeft = `${8 + depth * 14}px`;
+  row.style.paddingLeft = `${(compact ? 4 : 8) + depth * 14}px`;
   row.setAttribute('role', 'treeitem');
   row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
   if (entry.kind === 'dir') row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
@@ -1016,6 +1042,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.draggable = entry.kind === 'file' || entry.kind === 'dir';
   row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
   row.classList.toggle('expanded', expanded);
+  row.classList.toggle('collapsed', entry.kind === 'dir' && !expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
@@ -1023,21 +1050,24 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
   row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
-  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : fileExplorerIndexBadgeText(fullPath);
+  const changedFile = entry.kind === 'file'
+    ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
+    : null;
+  const gitStatus = entry.kind === 'file'
+    ? (options.sessionFilesMap ? (changedFile ? String(changedFile.status || 'M').toUpperCase() : '') : fileTreeGitStatus(fullPath))
+    : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
     row.classList.toggle(className, className === gitClass);
   }
-  if (entry.kind === 'dir' && entry.is_repo === true) {
-    // Rich hover popover (no native title — see DOIT.6 dedup of duplicate tab tooltips).
+  if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
     row.onmouseenter = () => showRepoRowHoverPopover(row, fullPath);
     row.onmouseleave = () => hideFileTreeRepoPopover();
-  } else {
+  } else if (!differMode) {
     row.onmouseenter = null;
     row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
-    // DOIT.31: a symlink's native title shows where it points ("name → target", broken flagged).
     if (entry.is_symlink === true && entry.symlink_target) {
       const broken = entry.kind === 'symlink-broken';
       row.title = `${entry.name} → ${entry.symlink_target}${broken ? ` ${t('finder.symlink.broken')}` : ''}`;
@@ -1045,83 +1075,126 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
       row.removeAttribute('title');
     }
   }
-  const newEntry = fileExplorerEntryIsNew(fullPath);
-  row.classList.toggle('new-entry', newEntry);
-  if (newEntry) scheduleNewEntryClassRemoval(row, fullPath);
-  const currentFile = entry.kind === 'file' && fullPath === activeFile;
-  const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
-  row.classList.toggle('current-file', currentFile);
-  row.classList.toggle('current-directory', currentDirectoryRow);
-  if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
-  else row.removeAttribute('aria-current');
+  if (!differMode) {
+    const newEntry = fileExplorerEntryIsNew(fullPath);
+    row.classList.toggle('new-entry', newEntry);
+    if (newEntry) scheduleNewEntryClassRemoval(row, fullPath);
+    const currentFile = entry.kind === 'file' && fullPath === activeFile;
+    const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
+    row.classList.toggle('current-file', currentFile);
+    row.classList.toggle('current-directory', currentDirectoryRow);
+    if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
+    else row.removeAttribute('aria-current');
+  }
   const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-  const displayName = fileTreeDisplayParts(fullPath, entry);
-  const changedFile = entry.kind === 'file' ? fileTreeChangedFile(fullPath) : null;
+  const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
+  const dirCountText = differMode && entry.kind === 'dir'
+    ? String(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap) || '')
+    : '';
+  // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
+  if (changedFile?.abs_path) {
+    row.dataset.openChangeFile = changedFile.abs_path;
+    row.dataset.openChangeSession = changedFile.session || '';
+    row.dataset.openChangeStatus = (changedFile.status || 'M').toUpperCase();
+    row.dataset.changeRel = changedFile.path || '';
+    if (changedFile.repo) row.dataset.openChangeRepo = changedFile.repo;
+    else delete row.dataset.openChangeRepo;
+    if (changedFile.size !== null && changedFile.size !== undefined) row.dataset.changeSize = String(changedFile.size);
+    else delete row.dataset.changeSize;
+  } else {
+    delete row.dataset.openChangeFile;
+    delete row.dataset.openChangeSession;
+    delete row.dataset.openChangeStatus;
+    delete row.dataset.changeRel;
+    delete row.dataset.openChangeRepo;
+    delete row.dataset.changeSize;
+  }
+  if (differMode && entry.kind === 'dir') {
+    const repoRoot = options.repoForDiffer || '';
+    const relDir = repoRoot && fullPath.startsWith(repoRoot + '/') ? fullPath.slice(repoRoot.length + 1) : '';
+    row.dataset.changesFolderToggle = fullPath;
+    row.dataset.openChangeDirectory = fullPath;
+    row.dataset.changeRel = relDir;
+  } else if (!differMode) {
+    delete row.dataset.changesFolderToggle;
+    delete row.dataset.openChangeDirectory;
+  }
   updateFileTreeRowContents(row, icon, displayName.text, {
     gitStatus,
     iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
-    nameHtml: displayName.html,
-    dateText: fileExplorerTreeShowDates ? fileTreeMtimeText(entry) : '',
+    nameHtml: differMode ? null : displayName.html,
+    dateText: fileExplorerTreeShowDates || differMode ? fileTreeMtimeText(entry) : '',
     diffParts: changedFile ? sessionFileDiffText(changedFile) : [],
+    agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : '',
+    dirCountText,
   });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
     bindFileImagePreview(row, fullPath, entry);
   }
-  row.onpointerdown = event => {
-    if (event.button != null && event.button !== 0) return;
-    cancelPendingFileExplorerActiveSync();
-    row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
-  };
-  row.onpointerup = event => {
-    if (event.button != null && event.button !== 0) return;
-    const start = row.__fileTreePointerDown;
-    row.__fileTreePointerDown = null;
-    if (row.__fileTreeDragging) return;
-    const dx = Math.abs((event.clientX || 0) - (start?.x || 0));
-    const dy = Math.abs((event.clientY || 0) - (start?.y || 0));
-    if (start && Math.max(dx, dy) > 4) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.detail > 1) return;
-    row.__fileTreePointerActivated = true;
-    setTimeout(() => {
-      row.__fileTreePointerActivated = false;
-    }, 0);
-    onFileTreeRowClick(row, fullPath, entry, event);
-  };
-  row.onclick = event => {
-    if (row.__fileTreePointerActivated) {
-      row.__fileTreePointerActivated = false;
+  if (differMode) {
+    // In differMode, event handling is via delegation in bindChangesPanel; clear Finder handlers
+    row.onpointerdown = null;
+    row.onpointerup = null;
+    row.onclick = null;
+    row.ondblclick = null;
+    row.oncontextmenu = null;
+    row.ondragstart = null;
+    row.ondragend = null;
+  } else {
+    row.onpointerdown = event => {
+      if (event.button != null && event.button !== 0) return;
+      cancelPendingFileExplorerActiveSync();
+      row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
+    };
+    row.onpointerup = event => {
+      if (event.button != null && event.button !== 0) return;
+      const start = row.__fileTreePointerDown;
+      row.__fileTreePointerDown = null;
+      if (row.__fileTreeDragging) return;
+      const dx = Math.abs((event.clientX || 0) - (start?.x || 0));
+      const dy = Math.abs((event.clientY || 0) - (start?.y || 0));
+      if (start && Math.max(dx, dy) > 4) return;
       event.preventDefault();
       event.stopPropagation();
-      return;
-    }
-    event.stopPropagation();
-    if (event.detail > 1) return;
-    onFileTreeRowClick(row, fullPath, entry, event);
-  };
-  row.ondblclick = event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (entry.kind === 'dir') openFileExplorerAt(fullPath);
-    else openFileInEditor(fullPath, entry);
-  };
-  row.oncontextmenu = event => {
-    event.preventDefault();
-    event.stopPropagation();
-    closeFileImagePreview();
-    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
-  };
-  row.ondragstart = event => {
-    row.__fileTreeDragging = true;
-    startFileTreeDrag(event, row, fullPath, entry);
-  };
-  row.ondragend = () => {
-    row.__fileTreeDragging = false;
-    dragFilePayloadState = null;
-    stopCustomDragPreview();
-    clearDropPreview();
-  };
+      if (event.detail > 1) return;
+      row.__fileTreePointerActivated = true;
+      setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
+      onFileTreeRowClick(row, fullPath, entry, event);
+    };
+    row.onclick = event => {
+      if (row.__fileTreePointerActivated) {
+        row.__fileTreePointerActivated = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      event.stopPropagation();
+      if (event.detail > 1) return;
+      onFileTreeRowClick(row, fullPath, entry, event);
+    };
+    row.ondblclick = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (entry.kind === 'dir') openFileExplorerAt(fullPath);
+      else openFileInEditor(fullPath, entry);
+    };
+    row.oncontextmenu = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeFileImagePreview();
+      showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
+    };
+    row.ondragstart = event => {
+      row.__fileTreeDragging = true;
+      startFileTreeDrag(event, row, fullPath, entry);
+    };
+    row.ondragend = () => {
+      row.__fileTreeDragging = false;
+      dragFilePayloadState = null;
+      stopCustomDragPreview();
+      clearDropPreview();
+    };
+  }
   return fullPath;
 }
 
@@ -1135,9 +1208,10 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   for (const entry of visible) {
     const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
     const row = existingRows.get(fullPath) || document.createElement('div');
-    updateFileTreeRow(row, parentPath, entry, depth);
+    updateFileTreeRow(row, parentPath, entry, depth, options);
     nextNodes.push(row);
-    if (entry.kind === 'dir' && fileExplorerExpanded.has(fullPath)) {
+    const isDifferDir = options.differMode === true && entry.kind === 'dir';
+    if (entry.kind === 'dir' && (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)))) {
       const childEntries = entriesByDir?.get(normalizeDirectoryPath(fullPath));
       const existingChildContainer = childContainerForRow(row, fullPath);
       const childContainer = existingChildContainer || (Array.isArray(childEntries) ? createFileTreeChildContainer(fullPath) : null);

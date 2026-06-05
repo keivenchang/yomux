@@ -6625,6 +6625,18 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     name.className = 'file-tree-name';
     row.appendChild(name);
   }
+  let dirCount = row.querySelector(':scope > .file-tree-dir-count');
+  if (!dirCount) {
+    dirCount = document.createElement('span');
+    dirCount.className = 'file-tree-dir-count';
+    row.appendChild(dirCount);
+  }
+  let agent = row.querySelector(':scope > .file-tree-agent');
+  if (!agent) {
+    agent = document.createElement('span');
+    agent.className = 'file-tree-agent';
+    row.appendChild(agent);
+  }
   let diff = row.querySelector(':scope > .file-tree-diff');
   if (!diff) {
     diff = document.createElement('span');
@@ -6640,11 +6652,13 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   let date = row.querySelector(':scope > .file-tree-date');
   if (!date) {
     date = document.createElement('span');
-    date.className = 'file-tree-date changes-file-date';
+    date.className = 'file-tree-date';
     row.appendChild(date);
   }
-  // Keep DOM order: icon → name → diff → status → date
-  if (name.nextSibling !== diff) row.insertBefore(diff, name.nextSibling);
+  // Keep DOM order: icon → name → dir-count → agent → diff → status → date
+  if (name.nextSibling !== dirCount) row.insertBefore(dirCount, name.nextSibling);
+  if (dirCount.nextSibling !== agent) row.insertBefore(agent, dirCount.nextSibling);
+  if (agent.nextSibling !== diff) row.insertBefore(diff, agent.nextSibling);
   if (diff.nextSibling !== status) row.insertBefore(status, diff.nextSibling);
   if (status.nextSibling !== date) row.insertBefore(date, status.nextSibling);
   icon.className = ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' ');
@@ -6656,6 +6670,13 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     name.innerHTML = '';
     name.textContent = nameText;
   }
+  const agentHtml = options.agentHtml || '';
+  if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
+  agent.hidden = !agentHtml;
+  row.classList.toggle('has-agent', Boolean(agentHtml));
+  const dirCountText = options.dirCountText || '';
+  dirCount.textContent = dirCountText;
+  dirCount.hidden = !dirCountText;
   const diffParts = options.diffParts || [];
   const diffHtml = diffParts.map(p => `<span class="changes-diff-${esc(p.kind)}">${esc(p.text)}</span>`).join(' ');
   if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
@@ -6666,18 +6687,23 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   date.hidden = !options.dateText;
 }
 
-function updateFileTreeRow(row, parentPath, entry, depth) {
+function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
+  const differMode = options.differMode === true;
+  const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
-  const expanded = entry.kind === 'dir' && fileExplorerExpanded.has(fullPath);
-  const indexedDirectory = entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
+  const expanded = entry.kind === 'dir' && (differMode
+    ? !changesFolderCollapsed.has(fullPath)
+    : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)));
+  const indexedDirectory = !differMode && entry.kind === 'dir' && fileExplorerDirectoryIsIndexed(fullPath);
   row.className = `file-tree-row kind-${entry.kind}`;
+  row.classList.toggle('compact', compact);
   row.dataset.path = fullPath;
   row.dataset.kind = entry.kind;
   row.dataset.name = entry.name;
   row.dataset.isRepo = entry.is_repo === true ? 'true' : 'false';
   row.dataset.indexed = indexedDirectory ? 'true' : 'false';
-  row.style.paddingLeft = `${8 + depth * 14}px`;
+  row.style.paddingLeft = `${(compact ? 4 : 8) + depth * 14}px`;
   row.setAttribute('role', 'treeitem');
   row.setAttribute('aria-selected', fileExplorerSelectedPaths.has(fullPath) ? 'true' : 'false');
   if (entry.kind === 'dir') row.setAttribute('aria-expanded', expanded ? 'true' : 'false');
@@ -6685,6 +6711,7 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   row.draggable = entry.kind === 'file' || entry.kind === 'dir';
   row.classList.toggle('selected', fileExplorerSelectedPaths.has(fullPath));
   row.classList.toggle('expanded', expanded);
+  row.classList.toggle('collapsed', entry.kind === 'dir' && !expanded);
   row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
   row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(fullPath));
   row.classList.toggle('indexed-directory', indexedDirectory);
@@ -6692,21 +6719,24 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
   row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
-  const gitStatus = entry.kind === 'file' ? fileTreeGitStatus(fullPath) : fileExplorerIndexBadgeText(fullPath);
+  const changedFile = entry.kind === 'file'
+    ? (options.sessionFilesMap ? (options.sessionFilesMap.get(fullPath) || null) : fileTreeChangedFile(fullPath))
+    : null;
+  const gitStatus = entry.kind === 'file'
+    ? (options.sessionFilesMap ? (changedFile ? String(changedFile.status || 'M').toUpperCase() : '') : fileTreeGitStatus(fullPath))
+    : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
     row.classList.toggle(className, className === gitClass);
   }
-  if (entry.kind === 'dir' && entry.is_repo === true) {
-    // Rich hover popover (no native title — see DOIT.6 dedup of duplicate tab tooltips).
+  if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
     row.onmouseenter = () => showRepoRowHoverPopover(row, fullPath);
     row.onmouseleave = () => hideFileTreeRepoPopover();
-  } else {
+  } else if (!differMode) {
     row.onmouseenter = null;
     row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
-    // DOIT.31: a symlink's native title shows where it points ("name → target", broken flagged).
     if (entry.is_symlink === true && entry.symlink_target) {
       const broken = entry.kind === 'symlink-broken';
       row.title = `${entry.name} → ${entry.symlink_target}${broken ? ` ${t('finder.symlink.broken')}` : ''}`;
@@ -6714,83 +6744,126 @@ function updateFileTreeRow(row, parentPath, entry, depth) {
       row.removeAttribute('title');
     }
   }
-  const newEntry = fileExplorerEntryIsNew(fullPath);
-  row.classList.toggle('new-entry', newEntry);
-  if (newEntry) scheduleNewEntryClassRemoval(row, fullPath);
-  const currentFile = entry.kind === 'file' && fullPath === activeFile;
-  const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
-  row.classList.toggle('current-file', currentFile);
-  row.classList.toggle('current-directory', currentDirectoryRow);
-  if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
-  else row.removeAttribute('aria-current');
+  if (!differMode) {
+    const newEntry = fileExplorerEntryIsNew(fullPath);
+    row.classList.toggle('new-entry', newEntry);
+    if (newEntry) scheduleNewEntryClassRemoval(row, fullPath);
+    const currentFile = entry.kind === 'file' && fullPath === activeFile;
+    const currentDirectoryRow = entry.kind === 'dir' && fullPath === currentDirectory;
+    row.classList.toggle('current-file', currentFile);
+    row.classList.toggle('current-directory', currentDirectoryRow);
+    if (currentFile || currentDirectoryRow) row.setAttribute('aria-current', 'true');
+    else row.removeAttribute('aria-current');
+  }
   const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
-  const displayName = fileTreeDisplayParts(fullPath, entry);
-  const changedFile = entry.kind === 'file' ? fileTreeChangedFile(fullPath) : null;
+  const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
+  const dirCountText = differMode && entry.kind === 'dir'
+    ? String(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap) || '')
+    : '';
+  // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
+  if (changedFile?.abs_path) {
+    row.dataset.openChangeFile = changedFile.abs_path;
+    row.dataset.openChangeSession = changedFile.session || '';
+    row.dataset.openChangeStatus = (changedFile.status || 'M').toUpperCase();
+    row.dataset.changeRel = changedFile.path || '';
+    if (changedFile.repo) row.dataset.openChangeRepo = changedFile.repo;
+    else delete row.dataset.openChangeRepo;
+    if (changedFile.size !== null && changedFile.size !== undefined) row.dataset.changeSize = String(changedFile.size);
+    else delete row.dataset.changeSize;
+  } else {
+    delete row.dataset.openChangeFile;
+    delete row.dataset.openChangeSession;
+    delete row.dataset.openChangeStatus;
+    delete row.dataset.changeRel;
+    delete row.dataset.openChangeRepo;
+    delete row.dataset.changeSize;
+  }
+  if (differMode && entry.kind === 'dir') {
+    const repoRoot = options.repoForDiffer || '';
+    const relDir = repoRoot && fullPath.startsWith(repoRoot + '/') ? fullPath.slice(repoRoot.length + 1) : '';
+    row.dataset.changesFolderToggle = fullPath;
+    row.dataset.openChangeDirectory = fullPath;
+    row.dataset.changeRel = relDir;
+  } else if (!differMode) {
+    delete row.dataset.changesFolderToggle;
+    delete row.dataset.openChangeDirectory;
+  }
   updateFileTreeRowContents(row, icon, displayName.text, {
     gitStatus,
     iconClass: [fileIconClassFor(entry.name, entry.kind), indexedDirectory ? 'file-icon-dir-indexed' : ''].filter(Boolean).join(' '),
-    nameHtml: displayName.html,
-    dateText: fileExplorerTreeShowDates ? fileTreeMtimeText(entry) : '',
+    nameHtml: differMode ? null : displayName.html,
+    dateText: fileExplorerTreeShowDates || differMode ? fileTreeMtimeText(entry) : '',
     diffParts: changedFile ? sessionFileDiffText(changedFile) : [],
+    agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : '',
+    dirCountText,
   });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
     bindFileImagePreview(row, fullPath, entry);
   }
-  row.onpointerdown = event => {
-    if (event.button != null && event.button !== 0) return;
-    cancelPendingFileExplorerActiveSync();
-    row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
-  };
-  row.onpointerup = event => {
-    if (event.button != null && event.button !== 0) return;
-    const start = row.__fileTreePointerDown;
-    row.__fileTreePointerDown = null;
-    if (row.__fileTreeDragging) return;
-    const dx = Math.abs((event.clientX || 0) - (start?.x || 0));
-    const dy = Math.abs((event.clientY || 0) - (start?.y || 0));
-    if (start && Math.max(dx, dy) > 4) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.detail > 1) return;
-    row.__fileTreePointerActivated = true;
-    setTimeout(() => {
-      row.__fileTreePointerActivated = false;
-    }, 0);
-    onFileTreeRowClick(row, fullPath, entry, event);
-  };
-  row.onclick = event => {
-    if (row.__fileTreePointerActivated) {
-      row.__fileTreePointerActivated = false;
+  if (differMode) {
+    // In differMode, event handling is via delegation in bindChangesPanel; clear Finder handlers
+    row.onpointerdown = null;
+    row.onpointerup = null;
+    row.onclick = null;
+    row.ondblclick = null;
+    row.oncontextmenu = null;
+    row.ondragstart = null;
+    row.ondragend = null;
+  } else {
+    row.onpointerdown = event => {
+      if (event.button != null && event.button !== 0) return;
+      cancelPendingFileExplorerActiveSync();
+      row.__fileTreePointerDown = {x: event.clientX || 0, y: event.clientY || 0};
+    };
+    row.onpointerup = event => {
+      if (event.button != null && event.button !== 0) return;
+      const start = row.__fileTreePointerDown;
+      row.__fileTreePointerDown = null;
+      if (row.__fileTreeDragging) return;
+      const dx = Math.abs((event.clientX || 0) - (start?.x || 0));
+      const dy = Math.abs((event.clientY || 0) - (start?.y || 0));
+      if (start && Math.max(dx, dy) > 4) return;
       event.preventDefault();
       event.stopPropagation();
-      return;
-    }
-    event.stopPropagation();
-    if (event.detail > 1) return;
-    onFileTreeRowClick(row, fullPath, entry, event);
-  };
-  row.ondblclick = event => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (entry.kind === 'dir') openFileExplorerAt(fullPath);
-    else openFileInEditor(fullPath, entry);
-  };
-  row.oncontextmenu = event => {
-    event.preventDefault();
-    event.stopPropagation();
-    closeFileImagePreview();
-    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
-  };
-  row.ondragstart = event => {
-    row.__fileTreeDragging = true;
-    startFileTreeDrag(event, row, fullPath, entry);
-  };
-  row.ondragend = () => {
-    row.__fileTreeDragging = false;
-    dragFilePayloadState = null;
-    stopCustomDragPreview();
-    clearDropPreview();
-  };
+      if (event.detail > 1) return;
+      row.__fileTreePointerActivated = true;
+      setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
+      onFileTreeRowClick(row, fullPath, entry, event);
+    };
+    row.onclick = event => {
+      if (row.__fileTreePointerActivated) {
+        row.__fileTreePointerActivated = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      event.stopPropagation();
+      if (event.detail > 1) return;
+      onFileTreeRowClick(row, fullPath, entry, event);
+    };
+    row.ondblclick = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (entry.kind === 'dir') openFileExplorerAt(fullPath);
+      else openFileInEditor(fullPath, entry);
+    };
+    row.oncontextmenu = event => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeFileImagePreview();
+      showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
+    };
+    row.ondragstart = event => {
+      row.__fileTreeDragging = true;
+      startFileTreeDrag(event, row, fullPath, entry);
+    };
+    row.ondragend = () => {
+      row.__fileTreeDragging = false;
+      dragFilePayloadState = null;
+      stopCustomDragPreview();
+      clearDropPreview();
+    };
+  }
   return fullPath;
 }
 
@@ -6804,9 +6877,10 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   for (const entry of visible) {
     const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
     const row = existingRows.get(fullPath) || document.createElement('div');
-    updateFileTreeRow(row, parentPath, entry, depth);
+    updateFileTreeRow(row, parentPath, entry, depth, options);
     nextNodes.push(row);
-    if (entry.kind === 'dir' && fileExplorerExpanded.has(fullPath)) {
+    const isDifferDir = options.differMode === true && entry.kind === 'dir';
+    if (entry.kind === 'dir' && (isDifferDir ? !changesFolderCollapsed.has(fullPath) : (options.autoExpand === true || fileExplorerExpanded.has(fullPath)))) {
       const childEntries = entriesByDir?.get(normalizeDirectoryPath(fullPath));
       const existingChildContainer = childContainerForRow(row, fullPath);
       const childContainer = existingChildContainer || (Array.isArray(childEntries) ? createFileTreeChildContainer(fullPath) : null);
@@ -16321,76 +16395,52 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
   </section>`;
 }
 
-function changeTreeNode(name, path) {
-  return {name, path, children: new Map(), files: []};
-}
-
-function changeTreeForEntries(entries) {
-  const root = changeTreeNode('', '');
-  for (const item of entries) {
-    const rel = String(item?.path || item?.abs_path || '').split('/').filter(Boolean);
-    const fileName = rel.pop() || basenameOf(item?.abs_path || item?.path || '');
-    let node = root;
-    let currentPath = '';
-    for (const part of rel) {
-      currentPath = currentPath ? `${currentPath}/${part}` : part;
-      if (!node.children.has(part)) node.children.set(part, changeTreeNode(part, currentPath));
-      node = node.children.get(part);
+// Build a synthetic file-tree entry structure from flat session file items so renderTreeChildren
+// can render the Differ using the same DOM-mutation logic as the Finder.
+function buildSessionFileTree(repoPath, sessionFiles) {
+  const entriesByDir = new Map(); // normalizedDirPath → [{name, kind, mtime?, size?}]
+  const sessionFilesMap = new Map(); // absPath → sessionFileItem
+  for (const item of sessionFiles) {
+    const absPath = item.abs_path || (repoPath && item.path ? `${repoPath}/${item.path}` : item.path || '');
+    if (!absPath) continue;
+    sessionFilesMap.set(absPath, item);
+    const relPath = item.path || (absPath.startsWith(repoPath + '/') ? absPath.slice(repoPath.length + 1) : basenameOf(absPath));
+    const parts = relPath.split('/').filter(Boolean);
+    if (!parts.length) continue;
+    // Ensure all ancestor directory entries exist in the map
+    for (let i = 1; i < parts.length; i++) {
+      const parentAbsPath = i === 1 ? repoPath : `${repoPath}/${parts.slice(0, i - 1).join('/')}`;
+      const key = normalizeDirectoryPath(parentAbsPath);
+      if (!entriesByDir.has(key)) entriesByDir.set(key, []);
+      const siblings = entriesByDir.get(key);
+      if (!siblings.some(e => e.name === parts[i - 1])) {
+        siblings.push({name: parts[i - 1], kind: 'dir'});
+      }
     }
-    node.files.push({...item, __displayName: fileName});
+    // File leaf
+    const fileName = parts[parts.length - 1];
+    const fileParentAbsPath = parts.length === 1 ? repoPath : `${repoPath}/${parts.slice(0, -1).join('/')}`;
+    const key = normalizeDirectoryPath(fileParentAbsPath);
+    if (!entriesByDir.has(key)) entriesByDir.set(key, []);
+    const siblings = entriesByDir.get(key);
+    if (!siblings.some(e => e.name === fileName)) {
+      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size});
+    }
   }
-  return root;
+  const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];
+  return {entries: topLevel, entriesByDir, sessionFilesMap};
 }
 
-function changeTreeFileCount(node) {
-  let count = node.files.length;
-  for (const child of node.children.values()) count += changeTreeFileCount(child);
-  return count;
-}
-
-function compressedChangeFolder(node) {
-  const names = [node.name];
-  let current = node;
-  while (!current.files.length && current.children.size === 1) {
-    const child = Array.from(current.children.values())[0];
-    names.push(child.name);
-    current = child;
-  }
-  return {label: names.join('/'), node: current, path: current.path};
-}
-
-function changesFolderCollapseKey(context, path) {
-  return [context.session || '', context.repo || '', path || ''].join('|');
-}
-
-function changesTreeChildrenHtml(node, context, depth) {
-  const folders = Array.from(node.children.values()).sort((left, right) => left.name.localeCompare(right.name, undefined, {numeric: true, sensitivity: 'base'}));
-  const folderHtml = folders.map(child => changesFolderHtml(child, context, depth)).join('');
-  const fileHtml = node.files.map(item => changeFileRowHtml(item, {...context, depth})).join('');
-  return `${folderHtml}${fileHtml}`;
-}
-
-function changesFolderHtml(node, context, depth) {
-  const folder = compressedChangeFolder(node);
-  const key = changesFolderCollapseKey(context, folder.path);
-  const collapsed = changesFolderCollapsed.has(key);
-  const count = changeTreeFileCount(folder.node);
-  const children = collapsed ? '' : changesTreeChildrenHtml(folder.node, context, depth + 1);
-  const folderRel = folder.path || '';
-  const repo = context.repo || '';
-  const folderAbs = repo && repo !== 'Outside repo' && folderRel ? childPath(repo, folderRel) : '';
-  const directoryAttrs = folderAbs
-    ? ` data-open-change-directory="${esc(folderAbs)}" data-change-rel="${esc(folderRel)}"`
-    : ` data-change-rel="${esc(folderRel)}"`;
-  return `<div class="changes-tree-folder${collapsed ? ' collapsed' : ''}" style="--changes-tree-depth:${depth}">
-    <button type="button" class="changes-tree-folder-row" data-changes-folder-toggle="${esc(key)}"${directoryAttrs} aria-expanded="${collapsed ? 'false' : 'true'}">
-      <span class="changes-tree-caret">${collapsed ? '▸' : '▾'}</span>
-      <span class="changes-tree-folder-icon">▸</span>
-      <span class="changes-tree-folder-name">${esc(folder.label)}/</span>
-      <span class="changes-tree-folder-count">${count}</span>
-    </button>
-    ${children ? `<div class="changes-tree-children">${children}</div>` : ''}
-  </div>`;
+// Render changed files for one repo section using the shared file-tree renderer.
+function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
+  const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(repoPath, sessionFiles);
+  renderTreeChildren(container, repoPath, entries, 0, {
+    entriesByDir,
+    sessionFilesMap,
+    differMode: true,
+    compact: options.compact,
+    repoForDiffer: repoPath,
+  });
 }
 
 // C5: a changed file can be touched by 0, 1, or several agents. Render an icon per agent from item.agents
@@ -16422,7 +16472,10 @@ function changeFileRowHtml(item, options = {}) {
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentSlotHtml = changeFileAgentsHtml(item);
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
-  const metaHtml = [diffHtml, dateHtml].filter(Boolean).join('');
+  const statusBadgeHtml = `<span class="changes-status changes-status-${esc(statusClass)}">${esc(statusKey)}</span>`;
+  const metaHtml = [diffHtml, statusBadgeHtml, dateHtml].filter(Boolean).join('');
+  // Row gets a git-* class for tinting (shared with Finder CSS rules)
+  const gitRowClass = {m:'git-modified',t:'git-transcript',a:'git-staged',d:'git-deleted',u:'git-untracked',unknown:'git-untracked'}[statusClass] || 'git-transcript';
   const compactClass = options.compact ? ' compact' : ' detailed';
   const depth = Math.max(0, Number(options.depth) || 0);
   const icon = fileIconFor(name);
@@ -16436,67 +16489,109 @@ function changeFileRowHtml(item, options = {}) {
   const actionAttr = absPath
     ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" data-change-rel="${esc(rel || '')}"${repoAttr}${sizeAttr}${titleAttr}`
     : ' disabled';
-  return `<button type="button" class="changes-file-row${compactClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
-    <span class="changes-status changes-status-${esc(statusClass)}">${esc(statusKey)}</span>
+  return `<button type="button" class="changes-file-row${compactClass} ${gitRowClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
     <span class="changes-file-icon ${esc(iconClass)}" aria-hidden="true">${esc(icon)}</span>
     <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span><span class="changes-file-path">${esc(parentLabel || rel)}</span></span>
     <span class="changes-file-meta">${metaHtml}</span>
   </button>`;
 }
 
-function changesRepoGroupsHtml(files, options = {}) {
+// DOM-mutation renderer for all repo sections in a Changes/Differ panel scroll area.
+// Replaces changesRepoGroupsHtml — incrementally updates sections rather than replacing innerHTML.
+function renderChangesGroups(groupsEl, files, options = {}) {
+  if (!groupsEl) return;
   const {regular, uploaded} = splitUploadedSessionFiles(files);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
-  const repoHtml = groupedSessionFiles(regular).map(([repo, entries]) => {
-    const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
-    const repoInfo = repoMap.get(repo) || {};
-    const tree = changeTreeForEntries(entries);
-    // DOIT.23: the repo header is a collapse toggle (per-repo, keyed by path), mirroring the uploaded group.
-    const collapsed = changesRepoCollapsed.has(repo);
-    const rows = collapsed ? '' : changesTreeChildrenHtml(tree, {session: payload.session || '', repo, compact: options.compact === true}, 0);
-    // C6: each real repo gets its OWN FROM/TO controls (scoped to its commit graph) plus its own
-    // comparison title. 'Outside repo' has no git graph, so no controls there.
-    const hasGit = repo && repo !== 'Outside repo';
-    const head = `<button type="button" class="changes-repo-head" data-changes-repo-toggle="${esc(repo)}" aria-expanded="${collapsed ? 'false' : 'true'}"><span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoTotalsHtml(repoInfo, entries)}</button>`;
-    if (options.compact === true) {
-      const refsRow = hasGit && !collapsed
-        ? `<div class="changes-repo-refs compact">${diffRefComparisonLineHtml(repo)}${repoComparisonErrorHtml(repoInfo)}${changesRepoMetaHtml(repoInfo, {hideZero: true})}</div>`
-        : '';
-      return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
-        ${head}
-        ${refsRow}
-        ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
-      </section>`;
+  const groups = groupedSessionFiles(regular);
+  const compact = options.compact === true;
+  // Index existing sections by repo key so we can reuse DOM nodes
+  const existing = new Map();
+  for (const child of groupsEl.children) {
+    const key = child.dataset.changesRepo;
+    if (key) existing.set(key, child);
+  }
+  const nextNodes = [];
+  for (const [repo, repoFiles] of groups) {
+    let section = existing.get(repo);
+    if (!section) {
+      section = document.createElement('section');
+      section.className = 'changes-repo-group';
+      section.dataset.changesRepo = repo;
     }
-    const refsRow = hasGit && !collapsed
-      ? `<div class="changes-repo-refs">${diffRefComparisonLineHtml(repo)}${repoComparisonErrorHtml(repoInfo)}${changesRepoMetaHtml(repoInfo)}</div>`
-      : '';
-    return `<section class="changes-repo-group${collapsed ? ' collapsed' : ''}">
-      ${head}
-      ${refsRow}
-      ${collapsed ? '' : `<div class="changes-file-list changes-tree">${rows}</div>`}
-    </section>`;
-  }).join('');
-  if (!uploaded.length) return repoHtml;
-  const uploadedRows = uploadedFilesCollapsed ? '' : uploaded.map(item => changeFileRowHtml(item, options)).join('');
-  const uploadedHtml = `<section class="changes-repo-group changes-uploaded-group${uploadedFilesCollapsed ? ' collapsed' : ''}">
+    const collapsed = changesRepoCollapsed.has(repo);
+    section.classList.toggle('collapsed', collapsed);
+    const repoInfo = repoMap.get(repo) || {};
+    const repoLabel = repo === 'Outside repo' ? repo : compactHomePath(repo);
+    const hasGit = repo && repo !== 'Outside repo';
+    // Update repo header button (small HTML string — not performance sensitive)
+    let head = section.querySelector(':scope > .changes-repo-head');
+    if (!head) {
+      head = document.createElement('button');
+      head.type = 'button';
+      head.className = 'changes-repo-head';
+      section.prepend(head);
+    }
+    head.dataset.changesRepoToggle = repo;
+    head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    head.innerHTML = `<span class="changes-repo-caret">${collapsed ? '▸' : '▾'}</span><span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
+    // Update "Comparing FROM TO" refs row (per-repo, only for git repos)
+    let refsRow = section.querySelector(':scope > .changes-repo-refs');
+    if (hasGit && !collapsed) {
+      if (!refsRow) {
+        refsRow = document.createElement('div');
+        refsRow.className = compact ? 'changes-repo-refs compact' : 'changes-repo-refs';
+        head.after(refsRow);
+      }
+      refsRow.innerHTML = `${diffRefComparisonLineHtml(repo)}${repoComparisonErrorHtml(repoInfo)}${changesRepoMetaHtml(repoInfo, {hideZero: compact})}`;
+      refsRow.hidden = false;
+    } else if (refsRow) {
+      refsRow.hidden = true;
+    }
+    // Update file list using the unified tree renderer
+    let fileList = section.querySelector(':scope > .changes-file-list');
+    if (!collapsed) {
+      if (!fileList) {
+        fileList = document.createElement('div');
+        fileList.className = 'changes-file-list';
+        section.append(fileList);
+      }
+      fileList.hidden = false;
+      renderChangedFileList(fileList, repo, repoFiles, {compact});
+    } else if (fileList) {
+      fileList.hidden = true;
+    }
+    nextNodes.push(section);
+  }
+  // Uploaded files section (keep HTML approach — uploaded rows have no git status)
+  if (uploaded.length) {
+    let uploadedSection = existing.get('__uploaded__');
+    if (!uploadedSection) {
+      uploadedSection = document.createElement('section');
+      uploadedSection.className = 'changes-repo-group changes-uploaded-group';
+      uploadedSection.dataset.changesRepo = '__uploaded__';
+    }
+    const uploadedRowsHtml = uploadedFilesCollapsed ? '' : uploaded.map(item => changeFileRowHtml(item, options)).join('');
+    uploadedSection.innerHTML = `
       <button type="button" class="changes-repo-head changes-uploaded-toggle" data-uploaded-files-toggle aria-expanded="${uploadedFilesCollapsed ? 'false' : 'true'}">
         <span><span class="changes-uploaded-caret">${uploadedFilesCollapsed ? '▸' : '▾'}</span> ${esc(t('changes.uploaded', {count: uploaded.length}))}</span><span>${uploadedFilesCollapsed ? esc(t('changes.collapsed')) : uploaded.length}</span>
       </button>
-      ${uploadedFilesCollapsed ? '' : `<div class="changes-file-list">${uploadedRows}</div>`}
-    </section>`;
-  return `${repoHtml}${uploadedHtml}`;
+      ${uploadedFilesCollapsed ? '' : `<div class="changes-file-list">${uploadedRowsHtml}</div>`}`;
+    uploadedSection.classList.toggle('collapsed', uploadedFilesCollapsed);
+    nextNodes.push(uploadedSection);
+  }
+  reconcileChildNodes(groupsEl, nextNodes);
 }
 
-function changesPanelHtml() {
+// Returns the static toolbar/header HTML for the main Changes panel.
+// The .changes-groups div is filled by renderChangesGroups separately.
+function changesPanelStaticHtml() {
   const target = sessionFilesPayload.session || sessionFilesTargetSession();
   const files = sessionFilesPayload.files || [];
   const loaded = sessionFilesPayload.loaded === true;
   const options = sessions.map(session => `<option value="${esc(session)}"${session === target ? ' selected' : ''}>${esc(sessionLabel(session))} ${esc(session)}</option>`).join('');
   const errorHtml = (sessionFilesPayload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const comparison = changesComparisonHeaderHtml(sessionFilesPayload, files, {loading: sessionFilesLoading});
-  const groups = changesRepoGroupsHtml(files, {payload: sessionFilesPayload});
   const empty = !sessionFilesLoading && loaded && !files.length ? `<div class="changes-empty">${esc(t('changes.emptyAi'))}</div>` : '';
   return `
     <div class="changes-toolbar">
@@ -16509,10 +16604,11 @@ function changesPanelHtml() {
     </div>
     ${comparison}
     ${errorHtml}
-    ${empty || groups}`;
+    ${empty ? empty : '<div class="changes-groups"></div>'}`;
 }
 
-function fileExplorerChangesPanelHtml() {
+// Returns the static toolbar/header HTML for the embedded Finder Differ panel.
+function fileExplorerChangesPanelStaticHtml() {
   const payload = fileExplorerSessionFilesPayload;
   const loading = fileExplorerSessionFilesLoading;
   const files = payload.files || [];
@@ -16520,8 +16616,6 @@ function fileExplorerChangesPanelHtml() {
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
   const empty = !loading && loaded && !files.length ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
-  // C7: name the session in the embedded Finder title, falling back
-  // to the generic title when there is no target session.
   const titleText = session ? t('changes.titleForSession', {session: sessionLabel(session) || session}) : t('changes.title');
   return `
     <div class="file-explorer-changes-head">
@@ -16536,7 +16630,74 @@ function fileExplorerChangesPanelHtml() {
     </div>
     ${changesComparisonHeaderHtml(payload, files, {loading, compact: true})}
     ${errorHtml}
-    ${empty || changesRepoGroupsHtml(files, {compact: true, payload})}`;
+    ${empty ? empty : '<div class="changes-groups"></div>'}`;
+}
+
+// Recursively count changed files in a directory subtree for Differ dir badge.
+function countChangedFilesInDir(dirPath, entriesByDir, sessionFilesMap) {
+  const children = entriesByDir ? (entriesByDir.get(normalizeDirectoryPath(dirPath)) || []) : [];
+  let count = 0;
+  for (const child of children) {
+    const childPath = dirPath === '/' ? `/${child.name}` : `${dirPath}/${child.name}`;
+    if (child.kind === 'file') {
+      if (sessionFilesMap && sessionFilesMap.has(childPath)) count++;
+    } else if (child.kind === 'dir') {
+      count += countChangedFilesInDir(childPath, entriesByDir, sessionFilesMap);
+    }
+  }
+  return count;
+}
+
+function dataAttributeName(key) {
+  return `data-${String(key).replace(/[A-Z]/g, match => `-${match.toLowerCase()}`)}`;
+}
+
+function serializedElementAttributes(element) {
+  const attrs = [];
+  const attrMap = element?.attributes || {};
+  const existing = new Set();
+  const add = (name, value) => {
+    if (!name || value === null || value === undefined || value === false || existing.has(name)) return;
+    existing.add(name);
+    if (value === true) attrs.push(` ${name}`);
+    else attrs.push(` ${name}="${esc(value)}"`);
+  };
+  const className = typeof element.className === 'string' ? element.className : '';
+  if (className) add('class', className);
+  for (const [name, value] of Object.entries(attrMap)) add(name, value);
+  if (element?.dataset && typeof element.dataset === 'object') {
+    for (const [key, value] of Object.entries(element.dataset)) add(dataAttributeName(key), value);
+  }
+  if (element?.hidden === true) add('hidden', true);
+  if (element?.draggable === true) add('draggable', 'true');
+  return attrs.join('');
+}
+
+function serializeElementHtml(element) {
+  if (!element) return '';
+  if (typeof element.outerHTML === 'string' && element.outerHTML) return element.outerHTML;
+  const tagName = String(element.localName || element.tagName || element.nodeName || 'div').toLowerCase();
+  const childHtml = Array.from(element.children || []).map(child => serializeElementHtml(child)).join('');
+  const body = childHtml || element.innerHTML || esc(element.textContent || '');
+  return `<${tagName}${serializedElementAttributes(element)}>${body}</${tagName}>`;
+}
+
+function changesGroupsSnapshotHtml(files, options = {}) {
+  const groupsEl = document.createElement('div');
+  groupsEl.className = 'changes-groups';
+  renderChangesGroups(groupsEl, files, options);
+  return serializeElementHtml(groupsEl);
+}
+
+function changesPanelHtml() {
+  const staticHtml = changesPanelStaticHtml();
+  const groupsHtml = changesGroupsSnapshotHtml(sessionFilesPayload.files || [], {payload: sessionFilesPayload});
+  return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
+}
+function fileExplorerChangesPanelHtml() {
+  const staticHtml = fileExplorerChangesPanelStaticHtml();
+  const groupsHtml = changesGroupsSnapshotHtml(fileExplorerSessionFilesPayload.files || [], {payload: fileExplorerSessionFilesPayload, compact: true});
+  return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
 
 function applyFileExplorerChangesHidden() {
@@ -16553,7 +16714,33 @@ function setFileExplorerChangesHidden(hidden) {
   applyFileExplorerChangesHidden();
 }
 
+function changesPanelBodyStaticHtml() {
+  return `<div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div><div class="changes-scroll">${changesPanelStaticHtml()}</div>`;
+}
+
+function replaceChangesStaticHtml(root, html, options = {}) {
+  const scrollElement = options.scrollSelector ? root.querySelector(options.scrollSelector) : root;
+  const scrollTop = scrollElement ? scrollElement.scrollTop : 0;
+  const scrollLeft = scrollElement ? scrollElement.scrollLeft : 0;
+  root.innerHTML = html;
+  root.__changesStaticHtml = html;
+  const nextScrollElement = options.scrollSelector ? root.querySelector(options.scrollSelector) : root;
+  if (nextScrollElement) restoreElementScrollPosition(nextScrollElement, scrollTop, scrollLeft);
+}
+
+function renderChangesRoot(root, staticHtml, files, groupOptions = {}, options = {}) {
+  if (!root) return;
+  const groupsMissing = !root.querySelector?.('.changes-groups');
+  const staticChanged = root.__changesStaticHtml !== staticHtml;
+  if (options.force === true || staticChanged || groupsMissing) {
+    replaceChangesStaticHtml(root, staticHtml, options);
+  }
+  const groups = root.querySelector?.('.changes-groups');
+  if (groups) renderChangesGroups(groups, files, groupOptions);
+}
+
 function createChangesPanel() {
+  const bodyHtml = changesPanelBodyStaticHtml();
   const panel = document.createElement('article');
   panel.className = 'panel changes-panel';
   panel.id = `panel-${changesItemId}`;
@@ -16570,9 +16757,13 @@ function createChangesPanel() {
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(changesItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div class="changes-body panel-overlay-root">
-        <div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div>
-        <div class="changes-scroll">${changesPanelHtml()}</div>
+        ${bodyHtml}
       </div>`;
+  const body = panel.querySelector('.changes-body');
+  if (body) {
+    body.__changesStaticHtml = bodyHtml;
+    renderChangesGroups(body.querySelector('.changes-groups'), sessionFilesPayload.files || [], {payload: sessionFilesPayload});
+  }
   bindPanelShell(panel, changesItemId);
   bindChangesPanel(panel);
   bindChangedFileRowBehaviors(panel);
@@ -16594,13 +16785,13 @@ function renderChangesPanels(options = {}) {
     const meta = panel.querySelector(`#meta-${cssEscape(changesItemId)}`);
     if (meta) meta.textContent = changesTabDetail();
     if (body && (options.force === true || !activeChangesControl(panel))) {
-      // DOIT.16 C3: preserve scroll on the inner .changes-scroll (the overlay-root body no longer scrolls).
-      const prevScroll = body.querySelector('.changes-scroll');
-      const scrollTop = prevScroll ? prevScroll.scrollTop : 0;
-      const scrollLeft = prevScroll ? prevScroll.scrollLeft : 0;
-      body.innerHTML = `<div id="panel-toasts-${changesItemId}" class="panel-toast-stack"></div><div class="changes-scroll">${changesPanelHtml()}</div>`;
-      const newScroll = body.querySelector('.changes-scroll');
-      if (newScroll) restoreElementScrollPosition(newScroll, scrollTop, scrollLeft);
+      renderChangesRoot(
+        body,
+        changesPanelBodyStaticHtml(),
+        sessionFilesPayload.files || [],
+        {payload: sessionFilesPayload},
+        {force: options.force === true, scrollSelector: '.changes-scroll'},
+      );
     }
     bindChangesPanel(panel);
     bindChangedFileRowBehaviors(panel);
@@ -16826,11 +17017,11 @@ function bindChangesPanel(panel) {
 // background poll re-render keeps the highlight (bindChangedFileRowBehaviors re-applies it).
 function selectChangedFileRow(path) {
   changesSelectedPath = path || '';
-  document.querySelectorAll('.changes-file-row.selected').forEach(row => {
+  document.querySelectorAll('[data-open-change-file].selected').forEach(row => {
     if (row.dataset.openChangeFile !== changesSelectedPath) row.classList.remove('selected');
   });
   if (!changesSelectedPath) return;
-  document.querySelectorAll(`.changes-file-row[data-open-change-file="${cssEscape(changesSelectedPath)}"]`)
+  document.querySelectorAll(`[data-open-change-file="${cssEscape(changesSelectedPath)}"]`)
     .forEach(row => row.classList.add('selected'));
 }
 
@@ -17265,7 +17456,13 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
   const changes = panel?.querySelector?.('[data-file-explorer-changes]');
   if (!changes) return;
   if (options.force === true || !activeChangesControl(panel)) {
-    replaceHtmlPreservingScroll(changes, fileExplorerChangesPanelHtml());
+    renderChangesRoot(
+      changes,
+      fileExplorerChangesPanelStaticHtml(),
+      fileExplorerSessionFilesPayload.files || [],
+      {payload: fileExplorerSessionFilesPayload, compact: true},
+      {force: options.force === true},
+    );
   }
   bindChangesPanel(panel);
   bindChangedFileRowBehaviors(panel);
