@@ -25,7 +25,7 @@ function menuGroups(...groups) {
   return items;
 }
 
-const aboutLinkedInUrl = 'https://www.linkedin.com/in/keivenchang/';
+const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
 
 function aboutDateTimeText() {
   if (bootstrap.versionCommitTime) return bootstrap.versionCommitTime;

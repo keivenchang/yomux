@@ -2893,8 +2893,8 @@ function makeFileTree(paths) {
   assert.ok(api.modalBodyHtmlForTest().includes('<dt>SHA</dt>'), 'About modal contains SHA metadata');
   assert.ok(api.modalBodyHtmlForTest().includes(`<dt>${api.t('menu.help.about.version')}</dt>`), 'About modal contains localized version metadata');
   assert.ok(api.modalBodyHtmlForTest().includes('Keiven Chang'), 'About modal contains Keiven Chang');
-  assert.ok(api.modalBodyHtmlForTest().includes('https://www.linkedin.com/in/keivenchang/'), 'Keiven Chang entry links to LinkedIn');
-  assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('https://www.linkedin.com/in/keivenchang/'), 'About LinkedIn URL is bundled');
+  assert.ok(api.modalBodyHtmlForTest().includes('https://www.linkedin.com/in/keiven/'), 'Keiven Chang entry links to LinkedIn');
+  assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('https://www.linkedin.com/in/keiven/'), 'About LinkedIn URL is bundled');
   assert.ok(preferencesCss.includes('.modal.about-open'), 'About modal has compact modal chrome');
   assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
   assert.ok(/\.about-brand-yo\s*\{[\s\S]*animation:\s*yolo-marker-rotate/.test(preferencesCss), 'About YO glyph spins with the shared YOLO marker animation');
