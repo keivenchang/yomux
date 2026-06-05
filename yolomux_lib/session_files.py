@@ -196,16 +196,20 @@ def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = No
 
 
 def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, str]]:
-    result = run_cmd(["git", "-C", str(repo), "log", f"--max-count={max(1, min(limit, 200))}", "--pretty=format:%H%x1f%h%x1f%s"], timeout=5.0)
+    result = run_cmd(["git", "-C", str(repo), "log", f"--max-count={max(1, min(limit, 200))}", "--pretty=format:%H%x1f%h%x1f%s%x1f%at%x1f%an"], timeout=5.0)
     refs = [{"ref": "HEAD", "short": "HEAD", "subject": "base commit"}, {"ref": "current", "short": "current", "subject": "working tree"}]
     if result.returncode != 0:
         return refs
     seen = {"current", "HEAD"}
     for line in result.stdout.splitlines():
-        parts = line.split("\x1f", 2)
-        if len(parts) != 3 or not parts[0] or parts[0] in seen:
+        parts = line.split("\x1f", 4)
+        if len(parts) < 3 or not parts[0] or parts[0] in seen:
             continue
-        refs.append({"ref": parts[0], "short": parts[1], "subject": parts[2]})
+        entry: dict[str, str] = {"ref": parts[0], "short": parts[1], "subject": parts[2]}
+        if len(parts) >= 5:
+            entry["date"] = parts[3]
+            entry["author"] = parts[4]
+        refs.append(entry)
         seen.add(parts[0])
     return refs
 

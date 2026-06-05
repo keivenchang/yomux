@@ -109,7 +109,7 @@ function diffRefSuggestions(repo) {
     for (const item of refs) {
       const ref = cleanDiffRef(item?.ref || '', '');
       if (!ref || seen.has(ref)) continue;
-      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || ''});
+      suggestions.push({ref, short: item?.short || ref.slice(0, 9), subject: item?.subject || '', date: item?.date || '', author: item?.author || ''});
       seen.add(ref);
       if (suggestions.length >= diffRefSuggestionLimit) return;
     }
@@ -128,6 +128,16 @@ function diffRefSuggestions(repo) {
 
 function diffRefOptionLabel(item, separator = ' - ') {
   return [item?.short || '', item?.subject || ''].filter(Boolean).join(separator) || item?.ref || '';
+}
+
+function diffRefItemMetaText(item) {
+  const ts = Number(item?.date || 0);
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  const dateStr = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  const author = String(item?.author || '').trim();
+  return author ? `${dateStr} ${author}` : dateStr;
 }
 
 function diffRefShaLike(value) {
@@ -318,7 +328,9 @@ function renderDiffRefPopover(input, options = {}) {
     const ref = item?.short || item?.ref || '';
     const subject = item?.subject || item?.ref || '';
     const label = diffRefOptionLabel(item);
-    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span></button>`;
+    const metaText = diffRefItemMetaText(item);
+    const metaHtml = metaText ? `<span class="diff-ref-suggestion-meta">${esc(metaText)}</span>` : '';
+    return `<button type="button" class="diff-ref-suggestion-option${active ? ' active' : ''}" role="option" aria-selected="${active ? 'true' : 'false'}" data-diff-ref-option-index="${index}" data-diff-ref-value="${esc(item?.ref || '')}" title="${esc(label)}"><span class="diff-ref-suggestion-ref">${esc(ref)}</span><span class="diff-ref-suggestion-subject">${esc(subject)}</span>${metaHtml}</button>`;
   }).join('');
   positionDiffRefPopover(input, context.compact);
   popover.hidden = false;

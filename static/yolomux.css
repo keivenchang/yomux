@@ -2125,7 +2125,7 @@ body.theme-light .branch-link {
   min-width: 0;
   height: 24px;
   display: grid;
-  grid-template-columns: minmax(7ch, 9ch) minmax(0, 1fr);
+  grid-template-columns: minmax(7ch, 9ch) minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   padding: 0 6px;
@@ -2158,6 +2158,16 @@ body.theme-light .branch-link {
   white-space: nowrap;
   font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
   color: var(--muted);
+}
+.diff-ref-suggestion-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 var(--ui-font-size-2xs)/1 var(--mono-font);
+  color: var(--muted);
+  opacity: 0.7;
+  justify-self: end;
 }
 .diff-ref-suggestion-empty {
   padding: 5px 7px;
