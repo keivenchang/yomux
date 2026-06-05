@@ -54,6 +54,8 @@ Do not hard-code layout capacity around one browser window, OS, zoom level, or f
 - Treat toolbar/icon alignment as a geometry contract. For visual bugs like misaligned blame/diff circles or Finder/Differ header icons, add a browser assertion that compares actual bounding boxes across the affected panes and themes; screenshots alone did not catch the recurrence.
 - CodeMirror live toggles must exercise the real UI event path. Wrap, line-number, blame, diff, and theme changes should reconfigure compartments or dispatch state effects without rebuilding the editor, and a browser regression should click the button and assert the document text remains visible. Source-grep tests missed a runtime `scheme is not defined` blank-editor failure.
 - Git editor actions are capability-gated as a pair. Blame and diff buttons should appear together only for files inside a git repo with meaningful committed history; untracked, no-history, or outside-repo files should hide both rather than showing disabled/mismatched controls.
+- Large Markdown cleanups still need surgical edits. Do not generate a replacement file under `/tmp` and overwrite the tracked Markdown with `\cp`; use `apply_patch` or a reviewed script-generated patch so concurrent user edits and unintended deletions are visible in the diff before the file changes.
+- In the YOLOmux repo, `cps` means the `yolo-cps` skill, not the Dynamo-utils `dyn-cps` flow. It requires the version bump, the full local check set, explicit staging, push, production fast-forward sync, and restarting BOTH prod `7777` and dev `7778`.
 - Good pattern to keep: after each substantial UI change, run `python3 tools/static_build.py --check`, `node --check static/yolomux.js`, `node tests/layout_url.test.js`, `python3 -m py_compile ...`, `python3 -m pytest tests ...`, and `git diff --check`. Report any sandbox-only failures separately and rerun them with the right permissions.
 - Implementer reflections (DOIT.7 retro, 2026-06-01): the rules below are what would have saved time on the build side of the DOIT.5/6 batches.
 - Pinned literals live in MULTIPLE test layers — grep before you change one. Every exact CSS token, label, glyph, or constant you edit is usually asserted in more than one place: `tests/layout_url.test.js` (node source-grep), `tests/test_browser_layout.py` (Selenium computed `rgb(...)`), and pytest. This session a single token change (`--pane-tab-unfocused-active-bg` `#285a2f`->`#4f9e3a`) broke both a node source-guard and a Selenium computed-color assertion, and one label (`Branch Info`->`YO!info`) broke three separate node pins. Before changing a pinned value, `grep -rn '<old-literal>' tests/` and update every pin in the same change.
@@ -141,18 +143,31 @@ Two side-by-side checkouts of the yolomux repo share `origin`:
 - `~/yolomux.dev/` — where all edits happen.
 - `~/yolomux/` — read-only production checkout.
 
-When the user says **"cps"** (`commit, push, sync`), do exactly this from `~/yolomux.dev/`:
+When the user says **"cps"** (`commit, push, sync`) in the YOLOmux repo, follow the `yolo-cps` skill. The short version from `~/yolomux.dev/` is:
 
 ```bash
+python3 -m py_compile yolomux.py tmux_wall.py auto_approve_tmux.py yolomux_lib/*.py
+python3 -m pytest tests -n 4 -q
+python3 tools/static_build.py --check
+node --check static/yolomux.js
+node --check static/tmux-wall.js
+node tests/layout_url.test.js
 git add -- <explicit-files>           # never `git add -A`; PNG screenshots and scratch files must not get swept in
 git commit -m "<message including Version: 0.1.N>"
 git push origin main
 cd ~/yolomux && git pull --ff-only origin main
+systemctl --user stop yolomux-prod-7777 2>/dev/null
+systemd-run --user --quiet --collect --unit=yolomux-prod-7777 ~/.local/bin/yolomux-restart-prod.sh
+systemctl --user stop yolomux-dev-7778 2>/dev/null
+systemd-run --user --quiet --collect --unit=yolomux-dev-7778 ~/.local/bin/yolomux-restart-dev.sh
 ```
 
 Rules:
 - `cps` is the alias. Same as `commit, push, sync`.
+- Bump `YOLOMUX_VERSION` in `yolomux_lib/common.py` in the same commit.
+- Run the full check set above before committing. If socket/browser tests fail under sandboxing with `PermissionError: Operation not permitted`, rerun the same command outside the sandbox before treating it as a product failure.
 - PRODUCTION pull is `--ff-only`. Never edit, stage, or commit inside `~/yolomux/`.
+- Restart both prod and dev after every `cps`, then verify `https://localhost:7777/api/ping`, `https://localhost:7778/api/ping`, and the rendered version on both login pages.
 - If the user has untracked screenshots (`20260*.png`) in `~/yolomux.dev/`, leave them. They are local debug artifacts and must not be committed.
 - If `~/yolomux.dev/` has modifications unrelated to the user's request, ask before staging — keep the commit scoped.
 
