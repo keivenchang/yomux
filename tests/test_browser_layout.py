@@ -382,8 +382,17 @@ def finder_click_toolbar_fixture_html():
           <div class="panel-head file-explorer-head">
             <div class="pane-tabs" hidden></div>
             <div class="file-explorer-toolbar">
+              <input class="file-explorer-path-inline" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
+              <button type="button" class="path-copy-button file-explorer-path-copy-panel"></button>
               <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel">.*</button>
-              <input class="file-explorer-path-inline" value="/home/test">
+              <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel">根目錄</button>
+              <button type="button" class="file-explorer-header-action">+</button>
+              <button type="button" class="file-explorer-header-action">▣</button>
+              <button type="button" class="file-explorer-header-action">↻</button>
+              <button type="button" class="file-explorer-header-action">▤</button>
+              <button type="button" class="file-explorer-header-action file-explorer-date-toggle">日期</button>
+              <button type="button" class="file-explorer-header-action file-explorer-changes-toggle">Δ</button>
+              <select class="file-explorer-sort-select"><option>A-Z</option></select>
               <div class="tabs pane-frame-controls file-explorer-frame-controls">
                 <button type="button" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
               </div>
@@ -1055,6 +1064,36 @@ def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(brow
     ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
     wait_background("#modified-files-head", tokens["green"])
+
+
+def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path):
+    load_finder_click_toolbar_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const toolbar = document.querySelector('#finder-panel .file-explorer-toolbar');
+        const path = toolbar.querySelector('.file-explorer-path-inline');
+        const toolbarRect = toolbar.getBoundingClientRect();
+        const pathRect = path.getBoundingClientRect();
+        const textProbe = document.createElement('span');
+        textProbe.style.color = 'var(--text)';
+        document.body.appendChild(textProbe);
+        const textColor = getComputedStyle(textProbe).color;
+        textProbe.remove();
+        return {
+          firstIsPath: toolbar.firstElementChild === path,
+          pathLeft: pathRect.left,
+          toolbarLeft: toolbarRect.left,
+          pathWidth: pathRect.width,
+          toolbarWidth: toolbarRect.width,
+          pathColor: getComputedStyle(path).color,
+          textColor,
+        };
+        """
+    )
+    assert metrics["firstIsPath"]
+    assert metrics["pathLeft"] <= metrics["toolbarLeft"] + 1
+    assert metrics["pathWidth"] >= min(220, metrics["toolbarWidth"] - 1)
+    assert metrics["pathColor"] == metrics["textColor"]
 
 
 def test_platform_controls_use_pc_glyphs(browser, tmp_path):

@@ -2320,6 +2320,19 @@ function makeFileTree(paths) {
   assert.ok(/::-moz-selection\s*\{(?=[^}]*background:\s*var\(--text-selection-bg\))(?![^}]*color:)[^}]*\}/.test(preferencesCss), 'Firefox text selection paints background only, preserving text color');
   assert.equal(preferencesCss.includes('--text-selection-text'), false, 'global selection no longer defines selected-text color');
   assert.ok(/\.file-tree-repo-meta\s*\{[^}]*font-size: var\(--ui-font-size-2xs\)/.test(preferencesCss), '#37: the Finder repo/branch label is condensed to a smaller font so more files fit');
+  assert.ok(/\.file-explorer-hidden-toggle,\s*\n\.file-explorer-root-mode-toggle,\s*\n\.file-explorer-header-action\s*\{[\s\S]*white-space:\s*nowrap/.test(preferencesCss), 'Finder toolbar text buttons never wrap localized labels vertically');
+  assert.ok(/\.file-explorer-root-mode-toggle\s*\{[\s\S]*?width:\s*auto[\s\S]*?min-width:\s*38px[\s\S]*?flex:\s*0 0 auto/.test(preferencesCss), 'Finder root-mode button sizes to localized label content');
+  assert.ok(/\.file-explorer-root-mode-toggle-panel\s*\{[\s\S]*?width:\s*auto[\s\S]*?min-width:\s*38px[\s\S]*?flex:\s*0 0 auto/.test(preferencesCss), 'Finder panel root-mode button sizes to localized label content');
+  assert.ok(/\.file-explorer-toolbar\s*\{[\s\S]*justify-content:\s*flex-start/.test(preferencesCss), 'Finder toolbar starts with the path instead of right-packing controls');
+  assert.ok(/\.file-explorer-toolbar \.file-explorer-path-inline\s*\{[\s\S]*flex-grow:\s*1[\s\S]*flex-shrink:\s*0[\s\S]*flex-basis:\s*min\(34ch,\s*100%\)[\s\S]*min-width:\s*min\(32ch,\s*100%\)/.test(preferencesCss), 'Finder path reserves readable inline space before toolbar actions wrap');
+  assert.ok(/\.file-explorer-path,[\s\S]*?\.file-explorer-path-inline\s*\{[\s\S]*color:\s*var\(--text\)[\s\S]*border:\s*1px solid var\(--line\)/.test(preferencesCss), 'Finder path uses normal text contrast and visible input chrome');
+  const finderPanelBundle = fs.readFileSync('static/yolomux.js', 'utf8');
+  const finderPanelStart = finderPanelBundle.indexOf('function createFileExplorerPanel');
+  const finderPanelSource = finderPanelBundle.slice(
+    finderPanelStart,
+    finderPanelBundle.indexOf('function bindFileExplorerPanel', finderPanelStart),
+  );
+  assert.ok(/<input class="file-explorer-path-inline"[\s\S]*file-explorer-path-copy-panel[\s\S]*file-explorer-hidden-toggle/.test(finderPanelSource), 'Finder panel toolbar renders path first, then copy, then action controls');
   assert.ok(preferencesCss.includes('--file-explorer-changes-size: 40%'), '#44: the Modified-files section defaults to 40% (2/5) of the Finder height');
   assert.ok(/body\.file-explorer-changes-hidden \.file-explorer-changes-panel/.test(preferencesCss), '#44: hiding the Modified-files section collapses both the panel and its resizer');
   assert.ok(/\.file-explorer-changes-panel \.changes-comparison-head\s*\{[^}]*flex-wrap: nowrap/.test(preferencesCss), '#44(d): the Finder comparison header is compacted to one tight line (header chrome takes less height)');
@@ -3774,6 +3787,10 @@ function makeFileTree(paths) {
   assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: {width: 300}}), false);
   assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'top', targetRect: {width: 520}}), true);
   assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: {width: 520}}), true);
+  assert.equal(api.dropIntentAllowsSession('__files__', {targetSlot: 'slot1', zone: 'left'}), false, 'Finder pane drags never advertise a pane split preview');
+  assert.equal(api.dropIntentAllowsSession('__changes__', {targetSlot: 'slot1', zone: 'left'}), false, 'Modified Files pane drags never advertise a pane split preview');
+  assert.equal(api.dropIntentAllowsSession('__files__', {boundary: 'root', zone: 'right', targetSlot: 'slot1'}), false, 'Finder pane drags never advertise a root split preview');
+  assert.equal(api.dropIntentAllowsSession('__changes__', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1'}), false, 'Modified Files pane drags never advertise a gutter split preview');
   api.splitSessionAtSlot(editorItem, 'left', 'bottom');
   const editorSplit = api.serialize(api.currentSlots());
   assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes('__files__'))), [{tabs: ['__files__'], active: '__files__'}]);
@@ -3924,7 +3941,7 @@ function makeFileTree(paths) {
   resizer.classList.add('layout-resizer');
   resizer.dataset.splitPath = '';
   resizer.rect = {left: 598, top: 0, right: 602, bottom: 800, width: 4, height: 800};
-  const gutterEvent = dragEvent(601, '__changes__');
+  const gutterEvent = dragEvent(601, '__info__');
   gutterEvent.target = resizer;
   gutterEvent.clientY = 400;
   const gutterIntent = api.dropIntentForEvent(gutterEvent, {allowBoundary: true});
@@ -3936,6 +3953,28 @@ function makeFileTree(paths) {
   assert.equal(api.gridForTest().dataset.dropLabel, 'full span');
   assert.ok(api.gridForTest().style.getPropertyValue('--drop-preview-width'), 'gutter preview geometry is explicit');
   api.clearDropPreview();
+
+  const noPreviewSlot = new TestElement('slot-one');
+  noPreviewSlot.classList.add('drop-slot');
+  noPreviewSlot.dataset.slot = 'slot1';
+  noPreviewSlot.rect = {left: 0, top: 0, right: 800, bottom: 400, width: 800, height: 400};
+  api.setGridPreviewNodesForTest([noPreviewSlot]);
+  const finderPaneDrag = dragEvent(16, '__files__');
+  finderPaneDrag.target = noPreviewSlot;
+  finderPaneDrag.clientY = 200;
+  api.handleDropDragOver(finderPaneDrag);
+  assert.ok(finderPaneDrag.defaultPrevented, 'Finder pane dragover is handled so the browser does not show its own drop UI');
+  assert.ok(finderPaneDrag.propagationStopped, 'Finder pane dragover is owned by the pane drag handler');
+  assert.equal(finderPaneDrag.dataTransfer.dropEffect, 'none');
+  assert.equal(noPreviewSlot.classList.contains('drop-preview'), false, 'Finder pane drags do not show a dotted pane preview');
+  const changesPaneDrag = dragEvent(16, '__changes__');
+  changesPaneDrag.target = noPreviewSlot;
+  changesPaneDrag.clientY = 200;
+  api.handleDropDragOver(changesPaneDrag);
+  assert.ok(changesPaneDrag.defaultPrevented, 'Modified Files pane dragover is handled so the browser does not show its own drop UI');
+  assert.ok(changesPaneDrag.propagationStopped, 'Modified Files pane dragover is owned by the pane drag handler');
+  assert.equal(changesPaneDrag.dataTransfer.dropEffect, 'none');
+  assert.equal(noPreviewSlot.classList.contains('drop-preview'), false, 'Modified Files pane drags do not show a dotted pane preview');
 
   api.setLayoutSlotsForTest(finderOnly);
   const finderStrip = tabStrip([tabElement('__files__', 100, 120)]);

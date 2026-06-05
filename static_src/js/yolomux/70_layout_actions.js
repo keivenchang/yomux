@@ -1742,6 +1742,7 @@ function itemCanSplitSinglePurposePane(item, intent) {
 
 function dropIntentAllowsSession(session, intent) {
   if (!isLayoutItem(session)) return false;
+  if (isFileExplorerItem(session) || isChangesItem(session)) return false;
   if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
   if (!intent?.targetSlot) return false;
   if (slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) {
