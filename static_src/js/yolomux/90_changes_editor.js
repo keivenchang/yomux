@@ -136,7 +136,7 @@ function diffRefItemMetaText(item) {
   const d = new Date(ts * 1000);
   const p = n => String(n).padStart(2, '0');
   const dateStr = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-  const author = String(item?.author || '').trim();
+  const author = String(item?.author || '').trim().split(/\s+/)[0] || '';
   return author ? `${dateStr} ${author}` : dateStr;
 }
 

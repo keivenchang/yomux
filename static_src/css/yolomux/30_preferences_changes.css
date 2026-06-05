@@ -173,6 +173,7 @@
 .diff-ref-suggestion-popover {
   position: fixed;
   z-index: var(--z-ref-suggestion);
+  min-width: min(520px, 90vw);
   max-height: min(320px, 42vh);
   overflow: auto;
   padding: 4px;
