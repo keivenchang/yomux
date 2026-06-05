@@ -201,7 +201,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/activity-summary":
             qs = parse_qs(parsed.query)
-            self.write_json(self.server.app.activity_summary_payload(force=parse_bool(qs.get("force", ["0"])[0])))
+            self.write_json(self.server.app.activity_summary_payload(
+                force=parse_bool(qs.get("force", ["0"])[0]),
+                locale=qs.get("locale", ["en"])[0],
+            ))
             return
         if parsed.path == "/api/tmux":
             qs = parse_qs(parsed.query)

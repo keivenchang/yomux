@@ -451,6 +451,10 @@ function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-co
   // Render assistant chat replies AND per-session summary cards through the Markdown pipeline so bold
   // titles, code, lists, and links display formatted. Without marked.js the escaped-text fallback stays.
   if (!node || typeof window.marked === 'undefined') return;
+  (node.querySelectorAll?.('.yoagent-global [data-yoagent-global-markdown]') || []).forEach(body => {
+    renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
+    body.removeAttribute('data-yoagent-global-markdown');
+  });
   (node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || []).forEach(body => {
     renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
     body.removeAttribute('data-yoagent-markdown');

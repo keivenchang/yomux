@@ -6,6 +6,7 @@
 let i18nActiveLocale = (typeof bootstrap === 'object' && bootstrap && bootstrap.locale) ? String(bootstrap.locale) : 'en';
 const i18nFallbackLocale = 'en';
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
+let i18nApplyLocaleRequestId = 0;
 // DOIT.8: seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
 // SYNCHRONOUSLY on the very first render — the menu bar/tabs/wordmark paint at boot before any fetch.
 if (typeof bootstrap === 'object' && bootstrap && bootstrap.strings && typeof bootstrap.strings === 'object') {
@@ -93,16 +94,18 @@ async function i18nLoadCatalog(locale) {
 // Switch the active locale: ensure the en fallback + the active catalog are loaded, then re-render
 // the localized surfaces. Safe to call before the render functions exist (guarded).
 async function applyLocale(locale) {
+  const requestId = ++i18nApplyLocaleRequestId;
   const next = String(locale || i18nFallbackLocale);
   await i18nLoadCatalog(i18nFallbackLocale);
   if (next !== i18nFallbackLocale) await i18nLoadCatalog(next);
+  if (requestId !== i18nApplyLocaleRequestId) return;
   i18nActiveLocale = next;
   // DOIT.8 Phase 2: flip the document direction so RTL locales (ar) mirror the whole layout.
   if (typeof document !== 'undefined' && document.documentElement) {
     document.documentElement.setAttribute('dir', i18nIsRtl(next) ? 'rtl' : 'ltr');
     document.documentElement.setAttribute('lang', next);
   }
-  rerenderForLocale();
+  rerenderForLocale({localeChange: true});
 }
 
 // The real (non-pseudo) locales that ship a catalog, most-specific first. 'system' resolves against
@@ -154,15 +157,18 @@ function resolveLocalePref(pref) {
   return 'en';
 }
 
-function rerenderForLocale() {
+function rerenderForLocale(options = {}) {
   // DOIT.6 #50: force-re-render EVERY localized surface so a language switch repaints the open UI on
   // the same interaction. Guarded so this is safe at any load order. Preferences must be forced past
   // the active-control guard (the language <select> is the active control when the switch fires).
   if (typeof renderPreferencesPanels === 'function') renderPreferencesPanels({force: true});
   if (typeof renderSessionButtons === 'function') renderSessionButtons();  // rebuilds the app menu bar
   if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+  if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
-  if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true});
+  if (typeof renderYoagentPanel === 'function') renderYoagentPanel({preserveDraft: true, allowBusyRebuild: options.localeChange === true});
+  if (typeof relocalizeInfoPanelChrome === 'function') relocalizeInfoPanelChrome();
+  if (options.localeChange === true && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true, silent: true, localeChange: true});
   if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
   if (document.getElementById('modal')?.classList?.contains('about-open') && typeof showAboutModal === 'function') showAboutModal();
   // The Modified-files / Changes panels (the Finder's panel AND the standalone Changes tab) localize

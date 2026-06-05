@@ -221,6 +221,7 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
         first = webapp.activity_summary_payload()
         second = webapp.activity_summary_payload()
         third = webapp.activity_summary_payload(force=True)
+        localized = webapp.activity_summary_payload(locale="zh-Hant")
     finally:
         webapp.control_server.stop()
 
@@ -228,6 +229,7 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     assert first["global"]["files"] == {"count": 1, "added": 1, "removed": 0}
     assert second["sessions"]["5"]["local"] == "cached test"
     assert third["sessions"]["5"]["local"] == "cached test"
+    assert localized["locale"] == "zh-Hant"
 
 
 def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):

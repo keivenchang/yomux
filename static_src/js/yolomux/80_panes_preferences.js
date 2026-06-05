@@ -1250,6 +1250,67 @@ function createInfoPanel() {
   return panel;
 }
 
+// The merged YO!info pane keeps its outer chrome and sub-tab row mounted between language changes so the
+// YO!agent chat draft and active sub-tab survive. Re-label those persistent controls in place.
+function relocalizeInfoPanelChrome(panel = document.getElementById(`panel-${infoItemId}`)) {
+  if (!panel) return;
+  const infoLabel = infoTabLabel();
+  const agentLabel = yoagentTabLabel();
+  const setLabel = (node, label) => {
+    if (!node) return;
+    node.textContent = label;
+    node.title = label;
+    node.setAttribute('aria-label', label);
+  };
+  setLabel(panel.querySelector('.virtual-panel-controls .terminal-tab'), infoLabel);
+  const minimizeLabel = t('pane.minimize');
+  const expandLabel = t('pane.expand');
+  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
+    button.title = minimizeLabel;
+    button.setAttribute('aria-label', minimizeLabel);
+  });
+  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
+    button.title = expandLabel;
+    button.setAttribute('aria-label', expandLabel);
+  });
+  const detailLabel = document.getElementById(`panel-tab-${infoItemId}`)?.querySelector('.session-button-dir');
+  if (detailLabel) detailLabel.textContent = infoLabel;
+  const meta = document.getElementById(`meta-${infoItemId}`);
+  if (meta) meta.textContent = t('info.subtitle');
+  const detailClose = panel.querySelector('.panel-detail-close[data-detail-toggle]');
+  if (detailClose) {
+    const label = t('pane.details.hide');
+    detailClose.title = label;
+    detailClose.setAttribute('aria-label', label);
+  }
+  panel.querySelector('.info-subtabs')?.setAttribute('aria-label', `${infoLabel} / ${agentLabel}`);
+  panel.querySelectorAll('[data-info-subtab]').forEach(button => {
+    const label = button.dataset.infoSubtab === 'yoagent' ? agentLabel : infoLabel;
+    const labelNode = button.querySelector('.session-button-dir') || button;
+    labelNode.textContent = label;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+  });
+  const infoRefresh = panel.querySelector('[data-info-refresh]');
+  if (infoRefresh) {
+    if (typeof setMetadataRefreshButtonLoading === 'function') {
+      setMetadataRefreshButtonLoading(infoRefresh, transcriptMetaLoading, t('info.refreshRepo'), t('info.refreshRepo'));
+    } else {
+      const label = t('info.refreshRepo');
+      infoRefresh.textContent = label;
+      infoRefresh.title = label;
+      infoRefresh.setAttribute('aria-label', label);
+    }
+  }
+  const agentRefresh = panel.querySelector('[data-yoagent-refresh]');
+  if (agentRefresh) {
+    agentRefresh.textContent = t('yoagent.refresh');
+    agentRefresh.title = t('yoagent.refreshTitle');
+    agentRefresh.setAttribute('aria-label', t('yoagent.refreshTitle'));
+  }
+  applyInfoSubTab(panel);
+}
+
 // Reflect the active sub-tab onto the merged panel (button highlight + which sub-view is visible).
 function applyInfoSubTab(panel = document.getElementById(`panel-${infoItemId}`)) {
   if (!panel) return;
@@ -1291,10 +1352,14 @@ function sessionActivitySummary(session) {
   return activitySummaryPayload?.sessions?.[session] || null;
 }
 
+function activitySummaryMarkdownBlockHtml(text, className) {
+  return `<div class="${esc(className)} markdown-body" data-yoagent-global-markdown>${esc(text)}</div>`;
+}
+
 function activitySummaryLinesHtml(lines, options = {}) {
   const items = Array.isArray(lines) ? lines.filter(Boolean) : [];
   if (!items.length) return options.empty ? `<div class="yoagent-empty">${esc(options.empty)}</div>` : '';
-  return items.map(line => `<div class="yoagent-line">${esc(line)}</div>`).join('');
+  return items.map(line => activitySummaryMarkdownBlockHtml(String(line), 'yoagent-line')).join('');
 }
 
 function relativeActivityGeneratedText(payload = activitySummaryPayload) {
@@ -1331,7 +1396,7 @@ function globalActivitySummaryHtml() {
       <span class="yoagent-generated" title="${esc(generated.title)}">(${esc(generated.text)})</span>
     </div>
     ${refreshBar}
-    ${headline ? `<div class="yoagent-headline">${esc(headline)}</div>` : activitySummaryLinesHtml([], {empty: t('yoagent.emptyGlobal')})}
+    ${headline ? activitySummaryMarkdownBlockHtml(headline, 'yoagent-headline') : activitySummaryLinesHtml([], {empty: t('yoagent.emptyGlobal')})}
     ${activitySummaryLinesHtml(detailLines)}
   </section>`;
 }
@@ -1532,7 +1597,10 @@ async function refreshActivitySummary(options = {}) {
   activitySummaryRefreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   try {
-    const response = await apiFetch(`/api/activity-summary${options.force ? '?force=1' : ''}`, {cache: 'no-store'});
+    const params = new URLSearchParams();
+    if (options.force) params.set('force', '1');
+    params.set('locale', i18nActiveLocaleId());
+    const response = await apiFetch(`/api/activity-summary?${params.toString()}`, {cache: 'no-store'});
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     if (!requestIsCurrent()) return;

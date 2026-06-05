@@ -563,16 +563,21 @@
 .info-subtab {
   flex: 0 0 auto;
   min-height: var(--pane-tab-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0 14px;
   border: 1px solid var(--pane-inactive-tab-border);
   background: var(--pane-inactive-tab-bg);
   color: var(--pane-tab-text);
   font: inherit;
   font-weight: 700;
+  line-height: 1;
   cursor: pointer;
 }
 .info-subtab .session-button-dir {
   color: inherit;
+  line-height: 1;
 }
 .info-subtab:first-child {
   border-radius: 6px 0 0 6px;
@@ -653,6 +658,9 @@
 .yoagent-line {
   padding: 2px 0;
   color: #d6dee9;
+}
+.yoagent-global .markdown-body {
+  white-space: normal;
 }
 .yoagent-session-summaries {
   width: 100%;
@@ -913,6 +921,7 @@
 .yoagent-chat-send-icon { width: 16px; height: 16px; }
 /* YO!agent rendered code blocks: soft rounded boxes (not the editor's near-black slab). */
 .yoagent-chat .markdown-body pre,
+.yoagent-global .markdown-body pre,
 .yoagent-session-summary .markdown-body pre {
   background: color-mix(in srgb, var(--panel2) 60%, var(--bg));
   border: 1px solid var(--line);
@@ -920,7 +929,11 @@
   padding: 8px 10px;
 }
 body.theme-light .info-pane {
-  background: var(--bg);
+  background: #ffffff;
+}
+body.theme-light .info-list,
+body.theme-light .info-watched {
+  background: #ffffff;
 }
 body.theme-light .yoagent-global {
   color: var(--text);
@@ -946,18 +959,22 @@ body.theme-light .yoagent-message-role {
   color: #475569;
 }
 body.theme-light .yoagent-message-body.markdown-body,
+body.theme-light .yoagent-global .markdown-body,
 body.theme-light .yoagent-session-summary-body.markdown-body {
   color: #111827;
 }
 body.theme-light .yoagent-chat .markdown-body strong,
+body.theme-light .yoagent-global .markdown-body strong,
 body.theme-light .yoagent-session-summary .markdown-body strong {
   color: #111827;
 }
 body.theme-light .yoagent-chat .markdown-body em,
+body.theme-light .yoagent-global .markdown-body em,
 body.theme-light .yoagent-session-summary .markdown-body em {
   color: #374151;
 }
 body.theme-light .yoagent-chat .markdown-body :not(pre) > code,
+body.theme-light .yoagent-global .markdown-body :not(pre) > code,
 body.theme-light .yoagent-session-summary .markdown-body :not(pre) > code {
   color: #0f4c81;
   background: #eef6ff;
@@ -967,12 +984,14 @@ body.theme-light .yoagent-session-summary .markdown-body :not(pre) > code {
    light box + dark text (the shared `.markdown-body pre` is dark-only and only the file editor had a
    light override). Matches the soft gray code boxes in mockup 044. */
 body.theme-light .yoagent-chat .markdown-body pre,
+body.theme-light .yoagent-global .markdown-body pre,
 body.theme-light .yoagent-session-summary .markdown-body pre {
   background: #f3f4f6;
   border-color: #e4e7ec;
   color: #1f2328;
 }
 body.theme-light .yoagent-chat .markdown-body pre code,
+body.theme-light .yoagent-global .markdown-body pre code,
 body.theme-light .yoagent-session-summary .markdown-body pre code {
   color: #1f2328;
 }
@@ -1089,7 +1108,7 @@ body.theme-light .info-row {
 }
 body.theme-light .info-row.header {
   color: var(--muted);
-  background: var(--panel2);
+  background: #ffffff;
 }
 body.theme-light .info-cell a {
   color: #1d4ed8;

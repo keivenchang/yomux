@@ -28,6 +28,7 @@
   height: 22px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
   padding: 0 8px;
   border: 1px solid var(--line);
@@ -35,6 +36,8 @@
   background: var(--panel2);
   color: var(--text);
   font-size: var(--ui-font-size-xs);
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
 }
 .info-refresh:hover,
@@ -790,9 +793,9 @@
   gap: 12px;
   margin-top: 12px;
   padding: 10px;
-  color: #ffe7b7;
-  background: rgba(100, 45, 0, 0.28);
-  border: 1px solid rgba(255, 177, 66, 0.72);
+  color: #ffd7d7;
+  background: rgba(95, 18, 18, 0.26);
+  border: 1px solid rgba(255, 120, 120, 0.72);
   border-radius: 6px;
 }
 .preferences-global-reset.confirming {
@@ -801,24 +804,24 @@
   box-shadow: 0 0 0 2px rgba(255, 142, 90, 0.12);
 }
 .preferences-global-reset-title {
-  color: #ffd36b;
-  font: 800 var(--ui-font-size-sm)/1.2 var(--ui-font);
-  letter-spacing: 0.02em;
+  color: #ff9b9b;
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
 }
 .preferences-global-reset-warning {
   margin-top: 3px;
-  color: #ffe9c8;
+  color: #ffdede;
   font: 600 var(--ui-font-size-xs)/1.28 var(--ui-font);
 }
 .preferences-global-reset .preferences-reset-all {
-  color: #240700;
-  background: #ffb142;
-  border-color: #ffd08a;
+  color: #ffffff;
+  background: #d92d20;
+  border-color: #ff8a80;
+  font: 600 var(--ui-font-size-sm)/1.1 var(--ui-font);
 }
 .preferences-global-reset .preferences-reset-all:hover,
 .preferences-global-reset .preferences-reset-all:focus-visible {
-  background: #ffc46d;
-  border-color: #ffe0b2;
+  background: #b42318;
+  border-color: #ffb4ad;
 }
 .preferences-reset-confirm {
   display: inline-flex;
@@ -1378,19 +1381,29 @@ body.theme-light .keyboard-shortcut-row kbd {
   border-color: rgba(15, 23, 42, 0.18);
 }
 body.theme-light .preferences-global-reset {
-  color: #7a4a00;
-  background: rgba(255, 177, 66, 0.16);
-  border-color: rgba(214, 140, 30, 0.6);
+  color: #7f1d1d;
+  background: #fff5f5;
+  border-color: rgba(220, 38, 38, 0.46);
 }
 body.theme-light .preferences-global-reset.confirming {
-  background: rgba(220, 40, 30, 0.10);
+  background: #fff1f0;
   border-color: #d9534f;
 }
 body.theme-light .preferences-global-reset-title {
-  color: #9a5b00;
+  color: #991b1b;
 }
 body.theme-light .preferences-global-reset-warning {
-  color: #7a4a00;
+  color: #7f1d1d;
+}
+body.theme-light .preferences-global-reset .preferences-reset-all {
+  color: #ffffff;
+  background: #dc2626;
+  border-color: #ef4444;
+}
+body.theme-light .preferences-global-reset .preferences-reset-all:hover,
+body.theme-light .preferences-global-reset .preferences-reset-all:focus-visible {
+  background: #b91c1c;
+  border-color: #dc2626;
 }
 body.theme-light .preferences-reset-cancel {
   background: rgba(15, 23, 42, 0.05);

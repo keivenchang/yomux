@@ -134,6 +134,14 @@ _YOAGENT_LANGUAGE_NAMES = {
     "zh-Hans": "Simplified Chinese",
     "es": "Spanish",
     "ja": "Japanese",
+    "de": "German",
+    "fr": "French",
+    "pt-BR": "Brazilian Portuguese",
+    "ru": "Russian",
+    "ko": "Korean",
+    "hi": "Hindi",
+    "ar": "Arabic",
+    "he": "Hebrew",
 }
 
 
@@ -284,7 +292,8 @@ class TmuxWebtermApp:
             "refresh_ms": refresh_ms,
         }
 
-    def activity_summary_payload(self, force: bool = False) -> dict[str, Any]:
+    def activity_summary_payload(self, force: bool = False, locale: str = "en") -> dict[str, Any]:
+        locale = str(locale or "en").strip() or "en"
         sessions, errors = discover_sessions(self.sessions)
         self.warm_metadata_cache_async(sessions)
         summaries: dict[str, Any] = {}
@@ -318,6 +327,7 @@ class TmuxWebtermApp:
             "sessions": summaries,
             "global": build_global_activity_summary(ordered_summaries, errors),
             "errors": errors,
+            "locale": locale,
         }
 
     def yoagent_settings(self) -> dict[str, Any]:

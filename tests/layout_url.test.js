@@ -1406,9 +1406,12 @@ function makeFileTree(paths) {
   assert.equal(/class="transcript-head info-head"/.test(source), false, '#40: the duplicate sub-view title bar is gone');
   assert.ok(/function createInfoPanel\(\)[\s\S]*?renderInfoPanel\(\);\s*renderYoagentPanel\(\);/.test(source), '#40: the merged panel renders both sub-views on creation');
   assert.equal(source.includes('function createYoagentPanel('), false, '#40: the standalone YO!agent panel builder is gone');
-  assert.ok(source.includes('function setInfoSubTab(') && source.includes('function applyInfoSubTab(') && source.includes('async function openInfoSubTab('), '#40: sub-tab switch + open helpers exist');
+  assert.ok(source.includes('function setInfoSubTab(') && source.includes('function applyInfoSubTab(') && source.includes('function relocalizeInfoPanelChrome(') && source.includes('async function openInfoSubTab('), '#40: sub-tab switch + locale + open helpers exist');
   assert.ok(/function setInfoSubTab[\s\S]*?writeStoredInfoSubTab\(next\)/.test(source), '#40: switching the sub-tab persists it (remembered across reloads)');
   assert.ok(/function openInfoSubTab[\s\S]*?selectSession\(infoItemId\)/.test(source), '#40: opening YO!agent activates the merged info pane');
+  assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)[\s\S]*?renderInfoPanel\(\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, allowBusyRebuild: options\.localeChange === true\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)/.test(source), '#40/#50: a language switch relabels persistent YO!info chrome and forces busy YO!agent UI to rebuild in the new locale');
+  assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?virtual-panel-controls \.terminal-tab[\s\S]*?info\.subtitle[\s\S]*?querySelectorAll\('\[data-info-subtab\]'\)[\s\S]*?button\.dataset\.infoSubtab === 'yoagent'[\s\S]*?data-info-refresh[\s\S]*?data-yoagent-refresh/.test(source), '#40/#50: the persistent YO!info/YO!agent sub-tab chrome and actions are localized in place by data attribute');
+  assert.ok(/let i18nApplyLocaleRequestId = 0/.test(source) && /async function applyLocale[\s\S]*?\+\+i18nApplyLocaleRequestId[\s\S]*?if \(requestId !== i18nApplyLocaleRequestId\) return/.test(source), '#50: overlapping language transitions cannot let an older catalog load repaint after the newer language choice');
   assert.ok(/maybeAdoptYoagentDeepLink[\s\S]*?infoPanelSubTab = 'yoagent'/.test(source), '#40: a yoagent deep-link pre-selects the YO!agent sub-tab');
   // DOIT.8 Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
   assert.ok(source.includes("esc(t('brand.marker'))"), 'the YO marker glyph renders via t(brand.marker)');
@@ -1434,12 +1437,14 @@ function makeFileTree(paths) {
   assert.ok(/\.info-subtab-actions\s*\{[\s\S]*?margin-inline-start:\s*auto/.test(mergedInfoCss), '#40: the active refresh action sits at the right side of the merged sub-tab bar');
   assert.ok(/\.info-subtab\.active\s*\{[\s\S]*?background:\s*var\(--pane-tab-active-bg/.test(mergedInfoCss), '#40: active YO!info sub-tab uses the pane active-tab color token');
   assert.ok(/\.info-subtab \.session-button-dir\s*\{[\s\S]*?color:\s*inherit/.test(mergedInfoCss), '#40: YO!info/YO!agent sub-tab labels inherit button contrast instead of forcing white text');
+  assert.ok(/\.info-subtab\s*\{[\s\S]*?display:\s*inline-flex[\s\S]*?align-items:\s*center[\s\S]*?line-height:\s*1/.test(mergedInfoCss), '#40: YO!info/YO!agent sub-tab labels are vertically centered, including CJK labels');
+  assert.ok(/body\.theme-light \.info-list,[\s\S]*?body\.theme-light \.info-watched\s*\{[\s\S]*?background:\s*#ffffff/.test(mergedInfoCss), '#40: the light-mode YO!info table uses a white surface');
   // #48: the merged info panel gets its own 4-row grid so the YO!info|YO!agent sub-tab row is always
   // visible (a real track), including when the detail header is collapsed.
   assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the info panel reserves a row for the sub-tab toggle');
   assert.ok(/\.info-panel\.details-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the sub-tab row survives a collapsed detail header');
   // #50: a language switch force-re-renders every localized surface and fires applyLocale optimistically.
-  assert.ok(/function rerenderForLocale\(\)[\s\S]*?renderPreferencesPanels\(\{force: true\}\)[\s\S]*?renderBrandWordmark\(\)/.test(source), '#50: rerenderForLocale force-re-renders Preferences + the wordmark');
+  assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?renderPreferencesPanels\(\{force: true\}\)[\s\S]*?renderBrandWordmark\(\)/.test(source), '#50: rerenderForLocale force-re-renders Preferences + the wordmark');
   assert.ok(/if \(path === 'general\.language'\) applyLocale\(resolveLocalePref\(value\)\)/.test(source), '#50: the language select switches locale optimistically, not on the poll');
   // #52: the wordmark YO/LO glyphs localize client-side (優樂 / 优乐) via t(brand.wordmark.*).
   assert.ok(/function renderBrandWordmark\(\)[\s\S]*?t\('brand\.wordmark\.yo'\)[\s\S]*?t\('brand\.wordmark\.lo'\)/.test(source), '#52: renderBrandWordmark localizes the YO/LO wordmark glyphs');
@@ -1713,7 +1718,8 @@ function makeFileTree(paths) {
   assert.equal(updateBody.includes("name.textContent = nameText;\n    name.innerHTML = '';"), false, 'Finder row text must not be cleared after being written');
   assert.ok(updateBody.includes("name.innerHTML = '';\n    name.textContent = nameText;"), 'Finder row clears stale HTML before writing plain text');
   assert.ok(source.includes("refreshActivitySummary({force: true})"), 'YO!agent Refresh summary forces cached summaries to rebuild');
-  assert.ok(source.includes("api/activity-summary${options.force ? '?force=1' : ''}"), 'YO!agent summary API supports a force refresh query');
+  assert.ok(source.includes("params.set('force', '1')"), 'YO!agent summary API supports a force refresh query');
+  assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent summary API carries the active locale query');
   assert.ok(source.includes("data-yolo-rule-open"), 'Preferences exposes an Open button for the YOLO rule file');
   assert.ok(source.includes("apiFetch('/api/yoagent/reset'"), 'YO!agent clear conversation resets the server-side CLI session');
   assert.ok(source.includes("renderYoagentPanel({preserveDraft: false, scrollBottom: true})"), 'YO!agent send/clear clears the draft and scrolls chat to the bottom');
@@ -1744,8 +1750,12 @@ function makeFileTree(paths) {
   assert.ok(source.includes('focusInput: true'), 'YO!agent chat refocuses the input after responses and retryable failures');
   assert.ok(source.includes('function refreshYoagentSummaryRegions'), 'YO!agent metadata refresh can update summaries without rebuilding the chat input');
   assert.ok(source.includes('summaryOnly: true'), 'YO!agent metadata refresh requests summary-only panel updates');
+  assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent activity-summary requests carry the active UI locale');
+  assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?allowBusyRebuild: options\.localeChange === true[\s\S]*?refreshActivitySummary\(\{force: true, silent: true, localeChange: true\}\)/.test(source), 'language switches force the busy YO!agent UI and activity summary through the new locale');
   // #45: assistant replies are structured Markdown — flag the body and render it through marked.js.
   assert.ok(source.includes('function renderYoagentMessageMarkdown'), '#45: YO!agent assistant replies render their multi-section Markdown body');
+  assert.ok(source.includes('data-yoagent-global-markdown'), 'YO!agent global summary lines are flagged for markdown rendering');
+  assert.ok(/\.yoagent-global \[data-yoagent-global-markdown\][\s\S]*?renderMarkdownPreviewInto\(body, yoagentTightMarkdown/.test(source), 'YO!agent global summary markdown is rendered through the sanitizer');
   assert.ok(/\.yoagent-message\.assistant \.yoagent-message-body\[data-yoagent-markdown\]/.test(source), '#45: the markdown render pass targets flagged assistant message bodies');
   assert.ok(/renderMarkdownPreviewInto\(body, yoagentTightMarkdown\(body\.textContent/.test(source), '#45/#129: assistant message Markdown is rendered (tightened) from the escaped-text fallback');
   assert.ok(source.includes("roleClass === 'assistant' ? 'yoagent-message-body markdown-body'"), '#45: assistant message bodies get the markdown-body class for formatting');
@@ -2512,13 +2522,15 @@ function makeFileTree(paths) {
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
   assert.ok(preferencesHtml.includes('data-preferences-search-action>YOsearch</button>'), 'preferences search has an explicit YOsearch action');
-  assert.equal(preferencesHtml.includes('preferences-global-reset'), false, 'preferences hide GLOBAL reset when every setting is already default');
+  assert.equal(preferencesHtml.includes('preferences-global-reset'), false, 'preferences hide Global reset when every setting is already default');
   api.setClientSettingsPatchForTest({general: {auto_focus: true}});
   const modifiedPreferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(modifiedPreferencesHtml.indexOf('preferences-global-reset') > modifiedPreferencesHtml.indexOf('preferences-sections'), 'preferences global reset is below the setting sections');
-  assert.ok(modifiedPreferencesHtml.includes('GLOBAL reset'), 'preferences reset is labeled as global');
+  assert.ok(modifiedPreferencesHtml.includes('Global reset'), 'preferences reset is labeled as global in normal-case text');
   assert.ok(modifiedPreferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
   assert.ok(modifiedPreferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action after a setting changes');
+  assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?background:\s*#d92d20[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button is red and uses normal UI text');
+  assert.ok(/body\.theme-light \.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?background:\s*#dc2626/.test(preferencesCss), 'preferences global reset button remains red in light mode');
   assert.equal(preferencesHtml.includes('data-preferences-reset-confirm'), false, 'preferences do not show the destructive confirmation until requested');
   const resetConfirmHtml = api.preferencesResetConfirmHtmlForTest();
   assert.ok(resetConfirmHtml.includes('data-preferences-reset-confirm'), 'reset-all requires a second continue action');
@@ -4396,6 +4408,7 @@ function makeFileTree(paths) {
   assert.ok(api.yoagentChatHtml().includes('claude'), 'YO!agent fallback notice includes the backend');
   assert.ok(api.yoagentChatHtml().includes('claude login'), 'YO!agent fallback notice includes the login action');
   assert.ok(api.globalActivitySummaryHtml().includes('3 files changed (+9/-2)'), 'global activity summary renders file totals');
+  assert.ok(api.globalActivitySummaryHtml().includes('data-yoagent-global-markdown'), 'global activity summary preserves markdown as escaped fallback until the render pass');
   assert.ok(api.globalActivitySummaryHtml().includes('Your most recent work is about editor fixes'), 'global activity summary renders a human sentence');
   assert.equal(api.globalActivitySummaryHtml().includes('Session alpha'), false, 'global activity summary omits per-session detail lines');
   assert.equal(api.sessionActivitySummary('alpha').local, "Codex session alpha is active in yolomux.dev. It has been working on editor fixes. It currently has 2 files changed (+8/-1).");
@@ -5135,20 +5148,20 @@ function makeFileTree(paths) {
 }
 
 {
-  // DOIT.6 #115: the Preferences GLOBAL-reset UI (title, warning, both buttons, per-row Reset) is localized.
+  // DOIT.6 #115: the Preferences global-reset UI (title, warning, both buttons, per-row Reset) is localized.
   const api = loadYolomux('', ['1']);
   const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
   api.i18nSetCatalogForTest('zh-Hant', zhHant);
   api.setActiveLocaleForTest('zh-Hant');
-  // A non-default value makes the GLOBAL-reset block render (it is hidden when everything is default).
+  // A non-default value makes the global-reset block render (it is hidden when everything is default).
   api.setClientSettingsPatchForTest({appearance: {ui_font_size: 19}});
   const html = api.preferencesPanelHtmlForTest('');
-  assert.ok(html.includes(zhHant['pref.reset.title']), '#115: the GLOBAL-reset title is localized');
+  assert.ok(html.includes(zhHant['pref.reset.title']), '#115: the global-reset title is localized');
   assert.ok(html.includes(zhHant['pref.reset.all']), '#115: the "Reset all defaults" button is localized');
   assert.ok(html.includes(`aria-label="${zhHant['pref.reset.aria']}"`), '#115: the reset group aria-label is localized');
   assert.ok(html.includes(`>${zhHant['pref.reset.row']}</button>`), '#115: the per-row Reset button is localized');
   // No bare English reset literals leak through.
-  assert.ok(!/>GLOBAL reset<|>Reset all defaults<|>Continue reset</.test(html), '#115: no English reset literals leak in a non-English locale');
+  assert.ok(!/>Global reset<|>Reset all defaults<|>Continue reset</.test(html), '#115: no English reset literals leak in a non-English locale');
   // Source guard: every reset literal routes through t('pref.reset.*').
   const src = fs.readFileSync('static/yolomux.js', 'utf8');
   for (const key of ['title', 'confirmTitle', 'warning', 'confirmWarning', 'continue', 'cancel', 'all', 'row', 'aria']) {
