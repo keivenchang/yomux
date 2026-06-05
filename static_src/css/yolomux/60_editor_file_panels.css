@@ -1320,6 +1320,9 @@ body.editor-theme-light .file-editor-content {
 .file-editor-preview-font-panel[hidden] {
   display: none;
 }
+.file-editor-diff-expand-panel[hidden] {
+  display: none;
+}
 .file-editor-preview-font-panel button {
   height: 20px;
   min-width: 24px;

@@ -255,6 +255,14 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   setFileEditorIcon(button, 'file-editor-icon-diff');
 }
 
+function updateFileEditorDiffExpandButton(button, path, state, item = null) {
+  if (!button) return;
+  const activeDiff = editorViewModeFor(path, item) === 'diff';
+  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || !activeDiff || !openFileDiffAvailable(state);
+  button.disabled = button.hidden || state?.diffLoading === true;
+  button.setAttribute('aria-pressed', diffExpandUnchanged ? 'true' : 'false');
+}
+
 async function openEditorFind(host = null) {
   const view = host?._cmView || null;
   const status = host
@@ -331,8 +339,13 @@ function setDiffExpandUnchanged(enabled) {
   diffExpandUnchanged = enabled === true;
   storageSet('yolomux.diffExpandUnchanged', diffExpandUnchanged ? '1' : '0');
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
-    const path = panel.dataset.filePath;
-    if (path) renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+    const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
+    const path = fileItemPath(item);
+    const state = openFiles.get(path);
+    updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
+    if (path && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
+      renderFileEditorPanel(panel, item);
+    }
   });
 }
 

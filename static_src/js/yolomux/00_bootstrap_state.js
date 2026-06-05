@@ -180,7 +180,7 @@ const EDITOR_SCHEMES = {
     id: 'yolomux-light', label: 'YOLOmux Light', dark: false,
     bg: '#ffffff', fg: '#1f2937', cursor: '#0f3d22', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f4f7fb',
     gutterBg: '#f6f8fa', lineNo: '#64748b', panel: '#f6f8fa', panel2: '#eef2f7', line: '#d0d7de', previewBg: '#ffffff',
-    syntax: {comment: '#64748b', keyword: '#6d28d9', string: '#166534', number: '#a16207', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#0f3d22', headingBg: '#ffffff', link: '#075985', inlineCode: '#0f4c81', inlineCodeBg: '#eef6ff', inlineCodeBorder: '#8ab4f8', atom: '#9d174d', property: '#1d4ed8', strong: '#a11b1b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
+    syntax: {comment: '#64748b', keyword: '#6d28d9', string: '#00843d', number: '#a16207', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#0f3d22', headingBg: '#ffffff', link: '#075985', inlineCode: '#0f4c81', inlineCodeBg: '#eef6ff', inlineCodeBorder: '#8ab4f8', atom: '#9d174d', property: '#1d4ed8', strong: '#a11b1b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
     diff: {addFg: '#15803d', removeFg: '#b91c1c'},
   },
   'vscode-light-plus': {

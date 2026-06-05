@@ -181,7 +181,7 @@ const EDITOR_SCHEMES = {
     id: 'yolomux-light', label: 'YOLOmux Light', dark: false,
     bg: '#ffffff', fg: '#1f2937', cursor: '#0f3d22', selection: 'rgba(37, 99, 235, 0.34)', activeLine: '#f4f7fb',
     gutterBg: '#f6f8fa', lineNo: '#64748b', panel: '#f6f8fa', panel2: '#eef2f7', line: '#d0d7de', previewBg: '#ffffff',
-    syntax: {comment: '#64748b', keyword: '#6d28d9', string: '#166534', number: '#a16207', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#0f3d22', headingBg: '#ffffff', link: '#075985', inlineCode: '#0f4c81', inlineCodeBg: '#eef6ff', inlineCodeBorder: '#8ab4f8', atom: '#9d174d', property: '#1d4ed8', strong: '#a11b1b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
+    syntax: {comment: '#64748b', keyword: '#6d28d9', string: '#00843d', number: '#a16207', function: '#075985', type: '#0f766e', variable: '#1f2937', tag: '#9f1239', heading: '#0f3d22', headingBg: '#ffffff', link: '#075985', inlineCode: '#0f4c81', inlineCodeBg: '#eef6ff', inlineCodeBorder: '#8ab4f8', atom: '#9d174d', property: '#1d4ed8', strong: '#a11b1b', emphasis: '#2b2b2b', invalid: '#b91c1c'},
     diff: {addFg: '#15803d', removeFg: '#b91c1c'},
   },
   'vscode-light-plus': {
@@ -4836,6 +4836,11 @@ function prNumberSearchForms(number) {
   return [`#${number}`, `PR#${number}`, `PR ${number}`, String(number)];
 }
 
+function finderSearchAliases(item) {
+  if (!isFileExplorerItem(item)) return [];
+  return ['Finder', 'File Explorer', t('finder.label.finder'), t('finder.label.explorer')];
+}
+
 function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
@@ -4856,6 +4861,7 @@ function tabSearchFields(item) {
     info.status,
     info.description,
     info.goal,
+    ...finderSearchAliases(item),
     pr?.title,
     pr?.url,
     pr?.number ? 'PR' : '',
@@ -9758,6 +9764,14 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   setFileEditorIcon(button, 'file-editor-icon-diff');
 }
 
+function updateFileEditorDiffExpandButton(button, path, state, item = null) {
+  if (!button) return;
+  const activeDiff = editorViewModeFor(path, item) === 'diff';
+  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || !activeDiff || !openFileDiffAvailable(state);
+  button.disabled = button.hidden || state?.diffLoading === true;
+  button.setAttribute('aria-pressed', diffExpandUnchanged ? 'true' : 'false');
+}
+
 async function openEditorFind(host = null) {
   const view = host?._cmView || null;
   const status = host
@@ -9834,8 +9848,13 @@ function setDiffExpandUnchanged(enabled) {
   diffExpandUnchanged = enabled === true;
   storageSet('yolomux.diffExpandUnchanged', diffExpandUnchanged ? '1' : '0');
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
-    const path = panel.dataset.filePath;
-    if (path) renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+    const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
+    const path = fileItemPath(item);
+    const state = openFiles.get(path);
+    updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
+    if (path && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
+      renderFileEditorPanel(panel, item);
+    }
   });
 }
 
@@ -17467,6 +17486,7 @@ function codeMirrorConfigSignature(path, options = {}) {
     original: options.original ? textFingerprint(options.original) : '',
     from: options.from || '',
     to: options.to || '',
+    expand: options.expand === true,
     language: codeMirrorLanguageName(path),
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
@@ -18132,6 +18152,7 @@ function renderFileEditorPanel(panel, item) {
     blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
   }
   updateFileEditorDiffButton(diffButton, path, state, item);
+  updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
   if (crossSplitButton) {
     crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
   }
@@ -18145,11 +18166,6 @@ function renderFileEditorPanel(panel, item) {
       diffRefPanel.dataset.diffRefRepoRendered = diffRepo;
     }
     syncDiffRefControlValues(diffRefPanel);
-  }
-  if (diffExpandButton) {
-    // B4: the expand/collapse-all-unchanged toggle is diff-only; reflect the persisted state.
-    diffExpandButton.hidden = mode !== 'diff' || state.kind !== 'text';
-    diffExpandButton.setAttribute('aria-pressed', diffExpandUnchanged ? 'true' : 'false');
   }
   updateFileEditorToolbarSeparators(panel);
   if (state.kind === 'image') {
@@ -18373,6 +18389,7 @@ function updateFileEditorToolbarSeparators(panel) {
     '.file-editor-find-panel',
     '.file-editor-blame-panel',
     '.file-editor-diff-panel',
+    '.file-editor-diff-expand-panel',
     '.file-editor-diff-ref-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
   const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel')

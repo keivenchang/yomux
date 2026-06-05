@@ -2180,6 +2180,7 @@ function codeMirrorConfigSignature(path, options = {}) {
     original: options.original ? textFingerprint(options.original) : '',
     from: options.from || '',
     to: options.to || '',
+    expand: options.expand === true,
     language: codeMirrorLanguageName(path),
     wrap: fileEditorWrapEnabled,
     lineNumbers: fileEditorLineNumbersEnabled,
@@ -2845,6 +2846,7 @@ function renderFileEditorPanel(panel, item) {
     blameButton.setAttribute('aria-pressed', fileEditorBlameEnabled ? 'true' : 'false');
   }
   updateFileEditorDiffButton(diffButton, path, state, item);
+  updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
   if (crossSplitButton) {
     crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
   }
@@ -2858,11 +2860,6 @@ function renderFileEditorPanel(panel, item) {
       diffRefPanel.dataset.diffRefRepoRendered = diffRepo;
     }
     syncDiffRefControlValues(diffRefPanel);
-  }
-  if (diffExpandButton) {
-    // B4: the expand/collapse-all-unchanged toggle is diff-only; reflect the persisted state.
-    diffExpandButton.hidden = mode !== 'diff' || state.kind !== 'text';
-    diffExpandButton.setAttribute('aria-pressed', diffExpandUnchanged ? 'true' : 'false');
   }
   updateFileEditorToolbarSeparators(panel);
   if (state.kind === 'image') {
@@ -3086,6 +3083,7 @@ function updateFileEditorToolbarSeparators(panel) {
     '.file-editor-find-panel',
     '.file-editor-blame-panel',
     '.file-editor-diff-panel',
+    '.file-editor-diff-expand-panel',
     '.file-editor-diff-ref-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
   const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel')

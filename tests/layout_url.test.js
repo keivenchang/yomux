@@ -460,6 +460,8 @@ globalThis.__layoutTestApi = {
   editorPreviewModeAvailable,
   setFileEditorViewMode,
   updateFileEditorDiffButton,
+  updateFileEditorDiffExpandButton,
+  codeMirrorConfigSignature,
   openFileDiffAvailable,
   activeEditorSchemeForTest() { return activeEditorScheme(); },
   configuredEditorSchemeForMode,
@@ -1309,6 +1311,24 @@ function makeFileTree(paths) {
   api.setFileEditorViewMode(codePath, 'diff', codeItem);
   api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: false, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem);
   assert.equal(diffButton.hidden, true, 'untracked files stay diff-button-free even in diff mode');
+  const diffExpandButton = new TestElement('diff-expand-button');
+  api.setFileEditorViewMode(codePath, 'edit', codeItem);
+  api.updateFileEditorDiffExpandButton(diffExpandButton, codePath, {kind: 'text', gitTracked: true, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem);
+  assert.equal(diffExpandButton.hidden, true, 'Expand unchanged is hidden outside Diff mode');
+  api.setFileEditorViewMode(codePath, 'diff', codeItem);
+  api.updateFileEditorDiffExpandButton(diffExpandButton, codePath, {kind: 'text', gitTracked: true, diffLoading: true}, codeItem);
+  assert.equal(diffExpandButton.hidden, true, 'Expand unchanged is hidden while the diff is still loading');
+  api.updateFileEditorDiffExpandButton(diffExpandButton, codePath, {kind: 'text', gitTracked: true, diffLoaded: true, diff: ''}, codeItem);
+  assert.equal(diffExpandButton.hidden, true, 'Expand unchanged is hidden when the loaded diff has no unchanged-context folds to control');
+  api.updateFileEditorDiffExpandButton(diffExpandButton, codePath, {kind: 'text', gitTracked: true, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem);
+  assert.equal(diffExpandButton.hidden, false, 'Expand unchanged is shown only for an active loaded diff');
+  assert.equal(diffExpandButton.disabled, false, 'Expand unchanged is clickable for an active loaded diff');
+  assert.equal(diffExpandButton.attributes['aria-pressed'], 'false', 'Expand unchanged reflects the persisted toggle state');
+  assert.notEqual(
+    api.codeMirrorConfigSignature(codePath, {mode: 'diff', expand: false}),
+    api.codeMirrorConfigSignature(codePath, {mode: 'diff', expand: true}),
+    'Diff expand/collapse changes the CodeMirror signature so the merge view rebuilds',
+  );
   api.setFileEditorViewMode(codePath, 'edit', codeItem);
 }
 
@@ -2247,9 +2267,14 @@ function makeFileTree(paths) {
   assert.ok(macFinderControls.includes('data-pane-close="__files__"'));
   assert.ok(macFinderControls.includes('pane-close pc-window-control pc-close'));
   assert.equal(macFinderControls.includes('data-pane-expand'), false);
+  const macFinderFields = macApi.tabSearchFields(macApi.fileExplorerItemId);
+  assert.ok(macFinderFields.includes('Finder'), 'Finder tab indexes its visible macOS name');
+  assert.ok(macFinderFields.includes('File Explorer'), 'Finder tab also indexes the File Explorer alias');
+  assert.equal(macApi.commandPaletteMatches({group: 'Tabs', label: 'Finder', detail: '', searchFields: macFinderFields}, 'File Explorer'), true, 'typing File Explorer finds the Finder command palette row');
 
   const forcedPcApi = loadYolomux('?platform=pc', ['1'], 'http:', 'MacIntel');
   assert.equal(forcedPcApi.fileExplorerLabel(), 'File Explorer');
+  assert.ok(forcedPcApi.tabSearchFields(forcedPcApi.fileExplorerItemId).includes('Finder'), 'File Explorer tab also indexes the Finder alias');
   assert.equal(forcedPcApi.platformWindowControlClass('close'), 'pc-window-control pc-close');
   assert.equal(forcedPcApi.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
   assert.equal(forcedPcApi.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
@@ -2701,6 +2726,7 @@ function makeFileTree(paths) {
   assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'YOLOmux Light uses a bright white editor background');
   assert.equal(api.activeEditorSchemeForTest().previewBg, '#ffffff', 'YOLOmux Light preview background is bright white');
   assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#64748b', 'YOLOmux Light uses muted-gray comments');
+  assert.equal(api.activeEditorSchemeForTest().syntax.string, '#00843d', 'YOLOmux Light strings are visibly green, not near-black green');
   assert.equal(api.activeEditorSchemeForTest().syntax.heading, '#0f3d22', '#34: YOLOmux Light markdown headings are dark green (matching dark mode), not maroon');
   api.setFileEditorCursorStyleForTest('block');
   api.applyEditorCursorStyle();

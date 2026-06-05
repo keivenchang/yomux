@@ -421,6 +421,11 @@ function prNumberSearchForms(number) {
   return [`#${number}`, `PR#${number}`, `PR ${number}`, String(number)];
 }
 
+function finderSearchAliases(item) {
+  if (!isFileExplorerItem(item)) return [];
+  return ['Finder', 'File Explorer', t('finder.label.finder'), t('finder.label.explorer')];
+}
+
 function tabSearchFields(item) {
   const info = transcriptMeta.sessions?.[item] || {};
   const filePath = fileItemPath(item) || '';
@@ -441,6 +446,7 @@ function tabSearchFields(item) {
     info.status,
     info.description,
     info.goal,
+    ...finderSearchAliases(item),
     pr?.title,
     pr?.url,
     pr?.number ? 'PR' : '',
