@@ -249,6 +249,7 @@
   "diff.ref.to": "TO",
   "diff.ref.from.aria": "पुरानी FROM commit चुनें",
   "diff.ref.to.aria": "नई TO ref चुनें",
+  "diff.ref.reset": "HEAD → वर्तमान पर रीसेट करें",
   "diff.ref.defaultBase": "डिफ़ॉल्ट base",
   "diff.ref.base": "Base",
   "diff.ref.workingTree": "Working Tree",

@@ -71,6 +71,7 @@
   "diff.ref.defaultBase": "Default base",
   "diff.ref.from": "FROM",
   "diff.ref.from.aria": "Pick an older FROM commit",
+  "diff.ref.reset": "Reset to HEAD → current",
   "diff.ref.to": "TO",
   "diff.ref.to.aria": "Pick a newer TO ref",
   "diff.ref.workingTree": "Working Tree",

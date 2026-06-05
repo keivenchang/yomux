@@ -249,6 +249,7 @@
   "diff.ref.to": "ДО",
   "diff.ref.from.aria": "Выбрать более старый commit ОТ",
   "diff.ref.to.aria": "Выбрать более новую ссылку ДО",
+  "diff.ref.reset": "Сбросить к HEAD → текущему",
   "diff.ref.defaultBase": "База по умолчанию",
   "diff.ref.base": "База",
   "diff.ref.workingTree": "Рабочее дерево",

@@ -403,9 +403,12 @@ function diffRefControlsHtml(options = {}) {
   const repoAttr = repo ? ` data-diff-ref-repo="${esc(repo)}"` : '';
   const fromInput = diffRefInputHtml({repo, compact, side: 'from', value: refs.from, suggestions: diffRefFromSuggestions(repo), aria: t('diff.ref.from.aria')});
   const toInput = diffRefInputHtml({repo, compact, side: 'to', value: refs.to, suggestions: diffRefToSuggestions(refs.from, repo), aria: t('diff.ref.to.aria')});
+  const isDefault = refs.from === 'HEAD' && refs.to === 'current';
+  const resetHidden = isDefault ? ' hidden' : '';
   return `<span class="${className}" data-diff-ref-controls${repoAttr}>
     <label class="diff-ref-control">${esc(t('diff.ref.from'))} ${fromInput}</label>
     <label class="diff-ref-control">${esc(t('diff.ref.to'))} ${toInput}</label>
+    <button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${esc(t('diff.ref.reset'))}">↺</button>
   </span>`;
 }
 
@@ -459,6 +462,8 @@ function syncDiffRefControlValues(container) {
   if (fromInput && fromInput !== active) fromInput.value = diffRefInputDisplayValue(refs.from, diffRefFromSuggestions(repo));
   if (toInput && toInput !== active) toInput.value = diffRefInputDisplayValue(refs.to, diffRefToSuggestions(refs.from, repo));
   refreshDiffRefToDatalist(controls);
+  const resetBtn = controls?.querySelector?.('[data-diff-ref-reset]');
+  if (resetBtn) resetBtn.hidden = refs.from === 'HEAD' && refs.to === 'current';
 }
 
 function fileExplorerSessionFilesTargetSession() {
@@ -771,7 +776,10 @@ function diffRefComparisonLineHtml(repo) {
   const body = esc(t('diff.comparing', {from: '{{FROM}}', to: '{{TO}}'}))
     .replace('{{FROM}}', fromInput)
     .replace('{{TO}}', toInput);
-  return `<span class="changes-repo-compare-title diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}</span>`;
+  const isDefault = refs.from === 'HEAD' && refs.to === 'current';
+  const resetHidden = isDefault ? ' hidden' : '';
+  const resetBtn = `<button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${esc(t('diff.ref.reset'))}">↺</button>`;
+  return `<span class="changes-repo-compare-title diff-ref-controls compact diff-ref-inline" data-diff-ref-controls data-diff-ref-repo="${esc(repo)}">${body}${resetBtn}</span>`;
 }
 
 // C6: per-repo comparison title (from the repo payload's own effective refs), shown beside that repo's
@@ -1257,6 +1265,14 @@ function bindChangesPanel(panel) {
       writeStoredChangesFolderCollapsed();
       renderChangesPanels({force: true});
       renderFileExplorerChangesPanels({force: true});
+      return;
+    }
+    const diffRefReset = event.target.closest('[data-diff-ref-reset]');
+    if (diffRefReset && panel.contains(diffRefReset)) {
+      event.preventDefault();
+      const controls = diffRefReset.closest('[data-diff-ref-controls]');
+      const repo = controls?.dataset?.diffRefRepo || '';
+      setRepoDiffRefs(repo, 'HEAD', 'current');
       return;
     }
     const refresh = event.target.closest('[data-session-files-refresh]');
@@ -2005,6 +2021,14 @@ function createFileEditorPanel(item) {
         : diffRefInputDisplayValue(escRefs.to, diffRefToSuggestions(escRefs.from, repo));
       input.blur?.();
     }
+  });
+  diffRefPanel?.addEventListener('click', event => {
+    if (!event.target.closest('[data-diff-ref-reset]')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const controls = event.target.closest('[data-diff-ref-controls]');
+    const repo = controls?.dataset?.diffRefRepo || '';
+    setRepoDiffRefs(repo, 'HEAD', 'current');
   });
   panel.querySelector('.file-editor-cross-split-panel')?.addEventListener('click', event => {
     event.preventDefault();

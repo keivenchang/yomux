@@ -249,6 +249,7 @@
   "diff.ref.to": "À",
   "diff.ref.from.aria": "Choisir un commit DE plus ancien",
   "diff.ref.to.aria": "Choisir une réf À plus récente",
+  "diff.ref.reset": "Réinitialiser à HEAD → actuel",
   "diff.ref.defaultBase": "Base par défaut",
   "diff.ref.base": "Base",
   "diff.ref.workingTree": "Arbre de travail",

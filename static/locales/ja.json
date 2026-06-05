@@ -71,6 +71,7 @@
   "diff.ref.defaultBase": "既定のベース",
   "diff.ref.from": "FROM",
   "diff.ref.from.aria": "より古い FROM コミットを選択",
+  "diff.ref.reset": "HEAD → 現在にリセット",
   "diff.ref.to": "TO",
   "diff.ref.to.aria": "より新しい TO 参照を選択",
   "diff.ref.workingTree": "作業ツリー",

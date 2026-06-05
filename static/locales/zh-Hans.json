@@ -71,6 +71,7 @@
   "diff.ref.defaultBase": "默认基准",
   "diff.ref.from": "从",
   "diff.ref.from.aria": "选择较旧的 FROM 提交",
+  "diff.ref.reset": "重置为 HEAD → 当前",
   "diff.ref.to": "到",
   "diff.ref.to.aria": "选择较新的 TO 引用",
   "diff.ref.workingTree": "工作目录",

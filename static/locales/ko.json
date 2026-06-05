@@ -71,6 +71,7 @@
   "diff.ref.defaultBase": "기본 베이스",
   "diff.ref.from": "FROM",
   "diff.ref.from.aria": "이전 FROM 커밋 선택",
+  "diff.ref.reset": "HEAD → current로 초기화",
   "diff.ref.to": "TO",
   "diff.ref.to.aria": "최신 TO 참조 선택",
   "diff.ref.workingTree": "작업 트리",

@@ -249,6 +249,7 @@
   "diff.ref.to": "אל",
   "diff.ref.from.aria": "בחר commit ישן יותר כ-FROM",
   "diff.ref.to.aria": "בחר ref חדש יותר כ-TO",
+  "diff.ref.reset": "איפוס ל-HEAD → נוכחי",
   "diff.ref.defaultBase": "בסיס ברירת מחדל",
   "diff.ref.base": "בסיס",
   "diff.ref.workingTree": "עץ עבודה",

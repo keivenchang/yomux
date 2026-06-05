@@ -249,6 +249,7 @@
   "diff.ref.to": "إلى",
   "diff.ref.from.aria": "اختر commit قديماً (من)",
   "diff.ref.to.aria": "اختر مرجعاً أحدث (إلى)",
+  "diff.ref.reset": "إعادة التعيين إلى HEAD → الحالي",
   "diff.ref.defaultBase": "القاعدة الافتراضية",
   "diff.ref.base": "القاعدة",
   "diff.ref.workingTree": "شجرة العمل",

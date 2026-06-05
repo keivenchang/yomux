@@ -71,6 +71,7 @@
   "diff.ref.defaultBase": "בסיס ברירת מחדל",
   "diff.ref.from": "מ-",
   "diff.ref.from.aria": "בחר commit ישן יותר כ-FROM",
+  "diff.ref.reset": "איפוס ל-HEAD → נוכחי",
   "diff.ref.to": "אל",
   "diff.ref.to.aria": "בחר ref חדש יותר כ-TO",
   "diff.ref.workingTree": "עץ עבודה",

@@ -249,6 +249,7 @@
   "diff.ref.to": "BIS",
   "diff.ref.from.aria": "Älteren VON-Commit wählen",
   "diff.ref.to.aria": "Neuere BIS-Ref wählen",
+  "diff.ref.reset": "Zurücksetzen auf HEAD → aktuell",
   "diff.ref.defaultBase": "Standardbasis",
   "diff.ref.base": "Basis",
   "diff.ref.workingTree": "Arbeitsbaum",

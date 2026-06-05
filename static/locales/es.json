@@ -71,6 +71,7 @@
   "diff.ref.defaultBase": "Base predeterminada",
   "diff.ref.from": "DESDE",
   "diff.ref.from.aria": "Elige un commit DESDE más antiguo",
+  "diff.ref.reset": "Restablecer a HEAD → actual",
   "diff.ref.to": "HASTA",
   "diff.ref.to.aria": "Elige una ref HASTA más nueva",
   "diff.ref.workingTree": "Árbol de trabajo",
