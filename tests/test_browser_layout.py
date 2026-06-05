@@ -402,7 +402,7 @@ def finder_click_toolbar_fixture_html():
             <div class="file-explorer-tree-panel" tabindex="0"></div>
             <div id="modified-files-panel" class="file-explorer-changes-panel" tabindex="0">
               <div id="modified-files-head" class="file-explorer-changes-head">
-                <span class="changes-title">Modified Files '5'</span>
+                <span class="changes-title">Differ: '5'</span>
                 <button type="button" class="changes-refresh">Refresh</button>
                 <button type="button" class="changes-close">x</button>
               </div>

@@ -2092,8 +2092,8 @@ function makeFileTree(paths) {
       {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
     ],
   });
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('Modified Files'), 'Finder embeds a modified-files panel');
-  assert.ok(/class="changes-title">Modified Files &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Modified-files title uses the compact session title');
+  assert.ok(api.fileExplorerChangesPanelHtml().includes('Differ:'), 'Finder embeds a Differ panel');
+  assert.ok(/class="changes-title">Differ: &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Differ title uses the compact session title');
   {
     const stickyApi = loadYolomux('', ['1', '2']);
     stickyApi.setFileExplorerChangesSelectedSessionForTest('1');

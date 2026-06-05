@@ -293,7 +293,7 @@ def files_sentence(files: dict[str, Any]) -> str:
     added = int(files.get("added") or 0)
     removed = int(files.get("removed") or 0)
     if not count:
-        return "no modified files attributed yet"
+        return "no Differ results attributed yet"
     return f"{plural(count, 'file')} changed (+{added}/-{removed})"
 
 
