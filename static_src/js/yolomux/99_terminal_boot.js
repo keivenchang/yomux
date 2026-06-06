@@ -712,7 +712,7 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
   const label = references.length === 1 ? references[0] : `${references.length} paths`;
   statusEl.innerHTML = inserted
     ? `<span class="ok">inserted ${esc(label)} into ${esc(sessionLabel(session))}</span>`
-    : `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
+    : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
 }
 
 function terminalPathDropPayload(event) {
@@ -946,7 +946,7 @@ function insertUploadPaths(session, paths, options = {}) {
   if (!options.silent) {
     statusEl.innerHTML = inserted
       ? `<span class="ok">inserted upload path into ${esc(sessionLabel(session))}</span>`
-      : `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
+      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
   }
   return inserted;
 }
@@ -958,7 +958,7 @@ function insertPasteUploadReferences(session, files, options = {}) {
   if (!options.silent) {
     statusEl.innerHTML = inserted
       ? `<span class="ok">inserted pasted image into ${esc(sessionLabel(session))}</span>`
-      : `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
+      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
   }
   return inserted;
 }
@@ -1182,12 +1182,12 @@ function activateTab(session, name, options = {}) {
 
 function tmuxWindow(session, key, label) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot switch tmux windows');
+    statusErr(localizedHtml('terminal.connection.readonlyTmuxWindow'));
     return;
   }
   const item = terminals.get(session);
   if (!item || item.socket?.readyState !== WebSocket.OPEN) {
-    statusErr(`${esc(sessionLabel(session))} terminal is not connected`);
+    statusErr(terminalNotConnectedHtml(session));
     return;
   }
   fitTerminal(session);
@@ -1210,7 +1210,7 @@ async function ensureTerminalRunning(session) {
   const ensured = await ensureSession(session);
   if (!ensured) {
     const container = document.getElementById(`term-${session}`);
-    if (container) container.innerHTML = `<pre class="terminal-error">Session ${esc(sessionLabel(session))} is not available. Click or drag it again to retry.</pre>`;
+    if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
     return;
   }
   startTerminal(session);
@@ -1353,13 +1353,13 @@ function updateTypingIndicator(session) {
 
 function updateStatus() {
   if (activeSessions.length === 0) {
-    statusEl.textContent = 'no session selected';
+    statusEl.textContent = t('terminal.status.noSessionSelected');
     statusEl.removeAttribute('title');
     return;
   }
   const activeTmuxSessions = activeSessions.filter(isTmuxSession);
   if (!activeTmuxSessions.length) {
-    statusEl.textContent = `${infoTabLabel()} shown`;
+    statusEl.textContent = t('terminal.status.viewShown', {view: infoTabLabel()});
     statusEl.removeAttribute('title');
     return;
   }
@@ -1369,8 +1369,8 @@ function updateStatus() {
     if (item?.socket?.readyState === WebSocket.OPEN) open += 1;
   }
   const total = activeTmuxSessions.length;
-  statusEl.textContent = open === total ? '' : `${open}/${total} conn`;
-  statusEl.title = open === total ? '' : `${open}/${total} terminal sockets connected`;
+  statusEl.textContent = open === total ? '' : t('terminal.connection.connShort', {open, total});
+  statusEl.title = open === total ? '' : t('terminal.connection.socketsTitle', {open, total});
 }
 
 async function toggleAutoApprove(session) {
@@ -1557,7 +1557,7 @@ function startSummaryStream(session) {
   });
   source.onerror = () => {
     if (summaryStreams.get(session) !== source) return;
-    appendSummary('\n[error] summary stream disconnected\n');
+    appendSummary(`\n${t('terminal.summary.streamDisconnected')}\n`);
     stopSummaryStream(session);
   };
 }
@@ -1784,7 +1784,7 @@ function startTranscriptStream(session, options = {}) {
     stopTranscriptStream(session);
     const pane = document.getElementById(`transcript-pane-${session}`);
     if (pane?.classList.contains('active')) {
-      statusErr(`${esc(sessionLabel(session))} transcript stream disconnected`);
+      statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
       setTimeout(() => {
         if (document.getElementById(`transcript-pane-${session}`)?.classList.contains('active')) {
           startTranscriptStream(session, {scrollBottom: false});

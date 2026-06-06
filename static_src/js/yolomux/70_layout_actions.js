@@ -1535,10 +1535,11 @@ function showTerminalConnectionToast(session, text, countdownMs = toastDurationM
 function scheduleTerminalReconnect(session, item) {
   if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
   const delay = Math.min(8000, 1000 * 2 ** item.reconnectAttempt);
+  const seconds = Math.round(delay / 1000);
   item.reconnectAttempt += 1;
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
-  statusErr(`${esc(sessionLabel(session))} disconnected; reconnecting in ${Math.round(delay / 1000)}s`);
-  showTerminalConnectionToast(session, `Disconnected. Reconnecting in ${Math.round(delay / 1000)}s.`, delay);
+  statusErr(localizedHtml('terminal.connection.reconnectingStatus', {session: sessionLabel(session), seconds}));
+  showTerminalConnectionToast(session, t('terminal.connection.reconnectingToast', {seconds}), delay);
   item.reconnectTimer = setTimeout(() => {
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
     item.reconnectTimer = null;

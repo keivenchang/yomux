@@ -966,9 +966,38 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 3px;
   height: 20px;
   padding: 0 6px;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
   font-size: var(--ui-font-size-2xs);
+}
+.file-explorer-changes-panel .changes-refresh::before {
+  content: "↻";
+  display: block;
+  flex: 0 0 auto;
+  font-size: var(--ui-font-size-sm);
+  line-height: 1;
+  text-indent: 0;
+}
+.file-explorer-changes-panel .changes-refresh:hover,
+.file-explorer-changes-panel .changes-refresh:focus-visible {
+  color: var(--text);
+  border-color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 72%, transparent);
+}
+body.theme-light .file-explorer-changes-panel .changes-refresh {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--line);
+}
+body.theme-light .file-explorer-changes-panel .changes-refresh:hover,
+body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
+  color: var(--text);
+  border-color: var(--text);
+  background: rgba(15, 23, 42, 0.05);
 }
 .file-explorer-changes-head .changes-date-toggle {
   height: 20px;
@@ -1020,15 +1049,12 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
     width: 22px;
     padding: 0;
     overflow: hidden;
-    text-indent: 999px;
+    text-indent: 0;
     white-space: nowrap;
+    font-size: 0;
   }
   .file-explorer-changes-head .changes-refresh::before {
-    content: "↻";
-    float: left;
-    width: 100%;
-    text-indent: 0;
-    text-align: center;
+    font-size: var(--ui-font-size-sm);
   }
   .file-explorer-changes-head .changes-summary {
     grid-area: summary;

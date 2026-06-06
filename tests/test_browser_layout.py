@@ -1256,6 +1256,69 @@ def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(brow
     wait_background("#modified-files-head", tokens["green"])
 
 
+def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(browser, tmp_path):
+    load_finder_click_toolbar_fixture(browser, tmp_path)
+    refresh_metrics = browser.execute_script(
+        """
+        document.body.classList.add('theme-light');
+        const button = document.querySelector('#modified-files-head .changes-refresh');
+        const style = getComputedStyle(button);
+        const before = getComputedStyle(button, '::before');
+        const rect = button.getBoundingClientRect();
+        return {
+          background: style.backgroundColor,
+          borderColor: style.borderTopColor,
+          color: style.color,
+          beforeContent: before.content,
+          beforeDisplay: before.display,
+          beforeFontSize: Number.parseFloat(before.fontSize),
+          height: rect.height,
+          width: rect.width,
+        };
+        """
+    )
+    assert refresh_metrics["background"] != "rgb(255, 255, 255)"
+    assert refresh_metrics["color"] != "rgb(255, 255, 255)"
+    assert refresh_metrics["borderColor"] != "rgb(255, 255, 255)"
+    assert refresh_metrics["beforeContent"] == '"↻"'
+    assert refresh_metrics["beforeDisplay"] != "none"
+    assert refresh_metrics["beforeFontSize"] >= 12
+    assert refresh_metrics["height"] >= 18
+    assert refresh_metrics["width"] >= 20
+
+    load_pc_controls_fixture(browser, tmp_path)
+    hover_tokens = browser.execute_script(
+        """
+        document.body.classList.add('theme-light');
+        const probe = document.createElement('div');
+        probe.style.position = 'absolute';
+        probe.style.left = '-1000px';
+        probe.style.top = '-1000px';
+        probe.style.background = 'var(--file-hover-bg)';
+        document.body.appendChild(probe);
+        const hoverBg = getComputedStyle(probe).backgroundColor;
+        probe.style.background = 'var(--file-hover-border)';
+        const hoverBorder = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return {hoverBg, hoverBorder};
+        """
+    )
+    ActionChains(browser).move_to_element(browser.find_element("id", "collapsed-dir")).perform()
+    row_metrics = browser.execute_script(
+        """
+        const row = document.getElementById('collapsed-dir');
+        const style = getComputedStyle(row);
+        return {
+          background: style.backgroundColor,
+          boxShadow: style.boxShadow,
+        };
+        """
+    )
+    assert hover_tokens["hoverBg"] == "rgb(255, 242, 168)"
+    assert row_metrics["background"] == hover_tokens["hoverBg"]
+    assert hover_tokens["hoverBorder"] in row_metrics["boxShadow"]
+
+
 def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path):
     load_finder_click_toolbar_fixture(browser, tmp_path)
     metrics = browser.execute_script(

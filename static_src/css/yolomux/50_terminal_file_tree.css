@@ -1652,8 +1652,9 @@ body.theme-light .modal.about-open {
   line-height: 1.05;
   gap: 5px;
 }
-.file-tree-row:hover {
-  background: rgba(255, 255, 255, 0.04);
+.file-tree-row:not(.selected):hover {
+  background: var(--file-hover-bg);
+  box-shadow: inset 4px 0 0 var(--file-hover-border), inset 0 0 0 1px var(--file-hover-outline);
 }
 .file-tree-row.selected {
   color: var(--file-selection-text);
@@ -2054,9 +2055,6 @@ body.theme-light .file-explorer-path-inline:focus {
 body.theme-light .file-explorer-path.invalid,
 body.theme-light .file-explorer-path-inline.invalid {
   color: var(--bad);
-}
-body.theme-light .file-tree-row:hover {
-  background: rgba(15, 23, 42, 0.05);
 }
 body.theme-light .file-tree-row.current-file:not(.selected) {
   color: #173a13;

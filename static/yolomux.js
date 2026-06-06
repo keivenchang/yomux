@@ -1205,6 +1205,18 @@ function statusOk(html) {
   statusEl.innerHTML = `<span class="ok">${html}</span>`;
 }
 
+function localizedHtml(key, params) {
+  return esc(t(key, params));
+}
+
+function terminalNotConnectedText(session) {
+  return t('terminal.connection.notConnected', {session: sessionLabel(session)});
+}
+
+function terminalNotConnectedHtml(session) {
+  return esc(terminalNotConnectedText(session));
+}
+
 function readStoredTabMetaVisible() {
   return storageGet(tabMetaStorageKey) !== '0';  // absent (null) or anything but '0' => visible
 }
@@ -3131,6 +3143,10 @@ const stateDefs = {
   done: {label: 'Done', short: 'DONE', priority: 8, attention: false},
 };
 
+function stateReason(key, params = {}) {
+  return t(`state.reason.${key}`, params);
+}
+
 function stateDef(key) {
   // #121: resolve the human label through t() on each access so a runtime language switch
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
@@ -3154,7 +3170,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   const lastAction = String(auto.last_action || '').toLowerCase();
   const approvalPromptVisible = approvalPrompt.visible === true;
   const approvalYesSelected = approvalPrompt.yes_selected === true;
-  const approvalPromptText = String(approvalPrompt.text || 'approval prompt is visible');
+  const approvalPromptText = String(approvalPrompt.text || stateReason('approvalPromptVisible'));
   const screenKey = String(screen.key || '');
   const screenText = String(screen.text || '');
   const agents = Array.isArray(info?.agents) ? info.agents : [];
@@ -3172,54 +3188,57 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   const checksState = String(pr?.checks?.state || '').toLowerCase();
 
   if (terminalDisconnected(session) || (!info && terminals.has(session))) {
-    return stateValue('disconnected', 'terminal connection is closed');
+    return stateValue('disconnected', stateReason('terminalConnectionClosed'));
   }
   if (screenKey === 'disconnected') {
-    return stateValue('disconnected', screenText || 'terminal screen unavailable');
+    const disconnectedReason = screenText && screenText !== 'failed to capture pane'
+      ? screenText
+      : stateReason('terminalScreenUnavailable');
+    return stateValue('disconnected', disconnectedReason);
   }
   if (/blocked|denied|rejected/.test(lastAction)) {
-    return stateValue('blocked', 'YOLO blocked an approval prompt');
+    return stateValue('blocked', stateReason('yoloBlockedApproval'));
   }
   if (approvalPromptVisible && approvalYesSelected && autoEnabled) {
-    return stateValue('yolo-approval', 'YOLO sees the prompt and will press Enter');
+    return stateValue('yolo-approval', stateReason('yoloWillPressEnter'));
   }
   if (approvalPromptVisible && approvalYesSelected) {
-    return stateValue('needs-approval', approvalPromptText || 'approval prompt is visible');
+    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
   }
   if (approvalPromptVisible) {
-    return stateValue('needs-input', 'approval prompt is visible but Yes is not selected');
+    return stateValue('needs-input', stateReason('approvalYesNotSelected'));
   }
   if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
-    return stateValue('needs-approval', approvalPromptText || 'approval prompt is visible');
+    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
   }
   if (screenKey === 'working') {
-    return stateValue('working', screenText || 'agent is working');
+    return stateValue('working', screenText || stateReason('agentWorking'));
   }
   if (screenKey === 'needs-input') {
-    return stateValue('needs-input', screenText || 'agent is waiting for input');
+    return stateValue('needs-input', screenText || stateReason('agentWaitingInput'));
   }
   if (screenKey === 'error') {
-    return stateValue('blocked', screenText || 'agent screen detection failed');
+    return stateValue('blocked', screenText || stateReason('agentScreenFailed'));
   }
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
-    return stateValue('needs-input', 'agent is waiting for input');
+    return stateValue('needs-input', stateReason('agentWaitingInput'));
   }
   if (agents.some(agent => agentErrorIsBlocking(agent.error)) || /blocked|error|failed|failure|stuck/.test(agentText)) {
-    return stateValue('blocked', 'agent reported an error or blocker');
+    return stateValue('blocked', stateReason('agentErrorBlocker'));
   }
   if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
-    return stateValue('tests-running', 'test command is active');
+    return stateValue('tests-running', stateReason('testsActive'));
   }
   if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && (prStatus.includes('passing') || checksState === 'success')) {
-    return stateValue('ready-review', 'PR checks are passing');
+    return stateValue('ready-review', stateReason('prChecksPassing'));
   }
   if (/done|completed|complete|finished|success/.test(agentText)) {
-    return stateValue('done', 'agent status is complete');
+    return stateValue('done', stateReason('agentComplete'));
   }
   if (agents.length || panes.some(pane => pane.active) || terminals.get(session)?.socket?.readyState === WebSocket.OPEN) {
-    return stateValue('working', 'agent or active pane detected');
+    return stateValue('working', stateReason('agentActivePaneDetected'));
   }
-  return stateValue('idle', 'no active agent state detected');
+  return stateValue('idle', stateReason('noActiveAgent'));
 }
 
 function agentErrorIsBlocking(error) {
@@ -13148,10 +13167,11 @@ function showTerminalConnectionToast(session, text, countdownMs = toastDurationM
 function scheduleTerminalReconnect(session, item) {
   if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
   const delay = Math.min(8000, 1000 * 2 ** item.reconnectAttempt);
+  const seconds = Math.round(delay / 1000);
   item.reconnectAttempt += 1;
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
-  statusErr(`${esc(sessionLabel(session))} disconnected; reconnecting in ${Math.round(delay / 1000)}s`);
-  showTerminalConnectionToast(session, `Disconnected. Reconnecting in ${Math.round(delay / 1000)}s.`, delay);
+  statusErr(localizedHtml('terminal.connection.reconnectingStatus', {session: sessionLabel(session), seconds}));
+  showTerminalConnectionToast(session, t('terminal.connection.reconnectingToast', {seconds}), delay);
   item.reconnectTimer = setTimeout(() => {
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
     item.reconnectTimer = null;
@@ -20987,7 +21007,7 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
   const label = references.length === 1 ? references[0] : `${references.length} paths`;
   statusEl.innerHTML = inserted
     ? `<span class="ok">inserted ${esc(label)} into ${esc(sessionLabel(session))}</span>`
-    : `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
+    : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
 }
 
 function terminalPathDropPayload(event) {
@@ -21221,7 +21241,7 @@ function insertUploadPaths(session, paths, options = {}) {
   if (!options.silent) {
     statusEl.innerHTML = inserted
       ? `<span class="ok">inserted upload path into ${esc(sessionLabel(session))}</span>`
-      : `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
+      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
   }
   return inserted;
 }
@@ -21233,7 +21253,7 @@ function insertPasteUploadReferences(session, files, options = {}) {
   if (!options.silent) {
     statusEl.innerHTML = inserted
       ? `<span class="ok">inserted pasted image into ${esc(sessionLabel(session))}</span>`
-      : `<span class="err">${esc(sessionLabel(session))} terminal is not connected</span>`;
+      : `<span class="err">${terminalNotConnectedHtml(session)}</span>`;
   }
   return inserted;
 }
@@ -21457,12 +21477,12 @@ function activateTab(session, name, options = {}) {
 
 function tmuxWindow(session, key, label) {
   if (readOnlyMode) {
-    statusErr('readonly access cannot switch tmux windows');
+    statusErr(localizedHtml('terminal.connection.readonlyTmuxWindow'));
     return;
   }
   const item = terminals.get(session);
   if (!item || item.socket?.readyState !== WebSocket.OPEN) {
-    statusErr(`${esc(sessionLabel(session))} terminal is not connected`);
+    statusErr(terminalNotConnectedHtml(session));
     return;
   }
   fitTerminal(session);
@@ -21485,7 +21505,7 @@ async function ensureTerminalRunning(session) {
   const ensured = await ensureSession(session);
   if (!ensured) {
     const container = document.getElementById(`term-${session}`);
-    if (container) container.innerHTML = `<pre class="terminal-error">Session ${esc(sessionLabel(session))} is not available. Click or drag it again to retry.</pre>`;
+    if (container) container.innerHTML = `<pre class="terminal-error">${localizedHtml('terminal.connection.sessionUnavailableRetry', {session: sessionLabel(session)})}</pre>`;
     return;
   }
   startTerminal(session);
@@ -21628,13 +21648,13 @@ function updateTypingIndicator(session) {
 
 function updateStatus() {
   if (activeSessions.length === 0) {
-    statusEl.textContent = 'no session selected';
+    statusEl.textContent = t('terminal.status.noSessionSelected');
     statusEl.removeAttribute('title');
     return;
   }
   const activeTmuxSessions = activeSessions.filter(isTmuxSession);
   if (!activeTmuxSessions.length) {
-    statusEl.textContent = `${infoTabLabel()} shown`;
+    statusEl.textContent = t('terminal.status.viewShown', {view: infoTabLabel()});
     statusEl.removeAttribute('title');
     return;
   }
@@ -21644,8 +21664,8 @@ function updateStatus() {
     if (item?.socket?.readyState === WebSocket.OPEN) open += 1;
   }
   const total = activeTmuxSessions.length;
-  statusEl.textContent = open === total ? '' : `${open}/${total} conn`;
-  statusEl.title = open === total ? '' : `${open}/${total} terminal sockets connected`;
+  statusEl.textContent = open === total ? '' : t('terminal.connection.connShort', {open, total});
+  statusEl.title = open === total ? '' : t('terminal.connection.socketsTitle', {open, total});
 }
 
 async function toggleAutoApprove(session) {
@@ -21832,7 +21852,7 @@ function startSummaryStream(session) {
   });
   source.onerror = () => {
     if (summaryStreams.get(session) !== source) return;
-    appendSummary('\n[error] summary stream disconnected\n');
+    appendSummary(`\n${t('terminal.summary.streamDisconnected')}\n`);
     stopSummaryStream(session);
   };
 }
@@ -22059,7 +22079,7 @@ function startTranscriptStream(session, options = {}) {
     stopTranscriptStream(session);
     const pane = document.getElementById(`transcript-pane-${session}`);
     if (pane?.classList.contains('active')) {
-      statusErr(`${esc(sessionLabel(session))} transcript stream disconnected`);
+      statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
       setTimeout(() => {
         if (document.getElementById(`transcript-pane-${session}`)?.classList.contains('active')) {
           startTranscriptStream(session, {scrollBottom: false});

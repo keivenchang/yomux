@@ -188,6 +188,9 @@
   --code-invalid: #ff6673;
   --code-diff-add: #56d364;
   --code-diff-remove: #ff7b72;
+  --file-hover-bg: rgba(245, 197, 66, 0.26);
+  --file-hover-border: #f5c542;
+  --file-hover-outline: rgba(245, 197, 66, 0.42);
   --file-selection-bg: rgba(75, 190, 72, 0.46);
   --file-selection-border: #9ee85d;
   --file-selection-text: #f7fff0;
@@ -349,6 +352,9 @@ body.theme-light {
   --shadow-popover: 0 18px 50px rgba(15, 23, 42, 0.24);
   --shadow-elevated: 0 16px 42px rgba(15, 23, 42, 0.24);
   --text-selection-bg: #93c5fd;
+  --file-hover-bg: #fff2a8;
+  --file-hover-border: #d97706;
+  --file-hover-outline: rgba(217, 119, 6, 0.34);
   --file-selection-bg: rgba(90, 190, 70, 0.34);
   --file-selection-border: #3f8f2d;
   --file-selection-text: #10230b;

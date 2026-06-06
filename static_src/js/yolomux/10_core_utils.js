@@ -229,6 +229,18 @@ function statusOk(html) {
   statusEl.innerHTML = `<span class="ok">${html}</span>`;
 }
 
+function localizedHtml(key, params) {
+  return esc(t(key, params));
+}
+
+function terminalNotConnectedText(session) {
+  return t('terminal.connection.notConnected', {session: sessionLabel(session)});
+}
+
+function terminalNotConnectedHtml(session) {
+  return esc(terminalNotConnectedText(session));
+}
+
 function readStoredTabMetaVisible() {
   return storageGet(tabMetaStorageKey) !== '0';  // absent (null) or anything but '0' => visible
 }

@@ -806,6 +806,10 @@ const stateDefs = {
   done: {label: 'Done', short: 'DONE', priority: 8, attention: false},
 };
 
+function stateReason(key, params = {}) {
+  return t(`state.reason.${key}`, params);
+}
+
 function stateDef(key) {
   // #121: resolve the human label through t() on each access so a runtime language switch
   // re-localizes it (stateDefs is frozen at load). Compact badge text is localized too.
@@ -829,7 +833,7 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   const lastAction = String(auto.last_action || '').toLowerCase();
   const approvalPromptVisible = approvalPrompt.visible === true;
   const approvalYesSelected = approvalPrompt.yes_selected === true;
-  const approvalPromptText = String(approvalPrompt.text || 'approval prompt is visible');
+  const approvalPromptText = String(approvalPrompt.text || stateReason('approvalPromptVisible'));
   const screenKey = String(screen.key || '');
   const screenText = String(screen.text || '');
   const agents = Array.isArray(info?.agents) ? info.agents : [];
@@ -847,54 +851,57 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   const checksState = String(pr?.checks?.state || '').toLowerCase();
 
   if (terminalDisconnected(session) || (!info && terminals.has(session))) {
-    return stateValue('disconnected', 'terminal connection is closed');
+    return stateValue('disconnected', stateReason('terminalConnectionClosed'));
   }
   if (screenKey === 'disconnected') {
-    return stateValue('disconnected', screenText || 'terminal screen unavailable');
+    const disconnectedReason = screenText && screenText !== 'failed to capture pane'
+      ? screenText
+      : stateReason('terminalScreenUnavailable');
+    return stateValue('disconnected', disconnectedReason);
   }
   if (/blocked|denied|rejected/.test(lastAction)) {
-    return stateValue('blocked', 'YOLO blocked an approval prompt');
+    return stateValue('blocked', stateReason('yoloBlockedApproval'));
   }
   if (approvalPromptVisible && approvalYesSelected && autoEnabled) {
-    return stateValue('yolo-approval', 'YOLO sees the prompt and will press Enter');
+    return stateValue('yolo-approval', stateReason('yoloWillPressEnter'));
   }
   if (approvalPromptVisible && approvalYesSelected) {
-    return stateValue('needs-approval', approvalPromptText || 'approval prompt is visible');
+    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
   }
   if (approvalPromptVisible) {
-    return stateValue('needs-input', 'approval prompt is visible but Yes is not selected');
+    return stateValue('needs-input', stateReason('approvalYesNotSelected'));
   }
   if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
-    return stateValue('needs-approval', approvalPromptText || 'approval prompt is visible');
+    return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
   }
   if (screenKey === 'working') {
-    return stateValue('working', screenText || 'agent is working');
+    return stateValue('working', screenText || stateReason('agentWorking'));
   }
   if (screenKey === 'needs-input') {
-    return stateValue('needs-input', screenText || 'agent is waiting for input');
+    return stateValue('needs-input', screenText || stateReason('agentWaitingInput'));
   }
   if (screenKey === 'error') {
-    return stateValue('blocked', screenText || 'agent screen detection failed');
+    return stateValue('blocked', screenText || stateReason('agentScreenFailed'));
   }
   if (/needs input|waiting for input|awaiting input|user input|input required|waiting for user|paused/.test(agentText)) {
-    return stateValue('needs-input', 'agent is waiting for input');
+    return stateValue('needs-input', stateReason('agentWaitingInput'));
   }
   if (agents.some(agent => agentErrorIsBlocking(agent.error)) || /blocked|error|failed|failure|stuck/.test(agentText)) {
-    return stateValue('blocked', 'agent reported an error or blocker');
+    return stateValue('blocked', stateReason('agentErrorBlocker'));
   }
   if (/pytest|cargo test|npm test|pnpm test|yarn test|vitest|jest|ctest|go test|python3 -m pytest|python -m pytest|ruff|mypy|pre-commit/.test(paneText)) {
-    return stateValue('tests-running', 'test command is active');
+    return stateValue('tests-running', stateReason('testsActive'));
   }
   if (pr?.number && !pr.draft && prStatus !== 'closed' && prStatus !== 'merged' && (prStatus.includes('passing') || checksState === 'success')) {
-    return stateValue('ready-review', 'PR checks are passing');
+    return stateValue('ready-review', stateReason('prChecksPassing'));
   }
   if (/done|completed|complete|finished|success/.test(agentText)) {
-    return stateValue('done', 'agent status is complete');
+    return stateValue('done', stateReason('agentComplete'));
   }
   if (agents.length || panes.some(pane => pane.active) || terminals.get(session)?.socket?.readyState === WebSocket.OPEN) {
-    return stateValue('working', 'agent or active pane detected');
+    return stateValue('working', stateReason('agentActivePaneDetected'));
   }
-  return stateValue('idle', 'no active agent state detected');
+  return stateValue('idle', stateReason('noActiveAgent'));
 }
 
 function agentErrorIsBlocking(error) {
