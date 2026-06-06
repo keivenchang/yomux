@@ -1,7 +1,6 @@
 import os
 import threading
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
 
 from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from yolomux_lib.common import UPLOAD_MAX_BYTES

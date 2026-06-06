@@ -1,12 +1,13 @@
 import json
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from yolomux_lib import filesystem
 from yolomux_lib.filesystem import FilesystemError
+
+from _git_helpers import git, init_repo
 
 
 def test_list_directory_returns_entries(tmp_path):
@@ -39,8 +40,8 @@ def test_list_directory_returns_entries(tmp_path):
 def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "checkout", "-b", "feature/repo-row"], cwd=repo, check=True, capture_output=True, text=True)
+    git(repo, "init")
+    git(repo, "checkout", "-b", "feature/repo-row")
 
     payload = filesystem.list_directory(str(tmp_path))
 
@@ -163,19 +164,21 @@ def test_list_directory_not_a_dir(tmp_path):
     assert info.value.status == 400
 
 
-def test_list_directory_sorts_from_entry_info_not_extra_stats():
-    source = Path("yolomux_lib/filesystem.py").read_text(encoding="utf-8")
-    start = source.index("def list_directory")
-    end = source.index("def _fuzzy_subsequence_match", start)
-    body = source[start:end]
+def test_list_directory_sorts_dirs_first_then_case_insensitive_name(tmp_path):
+    # Entries come back sorted dirs-first, then case-INsensitively by name (from the assembled entry
+    # list, not raw os.listdir order). Mixed case + mixed kind exercises both sort keys.
+    (tmp_path / "Zebra").mkdir()
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "beta.txt").write_text("b", encoding="utf-8")
+    (tmp_path / "Apple.txt").write_text("a", encoding="utf-8")
 
-    assert "entries.sort" in body
-    assert "sorted(os.listdir" not in body
-    assert "lambda n" not in body
+    names = [entry["name"] for entry in filesystem.list_directory(str(tmp_path))["entries"]]
+
+    assert names == ["alpha", "Zebra", "Apple.txt", "beta.txt"]
 
 
 def test_search_files_returns_fuzzy_matches_and_skips_heavy_dirs_inside_repo(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "init")
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "hello_x_and_y.py").write_text("print('ok')\n", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()
@@ -203,7 +206,7 @@ def test_search_files_non_repo_root_stays_shallow_but_indexes_child_repos(tmp_pa
     (root / ".cache" / "cache.txt").write_text("skip\n", encoding="utf-8")
     repo = root / "project"
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    git(repo, "init")
     (repo / "src").mkdir()
     (repo / "src" / "deep.py").write_text("print('repo')\n", encoding="utf-8")
 
@@ -252,7 +255,7 @@ def test_search_files_ranks_exact_filename_above_large_generated_sibling(tmp_pat
 def test_search_files_matches_absolute_path_segments(tmp_path):
     project = tmp_path / "home" / "keivenc" / "project"
     project.mkdir(parents=True)
-    subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True, text=True)
+    git(project, "init")
     (project / "README.md").write_text("# ok\n", encoding="utf-8")
 
     payload = filesystem.search_files(str(project), "hokread", 20)
@@ -261,7 +264,7 @@ def test_search_files_matches_absolute_path_segments(tmp_path):
 
 
 def test_search_files_marks_generated_upload_names(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "init")
     upload = tmp_path / "20260531-001-diagram.png"
     normal = tmp_path / "diagram.png"
     upload.write_bytes(b"png")
@@ -296,14 +299,11 @@ def test_read_file_returns_text(tmp_path):
 def test_read_file_reports_git_tracked(tmp_path):
     # A committed file is tracked; an untracked sibling and a file outside any repo are not.
     # The editor uses this flag to hide its blame/diff buttons for files with no git history.
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    init_repo(tmp_path)
     tracked = tmp_path / "tracked.txt"
     tracked.write_text("committed\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(tmp_path), "commit", "-q", "-m", "add"],
-        check=True,
-    )
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-q", "-m", "add")
     untracked = tmp_path / "untracked.txt"
     untracked.write_text("new\n", encoding="utf-8")
     tracked_payload = filesystem.read_file(str(tracked))
@@ -314,20 +314,14 @@ def test_read_file_reports_git_tracked(tmp_path):
 
 
 def test_read_file_reports_file_level_git_history(tmp_path):
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    init_repo(tmp_path)
     tracked = tmp_path / "tracked.txt"
     tracked.write_text("one\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(tmp_path), "commit", "-q", "-m", "add tracked"],
-        check=True,
-    )
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-q", "-m", "add tracked")
     tracked.write_text("two\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(tmp_path), "commit", "-q", "-m", "update tracked"],
-        check=True,
-    )
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "commit", "-q", "-m", "update tracked")
 
     payload = filesystem.read_file(str(tracked))
 
@@ -464,7 +458,7 @@ def test_delete_path_removes_directory_tree(tmp_path):
 
 
 def test_path_info_returns_git_relative_path(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "init")
     target = tmp_path / "src" / "main.py"
     target.parent.mkdir()
     target.write_text("print('hi')\n", encoding="utf-8")
@@ -477,13 +471,11 @@ def test_path_info_returns_git_relative_path(tmp_path):
 
 
 def test_diff_file_returns_git_diff_for_tracked_file(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "app.py"
     target.write_text("print('one')\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "add", "app.py")
+    git(tmp_path, "commit", "-m", "base")
     target.write_text("print('two')\n", encoding="utf-8")
 
     result = filesystem.diff_file(str(target))
@@ -498,7 +490,7 @@ def test_diff_file_returns_git_diff_for_tracked_file(tmp_path):
 
 
 def test_diff_file_returns_no_index_diff_for_untracked_file(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "init")
     target = tmp_path / "new.txt"
     target.write_text("hello\n", encoding="utf-8")
 
@@ -511,13 +503,11 @@ def test_diff_file_returns_no_index_diff_for_untracked_file(tmp_path):
 
 
 def test_diff_file_returns_head_content_for_deleted_file(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "gone.txt"
     target.write_text("old\n", encoding="utf-8")
-    subprocess.run(["git", "add", "gone.txt"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "add", "gone.txt")
+    git(tmp_path, "commit", "-m", "base")
     target.unlink()
 
     result = filesystem.diff_file(str(target))
@@ -528,17 +518,15 @@ def test_diff_file_returns_head_content_for_deleted_file(tmp_path):
 
 
 def test_diff_file_supports_commit_to_commit_refs(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "app.py"
     target.write_text("one\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "one"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    older = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    git(tmp_path, "add", "app.py")
+    git(tmp_path, "commit", "-m", "one")
+    older = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
     target.write_text("two\n", encoding="utf-8")
-    subprocess.run(["git", "commit", "-am", "two"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    newer = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    git(tmp_path, "commit", "-am", "two")
+    newer = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
     result = filesystem.diff_file(str(target), from_ref=older, to_ref=newer)
 
@@ -551,13 +539,11 @@ def test_diff_file_supports_commit_to_commit_refs(tmp_path):
 
 
 def test_diff_file_falls_back_when_requested_ref_is_unknown_in_repo(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "app.py"
     target.write_text("one\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "one"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    git(tmp_path, "add", "app.py")
+    git(tmp_path, "commit", "-m", "one")
     target.write_text("two\n", encoding="utf-8")
 
     result = filesystem.diff_file(str(target), from_ref="not-in-this-repo", to_ref="current")
@@ -569,17 +555,15 @@ def test_diff_file_falls_back_when_requested_ref_is_unknown_in_repo(tmp_path):
 
 
 def test_diff_file_falls_back_when_requested_ref_order_is_invalid(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    init_repo(tmp_path)
     target = tmp_path / "app.py"
     target.write_text("one\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "one"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    older = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    git(tmp_path, "add", "app.py")
+    git(tmp_path, "commit", "-m", "one")
+    older = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
     target.write_text("two\n", encoding="utf-8")
-    subprocess.run(["git", "commit", "-am", "two"], cwd=tmp_path, check=True, capture_output=True, text=True)
-    newer = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    git(tmp_path, "commit", "-am", "two")
+    newer = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
     target.write_text("three\n", encoding="utf-8")
 
     result = filesystem.diff_file(str(target), from_ref=newer, to_ref=older)

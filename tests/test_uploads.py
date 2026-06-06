@@ -1,10 +1,11 @@
+import inspect
 import os
-from pathlib import Path
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
 
 from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
+from yolomux_lib.common import UPLOAD_MAX_BYTES
 from yolomux_lib.common import UPLOAD_MAX_FILES
+from yolomux_lib.server import Handler
 from yolomux_lib.uploads import parse_multipart_upload
 from yolomux_lib.uploads import unique_upload_path
 
@@ -32,17 +33,18 @@ def test_unique_upload_path_increments_template_sequence(tmp_path):
 
 
 def test_upload_default_size_cap_is_low_enough_for_buffered_parser():
-    source = Path("yolomux_lib/common.py").read_text(encoding="utf-8")
-
-    assert 'UPLOAD_MAX_BYTES = positive_env_int("YOLOMUX_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)' in source
+    # The whole multipart body is buffered in memory, so the default cap must stay modest.
+    assert UPLOAD_MAX_BYTES == 20 * 1024 * 1024
 
 
 def test_upload_request_limit_comes_from_live_settings():
-    source = Path("yolomux_lib/server.py").read_text(encoding="utf-8")
+    # Scoped to handle_upload (inspect, not full-file string slicing): the per-request cap comes from
+    # the LIVE settings (app.upload_max_bytes()), not the static module constant, and feeds the parser.
+    body = inspect.getsource(Handler.handle_upload)
 
-    assert "self.server.app.upload_max_bytes()" in source
-    assert "content_length > UPLOAD_MAX_BYTES" not in source
-    assert "parse_multipart_upload(self.headers.get(\"Content-Type\", \"\"), body, max_part_bytes=upload_max_bytes)" in source
+    assert "self.server.app.upload_max_bytes()" in body
+    assert "content_length > UPLOAD_MAX_BYTES" not in body
+    assert 'parse_multipart_upload(self.headers.get("Content-Type", ""), body, max_part_bytes=upload_max_bytes)' in body
 
 
 def multipart_body(parts, boundary="test-boundary"):

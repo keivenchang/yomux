@@ -3,10 +3,17 @@ from typing import Any
 
 import pytest
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
-os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
 
 from yolomux_lib import auto_approve_worker
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    # process_once's post-action settle is `self.stop_event.wait(3.0)` (~3s of real wall time per test
+    # with no effect on the mocked screen). Make Event.wait return its set-state immediately instead of
+    # blocking — semantics preserved (False = not stopped), ~3s saved per test. Also no-op time.sleep.
+    monkeypatch.setattr(auto_approve_worker.threading.Event, "wait", lambda self, timeout=None: self.is_set())
+    monkeypatch.setattr(auto_approve_worker.time, "sleep", lambda *_args, **_kwargs: None)
 
 
 class DummyApproveModule:

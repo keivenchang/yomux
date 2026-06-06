@@ -1,9 +1,7 @@
 import json
 import os
-import subprocess
 import time
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
 
 from yolomux_lib.activity_summary import activity_signature
 from yolomux_lib.activity_summary import build_global_activity_summary
@@ -18,6 +16,8 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.session_files import session_files_payload_for_info
+
+from _git_helpers import git, init_repo
 
 
 def make_agent(session, transcript, cwd):
@@ -39,13 +39,11 @@ def make_agent(session, transcript, cwd):
 def test_activity_summary_reports_agent_repo_goal_and_file_counts(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+    init_repo(repo)
     target = repo / "app.py"
     target.write_text("old\n", encoding="utf-8")
-    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-m", "base")
     target.write_text("new\n", encoding="utf-8")
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text(

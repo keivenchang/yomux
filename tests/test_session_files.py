@@ -1,19 +1,14 @@
 import json
 import os
-import subprocess
 import time
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
-os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
 
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib import session_files
 
-
-def git(repo, *args):
-    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True, text=True)
+from _git_helpers import git
 
 
 def agent(kind, transcript, cwd):
@@ -123,24 +118,31 @@ def test_session_files_payload_keeps_transcript_paths_when_branch_is_clean(tmp_p
 
     payload = session_files.session_files_payload_for_info(info, hours=24, now=2000)
 
-    assert payload["files"] == [
-        {
-            "session": "s1",
-            "agents": ["codex"],
-            "agent": "codex",
-            "status": "T",
-            "repo": str(repo),
-            "path": "tracked.txt",
-            "abs_path": str(tracked),
-            "mtime": 1500,
-            "size": tracked.stat().st_size,
-            "source": "transcript",
-            "added": None,
-            "removed": None,
-            "uploaded": False,
-        }
-    ]
-    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 1, "added": 0, "removed": 0, "from_ref": "default", "to_ref": "base", "error": ""}]
+    assert len(payload["files"]) == 1
+    item = payload["files"][0]
+    assert item["session"] == "s1"
+    assert item["agents"] == ["codex"]
+    assert item["agent"] == "codex"
+    assert item["status"] == "T"
+    assert item["repo"] == str(repo)
+    assert item["path"] == "tracked.txt"
+    assert item["abs_path"] == str(tracked)
+    assert item["mtime"] == 1500
+    assert item["source"] == "transcript"
+    assert item["added"] is None
+    assert item["removed"] is None
+    assert item["uploaded"] is False
+
+    assert len(payload["repos"]) == 1
+    repo_summary = payload["repos"][0]
+    assert repo_summary["repo"] == str(repo)
+    assert repo_summary["count"] == 1
+    assert repo_summary["touched_count"] == 1
+    assert repo_summary["added"] == 0
+    assert repo_summary["removed"] == 0
+    assert repo_summary["from_ref"] == "default"
+    assert repo_summary["to_ref"] == "base"
+    assert repo_summary["error"] == ""
 
 
 def test_session_files_payload_collects_multiple_agents_for_one_file(tmp_path):

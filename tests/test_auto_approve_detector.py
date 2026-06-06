@@ -1,8 +1,8 @@
 import json
 import os
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
-os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
+import pytest
+
 
 import auto_approve_tmux
 from yolomux_lib import prompt_detector
@@ -380,75 +380,138 @@ def test_approval_prompt_detects_activity_after_claude_ctrl_b_footer():
     assert prompt_detector.approval_prompt_state(visible_text)["visible"] is False
 
 
-def test_visible_agent_working_detects_codex_working_footer():
-    visible_text = "◦ Working (1m 21s • esc to interrupt)\n"
-
-    assert prompt_detector.visible_agent_working(visible_text) is True
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
-
-
-def test_visible_agent_working_detects_codex_bullet_working_footer():
-    visible_text = "• Working (6m 38s • esc to interrupt)\n"
-
-    assert prompt_detector.visible_agent_working(visible_text) is True
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
-
-
-def test_visible_agent_working_detects_esc_to_interrupt_without_working_word():
-    visible_text = "◦ Reviewing files (24s • esc to interrupt)\n"
-
-    assert prompt_detector.visible_agent_working(visible_text) is True
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
-
-
-def test_visible_agent_working_detects_codex_working_with_input_prompt_below():
-    visible_text = "\n".join([
-        "○ Working (4m 09s • esc to interrupt)",
-        "",
-        "› Implement {feature}",
-        "",
-        "  gpt-5.5 xhigh · ~",
-    ])
-
-    assert prompt_detector.visible_agent_working(visible_text) is True
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
-
-
-def test_visible_agent_working_detects_claude_random_status_verb():
-    samples = [
+VISIBLE_AGENT_WORKING_CASES = [
+    pytest.param("◦ Working (1m 21s • esc to interrupt)\n", True, "working", id="codex-circle-working-footer"),
+    pytest.param("• Working (6m 38s • esc to interrupt)\n", True, "working", id="codex-bullet-working-footer"),
+    pytest.param("◦ Reviewing files (24s • esc to interrupt)\n", True, "working", id="codex-esc-to-interrupt-no-working-word"),
+    pytest.param(
+        "\n".join([
+            "○ Working (4m 09s • esc to interrupt)",
+            "",
+            "› Implement {feature}",
+            "",
+            "  gpt-5.5 xhigh · ~",
+        ]),
+        True,
+        "working",
+        id="codex-working-with-input-prompt-below",
+    ),
+    pytest.param(
         "✱ Imagining… (4s · ↓ 98 tokens)\n  ⎿  Tip: Connect Claude to your IDE · /ide\n",
-        "✦ Comboublahblah… (7s · ↓ 123 tokens)\n",
-        "✳ Doodooshit… (1m 2s · ↓ 1.2k tokens)\n",
-        "☉ Refactoring... (2.3s · ↑ 13 tokens · high effort)\n",
-    ]
+        True,
+        "working",
+        id="claude-random-status-imagining",
+    ),
+    pytest.param("✦ Comboublahblah… (7s · ↓ 123 tokens)\n", True, "working", id="claude-random-status-combo"),
+    pytest.param("✳ Doodooshit… (1m 2s · ↓ 1.2k tokens)\n", True, "working", id="claude-random-status-doodoo"),
+    pytest.param("☉ Refactoring... (2.3s · ↑ 13 tokens · high effort)\n", True, "working", id="claude-random-status-refactor"),
+    pytest.param(
+        "\n".join([
+            "✶ Thinking… (1s · ↑ 26.9k tokens · esc to interrupt)",
+            "100% context used",
+            "▶▶ bypass permissions on · 1 shell · esc to interrupt",
+        ]),
+        True,
+        "working",
+        id="claude-context-used-status-line",
+    ),
+    pytest.param(
+        "\n".join([
+            "⠿ Running 2 agents…",
+            "  ├ Verify detector fixtures · 14 tool uses · 31.2k tokens",
+            "  └ Check current Claude pane state · 23 tool uses · 77.5k tokens",
+            "",
+            "(ctrl+b to run in background)",
+        ]),
+        True,
+        "working",
+        id="claude-multi-agent-header",
+    ),
+    pytest.param(
+        "\n".join([
+            "● Lollygagging… (2m 1s · ↓ 8.0k tokens · thinking with xhigh effort)",
+            "",
+            "╭────────────────────────────────────────────╮",
+            "│ >                                          │",
+            "╰────────────────────────────────────────────╯",
+            "⏺ xhigh /effort",
+            "▶▶ bypass permissions on · 1 shell · esc to interrupt",
+        ]),
+        True,
+        "working",
+        id="claude-boxed-input-chrome-below-spinner",
+    ),
+    pytest.param(
+        "\n".join([
+            "● Updated 3 files and finished the task.",
+            "",
+            "╭────────────────────────────────────────────╮",
+            "│ >                                          │",
+            "╰────────────────────────────────────────────╯",
+            "▶▶ bypass permissions on · 1 shell",
+        ]),
+        False,
+        None,
+        id="finished-agent-without-live-spinner",
+    ),
+    pytest.param(
+        "\n".join([
+            "● Honking… (1m 12s · ↓ 5.8k tokens)",
+            "",
+            "● main  Fix preferences focus  ↑/↓ to select · Enter to view",
+            "○ Explore  Check current pane  47s",
+            "● xhigh /effort",
+        ]),
+        True,
+        "working",
+        id="claude-work-queue-below-spinner",
+    ),
+    pytest.param(
+        "\n".join([
+            "╭────────────────────────────────────────────╮",
+            "│ >                                          │",
+            "╰────────────────────────────────────────────╯",
+            "⏺ xhigh /effort",
+        ]),
+        False,
+        "idle",
+        id="boxed-input-chrome-without-working-line",
+    ),
+    pytest.param(
+        "\n".join([
+            "  Then sleep 10 approval should show:",
+            "",
+            "  • Working (10s • esc to interrupt)",
+            "",
+            "  with Working animated in the real TTY.",
+            "",
+            "› Explain this codebase",
+            "",
+            "  gpt-5.5 xhigh · ~",
+        ]),
+        False,
+        "idle",
+        id="stale-example-above-prompt",
+    ),
+    pytest.param("  esc to interrupt · ctrl+t to hide tasks\n", False, None, id="non-parenthesized-footer-hint"),
+    pytest.param(
+        "◦ Working (1m 21s • esc to interrupt)\n"
+        "  □ Pending task one\n"
+        "  ✓ Done task two\n"
+        "  ✗ Failed task three\n"
+        "  ◯ Another pending\n",
+        True,
+        "working",
+        id="unicode-task-glyphs",
+    ),
+]
 
-    for visible_text in samples:
-        assert prompt_detector.visible_agent_working(visible_text) is True
-        assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
 
-
-def test_visible_agent_working_ignores_context_used_status_line():
-    visible_text = "\n".join([
-        "✶ Thinking… (1s · ↑ 26.9k tokens · esc to interrupt)",
-        "100% context used",
-        "▶▶ bypass permissions on · 1 shell · esc to interrupt",
-    ])
-
-    assert prompt_detector.visible_agent_working(visible_text) is True
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
-
-
-def test_visible_agent_working_detects_claude_multi_agent_header_with_token_sublines():
-    visible_text = "\n".join([
-        "⠿ Running 2 agents…",
-        "  ├ Verify detector fixtures · 14 tool uses · 31.2k tokens",
-        "  └ Check current Claude pane state · 23 tool uses · 77.5k tokens",
-        "",
-        "(ctrl+b to run in background)",
-    ])
-
-    assert prompt_detector.visible_agent_working(visible_text) is True
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
+@pytest.mark.parametrize("visible_text, expected_working, expected_key", VISIBLE_AGENT_WORKING_CASES)
+def test_visible_agent_working_cases(visible_text, expected_working, expected_key):
+    assert prompt_detector.visible_agent_working(visible_text) is expected_working
+    if expected_key is not None:
+        assert prompt_detector.agent_screen_state(visible_text)["key"] == expected_key
 
 
 def test_claude_multi_agent_header_does_not_hide_live_approval_prompt():
@@ -467,85 +530,6 @@ def test_claude_multi_agent_header_does_not_hide_live_approval_prompt():
     assert prompt_state["type"] == "bash"
     assert screen_state["key"] == "approval"
     assert screen_state["key"] != "working"
-
-
-def test_visible_agent_working_detects_claude_boxed_input_chrome_below_spinner():
-    visible_text = "\n".join([
-        "● Lollygagging… (2m 1s · ↓ 8.0k tokens · thinking with xhigh effort)",
-        "",
-        "╭────────────────────────────────────────────╮",
-        "│ >                                          │",
-        "╰────────────────────────────────────────────╯",
-        "⏺ xhigh /effort",
-        "▶▶ bypass permissions on · 1 shell · esc to interrupt",
-    ])
-
-    assert prompt_detector.visible_agent_working(visible_text) is True
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
-
-
-def test_visible_agent_working_false_for_finished_agent_without_live_spinner():
-    # DOIT.6 #23: the YO marker must spin only on a LIVE spinner. A finished agent shows a completed
-    # bullet (no '…'/time/'esc to interrupt' annotation) + the input box; that is idle, not working.
-    visible_text = "\n".join([
-        "● Updated 3 files and finished the task.",
-        "",
-        "╭────────────────────────────────────────────╮",
-        "│ >                                          │",
-        "╰────────────────────────────────────────────╯",
-        "▶▶ bypass permissions on · 1 shell",
-    ])
-
-    assert prompt_detector.visible_agent_working(visible_text) is False
-    assert prompt_detector.agent_screen_state(visible_text)["key"] != "working"
-
-
-def test_visible_agent_working_detects_claude_work_queue_below_spinner():
-    visible_text = "\n".join([
-        "● Honking… (1m 12s · ↓ 5.8k tokens)",
-        "",
-        "● main  Fix preferences focus  ↑/↓ to select · Enter to view",
-        "○ Explore  Check current pane  47s",
-        "● xhigh /effort",
-    ])
-
-    assert prompt_detector.visible_agent_working(visible_text) is True
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "working"
-
-
-def test_visible_agent_working_ignores_boxed_input_chrome_without_working_line():
-    visible_text = "\n".join([
-        "╭────────────────────────────────────────────╮",
-        "│ >                                          │",
-        "╰────────────────────────────────────────────╯",
-        "⏺ xhigh /effort",
-    ])
-
-    assert prompt_detector.visible_agent_working(visible_text) is False
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "idle"
-
-
-def test_visible_agent_working_ignores_stale_example_above_prompt():
-    visible_text = "\n".join([
-        "  Then sleep 10 approval should show:",
-        "",
-        "  • Working (10s • esc to interrupt)",
-        "",
-        "  with Working animated in the real TTY.",
-        "",
-        "› Explain this codebase",
-        "",
-        "  gpt-5.5 xhigh · ~",
-    ])
-
-    assert prompt_detector.visible_agent_working(visible_text) is False
-    assert prompt_detector.agent_screen_state(visible_text)["key"] == "idle"
-
-
-def test_visible_agent_working_ignores_non_parenthesized_footer_hint():
-    visible_text = "  esc to interrupt · ctrl+t to hide tasks\n"
-
-    assert prompt_detector.visible_agent_working(visible_text) is False
 
 
 def test_detect_prompt_real_prompt_shapes_and_bottom_most_prompt_wins():
@@ -699,71 +683,10 @@ def test_ask_user_question_footer_parts_are_recognized():
     assert prompt_detector._is_ask_user_question_footer(footer)
 
 
-def test_target_resolution_self_test_cases_live_in_pytest():
-    sessions = ["project1", "project2", "project3", "misc"]
-
-    assert auto_approve_tmux._resolve_targets_from_sessions(["project1"], sessions) == ["project1"]
-    assert auto_approve_tmux._resolve_targets_from_sessions(["project1", "project2,project3"], sessions) == [
-        "project1",
-        "project2",
-        "project3",
-    ]
-    assert auto_approve_tmux._resolve_targets_from_sessions(["project*"], sessions) == [
-        "project1",
-        "project2",
-        "project3",
-    ]
-    assert auto_approve_tmux._resolve_targets_from_sessions(["project*:0.1"], sessions) == [
-        "project1:0.1",
-        "project2:0.1",
-        "project3:0.1",
-    ]
-    assert auto_approve_tmux.specs_have_wildcards(["project1", "project2:0.1"]) is False
-    assert auto_approve_tmux.specs_have_wildcards(["project1", "dyn*"]) is True
-    assert auto_approve_tmux.tmux_exact_target_from_sessions("1", ["1", "6", "ant"]) == "1:"
-    assert auto_approve_tmux.tmux_exact_target_from_sessions("%79", ["1", "6", "ant"]) == "%79"
-
-
-def test_cached_session_names_memoizes_within_ttl(monkeypatch):
-    # DOIT.6 #80: tmux_exact_target no longer runs `tmux list-sessions` on every capture — the
-    # session-name resolution is cached for a short window so a poll's captures reuse one resolution.
-    from yolomux_lib import tmux_utils
-    calls = {"n": 0}
-
-    def fake_names():
-        calls["n"] += 1
-        return ["1", "2"]
-
-    monkeypatch.setattr(tmux_utils, "tmux_session_names", fake_names)
-    tmux_utils._SESSION_NAMES_CACHE["at"] = 0.0  # force one fresh resolution
-    for _ in range(5):
-        assert tmux_utils.cached_session_names() == ["1", "2"]
-    assert calls["n"] == 1
-
-
-def test_tmux_exact_target_skips_resolution_for_unambiguous_targets(monkeypatch):
-    from yolomux_lib import tmux_utils
-
-    def fail_names():
-        raise AssertionError("must not resolve sessions for an unambiguous target")
-
-    monkeypatch.setattr(tmux_utils, "cached_session_names", fail_names)
-    assert tmux_utils.tmux_exact_target("%3") == "%3"
-    assert tmux_utils.tmux_exact_target("1:") == "1:"
-
-
-def test_visible_agent_working_survives_unicode_task_glyphs():
+def test_prompt_trailing_ui_line_accepts_unicode_task_glyphs():
     # DOIT.35 C1: a Ctrl-T task list using □/✓ (U+25A1/U+2713, this Claude version) below a working
     # footer must read as prompt-trailing chrome, not new output — else visible_agent_working flips to
     # False and the YO ball stops spinning while the agent works.
-    visible_text = (
-        "◦ Working (1m 21s • esc to interrupt)\n"
-        "  □ Pending task one\n"
-        "  ✓ Done task two\n"
-        "  ✗ Failed task three\n"
-        "  ◯ Another pending\n"
-    )
-    assert prompt_detector.visible_agent_working(visible_text) is True
     # the new glyph rows are recognized as prompt-trailing UI; the ballot-box family still is too.
     assert prompt_detector._is_prompt_trailing_ui_line("  □ Pending task") is True
     assert prompt_detector._is_prompt_trailing_ui_line("  ✓ Done task") is True

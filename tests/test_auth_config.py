@@ -260,20 +260,6 @@ def test_bootstrap_dev_flag_is_off_by_default_and_set_under_dev():
     assert boot(web.html_page([], "admin", dev=True))["dev"] is True
 
 
-def test_bootstrap_json_not_html_escaped_so_angle_brackets_round_trip():
-    # TODO "Bug Fixes": a <script> element's text is NOT HTML-decoded, so the bootstrap JSON must be
-    # JSON-unicode-escaped (</>/&), NOT html.escape'd — otherwise a value like the
-    # YO!agent answer-format "<topic>" comes back as the literal "&lt;topic&gt;" and the prefs textarea
-    # double-escapes it. The default yoagent.format contains "<topic>", so it exercises this.
-    page = web.html_page([])
-    script = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL).group(1)
-    # The raw script text uses the JSON \u escape for breakout chars, never HTML entities.
-    assert "\\u003c" in script and "&lt;" not in script
-    # JSON.parse (here json.loads) of the script text yields the literal characters, not entities.
-    fmt = json.loads(script)["settingsPayload"]["settings"]["yoagent"]["format"]
-    assert "<topic>" in fmt and "&lt;topic&gt;" not in fmt
-
-
 def test_bootstrap_json_escapes_breakout_chars_without_html_entities():
     page = web.html_page([])
     match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)

@@ -425,6 +425,7 @@ globalThis.__layoutTestApi = {
   childPathParts,
   inactiveTabItems,
   infoItemId,
+  infoPanelSubTabForTest() { return infoPanelSubTab; },
   itemInLayout,
   itemLabel,
   itemParam,
@@ -992,6 +993,9 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux('?keep=1');
+  assert.equal(api.layoutFromParam('', ''), null, 'empty layout param falls back to default layout');
+  assert.equal(api.layoutFromParam(null, ''), null, 'null layout param falls back to default layout');
+  assert.equal(api.layoutFromParam('not-a-layout', ''), null, 'garbage layout param falls back to default layout');
   const slots = nestedSlots(api);
   const url = api.setLayoutSlotsForTest(slots);
   const params = parseUrl(url);
@@ -1002,6 +1006,17 @@ function makeFileTree(paths) {
 
   const decoded = api.layoutFromParam(params.get('layout'), params.get('tabs'));
   assert.deepStrictEqual(canonical(api.serialize(decoded)), canonical(api.serialize(slots)));
+
+  const duplicateAcrossSlots = api.layoutFromParam('row@0(left,slot1)', 'left:1;slot1:1,2*');
+  assert.deepStrictEqual(canonical(api.serialize(duplicateAcrossSlots)), {
+    tree: {split: 'row', pct: 5, children: [{slot: 'left'}, {slot: 'slot1'}]},
+    panes: {
+      left: {tabs: ['1'], active: '1'},
+      slot1: {tabs: ['2'], active: '2'},
+    },
+  }, 'layout parser dedupes duplicate sessions across slots and clamps low split percentages');
+  const highPctLayout = api.layoutFromParam('row@120(left,slot1)', 'left:1;slot1:2');
+  assert.equal(api.serialize(highPctLayout).tree.pct, 95, 'layout parser clamps high split percentages');
 
   const reloaded = loadYolomux(`?${url.split('?')[1] || ''}`);
   assert.deepStrictEqual(canonical(reloaded.serialize(reloaded.currentSlots())), canonical(api.serialize(slots)));
@@ -1051,6 +1066,15 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
     panes: {left: {tabs: ['__files__'], active: '__files__'}},
   });
   assert.equal(api.fileExplorerModeForTest(), 'diff', 'legacy changes-only URLs restore Finder diff mode');
+}
+
+for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
+  const api = loadYolomux(`?sessions=${yoagentToken}&layout=left&tabs=left:${yoagentToken}`, ['1']);
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {slot: 'left'},
+    panes: {left: {tabs: ['__info__'], active: '__info__'}},
+  });
+  assert.equal(api.infoPanelSubTabForTest(), 'yoagent', `${yoagentToken} deep-link pre-selects the YO!agent sub-tab`);
 }
 
 {
@@ -1576,7 +1600,6 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)[\s\S]*?renderInfoPanel\(\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, allowBusyRebuild: options\.localeChange === true\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)/.test(source), '#40/#50: a language switch relabels persistent YO!info chrome and forces busy YO!agent UI to rebuild in the new locale');
   assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?virtual-panel-controls \.terminal-tab[\s\S]*?info\.subtitle[\s\S]*?querySelectorAll\('\[data-info-subtab\]'\)[\s\S]*?button\.dataset\.infoSubtab === 'yoagent'[\s\S]*?data-info-refresh[\s\S]*?data-yoagent-refresh/.test(source), '#40/#50: the persistent YO!info/YO!agent sub-tab chrome and actions are localized in place by data attribute');
   assert.ok(/let i18nApplyLocaleRequestId = 0/.test(source) && /async function applyLocale[\s\S]*?\+\+i18nApplyLocaleRequestId[\s\S]*?if \(requestId !== i18nApplyLocaleRequestId\) return/.test(source), '#50: overlapping language transitions cannot let an older catalog load repaint after the newer language choice');
-  assert.ok(/maybeAdoptYoagentDeepLink[\s\S]*?infoPanelSubTab = 'yoagent'/.test(source), '#40: a yoagent deep-link pre-selects the YO!agent sub-tab');
   // DOIT.8 Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
   assert.ok(source.includes("esc(t('brand.marker'))"), 'the YO marker glyph renders via t(brand.marker)');
   // #81: a failed autosave-on-close falls through to the explicit save/discard/cancel dialog instead of
@@ -1886,8 +1909,7 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.equal(source.includes('function differFileTreeHtmlStr'), false, 'Differ must not maintain a parallel file-tree HTML renderer');
   assert.equal(source.includes('function changesGroupsHtmlStr'), false, 'Differ groups must render through the shared DOM renderer, not a duplicate HTML renderer');
   assert.equal(/function renderChangesPanels[\s\S]*renderChangesRoot\(/.test(source), false, 'standalone Changes render loop is removed');
-  assert.ok(/function renderFileExplorerChangesPanel[\s\S]*renderChangesRoot\(/.test(source), 'Finder diff panel refreshes through the shared incremental render root');
-  assert.ok(/function renderFileExplorerChangesPanel[\s\S]*renderChangesRoot\(/.test(source), 'Finder embedded Differ refreshes through the shared incremental render root');
+  assert.ok(/function renderFileExplorerChangesPanel[\s\S]*renderChangesRoot\(/.test(source), 'Finder diff panel / embedded Differ refreshes through the shared incremental render root');
   assert.ok(source.includes('function updateFileTreeRowContents('), 'Finder row text/icon updates are localized');
   const updateStart = source.indexOf('function updateFileTreeRowContents(');
   const updateEnd = source.indexOf('function updateFileTreeRow(', updateStart);
@@ -3708,7 +3730,7 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   appMenuPopover.parentElement = appMenuWrapper;
   appMenuPopover.rect = {left: 900, right: 1380, top: 28, bottom: 400, width: 480, height: 372};
   api.fitAppMenuPopover(appMenuPopover);
-  assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-width'), '480px');
+  assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-width'), `${appMenuPopover.rect.width}px`);
   assert.equal(appMenuPopover.style.getPropertyValue('--app-menu-fit-offset'), '-180px');
   // C14: the menu-width measurer must un-clip the command label + detail spans (they were omitted, so the
   // menu measured to the LABELS and the longer detail sub-lines ellipsized with "…").
@@ -4958,13 +4980,15 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   });
 
   api.setLayoutSlotsForTest(dockedBoundarySlots);
-  api.setLayoutColumnRectsForTest({
+  const dockedBoundaryRects = {
     left: {left: 0, top: 0, right: 240, bottom: 800, width: 240, height: 800},
     slot1: {left: 240, top: 0, right: 1200, bottom: 800, width: 960, height: 800},
-  });
+  };
+  api.setLayoutColumnRectsForTest(dockedBoundaryRects);
   api.showDropPreview({boundary: 'root', zone: 'bottom', targetSlot: 'slot1', previewNode: api.gridForTest(), targetRect: {left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800}});
-  assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-left'), '246px', 'bottom full-span preview starts after the docked Finder');
-  assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-width'), '948px', 'bottom full-span preview spans only the non-Finder content');
+  const previewInset = 6;
+  assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-left'), `${dockedBoundaryRects.slot1.left + previewInset}px`, 'bottom full-span preview starts after the docked Finder');
+  assert.equal(api.gridForTest().style.getPropertyValue('--drop-preview-width'), `${dockedBoundaryRects.slot1.width - previewInset * 2}px`, 'bottom full-span preview spans only the non-Finder content');
   api.clearDropPreview();
 
   const dockedBoundaryMoveOnlyContent = api.emptyLayoutSlots();

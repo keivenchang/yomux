@@ -5,8 +5,6 @@ import threading
 from http import HTTPStatus
 
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
-os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
 
 import yolomux_lib.app as app_module
 from yolomux_lib.app import TmuxWebtermApp

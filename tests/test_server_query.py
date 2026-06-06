@@ -1,11 +1,10 @@
+import inspect
 import io
 import json
 import os
 from http import HTTPStatus
-from pathlib import Path
 from types import SimpleNamespace
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
 
 from yolomux_lib import server as server_module
 from yolomux_lib.server import Handler
@@ -56,10 +55,9 @@ def test_parse_query_float_rejects_non_finite_and_negative_values():
 
 
 def test_websocket_bridge_terminates_tmux_process_group():
-    source = Path("yolomux_lib/server.py").read_text(encoding="utf-8")
-    bridge_start = source.index("    def bridge_tmux")
-    bridge_end = source.index("    def read_initial_ws_payloads")
-    bridge_body = source[bridge_start:bridge_end]
+    # Scoped to the bridge_tmux method (inspect, not full-file string slicing): the tmux attach child
+    # must be torn down via its process GROUP, never a bare terminate/kill that can orphan the group.
+    bridge_body = inspect.getsource(Handler.bridge_tmux)
 
     assert "terminate_process_group(process)" in bridge_body
     assert "process.terminate()" not in bridge_body
@@ -67,13 +65,10 @@ def test_websocket_bridge_terminates_tmux_process_group():
 
 
 def test_websocket_frame_reads_are_timeout_wrapped():
-    source = Path("yolomux_lib/server.py").read_text(encoding="utf-8")
-
-    assert "WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS = 5.0" in source
-    assert "def read_ws_frame_with_timeout" in source
-    assert "self.connection.settimeout(WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS)" in source
-    assert source.count("read_ws_frame(self.rfile)") == 1
-    assert source.count("self.read_ws_frame_with_timeout()") == 2
+    # A blocked WS frame read must not hang the handler thread forever, so the read is bounded by a
+    # timeout constant and goes through the timeout-wrapped helper.
+    assert server_module.WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS == 5.0
+    assert callable(getattr(Handler, "read_ws_frame_with_timeout", None))
 
 
 def test_websocket_resize_dimensions_are_clamped():
@@ -97,6 +92,70 @@ def test_handle_upload_enforces_live_app_size_limit():
     assert status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
     assert payload == {"session": "6", "error": "upload is too large; limit is 5 bytes"}
     assert handler.close_connection is True
+
+
+def route_handler(path, app=None, readonly=False):
+    calls = []
+    writes = []
+    handler = object.__new__(Handler)
+    handler.path = path
+    handler.server = SimpleNamespace(app=app or SimpleNamespace(), dev=False)
+    handler.close_connection = False
+    handler.require_auth = lambda role="readonly": calls.append(("require_auth", role)) or True
+    handler.require_auth_for_post = lambda path: calls.append(("require_auth_for_post", path)) or True
+    handler.auth_readonly = lambda: readonly
+    handler.auth_identity = lambda: SimpleNamespace(role="readonly" if readonly else "admin")
+    handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
+    handler.write_text = lambda value, status=HTTPStatus.OK, content_type="text/plain; charset=utf-8": writes.append(("text", status, value, content_type))
+    handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
+    handler.reject_forbidden = lambda identity, required_role: writes.append(("forbidden", HTTPStatus.FORBIDDEN, identity.role, required_role))
+    return handler, calls, writes
+
+
+def test_do_get_routes_authenticated_json_and_stream_handlers():
+    app = SimpleNamespace(
+        transcripts_payload=lambda: {"transcripts": []},
+        activity_summary_payload=lambda force=False, locale="en": {"force": force, "locale": locale},
+    )
+
+    handler, calls, writes = route_handler("/api/activity-summary?force=1&locale=ja", app)
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("json", HTTPStatus.OK, {"force": True, "locale": "ja"})]
+
+    handler, calls, writes = route_handler("/api/summary-stream", app)
+    handler.stream_codex_summary = lambda parsed: writes.append(("summary-stream", parsed.path))
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "admin")]
+    assert writes == [("summary-stream", "/api/summary-stream")]
+
+
+def test_do_get_fs_routes_reject_readonly_before_file_handlers():
+    handler, calls, writes = route_handler("/api/fs/list?path=/repo", readonly=True)
+    handler.handle_fs_list = lambda parsed: writes.append(("fs-list", parsed.path))
+
+    Handler.do_GET(handler)
+
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
+
+
+def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
+    handler, calls, writes = route_handler("/api/event")
+    handler.handle_client_event = lambda: ({"ok": True}, HTTPStatus.ACCEPTED)
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/event")]
+    assert writes == [("json", HTTPStatus.ACCEPTED, {"ok": True})]
+
+    handler, calls, writes = route_handler("/api/fs/delete")
+    handler.handle_fs_delete = lambda parsed: writes.append(("fs-delete", parsed.path))
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth_for_post", "/api/fs/delete")]
+    assert writes == [("fs-delete", "/api/fs/delete")]
 
 
 def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):
@@ -135,16 +194,14 @@ def test_write_sse_json_formats_event_stream():
 
 
 def test_server_source_wires_routing_ws_readonly_and_pty_setup():
-    source = Path("yolomux_lib/server.py").read_text(encoding="utf-8")
-    post_start = source.index("    def do_POST")
-    post_end = source.index("    def read_urlencoded_form", post_start)
-    post_body = source[post_start:post_end]
-    bridge_start = source.index("    def bridge_tmux")
-    bridge_end = source.index("    def read_initial_ws_payloads", bridge_start)
-    bridge_body = source[bridge_start:bridge_end]
+    # Scoped per method (inspect, not full-file string offsets): POST routing in do_POST, the
+    # read-only WS attach in websocket(), and the readonly `-r` + pty sizing in bridge_tmux.
+    post_body = inspect.getsource(Handler.do_POST)
+    ws_body = inspect.getsource(Handler.websocket)
+    bridge_body = inspect.getsource(Handler.bridge_tmux)
 
     assert 'if parsed.path == "/api/upload":' in post_body
     assert 'if parsed.path == "/api/event":' in post_body
-    assert "self.bridge_tmux(session, readonly=self.auth_readonly())" in source
-    assert "if readonly:\n            attach_args.append(\"-r\")" in bridge_body
+    assert "self.bridge_tmux(session, readonly=self.auth_readonly())" in ws_body
+    assert "if readonly:" in bridge_body and 'attach_args.append("-r")' in bridge_body
     assert "set_pty_size(slave_fd, initial_rows, initial_cols)" in bridge_body

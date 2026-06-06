@@ -1,8 +1,6 @@
 import os
 from pathlib import Path
 
-os.environ.setdefault("YOLOMUX_CONFIG_DIR", "/tmp/yolomux-test-config")
-os.environ.setdefault("YOLOMUX_STATE_DIR", "/tmp/yolomux-test-state")
 
 import auto_approve_tmux
 from yolomux_lib import yolo_rules
@@ -88,15 +86,6 @@ def test_hard_floor_blocks_unrelaxable_cases():
     })
     assert yolo_rules.evaluate_ruleset("mkfs.ext4 /dev/sda1", permissive)["action"] == "approve"
     assert yolo_rules.hard_floor_decision("mkfs.ext4 /dev/sda1")["action"] == "block"
-
-
-def test_dangerously_yolo_still_hits_the_hard_floor():
-    # DOIT.6 #62: --dangerously-yolo opts out of the soft ruleset / ask-default, NOT the catastrophic
-    # floor — rm -rf /, mkfs, dd to a block device, and fork bombs are blocked even under the flag.
-    for cmd in ["rm -rf /", "mkfs.ext4 /dev/sda1", "dd if=/dev/zero of=/dev/sda", ":(){ :|:& };:"]:
-        decision = yolo_rules.evaluate(cmd, "bash", dangerously_yolo=True)
-        assert decision["action"] == "block", cmd
-        assert decision["source"] == "hard-floor", cmd
 
 
 def test_schema_validation_reports_errors():
@@ -277,10 +266,13 @@ def test_dangerously_yolo_keeps_the_hard_floor(monkeypatch):
     monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
     monkeypatch.setattr(yolo_rules, "yolo_settings", lambda: {"dry_run": False, "rule_file_path": "/tmp/yolo-rules-test.yaml"})
 
-    for flag in (False, True):
-        catastrophic = yolo_rules.evaluate("rm -rf /", dangerously_yolo=flag)
-        assert catastrophic["action"] == "block", flag
-        assert catastrophic["source"] == "hard-floor", flag
+    # The catastrophic floor (rm -rf /, mkfs, dd to a block device, fork bomb) blocks under BOTH flags
+    # even with an approve-all ruleset active (merged from the former test_dangerously_yolo_still_*).
+    for cmd in ["rm -rf /", "mkfs.ext4 /dev/sda1", "dd if=/dev/zero of=/dev/sda", ":(){ :|:& };:"]:
+        for flag in (False, True):
+            catastrophic = yolo_rules.evaluate(cmd, dangerously_yolo=flag)
+            assert catastrophic["action"] == "block", (cmd, flag)
+            assert catastrophic["source"] == "hard-floor", (cmd, flag)
 
     safe = yolo_rules.evaluate("ls -la", dangerously_yolo=True)
     assert safe["action"] == "approve"

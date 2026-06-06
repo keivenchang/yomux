@@ -18,8 +18,11 @@ WebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWa
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def browser():
+    # Module-scoped: launch headless Chrome ONCE for the whole file instead of per-test (~38 launches).
+    # Each test does its own browser.get(fresh file:// fixture); _reset_browser_state clears storage/cookies
+    # between tests so the reused driver can't leak state.
     chrome = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
     if not chrome:
         pytest.skip("Chrome/Chromium is not installed")
@@ -34,6 +37,22 @@ def browser():
         yield driver
     finally:
         driver.quit()
+
+
+@pytest.fixture(autouse=True)
+def _reset_browser_state(request):
+    # Reset the reused module-scoped driver after each test so per-page state (localStorage, cookies,
+    # window size) does not bleed into the next test. No-op for tests that don't use the browser.
+    yield
+    driver = request.node.funcargs.get("browser")
+    if driver is None:
+        return
+    try:
+        driver.delete_all_cookies()
+        driver.execute_script("try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}")
+        driver.set_window_size(1000, 700)
+    except Exception:
+        pass
 
 
 def pane_fixture_html(width):
@@ -2515,22 +2534,40 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
     assert metrics["settingsPosts"] >= 1, metrics
 
 
-def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
-    metrics = load_fixture(browser, tmp_path, 860)
+@pytest.mark.parametrize("width, expected_rows", [(860, [3, 3]), (493, [1, 2, 2, 1])])
+def test_pane_tabs_stay_within_panel(browser, tmp_path, width, expected_rows):
+    # Tabs wrap to fit the panel at any width: the toolbar never overflows the panel, the rows wrap to the
+    # expected counts, every tab stays within the panel's right edge, and the toolbar stays centered with no
+    # gap below the tab head. (Was two near-identical width tests, at 860 and 493.)
+    metrics = load_fixture(browser, tmp_path, width)
     assert metrics["toolbar"]["right"] <= metrics["panel"]["right"]
-    assert [row["count"] for row in metrics["rows"]] == [3, 3]
+    assert [row["count"] for row in metrics["rows"]] == expected_rows
+    assert all(tab["right"] <= metrics["panel"]["right"] for tab in metrics["tabs"])
+    assert metrics["toolbarCenterDelta"] <= 2
+    assert metrics["tabHeadBottomGap"] <= 2
 
+
+def test_pane_tab_wide_layout_shows_compact_detail_row(browser, tmp_path):
+    # At a comfortable width the first tab row shares the toolbar's row (sits left of it), lower rows stay
+    # within the panel, and the detail row is a single compact strip (text shown, symbol hidden, tinted bg).
+    metrics = load_fixture(browser, tmp_path, 860)
     first_row = metrics["rows"][0]
     assert max(first_row["rights"]) < metrics["toolbar"]["left"]
     lower_row_rights = [right for row in metrics["rows"][1:] for right in row["rights"]]
     assert max(lower_row_rights) <= metrics["panel"]["right"]
-    assert metrics["toolbarCenterDelta"] <= 2
-    assert metrics["tabHeadBottomGap"] <= 2
     assert metrics["detailRow"]["height"] <= 20
     assert metrics["hiddenTextDisplay"] != "none"
     assert metrics["hiddenSymbolDisplay"] == "none"
     assert metrics["detailBg"] != "rgb(18, 24, 35)"
     assert metrics["detailCloseRightGap"] <= 3
+
+
+def test_pane_tab_active_accent_theming(browser, tmp_path):
+    # The active pane tab + the pressed control tab share one --active-accent source (asserted as
+    # relationships, not pinned greens, so the appearance.active_color picker can't break it); unpressed
+    # controls share one neutral bg; theme-specific surfaces repaint on a theme switch while everything else
+    # stays token-equal; and inactive-tab dir text always contrasts with its bg (no white-on-white).
+    load_fixture(browser, tmp_path, 860)
     theme_metrics = browser.execute_script(
         """
         const originalPanel = document.querySelector('.panel.active-pane');
@@ -2572,7 +2609,9 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
         """
     )
     assert theme_metrics["dark"]["panelHeadBg"].startswith("color(srgb")
-    assert theme_metrics["light"]["panelHeadBg"] == "rgb(220, 232, 210)"
+    # The light chrome strip is a tinted (active-accent-derived) bar, NOT the neutral control bg — assert
+    # the relationship, not a pinned green, so it survives the appearance.active_color picker.
+    assert theme_metrics["light"]["panelHeadBg"] != theme_metrics["light"]["paneControlBg"]
     # Shared pane-chrome buttons (image 009): every UNPRESSED control is white (light) / near-black (dark)
     # via --pane-ctl-bg — including the expand "+" (formerly always-green). Only PRESSED/ACTIVE buttons go
     # green (asserted via toolbarActiveBg below). No per-button one-off colors.
@@ -2582,8 +2621,10 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     assert theme_metrics["light"]["zoomControlBg"] == "rgb(247, 249, 252)"
     assert theme_metrics["dark"]["zoomControlBg"] == theme_metrics["dark"]["paneControlBg"]  # all unpressed controls share one bg
     # The active control tab (the agent/"claude" pill) is PRESSED -> green, in both themes (shared rule).
-    assert theme_metrics["dark"]["toolbarActiveBg"] == "rgb(134, 214, 0)"
-    assert theme_metrics["light"]["toolbarActiveBg"] == "rgb(79, 158, 58)"
+    # The pressed/active control tab is the active accent (NOT a pinned green) — distinct from the
+    # unpressed control bg in both themes, so the picker (Green/Blue/...) doesn't break the test.
+    assert theme_metrics["dark"]["toolbarActiveBg"] != theme_metrics["dark"]["paneControlBg"]
+    assert theme_metrics["light"]["toolbarActiveBg"] != theme_metrics["light"]["paneControlBg"]
     # DOIT.6 #31: the active-tab greens are tuned PER THEME so a theme switch visibly repaints the active
     # pane tab; the frame controls are also theme-specific now (image 043). Every OTHER surface stays
     # token-equal across themes.
@@ -2595,16 +2636,19 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     for key, value in theme_metrics["dark"].items():
         if key not in theme_specific:
             assert theme_metrics["light"][key] == value
-    assert theme_metrics["dark"]["activeTabBg"] == "rgb(134, 214, 0)"
-    assert theme_metrics["light"]["activeTabBg"] == "rgb(79, 158, 58)"
+    # The active pane tab shares the active accent with the pressed control tab (one --active-accent
+    # source) and stands out from the unpressed control bg — true for any active-color preset.
+    assert theme_metrics["dark"]["activeTabBg"] == theme_metrics["dark"]["toolbarActiveBg"]
+    assert theme_metrics["light"]["activeTabBg"] == theme_metrics["light"]["toolbarActiveBg"]
+    assert theme_metrics["dark"]["activeTabBg"] != theme_metrics["dark"]["paneControlBg"]
     assert theme_metrics["light"]["activeTabBg"] != theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["light"]["inactiveActiveTabBg"] != theme_metrics["dark"]["inactiveActiveTabBg"]
-    # Active-tab text stays legible against its (theme-specific) green in light mode.
+    # Active-tab text stays legible against its (theme-specific) accent in BOTH modes.
     assert theme_metrics["light"]["activeTabColor"] != theme_metrics["light"]["activeTabBg"]
+    assert theme_metrics["dark"]["activeTabColor"] != theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["dark"]["activeTabShadow"] == "none"
     # images 003/004: an unfocused pane's active tab now uses the SAME full green as the focused pane's
     # active tab (no lightening) — the unfocused-active tokens are aliased to the focused ones.
-    assert theme_metrics["dark"]["inactiveActiveTabBg"] == "rgb(134, 214, 0)"
     assert theme_metrics["dark"]["inactiveActiveTabBg"] == theme_metrics["dark"]["activeTabBg"]
     assert theme_metrics["dark"]["inactiveActiveTabShadow"] == "none"
     # REGRESSION GUARD (image 008): the inactive-tab branch/dir TEXT must contrast with the tab bg in BOTH
@@ -2651,15 +2695,6 @@ def test_split_pane_seam_is_a_compact_tile_divider(browser, tmp_path):
     assert metrics["bottomTopBorder"] == "0px"
     assert metrics["topBottomRadius"] == "0px"
     assert metrics["bottomTopRadius"] == "0px"
-
-
-def test_pane_tabs_and_controls_stay_bounded_when_narrow(browser, tmp_path):
-    metrics = load_fixture(browser, tmp_path, 493)
-    assert metrics["toolbar"]["right"] <= metrics["panel"]["right"]
-    assert [row["count"] for row in metrics["rows"]] == [1, 2, 2, 1]
-    assert all(tab["right"] <= metrics["panel"]["right"] for tab in metrics["tabs"])
-    assert metrics["toolbarCenterDelta"] <= 2
-    assert metrics["tabHeadBottomGap"] <= 2
 
 
 def test_tab_menu_rows_are_compact_for_many_tabs(browser, tmp_path):
@@ -2745,9 +2780,7 @@ def test_active_pane_tab_container_lightens_in_dark_only(browser, tmp_path):
         }
         document.body.classList.add('theme-dark');
         const head = document.querySelector('.panel-head');
-        const darkHoverToken = getComputedStyle(document.body).getPropertyValue('--pane-tab-strip-hover-bg').trim();
         const darkStrip = colorFor('var(--pane-tab-strip-bg)');
-        const darkHover = colorFor('var(--pane-tab-strip-hover-bg)');
         const darkHead = getComputedStyle(head).backgroundColor;
         document.body.classList.remove('theme-dark');
         document.body.classList.add('theme-light');
@@ -2755,20 +2788,23 @@ def test_active_pane_tab_container_lightens_in_dark_only(browser, tmp_path):
         const lightHead = getComputedStyle(head).backgroundColor;
         return {
           darkStrip,
-          darkHover,
           darkHead,
-          darkHoverToken,
           darkStripBrightness: brightness(darkStrip),
-          darkHoverBrightness: brightness(darkHover),
           lightStrip,
           lightHead,
         };
         """
     )
-    assert metrics["darkHoverToken"] == "", metrics
     assert metrics["darkHead"] == metrics["darkStrip"], metrics
     assert metrics["darkStripBrightness"] > 0, metrics
     assert metrics["lightHead"] == metrics["lightStrip"], metrics
+
+
+def test_pane_tab_strip_hover_token_is_removed():
+    # The dark-only --pane-tab-strip-hover-bg was removed when the tab container + info bar were unified
+    # onto one token. Cheap string guard against its reintroduction — no browser needed (P3 demotion).
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    assert "--pane-tab-strip-hover-bg" not in css
 
 
 def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
@@ -3353,6 +3389,9 @@ def test_diff_overview_does_not_cover_editor_scrollbar(browser, tmp_path):
 
 def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
     load_codemirror_todo_diff_overview_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return window.__todoDiffOverviewMetrics != null")
+    )
     metrics = browser.execute_script("return window.__todoDiffOverviewMetrics")
     assert metrics["chunks"] == [
         {
@@ -4232,7 +4271,9 @@ def test_clicking_finder_does_not_change_terminal_pane_toolbar(browser, tmp_path
         };
         """
     )
-    assert light_metrics["detailBg"] == "rgb(220, 232, 210)"
+    # The detail row is the tinted (active-accent-derived) chrome strip with readable dark meta text —
+    # assert the readability relationship, not a pinned green, so the active_color picker doesn't break it.
+    assert light_metrics["detailBg"] != light_metrics["metaColor"]
     assert light_metrics["metaColor"] == "rgb(31, 41, 55)"
     assert light_metrics["actionColor"] == "rgb(31, 41, 55)"
     assert light_metrics["actionColor"] != light_metrics["actionBg"]

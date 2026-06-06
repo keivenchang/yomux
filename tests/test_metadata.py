@@ -1,4 +1,3 @@
-import subprocess
 from pathlib import Path
 
 from yolomux_lib import github_client
@@ -16,9 +15,7 @@ from yolomux_lib.metadata import project_pull_request
 from yolomux_lib.metadata import session_repo_summaries
 from yolomux_lib.metadata import summarize_github_checks
 
-
-def _git(repo, *args):
-    subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True, text=True)
+from _git_helpers import git as _git
 
 
 def _pane(session, index, path):
@@ -242,6 +239,64 @@ def test_github_graphql_requires_token(monkeypatch):
     monkeypatch.setattr(github_client, "github_token", lambda: None)
     # Without a token GraphQL is skipped entirely (no network attempt), returning None.
     assert github_client.github_graphql("query{}", {}) is None
+
+
+def test_github_graphql_posts_query_with_token(monkeypatch):
+    calls = []
+
+    def fake_http_json(url, headers, timeout, payload=None):
+        calls.append({"url": url, "headers": headers, "timeout": timeout, "payload": payload})
+        return {"ok": True}
+
+    monkeypatch.setattr(github_client, "github_token", lambda: "test-token")
+    monkeypatch.setattr(github_client, "http_json", fake_http_json)
+
+    result = github_client.github_graphql("query($id:Int!){x}", {"id": 7})
+
+    assert result == {"ok": True}
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["url"].endswith("/graphql")
+    assert call["headers"]["Accept"] == "application/vnd.github+json"
+    assert call["headers"]["User-Agent"] == "YOLOmux"
+    assert call["headers"]["Content-Type"] == "application/json"
+    assert call["headers"]["Authorization"] == "token test-token"
+    assert call["payload"] == {"query": "query($id:Int!){x}", "variables": {"id": 7}}
+
+
+def test_linear_issue_from_api_posts_query_with_token(monkeypatch):
+    calls = []
+
+    def fake_http_json(url, headers, timeout, payload=None):
+        calls.append({"url": url, "headers": headers, "timeout": timeout, "payload": payload})
+        return {
+            "data": {
+                "issue": {
+                    "identifier": "OPS-123",
+                    "title": "Fix tabs",
+                    "url": "https://linear.app/dynamo/issue/OPS-123",
+                    "state": {"name": "Done"},
+                }
+            }
+        }
+
+    monkeypatch.setattr(linear_client, "linear_key", lambda: "linear-token")
+    monkeypatch.setattr(linear_client, "http_json", fake_http_json)
+
+    issue = linear_client.linear_issue_from_api("OPS-123")
+
+    assert issue == {
+        "identifier": "OPS-123",
+        "title": "Fix tabs",
+        "state": "Done",
+        "url": "https://linear.app/dynamo/issue/OPS-123",
+        "source": "linear-api",
+    }
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["headers"] == {"Authorization": "linear-token", "Content-Type": "application/json"}
+    assert call["payload"]["variables"] == {"id": "OPS-123"}
+    assert "issue(id: $id)" in call["payload"]["query"]
 
 
 def test_review_decision_is_cached(monkeypatch):
