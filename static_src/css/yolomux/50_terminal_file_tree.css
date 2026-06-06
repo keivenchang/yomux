@@ -35,8 +35,9 @@
    — terminal, Finder, Preferences, Info, Changes, editor — dims identically; there is no per-pane JS
    overlay <div> (and so no isVirtualItem special-case). pointer-events:none lets a click on a dimmed
    pane fall through to focus it (the old overlay swallowed the first click). The focused/typing-ready
-   pane is not dimmed. */
-.panel:not(.focused-pane):not(.typing-ready-pane) .panel-overlay-root::after {
+   pane is not dimmed. A stale typing-ready terminal is still inactive when another pane owns
+   .focused-pane, so do not exempt .typing-ready-pane here. */
+.panel:not(.focused-pane) .panel-overlay-root::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -1665,9 +1666,13 @@ body.theme-light .modal.about-open {
 .file-tree-row {
   --file-tree-row-control-size: max(18px, calc(var(--file-explorer-font-size) + 1px));
   --file-tree-date-column-width: 16ch;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 4px;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  min-inline-size: 0;
   padding: 2px 8px;
   font-size: var(--file-explorer-font-size);
   line-height: 1.4;
@@ -1976,10 +1981,8 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   color: currentColor;
 }
 .file-tree-row.has-agent .file-tree-name {
-  flex: 0 1 auto;
-}
-.file-tree-row.has-agent .file-tree-agent {
-  margin-inline-end: auto;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .file-tree-diff {
   display: inline-flex;

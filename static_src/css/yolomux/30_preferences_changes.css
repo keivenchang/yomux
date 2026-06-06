@@ -19,10 +19,6 @@
   overflow: auto;
   padding: 10px;
 }
-.changes-panel {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-}
 .info-refresh {
   margin-inline-start: auto;
   height: 22px;
@@ -61,7 +57,6 @@
 @keyframes metadata-refresh-spin {
   to { transform: rotate(360deg); }
 }
-.changes-body,
 .file-explorer-changes-panel {
   --changes-row-hover-bg: rgba(118, 185, 0, 0.10);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
@@ -69,66 +64,6 @@
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
   --changes-icon-text: #a7c7ff;
-}
-.changes-body {
-  /* DOIT.16 C3: overlay-root must not be the scroll container (see .preferences-body) — scrolling
-     moves to the inner .changes-scroll so the inactive-pane dim covers the full pane at any scroll. */
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--bg);
-}
-.changes-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  scrollbar-gutter: stable;
-  scrollbar-width: auto;
-  scrollbar-color: rgba(190, 205, 218, 0.62) rgba(255, 255, 255, 0.06);
-  padding: 10px;
-}
-.panel.changes-panel:hover .changes-scroll,
-.panel.changes-panel:focus-within .changes-scroll {
-  scrollbar-color: rgba(150, 220, 92, 0.72) rgba(255, 255, 255, 0.08);
-}
-.changes-scroll::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-.changes-scroll::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.06);
-}
-.changes-scroll::-webkit-scrollbar-thumb {
-  min-height: 32px;
-  border: 2px solid transparent;
-  border-radius: 0;
-  background: rgba(190, 205, 218, 0.62);
-  background-clip: content-box;
-}
-.panel.changes-panel:hover .changes-scroll::-webkit-scrollbar-thumb,
-.panel.changes-panel:focus-within .changes-scroll::-webkit-scrollbar-thumb {
-  background: rgba(150, 220, 92, 0.72);
-  background-clip: content-box;
-}
-body.theme-light .changes-scroll {
-  scrollbar-color: rgba(82, 98, 116, 0.64) rgba(15, 23, 42, 0.08);
-}
-body.theme-light .panel.changes-panel:hover .changes-scroll,
-body.theme-light .panel.changes-panel:focus-within .changes-scroll {
-  scrollbar-color: rgba(95, 152, 0, 0.68) rgba(15, 23, 42, 0.08);
-}
-body.theme-light .changes-scroll::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.08);
-}
-body.theme-light .changes-scroll::-webkit-scrollbar-thumb {
-  background: rgba(82, 98, 116, 0.64);
-  background-clip: content-box;
-}
-body.theme-light .panel.changes-panel:hover .changes-scroll::-webkit-scrollbar-thumb,
-body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scrollbar-thumb {
-  background: rgba(95, 152, 0, 0.68);
-  background-clip: content-box;
 }
 .changes-toolbar {
   display: flex;
@@ -143,6 +78,11 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
   color: var(--muted);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-sm);
+}
+.file-explorer-changes-panel:hover > .changes-toolbar,
+.file-explorer-changes-panel:focus-within > .changes-toolbar {
+  background: var(--pane-tab-strip-bg);
+  color: var(--text);
 }
 .changes-control {
   display: inline-flex;
@@ -293,13 +233,6 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
 .changes-toolbar .changes-date-toggle {
   height: 24px;
 }
-.changes-summary {
-  margin-inline-start: auto;
-  color: var(--muted);
-}
-.changes-summary-separator {
-  color: var(--muted);
-}
 .changes-comparison-head {
   display: flex;
   flex-wrap: wrap;
@@ -323,9 +256,25 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
   font-weight: 700;
 }
 .changes-comparison-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
+}
+.changes-summary-label {
+  min-width: 0;
+}
+.changes-summary-totals {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-inline-start: auto;
+  white-space: nowrap;
 }
 .changes-error,
 .changes-empty {
@@ -503,7 +452,7 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
 }
 .changes-file-row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) max-content;
   align-items: center;
   gap: 7px;
   width: 100%;
@@ -520,7 +469,7 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
   cursor: pointer;
 }
 .changes-file-row.compact {
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) max-content;
   gap: 5px;
   padding: 2px 4px 2px calc(4px + (var(--changes-tree-depth, 0) * 14px));
   line-height: 1.05;
@@ -613,16 +562,19 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
 }
 .changes-file-main {
   min-width: 0;
+  overflow: hidden;
   display: grid;
   gap: 2px;
 }
 .changes-file-title {
   min-width: 0;
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 4px;
 }
 .changes-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -643,6 +595,9 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
+  min-width: max-content;
+  overflow: visible;
+  text-overflow: clip;
 }
 .changes-file-agent {
   display: inline-flex;
@@ -1235,7 +1190,6 @@ body.theme-light .info-refresh:focus-visible {
 body.theme-light .changes-error {
   color: #b91c1c;
 }
-body.theme-light .changes-body,
 body.theme-light .file-explorer-changes-panel,
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
@@ -1246,12 +1200,16 @@ body.theme-light .changes-repo-group {
   --changes-path-text: #59636e;
   --changes-icon-text: #1d4ed8;
 }
-body.theme-light .changes-body,
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
   color: var(--text);
   background: var(--panel);
   border-color: var(--line);
+}
+body.theme-light .file-explorer-changes-panel:hover > .changes-toolbar,
+body.theme-light .file-explorer-changes-panel:focus-within > .changes-toolbar {
+  background: var(--pane-tab-strip-bg);
+  color: var(--text);
 }
 body.theme-light .changes-comparison-head {
   color: var(--text);
@@ -1298,6 +1256,31 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;
   margin-inline-start: var(--preferences-control-left-indent);
+}
+.preferences-setting-control.setting-type-range {
+  grid-template-columns: minmax(calc(var(--preferences-control-left-indent) + 140px), 1fr) 4ch auto minmax(0, 1fr) auto;
+}
+.preferences-setting-control.setting-type-range input[type="range"] {
+  min-width: 140px;
+  width: 100%;
+  justify-self: stretch;
+  margin-inline-start: var(--preferences-control-left-indent);
+  accent-color: var(--brand-green);
+}
+.preferences-setting-control.setting-type-range .preferences-range-value {
+  grid-column: 2;
+  min-width: 4ch;
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1 var(--mono-font);
+  text-align: end;
+}
+.preferences-setting-control.setting-type-range .preferences-setting-suffix {
+  grid-column: 3;
+  justify-self: start;
+}
+.preferences-setting-control.setting-type-range .preferences-reset {
+  grid-column: 5;
+  justify-self: end;
 }
 .preferences-setting-control.setting-type-number {
   grid-template-columns: calc(var(--preferences-control-left-indent) + var(--preferences-number-control-width)) auto minmax(0, 1fr) auto;

@@ -201,12 +201,9 @@ function rerenderForLocale(options = {}) {
   if (options.localeChange === true && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true, silent: true, localeChange: true});
   if (typeof renderBrandWordmark === 'function') renderBrandWordmark();
   if (document.getElementById('modal')?.classList?.contains('about-open') && typeof showAboutModal === 'function') showAboutModal();
-  // The Modified-files / Changes panels (the Finder's panel AND the standalone Changes tab) localize
-  // their title, FROM/TO, session/sort, and Refresh strings in the panel head — but the loop above
-  // never touched them, so a language switch left them stale. Force-re-render BOTH destinations so the
-  // head repaints in the new locale on the same switch (force bypasses the active-control guard).
+  // The Finder diff panel localizes its title, FROM/TO, session/sort, and Refresh strings in the panel
+  // head. Force-re-render it so a language switch repaints the head in the new locale.
   if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
-  if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
   // The Finder's toolbar chrome (root/dates/sort labels) is baked into the panel at creation time, so the
   // body re-renders above never touch it — rebuild the Finder panel from source so a language switch
   // repaints its buttons too (the bug where switching to Hebrew left the toolbar in the previous locale).

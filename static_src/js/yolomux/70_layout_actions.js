@@ -641,28 +641,24 @@ function activatePaneTab(side, session, options = {}) {
   for (const key of layoutSlotKeys()) next[key] = paneStateForLayoutSlot(key);
   next[side].active = session;
   applyLayoutSlots(next, {focusSession: session});
-  if (isPreferencesItem(session) && options.userInitiated === true && autoFocusEnabled) {
-    focusFreshPreferencesSearchSoon();
-  }
   if (options.userInitiated && isTmuxSession(session)) focusTerminalFromUserAction(session, 25);
 }
 
-async function selectSession(session) {
-  if (isTmuxSession(session)) {
+async function selectSession(session, options = {}) {
+  if (options.userInitiated === true && isTmuxSession(session)) {
     noteFileExplorerChangesSessionInteraction(session);
   }
   if (isFileEditorItem(session)) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  const shouldFocusPreferencesSearch = isPreferencesItem(session);
   if (isFileExplorerItem(session)) {
     await openFileExplorerPane();
     scheduleFileExplorerActiveTabSync();
     return;
   }
   if (activeSessions.includes(session)) {
-    focusPanel(session, {userInitiated: true});
+    focusPanel(session, {userInitiated: options.userInitiated === true});
     return;
   }
   if (isTmuxSession(session) && filesOnlySlotForSession(session)) {
@@ -670,7 +666,6 @@ async function selectSession(session) {
     return;
   }
   await activateTabInExistingPane(session);
-  if (shouldFocusPreferencesSearch) focusFreshPreferencesSearchSoon();
 }
 
 function sessionAgentKind(session) {
@@ -1350,9 +1345,6 @@ function focusPanel(session, options = {}) {
   if (isVirtualItem(session)) {
     focusedTerminal = null;
     setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
-    if (isPreferencesItem(session) && options.userInitiated === true && autoFocusEnabled) {
-      focusFreshPreferencesSearchSoon(panel);
-    }
     return;
   }
   activateTab(session, 'terminal', {userInitiated: options.userInitiated === true});
@@ -1523,7 +1515,7 @@ function showTerminalConnectionToast(session, text, countdownMs = toastDurationM
     {
       container: displayToastContainer(session),
       countdownMs,
-      onClick: () => selectSession(session),
+      onClick: () => selectSession(session, {userInitiated: true}),
     },
   );
   if (node) {
@@ -1729,10 +1721,6 @@ function slotIsFileExplorerPane(slot) {
   return isFileExplorerItem(activeItemForSide(slot));
 }
 
-function slotIsChangesPane(slot) {
-  return isChangesItem(activeItemForSide(slot));
-}
-
 function dropIntentInlineSize(intent) {
   if (!intent || typeof intent === 'string') return 0;
   const rect = intent.targetRect || intent.previewNode?.getBoundingClientRect?.();
@@ -1742,17 +1730,17 @@ function dropIntentInlineSize(intent) {
 function itemCanSplitSinglePurposePane(item, intent) {
   const zone = typeof intent === 'string' ? intent : intent?.zone;
   if (zone !== 'top' && zone !== 'bottom') return false;
-  if (isFileExplorerItem(item) || isChangesItem(item)) return false;
+  if (isFileExplorerItem(item)) return false;
   const inlineSize = dropIntentInlineSize(intent);
   return !inlineSize || inlineSize >= minWidthForLayoutItem(item);
 }
 
 function dropIntentAllowsSession(session, intent) {
   if (!isLayoutItem(session)) return false;
-  if (isFileExplorerItem(session) || isChangesItem(session)) return false;
+  if (isFileExplorerItem(session)) return false;
   if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
   if (!intent?.targetSlot) return false;
-  if (slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) {
+  if (slotIsFileExplorerPane(intent.targetSlot)) {
     return itemCanSplitSinglePurposePane(session, intent);
   }
   return true;
@@ -1852,7 +1840,7 @@ function dropSessionAtEvent(event) {
     const intent = dropIntentForEvent(event, {allowBoundary: false});
     clearDropPreview();
     if (!intent?.targetSlot) return;
-    if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') return;
+    if (slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle') return;
     const zone = slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle' ? 'right' : intent.zone;
     openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: zone});
     return;
@@ -1877,7 +1865,7 @@ function handleDropDragOver(event) {
   const filePayload = fileDragPayload(event);
   if (filePayload?.path) {
     const intent = dropIntentForEvent(event, {allowBoundary: false});
-    if ((slotIsFileExplorerPane(intent.targetSlot) || slotIsChangesPane(intent.targetSlot)) && intent.zone === 'middle') {
+    if (slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle') {
       event.preventDefault();
       event.stopPropagation();
       event.dataTransfer.dropEffect = 'none';

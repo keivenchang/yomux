@@ -1002,10 +1002,16 @@ function insertIntoTerminal(session, text) {
   if (!item || item.socket?.readyState !== WebSocket.OPEN) return false;
   const filtered = stripTerminalQueryResponses(text);
   if (!filtered) return false;
+  noteFileExplorerChangesSessionInteraction(session);
+  setFocusedTerminal(session, {userInitiated: true});
   item.socket.send(JSON.stringify({type: 'input', data: filtered}));
   if (autoFocusEnabled) item.term?.focus?.();
-  setFocusedTerminal(session);
   return true;
+}
+
+function noteTerminalExplicitInput(session) {
+  noteFileExplorerChangesSessionInteraction(session);
+  setFocusedTerminal(session, {userInitiated: true});
 }
 
 function shellQuote(value) {
@@ -1320,6 +1326,9 @@ function startTerminal(session) {
   container.addEventListener('focusout', () => {
     clearFocusedTerminal(session);
   });
+  container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
+  container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
+  container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});
   term.onData(data => {
     if (readOnlyMode) return;
     const current = terminals.get(session);
@@ -1327,8 +1336,6 @@ function startTerminal(session) {
     if (socket?.readyState === WebSocket.OPEN) {
       const filtered = stripTerminalQueryResponses(data);
       if (filtered) {
-        noteFileExplorerChangesSessionInteraction(session);
-        setFocusedTerminal(session, {userInitiated: true});
         socket.send(JSON.stringify({type: 'input', data: filtered}));
       }
     }
@@ -1987,6 +1994,8 @@ async function boot() {
   await loadAutoStatuses();
   renderSessionButtons();
   renderPanels([], {prune: false});
+  seedVisualActivePaneItem(activeSessions);
+  updatePanelInactiveOverlays();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
   refreshTranscripts();
   refreshWatchedPrs();   // DOIT.29: first watched-PR fetch at boot; thereafter on its own interval

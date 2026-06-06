@@ -63,6 +63,8 @@ const fileExplorerTreeSortStorageKey = 'yolomux.fileExplorer.treeSort.v1';
 const fileExplorerRepoInfoStorageKey = 'yolomux.fileExplorer.repoInfo.v1';
 const fileExplorerIndexedDirsStorageKey = 'yolomux.fileExplorer.indexedDirs.v1';
 const fileExplorerIndexedDirsMigratedKey = 'yolomux.fileExplorer.indexedDirs.migrated.v1';  // C11 #3
+const fileExplorerModeStorageKey = 'yolomux.fileExplorerMode.v1';
+const legacyFileExplorerChangesHiddenStorageKey = 'yolomux.fileExplorerChangesHidden';
 const uploadedFilesCollapsedStorageKey = 'yolomux.modifiedFiles.uploadedCollapsed.v1';
 const changesFolderCollapsedStorageKey = 'yolomux.modifiedFiles.folderCollapsed.v1';
 const changesRepoCollapsedStorageKey = 'yolomux.modifiedFiles.repoCollapsed.v1';
@@ -263,7 +265,9 @@ let codeMirrorApiPromise = null;
 let codeMirrorBundlePromise = null;
 let preferencesSearchText = '';
 let preferencesResetConfirmVisible = false;
-let preferencesSearchFresh = true;
+const preferencesScrollRenderDeferMs = 200;
+let preferencesScrollActiveUntil = 0;
+let preferencesScrollFlushTimer = null;
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
 let uploadedFilesCollapsed = (() => {
   try {
@@ -276,18 +280,16 @@ let uploadedFilesCollapsed = (() => {
 let changesFolderCollapsed = readStoredSet(changesFolderCollapsedStorageKey);
 // DOIT.23: per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
-let sessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
-let sessionFilesPayloadSignature = '';
 let fileExplorerSessionFilesPayloadSignature = '';
-let sessionFilesLoading = false;
 let fileExplorerSessionFilesLoading = false;
-let sessionFilesRequestId = 0;
 let fileExplorerSessionFilesRequestId = 0;
+let fileExplorerExplicitSyncSession = '';
+let fileExplorerSyncManualCollapseSignature = '';
+let fileExplorerSyncManualCollapsedPaths = new Set();
 let fileExplorerLastInteractionAt = 0;
 let fileExplorerRefreshDeferred = false;
 let sessionFilesSortMode = 'newest';
-let sessionFilesSelectedSession = '';
 let changesSelectedPath = '';  // C5: the currently highlighted Modified-files row (persists across re-renders)
 let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
@@ -300,7 +302,7 @@ let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose ho
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
-let fileExplorerChangesHidden = storageGet('yolomux.fileExplorerChangesHidden') === '1';
+let fileExplorerMode = readStoredFileExplorerMode();
 let commandPaletteNode = null;
 let keyboardShortcutsNode = null;
 let commandPaletteMode = 'command';
@@ -420,7 +422,6 @@ function yoagentTabLabel() { return t('brand.tab.agent'); }
 let infoPanelSubTab = readStoredInfoSubTab();
 const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
-const changesItemId = '__changes__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
 const filePreviewItemPrefix = 'file-preview:';
@@ -487,24 +488,6 @@ const TAB_TYPES = [
     prunePriority: () => 0,
   },
   {
-    key: 'changes',
-    id: changesItemId,
-    aliases: ['changes', changesItemId],
-    match: item => item === changesItemId,
-    label: () => t('tab.changes'),
-    shortLabel: () => t('tab.changes'),
-    terminalTitle: () => t('tab.unavailableFor', {name: t('tab.changes')}),
-    sortRank: 0.7,
-    param: () => 'changes',
-    detail: () => changesTabDetail(),
-    rowHtml: (item, options) => changesPaneTabHtml(item, options),
-    createPanel: () => createChangesPanel(),
-    className: () => 'changes-item',
-    icon: 'changes',
-    minWidth: () => rootCssLengthPx('--changes-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
-    prunePriority: () => 0,
-  },
-  {
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
     match: item => typeof item === 'string' && item.startsWith(imageViewerItemPrefix),
@@ -564,7 +547,6 @@ function tabTypeForParam(value) {
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
-function isChangesItem(item) { return tabTypeForItem(item)?.key === 'changes'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
 function isFilePreviewItem(item) { return tabTypeForItem(item)?.key === 'file-preview'; }
 function isFileEditorItem(item) {
@@ -708,6 +690,7 @@ let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;
 let focusedPanelItem = null;
+let lastActivePaneItem = null;
 let lastFocusedTmuxSession = null;
 let dragSession = null;
 let dragSourceSlot = null;

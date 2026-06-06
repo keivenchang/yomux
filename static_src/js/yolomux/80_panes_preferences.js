@@ -299,7 +299,6 @@ function renderLayoutColumn(side) {
   column.className = 'layout-column';
   if (isFileExplorerItem(session)) column.classList.add('file-explorer-column');
   if (isPreferencesItem(session)) column.classList.add('preferences-column');
-  if (isChangesItem(session)) column.classList.add('changes-column');
   if (isFileEditorItem(session)) column.classList.add('file-editor-column');
   if (!session) column.classList.add('empty-pane-column');
   column.dataset.slot = side;
@@ -729,12 +728,6 @@ function preferencesPaneTabHtml(item = prefsItemId, options = {}) {
   return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.preferences'))}</span></span>`;
 }
 
-function changesPaneTabHtml(item = changesItemId, options = {}) {
-  const count = sessionFilesPayload.files?.length || 0;
-  const badge = count ? `<span class="session-state-badge changes-count-badge">${count}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-dir">${esc(t('tab.changes'))}</span>${badge}</span>`;
-}
-
 function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
   const state = openFiles.get(path) || {};
@@ -763,7 +756,7 @@ function bindPaneTabStrip(strip, side) {
     if (filePayload?.path) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) {
+      if (slotIsFileExplorerPane(side)) {
         event.dataTransfer.dropEffect = 'none';
         clearPaneTabDropPreview(strip);
         return;
@@ -777,7 +770,7 @@ function bindPaneTabStrip(strip, side) {
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) {
+    if (slotIsFileExplorerPane(side)) {
       event.dataTransfer.dropEffect = 'none';
       clearPaneTabDropPreview(strip);
       return;
@@ -796,7 +789,7 @@ function bindPaneTabStrip(strip, side) {
       clearPaneTabDropPreview(strip);
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) return;
+      if (slotIsFileExplorerPane(side)) return;
       openDraggedFilesInEditor(filePayload, {targetSlot: side, targetIndex: paneTabDropIndex(strip, event, '')});
       return;
     }
@@ -805,7 +798,7 @@ function bindPaneTabStrip(strip, side) {
     if (!payload?.session) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (slotIsFileExplorerPane(side) || slotIsChangesPane(side)) return;
+    if (slotIsFileExplorerPane(side)) return;
     moveSessionToSlot(payload.session, side, payload.sourceSlot || slotForSession(payload.session), paneTabDropIndex(strip, event, payload.session));
   };
 }
@@ -946,17 +939,12 @@ function bindPanelShell(panel, session) {
       noteFileExplorerChangesSessionInteraction(session);
       setFocusedTerminal(session, {userInitiated: true});
     } else {
-      setFocusedPanelItem(session, {
-        userInitiated: true,
-        focusPreferencesSearch: !preferenceFocusTargetIsInteractive(event.target),
-      });
+      setFocusedPanelItem(session, {userInitiated: true});
     }
   }, {capture: true});
   panel.addEventListener('focusin', event => {
     if (!isTmuxSession(session)) {
-      setFocusedPanelItem(session, {
-        focusPreferencesSearch: !preferenceFocusTargetIsInteractive(event.target),
-      });
+      setFocusedPanelItem(session);
     }
   });
   const head = panel.querySelector('.panel-head');
@@ -972,7 +960,7 @@ function bindPanelShell(panel, session) {
         event.stopPropagation();
         clearDropPreview();
         const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) {
+        if (slotIsFileExplorerPane(targetSlot)) {
           event.dataTransfer.dropEffect = 'none';
           return;
         }
@@ -987,7 +975,7 @@ function bindPanelShell(panel, session) {
       clearDropPreview();
       if (event.target.closest('.pane-tabs')) return;
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
-      if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) {
+      if (slotIsFileExplorerPane(targetSlot)) {
         event.dataTransfer.dropEffect = 'none';
         return;
       }
@@ -1004,7 +992,7 @@ function bindPanelShell(panel, session) {
         event.preventDefault();
         event.stopPropagation();
         const targetSlot = head.dataset.dragSlot || slotForSession(session);
-        if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) return;
+        if (slotIsFileExplorerPane(targetSlot)) return;
         if (targetSlot) openDraggedFilesInEditor(filePayload, {targetSlot});
         return;
       }
@@ -1015,7 +1003,7 @@ function bindPanelShell(panel, session) {
       event.stopPropagation();
       const targetSlot = head.dataset.dragSlot || slotForSession(session);
       if (!targetSlot) return;
-      if (slotIsFileExplorerPane(targetSlot) || slotIsChangesPane(targetSlot)) return;
+      if (slotIsFileExplorerPane(targetSlot)) return;
       if (isFileExplorerItem(payload.session)) {
         dockFileExplorerPane();
         return;
@@ -1760,10 +1748,15 @@ function preferenceSections() {
         {value: 'en-XA', label: t('pref.general.language.pseudo')},
       ], help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
-      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
+    ]},
+    {title: t('pref.section.notifications'), items: [
       {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
-      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
+      {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
+      {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
+      {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
+      {path: 'appearance.red_reminder_ms', label: t('pref.appearance.red_reminder_ms.label'), type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: t('pref.appearance.red_reminder_ms.help')},
+      {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
     ]},
     {title: t('pref.section.appearance'), items: [
       {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: [
@@ -1771,22 +1764,32 @@ function preferenceSections() {
         {value: 'dark', label: t('pref.appearance.theme.dark')},
         {value: 'light', label: t('pref.appearance.theme.light')},
       ], help: t('pref.appearance.theme.help')},
+      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
+      {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
+      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
+      {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
+      {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
+      {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
+      {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'number', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
+      {path: 'appearance.inactive_pane_opacity', label: t('pref.appearance.inactive_pane_opacity.label'), type: 'range', min: 0, max: 100, step: 5, suffix: '%', help: t('pref.appearance.inactive_pane_opacity.help')},
+      {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
+      {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
+        {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
+        {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
+      ], help: t('pref.appearance.date_time_hour_cycle.help')},
+    ]},
+    {title: t('pref.section.terminal_editor'), items: [
       {path: 'appearance.terminal_theme', label: t('pref.appearance.terminal_theme.label'), type: 'radio', choices: [
         {value: 'follow-app', label: t('pref.appearance.terminal_theme.follow-app')},
         {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
         {value: 'light', label: t('pref.appearance.terminal_theme.light')},
       ], help: t('pref.appearance.terminal_theme.help')},
-      {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
-        {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
-        {value: '12', label: t('pref.appearance.date_time_hour_cycle.12')},
-      ], help: t('pref.appearance.date_time_hour_cycle.help')},
-      {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
-      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
-      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 8, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
-      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
+      {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
       {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
       {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
+      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
+      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 8, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
       {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'radio', choices: [
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
@@ -1795,29 +1798,6 @@ function preferenceSections() {
         {value: 'yellow', label: t('pref.appearance.editor_cursor_color.yellow')},
         {value: 'theme', label: t('pref.appearance.editor_cursor_color.theme')},
       ], help: t('pref.appearance.editor_cursor_color.help')},
-      {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
-      {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
-      {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'number', min: 20, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
-      {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
-      {path: 'appearance.red_reminder_ms', label: t('pref.appearance.red_reminder_ms.label'), type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: t('pref.appearance.red_reminder_ms.help')},
-      {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
-      {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
-    ]},
-    {title: t('pref.section.yolo'), items: [
-      {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
-      {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
-      {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'radio', choices: [
-        {value: 'hybrid', label: t('pref.yolo.prompt_source.hybrid')},
-        {value: 'pane', label: t('pref.yolo.prompt_source.pane')},
-      ], help: t('pref.yolo.prompt_source.help')},
-    ]},
-    {title: t('pref.section.notifications'), items: [
-      {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
-      {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
-      {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
-    ]},
-    {title: t('pref.section.terminal_editor'), items: [
-      {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
       {path: 'terminal_editor.word_wrap', label: t('pref.terminal_editor.word_wrap.label'), type: 'boolean', help: t('pref.terminal_editor.word_wrap.help')},
       {path: 'terminal_editor.line_numbers', label: t('pref.terminal_editor.line_numbers.label'), type: 'boolean', help: t('pref.terminal_editor.line_numbers.help')},
       {path: 'editor.autosave', label: t('pref.editor.autosave.label'), type: 'boolean', help: t('pref.editor.autosave.help')},
@@ -1840,6 +1820,7 @@ function preferenceSections() {
       {path: 'uploads.max_bytes', label: t('pref.uploads.max_bytes.label'), type: 'number', min: 1, max: 512, step: 1, suffix: 'MB', scale: 1048576, help: t('pref.uploads.max_bytes.help')},
     ]},
     {title: t('pref.section.performance'), items: [
+      {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
       {path: 'performance.metadata_refresh_ms', label: t('pref.performance.metadata_refresh_ms.label'), type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: t('pref.performance.metadata_refresh_ms.help')},
       {path: 'performance.watched_pr_refresh_ms', label: t('pref.performance.watched_pr_refresh_ms.label'), type: 'number', min: 15000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.watched_pr_refresh_ms.help')},
       {path: 'performance.pane_state_refresh_ms', label: t('pref.performance.pane_state_refresh_ms.label'), type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.pane_state_refresh_ms.help')},
@@ -1855,6 +1836,14 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
+    ]},
+    {id: 'yolo', title: t('pref.section.yolo'), items: [
+      {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
+      {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
+      {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'radio', choices: [
+        {value: 'hybrid', label: t('pref.yolo.prompt_source.hybrid')},
+        {value: 'pane', label: t('pref.yolo.prompt_source.pane')},
+      ], help: t('pref.yolo.prompt_source.help')},
     ]},
     {title: t('pref.section.yoagent'), items: [
       {path: 'yoagent.backend', label: t('pref.yoagent.backend.label'), type: 'radio', choices: [
@@ -1892,18 +1881,35 @@ function preferenceDefault(path) {
 function preferenceStatusText() {
   if (clientSettingsPayload.error) return `settings error: ${clientSettingsPayload.error}`;
   if (yoloRulesPayload.error) return `YOLO rules error: ${yoloRulesPayload.error}`;
-  return `loaded ${compactHomePath(settingsConfigPath())}`;
+  return settingsLoadedAgeText();
+}
+
+function settingsLoadedAgeText(nowMs = Date.now()) {
+  const loadedMs = Number(clientSettingsPayload.mtime_ns || 0) / 1000000;
+  if (!Number.isFinite(loadedMs) || loadedMs <= 0) return 'loaded';
+  const ageSeconds = Math.max(0, Math.floor((Number(nowMs) - loadedMs) / 1000));
+  if (ageSeconds < 60) return `loaded ${ageSeconds} sec ago`;
+  const ageMinutes = Math.floor(ageSeconds / 60);
+  if (ageMinutes < 60) return `loaded ${ageMinutes} min ago`;
+  const ageHours = Math.floor(ageMinutes / 60);
+  if (ageHours < 24) return `loaded ${ageHours} hr ago`;
+  const ageDays = Math.floor(ageHours / 24);
+  return `loaded ${ageDays} day${ageDays === 1 ? '' : 's'} ago`;
 }
 
 function preferencesPathRowsHtml() {
   const settingsPath = settingsConfigPath();
+  return `
+    <div class="preferences-path-row">
+      <span class="preferences-path-label">${esc(t('pref.path.settings'))}</span><span class="preferences-path-value">${esc(settingsPath)} ${esc(settingsLoadedAgeText())}</span>${pathCopyButtonHtml(settingsPath, {className: 'preferences-path-copy', title: t('pref.path.copySettings')})}
+    </div>`;
+}
+
+function preferencesYoloRulesPathHtml() {
   const rulesPath = yoloRulePath();
   const rulesDetail = yoloRulesPayload.source ? ` · ${yoloRuleStatusDetail()}` : '';
   return `
-    <div class="preferences-path-row">
-      <span class="preferences-path-label">${esc(t('pref.path.settings'))}</span><span class="preferences-path-value">${esc(settingsPath)}</span>${pathCopyButtonHtml(settingsPath, {className: 'preferences-path-copy', title: t('pref.path.copySettings')})}
-    </div>
-    <div class="preferences-path-row">
+    <div class="preferences-path-row preferences-path-row--section">
       <span class="preferences-path-label">${esc(t('pref.path.rules'))}</span><span class="preferences-path-value">${esc(rulesPath)}${esc(rulesDetail)}</span>${pathCopyButtonHtml(rulesPath, {className: 'preferences-path-copy', title: t('pref.path.copyRules')})}
     </div>`;
 }
@@ -2070,6 +2076,9 @@ function preferenceControlHtml(item, query = '') {
     control = `<input type="checkbox" ${baseAttrs}${value ? ' checked' : ''}>`;
   } else if (item.type === 'number') {
     control = `<input type="number" ${baseAttrs} inputmode="decimal" value="${esc(clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value))}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}">`;
+  } else if (item.type === 'range') {
+    const rangeValue = clampPreferenceNumber(item, item.scale ? Number(value) / item.scale : value);
+    control = `<input type="range" ${baseAttrs} value="${esc(rangeValue)}" min="${esc(item.min)}" max="${esc(item.max)}" step="${esc(item.step || 1)}"><output class="preferences-range-value" for="${esc(controlId)}">${esc(rangeValue)}</output>`;
   } else if (item.type === 'select') {
     control = `<select ${baseAttrs}>${preferenceSelectOptionsHtml(item, value)}</select>`;
   } else if (item.type === 'radio') {
@@ -2135,7 +2144,10 @@ function preferencesPanelHtml() {
       const titleMatches = textMatchesPreferenceQuery(section.title, query);
       const visibleItems = section.items.filter(item => titleMatches || preferenceItemMatches(item, query));
       const collapsed = !query && collapsedPreferenceSections.has(section.title);
-      const rows = visibleItems.map(item => preferenceControlHtml(item)).join('');
+      const sectionIntro = section.id === 'yolo' && (!query || textMatchesPreferenceQuery('yolo rules rule file yaml auto approve approval', query))
+        ? preferencesYoloRulesPathHtml()
+        : '';
+      const rows = `${sectionIntro}${visibleItems.map(item => preferenceControlHtml(item)).join('')}`;
       const count = visibleItems.length;
       return `
         <section class="preferences-section${collapsed ? ' collapsed' : ''}" data-preference-section="${esc(section.title)}">
@@ -2172,13 +2184,11 @@ function preferencesPanelHtml() {
       <button type="button" class="preferences-search-button" data-preferences-search-action>YOsearch</button>
     </div>
     <div class="preferences-path-rows">${preferencesPathRowsHtml()}${readonly}</div>
-    <div class="preferences-status" data-level="${clientSettingsPayload.error || yoloRulesPayload.error ? 'error' : 'ok'}">${esc(preferenceStatusText())}</div>
     <div class="preferences-sections">${sections}</div>
     ${resetBlock}`;
 }
 
 function createPreferencesPanel() {
-  preferencesSearchFresh = true;
   const panel = document.createElement('article');
   panel.className = 'panel preferences-panel';
   panel.id = `panel-${prefsItemId}`;
@@ -2200,12 +2210,7 @@ function createPreferencesPanel() {
       </div>`;
   bindPanelShell(panel, prefsItemId);
   bindPreferencesPanel(panel);
-  focusPreferencesSearchSoon(panel);
   return panel;
-}
-
-function markPreferencesInteracted() {
-  preferencesSearchFresh = false;
 }
 
 function focusPreferencesSearch(panel = null) {
@@ -2223,22 +2228,38 @@ function focusPreferencesSearch(panel = null) {
   return true;
 }
 
-function focusPreferencesSearchSoon(panel = null) {
-  focusPreferencesSearch(panel);
-  requestAnimationFrame(() => focusPreferencesSearch(panel));
-  setTimeout(() => focusPreferencesSearch(panel), 0);
-  setTimeout(() => focusPreferencesSearch(panel), 80);
+function preferencesScrollIsActive(now = Date.now()) {
+  return Number(now) < preferencesScrollActiveUntil;
 }
 
-function focusFreshPreferencesSearchSoon(panel = null) {
-  if (!preferencesSearchFresh) return;
-  focusPreferencesSearchSoon(panel);
+function schedulePreferencesScrollFlush() {
+  if (preferencesScrollFlushTimer) clearTimeout(preferencesScrollFlushTimer);
+  preferencesScrollFlushTimer = setTimeout(() => {
+    preferencesScrollFlushTimer = null;
+    if (!pendingPreferencesRender) return;
+    if (preferencesScrollIsActive()) {
+      schedulePreferencesScrollFlush();
+      return;
+    }
+    pendingPreferencesRender = false;
+    renderPreferencesPanels();
+  }, preferencesScrollRenderDeferMs);
+}
+
+function notePreferencesScrollActivity(now = Date.now()) {
+  preferencesScrollActiveUntil = Math.max(preferencesScrollActiveUntil, Number(now) + preferencesScrollRenderDeferMs);
+  schedulePreferencesScrollFlush();
 }
 
 function renderPreferencesPanels(options = {}) {
-  // DOIT.6 #30: defer Preferences re-render while a tab drag is in flight (a rebuild + the auto-focus
-  // steal the drag and abort it — the worst case the user hit with Preferences active).
+  // DOIT.6 #30: defer Preferences re-render while a tab drag is in flight; rebuilding the dragged tab
+  // node aborts the native HTML5 drag.
   if (dragSession != null) { pendingPreferencesRender = true; return; }
+  if (options.force !== true && preferencesScrollIsActive()) {
+    pendingPreferencesRender = true;
+    schedulePreferencesScrollFlush();
+    return;
+  }
   for (const panel of document.querySelectorAll('.preferences-panel')) {
     const body = panel.querySelector('.preferences-body');
     const meta = panel.querySelector(`#meta-${cssEscape(prefsItemId)}`);
@@ -2252,11 +2273,6 @@ function renderPreferencesPanels(options = {}) {
       const scrollTop = prevScroll.scrollTop;
       const scrollLeft = prevScroll.scrollLeft;
       if (shouldKeepDom) {
-        const status = body.querySelector('.preferences-status');
-        if (status) {
-          status.dataset.level = clientSettingsPayload.error || yoloRulesPayload.error ? 'error' : 'ok';
-          status.textContent = preferenceStatusText();
-        }
         const pathRows = body.querySelector('.preferences-path-rows');
         if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? '<span class="preferences-readonly">readonly access</span>' : ''}`;
       } else {
@@ -2279,22 +2295,38 @@ function bindPreferencesPanel(panel) {
   panel.addEventListener('input', event => {
     const search = event.target.closest('[data-preferences-search]');
     if (search && panel.contains(search)) {
-      markPreferencesInteracted();
       preferencesSearchText = search.value || '';
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true, focusSearch: true});
       return;
     }
     const control = event.target.closest('[data-setting-path]');
-    if (!control || !panel.contains(control) || control.dataset.settingType !== 'number') return;
-    validatePreferenceNumberControl(control);
+    if (!control || !panel.contains(control)) return;
+    if (control.dataset.settingType === 'number') {
+      validatePreferenceNumberControl(control);
+      return;
+    }
+    if (control.dataset.settingType === 'range') {
+      const value = valueFromPreferenceControl(control);
+      const output = control.parentElement?.querySelector('.preferences-range-value');
+      if (output) output.textContent = String(control.value);
+      if (control.dataset.settingPath === 'appearance.inactive_pane_opacity') applyInactivePaneOpacity(value);
+    }
   });
   panel.addEventListener('change', event => {
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
-    markPreferencesInteracted();
     savePreferenceControl(control);
   });
+  panel.addEventListener('wheel', event => {
+    if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
+  }, {passive: true});
+  panel.addEventListener('touchmove', event => {
+    if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
+  }, {passive: true});
+  panel.addEventListener('scroll', event => {
+    if (event.target?.classList?.contains('preferences-scroll')) notePreferencesScrollActivity();
+  }, true);
   panel.addEventListener('focusout', () => {
     setTimeout(() => {
       if (!activePreferenceControl(panel)) renderPreferencesPanels();
@@ -2305,7 +2337,8 @@ function bindPreferencesPanel(panel) {
     if (searchAction && panel.contains(searchAction)) {
       event.preventDefault();
       preferencesResetConfirmVisible = false;
-      renderPreferencesPanels({force: true, focusSearch: true});
+      renderPreferencesPanels({force: true});
+      focusPreferencesSearch(panel);
       return;
     }
     const resetAll = event.target.closest('[data-preferences-reset-all]');
@@ -2323,7 +2356,6 @@ function bindPreferencesPanel(panel) {
     const resetConfirm = event.target.closest('[data-preferences-reset-confirm]');
     if (resetConfirm && panel.contains(resetConfirm)) {
       event.preventDefault();
-      markPreferencesInteracted();
       preferencesResetConfirmVisible = false;
       resetAllPreferences();
       return;
@@ -2381,7 +2413,6 @@ function bindPreferencesPanel(panel) {
     const reset = event.target.closest('[data-setting-reset]');
     if (!reset || !panel.contains(reset)) return;
     event.preventDefault();
-    markPreferencesInteracted();
     resetPreference(reset.dataset.settingReset || '');
   });
 }

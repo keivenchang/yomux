@@ -5,9 +5,10 @@ function toggleHiddenFiles() {
   if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
 }
 
-async function expandDirectoryRow(row, fullPath) {
+async function expandDirectoryRow(row, fullPath, options = {}) {
   const entries = await fetchDirectory(fullPath);
   if (!entries) return;
+  if (options.manual === true) forgetFileExplorerSyncManualCollapse(fullPath);
   fileExplorerExpanded.add(fullPath);
   row.classList.add('expanded');
   row.setAttribute('aria-expanded', 'true');
@@ -20,15 +21,15 @@ async function expandDirectoryRow(row, fullPath) {
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
 }
 
-function collapseDirectoryRow(row, fullPath) {
+function collapseDirectoryRow(row, fullPath, options = {}) {
+  if (options.manual === true) rememberFileExplorerSyncManualCollapse(fullPath);
   fileExplorerExpanded.delete(fullPath);
   row.classList.remove('expanded');
   row.setAttribute('aria-expanded', 'false');
   row.querySelector('.file-tree-icon').textContent = '▸';
-  const next = row.nextElementSibling;
-  if (next && next.classList.contains('file-tree-children') && next.dataset.parent === fullPath) {
-    next.remove();
-  }
+  Array.from(row.parentElement?.children || [])
+    .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
+    .forEach(node => node.remove());
 }
 
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());

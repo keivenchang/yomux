@@ -420,6 +420,20 @@ function writeStoredFileExplorerRootMode(mode) {
   storageSet(fileExplorerRootModeStorageKey, mode === 'sync' ? 'sync' : 'fixed');
 }
 
+function normalizeFileExplorerMode(mode) {
+  return mode === 'diff' ? 'diff' : 'files';
+}
+
+function readStoredFileExplorerMode() {
+  const stored = storageGet(fileExplorerModeStorageKey);
+  if (stored === 'diff' || stored === 'files') return stored;
+  return storageGet(legacyFileExplorerChangesHiddenStorageKey) === '0' ? 'diff' : 'files';
+}
+
+function writeStoredFileExplorerMode(mode) {
+  storageSet(fileExplorerModeStorageKey, normalizeFileExplorerMode(mode));
+}
+
 function normalizeEditorSchemeId(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'light' || normalized === 'white') return defaultLightEditorScheme;
@@ -596,7 +610,6 @@ function refreshFileExplorerTreeDateModeSurfaces() {
   if (typeof refreshFileExplorerTrees === 'function') {
     void refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
   }
-  if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
   if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
 }
 
@@ -635,18 +648,45 @@ function recordFocusNavTransition(previousItem, nextItem) {
   recordEditorNav(nextItem);
 }
 
+function rememberActivePaneItem(item) {
+  if (item && itemIsActivePaneTab(item)) lastActivePaneItem = item;
+}
+
+function visualActivePaneItem() {
+  if (focusedPanelItem && itemIsActivePaneTab(focusedPanelItem)) return focusedPanelItem;
+  if (lastActivePaneItem && itemIsActivePaneTab(lastActivePaneItem)) return lastActivePaneItem;
+  return null;
+}
+
+function seedVisualActivePaneItem(preferredItems = []) {
+  const candidates = [
+    ...preferredItems,
+    focusedPanelItem,
+    focusedTerminal,
+    lastFocusedTmuxSession,
+    ...activePaneItems(),
+  ];
+  const item = candidates.find(candidate => candidate && itemIsActivePaneTab(candidate));
+  if (item) lastActivePaneItem = item;
+  return item || null;
+}
+
 function setFocusedTerminal(session, options = {}) {
   const previousItem = focusedPanelItem;
   focusedTerminal = session;
   focusedPanelItem = session;
+  rememberActivePaneItem(session);
   clearPendingFileEditorFocusExcept(session);
   if (isTmuxSession(session)) lastFocusedTmuxSession = session;
   dismissAttentionAlertsForSession(session);
   updateSessionButtonStates();
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
-  scheduleFileExplorerActiveTabSync(session);
-  if (options.userInitiated === true) recordFocusNavTransition(previousItem, session);
+  if (options.userInitiated === true) {
+    rememberFileExplorerExplicitSyncSession(session);
+    scheduleFileExplorerActiveTabSync(session, {explicit: true});
+    recordFocusNavTransition(previousItem, session);
+  }
   else recordAutoFocusNav(session, previousItem);
 }
 
@@ -663,6 +703,7 @@ function setFocusedPanelItem(item, options = {}) {
   const previousItem = focusedPanelItem;
   if (focusedTerminal !== item) focusedTerminal = null;
   focusedPanelItem = item;
+  rememberActivePaneItem(item);
   clearPendingFileEditorFocusExcept(item);
   if (isTmuxSession(item)) {
     lastFocusedTmuxSession = item;
@@ -671,11 +712,12 @@ function setFocusedPanelItem(item, options = {}) {
   updateSessionButtonStates();
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
   updatePanelInactiveOverlays();
-  if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item);
-  if (isPreferencesItem(item) && options.focusPreferencesSearch !== false) {
-    focusFreshPreferencesSearchSoon();
+  if (options.userInitiated === true) {
+    if (isTmuxSession(item)) rememberFileExplorerExplicitSyncSession(item);
+    const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);
+    if (!isFileExplorerItem(item)) scheduleFileExplorerActiveTabSync(item, {explicit: explicitFinderSync});
+    recordFocusNavTransition(previousItem, item);
   }
-  if (options.userInitiated === true) recordFocusNavTransition(previousItem, item);
   else recordAutoFocusNav(item, previousItem);
 }
 
@@ -716,6 +758,7 @@ function focusTerminalFromUserAction(session, delay = 0) {
 function clearFocusForInactiveLayout() {
   if (focusedTerminal && !activeSessions.includes(focusedTerminal)) focusedTerminal = null;
   if (focusedPanelItem && !activeSessions.includes(focusedPanelItem)) focusedPanelItem = null;
+  if (lastActivePaneItem && !itemIsActivePaneTab(lastActivePaneItem)) lastActivePaneItem = null;
   if (lastFocusedTmuxSession && !activeSessions.includes(lastFocusedTmuxSession)) lastFocusedTmuxSession = null;
 }
 
@@ -737,9 +780,10 @@ function selectPanelOnHover(item) {
 }
 
 function updatePanelInactiveOverlays() {
+  const activeItem = visualActivePaneItem() || seedVisualActivePaneItem();
   for (const [item, panel] of panelNodes.entries()) {
-    panel.classList.toggle('focused-pane', item === focusedPanelItem);
-    panel.classList.toggle('active-pane', item === focusedPanelItem);
+    panel.classList.toggle('focused-pane', item === activeItem);
+    panel.classList.toggle('active-pane', item === activeItem);
   }
   if (typeof updateLinkedFilePreviewRings === 'function') updateLinkedFilePreviewRings();
   // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.

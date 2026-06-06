@@ -892,8 +892,8 @@ def finder_click_toolbar_fixture_html():
         <meta charset="utf-8">
         <style>{css}</style>
         <style>
-          body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 260px 1fr; gap: 8px; height: auto; min-height: 0; }}
-          .panel {{ height: 170px; }}
+          body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 420px 1fr; gap: 8px; height: auto; min-height: 0; }}
+          .panel {{ height: 230px; }}
         </style>
       </head>
       <body>
@@ -901,29 +901,56 @@ def finder_click_toolbar_fixture_html():
           <div class="panel-head file-explorer-head">
             <div class="pane-tabs" hidden></div>
             <div class="file-explorer-toolbar">
-              <input class="file-explorer-path-inline" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
-              <button type="button" class="path-copy-button file-explorer-path-copy-panel"></button>
-              <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel">.*</button>
-              <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel">根目錄</button>
-              <button type="button" class="file-explorer-header-action">+</button>
-              <button type="button" class="file-explorer-header-action">▣</button>
-              <button type="button" class="file-explorer-header-action">↻</button>
-              <button type="button" class="file-explorer-header-action">▤</button>
-              <button type="button" class="file-explorer-header-action file-explorer-date-toggle">日期</button>
-              <button type="button" class="file-explorer-header-action file-explorer-changes-toggle">Δ</button>
-              <select class="file-explorer-sort-select"><option>A-Z</option></select>
-              <div class="tabs pane-frame-controls file-explorer-frame-controls">
-                <button type="button" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
+              <div class="file-explorer-toolbar-row file-explorer-primary-row">
+                <span class="file-explorer-panel-title file-explorer-mode-files-only">Finder</span>
+                <span class="file-explorer-panel-title file-explorer-mode-diff-only">Differ</span>
+                <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
+                <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only"></button>
+                <span class="file-explorer-toolbar-spacer"></span>
+                <button type="button" class="file-explorer-header-action file-explorer-changes-collapse-toggle file-explorer-mode-diff-only" data-session-files-collapse-toggle aria-pressed="false">▴</button>
+                <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / Differ">
+                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="files" aria-pressed="true"><span class="file-explorer-mode-label">Finder</span></button>
+                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">Differ</span></button>
+                </span>
+                <div class="tabs pane-frame-controls file-explorer-frame-controls">
+                  <button type="button" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
+                </div>
+              </div>
+              <div class="file-explorer-toolbar-row file-explorer-scope-row file-explorer-mode-files-only">
+                <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only">.*</button>
+                <div class="file-explorer-quick-access-panel file-explorer-mode-files-only">
+                  <button type="button" class="file-explorer-quick-access-button">~</button>
+                  <button type="button" class="file-explorer-quick-access-button">/</button>
+                  <button type="button" class="file-explorer-quick-access-button">/tmp</button>
+                </div>
+                <span class="file-explorer-toolbar-spacer"></span>
+                <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel">No Sync</button>
+              </div>
+              <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
+                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" id="new-file">+</button>
+                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only">▣</button>
+                <button type="button" class="file-explorer-header-action">▤</button>
+                <span class="file-explorer-toolbar-spacer"></span>
+                <select class="file-explorer-sort-select file-explorer-mode-files-only"><option>A-Z</option></select>
+                <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
+                  <button type="button" class="file-explorer-header-action file-explorer-date-toggle changes-date-toggle">日期</button>
+                  <button type="button" class="changes-refresh">Reload</button>
+                </span>
               </div>
             </div>
           </div>
           <div class="file-explorer-pane">
-            <div class="file-explorer-tree-panel" tabindex="0"></div>
+            <div class="file-explorer-tree-panel" tabindex="0">tree rows</div>
+            <div class="file-explorer-changes-resizer"></div>
             <div id="modified-files-panel" class="file-explorer-changes-panel" tabindex="0">
+              <div class="changes-toolbar file-explorer-diff-toolbar">
+                <label class="changes-control">Session <select data-session-files-session><option>project1</option></select></label>
+                <label class="changes-control">Sort <select data-session-files-sort><option>new</option></select></label>
+                <button type="button" data-file-explorer-tree-dates>Ago</button>
+                <button type="button" class="changes-refresh" data-session-files-refresh>Reload</button>
+              </div>
               <div id="modified-files-head" class="file-explorer-changes-head">
                 <span class="changes-title">Differ: '5'</span>
-                <button type="button" class="changes-refresh">Refresh</button>
-                <button type="button" class="changes-close">x</button>
               </div>
             </div>
           </div>
@@ -947,6 +974,18 @@ def finder_click_toolbar_fixture_html():
           <div class="panel-detail-row"><div class="meta">path</div></div>
           <div class="tab-pane active"></div>
         </article>
+        <script>
+          document.body.classList.add('file-explorer-mode-files');
+          document.querySelectorAll('[data-file-explorer-mode-set]').forEach(button => button.addEventListener('click', () => {{
+            const nextDiff = button.dataset.fileExplorerModeSet === 'diff';
+            document.body.classList.toggle('file-explorer-mode-diff', nextDiff);
+            document.body.classList.toggle('file-explorer-mode-files', !nextDiff);
+            document.getElementById('finder-panel').dataset.fileExplorerMode = nextDiff ? 'diff' : 'files';
+            document.querySelectorAll('[data-file-explorer-mode-set]').forEach(toggle => {{
+              toggle.setAttribute('aria-pressed', toggle.dataset.fileExplorerModeSet === (nextDiff ? 'diff' : 'files') ? 'true' : 'false');
+            }});
+          }}));
+        </script>
       </body>
     </html>
     """
@@ -963,6 +1002,7 @@ def file_tree_status_alignment_fixture_html():
         <style>
           body {{ margin: 0; padding: 10px; width: 980px; }}
           .file-explorer-tree {{ width: 960px; overflow: visible; }}
+          .narrow-file-explorer-tree {{ width: 360px; overflow: hidden; margin-top: 18px; }}
         </style>
       </head>
       <body class="theme-light">
@@ -993,6 +1033,17 @@ def file_tree_status_alignment_fixture_html():
             <span class="file-tree-diff" hidden></span>
             <span class="file-tree-git-status">?</span>
             <span class="file-tree-date">1 hr ago</span>
+          </div>
+        </div>
+        <div class="file-explorer-tree narrow-file-explorer-tree">
+          <div id="status-row-long" class="file-tree-row kind-file git-modified has-agent" style="padding-left: 92px">
+            <span class="file-tree-icon file-icon-doc">*</span>
+            <span class="file-tree-name">TOOLCALLING_STREAMING_CASES.md</span>
+            <span class="file-tree-dir-count" hidden></span>
+            <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
+            <span class="file-tree-diff"><span class="changes-diff-add">+66</span></span>
+            <span class="file-tree-git-status">M</span>
+            <span class="file-tree-date">&lt;1 m</span>
           </div>
         </div>
       </body>
@@ -1059,11 +1110,15 @@ def split_seam_fixture_html():
     """
 
 
-def live_runtime_boot_fixture_html():
+def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None):
     css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
     script_uri = (REPO_ROOT / "static" / "yolomux.js").as_uri()
+    settings = settings or {}
+    sessions = sessions or ["1"]
+    session_files_payload = session_files_payload or {"session": sessions[0], "files": [], "repos": [], "errors": [], "loaded": True}
+    fs_entries = fs_entries or {}
     bootstrap = {
-        "sessions": ["1"],
+        "sessions": sessions,
         "availableAgents": ["term"],
         "accessRole": "admin",
         "homePath": "/home/test",
@@ -1073,8 +1128,8 @@ def live_runtime_boot_fixture_html():
         "version": "test",
         "versionCommitTime": "test",
         "settingsPayload": {
-            "settings": {},
-            "defaults": {},
+            "settings": settings,
+            "defaults": {"appearance": {"inactive_pane_opacity": 100}},
             "mtime_ns": 0,
         },
         "yoloRulesPayload": {
@@ -1095,6 +1150,8 @@ def live_runtime_boot_fixture_html():
       window.__bootFetches = [];
       window.__bootSockets = [];
       window.__terminalOpened = 0;
+      window.__settingsMtime = 0;
+      window.__settingsPayload = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).settingsPayload;
       window.addEventListener('error', event => window.__bootErrors.push(event.message || String(event.error || event)));
       window.addEventListener('unhandledrejection', event => window.__bootRejections.push(String(event.reason || event)));
       window.marked = {parse(text) { return String(text || ''); }};
@@ -1162,37 +1219,68 @@ def live_runtime_boot_fixture_html():
           headers: {'Content-Type': 'application/json'},
         }));
       }
+      function mergeSettings(base, patch) {
+        const result = Array.isArray(base) ? base.slice() : {...(base || {})};
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return result;
+        for (const [key, value] of Object.entries(patch)) {
+          if (value && typeof value === 'object' && !Array.isArray(value) && result[key] && typeof result[key] === 'object' && !Array.isArray(result[key])) {
+            result[key] = mergeSettings(result[key], value);
+          } else {
+            result[key] = Array.isArray(value) ? value.slice() : value;
+          }
+        }
+        return result;
+      }
       window.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'https://localhost');
         window.__bootFetches.push({path: url.pathname, method: options.method || 'GET'});
+        if (url.pathname === '/api/settings') {
+          if ((options.method || 'GET') === 'POST') {
+            const body = JSON.parse(options.body || '{}');
+            window.__settingsPayload.settings = mergeSettings(window.__settingsPayload.settings || {}, body.settings || body);
+            window.__settingsPayload.mtime_ns = ++window.__settingsMtime;
+          }
+          return jsonResponse(window.__settingsPayload);
+        }
         if (url.pathname === '/api/notify') return jsonResponse({enabled: false});
         if (url.pathname === '/api/ensure-session') return jsonResponse({ok: true, created: false});
         if (url.pathname === '/api/auto-approve') {
           return jsonResponse({
-            session_order: ['1'],
-            sessions: {'1': {target: '1', enabled: false, last_action: 'off'}},
+            session_order: window.__fixtureSessions,
+            sessions: Object.fromEntries(window.__fixtureSessions.map(session => [session, {target: session, enabled: false, last_action: 'off'}])),
             rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
           });
         }
         if (url.pathname === '/api/transcripts') {
+          const transcriptSessions = window.__fixtureTranscriptSessions || {};
+          const currentPath = window.__fixtureTranscriptCurrentPath || '/home/test/yolomux.dev';
+          const gitRoot = window.__fixtureTranscriptGitRoot || '/home/test/yolomux.dev';
           return jsonResponse({
-            session_order: ['1'],
-            sessions: {
-              '1': {
-                session: '1',
-                selected_pane: {current_path: '/home/test/yolomux.dev'},
-                project: {git: {root: '/home/test/yolomux.dev', branch: 'main'}},
+            session_order: window.__fixtureSessions,
+            sessions: Object.fromEntries(window.__fixtureSessions.map(session => {
+              const info = transcriptSessions[session] || {};
+              return [session, {
+                session,
+                selected_pane: {current_path: info.current_path || currentPath},
+                project: {git: {root: info.git_root || gitRoot, branch: info.branch || 'main'}},
                 agents: [],
-              },
-            },
+              }];
+            })),
           });
         }
-        if (url.pathname === '/api/activity-summary') return jsonResponse({sessions: {}, global: {lines: []}, session_order: ['1']});
-        if (url.pathname === '/api/session-files') return jsonResponse({session: '1', files: [], repos: [], errors: [], loaded: true});
+        if (url.pathname === '/api/activity-summary') return jsonResponse({sessions: {}, global: {lines: []}, session_order: window.__fixtureSessions});
+        if (url.pathname === '/api/session-files') {
+          const session = url.searchParams.get('session') || window.__fixtureSessions[0] || '1';
+          return jsonResponse((window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true});
+        }
         if (url.pathname === '/api/ping') return jsonResponse({ok: true});
         if (url.pathname === '/api/event') return jsonResponse({ok: true});
         if (url.pathname === '/api/events') return jsonResponse({events: []});
-        if (url.pathname === '/api/fs/list') return jsonResponse({path: '/home/test', entries: []});
+        if (url.pathname === '/api/fs/list') {
+          const path = url.searchParams.get('path') || '/home/test';
+          const entries = (window.__fixtureFsEntries || {})[path] || [];
+          return jsonResponse({path, entries});
+        }
         return jsonResponse({});
       };
     """
@@ -1225,7 +1313,7 @@ def live_runtime_boot_fixture_html():
           <div class="file-explorer-tree-col">
             <div class="file-explorer-head">
               <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle">.*</button>
-              <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle">Root</button>
+              <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle">No Sync</button>
               <div id="fileExplorerQuickAccess" class="file-explorer-quick-access"></div>
               <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/">
               <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy"></button>
@@ -1238,6 +1326,15 @@ def live_runtime_boot_fixture_html():
         <div id="panelPool" class="panel-pool" aria-hidden="true"></div>
         <section id="modal" class="modal"><div class="modal-head"><div id="modalTitle">Transcript</div><button id="closeModal">Close</button></div><pre id="modalBody"></pre></section>
         <script id="yolomux-bootstrap" type="application/json">{json.dumps(bootstrap, separators=(",", ":"))}</script>
+        <script>
+          window.__fixtureSessions = {json.dumps(sessions)};
+          window.__fixtureTranscriptSessions = {json.dumps(transcript_sessions or {}, separators=(",", ":"))};
+          window.__fixtureTranscriptCurrentPath = {json.dumps(transcript_current_path)};
+          window.__fixtureTranscriptGitRoot = {json.dumps(transcript_git_root)};
+          window.__fixtureSessionFilesPayload = {json.dumps(session_files_payload, separators=(",", ":"))};
+          window.__fixtureSessionFilesPayloads = {json.dumps(session_files_payloads or {}, separators=(",", ":"))};
+          window.__fixtureFsEntries = {json.dumps(fs_entries, separators=(",", ":"))};
+        </script>
         <script>{stub_script}</script>
         <script src="{script_uri}"></script>
       </body>
@@ -1382,6 +1479,20 @@ def load_finder_click_toolbar_fixture(browser, tmp_path):
     browser.get(page.as_uri())
 
 
+def activate_finder_diff_fixture(browser):
+    browser.execute_script(
+        """
+        document.body.classList.remove('file-explorer-mode-files');
+        document.body.classList.add('file-explorer-mode-diff');
+        const panel = document.getElementById('finder-panel');
+        if (panel) panel.dataset.fileExplorerMode = 'diff';
+        document.querySelectorAll('[data-file-explorer-mode-set]').forEach(toggle => {
+          toggle.setAttribute('aria-pressed', toggle.dataset.fileExplorerModeSet === 'diff' ? 'true' : 'false');
+        });
+        """
+    )
+
+
 def load_file_tree_status_alignment_fixture(browser, tmp_path):
     page = tmp_path / "file-tree-status-alignment.html"
     page.write_text(file_tree_status_alignment_fixture_html(), encoding="utf-8")
@@ -1400,10 +1511,10 @@ def load_split_seam_fixture(browser, tmp_path):
     browser.get(page.as_uri())
 
 
-def load_live_runtime_boot_fixture(browser, tmp_path):
+def load_live_runtime_boot_fixture(browser, tmp_path, search=""):
     page = tmp_path / "live-runtime-boot.html"
     page.write_text(live_runtime_boot_fixture_html(), encoding="utf-8")
-    browser.get(page.as_uri())
+    browser.get(page.as_uri() + search)
 
 
 def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_path):
@@ -1442,6 +1553,550 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     assert metrics["paneTabCount"] >= 1
     assert metrics["panelVisible"]
     assert metrics["terminalText"] == "fake terminal"
+
+
+@pytest.mark.parametrize("legacy_token", ["changes", "__changes__"])
+def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_token):
+    load_live_runtime_boot_fixture(browser, tmp_path, f"?layout=left&tabs=left:{legacy_token}")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('#panel-__files__')?.dataset.fileExplorerMode === 'diff'"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const panel = document.querySelector('#panel-__files__');
+        const filesButton = panel.querySelector('[data-file-explorer-mode-set="files"]');
+        const diffButton = panel.querySelector('[data-file-explorer-mode-set="diff"]');
+        const tree = panel.querySelector('.file-explorer-tree-panel');
+        const changes = panel.querySelector('.file-explorer-changes-panel');
+        const diffTitle = panel.querySelector('.file-explorer-panel-title.file-explorer-mode-diff-only');
+        const newFile = panel.querySelector('[data-file-explorer-new-file]');
+        const visible = selector => Array.from(panel.querySelectorAll(selector)).filter(node => node.getClientRects().length > 0);
+        return {
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+          panelConnected: panel?.isConnected === true,
+          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
+          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
+          panelMode: panel?.dataset.fileExplorerMode,
+          filesPressed: filesButton?.getAttribute('aria-pressed'),
+          diffPressed: diffButton?.getAttribute('aria-pressed'),
+          modeTexts: Array.from(panel.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
+          treeDisplay: getComputedStyle(tree).display,
+          changesDisplay: getComputedStyle(changes).display,
+          diffTitleDisplay: getComputedStyle(diffTitle).display,
+          newFileDisplay: getComputedStyle(newFile).display,
+          visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
+          visibleSessionSelects: visible('[data-session-files-session]').length,
+          visibleSortSelects: visible('[data-session-files-sort]').length,
+          visibleDateButtons: visible('[data-file-explorer-tree-dates]').length,
+          visibleReloadButtons: visible('[data-session-files-refresh], [data-file-explorer-refresh]').length,
+          sessionOptionTexts: Array.from(panel.querySelectorAll('[data-session-files-session] option')).map(option => option.textContent.trim()),
+          sessionFilesFetches: window.__bootFetches.filter(item => item.path === '/api/session-files').length,
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert metrics["panelConnected"]
+    assert metrics["bodyDiff"]
+    assert not metrics["bodyFiles"]
+    assert metrics["panelMode"] == "diff"
+    assert metrics["filesPressed"] == "false"
+    assert metrics["diffPressed"] == "true"
+    assert metrics["modeTexts"] == ["Finder", "Differ"]
+    assert metrics["treeDisplay"] == "none"
+    assert metrics["changesDisplay"] != "none"
+    assert metrics["diffTitleDisplay"] != "none"
+    assert metrics["newFileDisplay"] == "none"
+    assert metrics["visibleRootControls"] == 0, metrics
+    assert metrics["visibleSessionSelects"] == 1, metrics
+    assert metrics["visibleSortSelects"] == 1, metrics
+    assert metrics["visibleDateButtons"] == 1, metrics
+    assert metrics["visibleReloadButtons"] == 1, metrics
+    assert all(text != "1 1" for text in metrics["sessionOptionTexts"]), metrics
+    assert metrics["sessionFilesFetches"] >= 1
+
+
+def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, tmp_path):
+    session_files_payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/home/test/dynamo/repo-a"}, {"repo": "/home/test/dynamo/repo-b"}],
+        "files": [
+            {"repo": "/home/test/dynamo/repo-a", "path": "src/a.js", "abs_path": "/home/test/dynamo/repo-a/src/a.js"},
+            {"repo": "/home/test/dynamo/repo-b", "path": "lib/b.py", "abs_path": "/home/test/dynamo/repo-b/lib/b.py"},
+        ],
+    }
+    fs_entries = {
+        "/home/test": [{"name": "dynamo", "kind": "dir"}],
+        "/home/test/dynamo": [{"name": "repo-a", "kind": "dir"}, {"name": "repo-b", "kind": "dir"}],
+        "/home/test/dynamo/repo-a": [{"name": "src", "kind": "dir"}],
+        "/home/test/dynamo/repo-a/src": [{"name": "a.js", "kind": "file"}],
+        "/home/test/dynamo/repo-b": [{"name": "lib", "kind": "dir"}],
+        "/home/test/dynamo/repo-b/lib": [{"name": "b.py", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-common-root.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            transcript_current_path="/home/test/dynamo/repo-a/src",
+            transcript_git_root="/home/test/dynamo/repo-a",
+            session_files_payload=session_files_payload,
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.getElementById('panel-1') !== null;
+            """
+        )
+    )
+    browser.find_element("css selector", "#panel-1").click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            const rows = new Map(Array.from(tree?.querySelectorAll('.file-tree-row') || []).map(row => [row.dataset.path, row]));
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/dynamo'
+              && rows.get('/home/test/dynamo/repo-a')?.getAttribute('aria-expanded') === 'true'
+              && rows.get('/home/test/dynamo/repo-b')?.getAttribute('aria-expanded') === 'true'
+              && rows.has('/home/test/dynamo/repo-a/src')
+              && rows.has('/home/test/dynamo/repo-b/lib');
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        const rows = Array.from(tree?.querySelectorAll('.file-tree-row') || []).map(row => ({
+          path: row.dataset.path,
+          kind: row.dataset.kind,
+          expanded: row.getAttribute('aria-expanded') === 'true',
+          classes: Array.from(row.classList),
+          background: getComputedStyle(row).backgroundColor,
+        }));
+        return {
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+          root: document.querySelector('.file-explorer-path-inline')?.value || '',
+          rows,
+          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list').length,
+          plan: fileExplorerSyncPlan('1'),
+          expandedSet: Array.from(fileExplorerExpanded),
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert metrics["root"] == "/home/test/dynamo", metrics
+    row_paths = {row["path"] for row in metrics["rows"]}
+    assert {"/home/test/dynamo/repo-a", "/home/test/dynamo/repo-a/src", "/home/test/dynamo/repo-b", "/home/test/dynamo/repo-b/lib"}.issubset(row_paths), metrics
+    expanded_paths = {row["path"] for row in metrics["rows"] if row["expanded"]}
+    assert {"/home/test/dynamo/repo-a", "/home/test/dynamo/repo-b"}.issubset(expanded_paths), metrics
+    assert "/home/test/dynamo/repo-a/src" not in expanded_paths, metrics
+    assert "/home/test/dynamo/repo-b/lib" not in expanded_paths, metrics
+    rows_by_path = {row["path"]: row for row in metrics["rows"]}
+    for path in ["/home/test/dynamo/repo-a", "/home/test/dynamo/repo-b"]:
+        assert "file-tree-row--sync-expanded" in rows_by_path[path]["classes"], metrics
+        assert "file-tree-row--session-repo" not in rows_by_path[path]["classes"], metrics
+        assert "file-tree-row--session-touched" not in rows_by_path[path]["classes"], metrics
+        assert rows_by_path[path]["background"] != "rgba(0, 0, 0, 0)", metrics
+    for path in ["/home/test/dynamo/repo-a/src", "/home/test/dynamo/repo-b/lib"]:
+        assert "file-tree-row--sync-expanded" not in rows_by_path[path]["classes"], metrics
+        assert "file-tree-row--session-repo" not in rows_by_path[path]["classes"], metrics
+        assert "file-tree-row--session-touched" not in rows_by_path[path]["classes"], metrics
+        assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
+    assert rows_by_path["/home/test/dynamo/repo-a"]["background"] != rows_by_path["/home/test/dynamo/repo-a/src"]["background"], metrics
+    assert metrics["fetchedPaths"] >= 3, metrics
+    manual_collapse = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        const row = tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a"]');
+        row.click();
+        requestAnimationFrame(() => {
+          scheduleFileExplorerActiveTabSync();
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const current = tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a"]');
+            done({
+              expanded: current?.getAttribute('aria-expanded'),
+              childVisible: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a/src"]') !== null,
+              root: document.querySelector('.file-explorer-path-inline')?.value || '',
+            });
+          }));
+        });
+        """
+    )
+    assert manual_collapse["root"] == "/home/test/dynamo", manual_collapse
+    assert manual_collapse["expanded"] == "false", manual_collapse
+    assert manual_collapse["childVisible"] is False, manual_collapse
+    cleared = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        setFileExplorerRootMode('fixed', {sync: false});
+        requestAnimationFrame(() => done(Array.from(document.querySelectorAll('.file-tree-row')).map(row => ({
+          path: row.dataset.path,
+          hasExpanded: row.classList.contains('file-tree-row--sync-expanded'),
+          hasRepo: row.classList.contains('file-tree-row--session-repo'),
+          hasTouched: row.classList.contains('file-tree-row--session-touched'),
+        }))));
+        """
+    )
+    assert not any(row["hasExpanded"] or row["hasRepo"] or row["hasTouched"] for row in cleared), cleared
+
+
+def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
+    session_files_payloads = {
+        "5": {
+            "session": "5",
+            "loaded": True,
+            "errors": [],
+            "repos": [{"repo": "/home/test/yolomux.dev"}],
+            "files": [],
+        },
+        "6": {
+            "session": "6",
+            "loaded": True,
+            "errors": [],
+            "repos": [{"repo": "/home/test/other.dev"}],
+            "files": [
+                {"repo": "/home/test/other.dev", "path": "other/touched.js", "abs_path": "/home/test/other.dev/other/touched.js"},
+            ],
+        },
+    }
+    fs_entries = {
+        "/home/test": [{"name": "yolomux.dev", "kind": "dir"}, {"name": "other.dev", "kind": "dir"}],
+        "/home/test/yolomux.dev": [{"name": "src", "kind": "dir"}, {"name": "other", "kind": "dir"}],
+        "/home/test/yolomux.dev/src": [{"name": "main.js", "kind": "file"}],
+        "/home/test/yolomux.dev/other": [{"name": "touched.js", "kind": "file"}],
+        "/home/test/other.dev": [{"name": "other", "kind": "dir"}],
+        "/home/test/other.dev/other": [{"name": "touched.js", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-hover-sticky.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            sessions=["5", "6"],
+            transcript_sessions={
+                "5": {"current_path": "/home/test/yolomux.dev/src", "git_root": "/home/test/yolomux.dev"},
+                "6": {"current_path": "/home/test/other.dev/other", "git_root": "/home/test/other.dev"},
+            },
+            session_files_payload=session_files_payloads["5"],
+            session_files_payloads=session_files_payloads,
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,5,6&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:6")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.getElementById('panel-5') !== null
+              && document.getElementById('panel-6') !== null;
+            """
+        )
+    )
+    browser.find_element("css selector", "#panel-5").click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
+        )
+    )
+    ActionChains(browser).move_to_element(browser.find_element("css selector", "#panel-6")).perform()
+    hover_metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        setFocusedTerminal('6');
+        scheduleFileExplorerActiveTabSync();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+          const plan = fileExplorerSyncPlan();
+          done({
+            root: document.querySelector('.file-explorer-path-inline')?.value || '',
+            activeTmux: activeTmuxDirectoryPath(),
+            planSession: plan.session,
+            planRoot: plan.root,
+            otherVisible: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]') !== null,
+            otherRepoVisible: tree.querySelector('.file-tree-row[data-path="/home/test/other.dev"]') !== null,
+            otherExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]')?.getAttribute('aria-expanded') || '',
+          });
+        }));
+        """
+    )
+    assert hover_metrics["root"] == "/home/test/yolomux.dev", hover_metrics
+    assert hover_metrics["activeTmux"] == "/home/test/yolomux.dev/src", hover_metrics
+    assert hover_metrics["planSession"] == "5", hover_metrics
+    assert hover_metrics["planRoot"] == "/home/test/yolomux.dev", hover_metrics
+    assert hover_metrics["otherVisible"] is True, hover_metrics
+    assert hover_metrics["otherRepoVisible"] is False, hover_metrics
+    assert hover_metrics["otherExpanded"] == "false", hover_metrics
+    focus_report_metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        terminals.get('6')?.term?._onData?.('\\x1b[I');
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          done({
+            target: fileExplorerSessionFilesTargetSession(),
+            activeTmux: activeTmuxDirectoryPath(),
+            planSession: fileExplorerSyncPlan().session,
+            planRoot: fileExplorerSyncPlan().root,
+            payloadSession: fileExplorerSessionFilesPayload?.session || '',
+          });
+        }));
+        """
+    )
+    assert focus_report_metrics["target"] == "5", focus_report_metrics
+    assert focus_report_metrics["activeTmux"] == "/home/test/yolomux.dev/src", focus_report_metrics
+    assert focus_report_metrics["planSession"] == "5", focus_report_metrics
+    assert focus_report_metrics["planRoot"] == "/home/test/yolomux.dev", focus_report_metrics
+    assert focus_report_metrics["payloadSession"] == "5", focus_report_metrics
+    passive_select_metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        selectSession('6');
+        fetchSessionFiles({destination: 'finder', silent: true, force: true}).then(() => {
+          scheduleFileExplorerActiveTabSync();
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            done({
+              root: document.querySelector('.file-explorer-path-inline')?.value || '',
+              target: fileExplorerSessionFilesTargetSession(),
+              payloadSession: fileExplorerSessionFilesPayload?.session || '',
+              activeTmux: activeTmuxDirectoryPath(),
+              planRoot: fileExplorerSyncPlan().root,
+              otherExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]')?.getAttribute('aria-expanded') || '',
+            });
+          }));
+        }).catch(error => done({error: String(error)}));
+        """
+    )
+    assert passive_select_metrics["root"] == "/home/test/yolomux.dev", passive_select_metrics
+    assert passive_select_metrics["target"] == "5", passive_select_metrics
+    assert passive_select_metrics["payloadSession"] == "5", passive_select_metrics
+    assert passive_select_metrics["activeTmux"] == "/home/test/yolomux.dev/src", passive_select_metrics
+    assert passive_select_metrics["planRoot"] == "/home/test/yolomux.dev", passive_select_metrics
+    assert passive_select_metrics["otherExpanded"] == "false", passive_select_metrics
+    typed_metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        document.getElementById('term-6')?.dispatchEvent(new KeyboardEvent('keydown', {key: 'x', bubbles: true}));
+        terminals.get('6')?.term?._onData?.('x');
+        setTimeout(() => {
+          done({
+            target: fileExplorerSessionFilesTargetSession(),
+            activeTmux: activeTmuxDirectoryPath(),
+            planSession: fileExplorerSyncPlan().session,
+          });
+        }, 0);
+        """
+    )
+    assert typed_metrics["target"] == "6", typed_metrics
+    assert typed_metrics["activeTmux"] == "/home/test/other.dev/other", typed_metrics
+    assert typed_metrics["planSession"] == "6", typed_metrics
+
+
+def test_fixed_finder_does_not_follow_hovered_editor_until_explicit_click(browser, tmp_path):
+    fs_entries = {
+        "/home/test": [{"name": "repo-a", "kind": "dir"}, {"name": "repo-b", "kind": "dir"}],
+        "/home/test/repo-a": [{"name": "src", "kind": "dir"}],
+        "/home/test/repo-a/src": [{"name": "a.md", "kind": "file"}],
+        "/home/test/repo-b": [{"name": "other", "kind": "dir"}],
+        "/home/test/repo-b/other": [{"name": "b.md", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-fixed-finder-hover-editor.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"general": {"auto_focus": True}, "file_explorer": {"root_mode": "fixed"}},
+            sessions=[],
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    item_a = "file:/home/test/repo-a/src/a.md"
+    item_b = "file:/home/test/repo-b/other/b.md"
+    browser.get(
+        page.as_uri()
+        + "?sessions=files"
+        + "&layout=row@35(slot1,row@50(left,slot2))"
+        + f"&tabs=slot1:files;left:{item_a};slot2:{item_b}"
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.querySelector('.file-editor-panel[data-file-path="/home/test/repo-a/src/a.md"]')
+              && document.querySelector('.file-editor-panel[data-file-path="/home/test/repo-b/other/b.md"]');
+            """
+        )
+    )
+    browser.find_element("css selector", '.file-editor-panel[data-file-path="/home/test/repo-a/src/a.md"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            return tree?.querySelector('.file-tree-row[data-path="/home/test/repo-a/src/a.md"]') !== null;
+            """
+        )
+    )
+    ActionChains(browser).move_to_element(browser.find_element("css selector", '.file-editor-panel[data-file-path="/home/test/repo-b/other/b.md"]')).perform()
+    hover_metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        scheduleFileExplorerActiveTabSync();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+          done({
+            root: document.querySelector('.file-explorer-path-inline')?.value || '',
+            repoBExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/repo-b"]')?.getAttribute('aria-expanded') || '',
+            otherVisible: tree.querySelector('.file-tree-row[data-path="/home/test/repo-b/other"]') !== null,
+          });
+        }));
+        """
+    )
+    assert hover_metrics["root"] == "/home/test", hover_metrics
+    assert hover_metrics["repoBExpanded"] == "false", hover_metrics
+    assert hover_metrics["otherVisible"] is False, hover_metrics
+    browser.find_element("css selector", '.file-editor-panel[data-file-path="/home/test/repo-b/other/b.md"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            return tree?.querySelector('.file-tree-row[data-path="/home/test/repo-b/other/b.md"]') !== null;
+            """
+        )
+    )
+
+
+def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path):
+    session_files_payload = {
+        "session": "old",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/home/test/stale"}],
+        "files": [{"repo": "/home/test/stale", "path": "old.js", "abs_path": "/home/test/stale/old.js"}],
+    }
+    fs_entries = {
+        "/home/test": [{"name": "stale", "kind": "dir"}, {"name": "fresh.txt", "kind": "file"}],
+        "/home/test/stale": [{"name": "old.js", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-empty-session-home.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            transcript_current_path="",
+            session_files_payload=session_files_payload,
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?layout=left&tabs=left:files")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && Array.from(document.querySelectorAll('.file-tree-row')).some(row => row.dataset.path === '/home/test/stale');
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const rows = Array.from(document.querySelectorAll('.file-tree-row')).map(row => ({
+          path: row.dataset.path,
+          hasRepo: row.classList.contains('file-tree-row--session-repo'),
+          hasTouched: row.classList.contains('file-tree-row--session-touched'),
+        }));
+        return {
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+          root: document.querySelector('.file-explorer-path-inline')?.value || '',
+          rows,
+          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list').map(item => item.path),
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert metrics["root"] == "/home/test", metrics
+    assert "/home/test/stale" in {row["path"] for row in metrics["rows"]}, metrics
+    assert not any(row["hasRepo"] or row["hasTouched"] for row in metrics["rows"]), metrics
+
+
+def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof selectSession === 'function' && window.__terminalOpened >= 1")
+    )
+    opened = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        selectSession('__prefs__').then(
+          () => requestAnimationFrame(() => done({ok: true})),
+          error => done({ok: false, error: String(error)})
+        );
+        """
+    )
+    assert opened["ok"], opened
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('.preferences-scroll') !== null")
+    )
+    metrics = browser.execute_script(
+        """
+        const scroller = document.querySelector('.preferences-scroll');
+        scroller.scrollTop = 60;
+        scroller.dispatchEvent(new WheelEvent('wheel', {deltaY: 120, bubbles: true}));
+        renderPreferencesPanels();
+        const afterPassive = document.querySelector('.preferences-scroll');
+        renderPreferencesPanels({force: true});
+        const afterForced = document.querySelector('.preferences-scroll');
+        return {
+          passiveKeptScroller: afterPassive === scroller,
+          forcedReplacedScroller: afterForced !== afterPassive,
+          scrollTop: afterPassive.scrollTop,
+          bodyHtml: document.querySelector('.preferences-body')?.innerHTML || '',
+        };
+        """
+    )
+    assert metrics["passiveKeptScroller"], metrics
+    assert metrics["forcedReplacedScroller"], metrics
+    assert "preferences-sections" in metrics["bodyHtml"]
+
+
+def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof applySettingsPayload === 'function' && document.querySelector('#panel-1') !== null"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const panel = document.querySelector('#panel-1');
+        panel.classList.add('active-pane');
+        const applyOpacity = value => {
+          applySettingsPayload({settings: {appearance: {pane_ring_opacity: value}}, defaults: {}, mtime_ns: value}, {force: true});
+          const rootStyle = getComputedStyle(document.documentElement);
+          const panelStyle = getComputedStyle(panel);
+          return {
+            activeOpacity: rootStyle.getPropertyValue('--pane-active-ring-opacity').trim(),
+            normalOpacity: rootStyle.getPropertyValue('--pane-ring-opacity').trim(),
+            borderColor: panelStyle.borderLeftColor,
+          };
+        };
+        return {five: applyOpacity(5), defaultish: applyOpacity(75)};
+        """
+    )
+    assert metrics["five"]["activeOpacity"] == "5%", metrics
+    assert metrics["five"]["normalOpacity"] == "5%", metrics
+    assert metrics["defaultish"]["activeOpacity"] == "75%", metrics
+    assert metrics["five"]["borderColor"] != metrics["defaultish"]["borderColor"], metrics
 
 
 def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
@@ -1500,7 +2155,7 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
         return {dark, light: readMetrics()};
         """
     )
-    assert theme_metrics["dark"]["panelHeadBg"] == "rgb(31, 48, 38)"
+    assert theme_metrics["dark"]["panelHeadBg"].startswith("color(srgb")
     assert theme_metrics["light"]["panelHeadBg"] == "rgb(220, 232, 210)"
     # Shared pane-chrome buttons (image 009): every UNPRESSED control is white (light) / near-black (dark)
     # via --pane-ctl-bg — including the expand "+" (formerly always-green). Only PRESSED/ACTIVE buttons go
@@ -1652,6 +2307,295 @@ def test_topbar_uses_ui_font_size_and_compact_actions(browser, tmp_path):
     assert tiny_metrics["paneTabHeight"] <= 18
 
 
+def test_active_pane_tab_container_lightens_in_dark_only(browser, tmp_path):
+    load_fixture(browser, tmp_path, 860)
+    metrics = browser.execute_script(
+        """
+        function colorFor(styleValue) {
+          const probe = document.createElement('div');
+          probe.style.position = 'absolute';
+          probe.style.left = '-1000px';
+          probe.style.top = '-1000px';
+          probe.style.background = styleValue;
+          document.body.appendChild(probe);
+          const color = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return color;
+        }
+        function brightness(color) {
+          const nums = (color.match(/\\d+(?:\\.\\d+)?/g) || []).slice(0, 3).map(Number);
+          if (color.startsWith('color(srgb')) return nums.reduce((sum, value) => sum + value * 255, 0);
+          return nums[0] + nums[1] + nums[2];
+        }
+        document.body.classList.add('theme-dark');
+        const head = document.querySelector('.panel-head');
+        const darkHoverToken = getComputedStyle(document.body).getPropertyValue('--pane-tab-strip-hover-bg').trim();
+        const darkStrip = colorFor('var(--pane-tab-strip-bg)');
+        const darkHover = colorFor('var(--pane-tab-strip-hover-bg)');
+        const darkHead = getComputedStyle(head).backgroundColor;
+        document.body.classList.remove('theme-dark');
+        document.body.classList.add('theme-light');
+        const lightStrip = colorFor('var(--pane-tab-strip-bg)');
+        const lightHead = getComputedStyle(head).backgroundColor;
+        return {
+          darkStrip,
+          darkHover,
+          darkHead,
+          darkHoverToken,
+          darkStripBrightness: brightness(darkStrip),
+          darkHoverBrightness: brightness(darkHover),
+          lightStrip,
+          lightHead,
+        };
+        """
+    )
+    assert metrics["darkHoverToken"] == "", metrics
+    assert metrics["darkHead"] == metrics["darkStrip"], metrics
+    assert metrics["darkStripBrightness"] > 0, metrics
+    assert metrics["lightHead"] == metrics["lightStrip"], metrics
+
+
+def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    page = tmp_path / "diff-active-line-fill.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
+        <style>
+        body {{ margin: 0; padding: 20px; background: #0f1115; color: #dfe6ef; }}
+        .file-editor-diff-codemirror {{ width: 520px; background: var(--editor-scheme-bg); }}
+        .cm-editor {{ background: var(--editor-scheme-bg); }}
+        .cm-content {{ padding: 0; }}
+        .cm-line {{ display: block; min-height: 22px; line-height: 22px; padding-inline: 8px; }}
+        .cm-editor .cm-activeLine {{ background-color: rgba(255, 255, 255, 0.04); }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <div id="host" class="file-editor-codemirror-panel file-editor-diff-codemirror">
+            <div class="cm-editor"><div class="cm-content">
+              <div id="added-a" class="cm-line cm-insertedLine">added one</div>
+              <div id="added-active" class="cm-line cm-insertedLine cm-activeLine">added active</div>
+              <div id="plain-active" class="cm-line cm-activeLine">plain active</div>
+            </div></div>
+          </div>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script(
+        """
+        function bg(selector) {
+          return getComputedStyle(document.querySelector(selector)).backgroundColor;
+        }
+        const dark = {
+          added: bg('#added-a'),
+          activeAdded: bg('#added-active'),
+          plainActive: bg('#plain-active'),
+          addToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-add-line-bg').trim(),
+          removeToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-remove-line-bg').trim(),
+        };
+        document.body.classList.remove('editor-theme-dark');
+        document.body.classList.add('editor-theme-light');
+        const light = {
+          added: bg('#added-a'),
+          activeAdded: bg('#added-active'),
+          addToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-add-line-bg').trim(),
+        };
+        return {dark, light};
+        """
+    )
+    assert metrics["dark"]["added"] == metrics["dark"]["activeAdded"], metrics
+    assert metrics["dark"]["plainActive"] in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+    assert "transparent" not in metrics["dark"]["addToken"], metrics
+    assert "transparent" not in metrics["dark"]["removeToken"], metrics
+    assert metrics["light"]["added"] == metrics["light"]["activeAdded"], metrics
+    assert metrics["light"]["addToken"] == "#d2f0d6", metrics
+
+
+def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_path):
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+            "codeMirrorAssetUrl": bundle_uri,
+        },
+        separators=(",", ":"),
+    )
+    path = str(REPO_ROOT / "README.md")
+    original = subprocess.check_output(["git", "show", "HEAD:README.md"], cwd=REPO_ROOT, text=True)
+    current = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    diff = subprocess.check_output(["git", "diff", "HEAD", "--", "README.md"], cwd=REPO_ROOT, text=True)
+    payload = json.dumps(
+        {
+            "diff": diff,
+            "original": original,
+            "working": current,
+            "repo": str(REPO_ROOT),
+            "relative_path": "README.md",
+            "from_ref": "HEAD",
+            "to_ref": "current",
+            "untracked": False,
+            "working_missing": False,
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "readme-diff-race.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        #mount {{ width: 920px; height: 640px; }}
+        .file-editor-panel {{ width: 920px; height: 640px; }}
+        .file-editor-codemirror-panel {{ height: 100%; }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="mount"></div>
+          <script>
+            window.__readmeDiffPayload = {payload};
+            window.__readmeDiffErrors = [];
+            window.addEventListener('error', event => window.__readmeDiffErrors.push(event.message || String(event.error || event)));
+            window.addEventListener('unhandledrejection', event => window.__readmeDiffErrors.push(String(event.reason || event)));
+            function jsonResponse(payload) {{
+              const text = JSON.stringify(payload);
+              return Promise.resolve({{ok: true, status: 200, headers: {{get: () => 'application/json'}}, json: async () => payload, text: async () => text}});
+            }}
+            window.fetch = async input => {{
+              const url = new URL(String(input), 'https://localhost');
+              if (url.pathname === '/api/fs/diff') {{
+                window.__readmeDiffRequest = url.search;
+                return new Promise(resolve => {{
+                  window.__resolveReadmeDiffFetch = () => resolve(jsonResponse(window.__readmeDiffPayload));
+                }});
+              }}
+              return jsonResponse({{}});
+            }};
+          </script>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__readmeDiffReady = (async () => {{
+              const path = {json.dumps(path)};
+              const current = {json.dumps(current).replace("</script", "<\\/script")};
+              const item = fileEditorItemFor(path);
+              setFileState(path, {{
+                kind: 'text',
+                content: current,
+                original: current,
+                dirty: false,
+                language: 'markdown',
+                gitTracked: true,
+                gitHasHistory: true,
+                gitHistory: [{{sha: 'HEAD'}}],
+                diffLoaded: false,
+                diffUnavailable: false,
+                diff: '',
+                diffOriginal: '',
+              }});
+              setFileEditorViewMode(path, 'diff', item);
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.id = 'readme-diff-panel';
+              panel.classList.add('active-pane');
+              panelNodes.set(item, panel);
+              document.getElementById('mount').append(panel);
+              const originalLoadCodeMirrorApi = loadCodeMirrorApi;
+              window.__holdReadmeCodeMirrorLoad = false;
+              window.__readmeDiffLoadEntered = false;
+              let releaseLoad = null;
+              loadCodeMirrorApi = async function(...args) {{
+                if (window.__holdReadmeCodeMirrorLoad) {{
+                  window.__readmeDiffLoadEntered = true;
+                  await new Promise(resolve => {{
+                    releaseLoad = resolve;
+                    window.__releaseReadmeCodeMirrorLoad = resolve;
+                  }});
+                }}
+                return originalLoadCodeMirrorApi.apply(this, args);
+              }};
+              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const waitFor = async predicate => {{
+                for (let attempt = 0; attempt < 120; attempt += 1) {{
+                  if (predicate()) return true;
+                  await frame();
+                }}
+                return false;
+              }};
+              renderFileEditorPanel(panel, item);
+              await waitFor(() => window.__resolveReadmeDiffFetch);
+              await frame();
+              await frame();
+              const modeWhilePayloadUnresolved = panel._cmMode || '';
+              const textWhilePayloadUnresolved = panel._cmView?.state?.doc?.toString?.() || '';
+              window.__holdReadmeCodeMirrorLoad = true;
+              window.__resolveReadmeDiffFetch();
+              const diffLoadedWait = await waitFor(() => openFiles.get(path)?.diffLoaded === true);
+              let manualRenderCalled = false;
+              if (!window.__readmeDiffLoadEntered) {{
+                manualRenderCalled = true;
+                renderFileEditorPanel(panel, item);
+              }}
+              const loadEnteredWait = await waitFor(() => window.__readmeDiffLoadEntered);
+              const modeBeforeDiffBuildRelease = panel._cmMode || '';
+              if (releaseLoad) releaseLoad();
+              const finalWait = await waitFor(() => panel._cmMode === 'diff' && panel._cmView?.state?.doc?.toString?.().includes('Browser tools for watching'));
+              const finalText = panel._cmView?.state?.doc?.toString?.() || '';
+              const state = openFiles.get(path) || {{}};
+              return {{
+                modeWhilePayloadUnresolved,
+                textWhilePayloadUnresolved,
+                diffLoadedWait,
+                loadEnteredWait,
+                finalWait,
+                manualRenderCalled,
+                modeBeforeDiffBuildRelease,
+                finalMode: panel._cmMode || '',
+                finalTextLength: finalText.length,
+                expectedTextLength: current.length,
+                deletedRows: panel.querySelectorAll('.cm-deletedLine').length,
+                diffLoaded: state.diffLoaded === true,
+                diffLoading: state.diffLoading === true,
+                diffUnavailable: state.diffUnavailable === true,
+                diffLength: String(state.diff || '').length,
+                originalLength: String(state.diffOriginal || '').length,
+                viewMode: editorViewModeFor(path, item),
+                panelItems: filePanelItemsForPath(path),
+                panelConnected: panel.isConnected === true,
+                loadEntered: window.__readmeDiffLoadEntered === true,
+                apiHasMergeView: Boolean(window.YOLOmuxCodeMirror?.MergeView),
+                apiHasUnifiedMergeView: Boolean(window.YOLOmuxCodeMirror?.unifiedMergeView),
+                statusText: panel.querySelector('.file-editor-status-message')?.textContent || '',
+                request: window.__readmeDiffRequest || '',
+                errors: window.__readmeDiffErrors,
+              }};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__readmeDiffReady.then(done, error => done({error: String(error), errors: window.__readmeDiffErrors || []}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["modeWhilePayloadUnresolved"] != "edit", metrics
+    assert "Browser tools for watching" not in metrics["textWhilePayloadUnresolved"], metrics
+    assert metrics["finalMode"] == "diff", json.dumps(metrics, sort_keys=True)
+    assert metrics["finalTextLength"] == metrics["expectedTextLength"], metrics
+    assert metrics["deletedRows"] > 0, metrics
+    assert "from=HEAD" in metrics["request"] and "to=current" in metrics["request"], metrics
+    assert metrics["errors"] == [], metrics
+
+
 def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(browser, tmp_path):
     def theme_tokens():
         return browser.execute_script(
@@ -1669,6 +2613,7 @@ def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(brow
               return color;
             }
             return {
+              panel: tokenColor('--panel'),
               neutral: tokenColor('--panel2'),
               green: tokenColor('--pane-tab-strip-bg'),
             };
@@ -1692,16 +2637,16 @@ def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(brow
     load_finder_click_toolbar_fixture(browser, tmp_path)
     tokens = theme_tokens()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
-    wait_background("#modified-files-head", tokens["neutral"])
     ActionChains(browser).move_to_element(browser.find_element("css selector", "#finder-panel .file-explorer-head")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["green"])
-    wait_background("#modified-files-head", tokens["neutral"])
     ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
-    wait_background("#modified-files-head", tokens["neutral"])
+
+    activate_finder_diff_fixture(browser)
+    wait_background("#modified-files-panel .changes-toolbar", tokens["panel"])
     ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
-    wait_background("#modified-files-head", tokens["green"])
+    wait_background("#modified-files-panel .changes-toolbar", tokens["green"])
 
 
 def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_path):
@@ -1709,9 +2654,7 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     browser.execute_script(
         """
         const tree = document.querySelector('.file-explorer-tree-panel');
-        const differ = document.getElementById('modified-files-panel');
         tree.innerHTML = '<div style="height: 520px"></div>';
-        differ.insertAdjacentHTML('beforeend', '<div style="height: 520px"></div>');
         """
     )
 
@@ -1729,35 +2672,47 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     overflow = browser.execute_script(
         """
         const tree = document.querySelector('.file-explorer-tree-panel');
-        const differ = document.getElementById('modified-files-panel');
         return {
           tree: tree.scrollHeight > tree.clientHeight,
-          differ: differ.scrollHeight > differ.clientHeight,
         };
         """
     )
     assert overflow["tree"]
-    assert overflow["differ"]
 
-    wait_thumb(".file-explorer-tree-panel", neutral)
-    wait_thumb("#modified-files-panel", neutral)
-    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
-    wait_thumb("#modified-files-panel", green)
     wait_thumb(".file-explorer-tree-panel", neutral)
     ActionChains(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", green)
-    wait_thumb("#modified-files-panel", neutral)
     ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", neutral)
+
+    activate_finder_diff_fixture(browser)
+    browser.execute_script(
+        """
+        const differ = document.getElementById('modified-files-panel');
+        differ.insertAdjacentHTML('beforeend', '<div style="height: 520px"></div>');
+        """
+    )
+    overflow = browser.execute_script(
+        """
+        const differ = document.getElementById('modified-files-panel');
+        return {differ: differ.scrollHeight > differ.clientHeight};
+        """
+    )
+    assert overflow["differ"]
+    wait_thumb("#modified-files-panel", neutral)
+    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    wait_thumb("#modified-files-panel", green)
+    ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb("#modified-files-panel", neutral)
 
 
 def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(browser, tmp_path):
     load_finder_click_toolbar_fixture(browser, tmp_path)
+    activate_finder_diff_fixture(browser)
     refresh_metrics = browser.execute_script(
         """
         document.body.classList.add('theme-light');
-        const button = document.querySelector('#modified-files-head .changes-refresh');
+        const button = document.querySelector('#modified-files-panel .changes-refresh');
         const style = getComputedStyle(button);
         const before = getComputedStyle(button, '::before');
         const rect = button.getBoundingClientRect();
@@ -1877,6 +2832,51 @@ def test_finder_differ_status_badges_share_one_column(browser, tmp_path):
     assert hidden_date_metrics["statusRightGap"] <= 10
 
 
+def test_differ_long_filename_ellipsizes_before_date_column(browser, tmp_path):
+    load_file_tree_status_alignment_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const row = document.getElementById('status-row-long');
+        const tree = row.parentElement;
+        const name = row.querySelector('.file-tree-name');
+        const agent = row.querySelector('.file-tree-agent');
+        const diff = row.querySelector('.file-tree-diff');
+        const status = row.querySelector('.file-tree-git-status');
+        const date = row.querySelector('.file-tree-date');
+        const rowRect = row.getBoundingClientRect();
+        const treeRect = tree.getBoundingClientRect();
+        const nameRect = name.getBoundingClientRect();
+        const agentRect = agent.getBoundingClientRect();
+        const diffRect = diff.getBoundingClientRect();
+        const statusRect = status.getBoundingClientRect();
+        const dateRect = date.getBoundingClientRect();
+        return {
+          treeRight: treeRect.right,
+          rowRight: rowRect.right,
+          nameRight: nameRect.right,
+          agentLeft: agentRect.left,
+          diffLeft: diffRect.left,
+          statusLeft: statusRect.left,
+          dateLeft: dateRect.left,
+          dateRight: dateRect.right,
+          dateClientWidth: date.clientWidth,
+          dateScrollWidth: date.scrollWidth,
+          nameClientWidth: name.clientWidth,
+          nameScrollWidth: name.scrollWidth,
+          nameFlex: getComputedStyle(name).flex,
+          agentMarginInlineEnd: getComputedStyle(agent).marginInlineEnd,
+        };
+        """
+    )
+    assert metrics["dateRight"] <= metrics["treeRight"] + 0.5, metrics
+    assert metrics["dateScrollWidth"] <= metrics["dateClientWidth"] + 1, metrics
+    assert metrics["nameScrollWidth"] > metrics["nameClientWidth"] + 1, metrics
+    assert metrics["nameFlex"].startswith("1 1"), metrics
+    assert metrics["agentMarginInlineEnd"] == "0px", metrics
+    assert metrics["nameRight"] <= metrics["agentLeft"] + 0.5, metrics
+    assert metrics["agentLeft"] <= metrics["diffLeft"] <= metrics["statusLeft"] <= metrics["dateLeft"], metrics
+
+
 def test_diff_overview_does_not_cover_editor_scrollbar(browser, tmp_path):
     load_codemirror_scrollbar_overview_fixture(browser, tmp_path)
     metrics = browser.execute_script(
@@ -1926,19 +2926,19 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
             "toA": 147096,
             "endA": 147095,
             "fromB": 2235,
-            "toB": 32019,
-            "endB": 32018,
+            "toB": 32364,
+            "endB": 32363,
         }
     ]
     assert metrics["rows"]["bands"] == [
         {"kind": "remove", "start": 21, "end": 561},
-        {"kind": "add", "start": 561, "end": 760},
+        {"kind": "add", "start": 561, "end": 762},
     ]
-    assert metrics["rows"]["currentLineCount"] == 270
+    assert metrics["rows"]["currentLineCount"] == 272
     assert metrics["rows"]["deletedRows"] == 540
-    assert metrics["rows"]["totalRows"] == 810
+    assert metrics["rows"]["totalRows"] == 812
     assert metrics["deletedDomRows"] == metrics["removedRangeRows"]
-    assert metrics["insertedRangeRows"] == 199
+    assert metrics["insertedRangeRows"] == 201
     assert "linear-gradient" in metrics["overviewBackground"]
     assert metrics["overviewStops"] == metrics["expectedStops"], metrics["overviewBackground"]
     assert metrics["tickCount"] == 0
@@ -2025,18 +3025,58 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     metrics = browser.execute_script(
         """
         const toolbar = document.querySelector('#finder-panel .file-explorer-toolbar');
-        const path = toolbar.querySelector('.file-explorer-path-inline');
+        const primaryRow = toolbar.querySelector('.file-explorer-primary-row');
+        const actionsRow = toolbar.querySelector('.file-explorer-actions-row');
+        const title = primaryRow.querySelector('.file-explorer-panel-title.file-explorer-mode-files-only');
+        const path = primaryRow.querySelector('.file-explorer-path-inline');
+        const copy = primaryRow.querySelector('.file-explorer-path-copy-panel');
+        const mode = primaryRow.querySelector('.file-explorer-mode-switcher');
+        const cluster = toolbar.querySelector('.file-explorer-date-reload-cluster');
+        const date = cluster.querySelector('.file-explorer-date-toggle');
+        const refresh = cluster.querySelector('.changes-refresh');
+        const close = primaryRow.querySelector('.file-explorer-panel-close');
         const toolbarRect = toolbar.getBoundingClientRect();
+        const primaryRowRect = primaryRow.getBoundingClientRect();
+        const actionsRowRect = actionsRow.getBoundingClientRect();
+        const titleRect = title.getBoundingClientRect();
         const pathRect = path.getBoundingClientRect();
+        const copyRect = copy.getBoundingClientRect();
+        const modeRect = mode.getBoundingClientRect();
+        const clusterRect = cluster.getBoundingClientRect();
+        const dateRect = date.getBoundingClientRect();
+        const refreshRect = refresh.getBoundingClientRect();
+        const closeRect = close.getBoundingClientRect();
         const textProbe = document.createElement('span');
         textProbe.style.color = 'var(--text)';
         document.body.appendChild(textProbe);
         const textColor = getComputedStyle(textProbe).color;
         textProbe.remove();
         return {
-          firstIsPath: toolbar.firstElementChild === path,
+          firstRowIsPrimary: toolbar.firstElementChild === primaryRow,
+          titleInPrimaryRow: primaryRow.firstElementChild === title,
+          pathInPrimaryRow: title.nextElementSibling?.nextElementSibling === path,
+          titleRight: titleRect.right,
           pathLeft: pathRect.left,
-          toolbarLeft: toolbarRect.left,
+          pathRight: pathRect.right,
+          primaryRowLeft: primaryRowRect.left,
+          primaryRowRight: primaryRowRect.right,
+          primaryRowWidth: primaryRowRect.width,
+          copyLeft: copyRect.left,
+          copyRight: copyRect.right,
+          copyWidth: copyRect.width,
+          modeLeft: modeRect.left,
+          modeRight: modeRect.right,
+          modeTexts: Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim()),
+          actionsRowTop: actionsRowRect.top,
+          primaryRowBottom: primaryRowRect.bottom,
+          actionsRowRight: actionsRowRect.right,
+          clusterRight: clusterRect.right,
+          clusterLeft: clusterRect.left,
+          dateRight: dateRect.right,
+          refreshLeft: refreshRect.left,
+          refreshRight: refreshRect.right,
+          closeLeft: closeRect.left,
+          closeRight: closeRect.right,
           pathWidth: pathRect.width,
           toolbarWidth: toolbarRect.width,
           pathColor: getComputedStyle(path).color,
@@ -2044,10 +3084,137 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         };
         """
     )
-    assert metrics["firstIsPath"]
-    assert metrics["pathLeft"] <= metrics["toolbarLeft"] + 1
-    assert metrics["pathWidth"] >= min(220, metrics["toolbarWidth"] - 1)
+    assert metrics["firstRowIsPrimary"]
+    assert metrics["titleInPrimaryRow"]
+    assert metrics["pathInPrimaryRow"]
+    assert metrics["titleRight"] <= metrics["pathLeft"]
+    assert metrics["pathLeft"] > metrics["primaryRowLeft"]
+    assert metrics["pathWidth"] >= min(160, metrics["toolbarWidth"] / 3)
+    assert metrics["pathRight"] <= metrics["copyLeft"]
+    assert metrics["copyRight"] <= metrics["modeLeft"]
+    assert metrics["modeRight"] <= metrics["closeLeft"]
+    assert metrics["modeTexts"] == ["Finder", "Differ"]
+    assert abs(metrics["closeRight"] - metrics["primaryRowRight"]) <= 1
     assert metrics["pathColor"] == metrics["textColor"]
+    assert metrics["actionsRowTop"] >= metrics["primaryRowBottom"]
+    assert metrics["dateRight"] <= metrics["refreshLeft"]
+    assert metrics["refreshRight"] <= metrics["actionsRowRight"] + 1
+    assert metrics["clusterLeft"] > metrics["pathLeft"]
+
+
+def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
+    load_finder_click_toolbar_fixture(browser, tmp_path)
+    before = browser.execute_script(
+        """
+        const filesButton = document.querySelector('[data-file-explorer-mode-set="files"]');
+        const diffButton = document.querySelector('[data-file-explorer-mode-set="diff"]');
+        const newFile = document.getElementById('new-file');
+        const tree = document.querySelector('.file-explorer-tree-panel');
+        const changes = document.querySelector('.file-explorer-changes-panel');
+        const diffTitle = document.querySelector('.file-explorer-panel-title.file-explorer-mode-diff-only');
+        return {
+          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
+          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
+          filesPressed: filesButton.getAttribute('aria-pressed'),
+          diffPressed: diffButton.getAttribute('aria-pressed'),
+          texts: Array.from(document.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
+          diffButtonBg: getComputedStyle(diffButton).backgroundColor,
+          newFileDisplay: getComputedStyle(newFile).display,
+          treeDisplay: getComputedStyle(tree).display,
+          changesDisplay: getComputedStyle(changes).display,
+          diffTitleDisplay: getComputedStyle(diffTitle).display,
+        };
+        """
+    )
+    assert before["bodyFiles"]
+    assert not before["bodyDiff"]
+    assert before["filesPressed"] == "true"
+    assert before["diffPressed"] == "false"
+    assert before["texts"] == ["Finder", "Differ"]
+    assert before["newFileDisplay"] != "none"
+    assert before["treeDisplay"] != "none"
+    assert before["changesDisplay"] == "none"
+    assert before["diffTitleDisplay"] == "none"
+
+    browser.find_element("css selector", "[data-file-explorer-mode-set='diff']").click()
+    after = browser.execute_script(
+        """
+        const filesButton = document.querySelector('[data-file-explorer-mode-set="files"]');
+        const diffButton = document.querySelector('[data-file-explorer-mode-set="diff"]');
+        const newFile = document.getElementById('new-file');
+        const pane = document.querySelector('.file-explorer-pane');
+        const tree = document.querySelector('.file-explorer-tree-panel');
+        const changes = document.querySelector('.file-explorer-changes-panel');
+        const diffTitle = document.querySelector('.file-explorer-panel-title.file-explorer-mode-diff-only');
+        const visible = selector => Array.from(document.querySelectorAll(selector)).filter(node => node.getClientRects().length > 0);
+        const changesStyle = getComputedStyle(changes);
+        const paneRect = pane.getBoundingClientRect();
+        const changesRect = changes.getBoundingClientRect();
+        return {
+          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
+          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
+          panelMode: document.getElementById('finder-panel').dataset.fileExplorerMode,
+          filesPressed: filesButton.getAttribute('aria-pressed'),
+          diffPressed: diffButton.getAttribute('aria-pressed'),
+          texts: Array.from(document.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
+          diffButtonBg: getComputedStyle(diffButton).backgroundColor,
+          newFileDisplay: getComputedStyle(newFile).display,
+          treeDisplay: getComputedStyle(tree).display,
+          changesDisplay: changesStyle.display,
+          changesFlexGrow: changesStyle.flexGrow,
+          changesMaxBlockSize: changesStyle.maxBlockSize,
+          paneHeight: paneRect.height,
+          changesHeight: changesRect.height,
+          diffTitleDisplay: getComputedStyle(diffTitle).display,
+          visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
+          visibleSessionSelects: visible('[data-session-files-session]').length,
+          visibleSortSelects: visible('[data-session-files-sort]').length,
+          visibleDateButtons: visible('[data-file-explorer-tree-dates]').length,
+          visibleReloadButtons: visible('[data-session-files-refresh], [data-file-explorer-refresh]').length,
+        };
+        """
+    )
+    assert not after["bodyFiles"]
+    assert after["bodyDiff"]
+    assert after["panelMode"] == "diff"
+    assert after["filesPressed"] == "false"
+    assert after["diffPressed"] == "true"
+    assert after["texts"] == ["Finder", "Differ"]
+    assert after["diffButtonBg"] != before["diffButtonBg"]
+    assert after["newFileDisplay"] == "none"
+    assert after["treeDisplay"] == "none"
+    assert after["changesDisplay"] != "none"
+    assert after["changesFlexGrow"] == "1"
+    assert after["changesMaxBlockSize"] == "none"
+    assert abs(after["changesHeight"] - after["paneHeight"]) <= 1
+    assert after["diffTitleDisplay"] != "none"
+    assert after["visibleRootControls"] == 0
+    assert after["visibleSessionSelects"] == 1
+    assert after["visibleSortSelects"] == 1
+    assert after["visibleDateButtons"] == 1
+    assert after["visibleReloadButtons"] == 1
+
+    browser.find_element("css selector", "[data-file-explorer-mode-set='files']").click()
+    restored = browser.execute_script(
+        """
+        const filesButton = document.querySelector('[data-file-explorer-mode-set="files"]');
+        const diffButton = document.querySelector('[data-file-explorer-mode-set="diff"]');
+        return {
+          bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
+          bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
+          filesPressed: filesButton.getAttribute('aria-pressed'),
+          diffPressed: diffButton.getAttribute('aria-pressed'),
+          treeDisplay: getComputedStyle(document.querySelector('.file-explorer-tree-panel')).display,
+          changesDisplay: getComputedStyle(document.querySelector('.file-explorer-changes-panel')).display,
+        };
+        """
+    )
+    assert restored["bodyFiles"]
+    assert not restored["bodyDiff"]
+    assert restored["filesPressed"] == "true"
+    assert restored["diffPressed"] == "false"
+    assert restored["treeDisplay"] != "none"
+    assert restored["changesDisplay"] == "none"
 
 
 def test_platform_controls_use_pc_glyphs(browser, tmp_path):

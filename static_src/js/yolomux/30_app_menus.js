@@ -108,14 +108,6 @@ function menuTabDetail(item) {
   return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
 }
 
-function changesTabDetail() {
-  const count = sessionFilesPayload.files?.length || 0;
-  const session = sessionFilesPayload.session || sessionFilesTargetSession();
-  if (sessionFilesLoading) return t('changes.loading');
-  if (count) return `${tPlural('changes.fileCount', count)}${session ? t('changes.inSession', {session: sessionLabel(session)}) : ''}`;
-  return session ? t('changes.emptyAi') : t('changes.title');
-}
-
 function menuTabRowHtml(item, options = {}) {
   const type = tabTypeForItem(item);
   if (type?.rowHtml) return type.rowHtml(item, options);
@@ -135,8 +127,8 @@ function menuTabCommand(item, options = {}) {
   const active = item === currentActiveMenuItem();
   const detail = options.detail || (visible ? menuTabDetail(item) : (itemIsBackgroundPaneTab(item) ? t('menu.tabs.minimizedDetail') : t('menu.tabs.inactiveDetail')));
   return menuCommand(itemLabel(item), () => {
-    if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item);
-    return selectSession(item);
+    if (slot && visible && !options.openAsPane) return activatePaneTab(slot, item, {userInitiated: true});
+    return selectSession(item, {userInitiated: true});
   }, {
     checked: options.checked ?? active,
     detail: '',
@@ -531,7 +523,7 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
 }
 
 function fileMenuVirtualCommand(item, detail) {
-  return menuCommand(itemLabel(item), () => selectSession(item), {
+  return menuCommand(itemLabel(item), () => selectSession(item, {userInitiated: true}), {
     checked: itemInLayout(item),
     detail,
     iconHtml: tabTypeIconHtml(item, {menu: true}),
@@ -566,7 +558,7 @@ function appMenuTree() {
             detail: appShortcutText('P'),
             iconHtml: appMenuUiIcon('document'),
           }),
-          menuCommand(t('menu.file.preferences'), () => selectSession(prefsItemId), {
+          menuCommand(t('menu.file.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
             checked: itemInLayout(prefsItemId),
             detail: compactHomePath(settingsConfigPath()),
             iconHtml: tabTypeIconHtml(prefsItemId, {menu: true}),

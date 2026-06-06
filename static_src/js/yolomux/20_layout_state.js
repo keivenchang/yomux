@@ -288,7 +288,7 @@ function layoutFromParam(raw, tabsRaw = '') {
     }
   }
   next[layoutTreeKey] = legacyLayoutTree(next);
-  return sessionsFromSlots(next).length ? next : null;
+  return layoutHasRestorableContent(next) ? next : null;
 }
 
 function namedSlotLayoutFromParam(raw, tabsRaw) {
@@ -313,7 +313,7 @@ function namedSlotLayoutFromParam(raw, tabsRaw) {
   if (!leaves.length) return null;
   next[layoutTreeKey] = leaves.reduce((tree, leaf) => (tree ? splitNode('row', tree, leaf) : leaf), null);
   const normalized = normalizeLayoutSlots(next);
-  return sessionsFromSlots(normalized).length || layoutSlotKeys(normalized).some(slot => paneIsPlaceholder(slot, normalized)) ? normalized : null;
+  return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
 function treeLayoutFromParam(raw) {
@@ -333,7 +333,7 @@ function treeLayoutFromParam(raw) {
         : paneStateWithTabs(tabs.map(resolveLayoutItem), active);
     }
     const normalized = normalizeLayoutSlots(next);
-    return sessionsFromSlots(normalized).length ? normalized : null;
+    return layoutHasRestorableContent(normalized) ? normalized : null;
   } catch (_) {
     return null;
   }
@@ -355,7 +355,7 @@ function compactTreeLayoutFromParam(raw, tabsRaw) {
     next[slot] = tabStates.get(slot) || emptyPlaceholderPaneState();
   }
   const normalized = normalizeLayoutSlots(next);
-  return sessionsFromSlots(normalized).length ? normalized : null;
+  return layoutHasRestorableContent(normalized) ? normalized : null;
 }
 
 function parseCompactLayoutNode(parser) {
@@ -581,6 +581,10 @@ function paneHasLayoutContent(side, slots = layoutSlots) {
   return paneTabs(side, slots).length > 0 || paneIsPlaceholder(side, slots);
 }
 
+function layoutHasRestorableContent(slots = layoutSlots) {
+  return paneItems(slots).length > 0 || layoutSlotKeys(slots).some(slot => paneIsPlaceholder(slot, slots));
+}
+
 function paneStateForLayoutSlot(side, slots = layoutSlots) {
   return paneIsPlaceholder(side, slots)
     ? emptyPlaceholderPaneState()
@@ -644,7 +648,7 @@ function itemIsBackgroundPaneTab(item, slots = layoutSlots) {
 }
 
 function allTabItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, fileExplorerItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function sortTabItems(items) {
@@ -693,7 +697,7 @@ function openFileEditorItems() {
 }
 
 function computeLayoutItems() {
-  return [infoItemId, fileExplorerItemId, prefsItemId, changesItemId, ...openFileEditorItems(), ...visibleSessions];
+  return [infoItemId, fileExplorerItemId, prefsItemId, ...openFileEditorItems(), ...visibleSessions];
 }
 
 function isTmuxSession(item) {
@@ -763,6 +767,11 @@ function registerImageViewerLayoutItem(path) {
 
 function resolveLayoutItem(value) {
   const text = String(value || '');
+  if (text === 'changes' || text === '__changes__') {
+    fileExplorerMode = 'diff';
+    writeStoredFileExplorerMode(fileExplorerMode);
+    return fileExplorerItemId;
+  }
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
   if (type?.prefix === fileEditorItemPrefix) return registerFileEditorLayoutItem(text.slice(fileEditorItemPrefix.length)) || text;
@@ -1293,7 +1302,7 @@ function commandPaletteCommandItems() {
     targetItem: item,
     searchFields: tabSearchFields(item),
     keybinding: 'Enter',
-    run: () => selectSession(item),
+    run: () => selectSession(item, {userInitiated: true}),
     ...extra,
   });
   const fileGroups = new Map();   // path -> [items], in discovery order
@@ -1662,7 +1671,7 @@ function ensureCommandPalette() {
     if (chip && node.contains(chip)) {
       const viewItem = chip.dataset.viewItem;
       closeCommandPalette();
-      if (viewItem) selectSession(viewItem);
+      if (viewItem) selectSession(viewItem, {userInitiated: true});
       return;
     }
     const row = event.target.closest('[data-command-index]');
@@ -1877,7 +1886,7 @@ function sendBrowserNotification(title, options = {}) {
   const notification = new Notification(title, options);
   notification.onclick = () => {
     window.focus();
-    if (options.session) selectSession(options.session);
+    if (options.session) selectSession(options.session, {userInitiated: true});
     // DOIT.29: a watched-PR notification opens the PR (no session to focus); safe blank-target open.
     else if (options.url) {
       try { window.open(options.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
@@ -2058,7 +2067,7 @@ function showAttentionAlert(session, state) {
     state.reason,
     {
       container: attentionAlerts,
-      onClick: () => selectSession(session),
+      onClick: () => selectSession(session, {userInitiated: true}),
     },
   );
   if (node) {
@@ -2346,6 +2355,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
   // metadata interval (50_editor_settings_runtime.js), and the session-changing mutations
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
   renderAutoApproveButtons();
+  updatePanelInactiveOverlays();
   if (autoFocusEnabled && options.focusSession && activeSessions.includes(options.focusSession)) {
     setTimeout(() => focusPanel(options.focusSession), 80);
   } else if (options.message && activeSessions.length) {

@@ -413,6 +413,12 @@ function applyEditorCursorStyle() {
   document.body?.classList.add(`editor-cursor-${fileEditorCursorStyle}`);
 }
 
+function applyInactivePaneOpacity(value) {
+  const number = Number(value);
+  const percent = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : 100;
+  document.documentElement?.style.setProperty('--inactive-pane-opacity-scale', String(percent / 100));
+}
+
 function applyCssSettings() {
   const root = document.documentElement?.style;
   if (!root) return;
@@ -429,11 +435,12 @@ function applyCssSettings() {
   // (--pane-tab-panel-ring-width, unchanged) so it stays visible even at spacing 0.
   const paneSpacing = Math.max(0, Math.min(20, numberSetting('appearance.pane_spacing', 4)));
   root.setProperty('--pane-split-gap', `${paneSpacing}px`);
-  // Opacity (20-100%) of the translucent pane ring. Active green panes keep a stronger floor so focus
-  // remains obvious in both dark and light themes, while the setting can still raise it up to 100%.
-  const paneRingOpacity = Math.max(20, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)));
+  // Opacity (5-100%) of the translucent pane ring. The active ring follows the same setting; otherwise
+  // low values appear to save correctly while the visible focused pane still stays prominent.
+  const paneRingOpacity = Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)));
   root.setProperty('--pane-ring-opacity', `${paneRingOpacity}%`);
-  root.setProperty('--pane-active-ring-opacity', `${Math.max(75, paneRingOpacity)}%`);
+  root.setProperty('--pane-active-ring-opacity', `${paneRingOpacity}%`);
+  applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 100));
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
@@ -590,7 +597,6 @@ function applySettingsPayload(payload, options = {}) {
   rescheduleAllFileAutosaves();
   if (previousDateTimeHourCycle !== dateTimeHourCycle) {
     if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
-    if (typeof renderChangesPanels === 'function') renderChangesPanels({force: true});
     if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
   }
   if (previousEditorSchemeId !== activeEditorScheme().id) {

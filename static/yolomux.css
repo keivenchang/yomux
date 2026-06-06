@@ -42,7 +42,10 @@
   --pr-status-closed: #aeb8c7;
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
-  --inactive-pane-overlay: rgba(178, 190, 210, 0.18);
+  --inactive-pane-opacity-scale: 1;
+  --inactive-pane-overlay-rgb: 178 190 210;
+  --inactive-pane-overlay-alpha: 0.18;
+  --inactive-pane-overlay: rgb(var(--inactive-pane-overlay-rgb) / calc(var(--inactive-pane-overlay-alpha) * var(--inactive-pane-opacity-scale)));
   --inactive-tab-bg: #293240;
   --inactive-tab-bg-hover: #354052;
   --inactive-tab-border: #667286;
@@ -59,7 +62,10 @@
   --pane-tab-unfocused-active-text: var(--pane-tab-active-text);
   --pane-tab-unfocused-active-bg: var(--pane-tab-active-bg);
   --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
-  --pane-tab-strip-bg: #1f3026;
+  /* Focused chrome-bar green — the ONE token both the tab container (.panel-head) and the info/detail
+     row (.panel-detail-row) read via --pane-bar-bg. Derived from the brand accent so it reads clearly
+     green (not the old teal-ish #1f3026) and flips with theme; bump the % to push greener. */
+  --pane-tab-strip-bg: color-mix(in srgb, var(--brand-green) 22%, var(--panel));
   --pane-tab-yolo-text: #071000;
   --pane-tab-yolo-bg: #76b900;
   --pane-tab-yolo-border: #9be33d;
@@ -107,7 +113,7 @@
   --min-split-pane-width: 320px;
   --min-split-pane-height: 220px;
   --z-stacking-base: 1;
-  --z-terminal-overlay-low: 6;
+  --z-terminal-overlay-low: 30;
   --z-pane-tab-strip: 7;
   --z-finder-quick-access: 40;
   --z-file-tree-drag: 60;
@@ -265,7 +271,8 @@
 }
 body.theme-dark {
   color-scheme: dark;
-  --pane-tab-strip-bg: #1f3026;
+  /* --pane-tab-strip-bg inherits the greener :root mix (color-mix brand-green/panel). No re-statement and
+     no separate hover tint — the tab container and info bar share the one token so they always match. */
 }
 body.theme-light {
   color-scheme: light;
@@ -346,7 +353,8 @@ body.theme-light {
   --inactive-gray-hover: rgba(91, 101, 115, 0.54);
   /* #254/#259 follow-up: keep the neutral gray dim, but back off the light-mode alpha so inactive panes
      are only a touch quieter than focused panes. Dark-mode token (top of file) is left as-is. */
-  --inactive-pane-overlay: rgba(90, 96, 105, 0.09);
+  --inactive-pane-overlay-rgb: 90 96 105;
+  --inactive-pane-overlay-alpha: 0.09;
   --inactive-tab-bg: #e3e8f0;
   --inactive-tab-bg-hover: #d7deea;
   --inactive-tab-border: #9aa6b6;
@@ -1982,10 +1990,6 @@ body.theme-light .branch-link {
   overflow: auto;
   padding: 10px;
 }
-.changes-panel {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-}
 .info-refresh {
   margin-inline-start: auto;
   height: 22px;
@@ -2024,7 +2028,6 @@ body.theme-light .branch-link {
 @keyframes metadata-refresh-spin {
   to { transform: rotate(360deg); }
 }
-.changes-body,
 .file-explorer-changes-panel {
   --changes-row-hover-bg: rgba(118, 185, 0, 0.10);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
@@ -2032,66 +2035,6 @@ body.theme-light .branch-link {
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
   --changes-icon-text: #a7c7ff;
-}
-.changes-body {
-  /* DOIT.16 C3: overlay-root must not be the scroll container (see .preferences-body) — scrolling
-     moves to the inner .changes-scroll so the inactive-pane dim covers the full pane at any scroll. */
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--bg);
-}
-.changes-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  scrollbar-gutter: stable;
-  scrollbar-width: auto;
-  scrollbar-color: rgba(190, 205, 218, 0.62) rgba(255, 255, 255, 0.06);
-  padding: 10px;
-}
-.panel.changes-panel:hover .changes-scroll,
-.panel.changes-panel:focus-within .changes-scroll {
-  scrollbar-color: rgba(150, 220, 92, 0.72) rgba(255, 255, 255, 0.08);
-}
-.changes-scroll::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-.changes-scroll::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.06);
-}
-.changes-scroll::-webkit-scrollbar-thumb {
-  min-height: 32px;
-  border: 2px solid transparent;
-  border-radius: 0;
-  background: rgba(190, 205, 218, 0.62);
-  background-clip: content-box;
-}
-.panel.changes-panel:hover .changes-scroll::-webkit-scrollbar-thumb,
-.panel.changes-panel:focus-within .changes-scroll::-webkit-scrollbar-thumb {
-  background: rgba(150, 220, 92, 0.72);
-  background-clip: content-box;
-}
-body.theme-light .changes-scroll {
-  scrollbar-color: rgba(82, 98, 116, 0.64) rgba(15, 23, 42, 0.08);
-}
-body.theme-light .panel.changes-panel:hover .changes-scroll,
-body.theme-light .panel.changes-panel:focus-within .changes-scroll {
-  scrollbar-color: rgba(95, 152, 0, 0.68) rgba(15, 23, 42, 0.08);
-}
-body.theme-light .changes-scroll::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.08);
-}
-body.theme-light .changes-scroll::-webkit-scrollbar-thumb {
-  background: rgba(82, 98, 116, 0.64);
-  background-clip: content-box;
-}
-body.theme-light .panel.changes-panel:hover .changes-scroll::-webkit-scrollbar-thumb,
-body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scrollbar-thumb {
-  background: rgba(95, 152, 0, 0.68);
-  background-clip: content-box;
 }
 .changes-toolbar {
   display: flex;
@@ -2106,6 +2049,11 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
   color: var(--muted);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size-sm);
+}
+.file-explorer-changes-panel:hover > .changes-toolbar,
+.file-explorer-changes-panel:focus-within > .changes-toolbar {
+  background: var(--pane-tab-strip-bg);
+  color: var(--text);
 }
 .changes-control {
   display: inline-flex;
@@ -2256,13 +2204,6 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
 .changes-toolbar .changes-date-toggle {
   height: 24px;
 }
-.changes-summary {
-  margin-inline-start: auto;
-  color: var(--muted);
-}
-.changes-summary-separator {
-  color: var(--muted);
-}
 .changes-comparison-head {
   display: flex;
   flex-wrap: wrap;
@@ -2286,9 +2227,25 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
   font-weight: 700;
 }
 .changes-comparison-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
+}
+.changes-summary-label {
+  min-width: 0;
+}
+.changes-summary-totals {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-inline-start: auto;
+  white-space: nowrap;
 }
 .changes-error,
 .changes-empty {
@@ -2466,7 +2423,7 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
 }
 .changes-file-row {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) max-content;
   align-items: center;
   gap: 7px;
   width: 100%;
@@ -2483,7 +2440,7 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
   cursor: pointer;
 }
 .changes-file-row.compact {
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) max-content;
   gap: 5px;
   padding: 2px 4px 2px calc(4px + (var(--changes-tree-depth, 0) * 14px));
   line-height: 1.05;
@@ -2576,16 +2533,19 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
 }
 .changes-file-main {
   min-width: 0;
+  overflow: hidden;
   display: grid;
   gap: 2px;
 }
 .changes-file-title {
   min-width: 0;
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 4px;
 }
 .changes-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2606,6 +2566,9 @@ body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scro
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
+  min-width: max-content;
+  overflow: visible;
+  text-overflow: clip;
 }
 .changes-file-agent {
   display: inline-flex;
@@ -3198,7 +3161,6 @@ body.theme-light .info-refresh:focus-visible {
 body.theme-light .changes-error {
   color: #b91c1c;
 }
-body.theme-light .changes-body,
 body.theme-light .file-explorer-changes-panel,
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
@@ -3209,12 +3171,16 @@ body.theme-light .changes-repo-group {
   --changes-path-text: #59636e;
   --changes-icon-text: #1d4ed8;
 }
-body.theme-light .changes-body,
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
   color: var(--text);
   background: var(--panel);
   border-color: var(--line);
+}
+body.theme-light .file-explorer-changes-panel:hover > .changes-toolbar,
+body.theme-light .file-explorer-changes-panel:focus-within > .changes-toolbar {
+  background: var(--pane-tab-strip-bg);
+  color: var(--text);
 }
 body.theme-light .changes-comparison-head {
   color: var(--text);
@@ -3261,6 +3227,31 @@ body.theme-light .keyboard-shortcut-row kbd {
 .preferences-setting-control input[type="checkbox"] {
   justify-self: start;
   margin-inline-start: var(--preferences-control-left-indent);
+}
+.preferences-setting-control.setting-type-range {
+  grid-template-columns: minmax(calc(var(--preferences-control-left-indent) + 140px), 1fr) 4ch auto minmax(0, 1fr) auto;
+}
+.preferences-setting-control.setting-type-range input[type="range"] {
+  min-width: 140px;
+  width: 100%;
+  justify-self: stretch;
+  margin-inline-start: var(--preferences-control-left-indent);
+  accent-color: var(--brand-green);
+}
+.preferences-setting-control.setting-type-range .preferences-range-value {
+  grid-column: 2;
+  min-width: 4ch;
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1 var(--mono-font);
+  text-align: end;
+}
+.preferences-setting-control.setting-type-range .preferences-setting-suffix {
+  grid-column: 3;
+  justify-self: start;
+}
+.preferences-setting-control.setting-type-range .preferences-reset {
+  grid-column: 5;
+  justify-self: end;
 }
 .preferences-setting-control.setting-type-number {
   grid-template-columns: calc(var(--preferences-control-left-indent) + var(--preferences-number-control-width)) auto minmax(0, 1fr) auto;
@@ -3950,12 +3941,9 @@ body.theme-light .drop-slot.drag-over {
    gutter away from the neighbor; DOIT.24 moved it back to the seam border, keeping the opacity.) */
 .panel.active-pane,
 .panel.typing-ready-pane {
-  /* focused pane: all chrome bars switch from neutral gray to the bright tab-strip green together. */
-  --pane-bar-bg: var(--pane-tab-strip-bg);
-}
-.panel.changes-panel:hover,
-.panel.changes-panel:focus-within {
-  /* Standalone Modified Files chrome follows the same hover/focus cue as pane tab containers. */
+  /* focused pane: all chrome bars (tab container + info/detail row) switch from neutral gray to the
+     bright tab-strip green TOGETHER via the one shared --pane-bar-bg → --pane-tab-strip-bg token. No
+     separate per-bar override, so they always match; change --pane-tab-strip-bg to recolor both. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 .panel.file-explorer-panel > .file-explorer-head:hover,
@@ -4256,8 +4244,7 @@ body.theme-light .drop-slot.drag-over {
   box-shadow: none;
 }
 .panel.active-pane .pane-tab.active,
-.panel.file-explorer-panel .pane-tab.active,
-.panel.changes-panel .pane-tab.active {
+.panel.file-explorer-panel .pane-tab.active {
   color: var(--pane-tab-active-text);
   background: var(--pane-tab-active-bg);
   border-color: var(--pane-tab-active-border);
@@ -4266,7 +4253,7 @@ body.theme-light .drop-slot.drag-over {
 }
 /* DOIT.6: every pane keeps its active tab clearly green (no dimming) so you can tell which session
    each pane shows; the focused pane's extra cue is its brighter lime active tab + the pane ring. */
-.panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active {
+.panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active {
   opacity: 1;
 }
 /* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
@@ -4293,10 +4280,7 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
 .panel.active-pane .pane-tab.active .session-button-detail,
 .panel.file-explorer-panel .pane-tab.active .session-button-name,
 .panel.file-explorer-panel .pane-tab.active .session-button-dir,
-.panel.file-explorer-panel .pane-tab.active .session-button-detail,
-.panel.changes-panel .pane-tab.active .session-button-name,
-.panel.changes-panel .pane-tab.active .session-button-dir,
-.panel.changes-panel .pane-tab.active .session-button-detail {
+.panel.file-explorer-panel .pane-tab.active .session-button-detail {
   color: var(--pane-tab-active-text);
 }
 .pane-tab.active .session-yolo-marker.inactive {
@@ -4880,8 +4864,9 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
    — terminal, Finder, Preferences, Info, Changes, editor — dims identically; there is no per-pane JS
    overlay <div> (and so no isVirtualItem special-case). pointer-events:none lets a click on a dimmed
    pane fall through to focus it (the old overlay swallowed the first click). The focused/typing-ready
-   pane is not dimmed. */
-.panel:not(.focused-pane):not(.typing-ready-pane) .panel-overlay-root::after {
+   pane is not dimmed. A stale typing-ready terminal is still inactive when another pane owns
+   .focused-pane, so do not exempt .typing-ready-pane here. */
+.panel:not(.focused-pane) .panel-overlay-root::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -6510,9 +6495,13 @@ body.theme-light .modal.about-open {
 .file-tree-row {
   --file-tree-row-control-size: max(18px, calc(var(--file-explorer-font-size) + 1px));
   --file-tree-date-column-width: 16ch;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 4px;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  min-inline-size: 0;
   padding: 2px 8px;
   font-size: var(--file-explorer-font-size);
   line-height: 1.4;
@@ -6821,10 +6810,8 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   color: currentColor;
 }
 .file-tree-row.has-agent .file-tree-name {
-  flex: 0 1 auto;
-}
-.file-tree-row.has-agent .file-tree-agent {
-  margin-inline-end: auto;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .file-tree-diff {
   display: inline-flex;
@@ -7801,12 +7788,47 @@ body.theme-light .file-tree-rename-input {
 }
 .file-explorer-toolbar {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
   justify-content: flex-start;
   padding: 0;
   min-width: 0;
+}
+.file-explorer-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  inline-size: 100%;
+  min-width: 0;
+}
+.file-explorer-toolbar-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.file-explorer-primary-row .file-explorer-path-inline {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+.file-explorer-panel-title {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-family: var(--tab-font);
+  font-size: var(--ui-font-size);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.file-explorer-actions-row .file-explorer-date-reload-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+body.file-explorer-mode-diff .file-explorer-mode-files-only,
+body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only {
+  display: none;
 }
 .path-copy-button {
   position: relative;
@@ -7848,13 +7870,6 @@ body.theme-light .file-tree-rename-input {
   height: 20px;
   border-color: rgba(180, 230, 140, 0.34);
 }
-.file-explorer-toolbar .file-explorer-path-inline {
-  flex-grow: 1;
-  flex-shrink: 0;
-  flex-basis: min(34ch, 100%);
-  min-width: min(32ch, 100%);
-  max-width: none;
-}
 .file-explorer-repo-summary {
   flex: 0 1 auto;
   max-width: 30%;
@@ -7871,15 +7886,22 @@ body.theme-light .file-tree-rename-input {
   overflow: hidden;
   background: var(--panel);
   min-height: 0;
-  --file-explorer-changes-size: 40%;
   --file-explorer-changes-min-block-size: 96px;
   --file-explorer-changes-resizer-size: 6px;
 }
-/* Hidden Modified-files section: the close X / Finder toggle collapse both the panel and its resizer,
-   so the file tree takes the full Finder height. */
-body.file-explorer-changes-hidden .file-explorer-changes-panel,
-body.file-explorer-changes-hidden .file-explorer-changes-resizer {
+body:not(.file-explorer-mode-diff) .file-explorer-changes-panel,
+body:not(.file-explorer-mode-diff) .file-explorer-changes-resizer {
   display: none;
+}
+body.file-explorer-mode-diff .file-explorer-tree-panel,
+body.file-explorer-mode-diff .file-explorer-changes-resizer {
+  display: none;
+}
+body.file-explorer-mode-diff .file-explorer-changes-panel {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-block-size: none;
 }
 body.resizing-file-explorer-changes {
   cursor: row-resize;
@@ -7949,8 +7971,8 @@ body.resizing-file-explorer-changes {
 }
 .file-explorer-changes-panel {
   --pane-bar-bg: var(--panel2);
-  flex: 0 0 var(--file-explorer-changes-size);
-  min-height: var(--file-explorer-changes-min-block-size);
+  flex: 1 1 auto;
+  min-height: 0;
   container-type: inline-size;
   isolation: isolate;
   overflow-y: scroll;
@@ -8136,7 +8158,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   color: var(--brand-green);
   border-color: var(--brand-green);
 }
-.file-explorer-changes-panel .changes-refresh {
+.file-explorer-changes-panel .changes-refresh,
+.file-explorer-date-reload-cluster .changes-refresh {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -8148,7 +8171,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   color: var(--muted);
   font-size: var(--ui-font-size-2xs);
 }
-.file-explorer-changes-panel .changes-refresh::before {
+.file-explorer-changes-panel .changes-refresh::before,
+.file-explorer-date-reload-cluster .changes-refresh::before {
   content: "↻";
   display: block;
   flex: 0 0 auto;
@@ -8157,23 +8181,29 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   text-indent: 0;
 }
 .file-explorer-changes-panel .changes-refresh:hover,
-.file-explorer-changes-panel .changes-refresh:focus-visible {
+.file-explorer-changes-panel .changes-refresh:focus-visible,
+.file-explorer-date-reload-cluster .changes-refresh:hover,
+.file-explorer-date-reload-cluster .changes-refresh:focus-visible {
   color: var(--text);
   border-color: var(--text);
   background: color-mix(in srgb, var(--panel2) 72%, transparent);
 }
-body.theme-light .file-explorer-changes-panel .changes-refresh {
+body.theme-light .file-explorer-changes-panel .changes-refresh,
+body.theme-light .file-explorer-date-reload-cluster .changes-refresh {
   background: transparent;
   color: var(--muted);
   border-color: var(--line);
 }
 body.theme-light .file-explorer-changes-panel .changes-refresh:hover,
-body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
+body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible,
+body.theme-light .file-explorer-date-reload-cluster .changes-refresh:hover,
+body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visible {
   color: var(--text);
   border-color: var(--text);
   background: rgba(15, 23, 42, 0.05);
 }
-.file-explorer-changes-head .changes-date-toggle {
+.file-explorer-changes-head .changes-date-toggle,
+.file-explorer-date-reload-cluster .changes-date-toggle {
   height: 20px;
   align-self: center;
 }
@@ -8286,6 +8316,70 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
   padding: 0;
   line-height: 1;
 }
+.file-explorer-header-action.file-explorer-date-toggle {
+  width: auto;
+  min-width: 42px;
+  flex-basis: auto;
+  padding: 0 5px;
+}
+.file-explorer-changes-collapse-toggle {
+  font-size: var(--ui-font-size);
+}
+.file-explorer-mode-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.file-explorer-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 8px;
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: color-mix(in srgb, var(--brand-green) 18%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  border: 1px solid color-mix(in srgb, var(--brand-green) 45%, var(--pane-ctl-border, transparent));
+  border-radius: 4px;
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.file-explorer-mode-toggle:hover,
+.file-explorer-mode-toggle:focus-visible {
+  color: var(--text);
+  border-color: var(--brand-green);
+  background: color-mix(in srgb, var(--brand-green) 28%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+}
+.file-explorer-mode-toggle[aria-pressed="true"] {
+  color: var(--pane-tab-yolo-text, var(--pane-ctl-pressed-fg));
+  background: var(--brand-green);
+  border-color: var(--brand-green);
+}
+.file-explorer-mode-label {
+  pointer-events: none;
+}
+:root {
+  --finder-session-repo-bg: color-mix(in srgb, var(--brand-green) 16%, transparent);
+  --finder-session-touched-bg: color-mix(in srgb, var(--brand-green) 8%, transparent);
+  --finder-sync-expanded-bg: color-mix(in srgb, var(--accent-gold) 24%, transparent);
+}
+.file-tree-row.file-tree-row--sync-expanded:not(.selected) {
+  background: var(--finder-sync-expanded-bg);
+}
+.file-tree-row.file-tree-row--session-repo:not(.selected) {
+  background: var(--finder-session-repo-bg);
+}
+.file-tree-row.file-tree-row--session-touched:not(.selected) {
+  background: var(--finder-session-touched-bg);
+}
 .file-explorer-hidden-toggle-panel:hover,
 .file-explorer-root-mode-toggle-panel:hover,
 .file-explorer-header-action:hover,
@@ -8317,8 +8411,8 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
   position: relative;
   /* #250: a changed line should read as a soft tint, not a saturated block. Muted mix strength over
      the dark editor bg (was 74%/76% — far too vibrant); the light variant below is already soft. */
-  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
-  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 32%, transparent);
+  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 30%, var(--editor-scheme-bg));
+  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 32%, var(--editor-scheme-bg));
 }
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;
@@ -8352,6 +8446,9 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
 .file-editor-diff-codemirror .cm-insertedLine {
   --diff-full-line-bg: var(--diff-add-line-bg);
   background: var(--diff-full-line-bg);
+}
+.file-editor-diff-codemirror .cm-content .cm-activeLine {
+  background: var(--diff-full-line-bg, transparent);
 }
 .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 .file-editor-diff-codemirror .cm-merge-b .cm-changedLine,

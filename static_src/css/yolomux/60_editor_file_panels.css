@@ -679,12 +679,47 @@ body.theme-light .file-tree-rename-input {
 }
 .file-explorer-toolbar {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
   justify-content: flex-start;
   padding: 0;
   min-width: 0;
+}
+.file-explorer-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  inline-size: 100%;
+  min-width: 0;
+}
+.file-explorer-toolbar-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.file-explorer-primary-row .file-explorer-path-inline {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+.file-explorer-panel-title {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-family: var(--tab-font);
+  font-size: var(--ui-font-size);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.file-explorer-actions-row .file-explorer-date-reload-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+body.file-explorer-mode-diff .file-explorer-mode-files-only,
+body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only {
+  display: none;
 }
 .path-copy-button {
   position: relative;
@@ -726,13 +761,6 @@ body.theme-light .file-tree-rename-input {
   height: 20px;
   border-color: rgba(180, 230, 140, 0.34);
 }
-.file-explorer-toolbar .file-explorer-path-inline {
-  flex-grow: 1;
-  flex-shrink: 0;
-  flex-basis: min(34ch, 100%);
-  min-width: min(32ch, 100%);
-  max-width: none;
-}
 .file-explorer-repo-summary {
   flex: 0 1 auto;
   max-width: 30%;
@@ -749,15 +777,22 @@ body.theme-light .file-tree-rename-input {
   overflow: hidden;
   background: var(--panel);
   min-height: 0;
-  --file-explorer-changes-size: 40%;
   --file-explorer-changes-min-block-size: 96px;
   --file-explorer-changes-resizer-size: 6px;
 }
-/* Hidden Modified-files section: the close X / Finder toggle collapse both the panel and its resizer,
-   so the file tree takes the full Finder height. */
-body.file-explorer-changes-hidden .file-explorer-changes-panel,
-body.file-explorer-changes-hidden .file-explorer-changes-resizer {
+body:not(.file-explorer-mode-diff) .file-explorer-changes-panel,
+body:not(.file-explorer-mode-diff) .file-explorer-changes-resizer {
   display: none;
+}
+body.file-explorer-mode-diff .file-explorer-tree-panel,
+body.file-explorer-mode-diff .file-explorer-changes-resizer {
+  display: none;
+}
+body.file-explorer-mode-diff .file-explorer-changes-panel {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-block-size: none;
 }
 body.resizing-file-explorer-changes {
   cursor: row-resize;
@@ -827,8 +862,8 @@ body.resizing-file-explorer-changes {
 }
 .file-explorer-changes-panel {
   --pane-bar-bg: var(--panel2);
-  flex: 0 0 var(--file-explorer-changes-size);
-  min-height: var(--file-explorer-changes-min-block-size);
+  flex: 1 1 auto;
+  min-height: 0;
   container-type: inline-size;
   isolation: isolate;
   overflow-y: scroll;
@@ -1014,7 +1049,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   color: var(--brand-green);
   border-color: var(--brand-green);
 }
-.file-explorer-changes-panel .changes-refresh {
+.file-explorer-changes-panel .changes-refresh,
+.file-explorer-date-reload-cluster .changes-refresh {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1026,7 +1062,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   color: var(--muted);
   font-size: var(--ui-font-size-2xs);
 }
-.file-explorer-changes-panel .changes-refresh::before {
+.file-explorer-changes-panel .changes-refresh::before,
+.file-explorer-date-reload-cluster .changes-refresh::before {
   content: "↻";
   display: block;
   flex: 0 0 auto;
@@ -1035,23 +1072,29 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
   text-indent: 0;
 }
 .file-explorer-changes-panel .changes-refresh:hover,
-.file-explorer-changes-panel .changes-refresh:focus-visible {
+.file-explorer-changes-panel .changes-refresh:focus-visible,
+.file-explorer-date-reload-cluster .changes-refresh:hover,
+.file-explorer-date-reload-cluster .changes-refresh:focus-visible {
   color: var(--text);
   border-color: var(--text);
   background: color-mix(in srgb, var(--panel2) 72%, transparent);
 }
-body.theme-light .file-explorer-changes-panel .changes-refresh {
+body.theme-light .file-explorer-changes-panel .changes-refresh,
+body.theme-light .file-explorer-date-reload-cluster .changes-refresh {
   background: transparent;
   color: var(--muted);
   border-color: var(--line);
 }
 body.theme-light .file-explorer-changes-panel .changes-refresh:hover,
-body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
+body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible,
+body.theme-light .file-explorer-date-reload-cluster .changes-refresh:hover,
+body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visible {
   color: var(--text);
   border-color: var(--text);
   background: rgba(15, 23, 42, 0.05);
 }
-.file-explorer-changes-head .changes-date-toggle {
+.file-explorer-changes-head .changes-date-toggle,
+.file-explorer-date-reload-cluster .changes-date-toggle {
   height: 20px;
   align-self: center;
 }
@@ -1164,6 +1207,70 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
   padding: 0;
   line-height: 1;
 }
+.file-explorer-header-action.file-explorer-date-toggle {
+  width: auto;
+  min-width: 42px;
+  flex-basis: auto;
+  padding: 0 5px;
+}
+.file-explorer-changes-collapse-toggle {
+  font-size: var(--ui-font-size);
+}
+.file-explorer-mode-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.file-explorer-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 8px;
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: color-mix(in srgb, var(--brand-green) 18%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  border: 1px solid color-mix(in srgb, var(--brand-green) 45%, var(--pane-ctl-border, transparent));
+  border-radius: 4px;
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.file-explorer-mode-toggle:hover,
+.file-explorer-mode-toggle:focus-visible {
+  color: var(--text);
+  border-color: var(--brand-green);
+  background: color-mix(in srgb, var(--brand-green) 28%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+}
+.file-explorer-mode-toggle[aria-pressed="true"] {
+  color: var(--pane-tab-yolo-text, var(--pane-ctl-pressed-fg));
+  background: var(--brand-green);
+  border-color: var(--brand-green);
+}
+.file-explorer-mode-label {
+  pointer-events: none;
+}
+:root {
+  --finder-session-repo-bg: color-mix(in srgb, var(--brand-green) 16%, transparent);
+  --finder-session-touched-bg: color-mix(in srgb, var(--brand-green) 8%, transparent);
+  --finder-sync-expanded-bg: color-mix(in srgb, var(--accent-gold) 24%, transparent);
+}
+.file-tree-row.file-tree-row--sync-expanded:not(.selected) {
+  background: var(--finder-sync-expanded-bg);
+}
+.file-tree-row.file-tree-row--session-repo:not(.selected) {
+  background: var(--finder-session-repo-bg);
+}
+.file-tree-row.file-tree-row--session-touched:not(.selected) {
+  background: var(--finder-session-touched-bg);
+}
 .file-explorer-hidden-toggle-panel:hover,
 .file-explorer-root-mode-toggle-panel:hover,
 .file-explorer-header-action:hover,
@@ -1195,8 +1302,8 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
   position: relative;
   /* #250: a changed line should read as a soft tint, not a saturated block. Muted mix strength over
      the dark editor bg (was 74%/76% — far too vibrant); the light variant below is already soft. */
-  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
-  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 32%, transparent);
+  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 30%, var(--editor-scheme-bg));
+  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 32%, var(--editor-scheme-bg));
 }
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;
@@ -1230,6 +1337,9 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
 .file-editor-diff-codemirror .cm-insertedLine {
   --diff-full-line-bg: var(--diff-add-line-bg);
   background: var(--diff-full-line-bg);
+}
+.file-editor-diff-codemirror .cm-content .cm-activeLine {
+  background: var(--diff-full-line-bg, transparent);
 }
 .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 .file-editor-diff-codemirror .cm-merge-b .cm-changedLine,

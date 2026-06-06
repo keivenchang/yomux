@@ -435,12 +435,9 @@ body.theme-light .drop-slot.drag-over {
    gutter away from the neighbor; DOIT.24 moved it back to the seam border, keeping the opacity.) */
 .panel.active-pane,
 .panel.typing-ready-pane {
-  /* focused pane: all chrome bars switch from neutral gray to the bright tab-strip green together. */
-  --pane-bar-bg: var(--pane-tab-strip-bg);
-}
-.panel.changes-panel:hover,
-.panel.changes-panel:focus-within {
-  /* Standalone Modified Files chrome follows the same hover/focus cue as pane tab containers. */
+  /* focused pane: all chrome bars (tab container + info/detail row) switch from neutral gray to the
+     bright tab-strip green TOGETHER via the one shared --pane-bar-bg → --pane-tab-strip-bg token. No
+     separate per-bar override, so they always match; change --pane-tab-strip-bg to recolor both. */
   --pane-bar-bg: var(--pane-tab-strip-bg);
 }
 .panel.file-explorer-panel > .file-explorer-head:hover,
@@ -741,8 +738,7 @@ body.theme-light .drop-slot.drag-over {
   box-shadow: none;
 }
 .panel.active-pane .pane-tab.active,
-.panel.file-explorer-panel .pane-tab.active,
-.panel.changes-panel .pane-tab.active {
+.panel.file-explorer-panel .pane-tab.active {
   color: var(--pane-tab-active-text);
   background: var(--pane-tab-active-bg);
   border-color: var(--pane-tab-active-border);
@@ -751,7 +747,7 @@ body.theme-light .drop-slot.drag-over {
 }
 /* DOIT.6: every pane keeps its active tab clearly green (no dimming) so you can tell which session
    each pane shows; the focused pane's extra cue is its brighter lime active tab + the pane ring. */
-.panel:not(.active-pane):not(.file-explorer-panel):not(.changes-panel) .pane-tab.active {
+.panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active {
   opacity: 1;
 }
 /* image 003/004: an inactive pane's INACTIVE TABS match the gray bar (--pane-bar-bg, which is --panel2
@@ -778,10 +774,7 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
 .panel.active-pane .pane-tab.active .session-button-detail,
 .panel.file-explorer-panel .pane-tab.active .session-button-name,
 .panel.file-explorer-panel .pane-tab.active .session-button-dir,
-.panel.file-explorer-panel .pane-tab.active .session-button-detail,
-.panel.changes-panel .pane-tab.active .session-button-name,
-.panel.changes-panel .pane-tab.active .session-button-dir,
-.panel.changes-panel .pane-tab.active .session-button-detail {
+.panel.file-explorer-panel .pane-tab.active .session-button-detail {
   color: var(--pane-tab-active-text);
 }
 .pane-tab.active .session-yolo-marker.inactive {
