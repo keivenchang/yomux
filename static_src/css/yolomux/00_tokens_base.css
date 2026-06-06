@@ -48,28 +48,49 @@
   --inactive-tab-bg: #293240;
   --inactive-tab-bg-hover: #354052;
   --inactive-tab-border: #667286;
-  --pane-inactive-tab-bg: #285a2f;
-  --pane-inactive-tab-bg-hover: #336d3a;
-  --pane-inactive-tab-border: #9bd480;
+  --pane-inactive-tab-bg: var(--active-tab-muted-bg);
+  --pane-inactive-tab-bg-hover: var(--active-tab-muted-hover-bg);
+  --pane-inactive-tab-border: var(--active-tab-muted-border);
   --pane-tab-text: #dfe6ef;
-  --pane-tab-active-text: #071000;
-  --pane-tab-active-bg: #86d600;
-  --pane-tab-active-border: #9be33d;
-  --pane-tab-active-accent: #86d600;
+  /* DOIT.41: ONE source accent that every ACTIVE/FOCUSED surface derives from (active tab, focused-pane
+     ring + glow, chrome strip, file selection, hover tints). Swapped by the appearance.active_color
+     preference; Green is the default = the brand-green values below, so this refactor is a no-op.
+     NOTE: YOLO (--pane-tab-yolo-*, --auto-glow) and editor syntax greens deliberately do NOT derive
+     from this — YOLO stays brand green so a non-green accent never disguises auto-approve state. */
+  --active-accent: #76b900;          /* solid: ring, glow, strip, alpha tints */
+  --active-accent-rgb: 118 185 0;    /* triple → rgb(var(--active-accent-rgb) / α) for every alpha use */
+  --active-accent-bright: #86d600;   /* active-tab fill + border */
+  --active-accent-text: #071000;     /* text/icon ON the accent tab (contrast color) */
+  --active-accent-dim: color-mix(in srgb, var(--active-accent) 22%, var(--panel));  /* chrome strip bg */
+  --active-accent-soft: rgb(var(--active-accent-rgb) / 0.12);                        /* hover/selection wash */
+  --active-control-bg: var(--active-accent-bright);
+  --active-control-border: var(--active-accent-bright);
+  --active-control-text: var(--active-accent-text);
+  --active-control-soft-bg: var(--active-accent-soft);
+  --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
+  --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
+  --active-control-scrollbar-thumb: rgb(var(--active-accent-rgb) / 0.72);
+  --active-tab-muted-bg: color-mix(in srgb, var(--active-accent) 28%, var(--panel2));
+  --active-tab-muted-hover-bg: color-mix(in srgb, var(--active-accent) 36%, var(--panel2));
+  --active-tab-muted-border: color-mix(in srgb, var(--active-accent-bright) 64%, var(--line));
+  --pane-tab-active-text: var(--active-accent-text);
+  --pane-tab-active-bg: var(--active-accent-bright);
+  --pane-tab-active-border: var(--active-accent-bright);
+  --pane-tab-active-accent: var(--active-accent-bright);
   /* image 003/004: an inactive pane's ACTIVE tab keeps the SAME full green as the focused pane's active
      tab (no lightening) — alias the unfocused-active tokens to the focused ones (light + dark). */
   --pane-tab-unfocused-active-text: var(--pane-tab-active-text);
   --pane-tab-unfocused-active-bg: var(--pane-tab-active-bg);
   --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
   /* Focused chrome-bar green — the ONE token both the tab container (.panel-head) and the info/detail
-     row (.panel-detail-row) read via --pane-bar-bg. Derived from the brand accent so it reads clearly
-     green (not the old teal-ish #1f3026) and flips with theme; bump the % to push greener. */
-  --pane-tab-strip-bg: color-mix(in srgb, var(--brand-green) 22%, var(--panel));
+     row (.panel-detail-row) read via --pane-bar-bg. Derived from the active accent so it flips with the
+     active-color preference and the theme. */
+  --pane-tab-strip-bg: var(--active-accent-dim);
   --pane-tab-yolo-text: #071000;
   --pane-tab-yolo-bg: #76b900;
   --pane-tab-yolo-border: #9be33d;
-  --pane-tab-panel-ring: #76b900;
-  --pane-tab-panel-ring-shadow: rgba(118, 185, 0, 0.95);
+  --pane-tab-panel-ring: var(--active-accent);
+  --pane-tab-panel-ring-shadow: rgb(var(--active-accent-rgb) / 0.95);
   --pane-tab-panel-ring-width: 4px;
   --pane-ring-opacity: 75%;
   --pane-active-ring-opacity: 75%;
@@ -84,10 +105,10 @@
   --pane-tab-control-border: #536074;
   --pane-tab-control-hover-bg: #263247;
   --pane-tab-control-hover-border: #8fa1bc;
-  --pane-tab-zoom-bg: #2f5f3a;
-  --pane-tab-zoom-border: #5f8f6b;
-  --pane-tab-zoom-hover-bg: #52d273;
-  --pane-tab-zoom-hover-border: #9befad;
+  --pane-tab-zoom-bg: var(--active-control-bg);
+  --pane-tab-zoom-border: var(--active-control-border);
+  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
+  --pane-tab-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
   --pane-tab-badge-gold: #f5c542;
   --pane-tile-radius: 0;
   --pane-split-gap: 0px;
@@ -197,8 +218,8 @@
   --file-hover-bg: rgba(245, 197, 66, 0.26);
   --file-hover-border: #f5c542;
   --file-hover-outline: rgba(245, 197, 66, 0.42);
-  --file-selection-bg: rgba(75, 190, 72, 0.46);
-  --file-selection-border: #9ee85d;
+  --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
+  --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
   --editor-font: var(--mono-font);
   --editor-font-size: var(--ui-font-size);
@@ -242,10 +263,10 @@
   --pc-control-hover-fg: #ffffff;
   --pc-control-hover-bg: #263247;
   --pc-control-hover-border: #8fa1bc;
-  --pc-zoom-bg: #2f5f3a;
-  --pc-zoom-border: #5f8f6b;
-  --pc-zoom-hover-bg: #52d273;
-  --pc-zoom-hover-border: #9befad;
+  --pc-zoom-bg: var(--active-control-bg);
+  --pc-zoom-border: var(--active-control-border);
+  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
+  --pc-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
   --panel-close-size: 18px;
   --panel-close-radius: 4px;
   --panel-close-glyph-width: 9px;
@@ -275,12 +296,31 @@ body.theme-dark {
 }
 body.theme-light {
   color-scheme: light;
+  /* DOIT.41: light-theme defaults for the active accent (Green). The picker (applyActiveColor) overrides
+     these per preset; supplied (not derived) so Green stays the exact current light values. */
+  --active-accent: #5f9800;
+  --active-accent-rgb: 95 152 0;
+  --active-accent-bright: #4f9e3a;
+  --active-accent-text: #ffffff;
+  --active-accent-dim: #dce8d2;
+  --active-accent-soft: rgb(var(--active-accent-rgb) / 0.12);
+  --active-control-bg: var(--active-accent-bright);
+  --active-control-border: var(--active-accent-bright);
+  --active-control-text: var(--active-accent-text);
+  --active-control-soft-bg: var(--active-accent-soft);
+  --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
+  --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
+  --active-control-scrollbar-thumb: rgb(var(--active-accent-rgb) / 0.68);
+  --active-tab-muted-bg: color-mix(in srgb, var(--active-accent-bright) 20%, var(--panel));
+  --active-tab-muted-hover-bg: color-mix(in srgb, var(--active-accent-bright) 28%, var(--panel));
+  --active-tab-muted-border: color-mix(in srgb, var(--active-accent-bright) 46%, var(--line));
   /* The pane tab-strip container reads greenish-light (matching the detail row), not the old cool gray. */
-  --pane-tab-strip-bg: #dce8d2;
+  --pane-tab-strip-bg: var(--active-accent-dim);
   /* image 003/004: light-mode inactive/minimized tabs were white; tint them a very-light green a hair
      lighter than the strip so a tab still reads as a tab (dark mode keeps its own #285a2f). */
-  --pane-inactive-tab-bg: #e6f1dd;
-  --pane-inactive-tab-bg-hover: #d8ebcb;
+  --pane-inactive-tab-bg: var(--active-tab-muted-bg);
+  --pane-inactive-tab-bg-hover: var(--active-tab-muted-hover-bg);
+  --pane-inactive-tab-border: var(--active-tab-muted-border);
   /* image 008: the inactive-tab text token (#dfe6ef, tuned for the DARK tab bg) was near-white on the
      new light-green tabs/strip — white-on-white. Light mode needs DARK tab text. (Active tabs keep
      their own --pane-tab-active-text white-on-green.) */
@@ -292,16 +332,16 @@ body.theme-light {
   --pane-tab-control-border: #9aa6b6;
   --pane-tab-control-hover-bg: #e9eef6;
   --pane-tab-control-hover-border: #6b7788;
-  --pane-tab-zoom-bg: #4f9e3a;
-  --pane-tab-zoom-border: #3f8f2d;
-  --pane-tab-zoom-hover-bg: #5fae46;
-  --pane-tab-zoom-hover-border: #4f9e3a;
+  --pane-tab-zoom-bg: var(--active-control-bg);
+  --pane-tab-zoom-border: var(--active-control-border);
+  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  --pane-tab-zoom-hover-border: var(--active-control-border);
   /* DOIT.6 #31: active-tab greens tuned for the light surface so a theme switch visibly repaints the
      active pane tab (the dark-mode neon lime looked "stuck" with no light override). */
-  --pane-tab-active-bg: #4f9e3a;
-  --pane-tab-active-text: #ffffff;
-  --pane-tab-active-border: #3f8f2d;
-  --pane-tab-active-accent: #4f9e3a;
+  --pane-tab-active-bg: var(--active-accent-bright);
+  --pane-tab-active-text: var(--active-accent-text);
+  --pane-tab-active-border: var(--active-accent-bright);
+  --pane-tab-active-accent: var(--active-accent-bright);
   /* image 003/004: an inactive pane's active tab is full green here too. MUST re-alias in this theme
      block — `--unfocused: var(--focused)` set only in :root captures the DARK focused value and inherits
      it, so the light override of --pane-tab-active-* would otherwise be ignored. */
@@ -363,8 +403,8 @@ body.theme-light {
   --file-hover-bg: #fff2a8;
   --file-hover-border: #d97706;
   --file-hover-outline: rgba(217, 119, 6, 0.34);
-  --file-selection-bg: rgba(90, 190, 70, 0.34);
-  --file-selection-border: #3f8f2d;
+  --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
+  --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
   --pc-control-bg: #f7f9fc;
   --pc-control-fg: #1f2937;
@@ -372,10 +412,10 @@ body.theme-light {
   --pc-control-hover-fg: #0f172a;
   --pc-control-hover-bg: #e9eef6;
   --pc-control-hover-border: #6b7788;
-  --pc-zoom-bg: #dcefd5;
-  --pc-zoom-border: #6aa052;
-  --pc-zoom-hover-bg: #9be33d;
-  --pc-zoom-hover-border: #4f8f10;
+  --pc-zoom-bg: var(--active-control-bg);
+  --pc-zoom-border: var(--active-control-border);
+  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  --pc-zoom-hover-border: var(--active-control-border);
   --panel-close-hover-bg: rgba(15, 23, 42, 0.08);
 }
 * { box-sizing: border-box; }

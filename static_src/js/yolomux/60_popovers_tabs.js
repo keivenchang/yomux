@@ -1,4 +1,5 @@
 function toggleHiddenFiles() {
+  setFileExplorerManualRootMode();
   fileExplorerShowHidden = !fileExplorerShowHidden;
   storageSet(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0');
   syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
@@ -19,6 +20,7 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   const nextDepth = Math.round((depth - 8) / 14) + 1;
   renderTreeChildren(children, fullPath, entries, nextDepth);
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
+  rememberFileExplorerSyncExpandedState();
 }
 
 function collapseDirectoryRow(row, fullPath, options = {}) {
@@ -30,6 +32,7 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
   Array.from(row.parentElement?.children || [])
     .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
     .forEach(node => node.remove());
+  rememberFileExplorerSyncExpandedState();
 }
 
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());

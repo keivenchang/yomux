@@ -125,9 +125,9 @@
   --action-icon: var(--icon-tab-meta);
 }
 #tabMetaToggle.active {
-  color: #081205;
-  background: #8cc63f;
-  border-color: #b8ee5c;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 #logoutButton {
   --action-icon: var(--icon-logout);
@@ -381,9 +381,9 @@ body.theme-light .topbar-language {
   align-items: center;
   justify-content: center;
   padding: 0 4px;
-  color: #071000;
-  background: var(--brand-green);
-  border: 1px solid #b8ee5c;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
   border-radius: 999px;
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
@@ -507,12 +507,12 @@ body.theme-light .topbar-language {
   opacity: 0;
 }
 .app-menu-command[data-checked="true"] {
-  background: rgba(118, 185, 0, 0.07);
+  background: var(--active-control-soft-bg);
   border-color: transparent;
 }
 .app-menu-command[data-checked="true"] .app-menu-check {
   opacity: 1;
-  background: var(--brand-green);
+  background: var(--active-control-bg);
 }
 .app-menu-command + .app-menu-command,
 .app-menu-submenu-wrap + .app-menu-command,
@@ -577,9 +577,9 @@ body.theme-light .topbar-language {
   mask: var(--app-menu-ui-icon) center / contain no-repeat;
 }
 .app-menu-ui-icon.active {
-  color: #081205;
-  background: #8cc63f;
-  border-color: #b8ee5c;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .app-menu-ui-icon-notify {
   --app-menu-ui-icon: var(--icon-notify);
@@ -744,11 +744,11 @@ body.theme-light .topbar:focus-within {
 /* DOIT.12 A4: light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
    on the light neutral/hover-green bar. */
 body.theme-light #tabMetaToggle.active {
-  background: #5f9800;           /* match the .app-menu-ui-icon.active light tuning, not the garish #8cc63f */
-  border-color: #5f9800;
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 body.theme-light .app-menu-button-badge {
-  border-color: var(--brand-green); /* border matches the green count fill — drops the bright #b8ee5c halo */
+  border-color: var(--active-control-border);
 }
 body.theme-light .transport-warning::after {
   color: #5a1116;                /* light tooltip (dark-red text on a light-red surface), not near-black */
@@ -795,7 +795,7 @@ body.theme-light .app-menu-command {
   color: var(--text);
 }
 body.theme-light .app-menu-command[data-checked="true"] {
-  background: rgba(95, 152, 0, 0.08);
+  background: var(--active-control-soft-bg);
   border-color: transparent;
 }
 body.theme-light .app-menu-command:hover:not(:disabled),
@@ -824,14 +824,14 @@ body.theme-light .app-menu-ui-icon:focus-visible {
   border-color: #9aa6b6;
 }
 body.theme-light .app-menu-ui-icon.active {
-  color: #08120a;
-  background: #5f9800;
-  border-color: #4a7600;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 body.theme-light .app-menu-ui-icon.active:hover,
 body.theme-light .app-menu-ui-icon.active:focus-visible {
-  background: #6fab0a;
-  border-color: #4a7600;
+  background: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  border-color: var(--active-control-border);
 }
 /* #252 (image 033): the rich Tabs/Changes dropdown rows are `.app-menu-tab-command` (NOT
    `.app-menu-command`), so the light text/hover overrides above never reach them — their text children
@@ -858,7 +858,7 @@ body.theme-light .latency-meter {
    concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
    toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
 .notify-toggle.active {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }

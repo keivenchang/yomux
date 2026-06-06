@@ -453,9 +453,6 @@ body.theme-light .drop-slot.drag-over {
   --panel-ring-color: var(--pane-tab-panel-ring);
   --panel-ring-opacity: var(--pane-active-ring-opacity);
 }
-.panel.typing-ready-pane.yolo-ready-pane {
-  --panel-ring-color: var(--brand-green);
-}
 .panel.needs-input-pane,
 .panel.needs-exec-pane,
 .panel.needs-blocked-pane {

@@ -293,7 +293,7 @@
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: #151922;
   border: 1px solid #455164;
-  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(118, 185, 0, 0.12);
+  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.48), 0 0 0 1px var(--active-control-focus-ring);
   color: var(--fg);
 }
 .file-editor-dialog-title {
@@ -330,9 +330,9 @@
 }
 .file-editor-dialog-action:hover,
 .file-editor-dialog-action:focus-visible {
-  border-color: var(--good);
+  border-color: var(--active-control-border);
   outline: none;
-  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.35);
+  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-editor-dialog-action.danger {
   border-color: #9b2d33;
@@ -666,10 +666,10 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   font: inherit;
   line-height: 18px;
   background: rgba(10, 14, 20, 0.98);
-  border: 1px solid var(--brand-green);
+  border: 1px solid var(--active-control-border);
   border-radius: 3px;
   outline: none;
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.18);
+  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 /* Light mode (DOIT.12 B5): the rename box hardcodes a near-black fill while its text
    uses the theme-aware --text (dark in light) → dark-on-dark while renaming. */
@@ -734,8 +734,8 @@ body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only {
 }
 .path-copy-button:hover {
   color: var(--text);
-  border-color: rgba(118, 185, 0, 0.55);
-  background: rgba(118, 185, 0, 0.12);
+  border-color: var(--active-control-soft-border);
+  background: var(--active-control-soft-bg);
 }
 .path-copy-button::before,
 .path-copy-button::after {
@@ -807,7 +807,7 @@ body.resizing-file-explorer-changes {
 }
 .file-explorer-tree-panel:hover,
 .file-explorer-tree-panel:focus-within {
-  scrollbar-color: rgba(150, 220, 92, 0.72) rgba(255, 255, 255, 0.08);
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(255, 255, 255, 0.08);
 }
 .file-explorer-tree-panel::-webkit-scrollbar {
   width: 10px;
@@ -825,7 +825,7 @@ body.resizing-file-explorer-changes {
 }
 .file-explorer-tree-panel:hover::-webkit-scrollbar-thumb,
 .file-explorer-tree-panel:focus-within::-webkit-scrollbar-thumb {
-  background: rgba(150, 220, 92, 0.72);
+  background: var(--active-control-scrollbar-thumb);
   background-clip: content-box;
 }
 /* C15: route this inner Finder↔Modified-files split through the SHARED --pane-resizer-* tokens instead
@@ -876,7 +876,7 @@ body.resizing-file-explorer-changes {
 .file-explorer-changes-panel:hover,
 .file-explorer-changes-panel:focus-within {
   --pane-bar-bg: var(--pane-tab-strip-bg);
-  scrollbar-color: rgba(150, 220, 92, 0.72) rgba(255, 255, 255, 0.08);
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(255, 255, 255, 0.08);
 }
 body.theme-light .file-explorer-pane,
 body.theme-light .file-explorer-tree-panel {
@@ -888,7 +888,7 @@ body.theme-light .file-explorer-tree-panel {
 }
 body.theme-light .file-explorer-tree-panel:hover,
 body.theme-light .file-explorer-tree-panel:focus-within {
-  scrollbar-color: rgba(95, 152, 0, 0.68) rgba(15, 23, 42, 0.08);
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(15, 23, 42, 0.08);
 }
 body.theme-light .file-explorer-changes-panel {
   color: var(--text);
@@ -897,7 +897,7 @@ body.theme-light .file-explorer-changes-panel {
 }
 body.theme-light .file-explorer-changes-panel:hover,
 body.theme-light .file-explorer-changes-panel:focus-within {
-  scrollbar-color: rgba(95, 152, 0, 0.68) rgba(15, 23, 42, 0.08);
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(15, 23, 42, 0.08);
 }
 .file-explorer-changes-panel::-webkit-scrollbar {
   width: 10px;
@@ -918,7 +918,7 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
 }
 .file-explorer-changes-panel:hover::-webkit-scrollbar-thumb,
 .file-explorer-changes-panel:focus-within::-webkit-scrollbar-thumb {
-  background: rgba(150, 220, 92, 0.72);
+  background: var(--active-control-scrollbar-thumb);
   background-clip: content-box;
 }
 body.theme-light .file-explorer-tree-panel::-webkit-scrollbar-track {
@@ -933,7 +933,7 @@ body.theme-light .file-explorer-tree-panel:hover::-webkit-scrollbar-thumb,
 body.theme-light .file-explorer-tree-panel:focus-within::-webkit-scrollbar-thumb,
 body.theme-light .file-explorer-changes-panel:hover::-webkit-scrollbar-thumb,
 body.theme-light .file-explorer-changes-panel:focus-within::-webkit-scrollbar-thumb {
-  background: rgba(95, 152, 0, 0.68);
+  background: var(--active-control-scrollbar-thumb);
   background-clip: content-box;
 }
 .file-explorer-changes-head {
@@ -1046,8 +1046,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 }
 .file-explorer-changes-head .changes-close:hover,
 .file-explorer-changes-head .changes-close:focus-visible {
-  color: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .file-explorer-changes-panel .changes-refresh,
 .file-explorer-date-reload-cluster .changes-refresh {
@@ -1232,8 +1232,8 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   height: 22px;
   padding: 0 8px;
   color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: color-mix(in srgb, var(--brand-green) 18%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
-  border: 1px solid color-mix(in srgb, var(--brand-green) 45%, var(--pane-ctl-border, transparent));
+  background: color-mix(in srgb, var(--active-control-bg) 18%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  border: 1px solid color-mix(in srgb, var(--active-control-border) 45%, var(--pane-ctl-border, transparent));
   border-radius: 4px;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
@@ -1246,30 +1246,22 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 .file-explorer-mode-toggle:hover,
 .file-explorer-mode-toggle:focus-visible {
   color: var(--text);
-  border-color: var(--brand-green);
-  background: color-mix(in srgb, var(--brand-green) 28%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  border-color: var(--active-control-border);
+  background: color-mix(in srgb, var(--active-control-bg) 28%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
 }
 .file-explorer-mode-toggle[aria-pressed="true"] {
-  color: var(--pane-tab-yolo-text, var(--pane-ctl-pressed-fg));
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .file-explorer-mode-label {
   pointer-events: none;
 }
-:root {
-  --finder-session-repo-bg: color-mix(in srgb, var(--brand-green) 16%, transparent);
-  --finder-session-touched-bg: color-mix(in srgb, var(--brand-green) 8%, transparent);
-  --finder-sync-expanded-bg: color-mix(in srgb, var(--accent-gold) 24%, transparent);
-}
-.file-tree-row.file-tree-row--sync-expanded:not(.selected) {
-  background: var(--finder-sync-expanded-bg);
-}
-.file-tree-row.file-tree-row--session-repo:not(.selected) {
-  background: var(--finder-session-repo-bg);
-}
-.file-tree-row.file-tree-row--session-touched:not(.selected) {
-  background: var(--finder-session-touched-bg);
+.file-tree-row.file-tree-row--sync-expanded > .file-tree-name,
+.file-tree-row.file-tree-row--session-repo > .file-tree-name,
+.file-tree-row.file-tree-row--session-touched > .file-tree-name,
+.file-tree-row.file-tree-row--changed-ancestor > .file-tree-name {
+  font-weight: 800;
 }
 .file-explorer-hidden-toggle-panel:hover,
 .file-explorer-root-mode-toggle-panel:hover,
@@ -1279,10 +1271,11 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   border-color: var(--text);
 }
 .file-explorer-hidden-toggle-panel.active,
-.file-explorer-root-mode-toggle-panel.active {
-  color: #061207;
-  border-color: var(--brand-green);
-  background: rgba(118, 185, 0, 0.88);
+.file-explorer-root-mode-toggle-panel.active,
+.file-explorer-quick-access-button.active {
+  color: var(--active-control-text);
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
 }
 .cm-yolomux-diff-add {
   background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
@@ -1322,8 +1315,8 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   border-radius: 0;
 }
 .file-editor-diff-codemirror .cm-merge-revert button:hover {
-  color: #061207;
-  background: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
 }
 .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 .file-editor-diff-codemirror .cm-deletedChunk,
@@ -1632,9 +1625,9 @@ body.editor-theme-light .file-editor-content {
    is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token
    (theme-aware, the same gray Cursor uses), never selectable/copied as code. */
 .file-editor-blame-panel[aria-pressed="true"] {
-  color: #061207;
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .cm-line[data-blame]::after {
   content: " " attr(data-blame);
@@ -1648,9 +1641,9 @@ body.editor-theme-light .file-editor-content {
 }
 /* B4: the diff expand/collapse-all toggle goes green when ON (showing all context), like a pressed control. */
 .file-editor-diff-expand-panel[aria-pressed="true"] {
-  color: var(--pane-tab-active-text);
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .file-editor-save-panel:disabled {
   opacity: 0.44;
@@ -2234,9 +2227,9 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 }
 .file-editor-codemirror .cm-search label:has(input:checked),
 .file-editor-codemirror-panel .cm-search label:has(input:checked) {
-  color: #061207;
-  border-color: var(--brand-green);
-  background: rgba(118, 185, 0, 0.86);
+  color: var(--active-control-text);
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
 }
 .file-editor-codemirror .cm-search input[type="checkbox"],
 .file-editor-codemirror-panel .cm-search input[type="checkbox"] {
@@ -2246,7 +2239,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   height: 100%;
   margin: 0;
   opacity: 0;
-  accent-color: var(--brand-green);
+  accent-color: var(--active-control-bg);
   cursor: pointer;
 }
 .file-editor-codemirror .cm-search .cm-dialog-close,
@@ -2293,9 +2286,9 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search label:hover {
 }
 body.editor-theme-light .file-editor-codemirror .cm-search label:has(input:checked),
 body.editor-theme-light .file-editor-codemirror-panel .cm-search label:has(input:checked) {
-  color: #061207;
-  background: rgba(118, 185, 0, 0.76);
-  border-color: #4c7f00;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-search-count,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-count {

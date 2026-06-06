@@ -17,7 +17,7 @@ def test_pane_spacing_default_is_4px():
     # must match this so a fresh profile and a reset-to-defaults both render a 4px gap + 4px ring).
     assert default_settings()["appearance"]["pane_spacing"] == 4
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
-    assert default_settings()["appearance"]["inactive_pane_opacity"] == 100
+    assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
 
 
 def test_sanitize_settings_clamps_numbers_and_choices():
@@ -51,7 +51,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["pane_spacing"] == 20
     assert settings["appearance"]["pane_ring_opacity"] == 5
     assert settings["appearance"]["inactive_pane_opacity"] == 100
-    assert settings["file_explorer"]["root_mode"] == "fixed"
+    assert settings["file_explorer"]["root_mode"] == "sync"
     assert settings["file_explorer"]["image_open_mode"] == "same-tab"
     assert settings["file_explorer"]["image_preview_max_px"] == 1200
     assert settings["editor"]["autosave"] is True

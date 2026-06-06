@@ -1326,6 +1326,9 @@ function startTerminal(session) {
   container.addEventListener('focusout', () => {
     clearFocusedTerminal(session);
   });
+  container.addEventListener('copy', event => {
+    copyTerminalSelectionToClipboardEvent(session, term, event);
+  }, {capture: true});
   container.addEventListener('keydown', () => noteTerminalExplicitInput(session), {capture: true});
   container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});
   container.addEventListener('beforeinput', () => noteTerminalExplicitInput(session), {capture: true});

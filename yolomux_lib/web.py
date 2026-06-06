@@ -217,13 +217,13 @@ def html_page(sessions: list[str], access_role: str = "admin", dev: bool = False
     <div class="file-explorer-head">
       <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/" spellcheck="false" aria-label="File Explorer root path">
       <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy" title="Copy current path" aria-label="Copy current path"></button>
+      <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
       <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle" title="Show hidden files (dotfiles)" aria-pressed="false">.*</button>
-      <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle" title="No Sync: fixed root" aria-pressed="false">No Sync</button>
+      <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" title="Sync: follow active session" aria-pressed="true">Sync</button>
       <div id="fileExplorerQuickAccess" class="file-explorer-quick-access" aria-label="Quick paths"></div>
       <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="New file" aria-label="New file">+</button>
       <button type="button" class="file-explorer-header-action" data-file-explorer-new-folder title="New folder" aria-label="New folder">▣</button>
       <button type="button" class="file-explorer-header-action" data-file-explorer-refresh title="Refresh" aria-label="Refresh">↻</button>
-      <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="Collapse all" aria-label="Collapse all">▤</button>
       <button type="button" id="fileExplorerClose" class="file-explorer-close" title="Close File Explorer" aria-label="Close"></button>
     </div>
     <div class="file-explorer-tree" id="fileExplorerTree" role="tree" tabindex="0"></div>

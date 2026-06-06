@@ -413,7 +413,7 @@ function mergeSettingObjects(base, patch) {
 }
 
 function readStoredFileExplorerRootMode() {
-  return storageGet(fileExplorerRootModeStorageKey) === 'sync' ? 'sync' : 'fixed';
+  return storageGet(fileExplorerRootModeStorageKey) === 'fixed' ? 'fixed' : 'sync';
 }
 
 function writeStoredFileExplorerRootMode(mode) {
@@ -1152,8 +1152,13 @@ async function copyTextToClipboard(text) {
   const clipboard = globalThis.navigator?.clipboard;
   const value = String(text ?? '');
   if (clipboard?.writeText) {
-    await clipboard.writeText(value);
-    return;
+    try {
+      await clipboard.writeText(value);
+      return;
+    } catch (_) {
+      // Fall through to execCommand. Some browsers expose navigator.clipboard
+      // but reject writes on self-signed or permission-limited pages.
+    }
   }
   const textarea = document.createElement('textarea');
   textarea.value = value;
@@ -1330,6 +1335,17 @@ async function copyTerminalSelection(session, term, options = {}) {
   } catch (error) {
     statusErr(`copy failed: ${esc(error)}`);
   }
+}
+
+function copyTerminalSelectionToClipboardEvent(session, term, event) {
+  const selected = term.getSelection?.() || '';
+  if (!selected || !event?.clipboardData) return false;
+  event.clipboardData.setData('text/plain', selected);
+  event.preventDefault();
+  event.stopPropagation();
+  statusEl.textContent = 'copied';
+  term.clearSelection?.();
+  return true;
 }
 
 function installTerminalCopyShortcut(session, term) {

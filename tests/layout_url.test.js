@@ -734,6 +734,18 @@ globalThis.__layoutTestApi = {
   setFileExplorerSessionFilesPayloadForTest(payload) {
     fileExplorerSessionFilesPayload = payload;
   },
+  fileTreeChangedAncestorStatsForTest(payload) {
+    return Array.from(fileTreeChangedAncestorStats(payload).entries()).map(([path, stats]) => [path, {...stats}]);
+  },
+  updateFileTreeGitStatusRowsForTest(rows) {
+    const previousQuerySelectorAll = document.querySelectorAll;
+    document.querySelectorAll = selector => selector === '.file-tree-row[data-path]' ? rows : previousQuerySelectorAll(selector);
+    try {
+      updateFileTreeGitStatusRows();
+    } finally {
+      document.querySelectorAll = previousQuerySelectorAll;
+    }
+  },
   setFileExplorerModeForTest(mode) {
     fileExplorerMode = normalizeFileExplorerMode(mode);
   },
@@ -3094,8 +3106,8 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.ok(/\.file-explorer-actions-row \.file-explorer-date-reload-cluster\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder row 3 keeps date and reload grouped');
   assert.ok(/\.file-explorer-primary-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0/.test(preferencesCss), 'Finder path fills the primary row and can shrink without wrapping controls');
   assert.ok(/\.file-explorer-mode-switcher\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder/Differ mode switcher is a segmented inline control');
-  assert.ok(/\.file-explorer-mode-toggle\s*\{[\s\S]*background:\s*color-mix\(in srgb,\s*var\(--brand-green\)/.test(preferencesCss), 'Finder/Differ mode buttons use token-routed accent styling');
-  assert.ok(/\.file-explorer-mode-toggle\[aria-pressed="true"\]\s*\{[\s\S]*background:\s*var\(--brand-green\)/.test(preferencesCss), 'Finder/Differ mode button is filled when pressed');
+  assert.ok(/\.file-explorer-mode-toggle\s*\{[\s\S]*background:\s*color-mix\(in srgb,\s*var\(--active-control-bg\)/.test(preferencesCss), 'Finder/Differ mode buttons use shared active-control accent styling');
+  assert.ok(/\.file-explorer-mode-toggle\[aria-pressed="true"\]\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), 'Finder/Differ mode button is filled from the active-control token when pressed');
   assert.ok(/\.file-explorer-path,[\s\S]*?\.file-explorer-path-inline\s*\{[\s\S]*color:\s*var\(--text\)[\s\S]*border:\s*1px solid var\(--line\)/.test(preferencesCss), 'Finder path uses normal text contrast and visible input chrome');
   const finderPanelBundle = fs.readFileSync('static/yolomux.js', 'utf8');
   const finderPanelStart = finderPanelBundle.indexOf('function createFileExplorerPanel');
@@ -3105,7 +3117,8 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   );
   assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-toolbar-row file-explorer-scope-row[\s\S]*file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only/.test(finderPanelSource), 'Finder panel toolbar renders primary, scope, and files-only actions rows in order');
   assert.equal(finderPanelSource.includes('file-explorer-diff-row'), false, 'Differ title is folded into the shared primary row');
-  assert.ok(/file-explorer-panel-title file-explorer-mode-files-only[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel[\s\S]*fileExplorerChangesCollapseToggleHtml\(\)[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders title, path, copy, Differ collapse toggle, segmented mode switcher, and close control');
+  assert.ok(/data-file-explorer-collapse[\s\S]*file-explorer-panel-title file-explorer-mode-files-only[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel[\s\S]*fileExplorerChangesCollapseToggleHtml\(\)[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders collapse, title, path, copy, Differ collapse toggle, segmented mode switcher, and close control');
+  assert.ok(/file-explorer-toolbar-row file-explorer-scope-row[\s\S]*file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*file-explorer-quick-access-panel/.test(finderPanelSource), 'Finder scope row renders .*, Sync, then quick-root buttons');
   assert.ok(/const modes = \[[\s\S]*mode: 'files'[\s\S]*mode: 'diff'[\s\S]*data-file-explorer-mode-set="\$\{esc\(item\.mode\)\}"/.test(finderPanelBundle), 'Finder/Differ switcher renders both mode buttons from one segmented source');
   assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
   assert.ok(/file-explorer-sort-select[\s\S]*file-explorer-date-reload-cluster[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*data-file-explorer-refresh[\s\S]*changes\.refresh/.test(finderPanelSource), 'Finder date-mode button and Reload form a trailing Ago/Reload cluster in the files-only action row');
@@ -3138,20 +3151,20 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.ok(/body\.theme-light \.meta a/.test(preferencesCss), '#28: light theme adds a contrast override for detail-row links');
   assert.ok(/body\.theme-light \.pane-tab:hover/.test(preferencesCss), '#28: light theme fixes the near-white pane-tab hover border');
   assert.ok(/body\.theme-light \.tabs \.pane-actions:hover/.test(preferencesCss), '#28: light theme fixes the white tab-overflow hover glyph');
-  assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-active-bg:\s*#4f9e3a/.test(preferencesCss), '#31: the active pane tab has a light-mode green so a theme switch repaints it');
+  assert.ok(/body\.theme-light\s*\{[\s\S]*?--active-accent-bright:\s*#4f9e3a/.test(preferencesCss), '#31: the active pane tab has a light-mode green (via the active-accent token) so a theme switch repaints it');
   assert.ok(/body\.theme-light \.panel\.active-pane \.panel-detail-row \.session-button-name/.test(preferencesCss), '#35: the active-pane detail-row header label is forced dark in light mode (was light-on-light)');
   assert.ok(fs.readFileSync('static/yolomux.js', 'utf8').includes('session-button-dir pane-tab-info-label'), '#27: the YO!info tab label uses the themed .session-button-dir color treatment');
-  assert.ok(preferencesCss.includes('--pane-tab-active-bg: #86d600'), 'focused active pane tab uses a brighter brand green fill');
-  assert.ok(preferencesCss.includes('--pane-tab-active-accent: #86d600'), 'focused active pane tab accent token is the same green, not yellow/lime');
+  assert.ok(preferencesCss.includes('--active-accent-bright: #86d600'), 'focused active pane tab uses a brighter brand green fill (via the active-accent token)');
+  assert.ok(preferencesCss.includes('--pane-tab-active-accent: var(--active-accent-bright)'), 'focused active pane tab accent token derives from the shared active-accent (same green as the fill)');
   assert.equal(preferencesCss.includes('box-shadow: inset 0 2px 0 var(--pane-tab-active-accent)'), false, 'focused active pane tabs do not paint a contrasting top line');
   assert.ok(preferencesCss.includes('--pane-tab-width: 180px'), 'pane tabs default to the compact 180px width');
   assert.ok(changedFilesSource.includes("numberSetting('appearance.tab_width', 180)"), 'runtime settings fallback keeps the 180px tab width default');
-  assert.ok(preferencesCss.includes('--pane-tab-strip-bg: color-mix(in srgb, var(--brand-green) 22%, var(--panel));'), 'dark/root theme uses the greener shared pane tab-strip background token');
+  assert.ok(preferencesCss.includes('--active-accent-dim: color-mix(in srgb, var(--active-accent) 22%, var(--panel))'), 'dark/root theme uses the greener shared pane tab-strip background (active-accent-dim)');
   assert.equal(/body\.theme-dark\s*\{[^}]*--pane-tab-strip-bg\s*:/.test(preferencesCss), false, 'dark theme inherits the shared pane tab-strip token instead of restating a separate color');
   assert.equal(preferencesCss.includes('--pane-tab-strip-hover-bg:'), false, 'dark theme no longer defines a separate pane tab-container hover token');
   const themeLightTokenBlock = preferencesCss.match(/body\.theme-light\s*\{[^}]*\}/)?.[0] || '';
   assert.equal(themeLightTokenBlock.includes('--pane-tab-strip-hover-bg'), false, 'light theme does not define the dark-only pane tab-container hover token');
-  assert.ok(/body\.theme-light\s*\{[\s\S]*--pane-tab-strip-bg:\s*#dce8d2/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background');
+  assert.ok(/body\.theme-light\s*\{[\s\S]*--active-accent-dim:\s*#dce8d2/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background (active-accent-dim)');
   assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (DOIT.6 #6 + images 003/004: undimmed, un-lightened per-pane highlight)');
   assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
   assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 4px'), 'the pane ring uses the 4px width token (DOIT.20)');
@@ -3219,7 +3232,7 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.ok(/\.panel\.active-pane\.needs-input-pane[\s\S]*?\.panel\.typing-ready-pane\.needs-blocked-pane\s*\{[^}]*--panel-ring-color:\s*#ff3347/.test(preferencesCss), 'a focused needs-attention pane resolves the red ring color, not the green/yolo tint');
   assert.equal(/\.panel\.active-pane\s*\{[^}]*border-color:/.test(preferencesCss), false, 'the active pane sets --panel-ring-color (which colors the shared gutter border), not its own border-color');
   // images 003/004 pane-color polish:
-  assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-inactive-tab-bg:\s*#e6f1dd/.test(preferencesCss), 'light-mode inactive tabs are a very-light green (not white)');
+  assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-inactive-tab-bg:\s*var\(--active-tab-muted-bg\)/.test(preferencesCss), 'light-mode inactive tabs derive their tint from the active accent (not a fixed green)');
   // image 008: inactive-tab text is DARK in light mode (readable on the light-green tabs/strip), not the
   // dark-tuned near-white #dfe6ef that made it white-on-white.
   assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-text:\s*#1f2937/.test(preferencesCss), 'light-mode tab text is dark (no white-on-white inactive tabs)');
@@ -3312,16 +3325,16 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.equal(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-(?:changed|deleted)LineGutter\s*\{[^}]*background:\s*#[0-9a-fA-F]+/.test(preferencesCss), false, 'light theme must not reintroduce red/green left-gutter diff indicators');
   assert.ok(/\.file-editor-codemirror \.cm-scroller,\s*\n\.file-editor-codemirror-panel \.cm-scroller\s*\{[^}]*scrollbar-gutter:\s*stable[\s\S]*scrollbar-width:\s*auto/.test(preferencesCss), 'CodeMirror keeps a stable, draggable native scrollbar gutter');
   assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar,\s*\n\.file-editor-codemirror-panel \.cm-scroller::-webkit-scrollbar\s*\{[^}]*width:\s*12px[\s\S]*height:\s*12px/.test(preferencesCss), 'CodeMirror WebKit scrollbars are wide enough to grab without reading as diff markers');
-  assert.ok(/\.file-editor-codemirror \.cm-scroller,[\s\S]*?\.file-editor-codemirror-panel \.cm-scroller\s*\{[\s\S]*?scrollbar-color:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor native scrollbar thumb uses the active-tab green token');
+  assert.ok(/\.file-editor-codemirror \.cm-scroller,[\s\S]*?\.file-editor-codemirror-panel \.cm-scroller\s*\{[\s\S]*?scrollbar-color:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor native scrollbar thumb uses the active-tab accent token');
   assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-corner,[\s\S]*?background:\s*rgba\(255,\s*255,\s*255,\s*0\.04\)/.test(preferencesCss), 'editor scrollbar corner stays faint instead of reading as a second thumb');
-  assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-thumb,[\s\S]*?background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor WebKit scrollbar thumb uses the active-tab green token');
-  assert.ok(/body\.editor-theme-light \.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-thumb,[\s\S]*?background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'light editor WebKit scrollbar thumb also uses the active-tab green token');
-  assert.ok(/\.file-editor-panel:hover \.file-editor-codemirror-panel \.cm-scroller[\s\S]*?\{[\s\S]*?scrollbar-color:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor scrollbars stay active-tab green while the pane is hovered/focused');
-  assert.ok(/\.file-explorer-tree-panel:hover,[\s\S]*?\.file-explorer-tree-panel:focus-within\s*\{[\s\S]*?scrollbar-color:\s*rgba\(150,\s*220,\s*92,\s*0\.72\)/.test(preferencesCss), 'Finder tree scrollbar turns soft green only when Finder itself is hovered/focused');
-  assert.equal(/\.file-explorer-pane:hover \.file-explorer-tree-panel[\s\S]*?scrollbar-color:\s*rgba\(150,\s*220,\s*92,\s*0\.72\)/.test(preferencesCss), false, 'hovering embedded Differ through the shared Finder pane must not color the Finder scrollbar');
-  assert.ok(/\.file-explorer-changes-panel:hover,[\s\S]*?\.file-explorer-changes-panel:focus-within\s*\{[\s\S]*scrollbar-color:\s*rgba\(150,\s*220,\s*92,\s*0\.72\)/.test(preferencesCss), 'Modified-files scrollbar turns soft green on pane hover/focus');
+  assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-thumb,[\s\S]*?background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor WebKit scrollbar thumb uses the active-tab accent token');
+  assert.ok(/body\.editor-theme-light \.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-thumb,[\s\S]*?background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'light editor WebKit scrollbar thumb also uses the active-tab accent token');
+  assert.ok(/\.file-editor-panel:hover \.file-editor-codemirror-panel \.cm-scroller[\s\S]*?\{[\s\S]*?scrollbar-color:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor scrollbars stay active-tab accented while the pane is hovered/focused');
+  assert.ok(/\.file-explorer-tree-panel:hover,[\s\S]*?\.file-explorer-tree-panel:focus-within\s*\{[\s\S]*?scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'Finder tree scrollbar turns active-accent colored only when Finder itself is hovered/focused');
+  assert.equal(/\.file-explorer-pane:hover \.file-explorer-tree-panel[\s\S]*?scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), false, 'hovering embedded Differ through the shared Finder pane must not color the Finder scrollbar');
+  assert.ok(/\.file-explorer-changes-panel:hover,[\s\S]*?\.file-explorer-changes-panel:focus-within\s*\{[\s\S]*scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'Modified-files scrollbar turns active-accent colored on pane hover/focus');
   assert.equal(/\.panel\.changes-panel|\.changes-scroll/.test(preferencesCss), false, 'standalone Differ scrollbar CSS is removed');
-  assert.ok(/\.panel:hover \.terminal \.xterm-viewport[\s\S]*?\{[\s\S]*?scrollbar-color:\s*rgba\(150,\s*220,\s*92,\s*0\.72\)/.test(preferencesCss), 'terminal scrollbars turn soft green only while the pane is hovered/focused');
+  assert.ok(/\.panel:hover \.terminal \.xterm-viewport[\s\S]*?\{[\s\S]*?scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'terminal scrollbars turn active-accent colored only while the pane is hovered/focused');
   assert.ok(/--diff-add-line-bg:\s*color-mix\(in srgb,\s*var\(--code-diff-add\)\s*30%,\s*var\(--editor-scheme-bg\)\)/.test(preferencesCss), '#250: diff added lines use a muted opaque green fill over the dark bg');
   assert.ok(/\.file-editor-diff-codemirror \.cm-content \.cm-activeLine\s*\{[^}]*background:\s*var\(--diff-full-line-bg,\s*transparent\)/.test(preferencesCss), 'diff active lines keep the same red/green fill as their neighboring changed lines');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#d2f0d6/.test(preferencesCss), 'light diff added lines use the pleasant soft green (image 025)');
@@ -3335,7 +3348,7 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.ok(!/\.preferences-body\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .preferences-body must NOT be overflow:auto');
   assert.ok(/\.preferences-scroll\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .preferences-scroll is the scroll container');
   assert.equal(/\.changes-body|\.changes-scroll/.test(preferencesCss), false, 'standalone Differ overlay/scroll containers are removed');
-  assert.ok(/body\.theme-light \.app-menu-ui-icon\.active\s*\{[\s\S]*background:\s*#5f9800/.test(preferencesCss), '#251: light mode gives the active app-menu icon button a light-tuned green fill (no dark square)');
+  assert.ok(/body\.theme-light \.app-menu-ui-icon\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), '#251: light mode gives the active app-menu icon button a light-tuned active-control fill (no dark square)');
   assert.ok(/body\.theme-light \.app-menu-tab-command[\s\S]*\{[\s\S]*color:\s*var\(--text\)/.test(preferencesCss), '#252: light mode forces dark text on the rich Tabs/Changes dropdown rows so they are not washed out');
   assert.ok(/body\.theme-light \.file-explorer-changes-panel \.changes-comparison-head\s*\{[\s\S]*background:\s*transparent/.test(preferencesCss), '#253: the Finder "Comparing…" caption has no box chrome in light mode (blends as text)');
   assert.equal(/\.cm-deletedLineGutter\s*\{[^}]*color:\s*transparent/.test(preferencesCss), false, 'deleted rows carry no number via unified-merge read-only widgets, not a transparent-text gutter hack');
@@ -3906,14 +3919,19 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   const finderSyncStart = source.indexOf('function scheduleFileExplorerActiveTabSync(');
   const finderSyncEnd = source.indexOf('function cancelPendingFileExplorerActiveSync(', finderSyncStart);
   const finderSyncBody = source.slice(finderSyncStart, finderSyncEnd);
-  assert.ok(/if \(fileExplorerRootMode === 'sync'\) \{[\s\S]*if \(!syncItem \|\| syncItem !== explicitSession\) return/.test(finderSyncBody), 'Finder Sync requires an explicit tmux session before expanding');
-  assert.ok(/if \(fileExplorerRootMode === 'sync'\) \{[\s\S]*return;\s*\}\s*if \(options\.explicit !== true\) return;\s*const path = explicitFinderTargetPath\(preferredItem\)/.test(finderSyncBody), 'fixed Finder sync ignores passive hover and uses only explicit editor targets');
+  assert.ok(finderSyncBody.includes("if (fileExplorerRootMode !== 'sync') return;"), 'Finder ignores terminal/editor clicks when Sync is not pressed');
+  assert.ok(/const syncItem = isTmuxSession\(preferredItem\) \? preferredItem : explicitSession;[\s\S]*if \(!syncItem \|\| syncItem !== explicitSession\) return/.test(finderSyncBody), 'Finder Sync requires an explicit tmux session before expanding');
+  assert.equal(finderSyncBody.includes('syncFileExplorerToActiveTab(preferredItem'), false, 'fixed Finder mode never follows explicit tmux/editor clicks');
   const finderCandidatesStart = source.indexOf('function finderCandidateItems(');
   const finderCandidatesEnd = source.indexOf('function firstFinderPath(', finderCandidatesStart);
   const finderCandidatesBody = source.slice(finderCandidatesStart, finderCandidatesEnd);
   assert.equal(finderCandidatesBody.includes('focusedPanelItem'), false, 'Finder candidates do not read passive focusedPanelItem');
   assert.equal(finderCandidatesBody.includes('focusedTerminal'), false, 'Finder candidates do not read passive focusedTerminal');
   assert.equal(finderCandidatesBody.includes('lastFocusedTmuxSession'), false, 'Finder candidates do not read passive lastFocusedTmuxSession');
+  assert.ok(source.includes('function setFileExplorerManualRootMode()'), 'manual Finder scope buttons leave Sync mode explicitly');
+  assert.ok(source.includes('openFileExplorerManualRoot(expandQuickAccessPath(path));'), 'Finder quick-access opens are manual and disable Sync');
+  assert.ok(source.includes('const opened = await openFileExplorerManualRoot(target);'), 'Finder typed path opens are manual and disable Sync');
+  assert.ok(source.includes("if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);"), 'Finder root navigation by double-click is manual and disables Sync');
   assert.ok(source.includes('fileExplorerSyncManualCollapsedPaths'), 'Finder Sync tracks manually collapsed auto-expanded paths');
   assert.ok(/function fileExplorerSyncExpansionPaths\(plan\)[\s\S]*filter\(path => !fileExplorerSyncPathSuppressed\(path\)\)/.test(source), 'Finder Sync filters manually collapsed paths out of future auto-expansion');
   assert.ok(source.includes('function fileExplorerSyncExpansionTargets(root, affectedDirs = [], repoRoots = [])'), 'Finder Sync expansion targets are centralized');
@@ -3936,6 +3954,10 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.equal(shortcutsMenu.detail, '?');
   assert.ok(source.includes('function keyboardShortcutCatalog()'), 'shortcut help is driven from one catalog');
   assert.ok(api.keyboardShortcutsHtml().includes('outside text'), 'shortcut overlay scopes the Backspace close-tab fallback');
+  assert.ok(/async function copyTextToClipboard\(text\)[\s\S]*?if \(clipboard\?\.writeText\) \{[\s\S]*?try \{[\s\S]*?await clipboard\.writeText\(value\);[\s\S]*?\} catch/.test(source), 'clipboard copy falls back when navigator.clipboard exists but rejects');
+  assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event)'), 'terminal copy has a DOM copy-event fallback');
+  assert.ok(source.includes("container.addEventListener('copy', event => {"), 'terminal container handles browser copy events');
+  assert.ok(source.includes("event.clipboardData.setData('text/plain', selected);"), 'terminal copy-event fallback writes the xterm selection to clipboardData');
   assert.equal(source.includes("key === 'k' && platformActionAllowed"), false, 'Cmd+K no longer opens the command palette');
   assert.ok(source.includes("!mod && globalShortcutTargetAllowsAppAction(event.target) && (event.key === '?'"), 'question-mark shortcut does not fire while typing in editors or terminals');
   assert.equal(api.appModifier({ctrlKey: true, metaKey: false, altKey: false}), true, 'PC app modifier is Ctrl');
@@ -4102,7 +4124,7 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['finder.rootMode.fixed'], undefined, 'Finder toolbar no longer carries a Root mode title');
   const serverShell = fs.readFileSync('yolomux_lib/web.py', 'utf8');
   assert.ok(serverShell.includes('id="fileExplorerRootMode"'));
-  assert.ok(serverShell.includes('>No Sync</button>'), 'Server-rendered Finder root toggle starts as No Sync');
+  assert.ok(serverShell.includes('>Sync</button>'), 'Server-rendered Finder root toggle starts as Sync');
   assert.equal(serverShell.includes('>Root</button>'), false, 'Server-rendered Finder root toggle must not flash Root before JS runs');
   const readonlyApi = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly');
   assert.equal(readonlyApi.tmuxSessionActionCommands('1').every(item => item.disabled), true);
@@ -4113,9 +4135,9 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
     panes: [{current_path: '/home/test/yolomux.dev/mock', command: 'bash'}],
     selected_pane: {current_path: '/home/test/yolomux.dev'},
   });
-  assert.equal(api.fileExplorerRootModeValue(), 'fixed');
+  assert.equal(api.fileExplorerRootModeValue(), 'sync');
   assert.equal(api.activeTmuxDirectoryPath('1'), '/home/test/yolomux.dev');
-  assert.equal(api.fileExplorerRootForOpen('1'), '/home/test');
+  assert.equal(api.fileExplorerRootForOpen('1'), '/home/test/yolomux.dev');
   api.setSessionFilesPayloadForTest({session: '1', repos: [{repo: '/repo/app'}], files: []});
   api.setFileExplorerRootMode('sync', {sync: false});
   assert.equal(api.fileExplorerRootModeValue(), 'sync');
@@ -4242,12 +4264,10 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
     expandPaths: [],
   });
   const syncCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(syncCss.includes('--finder-session-repo-bg: color-mix(in srgb, var(--brand-green) 16%, transparent);'), 'Finder Sync repo highlight derives from --brand-green');
-  assert.ok(syncCss.includes('--finder-session-touched-bg: color-mix(in srgb, var(--brand-green) 8%, transparent);'), 'Finder Sync touched-dir highlight derives from --brand-green');
-  assert.ok(syncCss.includes('--finder-sync-expanded-bg: color-mix(in srgb, var(--accent-gold) 24%, transparent);'), 'Finder auto-expanded Sync highlight derives from --accent-gold');
-  assert.ok(syncCss.includes('.file-tree-row.file-tree-row--sync-expanded:not(.selected)'), 'Finder auto-expanded Sync highlight has a row class rule');
-  assert.ok(syncCss.includes('.file-tree-row.file-tree-row--session-repo:not(.selected)'), 'Finder Sync repo highlight has a row class rule');
-  assert.ok(syncCss.includes('.file-tree-row.file-tree-row--session-touched:not(.selected)'), 'Finder Sync touched-dir highlight has a row class rule');
+  assert.equal(syncCss.includes('--finder-session-repo-bg'), false, 'Finder Sync repo marker no longer uses a background token');
+  assert.equal(syncCss.includes('--finder-session-touched-bg'), false, 'Finder Sync touched-dir marker no longer uses a background token');
+  assert.equal(syncCss.includes('--finder-sync-expanded-bg'), false, 'Finder auto-expanded Sync marker no longer uses a background token');
+  assert.ok(/\.file-tree-row\.file-tree-row--sync-expanded > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-repo > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-touched > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--changed-ancestor > \.file-tree-name\s*\{[\s\S]*?font-weight:\s*800/.test(syncCss), 'Finder Sync and changed-ancestor markers bold the row name instead of painting a background');
   const scrollContainer = {
     clientHeight: 100,
     isConnected: true,
@@ -4354,6 +4374,46 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.equal(gitTree.children[1].classList.contains('has-agent'), true, 'changed Finder rows with agent attribution use the inline-agent file-tree layout');
   assert.ok(gitTree.children[1].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'changed Finder rows render the same agent icon slot as Differ rows');
   assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-git-status').textContent, 'M');
+
+  api.setFileExplorerSessionFilesPayloadForTest({
+    loaded: true,
+    repos: [],
+    files: [
+      {abs_path: '/repo/A/B/C/F', status: 'M'},
+      {abs_path: '/repo/A/B/C/G', status: 'M'},
+      {abs_path: '/repo/A/B/D/H', status: 'A'},
+    ],
+  });
+  api.setFileExplorerExpandedForTest(['/repo/A', '/repo/A/B', '/repo/A/B/C', '/repo/A/B/D']);
+  const ancestorTree = new TestElement('ancestor-tree');
+  ancestorTree.setAttribute('role', 'tree');
+  ancestorTree.classList.add('file-explorer-tree-panel');
+  api.renderTreeChildrenForTest(ancestorTree, '/repo', [{name: 'A', kind: 'dir'}], 0, [
+    ['/repo/A', [{name: 'B', kind: 'dir'}]],
+    ['/repo/A/B', [{name: 'C', kind: 'dir'}, {name: 'D', kind: 'dir'}]],
+    ['/repo/A/B/C', [{name: 'F', kind: 'file'}, {name: 'G', kind: 'file'}]],
+    ['/repo/A/B/D', [{name: 'H', kind: 'file'}]],
+  ]);
+  const ancestorRows = Object.fromEntries(ancestorTree.querySelectorAll('.file-tree-row[data-path]').map(row => [row.dataset.path, row]));
+  assert.equal(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-dir-count').textContent, '3', 'Finder changed ancestor A shows total changed descendants');
+  assert.equal(ancestorRows['/repo/A/B'].querySelector(':scope > .file-tree-dir-count').textContent, '3', 'Finder changed ancestor B shows total changed descendants');
+  assert.equal(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-dir-count').textContent, '2', 'Finder changed ancestor C counts only its subtree');
+  assert.equal(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-dir-count').textContent, '1', 'Finder changed ancestor D counts only its subtree');
+  assert.ok(ancestorRows['/repo/A'].classList.contains('file-tree-row--changed-ancestor'), 'Finder changed ancestors are bold-marked');
+  assert.equal(ancestorRows['/repo/A/B/C/F'].classList.contains('file-tree-row--changed-ancestor'), false, 'changed leaf files do not get the ancestor marker');
+
+  api.setFileExplorerSessionFilesPayloadForTest({loaded: true, repos: [], files: []});
+  const symlinkTree = new TestElement('symlink-tree');
+  symlinkTree.setAttribute('role', 'tree');
+  symlinkTree.classList.add('file-explorer-tree-panel');
+  api.renderTreeChildrenForTest(symlinkTree, '/repo', [
+    {name: 'utils', kind: 'dir', is_repo: true, is_symlink: true, symlink_target: '/home/test/utils', repo: {root: '/repo/utils', name: 'utils', branch: 'main'}},
+  ]);
+  const symlinkRow = symlinkTree.children[0];
+  const symlinkName = symlinkRow.querySelector(':scope > .file-tree-name');
+  assert.equal(symlinkName.textContent, 'utils [main] → /home/test/utils', 'symlinked repo rows initially show branch and target');
+  api.updateFileTreeGitStatusRowsForTest([symlinkRow]);
+  assert.equal(symlinkName.textContent, 'utils [main] → /home/test/utils', 'lightweight Finder status refresh preserves symlink target on repo rows');
 
   const slots = api.emptyLayoutSlots();
   slots[api.layoutTreeKey] = api.leafNode('slot2');
@@ -6062,9 +6122,9 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
     assert.ok(css.includes('--inactive-pane-overlay-alpha: 0.09'), '#259: light-mode inactive panes keep the softer alpha base');
     // Light-mode pane header (image 043): greenish-light tab-strip container + light frame-control
     // buttons (the minimize/zoom squares used to render dark/"black" with no light values).
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-strip-bg:\s*#dce8d2/.test(css), 'light mode: the pane tab-strip container is greenish-light');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*?--active-accent-dim:\s*#dce8d2/.test(css), 'light mode: the pane tab-strip container is greenish-light (active-accent-dim)');
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-control-bg:\s*#f7f9fc/.test(css), 'light mode: the pane minimize/frame button has a light fill (not a dark square)');
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-zoom-bg:\s*#4f9e3a/.test(css), 'light mode: the pane zoom button is green (readable with its light glyph), not a dark square');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-zoom-bg:\s*var\(--active-control-bg\)/.test(css), 'light mode: the pane zoom button uses the shared active-control fill, not a dark square');
     assert.equal(css.includes('--inactive-pane-overlay-rgb: 124 82 88'), false, '#259: the earlier warm/red tint is gone (superseded by gray)');
     assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.16'), false, '#259 follow-up: the too-dark light overlay alpha is gone');
     assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.13'), false, '#259 follow-up: the still-too-dark light overlay alpha is gone');
@@ -6298,17 +6358,17 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
 }
 
 {
-  // Preferences order is grouped by how the settings are used: general startup defaults, notifications,
-  // visual appearance, terminal/editor behavior, file handling, polling/performance, then agent controls.
+  // Preferences order is grouped by how the settings are used: general startup defaults, visual appearance,
+  // terminal/editor behavior, notifications, file handling, polling/performance, then agent controls.
   const api = loadYolomux('', ['1']);
   api.setActiveLocaleForTest('en');
   const html = api.preferencesPanelHtmlForTest('');
   const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
   const expectedOrder = [
     api.t('pref.section.general'),
-    api.t('pref.section.notifications'),
     api.t('pref.section.appearance'),
     api.t('pref.section.terminal_editor'),
+    api.t('pref.section.notifications'),
     api.fileExplorerLabel(),
     api.t('pref.section.uploads'),
     api.t('pref.section.performance'),
@@ -6327,7 +6387,13 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.ok(sectionHtml(api.t('pref.section.performance')).includes('data-setting-path="general.reload_on_update_auto"'), 'Auto-reload on server update is in Performance');
   const appearanceHtml = sectionHtml(api.t('pref.section.appearance'));
   assert.ok(appearanceHtml.includes('data-setting-path="general.default_layout"'), 'Default layout is in Appearance');
-  assert.ok(/data-setting-path="appearance\.pane_ring_opacity"[\s\S]*?min="5"/.test(appearanceHtml), 'Pane ring opacity can be lowered to 5%');
+  assert.ok(appearanceHtml.includes('Envy green'), 'Active color Green is labeled Envy green');
+  assert.ok(appearanceHtml.includes('Fresh sky'), 'Active color Blue is labeled Fresh sky');
+  assert.ok(appearanceHtml.includes('Blood orange'), 'Active color Orange is labeled Blood orange');
+  assert.ok(appearanceHtml.includes('Solar gold'), 'Active color Yellow is labeled Solar gold');
+  assert.ok(appearanceHtml.includes('Royal violet'), 'Active color Purple is labeled Royal violet');
+  assert.ok(appearanceHtml.includes('Moon white'), 'Active color White is labeled Moon white');
+  assert.ok(/data-setting-path="appearance\.pane_ring_opacity"[^>]*data-setting-type="range"[^>]*min="5"[^>]*max="100"/.test(appearanceHtml), 'Pane ring opacity renders as a 5-100 Appearance slider');
   assert.equal(appearanceHtml.includes('data-setting-path="appearance.inactive_pane_gradient"'), false, 'Inactive pane gradient is removed from Appearance');
   assert.ok(/data-setting-path="appearance\.inactive_pane_opacity"[^>]*data-setting-type="range"[^>]*min="0"[^>]*max="100"/.test(appearanceHtml), 'Inactive pane opacity renders as a 0-100 Appearance slider');
   const appearancePaths = [...appearanceHtml.matchAll(/data-setting-path="([^"]+)"/g)].map(match => match[1]);
@@ -6340,10 +6406,10 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   assert.equal(JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))['pref.appearance.pane_ring_opacity.help'], 'Percent, 5–100. This is the ring drawn over the ACTIVE content edge; lower values make the green/red pane ring fainter.', 'Pane ring opacity help describes the ACTIVE content-edge ring');
   const settingsRuntimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
   assert.ok(settingsRuntimeSource.includes("Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)))"), 'Pane ring opacity runtime clamp allows 5%');
-  assert.ok(settingsRuntimeSource.includes("root.setProperty('--pane-active-ring-opacity', `${paneRingOpacity}%`)"), 'The active pane ring opacity follows the 5-100% preference');
+  assert.ok(settingsRuntimeSource.includes("root.setProperty('--pane-active-ring-opacity', `${percent}%`)"), 'The active pane ring opacity follows the 5-100% preference');
   assert.equal(settingsRuntimeSource.includes('Math.max(75, paneRingOpacity)'), false, 'The active pane ring must not force a 75% floor');
   assert.equal(settingsRuntimeSource.includes('inactive_pane_gradient'), false, 'Inactive pane gradient is removed from runtime settings');
-  assert.ok(settingsRuntimeSource.includes("applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 100))"), 'Inactive pane opacity defaults to 100% in runtime settings');
+  assert.ok(settingsRuntimeSource.includes("applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 60))"), 'Inactive pane opacity defaults to 60% in runtime settings');
   assert.ok(fs.readFileSync('yolomux_lib/settings.py', 'utf8').includes('("appearance", "pane_ring_opacity"): (5, 100)'), 'Pane ring opacity server settings clamp allows 5%');
   assert.equal(fs.readFileSync('yolomux_lib/settings.py', 'utf8').includes('inactive_pane_gradient'), false, 'Inactive pane gradient is removed from server settings');
   assert.ok(fs.readFileSync('yolomux_lib/settings.py', 'utf8').includes('("appearance", "inactive_pane_opacity"): (0, 100)'), 'Inactive pane opacity server settings clamp is 0-100');
@@ -6476,7 +6542,7 @@ for (const legacyChangesToken of ['changes', '__changes__']) {
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(css), '#11: unfocused panes show a clearly-visible green active tab (aliased to the focused full-green token; images 003/004)');
   assert.ok(/\.panel:not\(\.active-pane\):not\(\.file-explorer-panel\) \.pane-tab\.active\s*\{\s*opacity:\s*1/.test(css), '#11: unfocused active tabs are no longer dimmed');
-  assert.ok(/--pane-tab-active-bg:\s*#86d600/.test(css), '#11: the focused pane keeps the brighter lime active tab as its extra cue');
+  assert.ok(/--active-accent-bright:\s*#86d600/.test(css), '#11: the focused pane keeps the brighter lime active tab as its extra cue (via active-accent)');
 }
 
 {

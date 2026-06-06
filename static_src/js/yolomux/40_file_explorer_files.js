@@ -22,7 +22,7 @@ async function openFileExplorerAt(path, options = {}) {
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   fileExplorerRoot = root;
   pruneFileExplorerSelectionForRoot(fileExplorerRoot);
-  fileExplorerManualSelectionActive = false;
+  fileExplorerManualSelectionActive = options.manualSelection === true;
   cancelPendingFileExplorerActiveSync();
   setFileExplorerPathDisplay(fileExplorerRoot);
   renderFileExplorerRootModeControls();
@@ -37,6 +37,13 @@ async function openFileExplorerAt(path, options = {}) {
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
   updateFileExplorerCurrentFileHighlight();
   return true;
+}
+
+async function saveFileExplorerRootMode(mode) {
+  if (readOnlyMode) return;
+  try {
+    await saveSettingsPatch(settingPatch('file_explorer.root_mode', mode));
+  } catch (_) {}
 }
 
 async function fetchDirectory(path, options = {}) {
@@ -232,12 +239,15 @@ function fileExplorerRootModeButtons() {
   ].filter(Boolean);
 }
 
+function syncFileExplorerRootModeButton(button) {
+  const label = t('finder.toolbar.syncLabel');
+  syncPressedButton(button, fileExplorerRootMode === 'sync', {labelOn: label, labelOff: label});
+  if (button) button.textContent = label;
+}
+
 function renderFileExplorerRootModeControls() {
-  const sync = fileExplorerRootMode === 'sync';
-  const label = sync ? t('finder.toolbar.syncLabel') : t('finder.toolbar.noSyncLabel');
   for (const button of fileExplorerRootModeButtons()) {
-    button.textContent = label;
-    syncPressedButton(button, sync, {labelOn: label, labelOff: label});
+    syncFileExplorerRootModeButton(button);
   }
   renderFileExplorerQuickAccessControls();
 }
@@ -262,17 +272,22 @@ function expandQuickAccessPath(path) {
 
 function renderQuickAccessInto(container) {
   if (!container) return;
+  const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
+  const sync = fileExplorerRootMode === 'sync';
   container.replaceChildren(...fileExplorerQuickAccessPaths().map(path => {
+    const expanded = normalizeDirectoryPath(expandQuickAccessPath(path));
+    const active = !sync && expanded === currentRoot;
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'file-explorer-quick-access-button';
     button.textContent = displayQuickAccessPath(path);
     button.title = `Open ${path}`;
     button.dataset.quickPath = path;
+    syncPressedButton(button, active, {labelOn: button.title, labelOff: button.title});
     button.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
-      openFileExplorerAt(expandQuickAccessPath(path));
+      openFileExplorerQuickAccessPath(path);
     });
     return button;
   }));
@@ -288,6 +303,7 @@ function setFileExplorerRootMode(mode, options = {}) {
   writeStoredFileExplorerRootMode(fileExplorerRootMode);
   renderFileExplorerRootModeControls();
   updateFileExplorerSessionHighlightRows();
+  if (options.persist === true) saveFileExplorerRootMode(fileExplorerRootMode);
   if (fileExplorerRootMode === 'sync' && options.sync !== false) {
     scheduleFileExplorerActiveTabSync(fileExplorerExplicitSyncSessionTarget(), {explicit: true});
   }
@@ -299,8 +315,24 @@ function fileExplorerRootModeValue() {
 
 function toggleFileExplorerRootMode() {
   const mode = fileExplorerRootMode === 'sync' ? 'fixed' : 'sync';
-  setFileExplorerRootMode(mode);
-  if (!readOnlyMode) saveSettingsPatch(settingPatch('file_explorer.root_mode', mode)).catch(() => {});
+  setFileExplorerRootMode(mode, {persist: true});
+}
+
+function setFileExplorerManualRootMode() {
+  if (fileExplorerRootMode !== 'fixed') {
+    setFileExplorerRootMode('fixed', {sync: false, persist: true});
+  } else {
+    renderFileExplorerRootModeControls();
+  }
+}
+
+function openFileExplorerManualRoot(path) {
+  setFileExplorerManualRootMode();
+  return openFileExplorerAt(path, {manualSelection: true});
+}
+
+function openFileExplorerQuickAccessPath(path) {
+  openFileExplorerManualRoot(expandQuickAccessPath(path));
 }
 
 function tmuxDirectoryForItem(item) {
@@ -360,6 +392,42 @@ function fileExplorerRootForOpen(preferredItem = null) {
     return normalizeDirectoryPath(homePath || '/');
   }
   return fileExplorerRoot || homePath || '/';
+}
+
+function fileExplorerSyncTargetKey(session, root) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  const normalizedSession = String(session || '');
+  return normalizedSession && normalizedRoot ? `${normalizedSession}\x1f${normalizedRoot}` : '';
+}
+
+function fileExplorerExpandedPathsForRoot(root, paths = Array.from(fileExplorerExpanded)) {
+  const normalizedRoot = normalizeDirectoryPath(root || '');
+  if (!normalizedRoot) return [];
+  return Array.from(new Set((paths || [])
+    .map(path => normalizeDirectoryPath(path))
+    .filter(path => path && path !== normalizedRoot && pathIsInsideDirectory(path, normalizedRoot))))
+    .sort((left, right) => (
+      childPathParts(normalizedRoot, left).length - childPathParts(normalizedRoot, right).length
+      || left.localeCompare(right)
+    ));
+}
+
+function rememberFileExplorerSyncExpandedState(session = fileExplorerVisibleSyncSession, root = fileExplorerVisibleSyncRoot) {
+  if (fileExplorerRootMode !== 'sync') return;
+  const key = fileExplorerSyncTargetKey(session, root);
+  if (!key) return;
+  setLimitedMapEntry(fileExplorerExpandedBySyncTarget, key, fileExplorerExpandedPathsForRoot(root), fileExplorerMemoryCacheLimit);
+}
+
+function rememberedFileExplorerSyncExpandedPaths(session, root) {
+  const key = fileExplorerSyncTargetKey(session, root);
+  const paths = key ? fileExplorerExpandedBySyncTarget.get(key) : null;
+  return Array.isArray(paths) ? fileExplorerExpandedPathsForRoot(root, paths) : [];
+}
+
+function setFileExplorerVisibleSyncTarget(session, root) {
+  fileExplorerVisibleSyncSession = String(session || '');
+  fileExplorerVisibleSyncRoot = normalizeDirectoryPath(root || '');
 }
 
 function sessionFilesRepoRoots(payload = fileExplorerSessionFilesPayload) {
@@ -483,13 +551,45 @@ function fileExplorerSyncPlanSignature(plan) {
   return [plan.session || '', plan.root, ...(plan.expandPaths || [])].join('\x1f');
 }
 
+function fileExplorerSyncManualCollapseKey(plan) {
+  return plan?.root ? fileExplorerSyncTargetKey(plan.session, plan.root) : '';
+}
+
+function rememberFileExplorerSyncManualCollapseState(targetKey = fileExplorerSyncManualCollapseTargetKey) {
+  if (!targetKey) return;
+  setLimitedMapEntry(fileExplorerSyncManualCollapsedByTarget, targetKey, Array.from(fileExplorerSyncManualCollapsedPaths), fileExplorerMemoryCacheLimit);
+}
+
 function resetFileExplorerSyncManualCollapsesIfNeeded(plan) {
-  const signature = fileExplorerSyncPlanSignature(plan);
-  if (signature !== fileExplorerSyncManualCollapseSignature) {
-    fileExplorerSyncManualCollapseSignature = signature;
-    fileExplorerSyncManualCollapsedPaths = new Set();
+  const targetKey = fileExplorerSyncManualCollapseKey(plan);
+  if (targetKey !== fileExplorerSyncManualCollapseTargetKey) {
+    rememberFileExplorerSyncManualCollapseState();
+    fileExplorerSyncManualCollapseTargetKey = targetKey;
+    fileExplorerSyncManualCollapsedPaths = new Set(fileExplorerSyncManualCollapsedByTarget.get(targetKey) || []);
   }
-  return signature;
+  return targetKey;
+}
+
+function fileExplorerSyncManualCollapsePlanForPath(path) {
+  const normalized = normalizeDirectoryPath(path || '');
+  if (!normalized) return null;
+  const visibleRoot = normalizeDirectoryPath(fileExplorerVisibleSyncRoot || currentFileExplorerRoot());
+  if (
+    fileExplorerVisibleSyncSession
+    && visibleRoot
+    && pathIsInsideDirectory(normalized, visibleRoot)
+  ) {
+    return {session: fileExplorerVisibleSyncSession, root: visibleRoot};
+  }
+  const explicitSession = fileExplorerExplicitSyncSessionTarget();
+  const explicitPlan = fileExplorerSyncPlan(explicitSession);
+  if (explicitPlan?.root && pathIsInsideDirectory(normalized, explicitPlan.root)) return explicitPlan;
+  const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
+  const fallbackSession = explicitSession || fileExplorerVisibleSyncSession || '';
+  if (fallbackSession && currentRoot && pathIsInsideDirectory(normalized, currentRoot)) {
+    return {session: fallbackSession, root: currentRoot};
+  }
+  return null;
 }
 
 function fileExplorerSyncPathSuppressed(path) {
@@ -516,20 +616,28 @@ function fileExplorerSyncHighlightedRepoRoots(plan, repoRoots) {
 
 function rememberFileExplorerSyncManualCollapse(path) {
   if (fileExplorerRootMode !== 'sync') return;
-  const plan = fileExplorerSyncPlan(fileExplorerExplicitSyncSessionTarget());
-  if (!plan.root || !pathIsInsideDirectory(path, plan.root)) return;
+  const plan = fileExplorerSyncManualCollapsePlanForPath(path);
+  if (!plan?.root || !pathIsInsideDirectory(path, plan.root)) return;
   resetFileExplorerSyncManualCollapsesIfNeeded(plan);
   fileExplorerSyncManualCollapsedPaths.add(normalizeDirectoryPath(path));
+  rememberFileExplorerSyncManualCollapseState();
 }
 
 function forgetFileExplorerSyncManualCollapse(path) {
   if (!path) return;
+  if (fileExplorerRootMode === 'sync') {
+    const plan = fileExplorerSyncManualCollapsePlanForPath(path);
+    if (plan) resetFileExplorerSyncManualCollapsesIfNeeded(plan);
+  }
   const normalized = normalizeDirectoryPath(path);
+  let changed = false;
   for (const collapsedPath of Array.from(fileExplorerSyncManualCollapsedPaths)) {
     if (pathIsInsideDirectory(collapsedPath, normalized) || pathIsInsideDirectory(normalized, collapsedPath)) {
       fileExplorerSyncManualCollapsedPaths.delete(collapsedPath);
+      changed = true;
     }
   }
+  if (changed) rememberFileExplorerSyncManualCollapseState();
 }
 
 function emptyFileExplorerSessionHighlightSets() {
@@ -731,7 +839,7 @@ async function commitFileExplorerPathInput(input) {
   const raw = 'value' in input ? input.value : input.textContent;
   const target = expandUserPath(raw);
   if (!target) return false;
-  const opened = await openFileExplorerAt(target);
+  const opened = await openFileExplorerManualRoot(target);
   if (!opened) setFileExplorerPathError(input, fileExplorerPathError || `Cannot open ${target}`);
   return opened;
 }
@@ -819,41 +927,31 @@ function fileExplorerPaneIsOpen() {
 
 function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return;
-  if (fileExplorerManualSelectionActive && preferredItem === null) return;
+  if (fileExplorerRootMode !== 'sync') return;
+  const explicit = options.explicit === true;
+  if (fileExplorerManualSelectionActive && !explicit) return;
+  if (explicit) fileExplorerManualSelectionActive = false;
   if (options.explicit === true && isTmuxSession(preferredItem)) rememberFileExplorerExplicitSyncSession(preferredItem);
   const explicitSession = fileExplorerExplicitSyncSessionTarget();
   const syncItem = isTmuxSession(preferredItem) ? preferredItem : explicitSession;
-  if (fileExplorerRootMode === 'sync') {
-    if (!syncItem || syncItem !== explicitSession) return;
-    const syncPlan = fileExplorerSyncPlan(syncItem);
-    const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
-    const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
-    if (
-      syncPlan.root
-      && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length)
-      && fileExplorerSyncPathInFlight !== syncSignature
-    ) {
-      const interactionGeneration = fileExplorerInteractionGeneration;
-      requestAnimationFrame(() => {
-        if (interactionGeneration !== fileExplorerInteractionGeneration) return;
-        syncFileExplorerRootToActiveTmux(syncItem).catch(error => {
-          console.warn('Finder root sync failed', error);
-        });
+  if (!syncItem || syncItem !== explicitSession) return;
+  const syncPlan = fileExplorerSyncPlan(syncItem);
+  const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
+  const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
+  if (
+    syncPlan.root
+    && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length)
+    && fileExplorerSyncPathInFlight !== syncSignature
+  ) {
+    const interactionGeneration = fileExplorerInteractionGeneration;
+    requestAnimationFrame(() => {
+      if (interactionGeneration !== fileExplorerInteractionGeneration) return;
+      syncFileExplorerRootToActiveTmux(syncItem).catch(error => {
+        console.warn('Finder root sync failed', error);
       });
-      return;
-    }
+    });
     return;
   }
-  if (options.explicit !== true) return;
-  const path = explicitFinderTargetPath(preferredItem);
-  if (!path || fileExplorerSyncPathInFlight === path) return;
-  const interactionGeneration = fileExplorerInteractionGeneration;
-  requestAnimationFrame(() => {
-    if (interactionGeneration !== fileExplorerInteractionGeneration) return;
-    syncFileExplorerToActiveTab(preferredItem, {explicit: true}).catch(error => {
-      console.warn('Finder sync failed', error);
-    });
-  });
 }
 
 function cancelPendingFileExplorerActiveSync() {
@@ -869,9 +967,18 @@ async function syncFileExplorerRootToActiveTmux(preferredItem = null) {
   fileExplorerSyncPathInFlight = signature;
   try {
     let changed = false;
+    const previousTargetKey = fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot);
+    const nextTargetKey = fileExplorerSyncTargetKey(plan.session, plan.root);
+    if (nextTargetKey && nextTargetKey !== previousTargetKey) {
+      rememberFileExplorerSyncExpandedState();
+    }
     if (plan.root !== currentFileExplorerRoot()) {
       changed = await openFileExplorerAt(plan.root, {preserveExpanded: false, preserveScroll: false});
       if (!changed) return false;
+    }
+    const rememberedExpandedPaths = rememberedFileExplorerSyncExpandedPaths(plan.session, plan.root);
+    if (rememberedExpandedPaths.length) {
+      changed = await restoreFileExplorerExpandedPaths(rememberedExpandedPaths, plan.root) || changed;
     }
     if (expandPaths.length) {
       const generation = ++fileExplorerSyncGeneration;
@@ -880,6 +987,8 @@ async function syncFileExplorerRootToActiveTmux(preferredItem = null) {
         changed = await expandFileExplorerTreesToPath(path, plan.root, generation, {scrollIntoView: false, auto: true}) || changed;
       }
     }
+    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+    rememberFileExplorerSyncExpandedState(plan.session, plan.root);
     updateFileExplorerSessionHighlightRows(preferredItem);
     return changed;
   } finally {
@@ -1066,6 +1175,7 @@ async function expandFileExplorerTreesToPath(path, root = currentFileExplorerRoo
 async function restoreFileExplorerExpandedPaths(paths, root = currentFileExplorerRoot()) {
   const expandedPaths = Array.from(new Set(paths))
     .filter(path => pathIsInsideDirectory(path, root) && path !== root)
+    .filter(path => fileExplorerRootMode !== 'sync' || !fileExplorerSyncPathSuppressed(path))
     .sort((left, right) => childPathParts(root, left).length - childPathParts(root, right).length);
   const generation = ++fileExplorerSyncGeneration;
   for (const path of expandedPaths) {
@@ -1082,6 +1192,29 @@ function fileTreeDirectRows(container) {
 function fileTreeChangedFile(path) {
   const files = Array.isArray(fileExplorerSessionFilesPayload?.files) ? fileExplorerSessionFilesPayload.files : [];
   return files.find(item => item?.abs_path === path) || null;
+}
+
+function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload) {
+  const stats = new Map();
+  const seen = new Set();
+  for (const file of Array.isArray(payload?.files) ? payload.files : []) {
+    const absPath = sessionFileAbsolutePath(file);
+    if (!absPath) continue;
+    let dir = normalizeDirectoryPath(dirnameOf(absPath));
+    while (dir && dir !== '/') {
+      const key = `${dir}\x1f${absPath}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        const current = stats.get(dir) || {count: 0};
+        current.count += 1;
+        stats.set(dir, current);
+      }
+      const parent = normalizeDirectoryPath(dirnameOf(dir));
+      if (!parent || parent === dir) break;
+      dir = parent;
+    }
+  }
+  return stats;
 }
 
 function fileTreeGitStatus(path) {
@@ -1345,6 +1478,9 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   row.dataset.kind = entry.kind;
   row.dataset.name = entry.name;
   row.dataset.isRepo = entry.is_repo === true ? 'true' : 'false';
+  row.dataset.isSymlink = entry.is_symlink === true ? 'true' : 'false';
+  if (entry.symlink_target) row.dataset.symlinkTarget = String(entry.symlink_target);
+  else delete row.dataset.symlinkTarget;
   row.dataset.indexed = indexedDirectory ? 'true' : 'false';
   const paddingLeft = `${(compact ? 4 : 8) + depth * 14}px`;
   if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
@@ -1367,6 +1503,10 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   row.classList.toggle('file-tree-row--sync-expanded', sessionHighlightClass === 'file-tree-row--sync-expanded');
   row.classList.toggle('file-tree-row--session-repo', sessionHighlightClass === 'file-tree-row--session-repo');
   row.classList.toggle('file-tree-row--session-touched', sessionHighlightClass === 'file-tree-row--session-touched');
+  const changedAncestor = !differMode && entry.kind === 'dir' && options.changedAncestorStats instanceof Map
+    ? (options.changedAncestorStats.get(fullPath) || null)
+    : null;
+  row.classList.toggle('file-tree-row--changed-ancestor', Boolean(changedAncestor?.count));
   // DOIT.31: flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
   // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
   row.classList.toggle('is-symlink', entry.is_symlink === true);
@@ -1410,8 +1550,10 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   }
   const icon = entry.kind === 'dir' ? (expanded ? '▾' : '▸') : (entry.kind === 'file' ? fileIconFor(entry.name) : '·');
   const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
-  const dirCountText = differMode && entry.kind === 'dir'
-    ? String(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap) || '')
+  const dirCountText = entry.kind === 'dir'
+    ? (differMode
+      ? String(countChangedFilesInDir(fullPath, options.entriesByDir, options.sessionFilesMap) || '')
+      : (changedAncestor?.count ? String(changedAncestor.count) : ''))
     : '';
   // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
   if (changedFile?.abs_path) {
@@ -1498,7 +1640,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     row.ondblclick = event => {
       event.preventDefault();
       event.stopPropagation();
-      if (entry.kind === 'dir') openFileExplorerAt(fullPath);
+      if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);
       else openFileInEditor(fullPath, entry);
     };
     row.oncontextmenu = event => {
@@ -1524,9 +1666,10 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
 function renderTreeChildren(container, parentPath, entries, depth, options = {}) {
   if (!container) return;
   cacheFileExplorerRepoInfoEntries(parentPath, entries);
-  const renderOptions = options.sessionHighlightSets ? options : {
+  const renderOptions = {
     ...options,
-    sessionHighlightSets: fileExplorerSessionHighlightSets(),
+    sessionHighlightSets: options.sessionHighlightSets || fileExplorerSessionHighlightSets(),
+    changedAncestorStats: options.changedAncestorStats instanceof Map ? options.changedAncestorStats : fileTreeChangedAncestorStats(),
   };
   const entriesByDir = renderOptions.entriesByDir instanceof Map ? renderOptions.entriesByDir : null;
   const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode);
@@ -1649,6 +1792,7 @@ function updateFileExplorerCurrentFileHighlight() {
 }
 
 function updateFileTreeGitStatusRows() {
+  const changedAncestorStats = fileTreeChangedAncestorStats();
   document.querySelectorAll('.file-tree-row[data-path]').forEach(row => {
     const gitStatus = row.dataset.kind === 'file' ? fileTreeGitStatus(row.dataset.path) : '';
     const gitClass = fileTreeGitStatusClass(gitStatus);
@@ -1664,8 +1808,18 @@ function updateFileTreeGitStatusRows() {
       kind: row.dataset.kind,
       name: row.dataset.name || basenameOf(row.dataset.path),
       is_repo: row.dataset.isRepo === 'true',
+      is_symlink: row.dataset.isSymlink === 'true',
+      symlink_target: row.dataset.symlinkTarget || '',
     };
     row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(row.dataset.path));
+    const changedAncestor = entry.kind === 'dir' ? (changedAncestorStats.get(row.dataset.path) || null) : null;
+    row.classList.toggle('file-tree-row--changed-ancestor', Boolean(changedAncestor?.count));
+    const dirCount = row.querySelector(':scope > .file-tree-dir-count');
+    if (dirCount) {
+      const dirCountText = changedAncestor?.count ? String(changedAncestor.count) : '';
+      dirCount.textContent = dirCountText;
+      dirCount.hidden = !dirCountText;
+    }
     const name = row.querySelector(':scope > .file-tree-name');
     const nextName = fileTreeDisplayParts(row.dataset.path, entry);
     if (name && name.textContent !== nextName.text) {
@@ -2144,6 +2298,7 @@ function collapseAllFileExplorerDirectories() {
     for (const path of fileExplorerSyncExpansionPaths(plan)) rememberFileExplorerSyncManualCollapse(path);
   }
   fileExplorerExpanded.clear();
+  rememberFileExplorerSyncExpandedState();
   refreshFileExplorerTrees({preserveExpanded: false, preserveScroll: true});
 }
 

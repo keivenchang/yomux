@@ -49,28 +49,49 @@
   --inactive-tab-bg: #293240;
   --inactive-tab-bg-hover: #354052;
   --inactive-tab-border: #667286;
-  --pane-inactive-tab-bg: #285a2f;
-  --pane-inactive-tab-bg-hover: #336d3a;
-  --pane-inactive-tab-border: #9bd480;
+  --pane-inactive-tab-bg: var(--active-tab-muted-bg);
+  --pane-inactive-tab-bg-hover: var(--active-tab-muted-hover-bg);
+  --pane-inactive-tab-border: var(--active-tab-muted-border);
   --pane-tab-text: #dfe6ef;
-  --pane-tab-active-text: #071000;
-  --pane-tab-active-bg: #86d600;
-  --pane-tab-active-border: #9be33d;
-  --pane-tab-active-accent: #86d600;
+  /* DOIT.41: ONE source accent that every ACTIVE/FOCUSED surface derives from (active tab, focused-pane
+     ring + glow, chrome strip, file selection, hover tints). Swapped by the appearance.active_color
+     preference; Green is the default = the brand-green values below, so this refactor is a no-op.
+     NOTE: YOLO (--pane-tab-yolo-*, --auto-glow) and editor syntax greens deliberately do NOT derive
+     from this — YOLO stays brand green so a non-green accent never disguises auto-approve state. */
+  --active-accent: #76b900;          /* solid: ring, glow, strip, alpha tints */
+  --active-accent-rgb: 118 185 0;    /* triple → rgb(var(--active-accent-rgb) / α) for every alpha use */
+  --active-accent-bright: #86d600;   /* active-tab fill + border */
+  --active-accent-text: #071000;     /* text/icon ON the accent tab (contrast color) */
+  --active-accent-dim: color-mix(in srgb, var(--active-accent) 22%, var(--panel));  /* chrome strip bg */
+  --active-accent-soft: rgb(var(--active-accent-rgb) / 0.12);                        /* hover/selection wash */
+  --active-control-bg: var(--active-accent-bright);
+  --active-control-border: var(--active-accent-bright);
+  --active-control-text: var(--active-accent-text);
+  --active-control-soft-bg: var(--active-accent-soft);
+  --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
+  --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
+  --active-control-scrollbar-thumb: rgb(var(--active-accent-rgb) / 0.72);
+  --active-tab-muted-bg: color-mix(in srgb, var(--active-accent) 28%, var(--panel2));
+  --active-tab-muted-hover-bg: color-mix(in srgb, var(--active-accent) 36%, var(--panel2));
+  --active-tab-muted-border: color-mix(in srgb, var(--active-accent-bright) 64%, var(--line));
+  --pane-tab-active-text: var(--active-accent-text);
+  --pane-tab-active-bg: var(--active-accent-bright);
+  --pane-tab-active-border: var(--active-accent-bright);
+  --pane-tab-active-accent: var(--active-accent-bright);
   /* image 003/004: an inactive pane's ACTIVE tab keeps the SAME full green as the focused pane's active
      tab (no lightening) — alias the unfocused-active tokens to the focused ones (light + dark). */
   --pane-tab-unfocused-active-text: var(--pane-tab-active-text);
   --pane-tab-unfocused-active-bg: var(--pane-tab-active-bg);
   --pane-tab-unfocused-active-border: var(--pane-tab-active-border);
   /* Focused chrome-bar green — the ONE token both the tab container (.panel-head) and the info/detail
-     row (.panel-detail-row) read via --pane-bar-bg. Derived from the brand accent so it reads clearly
-     green (not the old teal-ish #1f3026) and flips with theme; bump the % to push greener. */
-  --pane-tab-strip-bg: color-mix(in srgb, var(--brand-green) 22%, var(--panel));
+     row (.panel-detail-row) read via --pane-bar-bg. Derived from the active accent so it flips with the
+     active-color preference and the theme. */
+  --pane-tab-strip-bg: var(--active-accent-dim);
   --pane-tab-yolo-text: #071000;
   --pane-tab-yolo-bg: #76b900;
   --pane-tab-yolo-border: #9be33d;
-  --pane-tab-panel-ring: #76b900;
-  --pane-tab-panel-ring-shadow: rgba(118, 185, 0, 0.95);
+  --pane-tab-panel-ring: var(--active-accent);
+  --pane-tab-panel-ring-shadow: rgb(var(--active-accent-rgb) / 0.95);
   --pane-tab-panel-ring-width: 4px;
   --pane-ring-opacity: 75%;
   --pane-active-ring-opacity: 75%;
@@ -85,10 +106,10 @@
   --pane-tab-control-border: #536074;
   --pane-tab-control-hover-bg: #263247;
   --pane-tab-control-hover-border: #8fa1bc;
-  --pane-tab-zoom-bg: #2f5f3a;
-  --pane-tab-zoom-border: #5f8f6b;
-  --pane-tab-zoom-hover-bg: #52d273;
-  --pane-tab-zoom-hover-border: #9befad;
+  --pane-tab-zoom-bg: var(--active-control-bg);
+  --pane-tab-zoom-border: var(--active-control-border);
+  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
+  --pane-tab-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
   --pane-tab-badge-gold: #f5c542;
   --pane-tile-radius: 0;
   --pane-split-gap: 0px;
@@ -198,8 +219,8 @@
   --file-hover-bg: rgba(245, 197, 66, 0.26);
   --file-hover-border: #f5c542;
   --file-hover-outline: rgba(245, 197, 66, 0.42);
-  --file-selection-bg: rgba(75, 190, 72, 0.46);
-  --file-selection-border: #9ee85d;
+  --file-selection-bg: rgb(var(--active-accent-rgb) / 0.46);
+  --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #f7fff0;
   --editor-font: var(--mono-font);
   --editor-font-size: var(--ui-font-size);
@@ -243,10 +264,10 @@
   --pc-control-hover-fg: #ffffff;
   --pc-control-hover-bg: #263247;
   --pc-control-hover-border: #8fa1bc;
-  --pc-zoom-bg: #2f5f3a;
-  --pc-zoom-border: #5f8f6b;
-  --pc-zoom-hover-bg: #52d273;
-  --pc-zoom-hover-border: #9befad;
+  --pc-zoom-bg: var(--active-control-bg);
+  --pc-zoom-border: var(--active-control-border);
+  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
+  --pc-zoom-hover-border: color-mix(in srgb, var(--active-control-border) 78%, #ffffff 22%);
   --panel-close-size: 18px;
   --panel-close-radius: 4px;
   --panel-close-glyph-width: 9px;
@@ -276,12 +297,31 @@ body.theme-dark {
 }
 body.theme-light {
   color-scheme: light;
+  /* DOIT.41: light-theme defaults for the active accent (Green). The picker (applyActiveColor) overrides
+     these per preset; supplied (not derived) so Green stays the exact current light values. */
+  --active-accent: #5f9800;
+  --active-accent-rgb: 95 152 0;
+  --active-accent-bright: #4f9e3a;
+  --active-accent-text: #ffffff;
+  --active-accent-dim: #dce8d2;
+  --active-accent-soft: rgb(var(--active-accent-rgb) / 0.12);
+  --active-control-bg: var(--active-accent-bright);
+  --active-control-border: var(--active-accent-bright);
+  --active-control-text: var(--active-accent-text);
+  --active-control-soft-bg: var(--active-accent-soft);
+  --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
+  --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
+  --active-control-scrollbar-thumb: rgb(var(--active-accent-rgb) / 0.68);
+  --active-tab-muted-bg: color-mix(in srgb, var(--active-accent-bright) 20%, var(--panel));
+  --active-tab-muted-hover-bg: color-mix(in srgb, var(--active-accent-bright) 28%, var(--panel));
+  --active-tab-muted-border: color-mix(in srgb, var(--active-accent-bright) 46%, var(--line));
   /* The pane tab-strip container reads greenish-light (matching the detail row), not the old cool gray. */
-  --pane-tab-strip-bg: #dce8d2;
+  --pane-tab-strip-bg: var(--active-accent-dim);
   /* image 003/004: light-mode inactive/minimized tabs were white; tint them a very-light green a hair
      lighter than the strip so a tab still reads as a tab (dark mode keeps its own #285a2f). */
-  --pane-inactive-tab-bg: #e6f1dd;
-  --pane-inactive-tab-bg-hover: #d8ebcb;
+  --pane-inactive-tab-bg: var(--active-tab-muted-bg);
+  --pane-inactive-tab-bg-hover: var(--active-tab-muted-hover-bg);
+  --pane-inactive-tab-border: var(--active-tab-muted-border);
   /* image 008: the inactive-tab text token (#dfe6ef, tuned for the DARK tab bg) was near-white on the
      new light-green tabs/strip — white-on-white. Light mode needs DARK tab text. (Active tabs keep
      their own --pane-tab-active-text white-on-green.) */
@@ -293,16 +333,16 @@ body.theme-light {
   --pane-tab-control-border: #9aa6b6;
   --pane-tab-control-hover-bg: #e9eef6;
   --pane-tab-control-hover-border: #6b7788;
-  --pane-tab-zoom-bg: #4f9e3a;
-  --pane-tab-zoom-border: #3f8f2d;
-  --pane-tab-zoom-hover-bg: #5fae46;
-  --pane-tab-zoom-hover-border: #4f9e3a;
+  --pane-tab-zoom-bg: var(--active-control-bg);
+  --pane-tab-zoom-border: var(--active-control-border);
+  --pane-tab-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  --pane-tab-zoom-hover-border: var(--active-control-border);
   /* DOIT.6 #31: active-tab greens tuned for the light surface so a theme switch visibly repaints the
      active pane tab (the dark-mode neon lime looked "stuck" with no light override). */
-  --pane-tab-active-bg: #4f9e3a;
-  --pane-tab-active-text: #ffffff;
-  --pane-tab-active-border: #3f8f2d;
-  --pane-tab-active-accent: #4f9e3a;
+  --pane-tab-active-bg: var(--active-accent-bright);
+  --pane-tab-active-text: var(--active-accent-text);
+  --pane-tab-active-border: var(--active-accent-bright);
+  --pane-tab-active-accent: var(--active-accent-bright);
   /* image 003/004: an inactive pane's active tab is full green here too. MUST re-alias in this theme
      block — `--unfocused: var(--focused)` set only in :root captures the DARK focused value and inherits
      it, so the light override of --pane-tab-active-* would otherwise be ignored. */
@@ -364,8 +404,8 @@ body.theme-light {
   --file-hover-bg: #fff2a8;
   --file-hover-border: #d97706;
   --file-hover-outline: rgba(217, 119, 6, 0.34);
-  --file-selection-bg: rgba(90, 190, 70, 0.34);
-  --file-selection-border: #3f8f2d;
+  --file-selection-bg: rgb(var(--active-accent-rgb) / 0.34);
+  --file-selection-border: var(--active-accent-bright);
   --file-selection-text: #10230b;
   --pc-control-bg: #f7f9fc;
   --pc-control-fg: #1f2937;
@@ -373,10 +413,10 @@ body.theme-light {
   --pc-control-hover-fg: #0f172a;
   --pc-control-hover-bg: #e9eef6;
   --pc-control-hover-border: #6b7788;
-  --pc-zoom-bg: #dcefd5;
-  --pc-zoom-border: #6aa052;
-  --pc-zoom-hover-bg: #9be33d;
-  --pc-zoom-hover-border: #4f8f10;
+  --pc-zoom-bg: var(--active-control-bg);
+  --pc-zoom-border: var(--active-control-border);
+  --pc-zoom-hover-bg: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  --pc-zoom-hover-border: var(--active-control-border);
   --panel-close-hover-bg: rgba(15, 23, 42, 0.08);
 }
 * { box-sizing: border-box; }
@@ -554,9 +594,9 @@ body {
   --action-icon: var(--icon-tab-meta);
 }
 #tabMetaToggle.active {
-  color: #081205;
-  background: #8cc63f;
-  border-color: #b8ee5c;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 #logoutButton {
   --action-icon: var(--icon-logout);
@@ -810,9 +850,9 @@ body.theme-light .topbar-language {
   align-items: center;
   justify-content: center;
   padding: 0 4px;
-  color: #071000;
-  background: var(--brand-green);
-  border: 1px solid #b8ee5c;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
   border-radius: 999px;
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
@@ -936,12 +976,12 @@ body.theme-light .topbar-language {
   opacity: 0;
 }
 .app-menu-command[data-checked="true"] {
-  background: rgba(118, 185, 0, 0.07);
+  background: var(--active-control-soft-bg);
   border-color: transparent;
 }
 .app-menu-command[data-checked="true"] .app-menu-check {
   opacity: 1;
-  background: var(--brand-green);
+  background: var(--active-control-bg);
 }
 .app-menu-command + .app-menu-command,
 .app-menu-submenu-wrap + .app-menu-command,
@@ -1006,9 +1046,9 @@ body.theme-light .topbar-language {
   mask: var(--app-menu-ui-icon) center / contain no-repeat;
 }
 .app-menu-ui-icon.active {
-  color: #081205;
-  background: #8cc63f;
-  border-color: #b8ee5c;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .app-menu-ui-icon-notify {
   --app-menu-ui-icon: var(--icon-notify);
@@ -1173,11 +1213,11 @@ body.theme-light .topbar:focus-within {
 /* DOIT.12 A4: light-mode topbar coloring fixes — each was tuned only for the dark topbar and read wrong
    on the light neutral/hover-green bar. */
 body.theme-light #tabMetaToggle.active {
-  background: #5f9800;           /* match the .app-menu-ui-icon.active light tuning, not the garish #8cc63f */
-  border-color: #5f9800;
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 body.theme-light .app-menu-button-badge {
-  border-color: var(--brand-green); /* border matches the green count fill — drops the bright #b8ee5c halo */
+  border-color: var(--active-control-border);
 }
 body.theme-light .transport-warning::after {
   color: #5a1116;                /* light tooltip (dark-red text on a light-red surface), not near-black */
@@ -1224,7 +1264,7 @@ body.theme-light .app-menu-command {
   color: var(--text);
 }
 body.theme-light .app-menu-command[data-checked="true"] {
-  background: rgba(95, 152, 0, 0.08);
+  background: var(--active-control-soft-bg);
   border-color: transparent;
 }
 body.theme-light .app-menu-command:hover:not(:disabled),
@@ -1253,14 +1293,14 @@ body.theme-light .app-menu-ui-icon:focus-visible {
   border-color: #9aa6b6;
 }
 body.theme-light .app-menu-ui-icon.active {
-  color: #08120a;
-  background: #5f9800;
-  border-color: #4a7600;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 body.theme-light .app-menu-ui-icon.active:hover,
 body.theme-light .app-menu-ui-icon.active:focus-visible {
-  background: #6fab0a;
-  border-color: #4a7600;
+  background: color-mix(in srgb, var(--active-control-bg) 88%, #ffffff 12%);
+  border-color: var(--active-control-border);
 }
 /* #252 (image 033): the rich Tabs/Changes dropdown rows are `.app-menu-tab-command` (NOT
    `.app-menu-command`), so the light text/hover overrides above never reach them — their text children
@@ -1287,9 +1327,9 @@ body.theme-light .latency-meter {
    concatenated bundle it swallowed the start of the next partial's CSS. Completed: an enabled Notify
    toggle reads as active/pressed = brand green (theme-aware), like the other topbar toggles. */
 .notify-toggle.active {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .session-button-number {
   flex: 0 0 auto;
@@ -2006,7 +2046,7 @@ body.theme-light .branch-link {
 }
 .info-refresh:hover,
 .info-refresh:focus-visible {
-  border-color: var(--brand-green);
+  border-color: var(--active-control-border);
   color: #f2ffe8;
 }
 .info-refresh.loading {
@@ -2029,7 +2069,7 @@ body.theme-light .branch-link {
   to { transform: rotate(360deg); }
 }
 .file-explorer-changes-panel {
-  --changes-row-hover-bg: rgba(118, 185, 0, 0.10);
+  --changes-row-hover-bg: var(--active-control-soft-bg);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
   --changes-indent-line: rgba(148, 163, 184, 0.18);
   --changes-folder-text: var(--accent-gold);
@@ -2164,7 +2204,7 @@ body.theme-light .branch-link {
 }
 .diff-ref-suggestion-option:hover,
 .diff-ref-suggestion-option.active {
-  background: color-mix(in srgb, var(--brand-green) 14%, transparent);
+  background: var(--active-control-soft-bg);
 }
 .diff-ref-suggestion-ref {
   min-width: 0;
@@ -2282,7 +2322,7 @@ body.theme-light .branch-link {
 }
 .changes-repo-head:hover,
 .changes-repo-head:focus-visible {
-  color: var(--brand-green);
+  color: var(--active-control-bg);
   outline: none;
 }
 .changes-repo-caret {
@@ -2350,7 +2390,7 @@ body.theme-light .branch-link {
 }
 .changes-uploaded-toggle:hover,
 .changes-uploaded-toggle:focus-visible {
-  color: var(--brand-green);
+  color: var(--active-control-bg);
 }
 .changes-uploaded-caret {
   display: inline-block;
@@ -2730,7 +2770,7 @@ body.theme-light .branch-link {
 }
 .preferences-radio input[type="radio"] {
   cursor: pointer;
-  accent-color: var(--brand-green);
+  accent-color: var(--active-control-bg);
 }
 .preferences-radio input[type="radio"]:disabled,
 .preferences-radio:has(input:disabled) {
@@ -2796,8 +2836,8 @@ body.theme-light .branch-link {
   outline: none;
 }
 .preferences-search:focus {
-  border-color: var(--brand-green);
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.14);
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 .preferences-search-button,
 .preferences-reset-all {
@@ -2809,16 +2849,16 @@ body.theme-light .branch-link {
   font: 700 var(--ui-font-size-xs)/1 var(--control-font);
 }
 .preferences-search-button {
-  color: #061400;
-  background: var(--brand-green);
-  border-color: #a8e95a;
-  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.18);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
   font: 700 var(--ui-font-size-sm)/1.1 var(--ui-font);
 }
 .preferences-search-button:hover,
 .preferences-search-button:focus-visible {
-  background: #8bd41f;
-  border-color: #c3ff74;
+  background: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
+  border-color: var(--active-control-border);
 }
 .preferences-global-reset {
   display: grid;
@@ -2988,22 +3028,22 @@ body.theme-light .branch-link {
 }
 .command-palette-view-chip {
   padding: 0 5px;
-  border: 1px solid rgba(158, 232, 93, 0.34);
+  border: 1px solid var(--active-control-soft-border);
   border-radius: 999px;
-  color: #bddcaf;
-  background: rgba(118, 185, 0, 0.12);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
   font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
   text-transform: lowercase;
   cursor: pointer;   /* DOIT.22 follow-up: chips are clickable — jump to that view */
 }
 .command-palette-view-chip:hover {
-  border-color: var(--brand-green);
+  border-color: var(--active-control-border);
   color: var(--text);
 }
 body.theme-light .command-palette-view-chip {
-  border-color: rgba(95, 150, 42, 0.4);
-  color: #3f6312;
-  background: rgba(118, 185, 0, 0.14);
+  border-color: var(--active-control-soft-border);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
 }
 .command-palette-label .fuzzy-match,
 .command-palette-detail .fuzzy-match {
@@ -3211,7 +3251,7 @@ body.theme-light .changes-file-row.git-staged:not(.selected) .changes-file-name 
   color: #2f7d20;
 }
 body.theme-light .changes-file-row:hover {
-  background: rgba(95, 152, 0, 0.10);
+  background: var(--active-control-soft-bg);
 }
 body.theme-light .changes-diff-add {
   color: #166534;
@@ -3236,7 +3276,7 @@ body.theme-light .keyboard-shortcut-row kbd {
   width: 100%;
   justify-self: stretch;
   margin-inline-start: var(--preferences-control-left-indent);
-  accent-color: var(--brand-green);
+  accent-color: var(--active-control-bg);
 }
 .preferences-setting-control.setting-type-range .preferences-range-value {
   grid-column: 2;
@@ -3323,13 +3363,11 @@ body.theme-light .keyboard-shortcut-row kbd {
   font-size: var(--ui-font-size-xs);
 }
 .preferences-inline-action {
-  border-color: rgba(118, 185, 0, 0.55);
-  color: #d9f99d;
+  border-color: var(--active-control-soft-border);
+  color: var(--active-control-bg);
 }
-/* Light mode: the light-green #d9f99d is near-invisible on the light prefs panel — use a darker green
-   (caught by tools/static_build.py --lint-light). */
 body.theme-light .preferences-inline-action {
-  color: #3f6312;
+  color: var(--active-control-bg);
 }
 .popover-value a:hover,
 .branch-link:hover {
@@ -3431,8 +3469,8 @@ body.theme-light .command-palette-row {
 body.theme-light .command-palette-row.active,
 body.theme-light .command-palette-row:hover {
   color: #1f2937;
-  background: #e6f1dd;
-  border-color: rgba(118, 185, 0, 0.55);
+  background: var(--active-control-soft-bg);
+  border-color: var(--active-control-soft-border);
 }
 body.theme-light .command-palette-group,
 body.theme-light .command-palette-detail,
@@ -3958,9 +3996,6 @@ body.theme-light .drop-slot.drag-over {
      before this refactor, when both colored their real border green). */
   --panel-ring-color: var(--pane-tab-panel-ring);
   --panel-ring-opacity: var(--pane-active-ring-opacity);
-}
-.panel.typing-ready-pane.yolo-ready-pane {
-  --panel-ring-color: var(--brand-green);
 }
 .panel.needs-input-pane,
 .panel.needs-exec-pane,
@@ -4919,11 +4954,11 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 }
 .panel:hover .terminal .xterm-viewport,
 .panel:focus-within .terminal .xterm-viewport {
-  scrollbar-color: rgba(150, 220, 92, 0.72) transparent;
+  scrollbar-color: var(--active-control-scrollbar-thumb) transparent;
 }
 .panel:hover .terminal .xterm-viewport::-webkit-scrollbar-thumb,
 .panel:focus-within .terminal .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgba(150, 220, 92, 0.72);
+  background: var(--active-control-scrollbar-thumb);
   background-clip: content-box;
 }
 .terminal-context-menu {
@@ -4997,9 +5032,9 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   cursor: pointer;
 }
 .session-rename-actions .session-rename-submit {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: #9be33d;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .terminal-context-menu button {
   width: 100%;
@@ -5016,8 +5051,8 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .terminal-context-menu button:hover,
 .terminal-context-menu button:focus-visible {
   outline: 0;
-  color: #081205;
-  background: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
 }
 .terminal-context-menu button.danger {
   color: #ffd6dc;
@@ -5766,9 +5801,9 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   height: 30px;
   flex: 0 0 auto;
   padding: 0;
-  color: #071000;
-  background: var(--brand-green);
-  border: 1px solid var(--auto-border);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
   border-radius: 50%;
   cursor: pointer;
 }
@@ -6399,8 +6434,8 @@ body.theme-light .modal.about-open {
 .file-explorer-path-inline:focus {
   color: var(--text);
   background: rgba(10, 14, 20, 0.98);
-  border-color: var(--brand-green);
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.14);
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 .file-explorer-path.invalid,
 .file-explorer-path-inline.invalid {
@@ -6520,17 +6555,17 @@ body.theme-light .modal.about-open {
 .file-tree-row.selected {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(158, 232, 93, 0.24);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-tree-row.current-file:not(.selected) {
-  color: #eaf6df;
-  background: rgba(144, 196, 82, 0.12);
-  box-shadow: inset 3px 0 0 rgba(118, 185, 0, 0.55);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
+  box-shadow: inset 3px 0 0 var(--active-control-soft-border);
 }
 .file-tree-row.current-directory:not(.selected) {
-  color: #f2ffe8;
-  background: rgba(118, 185, 0, 0.16);
-  box-shadow: inset 3px 0 0 rgba(118, 185, 0, 0.72);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
+  box-shadow: inset 3px 0 0 var(--active-control-border);
 }
 .file-tree-row.renaming {
   background: rgba(82, 210, 115, 0.18);
@@ -6933,12 +6968,12 @@ body.theme-light .file-explorer-path-inline.invalid {
   color: var(--bad);
 }
 body.theme-light .file-tree-row.current-file:not(.selected) {
-  color: #173a13;
-  background: rgba(95, 152, 0, 0.12);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
 }
 body.theme-light .file-tree-row.current-directory:not(.selected) {
-  color: #10230b;
-  background: rgba(95, 152, 0, 0.16);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
 }
 body.theme-light .file-tree-row.new-entry:not(.selected) {
   color: #4f3600;
@@ -7058,10 +7093,11 @@ body.theme-light .file-tree-children::before {
 }
 .file-explorer-hidden-toggle.active,
 .file-explorer-root-mode-toggle.active,
+.file-explorer-quick-access-button.active,
 .file-explorer-date-toggle.active {
-  color: #061207;
-  border-color: var(--brand-green);
-  background: rgba(118, 185, 0, 0.88);
+  color: var(--active-control-text);
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
 }
 .file-explorer-quick-access,
 .file-explorer-quick-access-panel {
@@ -7073,17 +7109,22 @@ body.theme-light .file-tree-children::before {
   overflow: visible;
 }
 .file-explorer-quick-access-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 24px;
   height: 20px;
   padding: 0 7px;
+  border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--muted);
   background: transparent;
   font: 700 var(--ui-font-size-2xs) var(--mono-font);
+  cursor: pointer;
 }
 .file-explorer-quick-access-button:hover {
   color: var(--text);
-  border-color: rgba(118, 185, 0, 0.55);
+  border-color: var(--active-control-soft-border);
 }
 .file-editor {
   display: flex;
@@ -7402,7 +7443,7 @@ body.theme-light .file-tree-children::before {
   grid-template-rows: auto minmax(0, 1fr) auto;
   background: #151922;
   border: 1px solid #455164;
-  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(118, 185, 0, 0.12);
+  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.48), 0 0 0 1px var(--active-control-focus-ring);
   color: var(--fg);
 }
 .file-editor-dialog-title {
@@ -7439,9 +7480,9 @@ body.theme-light .file-tree-children::before {
 }
 .file-editor-dialog-action:hover,
 .file-editor-dialog-action:focus-visible {
-  border-color: var(--good);
+  border-color: var(--active-control-border);
   outline: none;
-  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.35);
+  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-editor-dialog-action.danger {
   border-color: #9b2d33;
@@ -7775,10 +7816,10 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   font: inherit;
   line-height: 18px;
   background: rgba(10, 14, 20, 0.98);
-  border: 1px solid var(--brand-green);
+  border: 1px solid var(--active-control-border);
   border-radius: 3px;
   outline: none;
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.18);
+  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 /* Light mode (DOIT.12 B5): the rename box hardcodes a near-black fill while its text
    uses the theme-aware --text (dark in light) → dark-on-dark while renaming. */
@@ -7843,8 +7884,8 @@ body:not(.file-explorer-mode-diff) .file-explorer-mode-diff-only {
 }
 .path-copy-button:hover {
   color: var(--text);
-  border-color: rgba(118, 185, 0, 0.55);
-  background: rgba(118, 185, 0, 0.12);
+  border-color: var(--active-control-soft-border);
+  background: var(--active-control-soft-bg);
 }
 .path-copy-button::before,
 .path-copy-button::after {
@@ -7916,7 +7957,7 @@ body.resizing-file-explorer-changes {
 }
 .file-explorer-tree-panel:hover,
 .file-explorer-tree-panel:focus-within {
-  scrollbar-color: rgba(150, 220, 92, 0.72) rgba(255, 255, 255, 0.08);
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(255, 255, 255, 0.08);
 }
 .file-explorer-tree-panel::-webkit-scrollbar {
   width: 10px;
@@ -7934,7 +7975,7 @@ body.resizing-file-explorer-changes {
 }
 .file-explorer-tree-panel:hover::-webkit-scrollbar-thumb,
 .file-explorer-tree-panel:focus-within::-webkit-scrollbar-thumb {
-  background: rgba(150, 220, 92, 0.72);
+  background: var(--active-control-scrollbar-thumb);
   background-clip: content-box;
 }
 /* C15: route this inner Finder↔Modified-files split through the SHARED --pane-resizer-* tokens instead
@@ -7985,7 +8026,7 @@ body.resizing-file-explorer-changes {
 .file-explorer-changes-panel:hover,
 .file-explorer-changes-panel:focus-within {
   --pane-bar-bg: var(--pane-tab-strip-bg);
-  scrollbar-color: rgba(150, 220, 92, 0.72) rgba(255, 255, 255, 0.08);
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(255, 255, 255, 0.08);
 }
 body.theme-light .file-explorer-pane,
 body.theme-light .file-explorer-tree-panel {
@@ -7997,7 +8038,7 @@ body.theme-light .file-explorer-tree-panel {
 }
 body.theme-light .file-explorer-tree-panel:hover,
 body.theme-light .file-explorer-tree-panel:focus-within {
-  scrollbar-color: rgba(95, 152, 0, 0.68) rgba(15, 23, 42, 0.08);
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(15, 23, 42, 0.08);
 }
 body.theme-light .file-explorer-changes-panel {
   color: var(--text);
@@ -8006,7 +8047,7 @@ body.theme-light .file-explorer-changes-panel {
 }
 body.theme-light .file-explorer-changes-panel:hover,
 body.theme-light .file-explorer-changes-panel:focus-within {
-  scrollbar-color: rgba(95, 152, 0, 0.68) rgba(15, 23, 42, 0.08);
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(15, 23, 42, 0.08);
 }
 .file-explorer-changes-panel::-webkit-scrollbar {
   width: 10px;
@@ -8027,7 +8068,7 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
 }
 .file-explorer-changes-panel:hover::-webkit-scrollbar-thumb,
 .file-explorer-changes-panel:focus-within::-webkit-scrollbar-thumb {
-  background: rgba(150, 220, 92, 0.72);
+  background: var(--active-control-scrollbar-thumb);
   background-clip: content-box;
 }
 body.theme-light .file-explorer-tree-panel::-webkit-scrollbar-track {
@@ -8042,7 +8083,7 @@ body.theme-light .file-explorer-tree-panel:hover::-webkit-scrollbar-thumb,
 body.theme-light .file-explorer-tree-panel:focus-within::-webkit-scrollbar-thumb,
 body.theme-light .file-explorer-changes-panel:hover::-webkit-scrollbar-thumb,
 body.theme-light .file-explorer-changes-panel:focus-within::-webkit-scrollbar-thumb {
-  background: rgba(95, 152, 0, 0.68);
+  background: var(--active-control-scrollbar-thumb);
   background-clip: content-box;
 }
 .file-explorer-changes-head {
@@ -8155,8 +8196,8 @@ body.theme-light .file-explorer-changes-panel .changes-comparison-head {
 }
 .file-explorer-changes-head .changes-close:hover,
 .file-explorer-changes-head .changes-close:focus-visible {
-  color: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .file-explorer-changes-panel .changes-refresh,
 .file-explorer-date-reload-cluster .changes-refresh {
@@ -8341,8 +8382,8 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   height: 22px;
   padding: 0 8px;
   color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: color-mix(in srgb, var(--brand-green) 18%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
-  border: 1px solid color-mix(in srgb, var(--brand-green) 45%, var(--pane-ctl-border, transparent));
+  background: color-mix(in srgb, var(--active-control-bg) 18%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  border: 1px solid color-mix(in srgb, var(--active-control-border) 45%, var(--pane-ctl-border, transparent));
   border-radius: 4px;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
@@ -8355,30 +8396,22 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 .file-explorer-mode-toggle:hover,
 .file-explorer-mode-toggle:focus-visible {
   color: var(--text);
-  border-color: var(--brand-green);
-  background: color-mix(in srgb, var(--brand-green) 28%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  border-color: var(--active-control-border);
+  background: color-mix(in srgb, var(--active-control-bg) 28%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
 }
 .file-explorer-mode-toggle[aria-pressed="true"] {
-  color: var(--pane-tab-yolo-text, var(--pane-ctl-pressed-fg));
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .file-explorer-mode-label {
   pointer-events: none;
 }
-:root {
-  --finder-session-repo-bg: color-mix(in srgb, var(--brand-green) 16%, transparent);
-  --finder-session-touched-bg: color-mix(in srgb, var(--brand-green) 8%, transparent);
-  --finder-sync-expanded-bg: color-mix(in srgb, var(--accent-gold) 24%, transparent);
-}
-.file-tree-row.file-tree-row--sync-expanded:not(.selected) {
-  background: var(--finder-sync-expanded-bg);
-}
-.file-tree-row.file-tree-row--session-repo:not(.selected) {
-  background: var(--finder-session-repo-bg);
-}
-.file-tree-row.file-tree-row--session-touched:not(.selected) {
-  background: var(--finder-session-touched-bg);
+.file-tree-row.file-tree-row--sync-expanded > .file-tree-name,
+.file-tree-row.file-tree-row--session-repo > .file-tree-name,
+.file-tree-row.file-tree-row--session-touched > .file-tree-name,
+.file-tree-row.file-tree-row--changed-ancestor > .file-tree-name {
+  font-weight: 800;
 }
 .file-explorer-hidden-toggle-panel:hover,
 .file-explorer-root-mode-toggle-panel:hover,
@@ -8388,10 +8421,11 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   border-color: var(--text);
 }
 .file-explorer-hidden-toggle-panel.active,
-.file-explorer-root-mode-toggle-panel.active {
-  color: #061207;
-  border-color: var(--brand-green);
-  background: rgba(118, 185, 0, 0.88);
+.file-explorer-root-mode-toggle-panel.active,
+.file-explorer-quick-access-button.active {
+  color: var(--active-control-text);
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
 }
 .cm-yolomux-diff-add {
   background: color-mix(in srgb, var(--code-diff-add) 30%, transparent);
@@ -8431,8 +8465,8 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   border-radius: 0;
 }
 .file-editor-diff-codemirror .cm-merge-revert button:hover {
-  color: #061207;
-  background: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
 }
 .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 .file-editor-diff-codemirror .cm-deletedChunk,
@@ -8741,9 +8775,9 @@ body.editor-theme-light .file-editor-content {
    is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token
    (theme-aware, the same gray Cursor uses), never selectable/copied as code. */
 .file-editor-blame-panel[aria-pressed="true"] {
-  color: #061207;
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .cm-line[data-blame]::after {
   content: " " attr(data-blame);
@@ -8757,9 +8791,9 @@ body.editor-theme-light .file-editor-content {
 }
 /* B4: the diff expand/collapse-all toggle goes green when ON (showing all context), like a pressed control. */
 .file-editor-diff-expand-panel[aria-pressed="true"] {
-  color: var(--pane-tab-active-text);
-  background: var(--brand-green);
-  border-color: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .file-editor-save-panel:disabled {
   opacity: 0.44;
@@ -9343,9 +9377,9 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
 }
 .file-editor-codemirror .cm-search label:has(input:checked),
 .file-editor-codemirror-panel .cm-search label:has(input:checked) {
-  color: #061207;
-  border-color: var(--brand-green);
-  background: rgba(118, 185, 0, 0.86);
+  color: var(--active-control-text);
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
 }
 .file-editor-codemirror .cm-search input[type="checkbox"],
 .file-editor-codemirror-panel .cm-search input[type="checkbox"] {
@@ -9355,7 +9389,7 @@ body.editor-cursor-block .file-editor-codemirror-panel .cm-cursor {
   height: 100%;
   margin: 0;
   opacity: 0;
-  accent-color: var(--brand-green);
+  accent-color: var(--active-control-bg);
   cursor: pointer;
 }
 .file-editor-codemirror .cm-search .cm-dialog-close,
@@ -9402,9 +9436,9 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search label:hover {
 }
 body.editor-theme-light .file-editor-codemirror .cm-search label:has(input:checked),
 body.editor-theme-light .file-editor-codemirror-panel .cm-search label:has(input:checked) {
-  color: #061207;
-  background: rgba(118, 185, 0, 0.76);
-  border-color: #4c7f00;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-search-count,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-count {

@@ -1750,14 +1750,6 @@ function preferenceSections() {
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
     ]},
-    {title: t('pref.section.notifications'), items: [
-      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
-      {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
-      {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
-      {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
-      {path: 'appearance.red_reminder_ms', label: t('pref.appearance.red_reminder_ms.label'), type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: t('pref.appearance.red_reminder_ms.help')},
-      {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
-    ]},
     {title: t('pref.section.appearance'), items: [
       {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: [
         {value: 'system', label: t('pref.appearance.theme.system')},
@@ -1770,8 +1762,16 @@ function preferenceSections() {
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
       {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
       {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
-      {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'number', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
+      {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'range', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
       {path: 'appearance.inactive_pane_opacity', label: t('pref.appearance.inactive_pane_opacity.label'), type: 'range', min: 0, max: 100, step: 5, suffix: '%', help: t('pref.appearance.inactive_pane_opacity.help')},
+      {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'select', choices: [
+        {value: 'green', label: t('pref.appearance.active_color.green')},
+        {value: 'blue', label: t('pref.appearance.active_color.blue')},
+        {value: 'orange', label: t('pref.appearance.active_color.orange')},
+        {value: 'yellow', label: t('pref.appearance.active_color.yellow')},
+        {value: 'purple', label: t('pref.appearance.active_color.purple')},
+        {value: 'white', label: t('pref.appearance.active_color.white')},
+      ], help: t('pref.appearance.active_color.help')},
       {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
       {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
@@ -1803,6 +1803,14 @@ function preferenceSections() {
       {path: 'editor.autosave', label: t('pref.editor.autosave.label'), type: 'boolean', help: t('pref.editor.autosave.help')},
       {path: 'editor.autosave_delay_seconds', label: t('pref.editor.autosave_delay_seconds.label'), type: 'number', min: 0.5, max: 60, step: 0.5, suffix: 's', help: t('pref.editor.autosave_delay_seconds.help')},
       {path: 'editor.blame_all_lines', label: t('pref.editor.blame_all_lines.label'), type: 'boolean', help: t('pref.editor.blame_all_lines.help')},
+    ]},
+    {title: t('pref.section.notifications'), items: [
+      {path: 'general.reload_on_update', label: t('pref.general.reload_on_update.label'), type: 'boolean', help: t('pref.general.reload_on_update.help')},
+      {path: 'notifications.notify_transitions', label: t('pref.notifications.notify_transitions.label'), type: 'list', help: t('pref.notifications.notify_transitions.help')},
+      {path: 'notifications.toast_duration_ms', label: t('pref.notifications.toast_duration_ms.label'), type: 'number', min: 1000, max: 60000, step: 500, suffix: 'ms', help: t('pref.notifications.toast_duration_ms.help')},
+      {path: 'notifications.throttle_seconds', label: t('pref.notifications.throttle_seconds.label'), type: 'number', min: 0, max: 600, step: 5, suffix: 's', help: t('pref.notifications.throttle_seconds.help')},
+      {path: 'appearance.red_reminder_ms', label: t('pref.appearance.red_reminder_ms.label'), type: 'number', min: 0, max: 10000, step: 50, suffix: 'ms', help: t('pref.appearance.red_reminder_ms.help')},
+      {path: 'appearance.metadata_badge_pulse_seconds', label: t('pref.appearance.metadata_badge_pulse_seconds.label'), type: 'number', min: 0, max: 120, step: 1, suffix: 's', help: t('pref.appearance.metadata_badge_pulse_seconds.help')},
     ]},
     {title: fileExplorerLabel(), items: [
       {path: 'file_explorer.root_mode', label: t('pref.file_explorer.root_mode.label'), type: 'radio', choices: ['fixed', 'sync'], help: t('pref.file_explorer.root_mode.help')},
@@ -2311,6 +2319,7 @@ function bindPreferencesPanel(panel) {
       const output = control.parentElement?.querySelector('.preferences-range-value');
       if (output) output.textContent = String(control.value);
       if (control.dataset.settingPath === 'appearance.inactive_pane_opacity') applyInactivePaneOpacity(value);
+      if (control.dataset.settingPath === 'appearance.pane_ring_opacity') applyPaneRingOpacity(value);
     }
   });
   panel.addEventListener('change', event => {

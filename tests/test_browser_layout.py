@@ -1,4 +1,5 @@
 from pathlib import Path
+import difflib
 import json
 import re
 import shutil
@@ -902,6 +903,7 @@ def finder_click_toolbar_fixture_html():
             <div class="pane-tabs" hidden></div>
             <div class="file-explorer-toolbar">
               <div class="file-explorer-toolbar-row file-explorer-primary-row">
+                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse>▤</button>
                 <span class="file-explorer-panel-title file-explorer-mode-files-only">Finder</span>
                 <span class="file-explorer-panel-title file-explorer-mode-diff-only">Differ</span>
                 <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
@@ -918,18 +920,17 @@ def finder_click_toolbar_fixture_html():
               </div>
               <div class="file-explorer-toolbar-row file-explorer-scope-row file-explorer-mode-files-only">
                 <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only">.*</button>
+                <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only active" aria-pressed="true">Sync</button>
                 <div class="file-explorer-quick-access-panel file-explorer-mode-files-only">
                   <button type="button" class="file-explorer-quick-access-button">~</button>
                   <button type="button" class="file-explorer-quick-access-button">/</button>
                   <button type="button" class="file-explorer-quick-access-button">/tmp</button>
                 </div>
                 <span class="file-explorer-toolbar-spacer"></span>
-                <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel">No Sync</button>
               </div>
               <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
                 <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" id="new-file">+</button>
                 <button type="button" class="file-explorer-header-action file-explorer-mode-files-only">▣</button>
-                <button type="button" class="file-explorer-header-action">▤</button>
                 <span class="file-explorer-toolbar-spacer"></span>
                 <select class="file-explorer-sort-select file-explorer-mode-files-only"><option>A-Z</option></select>
                 <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
@@ -1129,7 +1130,7 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         "versionCommitTime": "test",
         "settingsPayload": {
             "settings": settings,
-            "defaults": {"appearance": {"inactive_pane_opacity": 100}},
+            "defaults": {"appearance": {"inactive_pane_opacity": 60}},
             "mtime_ns": 0,
         },
         "yoloRulesPayload": {
@@ -1312,8 +1313,9 @@ def live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home
         <aside id="fileExplorer" class="file-explorer" hidden aria-label="File Explorer">
           <div class="file-explorer-tree-col">
             <div class="file-explorer-head">
+              <button type="button" class="file-explorer-header-action" data-file-explorer-collapse>▤</button>
               <button type="button" id="fileExplorerHiddenToggle" class="file-explorer-hidden-toggle">.*</button>
-              <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle">No Sync</button>
+              <button type="button" id="fileExplorerRootMode" class="file-explorer-root-mode-toggle active" aria-pressed="true">Sync</button>
               <div id="fileExplorerQuickAccess" class="file-explorer-quick-access"></div>
               <input class="file-explorer-path" id="fileExplorerPath" type="text" value="/">
               <button type="button" id="fileExplorerPathCopy" class="path-copy-button file-explorer-path-copy"></button>
@@ -1630,13 +1632,26 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
             {"repo": "/home/test/dynamo/repo-b", "path": "lib/b.py", "abs_path": "/home/test/dynamo/repo-b/lib/b.py"},
         ],
     }
+    updated_session_files_payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/home/test/dynamo/repo-a"}, {"repo": "/home/test/dynamo/repo-b"}, {"repo": "/home/test/dynamo/repo-c"}],
+        "files": [
+            {"repo": "/home/test/dynamo/repo-a", "path": "src/a.js", "abs_path": "/home/test/dynamo/repo-a/src/a.js"},
+            {"repo": "/home/test/dynamo/repo-b", "path": "lib/b.py", "abs_path": "/home/test/dynamo/repo-b/lib/b.py"},
+            {"repo": "/home/test/dynamo/repo-c", "path": "docs/c.md", "abs_path": "/home/test/dynamo/repo-c/docs/c.md"},
+        ],
+    }
     fs_entries = {
         "/home/test": [{"name": "dynamo", "kind": "dir"}],
-        "/home/test/dynamo": [{"name": "repo-a", "kind": "dir"}, {"name": "repo-b", "kind": "dir"}],
+        "/home/test/dynamo": [{"name": "repo-a", "kind": "dir"}, {"name": "repo-b", "kind": "dir"}, {"name": "repo-c", "kind": "dir"}],
         "/home/test/dynamo/repo-a": [{"name": "src", "kind": "dir"}],
         "/home/test/dynamo/repo-a/src": [{"name": "a.js", "kind": "file"}],
         "/home/test/dynamo/repo-b": [{"name": "lib", "kind": "dir"}],
         "/home/test/dynamo/repo-b/lib": [{"name": "b.py", "kind": "file"}],
+        "/home/test/dynamo/repo-c": [{"name": "docs", "kind": "dir"}],
+        "/home/test/dynamo/repo-c/docs": [{"name": "c.md", "kind": "file"}],
     }
     page = tmp_path / "live-runtime-sync-common-root.html"
     page.write_text(
@@ -1681,6 +1696,7 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
           expanded: row.getAttribute('aria-expanded') === 'true',
           classes: Array.from(row.classList),
           background: getComputedStyle(row).backgroundColor,
+          nameWeight: Number(getComputedStyle(row.querySelector(':scope > .file-tree-name')).fontWeight),
         }));
         return {
           errors: window.__bootErrors,
@@ -1707,13 +1723,15 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         assert "file-tree-row--sync-expanded" in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-repo" not in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-touched" not in rows_by_path[path]["classes"], metrics
-        assert rows_by_path[path]["background"] != "rgba(0, 0, 0, 0)", metrics
+        assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
+        assert rows_by_path[path]["nameWeight"] >= 700, metrics
     for path in ["/home/test/dynamo/repo-a/src", "/home/test/dynamo/repo-b/lib"]:
         assert "file-tree-row--sync-expanded" not in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-repo" not in rows_by_path[path]["classes"], metrics
         assert "file-tree-row--session-touched" not in rows_by_path[path]["classes"], metrics
+        assert "file-tree-row--changed-ancestor" in rows_by_path[path]["classes"], metrics
         assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
-    assert rows_by_path["/home/test/dynamo/repo-a"]["background"] != rows_by_path["/home/test/dynamo/repo-a/src"]["background"], metrics
+        assert rows_by_path[path]["nameWeight"] >= 700, metrics
     assert metrics["fetchedPaths"] >= 3, metrics
     manual_collapse = browser.execute_async_script(
         """
@@ -1737,6 +1755,38 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
     assert manual_collapse["root"] == "/home/test/dynamo", manual_collapse
     assert manual_collapse["expanded"] == "false", manual_collapse
     assert manual_collapse["childVisible"] is False, manual_collapse
+    payload_change = browser.execute_async_script(
+        """
+        const updatedPayload = arguments[0];
+        const done = arguments[arguments.length - 1];
+        window.__fixtureSessionFilesPayload = updatedPayload;
+        fetchSessionFiles({destination: 'finder', session: '1', force: true, silent: true}).then(() => {
+          rememberFileExplorerExplicitSyncSession('1');
+          return syncFileExplorerRootToActiveTmux('1');
+        }).then(() => {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            done({
+              root: document.querySelector('.file-explorer-path-inline')?.value || '',
+              plan: fileExplorerSyncPlan('1'),
+              repoAExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a"]')?.getAttribute('aria-expanded') || '',
+              repoAChildVisible: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a/src"]') !== null,
+              repoCExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-c"]')?.getAttribute('aria-expanded') || '',
+              repoCChildVisible: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-c/docs"]') !== null,
+              manualCollapsed: Array.from(fileExplorerSyncManualCollapsedPaths),
+            });
+          }));
+        }).catch(error => done({error: String(error)}));
+        """,
+        updated_session_files_payload,
+    )
+    assert payload_change["root"] == "/home/test/dynamo", payload_change
+    assert payload_change["plan"]["expandPaths"] == ["/home/test/dynamo/repo-a", "/home/test/dynamo/repo-b", "/home/test/dynamo/repo-c"], payload_change
+    assert payload_change["repoAExpanded"] == "false", payload_change
+    assert payload_change["repoAChildVisible"] is False, payload_change
+    assert payload_change["repoCExpanded"] == "true", payload_change
+    assert payload_change["repoCChildVisible"] is True, payload_change
+    assert "/home/test/dynamo/repo-a" in payload_change["manualCollapsed"], payload_change
     cleared = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -1750,6 +1800,201 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         """
     )
     assert not any(row["hasExpanded"] or row["hasRepo"] or row["hasTouched"] for row in cleared), cleared
+
+
+def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
+    session_files_payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/home/test/dynamo/repo-a"}, {"repo": "/home/test/yolomux.dev"}],
+        "files": [
+            {"repo": "/home/test/dynamo/repo-a", "path": "src/a.js", "abs_path": "/home/test/dynamo/repo-a/src/a.js"},
+            {"repo": "/home/test/yolomux.dev", "path": "static/app.js", "abs_path": "/home/test/yolomux.dev/static/app.js"},
+        ],
+    }
+    fs_entries = {
+        "/home/test": [{"name": "dynamo", "kind": "dir"}, {"name": "yolomux.dev", "kind": "dir"}],
+        "/home/test/dynamo": [{"name": "repo-a", "kind": "dir"}],
+        "/home/test/dynamo/repo-a": [{"name": "src", "kind": "dir"}],
+        "/home/test/dynamo/repo-a/src": [{"name": "a.js", "kind": "file"}],
+        "/home/test/yolomux.dev": [{"name": "static", "kind": "dir"}],
+        "/home/test/yolomux.dev/static": [{"name": "app.js", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-parent-collapse.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            transcript_current_path="/home/test/dynamo/repo-a/src",
+            transcript_git_root="/home/test/dynamo/repo-a",
+            session_files_payload=session_files_payload,
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.getElementById('panel-1') !== null;
+            """
+        )
+    )
+    browser.find_element("css selector", "#panel-1").click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo"]')?.getAttribute('aria-expanded') === 'true'
+              && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a"]')?.getAttribute('aria-expanded') === 'true'
+              && tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev"]')?.getAttribute('aria-expanded') === 'true';
+            """
+        )
+    )
+    collapsed_parent = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        const row = tree.querySelector('.file-tree-row[data-path="/home/test/dynamo"]');
+        fileExplorerExplicitSyncSession = '';
+        row.click();
+        syncFileExplorerRootToActiveTmux('1').then(() => {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const current = tree.querySelector('.file-tree-row[data-path="/home/test/dynamo"]');
+            done({
+              root: document.querySelector('.file-explorer-path-inline')?.value || '',
+              plan: fileExplorerSyncPlan('1'),
+              visibleSession: fileExplorerVisibleSyncSession,
+              manualCollapsed: Array.from(fileExplorerSyncManualCollapsedPaths),
+              dynamoExpanded: current?.getAttribute('aria-expanded') || '',
+              repoVisible: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a"]') !== null,
+              yolomuxExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev"]')?.getAttribute('aria-expanded') || '',
+            });
+          }));
+        }).catch(error => done({error: String(error)}));
+        """
+    )
+    assert collapsed_parent["root"] == "/home/test", collapsed_parent
+    assert set(collapsed_parent["plan"]["expandPaths"]) == {"/home/test/dynamo/repo-a", "/home/test/yolomux.dev"}, collapsed_parent
+    assert collapsed_parent["visibleSession"] == "1", collapsed_parent
+    assert "/home/test/dynamo" in collapsed_parent["manualCollapsed"], collapsed_parent
+    assert collapsed_parent["dynamoExpanded"] == "false", collapsed_parent
+    assert collapsed_parent["repoVisible"] is False, collapsed_parent
+    assert collapsed_parent["yolomuxExpanded"] == "true", collapsed_parent
+
+
+def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser, tmp_path):
+    session_files_payload = {
+        "session": "5",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/home/test/yolomux.dev"}],
+        "files": [],
+    }
+    fs_entries = {
+        "/home/test": [{"name": "yolomux.dev", "kind": "dir"}, {"name": "scratch", "kind": "dir"}],
+        "/home/test/yolomux.dev": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev/src": [{"name": "main.js", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-quick-access-manual.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            sessions=["5"],
+            transcript_sessions={
+                "5": {"current_path": "/home/test/yolomux.dev/src", "git_root": "/home/test/yolomux.dev"},
+            },
+            session_files_payload=session_files_payload,
+            session_files_payloads={"5": session_files_payload},
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,5&layout=row@35(slot1,left)&tabs=slot1:files;left:5")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.getElementById('panel-5') !== null;
+            """
+        )
+    )
+    browser.find_element("css selector", "#panel-5").click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
+        )
+    )
+    manual_metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        document.querySelector('.file-explorer-quick-access-button[data-quick-path="~"]').click();
+        requestAnimationFrame(() => {
+          scheduleFileExplorerActiveTabSync();
+          setSessionFilesPayloadForDestination('finder', {session: '5', loaded: true, errors: [], repos: [{repo: '/home/test/yolomux.dev'}], files: []});
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            done({
+              root: document.querySelector('.file-explorer-path-inline')?.value || '',
+              manual: fileExplorerManualSelectionActive,
+              mode: fileExplorerRootModeValue(),
+              explicitSession: fileExplorerExplicitSyncSessionTarget(),
+              planRoot: fileExplorerSyncPlan('5').root,
+              syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+              homePressed: document.querySelector('.file-explorer-quick-access-button[data-quick-path="~"]')?.getAttribute('aria-pressed') || '',
+            });
+          }));
+        });
+        """
+    )
+    assert manual_metrics["root"] == "/home/test", manual_metrics
+    assert manual_metrics["manual"] is True, manual_metrics
+    assert manual_metrics["mode"] == "fixed", manual_metrics
+    assert manual_metrics["explicitSession"] == "5", manual_metrics
+    assert manual_metrics["planRoot"] == "/home/test/yolomux.dev", manual_metrics
+    assert manual_metrics["syncPressed"] == "false", manual_metrics
+    assert manual_metrics["homePressed"] == "true", manual_metrics
+    browser.execute_script(
+        """
+        setFocusedTerminal('5', {userInitiated: true});
+        setFocusedPanelItem('5', {userInitiated: true});
+        document.getElementById('panel-5')?.click();
+        """
+    )
+    unchanged_metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          done({
+            root: document.querySelector('.file-explorer-path-inline')?.value || '',
+            mode: fileExplorerRootModeValue(),
+            syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+            homePressed: document.querySelector('.file-explorer-quick-access-button[data-quick-path="~"]')?.getAttribute('aria-pressed') || '',
+          });
+        }));
+        """
+    )
+    assert unchanged_metrics == {
+        "root": "/home/test",
+        "mode": "fixed",
+        "syncPressed": "false",
+        "homePressed": "true",
+    }, unchanged_metrics
+    browser.execute_script(
+        "document.querySelector('.file-explorer-root-mode-toggle-panel')?.click();"
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'
+              && fileExplorerRootModeValue() === 'sync'
+              && fileExplorerManualSelectionActive === false
+              && document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') === 'true'
+              && document.querySelector('.file-explorer-quick-access-button[data-quick-path="~"]')?.getAttribute('aria-pressed') === 'false';
+            """
+        )
+    )
 
 
 def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
@@ -1810,6 +2055,22 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
             "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'"
         )
     )
+    expanded_before_switch = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        const row = tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]');
+        row.click();
+        requestAnimationFrame(() => requestAnimationFrame(() => done({
+          expanded: row.getAttribute('aria-expanded'),
+          childVisible: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other/touched.js"]') !== null,
+          expandedSet: Array.from(fileExplorerExpanded),
+        })));
+        """
+    )
+    assert expanded_before_switch["expanded"] == "true", expanded_before_switch
+    assert expanded_before_switch["childVisible"] is True, expanded_before_switch
+    assert "/home/test/yolomux.dev/other" in expanded_before_switch["expandedSet"], expanded_before_switch
     ActionChains(browser).move_to_element(browser.find_element("css selector", "#panel-6")).perform()
     hover_metrics = browser.execute_async_script(
         """
@@ -1837,7 +2098,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     assert hover_metrics["planRoot"] == "/home/test/yolomux.dev", hover_metrics
     assert hover_metrics["otherVisible"] is True, hover_metrics
     assert hover_metrics["otherRepoVisible"] is False, hover_metrics
-    assert hover_metrics["otherExpanded"] == "false", hover_metrics
+    assert hover_metrics["otherExpanded"] == "true", hover_metrics
     focus_report_metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -1883,7 +2144,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     assert passive_select_metrics["payloadSession"] == "5", passive_select_metrics
     assert passive_select_metrics["activeTmux"] == "/home/test/yolomux.dev/src", passive_select_metrics
     assert passive_select_metrics["planRoot"] == "/home/test/yolomux.dev", passive_select_metrics
-    assert passive_select_metrics["otherExpanded"] == "false", passive_select_metrics
+    assert passive_select_metrics["otherExpanded"] == "true", passive_select_metrics
     typed_metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -1901,9 +2162,51 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     assert typed_metrics["target"] == "6", typed_metrics
     assert typed_metrics["activeTmux"] == "/home/test/other.dev/other", typed_metrics
     assert typed_metrics["planSession"] == "6", typed_metrics
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/other.dev'"
+        )
+    )
+    browser.execute_script(
+        """
+        document.getElementById('term-5')?.dispatchEvent(new KeyboardEvent('keydown', {key: 'y', bubbles: true}));
+        terminals.get('5')?.term?._onData?.('y');
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/yolomux.dev'
+              && tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]')?.getAttribute('aria-expanded') === 'true'
+              && tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other/touched.js"]') !== null;
+            """
+        )
+    )
+    restored_metrics = browser.execute_script(
+        """
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        return {
+          root: document.querySelector('.file-explorer-path-inline')?.value || '',
+          target: fileExplorerSessionFilesTargetSession(),
+          activeTmux: activeTmuxDirectoryPath(),
+          planSession: fileExplorerSyncPlan().session,
+          rememberedExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]')?.getAttribute('aria-expanded') || '',
+          childVisible: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other/touched.js"]') !== null,
+          expandedSet: Array.from(fileExplorerExpanded),
+        };
+        """
+    )
+    assert restored_metrics["root"] == "/home/test/yolomux.dev", restored_metrics
+    assert restored_metrics["target"] == "5", restored_metrics
+    assert restored_metrics["activeTmux"] == "/home/test/yolomux.dev/src", restored_metrics
+    assert restored_metrics["planSession"] == "5", restored_metrics
+    assert restored_metrics["rememberedExpanded"] == "true", restored_metrics
+    assert restored_metrics["childVisible"] is True, restored_metrics
+    assert "/home/test/yolomux.dev/other" in restored_metrics["expandedSet"], restored_metrics
 
 
-def test_fixed_finder_does_not_follow_hovered_editor_until_explicit_click(browser, tmp_path):
+def test_fixed_finder_does_not_follow_editor_clicks(browser, tmp_path):
     fs_entries = {
         "/home/test": [{"name": "repo-a", "kind": "dir"}, {"name": "repo-b", "kind": "dir"}],
         "/home/test/repo-a": [{"name": "src", "kind": "dir"}],
@@ -1938,14 +2241,28 @@ def test_fixed_finder_does_not_follow_hovered_editor_until_explicit_click(browse
         )
     )
     browser.find_element("css selector", '.file-editor-panel[data-file-path="/home/test/repo-a/src/a.md"]').click()
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-            return tree?.querySelector('.file-tree-row[data-path="/home/test/repo-a/src/a.md"]') !== null;
-            """
-        )
+    click_a_metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+          done({
+            root: document.querySelector('.file-explorer-path-inline')?.value || '',
+            mode: fileExplorerRootModeValue(),
+            syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+            repoAExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/repo-a"]')?.getAttribute('aria-expanded') || '',
+            fileAVisible: tree.querySelector('.file-tree-row[data-path="/home/test/repo-a/src/a.md"]') !== null,
+          });
+        }));
+        """
     )
+    assert click_a_metrics == {
+        "root": "/home/test",
+        "mode": "fixed",
+        "syncPressed": "false",
+        "repoAExpanded": "false",
+        "fileAVisible": False,
+    }, click_a_metrics
     ActionChains(browser).move_to_element(browser.find_element("css selector", '.file-editor-panel[data-file-path="/home/test/repo-b/other/b.md"]')).perform()
     hover_metrics = browser.execute_async_script(
         """
@@ -1965,14 +2282,28 @@ def test_fixed_finder_does_not_follow_hovered_editor_until_explicit_click(browse
     assert hover_metrics["repoBExpanded"] == "false", hover_metrics
     assert hover_metrics["otherVisible"] is False, hover_metrics
     browser.find_element("css selector", '.file-editor-panel[data-file-path="/home/test/repo-b/other/b.md"]').click()
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
-            return tree?.querySelector('.file-tree-row[data-path="/home/test/repo-b/other/b.md"]') !== null;
-            """
-        )
+    click_b_metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+          done({
+            root: document.querySelector('.file-explorer-path-inline')?.value || '',
+            mode: fileExplorerRootModeValue(),
+            syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+            repoBExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/repo-b"]')?.getAttribute('aria-expanded') || '',
+            fileBVisible: tree.querySelector('.file-tree-row[data-path="/home/test/repo-b/other/b.md"]') !== null,
+          });
+        }));
+        """
     )
+    assert click_b_metrics == {
+        "root": "/home/test",
+        "mode": "fixed",
+        "syncPressed": "false",
+        "repoBExpanded": "false",
+        "fileBVisible": False,
+    }, click_b_metrics
 
 
 def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path):
@@ -2099,6 +2430,91 @@ def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
     assert metrics["five"]["borderColor"] != metrics["defaultish"]["borderColor"], metrics
 
 
+def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=__files__,1,__prefs__&layout=row@32(slot1,row@56(left,right))&tabs=slot1:__files__;left:1;right:__prefs__")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('select[data-setting-path="appearance.active_color"]') !== null
+              && document.querySelector('#panel-1 .pane-tab.active') !== null
+              && document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]') !== null
+              && document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]') !== null
+              && document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]') !== null
+            """
+        )
+    )
+    browser.execute_script(
+        """
+        const panel = document.querySelector('#panel-1');
+        panel.classList.add('active-pane', 'focused-pane', 'typing-ready-pane', 'yolo-ready-pane');
+        document.getElementById('tabMetaToggle')?.classList.add('active');
+        const notify = document.getElementById('notifyToggle');
+        notify?.classList.add('notify-toggle', 'active');
+        const select = document.querySelector('select[data-setting-path="appearance.active_color"]');
+        select.value = 'blue';
+        select.dispatchEvent(new Event('change', {bubbles: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return window.__settingsPayload?.settings?.appearance?.active_color === 'blue'
+              && getComputedStyle(document.querySelector('#panel-1 .pane-tab.active')).backgroundColor === 'rgb(59, 130, 246)';
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const rootStyle = getComputedStyle(document.documentElement);
+        const bodyStyle = getComputedStyle(document.body);
+        const tabStyle = getComputedStyle(document.querySelector('#panel-1 .pane-tab.active'));
+        const panelStyle = getComputedStyle(document.querySelector('#panel-1'));
+        const prefsRange = document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]');
+        const ringRange = document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]');
+        const radio = document.querySelector('input[data-setting-path="appearance.date_time_hour_cycle"]');
+        const finderMode = document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]');
+        const tabMeta = document.getElementById('tabMetaToggle');
+        const notify = document.getElementById('notifyToggle');
+        return {
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+          rootAccent: rootStyle.getPropertyValue('--active-accent').trim(),
+          bodyAccent: bodyStyle.getPropertyValue('--active-accent').trim(),
+          rootRgb: rootStyle.getPropertyValue('--active-accent-rgb').trim(),
+          tabBg: tabStyle.backgroundColor,
+          tabBorder: tabStyle.borderTopColor,
+          panelBorder: panelStyle.borderTopColor,
+          prefsRangeAccent: getComputedStyle(prefsRange).accentColor,
+          ringRangeAccent: getComputedStyle(ringRange).accentColor,
+          radioAccent: getComputedStyle(radio).accentColor,
+          finderModeBg: getComputedStyle(finderMode).backgroundColor,
+          finderModeBorder: getComputedStyle(finderMode).borderTopColor,
+          tabMetaBg: getComputedStyle(tabMeta).backgroundColor,
+          tabMetaBorder: getComputedStyle(tabMeta).borderTopColor,
+          notifyBg: getComputedStyle(notify).backgroundColor,
+          settingsPosts: window.__bootFetches.filter(item => item.method === 'POST' && item.path === '/api/settings').length,
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert metrics["rootAccent"] == "#3b82f6", metrics
+    assert metrics["bodyAccent"] == "#3b82f6", metrics
+    assert metrics["rootRgb"] == "59 130 246", metrics
+    assert metrics["tabBg"] == "rgb(59, 130, 246)", metrics
+    assert metrics["tabBorder"] == "rgb(59, 130, 246)", metrics
+    assert metrics["panelBorder"].startswith("color(srgb 0.231373 0.509804 0.964706 / 0.75)"), metrics
+    assert metrics["prefsRangeAccent"] == "rgb(59, 130, 246)", metrics
+    assert metrics["ringRangeAccent"] == "rgb(59, 130, 246)", metrics
+    assert metrics["radioAccent"] == "rgb(59, 130, 246)", metrics
+    assert metrics["finderModeBg"] == "rgb(59, 130, 246)", metrics
+    assert metrics["finderModeBorder"] == "rgb(59, 130, 246)", metrics
+    assert metrics["tabMetaBg"] == "rgb(59, 130, 246)", metrics
+    assert metrics["tabMetaBorder"] == "rgb(59, 130, 246)", metrics
+    assert metrics["notifyBg"] == "rgb(59, 130, 246)", metrics
+    assert metrics["settingsPosts"] >= 1, metrics
+
+
 def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     metrics = load_fixture(browser, tmp_path, 860)
     assert metrics["toolbar"]["right"] <= metrics["panel"]["right"]
@@ -2175,7 +2591,7 @@ def test_pane_tabs_use_available_space_below_toolbar(browser, tmp_path):
     # dark keeps #285a2f, so it must NOT be required equal across themes.
     # toolbarActiveBg/Border are the PRESSED control tab's green, which is theme-specific (light #4f9e3a /
     # dark #86d600); detail-row bg now follows --pane-bar-bg so it is theme-specific too.
-    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder"}
+    theme_specific = {"panelHeadBg", "activeTabBg", "activeTabColor", "inactiveActiveTabBg", "inactiveActiveTabColor", "inactiveTabBg", "inactiveTabBorder", "inactiveDirColor", "paneControlBg", "paneControlBorder", "zoomControlBg", "toolbarActiveBg", "toolbarActiveBorder"}
     for key, value in theme_metrics["dark"].items():
         if key not in theme_specific:
             assert theme_metrics["light"][key] == value
@@ -2430,8 +2846,17 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     )
     path = str(REPO_ROOT / "README.md")
     original = subprocess.check_output(["git", "show", "HEAD:README.md"], cwd=REPO_ROOT, text=True)
-    current = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    diff = subprocess.check_output(["git", "diff", "HEAD", "--", "README.md"], cwd=REPO_ROOT, text=True)
+    current = original.replace(
+        "Browser tools for watching, driving, and summarizing tmux sessions.",
+        "Browser tools for watching and summarizing tmux sessions.\n\nDeterministic test-only README diff line.",
+        1,
+    )
+    diff = "diff --git a/README.md b/README.md\n" + "".join(difflib.unified_diff(
+        original.splitlines(keepends=True),
+        current.splitlines(keepends=True),
+        fromfile="a/README.md",
+        tofile="b/README.md",
+    ))
     payload = json.dumps(
         {
             "diff": diff,
@@ -2596,7 +3021,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     assert metrics["errors"] == [], metrics
 
 
-def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(browser, tmp_path):
+def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(browser, tmp_path):
     def theme_tokens():
         return browser.execute_script(
             """
@@ -2615,7 +3040,7 @@ def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(brow
             return {
               panel: tokenColor('--panel'),
               neutral: tokenColor('--panel2'),
-              green: tokenColor('--pane-tab-strip-bg'),
+              accent: tokenColor('--pane-tab-strip-bg'),
             };
             """
         )
@@ -2630,7 +3055,7 @@ def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(brow
     tokens = theme_tokens()
     wait_background("#topbar-fixture", tokens["neutral"])
     ActionChains(browser).move_to_element(browser.find_element("id", "topbar-fixture")).perform()
-    wait_background("#topbar-fixture", tokens["green"])
+    wait_background("#topbar-fixture", tokens["accent"])
     ActionChains(browser).move_to_element(browser.find_element("css selector", ".pane-tab")).perform()
     wait_background("#topbar-fixture", tokens["neutral"])
 
@@ -2638,7 +3063,7 @@ def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(brow
     tokens = theme_tokens()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
     ActionChains(browser).move_to_element(browser.find_element("css selector", "#finder-panel .file-explorer-head")).perform()
-    wait_background("#finder-panel .file-explorer-head", tokens["green"])
+    wait_background("#finder-panel .file-explorer-head", tokens["accent"])
     ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
 
@@ -2646,7 +3071,7 @@ def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(brow
     wait_background("#modified-files-panel .changes-toolbar", tokens["panel"])
     ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_background("#finder-panel .file-explorer-head", tokens["neutral"])
-    wait_background("#modified-files-panel .changes-toolbar", tokens["green"])
+    wait_background("#modified-files-panel .changes-toolbar", tokens["accent"])
 
 
 def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_path):
@@ -2668,7 +3093,16 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
         WebDriverWait(browser, 2).until(lambda _driver: thumb(selector) == expected)
 
     neutral = "rgba(190, 205, 218, 0.62)"
-    green = "rgba(150, 220, 92, 0.72)"
+    accent = browser.execute_script(
+        """
+        const probe = document.createElement('div');
+        probe.style.background = 'var(--active-control-scrollbar-thumb)';
+        document.body.appendChild(probe);
+        const color = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return color;
+        """
+    )
     overflow = browser.execute_script(
         """
         const tree = document.querySelector('.file-explorer-tree-panel');
@@ -2681,7 +3115,7 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
 
     wait_thumb(".file-explorer-tree-panel", neutral)
     ActionChains(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
-    wait_thumb(".file-explorer-tree-panel", green)
+    wait_thumb(".file-explorer-tree-panel", accent)
     ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", neutral)
 
@@ -2701,7 +3135,7 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     assert overflow["differ"]
     wait_thumb("#modified-files-panel", neutral)
     ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
-    wait_thumb("#modified-files-panel", green)
+    wait_thumb("#modified-files-panel", accent)
     ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb("#modified-files-panel", neutral)
 
@@ -2926,19 +3360,19 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
             "toA": 147096,
             "endA": 147095,
             "fromB": 2235,
-            "toB": 32364,
-            "endB": 32363,
+            "toB": 45505,
+            "endB": 45504,
         }
     ]
     assert metrics["rows"]["bands"] == [
         {"kind": "remove", "start": 21, "end": 561},
-        {"kind": "add", "start": 561, "end": 762},
+        {"kind": "add", "start": 561, "end": 801},
     ]
-    assert metrics["rows"]["currentLineCount"] == 272
+    assert metrics["rows"]["currentLineCount"] == 311
     assert metrics["rows"]["deletedRows"] == 540
-    assert metrics["rows"]["totalRows"] == 812
+    assert metrics["rows"]["totalRows"] == 851
     assert metrics["deletedDomRows"] == metrics["removedRangeRows"]
-    assert metrics["insertedRangeRows"] == 201
+    assert metrics["insertedRangeRows"] == 240
     assert "linear-gradient" in metrics["overviewBackground"]
     assert metrics["overviewStops"] == metrics["expectedStops"], metrics["overviewBackground"]
     assert metrics["tickCount"] == 0
@@ -3026,7 +3460,13 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         """
         const toolbar = document.querySelector('#finder-panel .file-explorer-toolbar');
         const primaryRow = toolbar.querySelector('.file-explorer-primary-row');
+        const scopeRow = toolbar.querySelector('.file-explorer-scope-row');
         const actionsRow = toolbar.querySelector('.file-explorer-actions-row');
+        const collapse = primaryRow.querySelector('[data-file-explorer-collapse]');
+        const sync = scopeRow.querySelector('.file-explorer-root-mode-toggle-panel');
+        const hidden = scopeRow.querySelector('.file-explorer-hidden-toggle-panel');
+        const quick = scopeRow.querySelector('.file-explorer-quick-access-panel');
+        const quickButtons = Array.from(quick.querySelectorAll('.file-explorer-quick-access-button'));
         const title = primaryRow.querySelector('.file-explorer-panel-title.file-explorer-mode-files-only');
         const path = primaryRow.querySelector('.file-explorer-path-inline');
         const copy = primaryRow.querySelector('.file-explorer-path-copy-panel');
@@ -3037,7 +3477,13 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const close = primaryRow.querySelector('.file-explorer-panel-close');
         const toolbarRect = toolbar.getBoundingClientRect();
         const primaryRowRect = primaryRow.getBoundingClientRect();
+        const scopeRowRect = scopeRow.getBoundingClientRect();
         const actionsRowRect = actionsRow.getBoundingClientRect();
+        const collapseRect = collapse.getBoundingClientRect();
+        const syncRect = sync.getBoundingClientRect();
+        const hiddenRect = hidden.getBoundingClientRect();
+        const quickRect = quick.getBoundingClientRect();
+        const firstQuickStyle = getComputedStyle(quickButtons[0]);
         const titleRect = title.getBoundingClientRect();
         const pathRect = path.getBoundingClientRect();
         const copyRect = copy.getBoundingClientRect();
@@ -3053,9 +3499,28 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         textProbe.remove();
         return {
           firstRowIsPrimary: toolbar.firstElementChild === primaryRow,
-          titleInPrimaryRow: primaryRow.firstElementChild === title,
+          collapseInPrimaryRow: primaryRow.firstElementChild === collapse,
+          titleAfterCollapse: collapse.nextElementSibling === title,
+          hiddenInScopeRow: scopeRow.firstElementChild === hidden,
+          syncAfterHidden: hidden.nextElementSibling === sync,
+          quickAfterSync: sync.nextElementSibling === quick,
+          syncText: sync.textContent.trim(),
+          syncPressed: sync.getAttribute('aria-pressed'),
+          quickTexts: quickButtons.map(button => button.textContent.trim()),
+          rootPressedCount: [sync, ...quickButtons].filter(button => button.getAttribute('aria-pressed') === 'true').length,
+          quickBorderStyle: firstQuickStyle.borderTopStyle,
+          quickBorderWidth: firstQuickStyle.borderTopWidth,
           pathInPrimaryRow: title.nextElementSibling?.nextElementSibling === path,
+          collapseRight: collapseRect.right,
+          syncLeft: syncRect.left,
+          syncRight: syncRect.right,
+          hiddenLeft: hiddenRect.left,
+          hiddenRight: hiddenRect.right,
+          quickLeft: quickRect.left,
+          scopeRowTop: scopeRowRect.top,
+          scopeRowBottom: scopeRowRect.bottom,
           titleRight: titleRect.right,
+          titleLeft: titleRect.left,
           pathLeft: pathRect.left,
           pathRight: pathRect.right,
           primaryRowLeft: primaryRowRect.left,
@@ -3085,18 +3550,32 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         """
     )
     assert metrics["firstRowIsPrimary"]
-    assert metrics["titleInPrimaryRow"]
+    assert metrics["collapseInPrimaryRow"]
+    assert metrics["titleAfterCollapse"]
+    assert metrics["hiddenInScopeRow"]
+    assert metrics["syncAfterHidden"]
+    assert metrics["quickAfterSync"]
+    assert metrics["syncText"] == "Sync"
+    assert metrics["syncPressed"] == "true"
+    assert metrics["quickTexts"] == ["~", "/", "/tmp"]
+    assert metrics["rootPressedCount"] == 1
+    assert metrics["quickBorderStyle"] == "solid"
+    assert metrics["quickBorderWidth"] == "1px"
     assert metrics["pathInPrimaryRow"]
+    assert metrics["collapseRight"] <= metrics["titleLeft"]
+    assert metrics["hiddenRight"] <= metrics["syncLeft"]
+    assert metrics["syncRight"] <= metrics["quickLeft"]
     assert metrics["titleRight"] <= metrics["pathLeft"]
     assert metrics["pathLeft"] > metrics["primaryRowLeft"]
-    assert metrics["pathWidth"] >= min(160, metrics["toolbarWidth"] / 3)
+    assert metrics["pathWidth"] >= min(90, metrics["toolbarWidth"] / 4)
     assert metrics["pathRight"] <= metrics["copyLeft"]
     assert metrics["copyRight"] <= metrics["modeLeft"]
     assert metrics["modeRight"] <= metrics["closeLeft"]
     assert metrics["modeTexts"] == ["Finder", "Differ"]
     assert abs(metrics["closeRight"] - metrics["primaryRowRight"]) <= 1
     assert metrics["pathColor"] == metrics["textColor"]
-    assert metrics["actionsRowTop"] >= metrics["primaryRowBottom"]
+    assert metrics["scopeRowTop"] >= metrics["primaryRowBottom"]
+    assert metrics["actionsRowTop"] >= metrics["scopeRowBottom"]
     assert metrics["dateRight"] <= metrics["refreshLeft"]
     assert metrics["refreshRight"] <= metrics["actionsRowRight"] + 1
     assert metrics["clusterLeft"] > metrics["pathLeft"]

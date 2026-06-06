@@ -415,8 +415,61 @@ function applyEditorCursorStyle() {
 
 function applyInactivePaneOpacity(value) {
   const number = Number(value);
-  const percent = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : 100;
+  const percent = Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : 60;
   document.documentElement?.style.setProperty('--inactive-pane-opacity-scale', String(percent / 100));
+}
+
+function applyPaneRingOpacity(value) {
+  const number = Number(value);
+  const percent = Number.isFinite(number) ? Math.max(5, Math.min(100, number)) : 75;
+  const root = document.documentElement?.style;
+  if (!root) return;
+  root.setProperty('--pane-ring-opacity', `${percent}%`);
+  root.setProperty('--pane-active-ring-opacity', `${percent}%`);
+}
+
+// DOIT.41: the appearance.active_color presets. Green is NOT listed — it is the default and maps to the
+// CSS token defaults (so picking Green clears the inline overrides = a no-op). Each preset supplies, per
+// theme, the solid accent (ring/glow/strip/tints), the tab fill (bright), and the on-accent text. White
+// in light mode uses a light-neutral fill with a darker-neutral ring so the active pane still reads.
+const ACTIVE_COLOR_PRESETS = {
+  blue:   {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}},
+  orange: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#c2570a', bright: '#c2570a', text: '#ffffff'}},
+  yellow: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#a16207', bright: '#a16207', text: '#ffffff'}},
+  purple: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}},
+  white:  {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}},
+};
+
+function hexToRgbTriple(hex) {
+  const h = String(hex || '').replace('#', '');
+  if (h.length !== 6) return '118 185 0';
+  return `${parseInt(h.slice(0, 2), 16)} ${parseInt(h.slice(2, 4), 16)} ${parseInt(h.slice(4, 6), 16)}`;
+}
+
+// Set the active-accent source vars on both roots: documentElement covers surfaces that resolve tokens
+// there, while body inline beats body.theme-light's class-level defaults for normal descendants.
+// Green/unknown clears both so the CSS defaults stand. Re-run on theme switch since the per-preset values
+// differ per resolved theme.
+function applyActiveColor(value) {
+  const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
+  if (!styles.length) return;
+  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft'];
+  const preset = ACTIVE_COLOR_PRESETS[value];
+  if (!preset) {
+    styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
+    return;
+  }
+  const light = document.body.classList.contains('theme-resolved-light');
+  const p = light ? preset.light : preset.dark;
+  const rgb = hexToRgbTriple(p.accent);
+  for (const style of styles) {
+    style.setProperty('--active-accent', p.accent);
+    style.setProperty('--active-accent-rgb', rgb);
+    style.setProperty('--active-accent-bright', p.bright);
+    style.setProperty('--active-accent-text', p.text);
+    style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 22%, var(--panel))`);
+    style.setProperty('--active-accent-soft', `rgb(${rgb} / 0.12)`);
+  }
 }
 
 function applyCssSettings() {
@@ -438,9 +491,9 @@ function applyCssSettings() {
   // Opacity (5-100%) of the translucent pane ring. The active ring follows the same setting; otherwise
   // low values appear to save correctly while the visible focused pane still stays prominent.
   const paneRingOpacity = Math.max(5, Math.min(100, numberSetting('appearance.pane_ring_opacity', 75)));
-  root.setProperty('--pane-ring-opacity', `${paneRingOpacity}%`);
-  root.setProperty('--pane-active-ring-opacity', `${paneRingOpacity}%`);
-  applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 100));
+  applyPaneRingOpacity(paneRingOpacity);
+  applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 60));
+  applyActiveColor(initialSetting('appearance.active_color', 'green'));
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
@@ -456,6 +509,8 @@ function applyGlobalThemeMode(options = {}) {
   if (document.documentElement?.style) document.documentElement.style.colorScheme = resolved;
   if (options.updateEditor !== false) applyEditorThemeMode({refreshEditors: options.refreshEditors !== false});
   if (options.updateTerminals) applyTerminalRuntimeSettings({fit: false});
+  // DOIT.41: the active-color presets are theme-specific, so re-apply on every theme switch.
+  applyActiveColor(initialSetting('appearance.active_color', 'green'));
 }
 
 let globalThemeMediaListenerInstalled = false;

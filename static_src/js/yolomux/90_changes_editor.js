@@ -1829,6 +1829,12 @@ function savePreferenceControl(control) {
   if (path === 'appearance.inactive_pane_opacity') {
     applyInactivePaneOpacity(value);
   }
+  if (path === 'appearance.pane_ring_opacity') {
+    applyPaneRingOpacity(value);
+  }
+  if (path === 'appearance.active_color') {
+    applyActiveColor(value);
+  }
   saveSettingsPatch(settingPatch(path, value), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
@@ -1917,6 +1923,7 @@ function createFileExplorerPanel() {
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
         <div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
+            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
             <span class="file-explorer-panel-title file-explorer-mode-files-only">${esc(t('finder.label.finder'))}</span>
             <span class="file-explorer-panel-title file-explorer-mode-diff-only">${esc(t('tab.changes'))}</span>
             <input class="file-explorer-path-inline file-explorer-mode-files-only" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
@@ -1937,14 +1944,13 @@ function createFileExplorerPanel() {
           </div>
           <div class="file-explorer-toolbar-row file-explorer-scope-row file-explorer-mode-files-only">
             <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
+            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.syncLabel'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
             <div class="file-explorer-quick-access-panel file-explorer-mode-files-only" aria-label="${esc(t('finder.toolbar.quickPaths'))}"></div>
             <span class="file-explorer-toolbar-spacer"></span>
-            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="${esc(t('finder.toolbar.noSyncLabel'))}" aria-pressed="false">${esc(t('finder.toolbar.noSyncLabel'))}</button>
           </div>
           <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
             <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
             <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}">▣</button>
-            <button type="button" class="file-explorer-header-action" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
             <span class="file-explorer-toolbar-spacer"></span>
             <select class="file-explorer-sort-select file-explorer-mode-files-only" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
               <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>
@@ -1979,6 +1985,7 @@ function createFileExplorerPanel() {
     });
   }
   if (rootModeBtn) {
+    syncFileExplorerRootModeButton(rootModeBtn);
     rootModeBtn.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();

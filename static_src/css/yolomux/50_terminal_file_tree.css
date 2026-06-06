@@ -90,11 +90,11 @@
 }
 .panel:hover .terminal .xterm-viewport,
 .panel:focus-within .terminal .xterm-viewport {
-  scrollbar-color: rgba(150, 220, 92, 0.72) transparent;
+  scrollbar-color: var(--active-control-scrollbar-thumb) transparent;
 }
 .panel:hover .terminal .xterm-viewport::-webkit-scrollbar-thumb,
 .panel:focus-within .terminal .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgba(150, 220, 92, 0.72);
+  background: var(--active-control-scrollbar-thumb);
   background-clip: content-box;
 }
 .terminal-context-menu {
@@ -168,9 +168,9 @@
   cursor: pointer;
 }
 .session-rename-actions .session-rename-submit {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: #9be33d;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .terminal-context-menu button {
   width: 100%;
@@ -187,8 +187,8 @@
 .terminal-context-menu button:hover,
 .terminal-context-menu button:focus-visible {
   outline: 0;
-  color: #081205;
-  background: var(--brand-green);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
 }
 .terminal-context-menu button.danger {
   color: #ffd6dc;
@@ -937,9 +937,9 @@
   height: 30px;
   flex: 0 0 auto;
   padding: 0;
-  color: #071000;
-  background: var(--brand-green);
-  border: 1px solid var(--auto-border);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border: 1px solid var(--active-control-border);
   border-radius: 50%;
   cursor: pointer;
 }
@@ -1570,8 +1570,8 @@ body.theme-light .modal.about-open {
 .file-explorer-path-inline:focus {
   color: var(--text);
   background: rgba(10, 14, 20, 0.98);
-  border-color: var(--brand-green);
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.14);
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 .file-explorer-path.invalid,
 .file-explorer-path-inline.invalid {
@@ -1691,17 +1691,17 @@ body.theme-light .modal.about-open {
 .file-tree-row.selected {
   color: var(--file-selection-text);
   background: var(--file-selection-bg);
-  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(158, 232, 93, 0.24);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-tree-row.current-file:not(.selected) {
-  color: #eaf6df;
-  background: rgba(144, 196, 82, 0.12);
-  box-shadow: inset 3px 0 0 rgba(118, 185, 0, 0.55);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
+  box-shadow: inset 3px 0 0 var(--active-control-soft-border);
 }
 .file-tree-row.current-directory:not(.selected) {
-  color: #f2ffe8;
-  background: rgba(118, 185, 0, 0.16);
-  box-shadow: inset 3px 0 0 rgba(118, 185, 0, 0.72);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
+  box-shadow: inset 3px 0 0 var(--active-control-border);
 }
 .file-tree-row.renaming {
   background: rgba(82, 210, 115, 0.18);
@@ -2104,12 +2104,12 @@ body.theme-light .file-explorer-path-inline.invalid {
   color: var(--bad);
 }
 body.theme-light .file-tree-row.current-file:not(.selected) {
-  color: #173a13;
-  background: rgba(95, 152, 0, 0.12);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
 }
 body.theme-light .file-tree-row.current-directory:not(.selected) {
-  color: #10230b;
-  background: rgba(95, 152, 0, 0.16);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
 }
 body.theme-light .file-tree-row.new-entry:not(.selected) {
   color: #4f3600;
@@ -2229,10 +2229,11 @@ body.theme-light .file-tree-children::before {
 }
 .file-explorer-hidden-toggle.active,
 .file-explorer-root-mode-toggle.active,
+.file-explorer-quick-access-button.active,
 .file-explorer-date-toggle.active {
-  color: #061207;
-  border-color: var(--brand-green);
-  background: rgba(118, 185, 0, 0.88);
+  color: var(--active-control-text);
+  border-color: var(--active-control-border);
+  background: var(--active-control-bg);
 }
 .file-explorer-quick-access,
 .file-explorer-quick-access-panel {
@@ -2244,17 +2245,22 @@ body.theme-light .file-tree-children::before {
   overflow: visible;
 }
 .file-explorer-quick-access-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 24px;
   height: 20px;
   padding: 0 7px;
+  border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--muted);
   background: transparent;
   font: 700 var(--ui-font-size-2xs) var(--mono-font);
+  cursor: pointer;
 }
 .file-explorer-quick-access-button:hover {
   color: var(--text);
-  border-color: rgba(118, 185, 0, 0.55);
+  border-color: var(--active-control-soft-border);
 }
 .file-editor {
   display: flex;

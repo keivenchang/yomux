@@ -35,7 +35,7 @@
 }
 .info-refresh:hover,
 .info-refresh:focus-visible {
-  border-color: var(--brand-green);
+  border-color: var(--active-control-border);
   color: #f2ffe8;
 }
 .info-refresh.loading {
@@ -58,7 +58,7 @@
   to { transform: rotate(360deg); }
 }
 .file-explorer-changes-panel {
-  --changes-row-hover-bg: rgba(118, 185, 0, 0.10);
+  --changes-row-hover-bg: var(--active-control-soft-bg);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
   --changes-indent-line: rgba(148, 163, 184, 0.18);
   --changes-folder-text: var(--accent-gold);
@@ -193,7 +193,7 @@
 }
 .diff-ref-suggestion-option:hover,
 .diff-ref-suggestion-option.active {
-  background: color-mix(in srgb, var(--brand-green) 14%, transparent);
+  background: var(--active-control-soft-bg);
 }
 .diff-ref-suggestion-ref {
   min-width: 0;
@@ -311,7 +311,7 @@
 }
 .changes-repo-head:hover,
 .changes-repo-head:focus-visible {
-  color: var(--brand-green);
+  color: var(--active-control-bg);
   outline: none;
 }
 .changes-repo-caret {
@@ -379,7 +379,7 @@
 }
 .changes-uploaded-toggle:hover,
 .changes-uploaded-toggle:focus-visible {
-  color: var(--brand-green);
+  color: var(--active-control-bg);
 }
 .changes-uploaded-caret {
   display: inline-block;
@@ -759,7 +759,7 @@
 }
 .preferences-radio input[type="radio"] {
   cursor: pointer;
-  accent-color: var(--brand-green);
+  accent-color: var(--active-control-bg);
 }
 .preferences-radio input[type="radio"]:disabled,
 .preferences-radio:has(input:disabled) {
@@ -825,8 +825,8 @@
   outline: none;
 }
 .preferences-search:focus {
-  border-color: var(--brand-green);
-  box-shadow: 0 0 0 2px rgba(118, 185, 0, 0.14);
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 2px var(--active-control-focus-ring);
 }
 .preferences-search-button,
 .preferences-reset-all {
@@ -838,16 +838,16 @@
   font: 700 var(--ui-font-size-xs)/1 var(--control-font);
 }
 .preferences-search-button {
-  color: #061400;
-  background: var(--brand-green);
-  border-color: #a8e95a;
-  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.18);
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
+  box-shadow: 0 0 0 1px var(--active-control-focus-ring);
   font: 700 var(--ui-font-size-sm)/1.1 var(--ui-font);
 }
 .preferences-search-button:hover,
 .preferences-search-button:focus-visible {
-  background: #8bd41f;
-  border-color: #c3ff74;
+  background: color-mix(in srgb, var(--active-control-bg) 84%, #ffffff 16%);
+  border-color: var(--active-control-border);
 }
 .preferences-global-reset {
   display: grid;
@@ -1017,22 +1017,22 @@
 }
 .command-palette-view-chip {
   padding: 0 5px;
-  border: 1px solid rgba(158, 232, 93, 0.34);
+  border: 1px solid var(--active-control-soft-border);
   border-radius: 999px;
-  color: #bddcaf;
-  background: rgba(118, 185, 0, 0.12);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
   font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
   text-transform: lowercase;
   cursor: pointer;   /* DOIT.22 follow-up: chips are clickable — jump to that view */
 }
 .command-palette-view-chip:hover {
-  border-color: var(--brand-green);
+  border-color: var(--active-control-border);
   color: var(--text);
 }
 body.theme-light .command-palette-view-chip {
-  border-color: rgba(95, 150, 42, 0.4);
-  color: #3f6312;
-  background: rgba(118, 185, 0, 0.14);
+  border-color: var(--active-control-soft-border);
+  color: var(--text);
+  background: var(--active-control-soft-bg);
 }
 .command-palette-label .fuzzy-match,
 .command-palette-detail .fuzzy-match {
@@ -1240,7 +1240,7 @@ body.theme-light .changes-file-row.git-staged:not(.selected) .changes-file-name 
   color: #2f7d20;
 }
 body.theme-light .changes-file-row:hover {
-  background: rgba(95, 152, 0, 0.10);
+  background: var(--active-control-soft-bg);
 }
 body.theme-light .changes-diff-add {
   color: #166534;
@@ -1265,7 +1265,7 @@ body.theme-light .keyboard-shortcut-row kbd {
   width: 100%;
   justify-self: stretch;
   margin-inline-start: var(--preferences-control-left-indent);
-  accent-color: var(--brand-green);
+  accent-color: var(--active-control-bg);
 }
 .preferences-setting-control.setting-type-range .preferences-range-value {
   grid-column: 2;
@@ -1352,13 +1352,11 @@ body.theme-light .keyboard-shortcut-row kbd {
   font-size: var(--ui-font-size-xs);
 }
 .preferences-inline-action {
-  border-color: rgba(118, 185, 0, 0.55);
-  color: #d9f99d;
+  border-color: var(--active-control-soft-border);
+  color: var(--active-control-bg);
 }
-/* Light mode: the light-green #d9f99d is near-invisible on the light prefs panel — use a darker green
-   (caught by tools/static_build.py --lint-light). */
 body.theme-light .preferences-inline-action {
-  color: #3f6312;
+  color: var(--active-control-bg);
 }
 .popover-value a:hover,
 .branch-link:hover {
@@ -1460,8 +1458,8 @@ body.theme-light .command-palette-row {
 body.theme-light .command-palette-row.active,
 body.theme-light .command-palette-row:hover {
   color: #1f2937;
-  background: #e6f1dd;
-  border-color: rgba(118, 185, 0, 0.55);
+  background: var(--active-control-soft-bg);
+  border-color: var(--active-control-soft-border);
 }
 body.theme-light .command-palette-group,
 body.theme-light .command-palette-detail,

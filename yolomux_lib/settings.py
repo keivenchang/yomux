@@ -50,7 +50,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "tab_width": 180,
         "pane_spacing": 4,
         "pane_ring_opacity": 75,
-        "inactive_pane_opacity": 100,
+        "inactive_pane_opacity": 60,
+        "active_color": "green",
         "max_tabs_per_pane": 10,
         "red_reminder_ms": 1550,
         "yolo_rotate_ms": 20000,
@@ -93,7 +94,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "blame_all_lines": False,
     },
     "file_explorer": {
-        "root_mode": "fixed",
+        "root_mode": "sync",
         "image_open_mode": "same-tab",
         "image_preview_max_px": 320,
         "quick_access_paths": ["~", "/", "/tmp"],
@@ -187,6 +188,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     # browser/OS. Phase 1 will widen this as real locale catalogs are added.
     ("general", "language"): {"system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr", "pt-BR", "ru", "ko", "hi", "ar", "he", "en-XA"},
     ("appearance", "theme"): {"system", "dark", "light"},
+    ("appearance", "active_color"): {"green", "blue", "orange", "yellow", "purple", "white"},
     ("appearance", "terminal_theme"): {"dark", "light", "follow-app"},
     ("appearance", "date_time_hour_cycle"): {"24", "12"},
     ("appearance", "editor_color_scheme"): {
@@ -238,6 +240,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "companion_dirs"): "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Useful for companion repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates.",
     ("github", "watched_prs"): "Pull requests to watch independently of any open session, one per line. Each is 'owner/repo#N' or a full https://github.com/owner/repo/pull/N URL. They show in YO!info and can notify on merge / CI / review changes (see notifications.notify_transitions).",
     ("appearance", "theme"): "system | dark | light. Global UI theme for menus, panes, Finder/File Explorer, Preferences, Differ, and editor defaults.",
+    ("appearance", "active_color"): "green | blue | orange | yellow | purple | white. Accent color for ACTIVE/FOCUSED UI (active tab, focused-pane ring/glow, chrome strip, file selection). Green is the default; YOLO markers always stay green.",
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
     ("appearance", "date_time_hour_cycle"): "24 | 12. Controls date/time displays in Finder/File Explorer and Differ. Default 24.",
     ("appearance", "ui_font_size"): "Pixels, 8-20. Drives tab and compact UI text.",
@@ -278,7 +281,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("editor", "autosave"): "true/false. When true, dirty editor tabs save after the delay when the file has not changed on disk.",
     ("editor", "autosave_delay_seconds"): "Seconds, 0.5-60. Delay before dirty editor tabs auto-save.",
     ("editor", "blame_all_lines"): "true/false. Default false. When inline git blame is on, annotate EVERY line (not just the cursor's current line, the Cursor default).",
-    ("file_explorer", "root_mode"): "fixed | sync. fixed stays put; sync follows the focused tmux cwd.",
+    ("file_explorer", "root_mode"): "fixed | sync. Default sync. fixed stays put; sync follows the focused tmux cwd.",
     ("file_explorer", "image_open_mode"): "same-tab | new-tab. same-tab reuses one image viewer while browsing; new-tab keeps one image tab per file.",
     ("file_explorer", "image_preview_max_px"): "Pixels, 120-1200. Maximum width and height for hover image previews.",
     ("file_explorer", "quick_access_paths"): "List of paths for File Explorer shortcuts.",
