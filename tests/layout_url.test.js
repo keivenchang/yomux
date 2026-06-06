@@ -347,6 +347,15 @@ globalThis.__layoutTestApi = {
   watchedPrTransitionKeys,
   shouldNotifyTransitionKey,
   codeMirrorDiffLayout,
+  buildDiffOverviewGradientForTest: buildDiffOverviewGradient,
+  buildDiffOverviewGradientFromBandsForTest: buildDiffOverviewGradientFromBands,
+  diffOverviewRowsFromCodeMirrorChunksForTest: diffOverviewRowsFromCodeMirrorChunks,
+  diffOverviewRowsFromCodeMirrorRenderedWeightsForTest: diffOverviewRowsFromCodeMirrorRenderedWeights,
+  diffOverviewScrollLooksCurrentOnlyForTest: diffOverviewScrollLooksCurrentOnly,
+  diffOverviewCodeMirrorChunksForTest: diffOverviewCodeMirrorChunks,
+  diffOverviewRemovedLineCountForTest: diffOverviewRemovedLineCount,
+  updateCodeMirrorDiffOverviewForTest: updateCodeMirrorDiffOverview,
+  setDiffExpandUnchangedForTest(value) { diffExpandUnchanged = value === true; },
   changesPaneTabHtml,
   changesPanelHtml,
   fileExplorerChangesPanelHtml,
@@ -491,6 +500,8 @@ globalThis.__layoutTestApi = {
   sessionFileTimeText,
   sessionFileRelativeTimeText,
   sessionFileDisplayTimeText,
+  fileExplorerTreeDateModeLabel,
+  fileExplorerTreeDateModeTitle,
   fileExplorerTreeDateModeForTest() { return fileExplorerTreeDateMode; },
   setFileExplorerTreeDateModeForTest(value) { fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(value); },
   dateTimeHourCycleForTest() { return dateTimeHourCycle; },
@@ -1843,9 +1854,12 @@ function makeFileTree(paths) {
   assert.ok(/\.file-tree-row\.has-agent \.file-tree-name\s*\{[^}]*flex:\s*0 1 auto/.test(sharedTreeCss), 'file-tree rows with agent metadata keep the agent directly after the filename');
   assert.ok(/\.file-tree-row\.has-agent \.file-tree-agent\s*\{[^}]*margin-inline-end:\s*auto/.test(sharedTreeCss), 'file-tree rows with agent metadata push diff/status/date after the inline agent');
   assert.ok(/\.file-tree-icon\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ file icons use a centered fixed box');
+  assert.ok(/\.file-tree-diff\s*\{[^}]*justify-content:\s*flex-end[\s\S]*flex:\s*0 0 6\.5ch[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ diff counts reserve one shared column before the git status badge');
   assert.ok(/\.file-tree-git-status\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ git status badges use the same centered box');
   assert.ok(/\.file-tree-git-status\s*\{[^}]*overflow:\s*hidden[\s\S]*white-space:\s*nowrap/.test(sharedTreeCss), 'Finder/Differ status badges cannot spill into the date column');
   assert.ok(/\.file-tree-date\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ date cells align to the icon/status centerline');
+  assert.ok(/\.file-tree-date\s*\{[^}]*justify-content:\s*flex-end[\s\S]*flex:\s*0 0 var\(--file-tree-date-column-width\)[\s\S]*inline-size:\s*var\(--file-tree-date-column-width\)/.test(sharedTreeCss), 'Finder/Differ date cells reserve a fixed right column so status badges line up');
+  assert.ok(/\.file-tree-dir-count\[hidden\],[\s\S]*?\.file-tree-date\[hidden\]\s*\{[\s\S]*display:\s*none/.test(sharedTreeCss), '#46: hidden Finder/Differ metadata cells do not reserve their right-side columns');
   assert.ok(source.includes("refreshActivitySummary({force: true})"), 'YO!agent Refresh summary forces cached summaries to rebuild');
   assert.ok(source.includes("params.set('force', '1')"), 'YO!agent summary API supports a force refresh query');
   assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent summary API carries the active locale query');
@@ -2105,6 +2119,8 @@ function makeFileTree(paths) {
   assert.deepEqual(api.diffRefPopoverItems('commit 117', {compact: true, suggestions: manyDiffRefs}).map(item => item.subject), ['commit 117'], 'typing filters the diff-ref popup to matching refs/subjects');
   assert.ok(/function diffRefComparisonLineHtml[\s\S]*diffRefResetButtonHtml\(refs\)/.test(changedFilesSource), 'Editor and Differ FROM/TO rows share the same reset button helper');
   assert.ok(/function diffRefControlsHtml[\s\S]*diffRefResetButtonHtml\(refs\)/.test(changedFilesSource), 'compact Editor FROM/TO controls use the shared reset button helper');
+  assert.ok(/function diffRefResetButtonHtml[\s\S]*>⇤<\/button>/.test(changedFilesSource), 'Diff reset button uses a jump-to-default glyph, not a reload-looking circular arrow');
+  assert.equal(/function diffRefResetButtonHtml[\s\S]*>↺<\/button>/.test(changedFilesSource), false, 'Diff reset button does not use the reload-looking circular arrow');
   assert.ok(/function commitDiffRefControls[\s\S]*dataset\?\.diffRefPath[\s\S]*setRepoDiffRefs\(repo, fromInput\?\.value, toInput\?\.value, \{path\}\)/.test(changedFilesSource), 'editor diff ref commits carry the file path so no-history files do not fall back to repo history');
   assert.ok(/function syncDiffRefControlValues[\s\S]*dataset\?\.diffRefPath[\s\S]*diffRefFromSuggestions\(repo, path\)[\s\S]*diffRefToSuggestions\(refs\.from, repo, path\)/.test(changedFilesSource), 'editor diff ref sync keeps using file-scoped history after rerenders');
   assert.ok(/status\.textContent !== statusText[\s\S]*date\.textContent !== dateText/.test(changedFilesSource), 'Differ/Finder metadata slots avoid rewriting unchanged status/date text');
@@ -2252,6 +2268,38 @@ function makeFileTree(paths) {
   assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['a.txt', 'b.txt', 'c.txt'], 'legacy Differ mtime value maps to New');
   api.setSessionFilesSortModeForTest('name');
   assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['a.txt', 'b.txt', 'c.txt'], 'legacy Differ name value maps to A-Z');
+  const renderedSortItems = [
+    {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'b.txt', abs_path: '/repo/app/b.txt', mtime: 100},
+    {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 200},
+    {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'c.txt', abs_path: '/repo/app/c.txt', mtime: 50},
+  ];
+  api.setFileExplorerSessionFilesPayloadForTest({
+    session: '1',
+    loaded: true,
+    errors: [],
+    refs_by_repo: {},
+    repos: [{repo: '/repo/app', count: 3, touched_count: 3, added: 0, removed: 0}],
+    files: renderedSortItems,
+  });
+  const renderedDifferOrder = () => Array.from(api.fileExplorerChangesPanelHtml().matchAll(/data-open-change-file="\/repo\/app\/([^"]+)"/g)).map(match => match[1]);
+  api.setSessionFilesSortModeForTest('az');
+  assert.deepEqual(renderedDifferOrder(), ['a.txt', 'b.txt', 'c.txt'], 'rendered Differ tree A-Z follows the Differ sort select');
+  api.setSessionFilesSortModeForTest('za');
+  assert.deepEqual(renderedDifferOrder(), ['c.txt', 'b.txt', 'a.txt'], 'rendered Differ tree Z-A follows the Differ sort select');
+  api.setSessionFilesSortModeForTest('newest');
+  assert.deepEqual(renderedDifferOrder(), ['a.txt', 'b.txt', 'c.txt'], 'rendered Differ tree New follows the Differ sort select');
+  api.setSessionFilesSortModeForTest('oldest');
+  assert.deepEqual(renderedDifferOrder(), ['c.txt', 'b.txt', 'a.txt'], 'rendered Differ tree Old follows the Differ sort select');
+  api.setFileExplorerSessionFilesPayloadForTest({
+    session: '1',
+    loaded: true,
+    errors: [],
+    refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
+    repos: [{repo: '/repo/app', count: 2, touched_count: 2, added: 2, removed: 1, behind: 0, ahead: 1}],
+    files: [
+      {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
+    ],
+  });
   api.setSessionFilesSortModeForTest('newest');
   assert.ok(/class="[^"]*file-explorer-date-toggle[^"]*changes-date-toggle[^"]*active[^"]*"[^>]*data-file-explorer-tree-dates[^>]*>Date<\/button>/.test(finderSortPanel), 'Finder embedded Differ header exposes the active-colored shared date-mode button');
   assert.ok(/class="changes-refresh"[^>]*>Reload<\/button>/.test(finderSortPanel), 'C13: the Reload button reads "Reload" (via i18n, not hardcoded)');
@@ -2376,14 +2424,381 @@ function makeFileTree(paths) {
   assert.ok(appSource.includes('options.fromRef || options.toRef'), 'editor diff accepts explicit FROM/TO override from Modified-files panel click');
   assert.ok(appSource.includes("const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';"), 'diff editor editability follows TO=current after the FROM/TO flip');
   assert.ok(appSource.includes('const diffEditsAllowed = diffTargetIsCurrent;'), 'diff editor allows edits on the new/current side');
-  assert.ok(/function destroyCodeMirrorPanel[\s\S]*\.cm-diff-overview'\)\?\.remove\(\)/.test(appSource), '#26: tearing down the CodeMirror panel removes the diff scrollbar overview so its red/green ticks do not linger in edit/normal mode');
-  // DOIT.12 B3: overview ticks are positioned from the editor's RENDERED geometry (lineBlockAt/contentHeight)
-  // so they track collapsed folds, with a line-fraction fallback before first measure...
-  assert.ok(/function diffOverviewTickPosition[\s\S]*?view\.lineBlockAt\(doc\.line\([\s\S]*?view\.contentHeight/.test(appSource), 'B3: diff overview ticks use rendered geometry (lineBlockAt/contentHeight)');
-  assert.ok(/function diffOverviewTickPosition[\s\S]*?\(chunk\.start - 1\) \/ Math\.max\(1, totalLines\)/.test(appSource), 'B3: diff overview ticks fall back to the line-number fraction pre-measure');
-  // ...and they REBUILD when a fold expands/collapses (geometry/height change), instead of going stale.
+  assert.ok(/function destroyCodeMirrorPanel[\s\S]*\.cm-diff-overview'\)\?\.remove\(\)/.test(appSource), '#26: tearing down the CodeMirror panel removes the diff scrollbar overview so its red/green rail does not linger in edit/normal mode');
+  // DOIT.38: the right overview is one linear-gradient derived from CodeMirror's rendered diff-row sequence.
+  assert.ok(/function buildDiffOverviewGradientFromBands[\s\S]*linear-gradient\(to bottom/.test(appSource), 'diff overview builds one linear-gradient from non-overlapping row bands');
+  assert.ok(/function diffOverviewCodeMirrorChunks[\s\S]*view\?\.state\?\.values[\s\S]*fromA[\s\S]*fromB/.test(appSource), 'diff overview reads CodeMirror merge chunks from the live EditorView state');
+  assert.ok(/function updateCodeMirrorDiffOverview[\s\S]*const chunks = diffOverviewCodeMirrorChunks\(view, panel\)[\s\S]*diffOverviewRowsFromCodeMirrorRenderedWeights\(view, chunks, currentText, original, container\)[\s\S]*\|\| diffOverviewRowsFromCodeMirrorChunks\(chunks, currentText, original\)/.test(appSource), 'diff overview derives the right rail from CodeMirror chunk rows, with text visual-row weights for wrap');
+  assert.ok(/function updateCodeMirrorDiffOverview[\s\S]*if \(!chunkRows && view\) \{[\s\S]*scheduleDiffOverviewReadinessRebuild\(panel\);[\s\S]*return;/.test(appSource), '#50: live CodeMirror diff views wait for chunks instead of drawing the raw-diff fallback rail');
+  assert.ok(/function diffOverviewScrollLooksCurrentOnly[\s\S]*scrollTarget\.scrollHeight[\s\S]*diffOverviewLineHeight[\s\S]*return scrollRows < threshold/.test(appSource), '#55/#56/#57: diff overview detects CodeMirror current-side-only scroll geometry before deleted widgets are mounted');
+  assert.ok(/function updateCodeMirrorDiffOverview[\s\S]*diffOverviewScrollLooksCurrentOnly\(chunkRows, scrollTarget, view, container\)[\s\S]*scheduleDiffOverviewSettledRebuild\(panel\)[\s\S]*return;/.test(appSource), '#55/#56/#57: pre-snap current-side-only editors defer the rail until CodeMirror mounts deleted rows');
+  assert.equal(appSource.includes('diffOverviewRowsFromCurrentSideOnly'), false, '#55/#56/#57: current-side-only pre-snap state does not draw a temporary green rail');
+  assert.equal(appSource.includes('diffOverviewRowsFromCodeMirrorGeometry'), false, 'diff overview does not infer red bands from lineBlockAt pixel gaps');
+  assert.ok(/function updateCodeMirrorDiffOverviewGeometry[\s\S]*scrollTarget\.clientHeight[\s\S]*overview\.style\.height/.test(appSource), 'diff overview rail is dynamically sized to the native vertical scrollbar track, excluding the horizontal scrollbar area');
+  assert.ok(/function updateCodeMirrorDiffOverview[\s\S]*overview\.style\.background = gradient/.test(appSource), 'diff overview writes the gradient onto the rail itself');
+  assert.equal(appSource.includes("cm-diff-overview-tick"), false, 'diff overview no longer creates per-chunk tick DOM');
+  assert.equal(appSource.includes('diffOverviewRenderedRows'), false, 'diff overview no longer samples rendered DOM rows for color ticks');
+  // ...and the neutral viewport indicator still REBUILDS when a fold expands/collapses (geometry/height change).
   assert.ok(/function codeMirrorDiffOverviewListener[\s\S]*?update\.geometryChanged \|\| update\.heightChanged[\s\S]*?scheduleDiffOverviewRebuild/.test(appSource), 'B3: a CM updateListener rebuilds the overview on geometry/fold change');
   assert.ok(/panel\._diffOverviewCtx = \{container, state, currentText, original\}/.test(appSource), 'B3: the overview build stores its context so the fold-rebuild can recompute from live geometry');
+  const parseOverviewStops = gradient => {
+    const stops = [];
+    const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
+    let match = pattern.exec(String(gradient || ''));
+    while (match) {
+      stops.push({
+        color: match[1].toLowerCase(),
+        startText: match[2],
+        endText: match[3],
+        start: Number.parseFloat(match[2]),
+        end: Number.parseFloat(match[3]),
+      });
+      match = pattern.exec(String(gradient || ''));
+    }
+    return stops;
+  };
+  const changedOverviewStops = gradient => parseOverviewStops(gradient).filter(stop => stop.color !== 'transparent');
+  const assertNoOverviewStopOverlap = stops => {
+    for (let index = 1; index < stops.length; index += 1) {
+      assert.equal(stops[index - 1].end <= stops[index].start, true, 'adjacent diff overview stops never overlap');
+    }
+  };
+  const positionedDiff = [
+    'diff --git a/a.txt b/a.txt',
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    '@@ -11 +11 @@',
+    '-old display row ten',
+    '+new display row eleven',
+  ].join('\n');
+  const positionedGradient = api.buildDiffOverviewGradientForTest(positionedDiff, 100);
+  assert.ok(positionedGradient.startsWith('linear-gradient(to bottom,'), 'diff overview gradient has the expected CSS function shape');
+  const positionedStops = changedOverviewStops(positionedGradient);
+  assert.deepEqual(positionedStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})), [
+    {color: '#ff5d6c', start: '10.000', end: '11.000'},
+    {color: '#38d878', start: '11.000', end: '12.000'},
+  ], 'diff overview maps consecutive removed/added rows to adjacent one-line gradient slices');
+  assert.equal(positionedStops[0].endText, positionedStops[1].startText, 'consecutive red/green rows share one exact boundary');
+  assertNoOverviewStopOverlap(positionedStops);
+  assert.deepEqual([...new Set(positionedStops.map(stop => stop.color))].sort(), ['#38d878', '#ff5d6c'], 'diff overview uses only the red and green row colors for changed stops');
+  assert.equal(/rgba|var\(|\bred\b|\bgreen\b/.test(positionedGradient), false, 'diff overview gradient uses literal row colors only');
+  assert.equal(api.buildDiffOverviewGradientForTest('', 100), null, 'empty diffs do not draw an overview gradient');
+  const makeLines = (count, label) => Array.from({length: count}, (_, index) => `${label} ${index + 1}`).join('\n');
+  const largePrefix = `${makeLines(21, 'same')}\n`;
+  const largeRemoved = makeLines(540, 'removed');
+  const largeAdded = makeLines(199, 'added');
+  const largeTail = makeLines(50, 'tail');
+  const largeOriginal = `${largePrefix}${largeRemoved}\n${largeTail}`;
+  const largeCurrent = `${largePrefix}${largeAdded}\n${largeTail}`;
+  const largeChunk = {
+    fromA: largePrefix.length,
+    toA: largePrefix.length + largeRemoved.length,
+    fromB: largePrefix.length,
+    toB: largePrefix.length + largeAdded.length,
+  };
+  const largeRows = api.diffOverviewRowsFromCodeMirrorChunksForTest([largeChunk], largeCurrent, largeOriginal);
+  assert.deepEqual(largeRows.bands, [
+    {kind: 'remove', start: 21, end: 561},
+    {kind: 'add', start: 561, end: 760},
+  ], 'large CodeMirror replacement chunks render as normal prefix, red deleted widget rows, then green changed current rows');
+  assert.equal(largeRows.currentLineCount, 270, 'large replacement current side includes all current rows');
+  assert.equal(largeRows.deletedRows, 540, 'large replacement deleted CodeMirror widget rows are counted in the denominator');
+  assert.equal(largeRows.totalRows, 810, 'large replacement overview denominator is current rows plus CodeMirror deleted widget rows');
+  const currentOnlyView = {
+    defaultLineHeight: 20,
+    state: {doc: {lines: 270}},
+    contentDOM: {classList: {contains: () => false}},
+  };
+  assert.equal(api.diffOverviewScrollLooksCurrentOnlyForTest(largeRows, {scrollHeight: 270 * 20}, currentOnlyView, null), true, '#55/#56/#57 live scroller height near current rows selects the pre-snap model');
+  assert.equal(api.diffOverviewScrollLooksCurrentOnlyForTest(largeRows, {scrollHeight: 810 * 20}, currentOnlyView, null), false, '#55/#56/#57 full diff scroller height keeps the red+green model after CodeMirror mounts deleted widgets');
+  const currentOnlyContainer = new TestElement('current-only-diff-container');
+  const currentOnlyScroller = new TestElement('current-only-diff-scroller');
+  currentOnlyScroller.className = 'cm-scroller';
+  currentOnlyScroller.clientHeight = 400;
+  currentOnlyScroller.scrollHeight = 270 * 20;
+  currentOnlyContainer.appendChild(currentOnlyScroller);
+  api.setDiffExpandUnchangedForTest(true);
+  api.updateCodeMirrorDiffOverviewForTest(
+    {
+      _cmMode: 'diff',
+      _diffOverviewWaitingForDeletedRows: true,
+      _cmMergeView: {chunks: [largeChunk]},
+      _cmView: {
+        scrollDOM: currentOnlyScroller,
+        defaultLineHeight: 20,
+        state: {doc: {lines: 270}, values: [[largeChunk]]},
+        contentDOM: {classList: {contains: () => false}},
+      },
+    },
+    currentOnlyContainer,
+    {diff: ''},
+    largeCurrent,
+    largeOriginal,
+  );
+  assert.equal(currentOnlyContainer.querySelector('.cm-diff-overview'), null, '#55/#56/#57 current-side-only CodeMirror geometry draws no temporary rail before the deleted widgets settle');
+  const largeStops = changedOverviewStops(api.buildDiffOverviewGradientFromBandsForTest(largeRows.bands, largeRows.totalRows));
+  assert.deepEqual(largeStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})), [
+    {color: '#ff5d6c', start: '2.593', end: '69.259'},
+    {color: '#38d878', start: '69.259', end: '93.827'},
+  ], 'large replacement gradient allocates the green band CodeMirror paints, not only literal raw additions');
+  assert.equal(largeStops[0].endText, largeStops[1].startText, 'large replacement red and green bands share one boundary and never overlap');
+  assertNoOverviewStopOverlap(largeStops);
+  const makeOverviewFixtureLines = (count, label) => Array.from({length: count}, (_, index) => `${label} ${String(index + 1).padStart(3, '0')}`);
+  // Screenshot #48 repro shape from:
+  //   git diff e01be55 7f5a7e8 -- static_src/js/yolomux/99_terminal_boot.js
+  // The hunk starts at line 164, removes 30 rows, then adds 80 current-side rows.
+  const screenshotPrefix = makeOverviewFixtureLines(163, 'same');
+  const screenshotRemoved = makeOverviewFixtureLines(30, 'removed');
+  const screenshotAdded = makeOverviewFixtureLines(80, 'added');
+  const screenshotTail = makeOverviewFixtureLines(40, 'tail');
+  const screenshotOriginal = [...screenshotPrefix, ...screenshotRemoved, ...screenshotTail].join('\n');
+  const screenshotCurrent = [...screenshotPrefix, ...screenshotAdded, ...screenshotTail].join('\n');
+  const lineStartsForTest = text => {
+    const starts = [0];
+    for (let index = 0; index < text.length; index += 1) {
+      if (text.charCodeAt(index) === 10) starts.push(index + 1);
+    }
+    return starts;
+  };
+  const offsetForLineForTest = (starts, lineNumber) => starts[Math.max(0, lineNumber - 1)] ?? starts[starts.length - 1] ?? 0;
+  const screenshotOriginalStarts = lineStartsForTest(screenshotOriginal);
+  const screenshotCurrentStarts = lineStartsForTest(screenshotCurrent);
+  const screenshotChunk = {
+    fromA: offsetForLineForTest(screenshotOriginalStarts, 164),
+    toA: offsetForLineForTest(screenshotOriginalStarts, 194),
+    fromB: offsetForLineForTest(screenshotCurrentStarts, 164),
+    toB: offsetForLineForTest(screenshotCurrentStarts, 244),
+  };
+  const screenshotRows = api.diffOverviewRowsFromCodeMirrorChunksForTest([screenshotChunk], screenshotCurrent, screenshotOriginal);
+  const expectedScreenshotStops = changedOverviewStops(api.buildDiffOverviewGradientFromBandsForTest(screenshotRows.bands, screenshotRows.totalRows));
+  assert.deepEqual(screenshotRows.bands, [
+    {kind: 'remove', start: 163, end: 193},
+    {kind: 'add', start: 193, end: 273},
+  ], '#48 exact 99_terminal_boot.js e01be55..7f5a7e8 renders red deleted rows followed immediately by green current rows');
+  assert.equal(expectedScreenshotStops[0].endText, expectedScreenshotStops[1].startText, '#48 red/green bands share one exact boundary');
+  const screenshotContainer = new TestElement('screenshot-diff-container');
+  const screenshotScroller = new TestElement('screenshot-diff-scroller');
+  screenshotScroller.className = 'cm-scroller';
+  screenshotScroller.clientHeight = 400;
+  screenshotScroller.scrollHeight = 20000;
+  screenshotContainer.appendChild(screenshotScroller);
+  const screenshotDoc = {
+    length: screenshotCurrent.length,
+    lines: screenshotCurrentStarts.length,
+    line(number) {
+      return {from: offsetForLineForTest(screenshotCurrentStarts, number)};
+    },
+  };
+  const screenshotPanel = {
+    _cmMode: 'diff',
+    _cmMergeView: {chunks: [screenshotChunk]},
+    _cmView: {
+      scrollDOM: screenshotScroller,
+      state: {doc: screenshotDoc, values: [[screenshotChunk]]},
+      contentHeight: 20000,
+      lineBlockAt(pos) {
+        const line = screenshotCurrentStarts.findIndex((start, index) => start <= pos && (screenshotCurrentStarts[index + 1] ?? Infinity) > pos) + 1;
+        const lineNumber = Math.max(1, line);
+        if (lineNumber < 164) return {top: (lineNumber - 1) * 20, bottom: lineNumber * 20};
+        if (lineNumber <= 243) {
+          const inflatedTop = 10000 + (lineNumber - 164) * 20;
+          return {top: inflatedTop, bottom: inflatedTop + 20};
+        }
+        const tailTop = 11600 + (lineNumber - 244) * 20;
+        return {top: tailTop, bottom: tailTop + 20};
+      },
+    },
+  };
+  api.setDiffExpandUnchangedForTest(true);
+  api.updateCodeMirrorDiffOverviewForTest(screenshotPanel, screenshotContainer, {diff: ''}, screenshotCurrent, screenshotOriginal);
+  const screenshotOverview = screenshotContainer.querySelector('.cm-diff-overview');
+  const screenshotStops = changedOverviewStops(screenshotOverview?.style?.background || '');
+  assert.deepEqual(
+    screenshotStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})),
+    expectedScreenshotStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})),
+    '#48 production overview ignores misleading lineBlockAt gaps and matches the CodeMirror row stream exactly',
+  );
+  assertNoOverviewStopOverlap(screenshotStops);
+  const wrappedCurrent = 'same\nwrapped current line\nnext';
+  const wrappedOriginal = 'same\nold line\nnext';
+  const wrappedCurrentStarts = lineStartsForTest(wrappedCurrent);
+  const wrappedOriginalStarts = lineStartsForTest(wrappedOriginal);
+  const wrappedChunk = {
+    fromA: offsetForLineForTest(wrappedOriginalStarts, 2),
+    toA: offsetForLineForTest(wrappedOriginalStarts, 3),
+    fromB: offsetForLineForTest(wrappedCurrentStarts, 2),
+    toB: offsetForLineForTest(wrappedCurrentStarts, 3),
+  };
+  const wrappedDoc = {
+    length: wrappedCurrent.length,
+    lines: wrappedCurrentStarts.length,
+    line(number) {
+      return {from: offsetForLineForTest(wrappedCurrentStarts, number)};
+    },
+  };
+  const wrappedView = {
+    defaultCharacterWidth: 8,
+    defaultLineHeight: 20,
+    contentDOM: {
+      clientWidth: 64,
+      classList: {contains: name => name === 'cm-lineWrapping'},
+      getBoundingClientRect: () => ({width: 64}),
+    },
+    state: {doc: wrappedDoc},
+    lineBlockAt(pos) {
+      if (pos >= offsetForLineForTest(wrappedCurrentStarts, 3)) return {top: 80, bottom: 100};
+      if (pos >= offsetForLineForTest(wrappedCurrentStarts, 2)) return {top: 20, bottom: 80};
+      return {top: 0, bottom: 20};
+    },
+  };
+  const wrappedRows = api.diffOverviewRowsFromCodeMirrorRenderedWeightsForTest(
+    wrappedView,
+    [wrappedChunk],
+    wrappedCurrent,
+    wrappedOriginal,
+    null,
+  );
+  assert.deepEqual(wrappedRows.bands, [
+    {kind: 'remove', start: 1, end: 2},
+    {kind: 'add', start: 2, end: 5},
+  ], '#49 wrap weights the green current line by its text visual-row estimate while keeping deleted rows explicit');
+  assert.equal(wrappedRows.totalRows, 6, '#49 wrap denominator uses visual row weights: normal + red + wrapped green + normal');
+  const deletedWrapCurrent = 'ok\nnew\nend';
+  const deletedWrapOriginal = 'ok\nold deleted line\nend';
+  const deletedWrapCurrentStarts = lineStartsForTest(deletedWrapCurrent);
+  const deletedWrapOriginalStarts = lineStartsForTest(deletedWrapOriginal);
+  const deletedWrapChunk = {
+    fromA: offsetForLineForTest(deletedWrapOriginalStarts, 2),
+    toA: offsetForLineForTest(deletedWrapOriginalStarts, 3),
+    fromB: offsetForLineForTest(deletedWrapCurrentStarts, 2),
+    toB: offsetForLineForTest(deletedWrapCurrentStarts, 3),
+  };
+  const deletedWrapDoc = {
+    length: deletedWrapCurrent.length,
+    lines: deletedWrapCurrentStarts.length,
+    line(number) {
+      return {from: offsetForLineForTest(deletedWrapCurrentStarts, number)};
+    },
+  };
+  const deletedWrapView = {
+    defaultCharacterWidth: 8,
+    defaultLineHeight: 20,
+    contentDOM: {
+      clientWidth: 24,
+      classList: {contains: name => name === 'cm-lineWrapping'},
+      getBoundingClientRect: () => ({width: 24}),
+    },
+    state: {doc: deletedWrapDoc},
+    lineBlockAt(pos) {
+      if (pos >= offsetForLineForTest(deletedWrapCurrentStarts, 3)) return {top: 40, bottom: 60};
+      if (pos >= offsetForLineForTest(deletedWrapCurrentStarts, 2)) return {top: 20, bottom: 40};
+      return {top: 0, bottom: 20};
+    },
+  };
+  const deletedWrapRows = api.diffOverviewRowsFromCodeMirrorRenderedWeightsForTest(
+    deletedWrapView,
+    [deletedWrapChunk],
+    deletedWrapCurrent,
+    deletedWrapOriginal,
+    null,
+  );
+  assert.deepEqual(deletedWrapRows.bands, [
+    {kind: 'remove', start: 1, end: 7},
+    {kind: 'add', start: 7, end: 8},
+  ], '#49 wrap estimates unmounted deleted rows from original text width instead of squeezing them to one row');
+  assert.equal(deletedWrapRows.totalRows, 9, '#49 wrapped deleted rows contribute to the full rail denominator');
+  assert.equal(appSource.includes("scrollTarget.addEventListener?.('scroll', rebuild"), false, '#51/#52: scrolling updates only the viewport box, not the red/green gradient');
+  const notReadyContainer = new TestElement('not-ready-diff-container');
+  const notReadyScroller = new TestElement('not-ready-diff-scroller');
+  notReadyScroller.className = 'cm-scroller';
+  notReadyContainer.appendChild(notReadyScroller);
+  const notReadyPanel = {
+    _cmMode: 'diff',
+    _cmView: {scrollDOM: notReadyScroller, state: {doc: wrappedDoc, values: []}},
+  };
+  const notReadyDiff = [
+    'diff --git a/a.txt b/a.txt',
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    '@@ -1,3 +1,3 @@',
+    '-old one',
+    '-old two',
+    '+new one',
+    '+new two',
+    ' context',
+  ].join('\n');
+  api.setDiffExpandUnchangedForTest(true);
+  api.updateCodeMirrorDiffOverviewForTest(
+    notReadyPanel,
+    notReadyContainer,
+    {diff: notReadyDiff},
+    'new one\nnew two\ncontext',
+    'old one\nold two\ncontext',
+  );
+  assert.equal(notReadyContainer.querySelector('.cm-diff-overview'), null, '#50: live CodeMirror diff with missing chunks does not draw the raw fallback rail before the settled rebuild');
+  const multiHunkDiff = [
+    'diff --git a/a.txt b/a.txt',
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    '@@ -6 +6 @@',
+    '-old near top',
+    '+new near top',
+    '@@ -50 +50 @@',
+    '-old far down',
+    '+new far down',
+  ].join('\n');
+  const multiHunkStops = changedOverviewStops(api.buildDiffOverviewGradientForTest(multiHunkDiff, 100));
+  assert.deepEqual(multiHunkStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})), [
+    {color: '#ff5d6c', start: '5.000', end: '6.000'},
+    {color: '#38d878', start: '6.000', end: '7.000'},
+    {color: '#ff5d6c', start: '50.000', end: '51.000'},
+    {color: '#38d878', start: '51.000', end: '52.000'},
+  ], 'diff overview leaves real uncolored gaps between separate hunks');
+  assert.equal(multiHunkStops.some(stop => stop.start > 7 && stop.start < 50), false, 'diff overview does not color the unchanged gap between hunks');
+  assertNoOverviewStopOverlap(multiHunkStops);
+  const replacementDiff = [
+    'diff --git a/a.txt b/a.txt',
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    '@@ -1,3 +1,3 @@',
+    '-old one',
+    '-old two',
+    '+new one',
+    '+new two',
+    ' context',
+  ].join('\n');
+  assert.equal(api.diffOverviewRemovedLineCountForTest(replacementDiff), 2, 'diff overview denominator includes deleted rows because they occupy editor rows');
+  api.setDiffExpandUnchangedForTest(false);
+  const overviewContainer = new TestElement('overview-container');
+  api.updateCodeMirrorDiffOverviewForTest(null, overviewContainer, {diff: replacementDiff}, 'new one\nnew two\ncontext', 'old one\nold two\ncontext');
+  assert.equal(overviewContainer.querySelector('.cm-diff-overview'), null, 'collapsed unchanged diff view omits the right overview colors entirely');
+  api.setDiffExpandUnchangedForTest(true);
+  api.updateCodeMirrorDiffOverviewForTest(null, overviewContainer, {diff: replacementDiff}, 'new one\nnew two\ncontext', 'old one\nold two\ncontext');
+  const overview = overviewContainer.querySelector('.cm-diff-overview');
+  assert.ok(overview, 'diff overview renders a rail for replacement hunks');
+  assert.ok(String(overview.style.background || '').includes('linear-gradient'), 'diff overview paints the red/green rail as one gradient');
+  assert.equal(overview.querySelectorAll('.cm-diff-overview-tick').length, 0, 'diff overview creates no per-chunk tick children');
+  const overviewStops = changedOverviewStops(overview.style.background);
+  assert.deepEqual(overviewStops.map(stop => ({color: stop.color, start: stop.startText, end: stop.endText})), [
+    {color: '#ff5d6c', start: '0.000', end: '40.000'},
+    {color: '#38d878', start: '40.000', end: '80.000'},
+  ], 'diff overview replacement gradient follows rendered red rows, then rendered green rows, linearly');
+  assertNoOverviewStopOverlap(overviewStops);
+  const viewportContainer = new TestElement('viewport-container');
+  const viewportScroller = new TestElement('viewport-scroller');
+  viewportScroller.className = 'cm-scroller';
+  viewportScroller.scrollTop = 50;
+  viewportScroller.clientHeight = 100;
+  viewportScroller.scrollHeight = 500;
+  viewportContainer.appendChild(viewportScroller);
+  api.updateCodeMirrorDiffOverviewForTest(null, viewportContainer, {diff: replacementDiff}, 'new one\nnew two\ncontext', 'old one\nold two\ncontext');
+  const viewportOverview = viewportContainer.querySelector('.cm-diff-overview');
+  const viewportIndicator = viewportOverview.querySelector('.cm-diff-overview-viewport');
+  assert.ok(viewportIndicator, 'diff overview includes a viewport indicator when a scroll container is available');
+  assert.equal(viewportIndicator.style.top, '10%', 'diff overview viewport indicator follows scrollTop / scrollHeight');
+  assert.equal(viewportIndicator.style.height, '20%', 'diff overview viewport indicator follows clientHeight / scrollHeight');
+  assert.equal(appSource.includes('splitLaneIndexes'), false, 'diff overview does not use an overlapping-lane model');
+  assert.equal(appSource.includes('Math.max(0.8'), false, 'diff overview does not inflate one-line ticks in percent space, which made adjacent red/green bands overlap');
   // DOIT.12 B4: a diff-only toolbar toggle shows ALL context (omits collapseUnchanged) vs collapsing runs.
   assert.ok(appSource.includes('file-editor-diff-expand-panel'), 'B4: the diff toolbar has an expand/collapse-all-unchanged toggle');
   assert.ok(/function toggleDiffExpandUnchanged[\s\S]*?setDiffExpandUnchanged/.test(appSource), 'B4: the toggle flips + persists diffExpandUnchanged and re-renders');
@@ -2394,10 +2809,13 @@ function makeFileTree(paths) {
   assert.equal(diffLayoutFn.includes("'side'"), false, '#33: the wide-pane side-by-side layout (which numbered deleted rows) is no longer selected, so deleted rows are unnumbered widgets at every width');
   assert.equal(api.codeMirrorDiffLayout({getBoundingClientRect: () => ({width: 2000})}), 'inline', '#33: even a very wide pane uses the unified (inline) diff, so deleted rows are never numbered');
   assert.equal(api.codeMirrorDiffLayout({getBoundingClientRect: () => ({width: 300})}), 'inline', '#33: a narrow pane also uses the unified diff');
+  assert.equal(appSource.includes('{wrap: false}'), false, '#47: expanded diff honors the live Word Wrap setting instead of forcing wrap off');
+  assert.equal(appSource.includes('view.lineBlockAt(doc.line(line).from)'), false, '#48: diff overview must not infer deleted-row color from CodeMirror pixel gaps');
   assert.ok(/if \(state\.diffLoading && state\._diffLoadingPromise\) return state\._diffLoadingPromise/.test(appSource), '#43: concurrent diff loads are deduped (callers await one in-flight load), so the panel never renders against an un-loaded original');
-  assert.ok(/if \(!state\.diffLoaded && !state\.diffUnavailable\) await refreshOpenFileDiff/.test(appSource), '#43: the diff panel awaits the load before rendering, so an untracked/all-added file resolves to diffUnavailable and falls back to the plain editor instead of flashing all-green');
+  assert.ok(/if \(!state\.diffLoaded && !state\.diffUnavailable\) \{[\s\S]{0,260}refreshOpenFileDiff\(path, \{silent: true\}\);[\s\S]{0,260}return ensureCodeMirrorPanel\(panel, item, path, state, \{forceMode: 'edit'\}\)/.test(appSource), '#43: unresolved diffs keep the normal editor visible while the deduped diff load completes, avoiding both blank panes and all-green flashes');
   assert.equal(appSource.includes("fileEditorEmptyState('No diff'"), false, 'clean selected refs render the normal editor instead of a No diff empty state');
   assert.ok(/if \(!openFileDiffAvailable\(state\)\)[\s\S]{0,360}return ensureCodeMirrorPanel\(panel, item, path, state, \{forceMode: 'edit'\}\)/.test(appSource), 'clean selected refs fall back to the normal editable CodeMirror view');
+  assert.ok(/state\.diffLoaded && !state\.diffLoading && !openFileDiffAvailable\(state\)/.test(appSource), 'once a diff load confirms no usable diff, diff mode exits to the normal editor');
   const refreshDiffStart = appSource.indexOf('async function refreshOpenFileDiff(');
   const openFileEditorStart = appSource.indexOf('async function openFileInEditor(', refreshDiffStart);
   assert.ok(refreshDiffStart > 0 && openFileEditorStart > refreshDiffStart, '#43: refreshOpenFileDiff body is locatable');
@@ -2742,7 +3160,25 @@ function makeFileTree(paths) {
   assert.ok(preferencesCss.includes('.command-palette-detail .fuzzy-match'), 'command palette highlights fuzzy matches in detail text');
   assert.ok(preferencesCss.includes('.file-editor-diff-codemirror .cm-deletedChunk .cm-chunkButtons'), 'diff merge controls are positioned in the chunk margin');
   assert.ok(preferencesCss.includes('inset-inline-end: 8px !important'), 'diff merge controls sit on the right edge');
-  assert.ok(preferencesCss.includes('.cm-diff-overview-tick'), 'diff overview ruler ticks are styled');
+  assert.ok(/\.file-editor-diff-codemirror \.cm-merge-revert\s*\{[^}]*display:\s*none/.test(preferencesCss), 'diff view hides the left-side merge/revert strip completely');
+  assert.ok(/\.file-editor-diff-codemirror \.cm-diff-overview\s*\{[^}]*inset-block:\s*0[\s\S]*inset-inline-end:\s*14px[\s\S]*width:\s*4px[\s\S]*pointer-events:\s*none/.test(preferencesCss), 'diff overview ruler matches the scrollbar track height, sits left of the native scrollbar hit area, and does not intercept scrollbar input');
+  assert.ok(/\.file-editor-diff-codemirror \.cm-diff-overview-viewport\s*\{[^}]*position:\s*absolute[\s\S]*border:\s*1px solid rgba\(226,\s*238,\s*248,\s*0\.18\)[\s\S]*background:\s*rgba\(226,\s*238,\s*248,\s*0\.045\)/.test(preferencesCss), 'diff overview shows a faint neutral viewport indicator over the red/green gradient');
+  assert.equal(preferencesCss.includes('.cm-diff-overview-tick'), false, 'diff overview has no tick CSS because it paints one gradient on the rail');
+  assert.equal(preferencesCss.includes('.cm-diff-overview-tick.split-lane'), false, 'diff overview uses one full-width color per rendered row band, not split lanes');
+  assert.ok(/\.file-editor-diff-codemirror \.cm-changedLineGutter,\s*\n\.file-editor-diff-codemirror \.cm-deletedLineGutter\s*\{[^}]*color:\s*inherit[\s\S]*background:\s*transparent/.test(preferencesCss), 'diff left gutter stays neutral; only changed content rows and the right overview rail carry red/green diff color');
+  assert.equal(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-(?:changed|deleted)LineGutter\s*\{[^}]*background:\s*#[0-9a-fA-F]+/.test(preferencesCss), false, 'light theme must not reintroduce red/green left-gutter diff indicators');
+  assert.ok(/\.file-editor-codemirror \.cm-scroller,\s*\n\.file-editor-codemirror-panel \.cm-scroller\s*\{[^}]*scrollbar-gutter:\s*stable[\s\S]*scrollbar-width:\s*auto/.test(preferencesCss), 'CodeMirror keeps a stable, draggable native scrollbar gutter');
+  assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar,\s*\n\.file-editor-codemirror-panel \.cm-scroller::-webkit-scrollbar\s*\{[^}]*width:\s*12px[\s\S]*height:\s*12px/.test(preferencesCss), 'CodeMirror WebKit scrollbars are wide enough to grab without reading as diff markers');
+  assert.ok(/\.file-editor-codemirror \.cm-scroller,[\s\S]*?\.file-editor-codemirror-panel \.cm-scroller\s*\{[\s\S]*?scrollbar-color:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor native scrollbar thumb uses the active-tab green token');
+  assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-corner,[\s\S]*?background:\s*rgba\(255,\s*255,\s*255,\s*0\.04\)/.test(preferencesCss), 'editor scrollbar corner stays faint instead of reading as a second thumb');
+  assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-thumb,[\s\S]*?background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor WebKit scrollbar thumb uses the active-tab green token');
+  assert.ok(/body\.editor-theme-light \.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-thumb,[\s\S]*?background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'light editor WebKit scrollbar thumb also uses the active-tab green token');
+  assert.ok(/\.file-editor-panel:hover \.file-editor-codemirror-panel \.cm-scroller[\s\S]*?\{[\s\S]*?scrollbar-color:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor scrollbars stay active-tab green while the pane is hovered/focused');
+  assert.ok(/\.file-explorer-tree-panel:hover,[\s\S]*?\.file-explorer-tree-panel:focus-within\s*\{[\s\S]*?scrollbar-color:\s*rgba\(150,\s*220,\s*92,\s*0\.72\)/.test(preferencesCss), 'Finder tree scrollbar turns soft green only when Finder itself is hovered/focused');
+  assert.equal(/\.file-explorer-pane:hover \.file-explorer-tree-panel[\s\S]*?scrollbar-color:\s*rgba\(150,\s*220,\s*92,\s*0\.72\)/.test(preferencesCss), false, 'hovering embedded Differ through the shared Finder pane must not color the Finder scrollbar');
+  assert.ok(/\.file-explorer-changes-panel:hover,[\s\S]*?\.file-explorer-changes-panel:focus-within\s*\{[\s\S]*scrollbar-color:\s*rgba\(150,\s*220,\s*92,\s*0\.72\)/.test(preferencesCss), 'Modified-files scrollbar turns soft green on pane hover/focus');
+  assert.ok(/\.panel\.changes-panel:hover \.changes-scroll,[\s\S]*?\.panel\.changes-panel:focus-within \.changes-scroll\s*\{[\s\S]*scrollbar-color:\s*rgba\(150,\s*220,\s*92,\s*0\.72\)/.test(preferencesCss), 'standalone Differ scrollbar turns soft green when the Differ pane is hovered/focused');
+  assert.ok(/\.panel:hover \.terminal \.xterm-viewport[\s\S]*?\{[\s\S]*?scrollbar-color:\s*rgba\(150,\s*220,\s*92,\s*0\.72\)/.test(preferencesCss), 'terminal scrollbars turn soft green only while the pane is hovered/focused');
   assert.ok(/--diff-add-line-bg:\s*color-mix\(in srgb, var\(--code-diff-add\) 30%/.test(preferencesCss), '#250: diff added lines use a muted green fill (soft tint over the dark bg)');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#d2f0d6/.test(preferencesCss), 'light diff added lines use the pleasant soft green (image 025)');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#fbe5e5/.test(preferencesCss), 'light diff removed lines use the pleasant soft pink (image 025)');
@@ -2883,9 +3319,15 @@ function makeFileTree(paths) {
     assert.equal(api.dateTimeHourCycleForTest(), '24', 'invalid date/time clock values normalize to 24-hour');
     api.setFileExplorerTreeDateModeForTest('none');
     assert.equal(api.sessionFileDisplayTimeText(timestamp), '', 'file-tree date mode None hides Finder/Differ timestamps');
+    assert.equal(api.fileExplorerTreeDateModeLabel('none'), 'None', 'file-tree date mode None label uses the source locale catalog');
+    assert.equal(api.fileExplorerTreeDateModeLabel('date'), 'Date', 'file-tree date mode Date label uses the source locale catalog');
+    assert.equal(api.fileExplorerTreeDateModeLabel('relative'), 'Ago', 'file-tree date mode Ago label uses the source locale catalog');
+    assert.equal(api.fileExplorerTreeDateModeTitle('relative'), 'Date display: Ago. Click to cycle None, Date, Ago.', 'file-tree date mode tooltip uses localized catalog text');
     api.setFileExplorerTreeDateModeForTest('date');
     assert.equal(api.sessionFileDisplayTimeText(timestamp), api.sessionFileTimeText(timestamp), 'file-tree date mode Date uses the localized absolute timestamp');
     api.setFileExplorerTreeDateModeForTest('relative');
+    assert.equal(api.sessionFileRelativeTimeText(1000, 999), 'now', 'file-tree relative dates localize the now case');
+    assert.equal(api.sessionFileRelativeTimeText(1000, 1059), '<1 min ago', 'file-tree relative dates localize the sub-minute case');
     assert.equal(api.sessionFileRelativeTimeText(1000, 1060), '1 min ago', 'file-tree relative dates show minute age');
     assert.equal(api.sessionFileRelativeTimeText(1000, 19720), '5.2 hrs ago', 'file-tree relative dates show decimal hour age');
     assert.equal(api.sessionFileRelativeTimeText(1000, 217000), '2.5 days ago', 'file-tree relative dates show decimal day age');
@@ -5554,6 +5996,13 @@ function makeFileTree(paths) {
     assert.ok(/[年月日]/.test(localizedDate), `${locale} Finder date uses Chinese date wording`);
     assert.equal(/上午|下午|[AP]\.?M\.?/i.test(localizedDate), false, `${locale} Finder date defaults to a 24-hour clock`);
     assert.ok(/\d{2}:\d{2}/.test(localizedDate), `${locale} Finder date includes a two-digit clock`);
+    assert.equal(api.fileExplorerTreeDateModeLabel('none'), catalog['finder.dateMode.none'], `${locale} Finder/Differ None date-mode button is localized`);
+    assert.equal(api.fileExplorerTreeDateModeLabel('date'), catalog['finder.dateMode.date'], `${locale} Finder/Differ Date date-mode button is localized`);
+    assert.equal(api.fileExplorerTreeDateModeLabel('relative'), catalog['finder.dateMode.relative'], `${locale} Finder/Differ Ago date-mode button is localized`);
+    assert.equal(api.fileExplorerTreeDateModeTitle('relative').includes('None'), false, `${locale} Finder/Differ date-mode tooltip does not leak English None`);
+    assert.equal(api.fileExplorerTreeDateModeTitle('relative').includes('Date display'), false, `${locale} Finder/Differ date-mode tooltip does not leak English title text`);
+    assert.equal(api.sessionFileRelativeTimeText(1000, 19720), catalog['relative.compact.hour.other'].replace('{count}', '5.2'), `${locale} Finder/Differ compact Ago text is localized`);
+    assert.equal(/\bago\b|hrs?|days?|min\b/i.test(api.sessionFileRelativeTimeText(1000, 217000)), false, `${locale} Finder/Differ compact Ago text does not leak English units`);
     // The YOLO-toggle menu labels + the YOLO submenu header use the localized brand glyph (優/优 and
     // 優樂/优乐), not a Latin "YO"/"YOLO" (images #57 / #59).
     const glyph = locale === 'zh-Hant' ? '優' : '优';

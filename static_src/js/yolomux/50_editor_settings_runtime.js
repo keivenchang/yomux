@@ -268,7 +268,7 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   // the creation commit): there is no meaningful older file version to diff/blame against.
   button.hidden = !fileEditorGitActionControlsVisible(path, state, item);
   button.disabled = !active && loading;
-  const label = !active && loading ? 'Loading diff' : (active ? 'Exit diff' : 'Diff');
+  const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('editor.diff'));
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
   setFileEditorIcon(button, 'file-editor-icon-diff');
 }

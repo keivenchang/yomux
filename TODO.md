@@ -217,7 +217,9 @@ The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py
 
 ### Bug Fixes And Tech Debt
 
-- [ ] [M] Optional event-driven session prune: when a terminal WebSocket closes, confirm via a fresh roster check and remove the dead session from the UI immediately instead of waiting for the next status-payload roster refresh. This is a fast-path polish item; the cheaper status-payload roster refresh already shipped.
+- [x] [S] Diff editor: the editor's left panel (gutter/line-number column) picks up a red background tint from the diff's "from" side coloring. Remove this — the left panel should stay neutral (no red). Only the actual changed-line rows should carry diff color, not the surrounding chrome. (Screenshot: 20260605-033.png) DONE 2026-06-05: `.cm-changedLineGutter` and `.cm-deletedLineGutter` now inherit neutral gutter styling with transparent backgrounds in both themes; light-mode red/green gutter overrides were removed, and source + browser regressions pin the neutral left gutter.
+
+→ Pane scrollbar hover coloring and event-driven session prune moved to DOIT.38.
 
 ## Good Ideas From Similar Products
 

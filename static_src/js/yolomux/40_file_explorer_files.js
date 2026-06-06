@@ -882,16 +882,17 @@ function fileTreeMtimeText(entry) {
   return sessionFileDisplayTimeText(entry?.mtime);
 }
 
-function sortedFileTreeEntries(entries) {
+function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode) {
   const visible = entries.filter(entry => fileExplorerShowHidden || !entry.name.startsWith('.'));
-  const direction = fileExplorerTreeSortMode === 'za' ? -1 : 1;
+  const mode = ['az', 'za', 'newest', 'oldest'].includes(sortMode) ? sortMode : 'az';
+  const direction = mode === 'za' ? -1 : 1;
   return visible.sort((left, right) => {
     const leftKind = left.kind === 'dir' ? 0 : 1;
     const rightKind = right.kind === 'dir' ? 0 : 1;
     if (leftKind !== rightKind) return leftKind - rightKind;
-    if (fileExplorerTreeSortMode === 'newest' || fileExplorerTreeSortMode === 'oldest') {
+    if (mode === 'newest' || mode === 'oldest') {
       const mtimeResult = Number(right.mtime || 0) - Number(left.mtime || 0);
-      if (mtimeResult !== 0) return fileExplorerTreeSortMode === 'newest' ? mtimeResult : -mtimeResult;
+      if (mtimeResult !== 0) return mode === 'newest' ? mtimeResult : -mtimeResult;
     }
     return String(left.name || '').localeCompare(String(right.name || ''), undefined, {numeric: true, sensitivity: 'base'}) * direction;
   });
@@ -1225,7 +1226,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   if (!container) return;
   cacheFileExplorerRepoInfoEntries(parentPath, entries);
   const entriesByDir = options.entriesByDir instanceof Map ? options.entriesByDir : null;
-  const visible = sortedFileTreeEntries(entries);
+  const visible = sortedFileTreeEntries(entries, options.treeSortMode);
   const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
   const nextNodes = [];
   for (const entry of visible) {

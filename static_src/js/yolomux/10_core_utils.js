@@ -554,13 +554,16 @@ function syncFileExplorerHiddenButton(button) {
 
 function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateMode) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
-  if (normalized === 'date') return 'Date';
-  if (normalized === 'relative') return 'Ago';
-  return 'None';
+  return t(`finder.dateMode.${normalized}`);
 }
 
 function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
-  return `Date display: ${fileExplorerTreeDateModeLabel(mode)}. Click to cycle None, Date, Ago.`;
+  return t('finder.dateMode.title', {
+    mode: fileExplorerTreeDateModeLabel(mode),
+    none: fileExplorerTreeDateModeLabel('none'),
+    date: fileExplorerTreeDateModeLabel('date'),
+    relative: fileExplorerTreeDateModeLabel('relative'),
+  });
 }
 
 function syncFileExplorerTreeDateButton(button) {

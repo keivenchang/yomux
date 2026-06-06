@@ -767,7 +767,31 @@ body.resizing-file-explorer-changes {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  scrollbar-color: rgba(190, 205, 218, 0.62) rgba(255, 255, 255, 0.06);
   padding: 4px 0;
+}
+.file-explorer-tree-panel:hover,
+.file-explorer-tree-panel:focus-within {
+  scrollbar-color: rgba(150, 220, 92, 0.72) rgba(255, 255, 255, 0.08);
+}
+.file-explorer-tree-panel::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.file-explorer-tree-panel::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+}
+.file-explorer-tree-panel::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 0;
+  background: rgba(190, 205, 218, 0.62);
+  background-clip: content-box;
+}
+.file-explorer-tree-panel:hover::-webkit-scrollbar-thumb,
+.file-explorer-tree-panel:focus-within::-webkit-scrollbar-thumb {
+  background: rgba(150, 220, 92, 0.72);
+  background-clip: content-box;
 }
 /* C15: route this inner Finder↔Modified-files split through the SHARED --pane-resizer-* tokens instead
    of the old special-cased hardcoded-green strip. At rest a thin yellow line (--pane-resizer-bg, the same
@@ -810,23 +834,35 @@ body.resizing-file-explorer-changes {
   overflow-y: scroll;
   overflow-x: auto;
   scrollbar-gutter: stable;
-  scrollbar-color: rgba(118, 185, 0, 0.55) rgba(255, 255, 255, 0.06);
+  scrollbar-color: rgba(190, 205, 218, 0.62) rgba(255, 255, 255, 0.06);
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
   padding: 0 5px 5px;
 }
 .file-explorer-changes-panel:hover,
 .file-explorer-changes-panel:focus-within {
   --pane-bar-bg: var(--pane-tab-strip-bg);
+  scrollbar-color: rgba(150, 220, 92, 0.72) rgba(255, 255, 255, 0.08);
 }
 body.theme-light .file-explorer-pane,
 body.theme-light .file-explorer-tree-panel {
   color: var(--text);
   background: var(--panel);
 }
+body.theme-light .file-explorer-tree-panel {
+  scrollbar-color: rgba(82, 98, 116, 0.64) rgba(15, 23, 42, 0.08);
+}
+body.theme-light .file-explorer-tree-panel:hover,
+body.theme-light .file-explorer-tree-panel:focus-within {
+  scrollbar-color: rgba(95, 152, 0, 0.68) rgba(15, 23, 42, 0.08);
+}
 body.theme-light .file-explorer-changes-panel {
   color: var(--text);
-  scrollbar-color: rgba(95, 152, 0, 0.62) rgba(15, 23, 42, 0.08);
+  scrollbar-color: rgba(82, 98, 116, 0.64) rgba(15, 23, 42, 0.08);
   background: color-mix(in srgb, var(--panel2) 76%, var(--panel) 24%);
+}
+body.theme-light .file-explorer-changes-panel:hover,
+body.theme-light .file-explorer-changes-panel:focus-within {
+  scrollbar-color: rgba(95, 152, 0, 0.68) rgba(15, 23, 42, 0.08);
 }
 .file-explorer-changes-panel::-webkit-scrollbar {
   width: 10px;
@@ -842,11 +878,27 @@ body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
   min-height: 32px;
   border: 2px solid transparent;
   border-radius: 0;
-  background: rgba(118, 185, 0, 0.55);
+  background: rgba(190, 205, 218, 0.62);
   background-clip: content-box;
 }
-.file-explorer-changes-panel::-webkit-scrollbar-thumb:hover {
-  background: rgba(118, 185, 0, 0.8);
+.file-explorer-changes-panel:hover::-webkit-scrollbar-thumb,
+.file-explorer-changes-panel:focus-within::-webkit-scrollbar-thumb {
+  background: rgba(150, 220, 92, 0.72);
+  background-clip: content-box;
+}
+body.theme-light .file-explorer-tree-panel::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.08);
+}
+body.theme-light .file-explorer-tree-panel::-webkit-scrollbar-thumb,
+body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-thumb {
+  background: rgba(82, 98, 116, 0.64);
+  background-clip: content-box;
+}
+body.theme-light .file-explorer-tree-panel:hover::-webkit-scrollbar-thumb,
+body.theme-light .file-explorer-tree-panel:focus-within::-webkit-scrollbar-thumb,
+body.theme-light .file-explorer-changes-panel:hover::-webkit-scrollbar-thumb,
+body.theme-light .file-explorer-changes-panel:focus-within::-webkit-scrollbar-thumb {
+  background: rgba(95, 152, 0, 0.68);
   background-clip: content-box;
 }
 .file-explorer-changes-head {
@@ -1154,11 +1206,10 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
   min-width: 0;
 }
 .file-editor-diff-codemirror .cm-merge-revert {
-  width: 2.2em;
-  background: color-mix(in srgb, var(--line) 46%, transparent);
-  border-inline: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  display: none;
 }
 .file-editor-diff-codemirror .cm-merge-revert button {
+  display: none;
   color: var(--text);
   background: color-mix(in srgb, var(--panel2) 85%, transparent);
   border-radius: 0;
@@ -1194,7 +1245,8 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
    intra-line change-highlight background rules and their --diff-*-text-bg tokens are gone. */
 .file-editor-diff-codemirror .cm-changedLineGutter,
 .file-editor-diff-codemirror .cm-deletedLineGutter {
-  background: color-mix(in srgb, var(--accent-gold) 45%, transparent);
+  color: inherit;
+  background: transparent;
 }
 .file-editor-diff-codemirror .cm-deletedChunk {
   position: relative;
@@ -1222,40 +1274,31 @@ body.theme-light .file-explorer-changes-panel .changes-refresh:focus-visible {
 }
 .file-editor-diff-codemirror .cm-diff-overview {
   position: absolute;
-  inset-block: 8px;
-  inset-inline-end: 3px;
+  inset-block: 0;
+  inset-inline-end: 14px;
   z-index: 4;
   width: 4px;
-  pointer-events: auto;
+  pointer-events: none;
 }
-.file-editor-diff-codemirror .cm-diff-overview-tick {
+.file-editor-diff-codemirror .cm-diff-overview-viewport {
   position: absolute;
-  inset-inline: 0;
-  min-height: 2px;
-  border-radius: 0;
-  cursor: pointer;
-}
-.file-editor-diff-codemirror .cm-diff-overview-tick.add {
-  background: #38d878;
-}
-.file-editor-diff-codemirror .cm-diff-overview-tick.remove {
-  background: #ff5d6c;
+  inset-inline: -2px;
+  z-index: 1;
+  box-sizing: border-box;
+  min-height: 6px;
+  border: 1px solid rgba(226, 238, 248, 0.18);
+  border-radius: 2px;
+  background: rgba(226, 238, 248, 0.045);
+  pointer-events: none;
 }
 body.editor-theme-light .file-editor-diff-codemirror {
   --code-diff-add: #00a152;
   --code-diff-remove: #d81f32;
   /* Light diff: the pleasant soft green/pink palette the user picked (image 025) — clearly visible
      on the white editor but light enough for dark code text on top (was the near-white #e6ffec/
-     #ffebe9). Gutters use the deeper accent tone from the same palette. */
+     #ffebe9). */
   --diff-add-line-bg: #d2f0d6;
   --diff-remove-line-bg: #fbe5e5;
-}
-body.editor-theme-light .file-editor-diff-codemirror .cm-changedLineGutter {
-  color: #116329;
-  background: #a8dfb2;
-}
-body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLineGutter {
-  background: #f1c5c5;
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedText,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk .cm-deletedText {
@@ -1267,14 +1310,6 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
   color: #064e3b;
   background: #b9e7c2;
   text-decoration-color: #064e3b;
-}
-/* Light editor (DOIT.12 B5): the overview-ruler ticks kept saturated dark green/red
-   that mismatched the light diff line fills — match them to --code-diff-*. */
-body.editor-theme-light .file-editor-diff-codemirror .cm-diff-overview-tick.add {
-  background: #00a152;
-}
-body.editor-theme-light .file-editor-diff-codemirror .cm-diff-overview-tick.remove {
-  background: #d81f32;
 }
 /* Inline (non-mergeview) editor diff decorations read --code-diff-* from the content
    scope; the light values were scoped ONLY to .file-editor-diff-codemirror, so the
@@ -1749,7 +1784,44 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-codemirror .cm-scroller,
 .file-editor-codemirror-panel .cm-scroller {
-  scrollbar-color: rgba(118, 185, 0, 0.4) rgba(255, 255, 255, 0.05);
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: var(--pane-tab-active-bg) rgba(255, 255, 255, 0.10);
+}
+.file-editor-codemirror .cm-scroller::-webkit-scrollbar,
+.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+.file-editor-codemirror .cm-scroller::-webkit-scrollbar-track,
+.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.10);
+}
+.file-editor-codemirror .cm-scroller::-webkit-scrollbar-corner,
+.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-corner {
+  background: rgba(255, 255, 255, 0.04);
+}
+.file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb,
+.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb {
+  background: var(--pane-tab-active-bg);
+  border: 2px solid rgba(7, 10, 14, 0.95);
+  border-radius: 6px;
+}
+.file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb:hover,
+.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb:hover {
+  background: var(--pane-tab-active-bg);
+}
+.file-editor-panel:hover .file-editor-codemirror .cm-scroller,
+.file-editor-panel:focus-within .file-editor-codemirror .cm-scroller,
+.file-editor-panel:hover .file-editor-codemirror-panel .cm-scroller,
+.file-editor-panel:focus-within .file-editor-codemirror-panel .cm-scroller {
+  scrollbar-color: var(--pane-tab-active-bg) rgba(255, 255, 255, 0.10);
+}
+.file-editor-panel:hover .file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb,
+.file-editor-panel:focus-within .file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb,
+.file-editor-panel:hover .file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb,
+.file-editor-panel:focus-within .file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb {
+  background: var(--pane-tab-active-bg);
 }
 .file-editor-codemirror .cm-content ::selection,
 .file-editor-codemirror-panel .cm-content ::selection {
@@ -1794,6 +1866,15 @@ body.editor-theme-light .file-editor-codemirror .cm-scroller,
 body.editor-theme-light .file-editor-codemirror-panel .cm-scroller {
   color: var(--text) !important;
   background: var(--editor-bg) !important;
+}
+body.editor-theme-light .file-editor-codemirror .cm-scroller::-webkit-scrollbar-track,
+body.editor-theme-light .file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.16);
+}
+body.editor-theme-light .file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb,
+body.editor-theme-light .file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb {
+  background: var(--pane-tab-active-bg);
+  border-color: rgba(255, 255, 255, 0.92);
 }
 body.editor-theme-light .file-editor-codemirror .cm-content,
 body.editor-theme-light .file-editor-codemirror-panel .cm-content {

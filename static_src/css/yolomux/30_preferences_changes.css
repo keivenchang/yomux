@@ -83,7 +83,52 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  scrollbar-color: rgba(190, 205, 218, 0.62) rgba(255, 255, 255, 0.06);
   padding: 10px;
+}
+.panel.changes-panel:hover .changes-scroll,
+.panel.changes-panel:focus-within .changes-scroll {
+  scrollbar-color: rgba(150, 220, 92, 0.72) rgba(255, 255, 255, 0.08);
+}
+.changes-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.changes-scroll::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+}
+.changes-scroll::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 0;
+  background: rgba(190, 205, 218, 0.62);
+  background-clip: content-box;
+}
+.panel.changes-panel:hover .changes-scroll::-webkit-scrollbar-thumb,
+.panel.changes-panel:focus-within .changes-scroll::-webkit-scrollbar-thumb {
+  background: rgba(150, 220, 92, 0.72);
+  background-clip: content-box;
+}
+body.theme-light .changes-scroll {
+  scrollbar-color: rgba(82, 98, 116, 0.64) rgba(15, 23, 42, 0.08);
+}
+body.theme-light .panel.changes-panel:hover .changes-scroll,
+body.theme-light .panel.changes-panel:focus-within .changes-scroll {
+  scrollbar-color: rgba(95, 152, 0, 0.68) rgba(15, 23, 42, 0.08);
+}
+body.theme-light .changes-scroll::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.08);
+}
+body.theme-light .changes-scroll::-webkit-scrollbar-thumb {
+  background: rgba(82, 98, 116, 0.64);
+  background-clip: content-box;
+}
+body.theme-light .panel.changes-panel:hover .changes-scroll::-webkit-scrollbar-thumb,
+body.theme-light .panel.changes-panel:focus-within .changes-scroll::-webkit-scrollbar-thumb {
+  background: rgba(95, 152, 0, 0.68);
+  background-clip: content-box;
 }
 .changes-toolbar {
   display: flex;

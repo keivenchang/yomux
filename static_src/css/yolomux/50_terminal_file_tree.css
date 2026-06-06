@@ -70,6 +70,31 @@
 }
 .terminal .xterm-viewport {
   overflow-y: auto;
+  scrollbar-width: auto;
+  scrollbar-color: rgba(190, 205, 218, 0.62) transparent;
+}
+.terminal .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.terminal .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+.terminal .xterm-viewport::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 0;
+  background: rgba(190, 205, 218, 0.62);
+  background-clip: content-box;
+}
+.panel:hover .terminal .xterm-viewport,
+.panel:focus-within .terminal .xterm-viewport {
+  scrollbar-color: rgba(150, 220, 92, 0.72) transparent;
+}
+.panel:hover .terminal .xterm-viewport::-webkit-scrollbar-thumb,
+.panel:focus-within .terminal .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(150, 220, 92, 0.72);
+  background-clip: content-box;
 }
 .terminal-context-menu {
   position: fixed;
@@ -1638,6 +1663,8 @@ body.theme-light .modal.about-open {
   padding: 4px 0;
 }
 .file-tree-row {
+  --file-tree-row-control-size: max(18px, calc(var(--file-explorer-font-size) + 1px));
+  --file-tree-date-column-width: 16ch;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1957,11 +1984,13 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
 .file-tree-diff {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
-  flex-shrink: 0;
+  flex: 0 0 6.5ch;
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
   font-weight: 800;
+  line-height: 1;
 }
 .file-tree-agent {
   display: inline-flex;
@@ -1986,9 +2015,11 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 max(18px, calc(var(--file-explorer-font-size) + 1px));
-  min-width: max(18px, calc(var(--file-explorer-font-size) + 1px));
-  height: max(18px, calc(var(--file-explorer-font-size) + 1px));
+  align-self: center;
+  box-sizing: border-box;
+  flex: 0 0 var(--file-tree-row-control-size);
+  min-width: var(--file-tree-row-control-size);
+  height: var(--file-tree-row-control-size);
   padding: 0;
   border-radius: 3px;
   color: #061207;
@@ -2004,8 +2035,12 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
 .file-tree-date {
   display: inline-flex;
   align-items: center;
-  flex-shrink: 0;
-  min-height: max(18px, calc(var(--file-explorer-font-size) + 1px));
+  justify-content: flex-end;
+  align-self: center;
+  box-sizing: border-box;
+  flex: 0 0 var(--file-tree-date-column-width);
+  inline-size: var(--file-tree-date-column-width);
+  min-height: var(--file-tree-row-control-size);
   padding-inline-start: 4px;
   color: var(--muted);
   font-family: var(--mono-font);
@@ -2013,7 +2048,16 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   line-height: 1;
   font-stretch: condensed;
   letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: clip;
   white-space: nowrap;
+}
+.file-tree-dir-count[hidden],
+.file-tree-agent[hidden],
+.file-tree-diff[hidden],
+.file-tree-git-status[hidden],
+.file-tree-date[hidden] {
+  display: none;
 }
 .file-tree-children {
   position: relative;

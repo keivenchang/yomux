@@ -61,7 +61,7 @@ The `YO` button toggles YOLO auto-approval for a tmux session. The visible tmux 
 - The menu bar contains `File`, `View`, `tmux`, `Tabs`, and `Help`. `File` opens the File Explorer / Finder, Preferences, and logout flow; `tmux` creates and manages the currently focused tmux session; `Tabs` navigates active, minimized, and inactive tabs.
 - The `Tabs` menu lists tabs with compact rich rows separated by bars. It does not print section headers such as Active, Minimized, or Inactive.
 - The `Tabs` menu shows a small count badge when YOLO is enabled for one or more sessions. `tmux` has the current session's YO button at the top, direct `+ Claude` / `+ Codex` / `+ Term` launch items, session actions, and the `YOLO` rule actions at the bottom.
-- By default YOLOmux shows existing tmux sessions, capped at nine visible session tabs (`1`–`9`). It does not create default `yolomuxN` sessions.
+- By default YOLOmux shows existing tmux sessions (up to 99). It does not create default `yolomuxN` sessions.
 - `+ Claude` / `+ Codex` create the next numbered tmux session with that agent (e.g. `7` when six exist). Each appears only when that CLI is on the server `PATH`; if neither is, YOLOmux shows `+ Term` and creates a plain shell session.
 - Each session tab has its own `YO` button, status badges, session label, compact work description, and hide button.
 - The layout is encoded in the page URL (`sessions`, `layout`, `tabs`), so a reload — or a bookmarked link — preserves the exact layout without browser storage.
@@ -104,10 +104,10 @@ Choose specific sessions:
 python3 yolomux.py --sessions project1,project2
 ```
 
-Run on a shared development host:
+Run on a specific port (host defaults to `0.0.0.0`):
 
 ```bash
-python3 yolomux.py --host 0.0.0.0 --port 9998
+python3 yolomux.py --port 9998
 ```
 
 Run a background server with logs under `/tmp`:

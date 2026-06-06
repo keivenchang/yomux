@@ -458,7 +458,7 @@ function diffRefResetButtonHtml(refs = repoDiffRefs('')) {
   const isDefault = refs.from === 'HEAD' && refs.to === 'current';
   const resetHidden = isDefault ? ' hidden' : '';
   const label = esc(t('diff.ref.reset'));
-  return `<button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">↺</button>`;
+  return `<button type="button" class="diff-ref-reset" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">⇤</button>`;
 }
 
 // C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
@@ -708,24 +708,28 @@ function compactAgeNumber(value) {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
+function compactRelativeFileTimeText(unit, countText) {
+  const category = countText === '1' ? 'one' : 'other';
+  return t(`relative.compact.${unit}.${category}`, {count: countText});
+}
+
 function sessionFileRelativeTimeText(mtime, nowSeconds = Date.now() / 1000) {
   const value = Number(mtime || 0);
   if (!value) return '';
   const now = Number(nowSeconds);
   if (!Number.isFinite(now)) return '';
   const age = now - value;
-  if (age <= 0) return 'now';
-  if (age < 60) return '<1 min ago';
+  if (age <= 0) return t('relative.compact.now');
+  if (age < 60) return t('relative.compact.lessThanMinute');
   if (age < 3600) {
-    const minutes = Math.max(1, Math.round(age / 60));
-    return `${minutes} min ago`;
+    return compactRelativeFileTimeText('minute', String(Math.max(1, Math.round(age / 60))));
   }
   if (age < 86400) {
     const hoursText = compactAgeNumber(age / 3600);
-    return `${hoursText} ${hoursText === '1' ? 'hr' : 'hrs'} ago`;
+    return compactRelativeFileTimeText('hour', hoursText);
   }
   const daysText = compactAgeNumber(age / 86400);
-  return `${daysText} ${daysText === '1' ? 'day' : 'days'} ago`;
+  return compactRelativeFileTimeText('day', daysText);
 }
 
 function sessionFileDisplayTimeText(mtime) {
@@ -975,6 +979,7 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
     differMode: true,
     compact: options.compact,
     repoForDiffer: repoPath,
+    treeSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
   });
 }
 
@@ -2466,7 +2471,9 @@ function restoreFileEditorPanelViewState(item, panel) {
 function destroyCodeMirrorPanel(panel) {
   panel?._cmResizeObserver?.disconnect?.();
   if (panel) panel._cmResizeObserver = null;
-  // Clear the diff scrollbar overview so its red/green ticks don't linger after switching to
+  panel?._diffOverviewViewportCleanup?.();
+  if (panel) panel._diffOverviewWaitingForDeletedRows = false;
+  // Clear the diff scrollbar overview so its red/green rail doesn't linger after switching to
   // edit/normal mode (only the diff build re-adds it via updateCodeMirrorDiffOverview).
   panel?.querySelector?.('.cm-diff-overview')?.remove();
   if (panel?._cmMergeView) {
@@ -2738,142 +2745,440 @@ function reconfigureCodeMirrorPanelEditorOptions(panel) {
     try { view.dispatch({effects: effect}); } catch (_) {}
   }
   updateCodeMirrorCursorStatus(panel);
+  if (panel?._cmMode === 'diff') scheduleDiffOverviewRebuild(panel);
   return true;
 }
 
-function diffOverviewCollector() {
-  const chunks = [];
-  let current = null;
-  const pushCurrent = () => {
-    if (current) chunks.push(current);
-    current = null;
-  };
-  return {
-    add(kind, line) {
-      const start = Math.max(1, Number(line || 1));
-      if (current && current.kind === kind && start <= current.end + 1) {
-        current.end = Math.max(current.end, start);
-        return;
-      }
-      pushCurrent();
-      current = {kind, start, end: start};
-    },
-    flush() {
-      pushCurrent();
-    },
-    finish() {
-      pushCurrent();
-      return chunks;
-    },
-  };
+function diffOverviewPercent(lineIndex, totalLines) {
+  const total = Math.max(1, Number(totalLines || 0));
+  const value = Math.max(0, Math.min(100, (Number(lineIndex || 0) / total) * 100));
+  return value.toFixed(3);
 }
 
-// B3 (DOIT.12): position one overview tick for a diff chunk. When the CM view is laid out, use its REAL
-// rendered geometry (lineBlockAt/contentHeight) so the tick tracks collapsed-fold space and re-tracks when
-// a fold expands; before first measure (or with no view) fall back to the line-number fraction. Returns
-// {top, height} as percentages of the scroll track, plus scrollTop (px) for click-to-scroll (null = use %).
-function diffOverviewTickPosition(view, chunk, totalLines) {
-  if (view && view.state && view.contentHeight > 1) {
-    const doc = view.state.doc;
-    const startLine = Math.max(1, Math.min(doc.lines, chunk.start));
-    const endLine = Math.max(startLine, Math.min(doc.lines, chunk.end));
-    const topBlock = view.lineBlockAt(doc.line(startLine).from);
-    const endBlock = view.lineBlockAt(doc.line(endLine).from);
-    const contentHeight = Math.max(1, view.contentHeight);
-    const top = Math.max(0, Math.min(100, (topBlock.top / contentHeight) * 100));
-    const bottom = Math.max(top, Math.min(100, (endBlock.bottom / contentHeight) * 100));
-    return {top, height: Math.max(0.8, bottom - top), scrollTop: topBlock.top};
-  }
-  return {
-    top: Math.max(0, Math.min(100, ((chunk.start - 1) / Math.max(1, totalLines)) * 100)),
-    height: Math.max(0.8, ((chunk.end - chunk.start + 1) / Math.max(1, totalLines)) * 100),
-    scrollTop: null,
-  };
-}
-
-function diffOverviewChunks(diff, totalLines) {
-  const collector = diffOverviewCollector();
-  let oldLine = 0;
-  let newLine = 0;
+function diffOverviewRemovedLineCount(diff) {
+  let count = 0;
+  let hasHunk = false;
   for (const line of String(diff || '').split('\n')) {
-    const hunk = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
-    if (hunk) {
-      collector.flush();
-      oldLine = Math.max(1, Number(hunk[1]) || 1);
-      newLine = Math.max(1, Number(hunk[2]) || 1);
+    if (/^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/.test(line)) {
+      hasHunk = true;
       continue;
     }
-    if (!newLine || line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+')) {
-      collector.add('add', newLine);
-      newLine += 1;
-    } else if (line.startsWith('-')) {
-      collector.add('remove', newLine || oldLine);
-      oldLine += 1;
-    } else {
-      collector.flush();
-      oldLine += 1;
-      newLine += 1;
-    }
+    if (!hasHunk || line.startsWith('+++') || line.startsWith('---') || line.startsWith('\\')) continue;
+    if (line.startsWith('-')) count += 1;
   }
-  return collector.finish();  // raw {kind,start,end}; positioning happens in updateCodeMirrorDiffOverview
+  return count;
 }
 
-function diffOverviewChunksFromDocuments(original, current, totalLines) {
-  const left = String(original || '').split('\n');
-  const right = String(current || '').split('\n');
-  const collector = diffOverviewCollector();
-  const max = Math.max(left.length, right.length);
-  for (let index = 0; index < max; index += 1) {
-    const leftLine = left[index];
-    const rightLine = right[index];
-    if (leftLine === rightLine) {
-      collector.flush();
+function diffOverviewLineStarts(text) {
+  const value = String(text ?? '');
+  const starts = [0];
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) === 10) starts.push(index + 1);
+  }
+  return starts;
+}
+
+function diffOverviewLineNumberAt(starts, position) {
+  const lineStarts = Array.isArray(starts) && starts.length ? starts : [0];
+  const pos = Math.max(0, Number(position || 0));
+  let lo = 0;
+  let hi = lineStarts.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (lineStarts[mid] <= pos) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return Math.max(1, hi + 1);
+}
+
+function diffOverviewLineCountForRange(starts, from, end) {
+  const start = Number(from);
+  const finish = Number(end);
+  if (!Number.isFinite(start) || !Number.isFinite(finish) || finish < start) return 0;
+  return Math.max(0, diffOverviewLineNumberAt(starts, finish) - diffOverviewLineNumberAt(starts, start) + 1);
+}
+
+function diffOverviewChunkEnd(chunk, side) {
+  const explicit = Number(chunk?.[`end${side}`]);
+  if (Number.isFinite(explicit)) return explicit;
+  const from = Number(chunk?.[`from${side}`]);
+  const to = Number(chunk?.[`to${side}`]);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return from;
+  return Math.max(from, to - 1);
+}
+
+function diffOverviewIsCodeMirrorChunk(chunk) {
+  return chunk
+    && Number.isFinite(Number(chunk.fromA))
+    && Number.isFinite(Number(chunk.toA))
+    && Number.isFinite(Number(chunk.fromB))
+    && Number.isFinite(Number(chunk.toB));
+}
+
+function diffOverviewCodeMirrorChunks(view, panel = null) {
+  const mergeChunks = panel?._cmMergeView?.chunks;
+  if (Array.isArray(mergeChunks) && mergeChunks.length && mergeChunks.every(diffOverviewIsCodeMirrorChunk)) {
+    return mergeChunks;
+  }
+  const values = view?.state?.values;
+  if (!Array.isArray(values)) return null;
+  for (const value of values) {
+    if (Array.isArray(value) && value.length && value.every(diffOverviewIsCodeMirrorChunk)) return value;
+  }
+  return null;
+}
+
+function diffOverviewSortedCodeMirrorChunks(chunks) {
+  return Array.isArray(chunks)
+    ? chunks.filter(diffOverviewIsCodeMirrorChunk).sort((a, b) => Number(a.fromB) - Number(b.fromB) || Number(a.fromA) - Number(b.fromA))
+    : [];
+}
+
+function mergeDiffOverviewBand(bands, kind, start, end) {
+  if (end <= start) return;
+  const last = bands[bands.length - 1];
+  if (last && last.kind === kind && last.end === start) {
+    last.end = end;
+  } else {
+    bands.push({kind, start, end});
+  }
+}
+
+function diffOverviewLineHeight(view, container) {
+  const measured = Number(view?.defaultLineHeight || 0);
+  if (Number.isFinite(measured) && measured > 0) return measured;
+  const content = view?.contentDOM || container?.querySelector?.('.cm-content');
+  if (content && typeof getComputedStyle === 'function') {
+    const lineHeight = Number.parseFloat(getComputedStyle(content).lineHeight || '');
+    if (Number.isFinite(lineHeight) && lineHeight > 0) return lineHeight;
+  }
+  return 20;
+}
+
+function diffOverviewPrefixWeights(weights) {
+  const prefix = [0];
+  for (let index = 1; index < weights.length; index += 1) {
+    prefix[index] = prefix[index - 1] + Math.max(1, Number(weights[index] || 1));
+  }
+  return prefix;
+}
+
+function diffOverviewRangeWeight(prefixWeights, startLine, endLine) {
+  const lastLine = Math.max(0, prefixWeights.length - 1);
+  const start = Math.max(1, Math.min(lastLine, Number(startLine || 1)));
+  const end = Math.max(0, Math.min(lastLine, Number(endLine || 0)));
+  if (end < start) return 0;
+  return prefixWeights[end] - prefixWeights[start - 1];
+}
+
+function diffOverviewLineModel(text, view = null, container = null, lineCountOverride = null) {
+  const value = String(text ?? '');
+  const starts = diffOverviewLineStarts(value);
+  const lines = value.split('\n');
+  const lineCount = Math.max(1, Number(lineCountOverride || starts.length || lines.length || 1));
+  const weights = [0];
+  for (let lineNumber = 1; lineNumber <= lineCount; lineNumber += 1) {
+    weights.push(diffOverviewEstimatedTextLineWeight(lines[lineNumber - 1] || '', view, container));
+  }
+  const prefixWeights = diffOverviewPrefixWeights(weights);
+  return {
+    starts,
+    lineCount,
+    prefixWeights,
+    rows: prefixWeights[lineCount] || lineCount,
+  };
+}
+
+function diffOverviewLineModelRangeWeight(model, startLine, endLine) {
+  return model ? diffOverviewRangeWeight(model.prefixWeights, startLine, endLine) : 0;
+}
+
+function diffOverviewWrappingEnabled(view, container) {
+  return view?.contentDOM?.classList?.contains?.('cm-lineWrapping')
+    || Boolean(container?.querySelector?.('.cm-content.cm-lineWrapping'));
+}
+
+function diffOverviewContentWidth(view, container) {
+  const contentWidth = Number(view?.contentDOM?.getBoundingClientRect?.().width || view?.contentDOM?.clientWidth || 0);
+  if (Number.isFinite(contentWidth) && contentWidth > 0) return contentWidth;
+  const content = container?.querySelector?.('.cm-content');
+  const fallbackWidth = Number(content?.getBoundingClientRect?.().width || content?.clientWidth || 0);
+  if (Number.isFinite(fallbackWidth) && fallbackWidth > 0) return fallbackWidth;
+  const scrollerWidth = Number(view?.scrollDOM?.clientWidth || container?.querySelector?.('.cm-scroller')?.clientWidth || 0);
+  return Number.isFinite(scrollerWidth) && scrollerWidth > 0 ? scrollerWidth : 1;
+}
+
+function diffOverviewCharacterWidth(view) {
+  const measured = Number(view?.defaultCharacterWidth || 0);
+  return Number.isFinite(measured) && measured > 0 ? measured : 8;
+}
+
+function diffOverviewEstimatedTextLineWeight(text, view, container) {
+  if (!diffOverviewWrappingEnabled(view, container)) return 1;
+  const width = Math.max(1, diffOverviewContentWidth(view, container));
+  const charWidth = Math.max(1, diffOverviewCharacterWidth(view));
+  const columns = Math.max(1, Math.floor(width / charWidth));
+  const visualColumns = Math.max(1, String(text ?? '').replace(/\t/g, '    ').length);
+  return Math.max(1, Math.ceil(visualColumns / columns));
+}
+
+function diffOverviewRowsFromCodeMirrorLineModels(chunks, currentModel, originalModel, options = {}) {
+  const validChunks = diffOverviewSortedCodeMirrorChunks(chunks);
+  if (!validChunks.length || !currentModel) return null;
+  const includeRemoved = options.includeRemoved !== false;
+  const bands = [];
+  let row = 0;
+  let currentLine = 1;
+  let deletedRows = 0;
+
+  for (const chunk of validChunks) {
+    const fromA = Number(chunk.fromA);
+    const toA = Number(chunk.toA);
+    const fromB = Number(chunk.fromB);
+    const toB = Number(chunk.toB);
+    const startCurrentLine = Math.min(currentModel.lineCount, Math.max(1, diffOverviewLineNumberAt(currentModel.starts, fromB)));
+    if (startCurrentLine > currentLine) {
+      row += diffOverviewLineModelRangeWeight(currentModel, currentLine, startCurrentLine - 1);
+      currentLine = startCurrentLine;
+    }
+
+    if (includeRemoved && originalModel && toA > fromA) {
+      const removedCount = diffOverviewLineCountForRange(originalModel.starts, fromA, diffOverviewChunkEnd(chunk, 'A'));
+      const removedStartLine = diffOverviewLineNumberAt(originalModel.starts, fromA);
+      const removedWeight = diffOverviewLineModelRangeWeight(originalModel, removedStartLine, removedStartLine + removedCount - 1);
+      mergeDiffOverviewBand(bands, 'remove', row, row + removedWeight);
+      row += removedWeight;
+      deletedRows += removedWeight;
+    }
+
+    if (toB > fromB) {
+      const insertedEnd = diffOverviewChunkEnd(chunk, 'B');
+      const insertedEndLine = Math.min(currentModel.lineCount, Math.max(startCurrentLine, diffOverviewLineNumberAt(currentModel.starts, insertedEnd)));
+      const insertedWeight = diffOverviewLineModelRangeWeight(currentModel, startCurrentLine, insertedEndLine);
+      mergeDiffOverviewBand(bands, 'add', row, row + insertedWeight);
+      row += insertedWeight;
+      currentLine = Math.max(currentLine, insertedEndLine + 1);
+    }
+  }
+
+  if (currentLine <= currentModel.lineCount) row += diffOverviewLineModelRangeWeight(currentModel, currentLine, currentModel.lineCount);
+  return {
+    bands,
+    currentLineCount: currentModel.lineCount,
+    currentRows: currentModel.rows,
+    deletedRows,
+    totalRows: Math.max(row, currentModel.rows + deletedRows, 1),
+  };
+}
+
+function diffOverviewRowsFromCodeMirrorChunks(chunks, currentText, originalText) {
+  return diffOverviewRowsFromCodeMirrorLineModels(
+    chunks,
+    diffOverviewLineModel(currentText),
+    diffOverviewLineModel(originalText),
+  );
+}
+
+function diffOverviewRowsFromCodeMirrorRenderedWeights(view, chunks, currentText, originalText, container = null) {
+  const doc = view?.state?.doc;
+  const currentLineCount = Math.max(1, Number(doc?.lines || diffOverviewLineStarts(currentText).length || 1));
+  const rows = diffOverviewRowsFromCodeMirrorLineModels(
+    chunks,
+    diffOverviewLineModel(currentText, view, container, currentLineCount),
+    diffOverviewLineModel(originalText, view, container),
+  );
+  if (rows) rows.renderedWeights = true;
+  return rows;
+}
+
+function diffOverviewScrollLooksCurrentOnly(rows, scrollTarget, view, container) {
+  const deletedRows = Number(rows?.deletedRows || 0);
+  if (deletedRows <= 0 || !scrollTarget) return false;
+  const totalRows = Number(rows?.totalRows || 0);
+  const currentRows = Number(rows?.currentRows || rows?.currentLineCount || 0);
+  if (!Number.isFinite(totalRows) || !Number.isFinite(currentRows) || totalRows <= currentRows) return false;
+  const scrollHeight = Number(scrollTarget.scrollHeight || 0);
+  if (!Number.isFinite(scrollHeight) || scrollHeight <= 0) return false;
+  const scrollRows = scrollHeight / diffOverviewLineHeight(view, container);
+  const threshold = currentRows + (totalRows - currentRows) * 0.5;
+  return scrollRows < threshold;
+}
+
+function diffOverviewBandsFromUnifiedDiff(diff, totalLines) {
+  const total = Math.max(1, Number(totalLines || 0));
+  const bands = [];
+  let lineIndex = 0;
+  let newLine = 1;
+  let hasHunk = false;
+  const appendLine = kind => {
+    const start = Math.max(0, Math.min(total, lineIndex));
+    const end = Math.max(start, Math.min(total, lineIndex + 1));
+    if (end <= start) return;
+    mergeDiffOverviewBand(bands, kind, start, end);
+  };
+  for (const line of String(diff || '').split('\n')) {
+    const hunk = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
+    if (hunk) {
+      const nextNewLine = Math.max(1, Number(hunk[1]) || 1);
+      lineIndex += Math.max(0, nextNewLine - newLine);
+      newLine = nextNewLine;
+      hasHunk = true;
       continue;
     }
-    if (rightLine !== undefined) collector.add('add', index + 1);
-    if (leftLine !== undefined) collector.add('remove', Math.min(index + 1, totalLines));
+    if (!hasHunk || line.startsWith('+++') || line.startsWith('---') || line.startsWith('\\')) continue;
+    if (line.startsWith('+')) {
+      appendLine('add');
+      newLine += 1;
+      lineIndex += 1;
+    } else if (line.startsWith('-')) {
+      appendLine('remove');
+      lineIndex += 1;
+    } else {
+      newLine += 1;
+      lineIndex += 1;
+    }
   }
-  return collector.finish();  // raw {kind,start,end}; positioning happens in updateCodeMirrorDiffOverview
+  return bands;
+}
+
+function buildDiffOverviewGradientFromBands(bands, totalLines) {
+  const total = Math.max(1, Number(totalLines || 0));
+  const stops = [];
+  let lastStop = 0;
+  const appendTransparent = until => {
+    if (until > lastStop) stops.push(`transparent ${diffOverviewPercent(lastStop, total)}% ${diffOverviewPercent(until, total)}%`);
+  };
+  for (const band of Array.isArray(bands) ? bands : []) {
+    const start = Math.max(0, Math.min(total, Number(band?.start || 0)));
+    const end = Math.max(start, Math.min(total, Number(band?.end || 0)));
+    if (end <= start) continue;
+    appendTransparent(start);
+    const color = band.kind === 'add' ? '#38d878' : '#ff5d6c';
+    stops.push(`${color} ${diffOverviewPercent(start, total)}% ${diffOverviewPercent(end, total)}%`);
+    lastStop = end;
+  }
+  if (!stops.some(stop => !stop.startsWith('transparent'))) return null;
+  appendTransparent(total);
+  return `linear-gradient(to bottom, ${stops.join(', ')})`;
+}
+
+function buildDiffOverviewGradient(diff, totalLines) {
+  return buildDiffOverviewGradientFromBands(diffOverviewBandsFromUnifiedDiff(diff, totalLines), totalLines);
+}
+
+function codeMirrorDiffOverviewScrollTarget(view, container) {
+  return view?.scrollDOM || container?.querySelector?.('.cm-scroller') || container?.querySelector?.('.cm-mergeView') || null;
+}
+
+function updateCodeMirrorDiffOverviewGeometry(overview, scrollTarget) {
+  if (!overview || !scrollTarget?.getBoundingClientRect || !overview.parentElement?.getBoundingClientRect) return;
+  const containerRect = overview.parentElement.getBoundingClientRect();
+  const scrollRect = scrollTarget.getBoundingClientRect();
+  const top = Math.max(0, scrollRect.top - containerRect.top);
+  const height = Math.max(1, Number(scrollTarget.clientHeight || 0));
+  overview.style.top = `${top}px`;
+  overview.style.bottom = 'auto';
+  overview.style.height = `${height}px`;
+}
+
+function updateCodeMirrorDiffOverviewViewport(viewport, scrollTarget) {
+  if (!viewport || !scrollTarget) return;
+  updateCodeMirrorDiffOverviewGeometry(viewport.parentElement, scrollTarget);
+  const scrollHeight = Math.max(1, Number(scrollTarget.scrollHeight || 0));
+  const clientHeight = Math.max(1, Number(scrollTarget.clientHeight || 0));
+  const scrollTop = Math.max(0, Number(scrollTarget.scrollTop || 0));
+  const top = Math.max(0, Math.min(100, (scrollTop / scrollHeight) * 100));
+  const height = Math.max(2, Math.min(100 - top, (clientHeight / scrollHeight) * 100));
+  viewport.style.top = `${top}%`;
+  viewport.style.height = `${height}%`;
+}
+
+function installCodeMirrorDiffOverviewViewport(panel, overview, scrollTarget) {
+  panel?._diffOverviewViewportCleanup?.();
+  if (!overview || !scrollTarget) return;
+  const viewport = document.createElement('div');
+  viewport.className = 'cm-diff-overview-viewport';
+  overview.appendChild(viewport);
+  const update = () => updateCodeMirrorDiffOverviewViewport(viewport, scrollTarget);
+  update();
+  scrollTarget.addEventListener?.('scroll', update, {passive: true});
+  if (panel) {
+    panel._diffOverviewViewportCleanup = () => {
+      scrollTarget.removeEventListener?.('scroll', update);
+      if (viewport.parentElement) viewport.remove();
+      panel._diffOverviewViewportCleanup = null;
+    };
+  }
 }
 
 function updateCodeMirrorDiffOverview(panel, container, state, currentText, original) {
-  // Remember the inputs so a fold expand/collapse (geometryChanged) can REBUILD the ticks against the new
-  // rendered layout — see codeMirrorDiffOverviewListener (B3: ticks were built once and went stale on fold).
+  // Remember the inputs so a fold expand/collapse can rebuild the viewport indicator against the
+  // current scroll surface; the red/green rows themselves are a single linear-gradient.
   if (panel) panel._diffOverviewCtx = {container, state, currentText, original};
   container?.querySelector?.('.cm-diff-overview')?.remove();
-  const totalLines = Math.max(String(currentText || '').split('\n').length, String(original || '').split('\n').length, 1);
-  const parsedChunks = diffOverviewChunks(state?.diff || '', totalLines);
-  const chunks = parsedChunks.length ? parsedChunks : diffOverviewChunksFromDocuments(original, currentText, totalLines);
-  if (!container || !chunks.length) return;
+  panel?._diffOverviewViewportCleanup?.();
+  if (!diffExpandUnchanged) return;
   const view = panel?._cmView;
+  const scrollTarget = codeMirrorDiffOverviewScrollTarget(view, container);
+  const currentLineCount = Math.max(String(currentText || '').split('\n').length, 1);
+  const chunks = diffOverviewCodeMirrorChunks(view, panel);
+  let chunkRows = diffOverviewRowsFromCodeMirrorRenderedWeights(view, chunks, currentText, original, container)
+    || diffOverviewRowsFromCodeMirrorChunks(chunks, currentText, original);
+  if (!chunkRows && view) {
+    scheduleDiffOverviewReadinessRebuild(panel);
+    return;
+  }
+  if (diffOverviewScrollLooksCurrentOnly(chunkRows, scrollTarget, view, container)) {
+    if (panel && !panel._diffOverviewWaitingForDeletedRows) {
+      panel._diffOverviewWaitingForDeletedRows = true;
+      scheduleDiffOverviewSettledRebuild(panel);
+    }
+    return;
+  }
+  if (panel) panel._diffOverviewWaitingForDeletedRows = false;
+  if (panel) panel._diffOverviewReadinessRetries = 0;
+  const fallbackRows = {
+    bands: diffOverviewBandsFromUnifiedDiff(state?.diff || '', currentLineCount + diffOverviewRemovedLineCount(state?.diff || '')),
+    totalRows: Math.max(currentLineCount + diffOverviewRemovedLineCount(state?.diff || ''), 1),
+  };
+  const rows = chunkRows || fallbackRows;
+  const gradient = buildDiffOverviewGradientFromBands(rows.bands, rows.totalRows);
+  if (!gradient || !container) return;
   const overview = document.createElement('div');
   overview.className = 'cm-diff-overview';
   overview.setAttribute('aria-hidden', 'true');
-  for (const chunk of chunks) {
-    const pos = diffOverviewTickPosition(view, chunk, totalLines);
-    const tick = document.createElement('button');
-    tick.type = 'button';
-    tick.className = `cm-diff-overview-tick ${chunk.kind}`;
-    tick.style.top = `${pos.top}%`;
-    tick.style.height = `${pos.height}%`;
-    tick.title = `${chunk.kind === 'add' ? 'Added' : 'Removed'} lines ${chunk.start}-${chunk.end}`;
-    tick.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      const scrollTarget = view?.scrollDOM || container.querySelector('.cm-scroller') || container.querySelector('.cm-mergeView');
-      if (!scrollTarget) return;
-      // Prefer the chunk's REAL rendered top (reflects folds); fall back to the % approximation.
-      if (pos.scrollTop != null) scrollTarget.scrollTop = Math.round(pos.scrollTop);
-      else scrollTarget.scrollTop = Math.round(Math.max(0, scrollTarget.scrollHeight - scrollTarget.clientHeight) * (pos.top / 100));
-    });
-    overview.appendChild(tick);
-  }
+  overview.style.background = gradient;
   container.appendChild(overview);
+  installCodeMirrorDiffOverviewViewport(panel, overview, scrollTarget);
 }
 
-// B3: rebuild the diff overview ticks whenever the editor's rendered geometry changes (a fold expanding/
-// collapsing fires heightChanged), so the ticks re-track instead of going stale. Debounced via rAF.
+function scheduleDiffOverviewReadinessRebuild(panel) {
+  if (!panel || panel._diffOverviewReadinessQueued) return;
+  const attempts = Number(panel._diffOverviewReadinessRetries || 0);
+  if (attempts >= 6) return;
+  panel._diffOverviewReadinessRetries = attempts + 1;
+  panel._diffOverviewReadinessQueued = true;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      panel._diffOverviewReadinessQueued = false;
+      scheduleDiffOverviewRebuild(panel);
+    });
+  });
+}
+
+function scheduleDiffOverviewSettledRebuild(panel) {
+  if (!panel || panel._diffOverviewSettledQueued) return;
+  panel._diffOverviewSettledQueued = true;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      panel._diffOverviewSettledQueued = false;
+      scheduleDiffOverviewRebuild(panel);
+    });
+  });
+}
+
+// B3: rebuild the diff overview whenever the editor's rendered geometry changes (a fold expanding/
+// collapsing fires heightChanged). Debounced via rAF.
 function scheduleDiffOverviewRebuild(panel) {
   const ctx = panel?._diffOverviewCtx;
   if (!ctx || panel._diffOverviewRebuildQueued) return;
@@ -2928,11 +3233,14 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmGeneration = generation;
   container.hidden = false;
   container.classList.add('file-editor-diff-codemirror');
-  // Always await the diff load (the dedup'd in-flight promise) before rendering, so we never build a
-  // MergeView against an un-loaded/empty original — an untracked/all-added file then resolves to
-  // diffUnavailable and falls back to the plain editor below instead of flashing all-green.
-  if (!state.diffLoaded && !state.diffUnavailable) await refreshOpenFileDiff(path, {silent: true});
-  if (panel._cmGeneration !== generation) return null;
+  // Kick off the deduped diff load, but keep the normal editor visible while the payload is unresolved.
+  // Building a MergeView before the old/new blobs are known caused all-green flashes; leaving the pane
+  // empty while git worked made new/no-diff files look blank.
+  if (!state.diffLoaded && !state.diffUnavailable) {
+    refreshOpenFileDiff(path, {silent: true});
+    setFileEditorPanelStatus(panel, t('editor.diffLoading'), '');
+    return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
+  }
   if (!openFileDiffAvailable(state)) {
     if (state.diffUnavailable) {
       const msg = `diff unavailable: ${state.diffError || 'unknown error'}`;
@@ -2963,6 +3271,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path});
     }
     updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
+    scheduleDiffOverviewSettledRebuild(panel);
     restoreFileEditorPanelViewState(item, panel);
     updateCodeMirrorCursorStatus(panel);
     focusFileEditorPanelIfReady(panel, item);
@@ -2993,10 +3302,10 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
         extensions: [
           ...(diffEditsAllowed
             ? [
-                ...codeMirrorExtensions(api, panel, path, {wrap: false}),
+                ...codeMirrorExtensions(api, panel, path),
                 codeMirrorWorkingUpdateExtension(api, panel, path),
               ]
-            : codeMirrorReadOnlyExtensions(api, path, panel, {wrap: false})),
+            : codeMirrorReadOnlyExtensions(api, path, panel)),
           // B3: panel._cmView is this `b` editor (side-by-side), so the overview rebuild listener lives here.
           codeMirrorDiffOverviewListener(api, panel),
         ],
@@ -3026,8 +3335,8 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           // B4: expand-all omits collapseUnchanged so every unchanged line shows; else collapse the runs.
           ...(diffExpandUnchanged ? {} : {collapseUnchanged: {margin: 3, minSize: 8}}),
         }),
-        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path, {wrap: false}) : codeMirrorReadOnlyExtensions(api, path, panel, {wrap: false})),
-        codeMirrorDiffOverviewListener(api, panel),  // B3: rebuild overview ticks on fold/geometry change
+        ...(diffEditsAllowed ? codeMirrorExtensions(api, panel, path) : codeMirrorReadOnlyExtensions(api, path, panel)),
+        codeMirrorDiffOverviewListener(api, panel),  // B3: rebuild overview on fold/geometry change
       ],
     });
     panel._cmView = new api.EditorView({
@@ -3048,6 +3357,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   panel._cmSignature = signature;
   panel._cmMode = 'diff';
   updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
+  scheduleDiffOverviewSettledRebuild(panel);
   restoreFileEditorPanelViewState(item, panel);
   updateCodeMirrorCursorStatus(panel);
   focusFileEditorPanelIfReady(panel, item);
@@ -3201,7 +3511,7 @@ function renderFileEditorPanel(panel, item) {
   // DOIT.6 #149: do NOT auto-load the diff when a file opens/renders. The diff loads only on explicit
   // diff-mode entry (the Diff button + the Modified-files menu both open in diff view and load there),
   // so opening/editing a file does zero diff work (one fewer network round-trip + re-render; ties to DOIT.9).
-  if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && state.diffUnavailable) {
+  if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && !openFileDiffAvailable(state)) {
     setFileEditorViewMode(path, 'edit', item);
   }
   const mode = editorViewModeFor(path, item);

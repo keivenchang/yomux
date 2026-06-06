@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import re
 import shutil
+import subprocess
 
 import pytest
 
@@ -404,6 +405,346 @@ def codemirror_bundle_fixture_html():
     """
 
 
+def codemirror_todo_diff_overview_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        }
+    )
+    original = subprocess.check_output(["git", "show", "7f5a7e82ce:TODO.md"], cwd=REPO_ROOT, text=True)
+    current = subprocess.check_output(["git", "show", "HEAD:TODO.md"], cwd=REPO_ROOT, text=True)
+    app_script = app_bundle_before_boot_script()
+    original_json = json.dumps(original).replace("</script", "<\\/script")
+    current_json = json.dumps(current).replace("</script", "<\\/script")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <script src="{bundle_uri}"></script>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+          #mount {{ width: 920px; height: 640px; }}
+          .file-editor-panel {{ width: 920px; height: 640px; }}
+          .file-editor-codemirror-panel {{ height: 100%; }}
+        </style>
+      </head>
+      <body class="theme-dark editor-theme-dark">
+        <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+        <div id="mount"></div>
+        <script>{app_script}</script>
+        <script>
+          (function() {{
+            const original = {original_json};
+            const current = {current_json};
+            const CM = window.YOLOmuxCodeMirror;
+            diffExpandUnchanged = true;
+            const panel = document.createElement('article');
+            panel.className = 'panel file-editor-panel active-pane';
+            const container = document.createElement('div');
+            container.className = 'file-editor-codemirror-panel file-editor-diff-codemirror';
+            panel.append(container);
+            document.getElementById('mount').append(panel);
+            const view = new CM.EditorView({{
+              state: CM.EditorState.create({{
+                doc: current,
+                extensions: [
+                  CM.unifiedMergeView({{original, highlightChanges: false, gutter: true}}),
+                  CM.lineNumbers(),
+                ],
+              }}),
+              parent: container,
+            }});
+            panel._cmView = view;
+            panel._cmMode = 'diff';
+            const chunks = diffOverviewCodeMirrorChunks(view, panel);
+            const rows = diffOverviewRowsFromCodeMirrorChunks(chunks, current, original);
+            updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
+            const overview = container.querySelector('.cm-diff-overview');
+            const overviewRect = overview.getBoundingClientRect();
+            const scrollerRect = view.scrollDOM.getBoundingClientRect();
+            const verticalTrackBottom = scrollerRect.top + view.scrollDOM.clientHeight;
+            const normalizeOverviewColor = color => {{
+              const value = String(color || '').toLowerCase();
+              if (value === 'transparent' || value === '#ff5d6c' || value === '#38d878') return value;
+              const rgb = /^rgb\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)$/.exec(value);
+              if (!rgb) return value;
+              const hex = rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('');
+              return `#${{hex}}`;
+            }};
+            const parseStops = gradient => {{
+              const value = String(gradient || '');
+              const stops = [];
+              const rangePattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%\\s+([0-9.]+)%/gi;
+              let match = rangePattern.exec(value);
+              while (match) {{
+                const color = normalizeOverviewColor(match[1]);
+                if (color !== 'transparent') {{
+                  stops.push({{color, start: match[2], end: match[3]}});
+                }}
+                match = rangePattern.exec(value);
+              }}
+              if (stops.length) return stops;
+              const tokens = [];
+              const tokenPattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%/gi;
+              match = tokenPattern.exec(value);
+              while (match) {{
+                tokens.push({{color: normalizeOverviewColor(match[1]), pos: match[2]}});
+                match = tokenPattern.exec(value);
+              }}
+              for (let index = 1; index < tokens.length; index += 1) {{
+                const prev = tokens[index - 1];
+                const next = tokens[index];
+                if (prev.color === next.color && prev.color !== 'transparent') {{
+                  stops.push({{color: prev.color, start: prev.pos, end: next.pos}});
+                }}
+              }}
+              return stops;
+            }};
+            const renderedRows = diffOverviewRowsFromCodeMirrorRenderedWeights(view, chunks, current, original, container) || rows;
+            const expectedGradient = buildDiffOverviewGradientFromBands(renderedRows.bands, renderedRows.totalRows);
+            window.__todoDiffOverviewMetrics = {{
+              chunks: chunks.map(chunk => ({{
+                fromA: chunk.fromA,
+                toA: chunk.toA,
+                endA: chunk.endA,
+                fromB: chunk.fromB,
+                toB: chunk.toB,
+                endB: chunk.endB,
+              }})),
+              rows,
+              renderedRows,
+              overviewBackground: overview?.style?.background || '',
+              overviewStops: parseStops(overview?.style?.background || ''),
+              expectedStops: parseStops(expectedGradient),
+              tickCount: container.querySelectorAll('.cm-diff-overview-tick').length,
+              deletedDomRows: container.querySelectorAll('.cm-deletedLine').length,
+              insertedRangeRows: rows?.bands?.find(band => band.kind === 'add')?.end - rows?.bands?.find(band => band.kind === 'add')?.start,
+              removedRangeRows: rows?.bands?.find(band => band.kind === 'remove')?.end - rows?.bands?.find(band => band.kind === 'remove')?.start,
+              overviewTopDelta: Math.abs(overviewRect.top - scrollerRect.top),
+              overviewBottomDelta: Math.abs(overviewRect.bottom - verticalTrackBottom),
+            }};
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+
+
+def codemirror_file_explorer_diff_overview_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        }
+    )
+    path = "static_src/js/yolomux/40_file_explorer_files.js"
+    original = subprocess.check_output(["git", "show", f"e01be55:{path}"], cwd=REPO_ROOT, text=True)
+    current = subprocess.check_output(["git", "show", f"595cad161a:{path}"], cwd=REPO_ROOT, text=True)
+    app_script = app_bundle_before_boot_script()
+    original_json = json.dumps(original).replace("</script", "<\\/script")
+    current_json = json.dumps(current).replace("</script", "<\\/script")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <script src="{bundle_uri}"></script>
+        <style>
+          body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+          #mount {{ width: 920px; height: 640px; }}
+          .file-editor-panel {{ width: 920px; height: 640px; }}
+          .file-editor-codemirror-panel {{ height: 100%; }}
+        </style>
+      </head>
+      <body class="theme-dark editor-theme-dark">
+        <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+        <div id="mount"></div>
+        <script>{app_script}</script>
+        <script>
+          (function() {{
+            const original = {original_json};
+            const current = {current_json};
+            const CM = window.YOLOmuxCodeMirror;
+            diffExpandUnchanged = true;
+            const panel = document.createElement('article');
+            panel.className = 'panel file-editor-panel active-pane';
+            const container = document.createElement('div');
+            container.className = 'file-editor-codemirror-panel file-editor-diff-codemirror';
+            panel.append(container);
+            document.getElementById('mount').append(panel);
+            const view = new CM.EditorView({{
+              state: CM.EditorState.create({{
+                doc: current,
+                extensions: [
+                  CM.unifiedMergeView({{original, highlightChanges: false, gutter: true}}),
+                  CM.lineNumbers(),
+                ],
+              }}),
+              parent: container,
+            }});
+            panel._cmView = view;
+            panel._cmMode = 'diff';
+            updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
+
+            const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const normalizeColor = color => {{
+              const value = String(color || '').toLowerCase();
+              if (value === 'transparent' || value === '#ff5d6c' || value === '#38d878') return value;
+              const rgb = /^rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/.exec(value);
+              if (!rgb) return value;
+              return `#${{rgb.slice(1).map(part => Number(part).toString(16).padStart(2, '0')).join('')}}`;
+            }};
+            const parseStops = gradient => {{
+              const value = String(gradient || '');
+              const stops = [];
+              const rangePattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%\\s+([0-9.]+)%/gi;
+              let match = rangePattern.exec(value);
+              while (match) {{
+                stops.push({{color: normalizeColor(match[1]), start: Number(match[2]) / 100, end: Number(match[3]) / 100}});
+                match = rangePattern.exec(value);
+              }}
+              if (stops.length) return stops;
+              const tokens = [];
+              const tokenPattern = /(#[0-9a-f]{{6}}|rgb\\(\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*\\d+\\s*\\)|transparent)\\s+([0-9.]+)%/gi;
+              match = tokenPattern.exec(value);
+              while (match) {{
+                tokens.push({{color: normalizeColor(match[1]), pos: Number(match[2]) / 100}});
+                match = tokenPattern.exec(value);
+              }}
+              for (let index = 1; index < tokens.length; index += 1) {{
+                const prev = tokens[index - 1];
+                const next = tokens[index];
+                if (next.pos > prev.pos) stops.push({{color: prev.color, start: prev.pos, end: next.pos}});
+              }}
+              return stops;
+            }};
+            const changedStops = gradient => parseStops(gradient).filter(item => item.color !== 'transparent');
+            const overview = () => container.querySelector('.cm-diff-overview');
+            const railColorAt = fraction => {{
+              const stop = parseStops(overview()?.style?.background || '').find(item => fraction >= item.start && fraction < item.end);
+              if (!stop || stop.color === 'transparent') return 'normal';
+              if (stop.color === '#ff5d6c') return 'remove';
+              if (stop.color === '#38d878') return 'add';
+              return stop.color;
+            }};
+            const rowKind = node => {{
+              for (let currentNode = node; currentNode && currentNode !== document.body; currentNode = currentNode.parentElement) {{
+                if (currentNode.classList?.contains('cm-deletedLine') || currentNode.classList?.contains('cm-deletedChunk')) return 'remove';
+                if (currentNode.classList?.contains('cm-changedLine') || currentNode.classList?.contains('cm-insertedLine')) return 'add';
+              }}
+              return 'normal';
+            }};
+            const visibleKindAt = y => {{
+              const rect = view.scrollDOM.getBoundingClientRect();
+              const x = rect.left + Math.min(220, Math.max(50, rect.width * 0.35));
+              const nodes = document.elementsFromPoint(x, rect.top + y);
+              const row = nodes.find(node => node.classList?.contains('cm-line') || node.classList?.contains('cm-deletedLine') || node.classList?.contains('cm-deletedChunk'))
+                || nodes.find(node => node.closest?.('.cm-line, .cm-deletedLine, .cm-deletedChunk'))?.closest('.cm-line, .cm-deletedLine, .cm-deletedChunk');
+              return row ? rowKind(row) : 'none';
+            }};
+            window.__fileExplorerDiffOverviewMetrics = async function() {{
+              await settle();
+              const cmChunks = diffOverviewCodeMirrorChunks(view, panel);
+              const chunks = cmChunks.map(chunk => ({{
+                fromA: chunk.fromA,
+                toA: chunk.toA,
+                endA: chunk.endA,
+                fromB: chunk.fromB,
+                toB: chunk.toB,
+                endB: chunk.endB,
+              }}));
+              const initialBackground = overview()?.style?.background || '';
+              const initialOverviewPresent = Boolean(overview());
+              const initialDeletedDomRows = container.querySelectorAll('.cm-deletedLine').length;
+              const fullRows = diffOverviewRowsFromCodeMirrorRenderedWeights(view, cmChunks, current, original, container)
+                || diffOverviewRowsFromCodeMirrorChunks(cmChunks, current, original);
+              const expectedFullBackground = buildDiffOverviewGradientFromBands(fullRows.bands, fullRows.totalRows);
+              const positions = [
+                {{name: 'top-normal', scrollTop: 0}},
+                {{name: 'warmup-normal-05', scrollTop: 3504}},
+                {{name: 'warmup-normal-15', scrollTop: 10512}},
+                {{name: 'warmup-red-25', scrollTop: 17520}},
+                {{name: 'warmup-red-30', scrollTop: 21024}},
+                {{name: 'warmup-red-34', scrollTop: 23827}},
+                {{name: 'warmup-red-38', scrollTop: 26630}},
+                {{name: 'warmup-red-42', scrollTop: 29433}},
+                {{name: 'warmup-red-45', scrollTop: 31536}},
+                {{name: 'warmup-green-50', scrollTop: 35040}},
+                {{name: 'warmup-green-60', scrollTop: 42049}},
+                {{name: 'red-middle-previous-regression', scrollTop: 49505}},
+                {{name: 'red-late-previous-regression', scrollTop: 56065}},
+                {{name: 'green-middle', scrollTop: 70081}},
+              ];
+              const cases = [];
+              for (const item of positions) {{
+                view.scrollDOM.scrollTop = item.scrollTop;
+                await settle();
+                updateCodeMirrorDiffOverview(panel, container, {{diff: ''}}, current, original);
+                await settle();
+                const scrollHeight = Math.max(1, Number(view.scrollDOM.scrollHeight || 0));
+                const clientHeight = Math.max(1, Number(view.scrollDOM.clientHeight || 0));
+                const sampleYs = [20, 80, 160, 260, 380].filter(y => y < clientHeight);
+                const samples = sampleYs.map(y => {{
+                  const fraction = (Number(view.scrollDOM.scrollTop || 0) + y) / scrollHeight;
+                  return {{y, fraction, visible: visibleKindAt(y), rail: railColorAt(fraction)}};
+                }});
+                cases.push({{
+                  name: item.name,
+                  requestedScrollTop: item.scrollTop,
+                  scrollTop: view.scrollDOM.scrollTop,
+                  scrollHeight,
+                  clientHeight,
+                  railPresent: Boolean(overview()),
+                  background: overview()?.style?.background || '',
+                  deletedDomRows: container.querySelectorAll('.cm-deletedLine').length,
+                  samples,
+                  mismatches: overview() ? samples.filter(sample => sample.visible !== 'none' && sample.visible !== sample.rail) : [],
+                }});
+              }}
+              return {{
+                chunks,
+                initialBackground,
+                initialOverviewPresent,
+                initialDeletedDomRows,
+                initialChangedStops: changedStops(initialBackground),
+                fullRows,
+                finalBackground: overview()?.style?.background || '',
+                finalOverviewPresent: Boolean(overview()),
+                finalChangedStops: changedStops(overview()?.style?.background || ''),
+                expectedFullChangedStops: changedStops(expectedFullBackground),
+                tickCount: container.querySelectorAll('.cm-diff-overview-tick').length,
+                cases,
+              }};
+            }};
+          }})();
+        </script>
+      </body>
+    </html>
+    """
+
+
 def app_bundle_before_boot_script():
     source = (REPO_ROOT / "static" / "yolomux.js").read_text(encoding="utf-8")
     boot_start = source.index("if (refreshMeta) {")
@@ -606,6 +947,89 @@ def finder_click_toolbar_fixture_html():
           <div class="panel-detail-row"><div class="meta">path</div></div>
           <div class="tab-pane active"></div>
         </article>
+      </body>
+    </html>
+    """
+
+
+def file_tree_status_alignment_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 10px; width: 980px; }}
+          .file-explorer-tree {{ width: 960px; overflow: visible; }}
+        </style>
+      </head>
+      <body class="theme-light">
+        <div class="file-explorer-tree">
+          <div id="status-row-m" class="file-tree-row kind-file git-modified has-agent" style="padding-left: 92px">
+            <span class="file-tree-icon file-icon-code">*</span>
+            <span class="file-tree-name">10_core_utils.js</span>
+            <span class="file-tree-dir-count" hidden></span>
+            <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
+            <span class="file-tree-diff"><span class="changes-diff-add">+7</span><span class="changes-diff-remove">-4</span></span>
+            <span class="file-tree-git-status">M</span>
+            <span class="file-tree-date">20 min ago</span>
+          </div>
+          <div id="status-row-t" class="file-tree-row kind-file git-transcript has-agent" style="padding-left: 92px">
+            <span class="file-tree-icon file-icon-code">*</span>
+            <span class="file-tree-name">50_editor_settings_runtime.js</span>
+            <span class="file-tree-dir-count" hidden></span>
+            <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
+            <span class="file-tree-diff" hidden></span>
+            <span class="file-tree-git-status">T</span>
+            <span class="file-tree-date">2.5 hrs ago</span>
+          </div>
+          <div id="status-row-q" class="file-tree-row kind-file git-untracked" style="padding-left: 52px">
+            <span class="file-tree-icon file-icon-image">*</span>
+            <span class="file-tree-name">20260605-026.png</span>
+            <span class="file-tree-dir-count" hidden></span>
+            <span class="file-tree-agent" hidden></span>
+            <span class="file-tree-diff" hidden></span>
+            <span class="file-tree-git-status">?</span>
+            <span class="file-tree-date">1 hr ago</span>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+
+
+def codemirror_scrollbar_overview_fixture_html():
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    return f"""
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>{css}</style>
+        <style>
+          body {{ margin: 0; padding: 12px; background: #11151d; }}
+          #host {{ position: relative; width: 420px; height: 220px; }}
+          #host .cm-editor {{ height: 100%; }}
+          #host .cm-scroller {{ position: absolute; inset: 0; overflow: scroll; }}
+          #host .cm-content {{ width: 900px; height: 900px; }}
+        </style>
+      </head>
+      <body class="editor-theme-light">
+        <div id="host" class="file-editor-codemirror-panel file-editor-diff-codemirror">
+          <div class="cm-editor">
+            <div id="scroller" class="cm-scroller">
+              <div id="merge-revert" class="cm-merge-revert"><button type="button">↔</button></div>
+              <div class="cm-gutters">
+                <div id="changed-gutter" class="cm-changedLineGutter">12</div>
+                <div id="deleted-gutter" class="cm-deletedLineGutter">13</div>
+              </div>
+              <div class="cm-content"></div>
+            </div>
+          </div>
+          <div id="overview" class="cm-diff-overview" style="background: linear-gradient(to bottom, #ff5d6c 0.000% 40.000%, #38d878 40.000% 80.000%, transparent 80.000% 100.000%)"></div>
+        </div>
       </body>
     </html>
     """
@@ -940,9 +1364,33 @@ def load_codemirror_bundle_fixture(browser, tmp_path):
     browser.get(page.as_uri())
 
 
+def load_codemirror_todo_diff_overview_fixture(browser, tmp_path):
+    page = tmp_path / "codemirror-todo-diff-overview.html"
+    page.write_text(codemirror_todo_diff_overview_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_codemirror_file_explorer_diff_overview_fixture(browser, tmp_path):
+    page = tmp_path / "codemirror-file-explorer-diff-overview.html"
+    page.write_text(codemirror_file_explorer_diff_overview_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
 def load_finder_click_toolbar_fixture(browser, tmp_path):
     page = tmp_path / "finder-click-toolbar.html"
     page.write_text(finder_click_toolbar_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_file_tree_status_alignment_fixture(browser, tmp_path):
+    page = tmp_path / "file-tree-status-alignment.html"
+    page.write_text(file_tree_status_alignment_fixture_html(), encoding="utf-8")
+    browser.get(page.as_uri())
+
+
+def load_codemirror_scrollbar_overview_fixture(browser, tmp_path):
+    page = tmp_path / "codemirror-scrollbar-overview.html"
+    page.write_text(codemirror_scrollbar_overview_fixture_html(), encoding="utf-8")
     browser.get(page.as_uri())
 
 
@@ -1256,6 +1704,54 @@ def test_topbar_finder_and_modified_files_headers_hover_green_in_light_mode(brow
     wait_background("#modified-files-head", tokens["green"])
 
 
+def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_path):
+    load_finder_click_toolbar_fixture(browser, tmp_path)
+    browser.execute_script(
+        """
+        const tree = document.querySelector('.file-explorer-tree-panel');
+        const differ = document.getElementById('modified-files-panel');
+        tree.innerHTML = '<div style="height: 520px"></div>';
+        differ.insertAdjacentHTML('beforeend', '<div style="height: 520px"></div>');
+        """
+    )
+
+    def thumb(selector):
+        return browser.execute_script(
+            "return getComputedStyle(document.querySelector(arguments[0]), '::-webkit-scrollbar-thumb').backgroundColor",
+            selector,
+        )
+
+    def wait_thumb(selector, expected):
+        WebDriverWait(browser, 2).until(lambda _driver: thumb(selector) == expected)
+
+    neutral = "rgba(190, 205, 218, 0.62)"
+    green = "rgba(150, 220, 92, 0.72)"
+    overflow = browser.execute_script(
+        """
+        const tree = document.querySelector('.file-explorer-tree-panel');
+        const differ = document.getElementById('modified-files-panel');
+        return {
+          tree: tree.scrollHeight > tree.clientHeight,
+          differ: differ.scrollHeight > differ.clientHeight,
+        };
+        """
+    )
+    assert overflow["tree"]
+    assert overflow["differ"]
+
+    wait_thumb(".file-explorer-tree-panel", neutral)
+    wait_thumb("#modified-files-panel", neutral)
+    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    wait_thumb("#modified-files-panel", green)
+    wait_thumb(".file-explorer-tree-panel", neutral)
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
+    wait_thumb(".file-explorer-tree-panel", green)
+    wait_thumb("#modified-files-panel", neutral)
+    ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
+    wait_thumb(".file-explorer-tree-panel", neutral)
+    wait_thumb("#modified-files-panel", neutral)
+
+
 def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(browser, tmp_path):
     load_finder_click_toolbar_fixture(browser, tmp_path)
     refresh_metrics = browser.execute_script(
@@ -1317,6 +1813,211 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
     assert hover_tokens["hoverBg"] == "rgb(255, 242, 168)"
     assert row_metrics["background"] == hover_tokens["hoverBg"]
     assert hover_tokens["hoverBorder"] in row_metrics["boxShadow"]
+
+
+def test_finder_differ_status_badges_share_one_column(browser, tmp_path):
+    load_file_tree_status_alignment_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const rowIds = ['status-row-m', 'status-row-t', 'status-row-q'];
+        const rows = rowIds.map(id => {
+          const row = document.getElementById(id);
+          const status = row.querySelector('.file-tree-git-status');
+          const date = row.querySelector('.file-tree-date');
+          const rowRect = row.getBoundingClientRect();
+          const statusRect = status.getBoundingClientRect();
+          const dateRect = date.getBoundingClientRect();
+          return {
+            statusCenterX: statusRect.left + statusRect.width / 2,
+            statusCenterY: statusRect.top + statusRect.height / 2,
+            rowCenterY: rowRect.top + rowRect.height / 2,
+            statusRight: statusRect.right,
+            dateLeft: dateRect.left,
+            dateRight: dateRect.right,
+          };
+        });
+        const xs = rows.map(row => row.statusCenterX);
+        const centerYs = rows.map(row => Math.abs(row.statusCenterY - row.rowCenterY));
+        const dateRights = rows.map(row => row.dateRight);
+        return {
+          statusCenterDelta: Math.max(...xs) - Math.min(...xs),
+          maxVerticalDelta: Math.max(...centerYs),
+          dateRightDelta: Math.max(...dateRights) - Math.min(...dateRights),
+          statusBeforeDate: rows.every(row => row.statusRight <= row.dateLeft + 0.5),
+        };
+        """
+    )
+    assert metrics["statusCenterDelta"] <= 0.75
+    assert metrics["dateRightDelta"] <= 0.75
+    assert metrics["maxVerticalDelta"] <= 1.0
+    assert metrics["statusBeforeDate"]
+    hidden_date_metrics = browser.execute_script(
+        """
+        const row = document.getElementById('status-row-m');
+        const status = row.querySelector('.file-tree-git-status');
+        const diff = row.querySelector('.file-tree-diff');
+        const date = row.querySelector('.file-tree-date');
+        const beforeStatusRight = status.getBoundingClientRect().right;
+        const beforeDiffRight = diff.getBoundingClientRect().right;
+        date.hidden = true;
+        const rowRect = row.getBoundingClientRect();
+        const statusRect = status.getBoundingClientRect();
+        const diffRect = diff.getBoundingClientRect();
+        return {
+          dateDisplay: getComputedStyle(date).display,
+          statusGain: statusRect.right - beforeStatusRight,
+          diffGain: diffRect.right - beforeDiffRight,
+          statusRightGap: rowRect.right - statusRect.right,
+        };
+        """
+    )
+    assert hidden_date_metrics["dateDisplay"] == "none"
+    assert hidden_date_metrics["statusGain"] >= 80
+    assert hidden_date_metrics["diffGain"] >= 80
+    assert hidden_date_metrics["statusRightGap"] <= 10
+
+
+def test_diff_overview_does_not_cover_editor_scrollbar(browser, tmp_path):
+    load_codemirror_scrollbar_overview_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const hostRect = document.getElementById('host').getBoundingClientRect();
+        const overviewRect = document.getElementById('overview').getBoundingClientRect();
+        const overviewStyle = getComputedStyle(document.getElementById('overview'));
+        const scroller = document.getElementById('scroller');
+        const scrollerRect = scroller.getBoundingClientRect();
+        const scrollbarStyle = getComputedStyle(scroller, '::-webkit-scrollbar');
+        const cornerStyle = getComputedStyle(scroller, '::-webkit-scrollbar-corner');
+        document.getElementById('overview').style.top = '0px';
+        document.getElementById('overview').style.bottom = 'auto';
+        document.getElementById('overview').style.height = `${scroller.clientHeight}px`;
+        const adjustedOverviewRect = document.getElementById('overview').getBoundingClientRect();
+        const verticalTrackBottom = scrollerRect.top + scroller.clientHeight;
+        return {
+          overviewRightGap: hostRect.right - adjustedOverviewRect.right,
+          overviewTopDelta: Math.abs(adjustedOverviewRect.top - scrollerRect.top),
+          overviewBottomDelta: Math.abs(adjustedOverviewRect.bottom - verticalTrackBottom),
+          overviewWidth: adjustedOverviewRect.width,
+          overviewBackground: overviewStyle.backgroundImage,
+          overviewPointerEvents: overviewStyle.pointerEvents,
+          tickCount: document.querySelectorAll('.cm-diff-overview-tick').length,
+          scrollbarWidth: Number.parseFloat(scrollbarStyle.width || '0'),
+          cornerBackground: cornerStyle.backgroundColor,
+        };
+        """
+    )
+    assert metrics["overviewRightGap"] >= 12
+    assert metrics["overviewTopDelta"] <= 1
+    assert metrics["overviewBottomDelta"] <= 1
+    assert 3 <= metrics["overviewWidth"] <= 5
+    assert "linear-gradient" in metrics["overviewBackground"]
+    assert metrics["overviewPointerEvents"] == "none"
+    assert metrics["tickCount"] == 0
+    assert 11 <= metrics["scrollbarWidth"] <= 13
+    assert metrics["cornerBackground"] in {"rgba(255, 255, 255, 0.04)", "rgba(255, 255, 255, 0.05)"}
+
+
+def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
+    load_codemirror_todo_diff_overview_fixture(browser, tmp_path)
+    metrics = browser.execute_script("return window.__todoDiffOverviewMetrics")
+    assert metrics["chunks"] == [
+        {
+            "fromA": 2235,
+            "toA": 147096,
+            "endA": 147095,
+            "fromB": 2235,
+            "toB": 32019,
+            "endB": 32018,
+        }
+    ]
+    assert metrics["rows"]["bands"] == [
+        {"kind": "remove", "start": 21, "end": 561},
+        {"kind": "add", "start": 561, "end": 760},
+    ]
+    assert metrics["rows"]["currentLineCount"] == 270
+    assert metrics["rows"]["deletedRows"] == 540
+    assert metrics["rows"]["totalRows"] == 810
+    assert metrics["deletedDomRows"] == metrics["removedRangeRows"]
+    assert metrics["insertedRangeRows"] == 199
+    assert "linear-gradient" in metrics["overviewBackground"]
+    assert metrics["overviewStops"] == metrics["expectedStops"], metrics["overviewBackground"]
+    assert metrics["tickCount"] == 0
+    assert metrics["overviewTopDelta"] <= 1
+    assert metrics["overviewBottomDelta"] <= 1
+
+
+def test_diff_overview_matches_actual_file_explorer_visible_rows_after_scroll(browser, tmp_path):
+    load_codemirror_file_explorer_diff_overview_fixture(browser, tmp_path)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        window.__fileExplorerDiffOverviewMetrics().then(done);
+        """
+    )
+    assert metrics["chunks"] == [
+        {
+            "fromA": 56602,
+            "toA": 138459,
+            "endA": 138458,
+            "fromB": 56602,
+            "toB": 144134,
+            "endB": 144133,
+        }
+    ]
+    assert metrics["tickCount"] == 0
+    assert metrics["initialBackground"] != metrics["finalBackground"]
+    assert metrics["initialBackground"] == ""
+    assert metrics["initialOverviewPresent"] is False
+    assert metrics["initialDeletedDomRows"] == 0
+    assert metrics["initialChangedStops"] == []
+    assert metrics["fullRows"]["deletedRows"] == 1986
+    assert metrics["finalOverviewPresent"] is True
+    assert metrics["finalChangedStops"] == metrics["expectedFullChangedStops"], metrics["finalBackground"]
+    assert any(stop["color"] == "#ff5d6c" for stop in metrics["finalChangedStops"])
+    assert any(stop["color"] == "#38d878" for stop in metrics["finalChangedStops"])
+    cases = {case["name"]: case for case in metrics["cases"]}
+    assert cases["top-normal"]["deletedDomRows"] == 0
+    assert cases["red-middle-previous-regression"]["deletedDomRows"] == 1986
+    checked_cases = [
+        cases["red-middle-previous-regression"],
+        cases["red-late-previous-regression"],
+        cases["green-middle"],
+    ]
+    for case in checked_cases:
+        assert case["mismatches"] == [], f"{case['name']} mismatched visible rows: {case['mismatches']}"
+    for case in cases.values():
+        if not case["railPresent"]:
+            assert case["background"] == ""
+            assert not any(sample["rail"] == "remove" for sample in case["samples"]), case
+    assert any(sample["visible"] == "normal" for sample in cases["top-normal"]["samples"])
+    assert any(sample["visible"] == "remove" for sample in cases["red-middle-previous-regression"]["samples"])
+    assert any(sample["visible"] == "remove" for sample in cases["red-late-previous-regression"]["samples"])
+    assert any(sample["visible"] == "add" for sample in cases["green-middle"]["samples"])
+
+
+def test_diff_left_gutter_stays_neutral(browser, tmp_path):
+    load_codemirror_scrollbar_overview_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const changed = document.getElementById('changed-gutter');
+        const deleted = document.getElementById('deleted-gutter');
+        const mergeRevert = document.getElementById('merge-revert');
+        const changedStyle = getComputedStyle(changed);
+        const deletedStyle = getComputedStyle(deleted);
+        const mergeRevertStyle = getComputedStyle(mergeRevert);
+        return {
+          changedBg: changedStyle.backgroundColor,
+          deletedBg: deletedStyle.backgroundColor,
+          changedColor: changedStyle.color,
+          deletedColor: deletedStyle.color,
+          mergeRevertDisplay: mergeRevertStyle.display,
+        };
+        """
+    )
+    assert metrics["changedBg"] == "rgba(0, 0, 0, 0)"
+    assert metrics["deletedBg"] == "rgba(0, 0, 0, 0)"
+    assert metrics["changedColor"] == metrics["deletedColor"]
+    assert metrics["mergeRevertDisplay"] == "none"
 
 
 def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path):
