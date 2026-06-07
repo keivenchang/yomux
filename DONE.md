@@ -6,6 +6,9 @@ dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 
 ## 2026-06-06
 
+### DOIT.45 editor diff + FROM/TO ref picker on clean files
+- Fixed the recurring bug where pressing `Δ DIFF` on a git-tracked file with history but a clean working tree showed no FROM/TO sha picker. The clean file's default HEAD-vs-working diff is empty, so `openFileDiffAvailable()` was false and `renderFileEditorPanel` force-exited diff mode back to edit, hiding `.file-editor-diff-ref-panel`. Extracted the force-exit into `diffModeShouldFallBackToEdit(path, state, item)` and gated it on `!fileStateHasUsefulGitHistory(state)`: a file with useful history now stays in diff mode so the picker is reachable and the user can compare arbitrary refs, while untracked / creation-only / outside-repo files still fall back to the editor. Added a JS guard for clean-with-history, no-history, and real-diff states plus a source-grep guard requiring the useful-history clause.
+
 ### DOIT.44 pending-approval roster badge
 - Fixed the auto-approve-off roster path so pending permission prompts are visible without focusing the session. The cheap all-session status path now captures the discovered agent pane instead of the bare tmux session, derives `approval_prompt_state()` from the already-captured visible pane text, and still avoids the expensive hybrid transcript / full-pane prompt fan-out. The session-state classifier also treats `screen.key === "approval"` as `needs-approval`, so the roster lights `EXEC?` even if a future payload misses `prompt.visible`. Added backend coverage for cheap roster prompt visibility and non-active agent-pane targeting, plus a JS classifier regression for screen-only approval state. README now documents the pending-prompt attention badge behavior.
 

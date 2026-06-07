@@ -8,6 +8,7 @@
   --text: #e4e8ee;
   --muted: #9aa5b1;
   --line: #303948;
+  --tree-indent-line: rgba(148, 163, 184, 0.45);
   --good: #52d273;
   --active-ring: rgba(255, 255, 255, 0.96);
   --brand-green: #76b900;
@@ -379,6 +380,7 @@ body.theme-light {
   --text: #17202c;
   --muted: #5b6573;
   --line: #c9d2df;
+  --tree-indent-line: rgba(100, 116, 139, 0.12);
   --good: #2f7d20;
   --active-ring: rgba(15, 23, 42, 0.95);
   --brand-green: #5f9800;

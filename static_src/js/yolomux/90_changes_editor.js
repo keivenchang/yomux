@@ -803,14 +803,11 @@ function writeStoredChangesRepoCollapsed() {
 
 function fileExplorerChangesRepoKeys(payload = fileExplorerSessionFilesPayload) {
   const repos = new Set();
-  for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) {
-    const path = repo?.repo || repo?.root || '';
-    if (path) repos.add(path);
-  }
-  for (const item of Array.isArray(payload?.files) ? payload.files : []) {
+  const visibleFiles = fileExplorerDifferFiles(payload);
+  for (const item of visibleFiles) {
     if (item?.repo) repos.add(item.repo);
   }
-  if (!repos.size && payload?.session) repos.add(payload.session);
+  if (!repos.size && visibleFiles.length && payload?.session) repos.add(payload.session);
   return Array.from(repos).sort();
 }
 
@@ -853,6 +850,14 @@ function setAllFileExplorerChangesCollapsed(collapsed) {
 
 function toggleAllFileExplorerChanges() {
   setAllFileExplorerChangesCollapsed(!fileExplorerChangesAllReposCollapsed());
+}
+
+function sessionFileIsDifferVisible(item) {
+  return String(item?.status || 'M').toUpperCase() !== 'T';
+}
+
+function fileExplorerDifferFiles(payload = fileExplorerSessionFilesPayload) {
+  return (Array.isArray(payload?.files) ? payload.files : []).filter(sessionFileIsDifferVisible);
 }
 
 function changeStatusClassKey(statusKey) {
@@ -943,12 +948,12 @@ function repoComparisonErrorHtml(repoInfo) {
 
 function changesRepoCount(payload, files) {
   const repos = new Set();
-  for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) {
-    const path = normalizeDirectoryPath(repo?.repo || '');
+  for (const file of Array.isArray(files) ? files : []) {
+    const path = normalizeDirectoryPath(file?.repo || '');
     if (path) repos.add(path);
   }
   if (!repos.size) {
-    for (const file of Array.isArray(files) ? files : []) {
+    for (const file of fileExplorerDifferFiles(payload)) {
       const path = normalizeDirectoryPath(file?.repo || '');
       if (path) repos.add(path);
     }
@@ -963,10 +968,8 @@ function changesSummaryHtml(payload, files, session, loading, loaded) {
   const repoCount = changesRepoCount(payload, files);
   const repos = tPlural('changes.repoCount', repoCount);
   const count = tPlural('changes.fileCount', fileCount);
-  const {added, removed} = changeFileTotals(files);
   const scope = session ? t('changes.inSession', {session: sessionLabel(session)}) : '';
-  const title = `+${added} -${removed} ${tPlural('changes.fileCount', fileCount)}`;
-  return `<span class="changes-summary-label">${esc(repos)}, ${esc(count)}${esc(scope)}</span><span class="changes-summary-totals" title="${esc(title)}"><span class="changes-diff-add">+${added}</span><span class="changes-diff-remove">-${removed}</span><span class="changes-repo-count">${fileCount}</span></span>`;
+  return `<span class="changes-summary-label">${esc(repos)}, ${esc(count)}${esc(scope)}</span>`;
 }
 
 function changesRepoMetaHtml(repoInfo, options = {}) {
@@ -1239,11 +1242,27 @@ function sessionFilesSessionSelectHtml(target, options = {}) {
   return `<select${classes} data-session-files-session>${selectOptions}</select>`;
 }
 
+function fileExplorerDiffSessionControlHtml(session) {
+  return `<label class="file-explorer-diff-session-control file-explorer-mode-diff-only changes-control">${esc(t('changes.session'))}: ${sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'})}</label>`;
+}
+
+function syncFileExplorerDiffSessionControls() {
+  const session = fileExplorerSessionFilesTargetSession();
+  for (const select of document.querySelectorAll('.file-explorer-diff-session-control [data-session-files-session]')) {
+    const options = Array.from(select.options || []);
+    if (options.length !== sessions.length || !options.some(option => option.value === session)) {
+      select.outerHTML = sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'});
+    } else if (select.value !== session) {
+      select.value = session;
+    }
+  }
+}
+
 // Returns the static toolbar/header HTML for the embedded Finder Differ panel.
 function fileExplorerChangesPanelStaticHtml(options = {}) {
   const payload = fileExplorerSessionFilesPayload;
   const loading = fileExplorerSessionFilesLoading;
-  const files = payload.files || [];
+  const files = fileExplorerDifferFiles(payload);
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
@@ -1252,7 +1271,6 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   if (full) {
     return `
       <div class="changes-toolbar file-explorer-diff-toolbar">
-        <label class="changes-control">${esc(t('changes.session'))} ${sessionFilesSessionSelectHtml(session)}</label>
         <label class="changes-control">${esc(t('changes.sort'))} ${sessionFilesSortSelectHtml()}</label>
         ${fileExplorerTreeDateButtonHtml('changes-date-toggle')}
         <button type="button" class="changes-refresh" data-session-files-refresh title="${esc(t('changes.refresh.title'))}" aria-label="${esc(t('changes.refresh.title'))}">${esc(t('changes.refresh'))}</button>
@@ -1333,7 +1351,7 @@ function changesGroupsSnapshotHtml(files, options = {}) {
 
 function fileExplorerChangesPanelHtml() {
   const staticHtml = fileExplorerChangesPanelStaticHtml();
-  const groupsHtml = changesGroupsSnapshotHtml(fileExplorerSessionFilesPayload.files || [], {payload: fileExplorerSessionFilesPayload, compact: fileExplorerMode !== 'diff'});
+  const groupsHtml = changesGroupsSnapshotHtml(fileExplorerDifferFiles(), {payload: fileExplorerSessionFilesPayload, compact: fileExplorerMode !== 'diff'});
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
 
@@ -1376,6 +1394,7 @@ function applyFileExplorerMode(panel = null) {
     btn.title = fileExplorerModeTitle();
     btn.setAttribute('aria-label', fileExplorerModeTitle());
   });
+  syncFileExplorerDiffSessionControls();
   syncFileExplorerChangesCollapseButtons();
 }
 
@@ -1950,6 +1969,7 @@ function createFileExplorerPanel() {
         <div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
             ${fileExplorerModeSwitcherHtml()}
+            ${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}
             <input class="file-explorer-path-inline file-explorer-mode-files-only" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
             <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.copyPath'))}" aria-label="${esc(t('finder.toolbar.copyPath'))}"></button>
             <span class="file-explorer-toolbar-spacer"></span>
@@ -2092,11 +2112,12 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
     renderChangesRoot(
       changes,
       fileExplorerChangesPanelStaticHtml({full: fileExplorerMode === 'diff'}),
-      fileExplorerSessionFilesPayload.files || [],
+      fileExplorerDifferFiles(),
       {payload: fileExplorerSessionFilesPayload, compact: fileExplorerMode !== 'diff'},
       {force: options.force === true},
     );
   }
+  syncFileExplorerDiffSessionControls();
   bindChangesPanel(panel);
   bindChangedFileRowBehaviors(panel);
   syncFileExplorerChangesCollapseButtons();
@@ -3585,6 +3606,21 @@ function renderFileEditorRawPane(rawPane, path, content) {
   });
 }
 
+// DOIT.45: should an in-diff-mode editor fall back to edit because the loaded diff has nothing to show?
+// YES only when the file has NO useful git history — those files genuinely can't be diffed. A file WITH
+// useful history (e.g. README.md with many commits but a clean working tree → an empty HEAD-vs-working
+// diff) must STAY in diff mode so the FROM/TO sha picker stays reachable and the user can compare
+// ARBITRARY refs. Force-exiting on an empty default diff (the old behavior) hid the picker entirely on
+// clean files — the recurring "press DIFF, no FROM/TO menu" bug.
+function diffModeShouldFallBackToEdit(path, state, item = null) {
+  return state?.kind === 'text'
+    && editorViewModeFor(path, item) === 'diff'
+    && state.diffLoaded === true
+    && !state.diffLoading
+    && !openFileDiffAvailable(state)
+    && !fileStateHasUsefulGitHistory(state);
+}
+
 function renderFileEditorPanel(panel, item) {
   const path = fileItemPath(item);
   captureFileEditorPanelViewState(item, panel);
@@ -3655,7 +3691,7 @@ function renderFileEditorPanel(panel, item) {
   // DOIT.6 #149: do NOT auto-load the diff when a file opens/renders. The diff loads only on explicit
   // diff-mode entry (the Diff button + the Modified-files menu both open in diff view and load there),
   // so opening/editing a file does zero diff work (one fewer network round-trip + re-render; ties to DOIT.9).
-  if (state.kind === 'text' && editorViewModeFor(path, item) === 'diff' && state.diffLoaded && !state.diffLoading && !openFileDiffAvailable(state)) {
+  if (diffModeShouldFallBackToEdit(path, state, item)) {
     setFileEditorViewMode(path, 'edit', item);
   }
   const mode = editorViewModeFor(path, item);

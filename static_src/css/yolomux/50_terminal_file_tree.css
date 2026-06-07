@@ -2080,7 +2080,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   top: 0;
   bottom: 0;
   left: 15px;
-  border-inline-start: 1px solid rgba(148, 163, 184, 0.18);
+  border-inline-start: 1px solid var(--tree-indent-line);
   pointer-events: none;
 }
 .file-tree-children {

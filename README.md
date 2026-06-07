@@ -77,6 +77,7 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs:
 - Finder file and diff rows share the same file date modes (`None`, `Date`, `Ago`); in Finder, the date toggle and Reload control sit together on the toolbar's right edge so row times line up under the date column.
 - Finder diff rows keep status, diff counts, and the time column visible by trimming long filenames first.
 - Editor diff rows use one consistent red or green fill for changed lines, including the cursor's active line.
+- The file editor's `Δ DIFF` toggle opens a diff view with a FROM/TO sha picker for any git-tracked file with commit history, including a file with no uncommitted changes. The default HEAD-vs-working diff for a clean file is empty, but diff mode stays open so you can pick two refs to compare; it only falls back to the editor for files git cannot diff.
 - Diff panes hold the loading state until the requested FROM/TO payload is ready, then render the diff without flashing a transient edit view.
 - The terminal border turns yellow for the focused pane.
 - Sessions waiting at a detected permission prompt show an attention badge in the roster even when YOLO auto-approval is off, so pending `Yes/No` prompts do not silently sit idle.

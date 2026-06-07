@@ -697,6 +697,17 @@ body.theme-light .file-tree-rename-input {
   flex: 1 1 auto;
   min-width: 0;
 }
+.file-explorer-diff-session-control {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-inline-size: min(240px, 34vw);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.file-explorer-diff-session-select {
+  min-width: 0;
+  max-inline-size: 150px;
+}
 .file-explorer-primary-row .file-explorer-path-inline {
   flex: 1 1 0;
   min-width: 0;

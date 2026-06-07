@@ -337,6 +337,7 @@ globalThis.__layoutTestApi = {
   fileExplorerDirectoryIsIndexed,
   fileExplorerIndexBadgeText,
   fileEditorGitActionControlsVisible,
+  diffModeShouldFallBackToEdit,
   setFileExplorerIndexedDirsForTest(paths) { setFileExplorerIndexedDirs(paths); },
   setFileExplorerIndexStatusForTest(root, status) { fileExplorerIndexStatus.set(normalizeStoredFileExplorerIndexedDir(root), status); },
   createTopbarSearch,
@@ -1457,6 +1458,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({}), codeItem), true, 'files with history and unknown diff state show the Diff/Blame pair');
   api.setFileEditorViewMode(codePath, 'diff', codeItem);
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), true, 'active diff mode keeps the paired git controls visible so Exit diff remains available');
+  // DOIT.45 (RECURRING): pressing DIFF on a git-tracked file with useful history but a CLEAN working tree
+  // (empty HEAD-vs-working diff) must NOT force-exit diff mode — the FROM/TO sha ref picker has to stay
+  // reachable so the user can compare ARBITRARY refs. A clean README.md (many commits, no working changes)
+  // used to snap back to edit and hide the picker entirely. codePath is in diff mode here.
+  assert.equal(api.diffModeShouldFallBackToEdit(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), false, 'DOIT.45: a clean file WITH useful git history stays in diff mode so the FROM/TO ref picker stays reachable');
+  assert.equal(api.diffModeShouldFallBackToEdit(codePath, {kind: 'text', gitTracked: true, gitHasHistory: false, gitHistory: [], diffLoaded: true, diff: ''}, codeItem), true, 'DOIT.45: a file WITHOUT useful history still falls back to edit when its diff is empty');
+  assert.equal(api.diffModeShouldFallBackToEdit(codePath, trackedHistoryState({diffLoaded: true, diff: 'diff --git a/a b/a'}), codeItem), false, 'DOIT.45: a file with a real diff stays in diff mode (control)');
   api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: false, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem);
   assert.equal(diffButton.hidden, true, 'untracked files stay diff-button-free even in diff mode');
   const diffExpandButton = new TestElement('diff-expand-button');
@@ -2128,10 +2136,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     loaded: true,
     errors: [],
     refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
-    repos: [{repo: '/repo/app', count: 2, touched_count: 2, added: 10, removed: 1, behind: 0, ahead: 2}],
+    repos: [{repo: '/repo/app', count: 2, touched_count: 3, added: 10, removed: 1, behind: 0, ahead: 2}],
     files: [
       {session: '1', agent: 'codex', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
       {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200, added: 8, removed: 0},
+      {session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/touched-only.py', abs_path: '/repo/app/src/touched-only.py', mtime: 300, added: 0, removed: 0, source: 'transcript'},
     ],
   });
   api.setFileExplorerModeForTest('diff');
@@ -2142,10 +2151,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/changes-repo-caret[\s\S]*changes-repo-title[^>]*>\/repo\/app<[\s\S]*changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+10<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>2<\/span>/.test(repoHead), 'repo disclosure header shows repo name, +added, -removed, and file count');
   assert.equal(/Behind|Ahead/.test(repoHead), false, 'ahead/behind stays out of the repo disclosure header');
   assert.ok(changesHtml.includes('1 repo, 2 files changed in &#39;1&#39;'), 'Finder diff summary names repo count, file count, and session explicitly');
+  const comparisonSummaryStart = changesHtml.indexOf('class="changes-comparison-summary"');
+  const comparisonSummary = changesHtml.slice(comparisonSummaryStart, changesHtml.indexOf('</div>', comparisonSummaryStart));
+  assert.equal(/changes-summary-totals|changes-diff-add|changes-diff-remove|changes-repo-count/.test(comparisonSummary), false, 'Finder diff summary does not repeat global +line/-line/file totals');
   assert.ok(/changes-repo-refs[\s\S]*changes-repo-compare-title[\s\S]*Comparing[\s\S]*data-diff-ref-from[\s\S]*to[\s\S]*data-diff-ref-to/.test(changesHtml), 'Finder diff shows a per-repo comparison row with inline FROM/TO controls');
-  assert.equal((changesHtml.match(/repo, 2 files changed in &#39;1&#39;/g) || []).length, 1, '#24: the repo/file-count/+/- summary appears exactly once (in the comparison card), not duplicated in the toolbar');
+  assert.equal((changesHtml.match(/repo, 2 files changed in &#39;1&#39;/g) || []).length, 1, '#24: the repo/file-count summary appears exactly once (in the comparison card), not duplicated in the toolbar');
   assert.equal(changesHtml.includes('class="changes-summary"'), false, '#24: the standalone toolbar summary duplicate is removed');
   assert.ok(changesHtml.includes('class="changes-comparison-summary"'), '#24: the summary lives in the comparison card');
+  assert.equal(changesHtml.includes('touched-only.py'), false, 'Differ hides transcript-only T rows that have no real diff');
+  const fullToolbarSlice = changesHtml.slice(changesHtml.indexOf('changes-toolbar'), changesHtml.indexOf('</div>', changesHtml.indexOf('changes-toolbar')));
+  assert.equal(fullToolbarSlice.includes('data-session-files-session'), false, 'full Differ body toolbar no longer repeats the Session dropdown');
+  assert.ok(/data-session-files-sort[\s\S]*data-file-explorer-tree-dates[\s\S]*data-session-files-refresh/.test(fullToolbarSlice), 'full Differ body toolbar keeps Sort, date mode, and Reload');
   assert.ok(changesHtml.includes('Behind 0 commits'), 'Finder diff shows behind count');
   assert.ok(changesHtml.includes('Ahead 2 commits'), 'Finder diff shows ahead count');
   assert.ok(changesHtml.includes('file-tree-name">src'), 'Finder diff groups nested paths under folders');
@@ -2497,7 +2513,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.changes-repo-totals\s*\{[\s\S]*margin-inline-start:\s*auto/.test(changedFilesCss), 'Modified-files repo totals are pinned to the right side of the disclosure header');
   assert.ok(/\.changes-tree-folder-name\s*\{[\s\S]*color:\s*var\(--changes-folder-text\)[\s\S]*font-weight:\s*400/.test(changedFilesCss), 'Modified-files subdirectory names are gold but not bold');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-folder-text:\s*var\(--accent-gold\)/.test(changedFilesCss), 'Finder diff inherits the same gold subdirectory token');
-  assert.ok(/body\.theme-light \.file-explorer-changes-panel,[\s\S]*?--changes-indent-line:\s*rgba\(100,\s*116,\s*139,\s*0\.12\)/.test(changedFilesCss), 'light-mode Modified-files folder connector lines are subdued');
+  assert.ok(/body\.theme-light\b[\s\S]*?--tree-indent-line:\s*rgba\(100,\s*116,\s*139,\s*0\.12\)/.test(changedFilesCss), 'light-mode tree connector lines are subdued (shared --tree-indent-line token)');
   assert.ok(/body\.theme-light \.changes-file-row\s*\{[\s\S]*border-top-color:\s*rgba\(100,\s*116,\s*139,\s*0\.13\)/.test(changedFilesCss), 'light-mode Modified-files row dividers are subdued');
   assert.ok(changedFilesCss.includes('.changes-status-r,'), 'modified-file rename/copy statuses get distinct colors');
   assert.ok(/\.changes-status-t\s*\{[^}]*background:\s*#94a3b8/.test(changedFilesCss), 'touched-only transcript rows get a neutral status color');
@@ -2970,7 +2986,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/ensureCodeMirrorPanel\(panel, item, path, state\)\.then\(loaded => \{[\s\S]{0,160}renderFileEditorRawPane\(rawPane, path, state\.content\);[\s\S]{0,160}\}\)\.catch\(error => \{[\s\S]{0,360}renderFileEditorRawPane\(rawPane, path, state\.content\);/.test(appSource), 'CodeMirror render promise rejections are caught and fall back to raw text');
   assert.equal(appSource.includes("fileEditorEmptyState('No diff'"), false, 'clean selected refs render the normal editor instead of a No diff empty state');
   assert.ok(/if \(!openFileDiffAvailable\(state\)\)[\s\S]{0,360}return ensureCodeMirrorPanel\(panel, item, path, state, \{forceMode: 'edit'\}\)/.test(appSource), 'clean selected refs fall back to the normal editable CodeMirror view');
-  assert.ok(/state\.diffLoaded && !state\.diffLoading && !openFileDiffAvailable\(state\)/.test(appSource), 'once a diff load confirms no usable diff, diff mode exits to the normal editor');
+  assert.ok(/function diffModeShouldFallBackToEdit[\s\S]*!state\.diffLoading[\s\S]*!openFileDiffAvailable\(state\)[\s\S]*!fileStateHasUsefulGitHistory\(state\)/.test(appSource), 'DOIT.45: once a diff load confirms no usable diff, diff mode exits to edit ONLY when the file has no useful history — a file WITH history stays in diff mode so the FROM/TO ref picker is reachable');
   const refreshDiffStart = appSource.indexOf('async function refreshOpenFileDiff(');
   const openFileEditorStart = appSource.indexOf('async function openFileInEditor(', refreshDiffStart);
   assert.ok(refreshDiffStart > 0 && openFileEditorStart > refreshDiffStart, '#43: refreshOpenFileDiff body is locatable');
@@ -3154,7 +3170,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-toolbar-row file-explorer-scope-row[\s\S]*file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only/.test(finderPanelSource), 'Finder panel toolbar renders primary, scope, and files-only actions rows in order');
   assert.equal(finderPanelSource.includes('file-explorer-diff-row'), false, 'Differ title is folded into the shared primary row');
   assert.equal(finderPanelSource.includes('file-explorer-panel-title'), false, 'Finder panel no longer prints redundant Finder/Differ title text');
-  assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel[\s\S]*fileExplorerChangesCollapseToggleHtml\(\)[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders mode switcher, path, copy, Differ collapse toggle, and close control');
+  assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel[\s\S]*fileExplorerChangesCollapseToggleHtml\(\)[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders mode switcher, diff-mode Session select, path, copy, Differ collapse toggle, and close control');
+  assert.ok(/function fileExplorerDiffSessionControlHtml[\s\S]*file-explorer-diff-session-control file-explorer-mode-diff-only changes-control[\s\S]*changes\.session[\s\S]*sessionFilesSessionSelectHtml\(session/.test(finderPanelBundle), 'Differ mode keeps the Session dropdown in the top Finder/Differ row');
   assert.ok(/file-explorer-toolbar-row file-explorer-scope-row[\s\S]*file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*file-explorer-quick-access-panel/.test(finderPanelSource), 'Finder scope row renders .*, Sync, then quick-root buttons');
   assert.equal(api.displayQuickAccessPath('/'), '/*', 'Finder root quick-access button labels root as /*');
   assert.equal(api.displayQuickAccessPath('/*'), '/*', 'Finder accepts /* as the root quick-access label');

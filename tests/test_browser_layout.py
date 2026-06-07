@@ -926,6 +926,7 @@ def finder_click_toolbar_fixture_html():
                   <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="files" aria-pressed="true"><span class="file-explorer-mode-label">Finder</span></button>
                   <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">Differ</span></button>
                 </span>
+                <label class="file-explorer-diff-session-control file-explorer-mode-diff-only changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
                 <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
                 <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only"></button>
                 <span class="file-explorer-toolbar-spacer"></span>
@@ -962,7 +963,6 @@ def finder_click_toolbar_fixture_html():
             <div class="file-explorer-changes-resizer"></div>
             <div id="modified-files-panel" class="file-explorer-changes-panel" tabindex="0">
               <div class="changes-toolbar file-explorer-diff-toolbar">
-                <label class="changes-control">Session <select data-session-files-session><option>project1</option></select></label>
                 <label class="changes-control">Sort <select data-session-files-sort><option>new</option></select></label>
                 <button type="button" data-file-explorer-tree-dates>Ago</button>
                 <button type="button" class="changes-refresh" data-session-files-refresh>Reload</button>
@@ -3845,6 +3845,7 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const path = primaryRow.querySelector('.file-explorer-path-inline');
         const copy = primaryRow.querySelector('.file-explorer-path-copy-panel');
         const mode = primaryRow.querySelector('.file-explorer-mode-switcher');
+        const diffSession = primaryRow.querySelector('.file-explorer-diff-session-control');
         const modeButtons = Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]'));
         const modeLabels = Array.from(mode.querySelectorAll('.file-explorer-mode-label'));
         const cluster = toolbar.querySelector('.file-explorer-date-reload-cluster');
@@ -3891,7 +3892,9 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           rootPressedCount: [sync, ...quickButtons].filter(button => button.getAttribute('aria-pressed') === 'true').length,
           quickBorderStyle: firstQuickStyle.borderTopStyle,
           quickBorderWidth: firstQuickStyle.borderTopWidth,
-          pathInPrimaryRow: mode.nextElementSibling === path,
+          diffSessionAfterMode: mode.nextElementSibling === diffSession,
+          pathAfterDiffSession: diffSession.nextElementSibling === path,
+          diffSessionHiddenInFilesMode: getComputedStyle(diffSession).display === 'none',
           collapseRight: collapseRect.right,
           newFileLeft: newFileRect.left,
           newFileRight: newFileRect.right,
@@ -3951,7 +3954,9 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["rootPressedCount"] == 1
     assert metrics["quickBorderStyle"] == "solid"
     assert metrics["quickBorderWidth"] == "1px"
-    assert metrics["pathInPrimaryRow"]
+    assert metrics["diffSessionAfterMode"]
+    assert metrics["pathAfterDiffSession"]
+    assert metrics["diffSessionHiddenInFilesMode"]
     assert metrics["collapseRight"] <= metrics["newFileLeft"]
     assert metrics["newFileRight"] <= metrics["newFolderLeft"]
     assert metrics["hiddenRight"] <= metrics["syncLeft"]

@@ -9,6 +9,7 @@
   --text: #e4e8ee;
   --muted: #9aa5b1;
   --line: #303948;
+  --tree-indent-line: rgba(148, 163, 184, 0.45);
   --good: #52d273;
   --active-ring: rgba(255, 255, 255, 0.96);
   --brand-green: #76b900;
@@ -380,6 +381,7 @@ body.theme-light {
   --text: #17202c;
   --muted: #5b6573;
   --line: #c9d2df;
+  --tree-indent-line: rgba(100, 116, 139, 0.12);
   --good: #2f7d20;
   --active-ring: rgba(15, 23, 42, 0.95);
   --brand-green: #5f9800;
@@ -2086,7 +2088,8 @@ body.theme-light .branch-link {
 .file-explorer-changes-panel {
   --changes-row-hover-bg: var(--active-control-soft-bg);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
-  --changes-indent-line: rgba(148, 163, 184, 0.18);
+  --changes-indent-line: var(--tree-indent-line);
+  --changes-repo-head-bg: color-mix(in srgb, var(--panel2) 88%, var(--text) 12%);
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
   --changes-icon-text: #a7c7ff;
@@ -2328,7 +2331,7 @@ body.theme-light .branch-link {
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  background: var(--panel2);
+  background: var(--changes-repo-head-bg);
   color: var(--text);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-xs);
@@ -2484,7 +2487,7 @@ body.theme-light .branch-link {
   width: 100%;
   padding: 4px 7px 4px calc(7px + (var(--changes-tree-depth, 0) * 16px));
   border: 0;
-  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  border-top: 1px solid var(--changes-indent-line);
   background: transparent;
   color: var(--muted);
   text-align: start;
@@ -3226,7 +3229,8 @@ body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
   --changes-row-hover-bg: rgba(31, 111, 235, 0.08);
   --changes-folder-bg: #f6f8fa;
-  --changes-indent-line: rgba(100, 116, 139, 0.12);
+  --changes-indent-line: var(--tree-indent-line);
+  --changes-repo-head-bg: var(--panel2);
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: #59636e;
   --changes-icon-text: #1d4ed8;
@@ -7125,7 +7129,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   top: 0;
   bottom: 0;
   left: 15px;
-  border-inline-start: 1px solid rgba(148, 163, 184, 0.18);
+  border-inline-start: 1px solid var(--tree-indent-line);
   pointer-events: none;
 }
 .file-tree-children {
@@ -8041,6 +8045,17 @@ body.theme-light .file-tree-rename-input {
 .file-explorer-toolbar-spacer {
   flex: 1 1 auto;
   min-width: 0;
+}
+.file-explorer-diff-session-control {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-inline-size: min(240px, 34vw);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.file-explorer-diff-session-select {
+  min-width: 0;
+  max-inline-size: 150px;
 }
 .file-explorer-primary-row .file-explorer-path-inline {
   flex: 1 1 0;
