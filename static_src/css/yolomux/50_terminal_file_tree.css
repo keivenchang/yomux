@@ -70,32 +70,11 @@
   box-sizing: content-box;
 }
 .terminal .xterm-viewport {
+  /* Terminal and YO!info scrollbars must always inherit a shared pane scrollbar rule from layout CSS;
+     never customize scrollbar colors or hover behavior here. */
+  --pane-scrollbar-track: transparent;
+  --pane-scrollbar-track-active: transparent;
   overflow-y: auto;
-  scrollbar-width: auto;
-  scrollbar-color: rgba(190, 205, 218, 0.62) transparent;
-}
-.terminal .xterm-viewport::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-.terminal .xterm-viewport::-webkit-scrollbar-track {
-  background: transparent;
-}
-.terminal .xterm-viewport::-webkit-scrollbar-thumb {
-  min-height: 32px;
-  border: 2px solid transparent;
-  border-radius: 0;
-  background: rgba(190, 205, 218, 0.62);
-  background-clip: content-box;
-}
-.panel:hover .terminal .xterm-viewport,
-.panel:focus-within .terminal .xterm-viewport {
-  scrollbar-color: var(--active-control-scrollbar-thumb) transparent;
-}
-.panel:hover .terminal .xterm-viewport::-webkit-scrollbar-thumb,
-.panel:focus-within .terminal .xterm-viewport::-webkit-scrollbar-thumb {
-  background: var(--active-control-scrollbar-thumb);
-  background-clip: content-box;
 }
 .terminal-context-menu {
   position: fixed;
@@ -429,6 +408,8 @@
   height: 20px;
 }
 .transcript-preview {
+  /* Scrollable YO!info bodies always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   min-height: 0;
   padding: 8px;
   overflow: auto;
@@ -623,6 +604,8 @@
   background: var(--pane-inactive-tab-bg-hover);
 }
 .info-list {
+  /* YO!info table scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   min-height: 0;
   overflow: auto;
   padding: 8px 10px;
@@ -755,6 +738,8 @@
   border-color: color-mix(in srgb, var(--brand-green) 45%, var(--line));
 }
 .yoagent-chat-history {
+  /* YO!agent chat scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   min-height: 0;
   overflow: auto;
   display: flex;

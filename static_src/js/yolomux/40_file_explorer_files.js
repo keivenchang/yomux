@@ -1217,11 +1217,13 @@ function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload)
     let dir = normalizeDirectoryPath(dirnameOf(absPath));
     while (dir && dir !== '/') {
       const key = `${dir}\x1f${absPath}`;
-      const current = stats.get(dir) || {count: 0, agents: []};
+      const current = stats.get(dir) || {count: 0, agents: [], mtime: 0};
       if (!seen.has(key)) {
         seen.add(key);
         current.count += 1;
       }
+      const mtime = Number(file.mtime || 0);
+      if (Number.isFinite(mtime) && mtime > Number(current.mtime || 0)) current.mtime = mtime;
       for (const agent of agents) {
         if (!current.agents.includes(agent)) current.agents.push(agent);
       }
@@ -1354,6 +1356,22 @@ function fileTreeGitStatusBadgeClass(status) {
   return String(status || '').toUpperCase() === '?' ? 'file-tree-git-status-unknown' : '';
 }
 
+function gitStatusBadgeTitle(status) {
+  const key = String(status || '').toUpperCase();
+  const labels = {
+    M: 'modified',
+    A: 'added',
+    D: 'deleted',
+    T: 'touched by AI transcript',
+    '?': 'untracked',
+    U: 'untracked',
+    S: 'staged',
+    R: 'renamed',
+    C: 'copied',
+  };
+  return labels[key] ? `${key}: ${labels[key]}` : '';
+}
+
 function fileIconClassFor(name, kind = 'file') {
   if (kind === 'dir') return 'file-icon-dir';
   const lowerName = String(name || '').toLowerCase();
@@ -1476,8 +1494,13 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(statusText)].filter(Boolean).join(' '));
   if (status.textContent !== statusText) status.textContent = statusText;
   const statusTitle = options.gitStatusTitle || '';
-  if (statusTitle) status.title = statusTitle;
-  else status.removeAttribute('title');
+  if (statusTitle) {
+    status.setAttribute('title', statusTitle);
+    status.setAttribute('aria-label', statusTitle);
+  } else {
+    status.removeAttribute('title');
+    status.removeAttribute('aria-label');
+  }
   setHiddenIfChanged(status, !statusText);
   const dateText = options.dateText || '';
   if (date.textContent !== dateText) date.textContent = dateText;
@@ -1539,7 +1562,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const gitStatus = entry.kind === 'file'
     ? (options.sessionFilesMap ? (changedFile ? String(changedFile.status || 'M').toUpperCase() : '') : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
-  const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : '';
+  const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus);
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
     row.classList.toggle(className, className === gitClass);
@@ -1818,12 +1841,21 @@ function updateFileTreeGitStatusRows() {
   document.querySelectorAll('.file-tree-row[data-path]').forEach(row => {
     const gitStatus = row.dataset.kind === 'file' ? fileTreeGitStatus(row.dataset.path) : '';
     const gitClass = fileTreeGitStatusClass(gitStatus);
-    for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
+    for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
       row.classList.toggle(className, className === gitClass);
     }
     const status = row.querySelector(':scope > .file-tree-git-status');
     if (status) {
+      setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(gitStatus)].filter(Boolean).join(' '));
       status.textContent = gitStatus;
+      const title = gitStatusBadgeTitle(gitStatus);
+      if (title) {
+        status.setAttribute('title', title);
+        status.setAttribute('aria-label', title);
+      } else {
+        status.removeAttribute('title');
+        status.removeAttribute('aria-label');
+      }
       status.hidden = !gitStatus;
     }
     const entry = {
@@ -2144,7 +2176,7 @@ function updateFileExplorerIndexedDirectoryRows() {
       const badge = fileExplorerIndexBadgeText(path);
       if (status.textContent !== badge) status.textContent = badge;
       const title = fileExplorerIndexBadgeTitle(path);
-      if (title) status.title = title;
+      if (title) status.setAttribute('title', title);
       else status.removeAttribute('title');
       setHiddenIfChanged(status, !badge);
     }

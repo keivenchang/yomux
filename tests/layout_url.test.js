@@ -2156,7 +2156,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
   assert.ok(changesHtml.includes('changes-file-agent'), 'changed-file rows show the agent icon slot');
   assert.ok(changesHtml.includes('file-tree-row kind-file git-modified has-agent'), 'changed-file rows use the shared file-tree row renderer and inline-agent layout');
-  assert.ok(changesHtml.includes('file-tree-git-status">M</span>'), 'changed-file rows show the M/T status badge in the shared file-tree status slot');
+  assert.ok(/file-tree-git-status"[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(changesHtml), 'changed-file rows show and label the M status badge in the shared file-tree status slot');
+  assert.ok(/file-tree-git-status"[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(changesHtml), 'added changed-file rows label the A status badge');
   assert.ok(changesHtml.includes('file-tree-dir-count">1</span>'), 'changed-file folders show a recursive changed-file count from the shared row renderer');
   assert.ok(changesHtml.includes('file-tree-icon'), 'changed-file rows show a file-type icon slot');
   assert.ok(changesHtml.includes('file-tree-date'), 'changed-file rows wrap the date for skinny styling');
@@ -2235,6 +2236,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     {compact: true},
   );
   assert.ok(/changes-file-name[^>]*>README\.md<\/span>[\s\S]*changes-file-agent[\s\S]*changes-file-meta[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-status[^>]*>M<\/span>[\s\S]*changes-file-date/.test(compactChangeHtml), 'compact changed-file row order is file, AI icon, counts, status, date');
+  assert.ok(/changes-status[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(compactChangeHtml), 'compact changed-file M badge explains itself on hover');
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   assert.ok(changesHtml.includes('data-open-change-status="A"'), 'changed-file clicks carry status for deleted-file diff opens');
@@ -2244,21 +2246,26 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(changedFilesSource.includes("viewMode: initialMode"), 'non-diff rows fall back to normal editor mode instead of forcing diff');
   const touchedOnlyHtml = api.changeFileRowHtml({session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/merged.py', abs_path: '/repo/app/src/merged.py', mtime: 100, source: 'transcript'}, {compact: true});
   assert.ok(touchedOnlyHtml.includes('changes-status-t') && touchedOnlyHtml.includes('>T</span>'), 'touched-only transcript rows carry a neutral T status badge');
+  assert.ok(/changes-status[^>]*title="T: touched by AI transcript"[^>]*aria-label="T: touched by AI transcript"[^>]*>T<\/span>/.test(touchedOnlyHtml), 'touched-only T badge explains itself on hover');
   // C5: agent attribution renders 0-to-N icons from item.agents (Claude before Codex), with a screen-
   // reader label when more than one appears.
   const zeroAgentRow = api.changeFileRowHtml({session: '1', agents: [], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
   assert.equal(zeroAgentRow.includes('changes-file-agent'), false, 'C5: a file with no transcript attribution renders zero agent icons');
   const oneAgentRow = api.changeFileRowHtml({session: '1', agents: ['codex'], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
   assert.ok(oneAgentRow.includes('agent-icon codex') && !oneAgentRow.includes('agent-icon claude'), 'C5: one agent renders exactly one icon');
+  assert.ok(/agent-icon codex"[^>]*aria-label="modified by Codex [^"]* ago"[^>]*title="modified by Codex [^"]* ago"/.test(oneAgentRow), 'C5: Codex icon hover names who modified the file and when');
   const twoAgentRow = api.changeFileRowHtml({session: '1', agents: ['codex', 'claude'], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
   assert.ok(twoAgentRow.includes('agent-icon claude') && twoAgentRow.includes('agent-icon codex'), 'C5: a file touched by both agents renders both icons');
   assert.ok(twoAgentRow.indexOf('agent-icon claude') < twoAgentRow.indexOf('agent-icon codex'), 'C5: agent icons order Claude before Codex');
-  assert.ok(/changes-file-agent[^>]*aria-label="Claude, Codex"/.test(twoAgentRow), 'C5: the multi-agent slot is labeled for screen readers');
+  assert.ok(/changes-file-agent(?![^>]*title=)[^>]*aria-label="modified by Claude [^"]* ago, modified by Codex [^"]* ago"/.test(twoAgentRow), 'C5: the multi-agent slot is labeled for screen readers without a generic native tooltip');
+  assert.ok(/agent-icon claude"[^>]*title="modified by Claude [^"]* ago"/.test(twoAgentRow), 'C5: Claude icon hover names who modified the file and when');
+  assert.ok(/agent-icon codex"[^>]*title="modified by Codex [^"]* ago"/.test(twoAgentRow), 'C5: Codex icon hover stays contextual in multi-agent rows');
   const legacyAgentRow = api.changeFileRowHtml({session: '1', agent: 'codex', status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
   assert.ok(legacyAgentRow.includes('agent-icon codex'), 'C5: legacy scalar agent payloads still render their icon');
   // C5: image rows carry size + relative path and DROP the native title (the rich hover preview replaces it);
   // non-image rows keep the full-path title.
   const imageRow = api.changeFileRowHtml({session: '1', agents: [], status: 'A', repo: '/repo/app', path: 'pic.png', abs_path: '/repo/app/pic.png', mtime: 1, size: 4096}, {});
+  assert.ok(/changes-status[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(imageRow), 'C5: added status badge explains itself on hover');
   assert.ok(imageRow.includes('data-change-size="4096"'), 'C5: image rows carry the file size for preview gating');
   assert.ok(imageRow.includes('data-change-rel="pic.png"'), 'C5: rows carry the relative path for Copy path');
   assert.equal(/title="[^"]*pic\.png"/.test(imageRow), false, 'C5: image rows drop the native title so it does not duplicate the hover preview');
@@ -3129,10 +3136,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-explorer-toolbar-row\s*\{[\s\S]*inline-size:\s*100%/.test(preferencesCss), 'Finder toolbar rows span the pane width');
   assert.ok(/\.file-explorer-toolbar-spacer\s*\{[\s\S]*flex:\s*1 1 auto/.test(preferencesCss), 'Finder toolbar uses explicit spacers to pin right-side controls');
   assert.ok(/\.file-explorer-actions-row \.file-explorer-date-reload-cluster\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder row 3 keeps date and reload grouped');
-  assert.ok(/\.file-explorer-primary-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 auto[\s\S]*min-width:\s*0/.test(preferencesCss), 'Finder path fills the primary row and can shrink without wrapping controls');
+  assert.ok(/\.file-explorer-primary-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 0[\s\S]*min-width:\s*0[\s\S]*min-inline-size:\s*0/.test(preferencesCss), 'Finder path fills the primary row and can shrink without wrapping controls');
+  assert.ok(/body:not\(\.file-explorer-mode-diff\) \.file-explorer-primary-row \.file-explorer-toolbar-spacer\s*\{[\s\S]*flex:\s*0 0 0/.test(preferencesCss), 'Finder files mode lets the path input consume the space before Copy and close');
   assert.ok(/\.file-explorer-mode-switcher\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder/Differ mode switcher is a segmented inline control');
+  assert.ok(/\.file-explorer-mode-toggle\s*\{[\s\S]*height:\s*22px[\s\S]*padding:\s*0 5px[\s\S]*font-family:\s*var\(--control-font\)[\s\S]*font-stretch:\s*condensed/.test(preferencesCss), 'Finder/Differ mode buttons use compact horizontal condensed button sizing');
+  assert.equal(/\.file-explorer-mode-label\s*\{[\s\S]*writing-mode:\s*vertical-rl/.test(preferencesCss), false, 'Finder/Differ mode labels are regular left-to-right text');
   assert.ok(/\.file-explorer-mode-toggle\s*\{[\s\S]*background:\s*color-mix\(in srgb,\s*var\(--active-control-bg\)/.test(preferencesCss), 'Finder/Differ mode buttons use shared active-control accent styling');
   assert.ok(/\.file-explorer-mode-toggle\[aria-pressed="true"\]\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), 'Finder/Differ mode button is filled from the active-control token when pressed');
+  assert.ok(/\.file-explorer-folder-icon\s*\{[\s\S]*border:\s*1\.5px solid currentColor[\s\S]*\.file-explorer-folder-icon::before/.test(preferencesCss), 'Finder new-folder button renders a folder icon instead of a square glyph');
   assert.ok(/\.file-explorer-path,[\s\S]*?\.file-explorer-path-inline\s*\{[\s\S]*color:\s*var\(--text\)[\s\S]*border:\s*1px solid var\(--line\)/.test(preferencesCss), 'Finder path uses normal text contrast and visible input chrome');
   const finderPanelBundle = fs.readFileSync('static/yolomux.js', 'utf8');
   const finderPanelStart = finderPanelBundle.indexOf('function createFileExplorerPanel');
@@ -3142,7 +3153,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   );
   assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-toolbar-row file-explorer-scope-row[\s\S]*file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only/.test(finderPanelSource), 'Finder panel toolbar renders primary, scope, and files-only actions rows in order');
   assert.equal(finderPanelSource.includes('file-explorer-diff-row'), false, 'Differ title is folded into the shared primary row');
-  assert.ok(/data-file-explorer-collapse[\s\S]*file-explorer-panel-title file-explorer-mode-files-only[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel[\s\S]*fileExplorerChangesCollapseToggleHtml\(\)[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders collapse, title, path, copy, Differ collapse toggle, segmented mode switcher, and close control');
+  assert.equal(finderPanelSource.includes('file-explorer-panel-title'), false, 'Finder panel no longer prints redundant Finder/Differ title text');
+  assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel[\s\S]*fileExplorerChangesCollapseToggleHtml\(\)[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders mode switcher, path, copy, Differ collapse toggle, and close control');
   assert.ok(/file-explorer-toolbar-row file-explorer-scope-row[\s\S]*file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*file-explorer-quick-access-panel/.test(finderPanelSource), 'Finder scope row renders .*, Sync, then quick-root buttons');
   assert.equal(api.displayQuickAccessPath('/'), '/*', 'Finder root quick-access button labels root as /*');
   assert.equal(api.displayQuickAccessPath('/*'), '/*', 'Finder accepts /* as the root quick-access label');
@@ -3155,6 +3167,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(finderPanelSource.includes('file-explorer-repo-summary'), false, 'Finder files-only action row no longer prints repo/path text between sort and date display');
   const finderActionsRowStart = finderPanelSource.indexOf('file-explorer-toolbar-row file-explorer-actions-row');
   const finderActionsRowSource = finderPanelSource.slice(finderActionsRowStart, finderPanelSource.indexOf('</div>', finderActionsRowStart));
+  assert.ok(/data-file-explorer-collapse[\s\S]*data-file-explorer-new-file[\s\S]*data-file-explorer-new-folder[\s\S]*file-explorer-folder-icon/.test(finderActionsRowSource), 'Finder files-only action row renders collapse, new file, then a folder-icon new-folder button');
   assert.equal(finderActionsRowSource.includes('data-file-explorer-mode-set'), false, 'Finder files-only action row no longer repeats the mode switcher');
   assert.equal(/data-file-explorer-refresh[\s\S]*file-explorer-collapse/.test(finderPanelSource), false, 'Finder no longer has a standalone left-side refresh button before collapse');
   assert.equal(preferencesCss.includes('--file-explorer-changes-size: 40%'), false, 'Finder diff mode no longer keeps the old 40% stacked Modified-files section cap');
@@ -3353,18 +3366,38 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(preferencesCss.includes('.cm-diff-overview-tick.split-lane'), false, 'diff overview uses one full-width color per rendered row band, not split lanes');
   assert.ok(/\.file-editor-diff-codemirror \.cm-changedLineGutter,\s*\n\.file-editor-diff-codemirror \.cm-deletedLineGutter\s*\{[^}]*color:\s*inherit[\s\S]*background:\s*transparent/.test(preferencesCss), 'diff left gutter stays neutral; only changed content rows and the right overview rail carry red/green diff color');
   assert.equal(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-(?:changed|deleted)LineGutter\s*\{[^}]*background:\s*#[0-9a-fA-F]+/.test(preferencesCss), false, 'light theme must not reintroduce red/green left-gutter diff indicators');
-  assert.ok(/\.file-editor-codemirror \.cm-scroller,\s*\n\.file-editor-codemirror-panel \.cm-scroller\s*\{[^}]*scrollbar-gutter:\s*stable[\s\S]*scrollbar-width:\s*auto/.test(preferencesCss), 'CodeMirror keeps a stable, draggable native scrollbar gutter');
-  assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar,\s*\n\.file-editor-codemirror-panel \.cm-scroller::-webkit-scrollbar\s*\{[^}]*width:\s*12px[\s\S]*height:\s*12px/.test(preferencesCss), 'CodeMirror WebKit scrollbars are wide enough to grab without reading as diff markers');
-  assert.ok(/\.file-editor-codemirror \.cm-scroller,[\s\S]*?\.file-editor-codemirror-panel \.cm-scroller\s*\{[\s\S]*?scrollbar-color:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor native scrollbar thumb uses the active-tab accent token');
-  assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-corner,[\s\S]*?background:\s*rgba\(255,\s*255,\s*255,\s*0\.04\)/.test(preferencesCss), 'editor scrollbar corner stays faint instead of reading as a second thumb');
-  assert.ok(/\.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-thumb,[\s\S]*?background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor WebKit scrollbar thumb uses the active-tab accent token');
-  assert.ok(/body\.editor-theme-light \.file-editor-codemirror \.cm-scroller::-webkit-scrollbar-thumb,[\s\S]*?background:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'light editor WebKit scrollbar thumb also uses the active-tab accent token');
-  assert.ok(/\.file-editor-panel:hover \.file-editor-codemirror-panel \.cm-scroller[\s\S]*?\{[\s\S]*?scrollbar-color:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'editor scrollbars stay active-tab accented while the pane is hovered/focused');
-  assert.ok(/\.file-explorer-tree-panel:hover,[\s\S]*?\.file-explorer-tree-panel:focus-within\s*\{[\s\S]*?scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'Finder tree scrollbar turns active-accent colored only when Finder itself is hovered/focused');
-  assert.equal(/\.file-explorer-pane:hover \.file-explorer-tree-panel[\s\S]*?scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), false, 'hovering embedded Differ through the shared Finder pane must not color the Finder scrollbar');
-  assert.ok(/\.file-explorer-changes-panel:hover,[\s\S]*?\.file-explorer-changes-panel:focus-within\s*\{[\s\S]*scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'Modified-files scrollbar turns active-accent colored on pane hover/focus');
+  assert.ok(/\.file-editor-codemirror \.cm-scroller,\s*\n\.file-editor-codemirror-panel \.cm-scroller\s*\{[^}]*scrollbar-gutter:\s*stable[\s\S]*--pane-scrollbar-size:\s*12px/.test(preferencesCss), 'CodeMirror keeps a stable, draggable native scrollbar gutter while using the shared pane scrollbar behavior');
+  assert.ok(/\.panel:hover\s*\{[^}]*--pane-scrollbar-current-thumb:\s*var\(--pane-scrollbar-thumb-active\)[\s\S]*--pane-scrollbar-current-track:\s*var\(--pane-scrollbar-track-active\)/.test(preferencesCss), 'pane hover flips the inherited shared scrollbar variables to the active accent');
+  assert.ok(preferencesCss.includes('Pane scrollbars must always inherit a shared pane scrollbar contract'), 'pane CSS documents that scrollbars must inherit the shared rule');
+  for (const selector of [
+    '.preferences-scroll',
+    '.terminal .xterm-viewport',
+    '.transcript-preview',
+    '.summary-preview',
+    '.event-list',
+    '.info-list',
+    '.yoagent-chat-history',
+    '.yoagent-chat .markdown-body pre',
+    '.file-explorer-tree-panel',
+    '.file-explorer-changes-panel',
+    '.file-editor-raw-panel',
+    '.file-editor-preview-pane',
+    '.file-editor-preview-pane-panel',
+    '.file-editor-image-panel',
+    '.file-editor-dialog-body',
+    '.file-editor-diff-codemirror .cm-mergeView',
+    '.file-editor-codemirror .cm-scroller',
+    '.file-editor-codemirror-panel .cm-scroller',
+  ]) {
+    assert.ok(preferencesCss.includes(selector), `shared pane scrollbar selector includes ${selector}`);
+  }
+  assert.ok(preferencesCss.includes('scrollbar-color: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb)) var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));'), 'shared scrollbar rule defaults to neutral gray and inherits active color only from pane hover variables');
+  assert.ok(/:where\([\s\S]*\)::\-webkit-scrollbar-thumb\s*\{[^}]*background:\s*var\(--pane-scrollbar-current-thumb,\s*var\(--pane-scrollbar-thumb\)\)/.test(preferencesCss), 'shared WebKit thumb uses the inherited current pane thumb token');
+  assert.equal(/\.file-editor-panel:hover \.file-editor-codemirror-panel \.cm-scroller[\s\S]*?\{[\s\S]*?scrollbar-color:/.test(preferencesCss), false, 'editor pane no longer has local hover scrollbar coloring');
+  assert.equal(/\.file-explorer-tree-panel:hover,[\s\S]*?\.file-explorer-tree-panel:focus-within\s*\{[\s\S]*?scrollbar-color:/.test(preferencesCss), false, 'Finder tree no longer has local hover scrollbar coloring');
+  assert.equal(/\.file-explorer-changes-panel:hover,[\s\S]*?\.file-explorer-changes-panel:focus-within\s*\{[\s\S]*scrollbar-color:/.test(preferencesCss), false, 'Modified-files no longer has local hover scrollbar coloring');
   assert.equal(/\.panel\.changes-panel|\.changes-scroll/.test(preferencesCss), false, 'standalone Differ scrollbar CSS is removed');
-  assert.ok(/\.panel:hover \.terminal \.xterm-viewport[\s\S]*?\{[\s\S]*?scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'terminal scrollbars turn active-accent colored only while the pane is hovered/focused');
+  assert.equal(/\.panel:hover \.terminal \.xterm-viewport[\s\S]*?\{[\s\S]*?scrollbar-color:/.test(preferencesCss), false, 'terminal no longer has a local hover scrollbar color rule');
   assert.ok(/--diff-add-line-bg:\s*color-mix\(in srgb,\s*var\(--code-diff-add\)\s*30%,\s*var\(--editor-scheme-bg\)\)/.test(preferencesCss), '#250: diff added lines use a muted opaque green fill over the dark bg');
   assert.ok(/\.file-editor-diff-codemirror \.cm-content \.cm-activeLine\s*\{[^}]*background:\s*var\(--diff-full-line-bg,\s*transparent\)/.test(preferencesCss), 'diff active lines keep the same red/green fill as their neighboring changed lines');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#d2f0d6/.test(preferencesCss), 'light diff added lines use the pleasant soft green (image 025)');
@@ -3377,8 +3410,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.preferences-body\s*\{[^}]*overflow:\s*hidden/.test(preferencesCss), 'C3: .preferences-body (overlay-root) must not scroll (overflow:hidden)');
   assert.ok(!/\.preferences-body\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .preferences-body must NOT be overflow:auto');
   assert.ok(/\.preferences-scroll\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .preferences-scroll is the scroll container');
-  assert.ok(/\.preferences-scroll\s*\{[^}]*scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'Preferences scrollbar uses the active accent token instead of a gray native thumb');
-  assert.ok(/\.preferences-scroll::-webkit-scrollbar-thumb\s*\{[^}]*background:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'Preferences WebKit scrollbar thumb uses the active accent token');
+  assert.equal(/\.preferences-scroll\s*\{[^}]*scrollbar-color:/.test(preferencesCss), false, 'Preferences does not customize scrollbar colors locally');
+  assert.equal(/\.preferences-scroll::\-webkit-scrollbar-thumb/.test(preferencesCss), false, 'Preferences does not customize WebKit scrollbar thumbs locally');
   assert.equal(/\.changes-body|\.changes-scroll/.test(preferencesCss), false, 'standalone Differ overlay/scroll containers are removed');
   assert.ok(/body\.theme-light \.app-menu-ui-icon\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), '#251: light mode gives the active app-menu icon button a light-tuned active-control fill (no dark square)');
   assert.ok(/body\.theme-light \.app-menu-tab-command[\s\S]*\{[\s\S]*color:\s*var\(--text\)/.test(preferencesCss), '#252: light mode forces dark text on the rich Tabs/Changes dropdown rows so they are not washed out');
@@ -4419,7 +4452,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     gitTree.children[1].querySelector(':scope > .file-tree-agent'),
     'changed Finder rows place the AI marker immediately after the filename',
   );
-  assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-git-status').textContent, 'M');
+  const modifiedStatus = gitTree.children[1].querySelector(':scope > .file-tree-git-status');
+  assert.equal(modifiedStatus.textContent, 'M');
+  assert.equal(modifiedStatus.getAttribute('title'), 'M: modified', 'Finder M status badge explains itself on hover');
+  assert.equal(modifiedStatus.getAttribute('aria-label'), 'M: modified', 'Finder M status badge is labeled for assistive tech');
   api.setFileExplorerSessionFilesPayloadForTest({
     loaded: true,
     repos: [],
@@ -4428,16 +4464,18 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const unknownTree = new TestElement('unknown-tree');
   unknownTree.setAttribute('role', 'tree');
   api.renderTreeChildrenForTest(unknownTree, '/repo', [{name: 'screenshot.png', kind: 'file'}]);
-  assert.equal(unknownTree.children[0].querySelector(':scope > .file-tree-git-status').textContent, '?');
-  assert.equal(unknownTree.children[0].querySelector(':scope > .file-tree-git-status').classList.contains('file-tree-git-status-unknown'), true, 'Finder ? status badge uses a faint-neutral class');
+  const unknownStatus = unknownTree.children[0].querySelector(':scope > .file-tree-git-status');
+  assert.equal(unknownStatus.textContent, '?');
+  assert.equal(unknownStatus.classList.contains('file-tree-git-status-unknown'), true, 'Finder ? status badge uses a faint-neutral class');
+  assert.equal(unknownStatus.getAttribute('title'), '?: untracked', 'Finder ? status badge explains itself on hover');
 
   api.setFileExplorerSessionFilesPayloadForTest({
     loaded: true,
     repos: [],
     files: [
-      {abs_path: '/repo/A/B/C/F', agents: ['codex'], status: 'M'},
-      {abs_path: '/repo/A/B/C/G', agent: 'claude', status: 'M'},
-      {abs_path: '/repo/A/B/D/H', agents: ['codex'], status: 'A'},
+      {abs_path: '/repo/A/B/C/F', agents: ['codex'], status: 'M', mtime: 1},
+      {abs_path: '/repo/A/B/C/G', agent: 'claude', status: 'M', mtime: 2},
+      {abs_path: '/repo/A/B/D/H', agents: ['codex'], status: 'A', mtime: 3},
     ],
   });
   api.setFileExplorerExpandedForTest(['/repo/A', '/repo/A/B', '/repo/A/B/C', '/repo/A/B/D']);
@@ -4462,6 +4500,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor C inherits Codex marker from descendants');
   assert.ok(!ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon claude'), 'Finder changed ancestor D only shows agents present in that subtree');
   assert.ok(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor D inherits Codex marker from descendants');
+  assert.ok(/agent-icon claude"[^>]*title="modified by Claude [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Claude marker hover names who modified it and when');
+  assert.ok(/agent-icon codex"[^>]*title="modified by Codex [^"]* ago"/.test(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML), 'Finder changed ancestor Codex marker hover names who modified it and when');
   assert.equal(
     ancestorRows['/repo/A'].querySelector(':scope > .file-tree-name').nextElementSibling,
     ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent'),

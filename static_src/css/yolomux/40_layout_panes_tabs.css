@@ -265,6 +265,162 @@ body.theme-light .drop-slot.drag-over {
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
+.panel:hover {
+  --pane-scrollbar-current-thumb: var(--pane-scrollbar-thumb-active);
+  --pane-scrollbar-current-track: var(--pane-scrollbar-track-active);
+}
+/* Pane scrollbars must always inherit a shared pane scrollbar contract from this block. Never customize
+   thumb/track colors in pane-specific CSS; add new pane scroll containers to this shared list instead. */
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+) {
+  scrollbar-width: auto;
+  scrollbar-color: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb)) var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar {
+  width: var(--pane-scrollbar-size);
+  height: var(--pane-scrollbar-size);
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar-track {
+  background: var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar-corner {
+  background: var(--pane-scrollbar-corner, var(--pane-scrollbar-current-track, var(--pane-scrollbar-track)));
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar-thumb {
+  background: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb));
+  border: var(--pane-scrollbar-border);
+  border-radius: var(--pane-scrollbar-radius);
+  background-clip: content-box;
+}
 .panel.empty-pane-panel {
   display: flex;
   grid-template-rows: none;

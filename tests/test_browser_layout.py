@@ -922,17 +922,14 @@ def finder_click_toolbar_fixture_html():
             <div class="pane-tabs" hidden></div>
             <div class="file-explorer-toolbar">
               <div class="file-explorer-toolbar-row file-explorer-primary-row">
-                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse>▤</button>
-                <span class="file-explorer-panel-title file-explorer-mode-files-only">Finder</span>
-                <span class="file-explorer-panel-title file-explorer-mode-diff-only">Differ</span>
-                <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
-                <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only"></button>
-                <span class="file-explorer-toolbar-spacer"></span>
-                <button type="button" class="file-explorer-header-action file-explorer-changes-collapse-toggle file-explorer-mode-diff-only" data-session-files-collapse-toggle aria-pressed="false">▴</button>
                 <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / Differ">
                   <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="files" aria-pressed="true"><span class="file-explorer-mode-label">Finder</span></button>
                   <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">Differ</span></button>
                 </span>
+                <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
+                <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only"></button>
+                <span class="file-explorer-toolbar-spacer"></span>
+                <button type="button" class="file-explorer-header-action file-explorer-changes-collapse-toggle file-explorer-mode-diff-only" data-session-files-collapse-toggle aria-pressed="false">▴</button>
                 <div class="tabs pane-frame-controls file-explorer-frame-controls">
                   <button type="button" class="tab pane-close pc-window-control pc-close file-explorer-panel-close"></button>
                 </div>
@@ -948,8 +945,9 @@ def finder_click_toolbar_fixture_html():
                 <span class="file-explorer-toolbar-spacer"></span>
               </div>
               <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
-                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" id="new-file">+</button>
-                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only">▣</button>
+                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse>▤</button>
+                <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" id="new-file" data-file-explorer-new-file>+</button>
+                <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
                 <span class="file-explorer-toolbar-spacer"></span>
                 <select class="file-explorer-sort-select file-explorer-mode-files-only"><option>A-Z</option></select>
                 <span class="file-explorer-date-reload-cluster file-explorer-mode-files-only">
@@ -1591,7 +1589,6 @@ def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_tok
         const diffButton = panel.querySelector('[data-file-explorer-mode-set="diff"]');
         const tree = panel.querySelector('.file-explorer-tree-panel');
         const changes = panel.querySelector('.file-explorer-changes-panel');
-        const diffTitle = panel.querySelector('.file-explorer-panel-title.file-explorer-mode-diff-only');
         const newFile = panel.querySelector('[data-file-explorer-new-file]');
         const visible = selector => Array.from(panel.querySelectorAll(selector)).filter(node => node.getClientRects().length > 0);
         return {
@@ -1606,7 +1603,7 @@ def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_tok
           modeTexts: Array.from(panel.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim().replace(/\\s+/g, ' ')),
           treeDisplay: getComputedStyle(tree).display,
           changesDisplay: getComputedStyle(changes).display,
-          diffTitleDisplay: getComputedStyle(diffTitle).display,
+          titleCount: panel.querySelectorAll('.file-explorer-panel-title').length,
           newFileDisplay: getComputedStyle(newFile).display,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
           visibleSessionSelects: visible('[data-session-files-session]').length,
@@ -1629,7 +1626,7 @@ def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_tok
     assert metrics["modeTexts"] == ["Finder", "Differ"]
     assert metrics["treeDisplay"] == "none"
     assert metrics["changesDisplay"] != "none"
-    assert metrics["diffTitleDisplay"] != "none"
+    assert metrics["titleCount"] == 0
     assert metrics["newFileDisplay"] == "none"
     assert metrics["visibleRootControls"] == 0, metrics
     assert metrics["visibleSessionSelects"] == 1, metrics
@@ -2568,6 +2565,8 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
         scrollProbe.style.background = 'var(--active-control-scrollbar-thumb)';
         document.body.appendChild(scrollProbe);
         const expectedScrollThumb = getComputedStyle(scrollProbe).backgroundColor;
+        scrollProbe.style.background = 'var(--pane-scrollbar-thumb)';
+        const expectedNeutralScrollThumb = getComputedStyle(scrollProbe).backgroundColor;
         scrollProbe.remove();
         return {
           errors: window.__bootErrors,
@@ -2584,6 +2583,7 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
           prefsScrollColor: getComputedStyle(prefsScroll).scrollbarColor,
           prefsScrollThumb: getComputedStyle(prefsScroll, '::-webkit-scrollbar-thumb').backgroundColor,
           expectedScrollThumb,
+          expectedNeutralScrollThumb,
           finderModeBg: getComputedStyle(finderMode).backgroundColor,
           finderModeBorder: getComputedStyle(finderMode).borderTopColor,
           tabMetaBg: getComputedStyle(tabMeta).backgroundColor,
@@ -2605,14 +2605,87 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
     assert metrics["ringRangeAccent"] == "rgb(59, 130, 246)", metrics
     assert metrics["radioAccent"] == "rgb(59, 130, 246)", metrics
     assert metrics["expectedScrollThumb"] == "rgba(59, 130, 246, 0.72)", metrics
-    assert metrics["prefsScrollColor"].startswith(metrics["expectedScrollThumb"]), metrics
-    assert metrics["prefsScrollThumb"] == metrics["expectedScrollThumb"], metrics
+    assert metrics["prefsScrollColor"].startswith(metrics["expectedNeutralScrollThumb"]), metrics
+    assert metrics["prefsScrollThumb"] == metrics["expectedNeutralScrollThumb"], metrics
     assert metrics["finderModeBg"] == "rgb(59, 130, 246)", metrics
     assert metrics["finderModeBorder"] == "rgb(59, 130, 246)", metrics
     assert metrics["tabMetaBg"] == "rgb(59, 130, 246)", metrics
     assert metrics["tabMetaBorder"] == "rgb(59, 130, 246)", metrics
     assert metrics["notifyBg"] == "rgb(59, 130, 246)", metrics
     assert metrics["settingsPosts"] >= 1, metrics
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
+    WebDriverWait(browser, 2).until(
+        lambda driver: driver.execute_script(
+            "return getComputedStyle(document.querySelector('.preferences-scroll'), '::-webkit-scrollbar-thumb').backgroundColor"
+        ) == metrics["expectedScrollThumb"]
+    )
+    ActionChains(browser).move_to_element(browser.find_element("css selector", "#panel-1")).perform()
+    WebDriverWait(browser, 2).until(
+        lambda driver: driver.execute_script(
+            "return getComputedStyle(document.querySelector('.preferences-scroll'), '::-webkit-scrollbar-thumb').backgroundColor"
+        ) == metrics["expectedNeutralScrollThumb"]
+    )
+
+
+def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=__info__,__prefs__,1&layout=row@34(left,row@50(mid,right))&tabs=left:__info__;mid:__prefs__;right:1",
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.querySelector('.info-list') !== null && document.querySelector('.preferences-scroll') !== null"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const info = document.querySelector('.info-list');
+        const prefs = document.querySelector('.preferences-scroll');
+        info.insertAdjacentHTML('beforeend', '<div style="height: 900px"></div>');
+        prefs.insertAdjacentHTML('beforeend', '<div style="height: 900px"></div>');
+        const probe = document.createElement('div');
+        probe.style.background = 'var(--pane-scrollbar-thumb)';
+        document.body.appendChild(probe);
+        const neutral = getComputedStyle(probe).backgroundColor;
+        probe.style.background = 'var(--active-control-scrollbar-thumb)';
+        const accent = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return {
+          neutral,
+          accent,
+          infoOverflow: info.scrollHeight > info.clientHeight,
+          prefsOverflow: prefs.scrollHeight > prefs.clientHeight,
+          infoThumb: getComputedStyle(info, '::-webkit-scrollbar-thumb').backgroundColor,
+          prefsThumb: getComputedStyle(prefs, '::-webkit-scrollbar-thumb').backgroundColor,
+        };
+        """
+    )
+    assert metrics["infoOverflow"], metrics
+    assert metrics["prefsOverflow"], metrics
+    assert metrics["infoThumb"] == metrics["neutral"], metrics
+    assert metrics["prefsThumb"] == metrics["neutral"], metrics
+
+    def thumb(selector):
+        return browser.execute_script(
+            "return getComputedStyle(document.querySelector(arguments[0]), '::-webkit-scrollbar-thumb').backgroundColor",
+            selector,
+        )
+
+    def wait_thumb(selector, expected):
+        WebDriverWait(browser, 2).until(lambda _driver: thumb(selector) == expected)
+
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".info-list")).perform()
+    wait_thumb(".info-list", metrics["accent"])
+    wait_thumb(".preferences-scroll", metrics["neutral"])
+
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
+    wait_thumb(".preferences-scroll", metrics["accent"])
+    wait_thumb(".info-list", metrics["neutral"])
+
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".topbar")).perform()
+    wait_thumb(".info-list", metrics["neutral"])
+    wait_thumb(".preferences-scroll", metrics["neutral"])
 
 
 @pytest.mark.parametrize("width, expected_rows", [(860, [3, 3]), (493, [1, 2, 2, 1])])
@@ -3641,7 +3714,11 @@ def test_diff_overview_does_not_cover_editor_scrollbar(browser, tmp_path):
     assert metrics["overviewPointerEvents"] == "none"
     assert metrics["tickCount"] == 0
     assert 11 <= metrics["scrollbarWidth"] <= 13
-    assert metrics["cornerBackground"] in {"rgba(255, 255, 255, 0.04)", "rgba(255, 255, 255, 0.05)"}
+    assert metrics["cornerBackground"] in {
+        "rgba(255, 255, 255, 0.04)",
+        "rgba(255, 255, 255, 0.05)",
+        "rgba(15, 23, 42, 0.1)",
+    }
 
 
 def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
@@ -3758,15 +3835,18 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const primaryRow = toolbar.querySelector('.file-explorer-primary-row');
         const scopeRow = toolbar.querySelector('.file-explorer-scope-row');
         const actionsRow = toolbar.querySelector('.file-explorer-actions-row');
-        const collapse = primaryRow.querySelector('[data-file-explorer-collapse]');
+        const collapse = actionsRow.querySelector('[data-file-explorer-collapse]');
+        const newFile = actionsRow.querySelector('[data-file-explorer-new-file]');
+        const newFolder = actionsRow.querySelector('[data-file-explorer-new-folder]');
         const sync = scopeRow.querySelector('.file-explorer-root-mode-toggle-panel');
         const hidden = scopeRow.querySelector('.file-explorer-hidden-toggle-panel');
         const quick = scopeRow.querySelector('.file-explorer-quick-access-panel');
         const quickButtons = Array.from(quick.querySelectorAll('.file-explorer-quick-access-button'));
-        const title = primaryRow.querySelector('.file-explorer-panel-title.file-explorer-mode-files-only');
         const path = primaryRow.querySelector('.file-explorer-path-inline');
         const copy = primaryRow.querySelector('.file-explorer-path-copy-panel');
         const mode = primaryRow.querySelector('.file-explorer-mode-switcher');
+        const modeButtons = Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]'));
+        const modeLabels = Array.from(mode.querySelectorAll('.file-explorer-mode-label'));
         const cluster = toolbar.querySelector('.file-explorer-date-reload-cluster');
         const date = cluster.querySelector('.file-explorer-date-toggle');
         const refresh = cluster.querySelector('.changes-refresh');
@@ -3776,14 +3856,17 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         const scopeRowRect = scopeRow.getBoundingClientRect();
         const actionsRowRect = actionsRow.getBoundingClientRect();
         const collapseRect = collapse.getBoundingClientRect();
+        const newFileRect = newFile.getBoundingClientRect();
+        const newFolderRect = newFolder.getBoundingClientRect();
         const syncRect = sync.getBoundingClientRect();
         const hiddenRect = hidden.getBoundingClientRect();
         const quickRect = quick.getBoundingClientRect();
         const firstQuickStyle = getComputedStyle(quickButtons[0]);
-        const titleRect = title.getBoundingClientRect();
         const pathRect = path.getBoundingClientRect();
         const copyRect = copy.getBoundingClientRect();
         const modeRect = mode.getBoundingClientRect();
+        const modeButtonRects = modeButtons.map(button => button.getBoundingClientRect());
+        const modeButtonStyles = modeButtons.map(button => getComputedStyle(button));
         const clusterRect = cluster.getBoundingClientRect();
         const dateRect = date.getBoundingClientRect();
         const refreshRect = refresh.getBoundingClientRect();
@@ -3795,8 +3878,10 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         textProbe.remove();
         return {
           firstRowIsPrimary: toolbar.firstElementChild === primaryRow,
-          collapseInPrimaryRow: primaryRow.firstElementChild === collapse,
-          titleAfterCollapse: collapse.nextElementSibling === title,
+          modeFirstInPrimaryRow: primaryRow.firstElementChild === mode,
+          noPanelTitle: primaryRow.querySelector('.file-explorer-panel-title') === null,
+          actionsOrder: actionsRow.firstElementChild === collapse && collapse.nextElementSibling === newFile && newFile.nextElementSibling === newFolder,
+          folderIconPresent: newFolder.querySelector('.file-explorer-folder-icon') !== null,
           hiddenInScopeRow: scopeRow.firstElementChild === hidden,
           syncAfterHidden: hidden.nextElementSibling === sync,
           quickAfterSync: sync.nextElementSibling === quick,
@@ -3806,8 +3891,11 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           rootPressedCount: [sync, ...quickButtons].filter(button => button.getAttribute('aria-pressed') === 'true').length,
           quickBorderStyle: firstQuickStyle.borderTopStyle,
           quickBorderWidth: firstQuickStyle.borderTopWidth,
-          pathInPrimaryRow: title.nextElementSibling?.nextElementSibling === path,
+          pathInPrimaryRow: mode.nextElementSibling === path,
           collapseRight: collapseRect.right,
+          newFileLeft: newFileRect.left,
+          newFileRight: newFileRect.right,
+          newFolderLeft: newFolderRect.left,
           syncLeft: syncRect.left,
           syncRight: syncRect.right,
           hiddenLeft: hiddenRect.left,
@@ -3815,8 +3903,6 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           quickLeft: quickRect.left,
           scopeRowTop: scopeRowRect.top,
           scopeRowBottom: scopeRowRect.bottom,
-          titleRight: titleRect.right,
-          titleLeft: titleRect.left,
           pathLeft: pathRect.left,
           pathRight: pathRect.right,
           primaryRowLeft: primaryRowRect.left,
@@ -3827,7 +3913,13 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
           copyWidth: copyRect.width,
           modeLeft: modeRect.left,
           modeRight: modeRect.right,
+          modeWidth: modeRect.width,
+          modeMaxButtonWidth: Math.max(...modeButtonRects.map(rect => rect.width)),
+          modeButtonHorizontal: modeButtonRects.every(rect => rect.width > rect.height),
+          modeLabelsHorizontal: modeLabels.every(label => getComputedStyle(label).writingMode === 'horizontal-tb'),
+          modeUsesCondensedControlFont: modeButtonStyles.every(style => style.fontFamily.toLowerCase().includes('narrow') || style.fontStretch === 'condensed'),
           modeTexts: Array.from(mode.querySelectorAll('[data-file-explorer-mode-set]')).map(button => button.textContent.trim()),
+          pathConsumesRemaining: pathRect.width >= primaryRowRect.width - modeRect.width - copyRect.width - closeRect.width - 36,
           actionsRowTop: actionsRowRect.top,
           primaryRowBottom: primaryRowRect.bottom,
           actionsRowRight: actionsRowRect.right,
@@ -3846,8 +3938,10 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
         """
     )
     assert metrics["firstRowIsPrimary"]
-    assert metrics["collapseInPrimaryRow"]
-    assert metrics["titleAfterCollapse"]
+    assert metrics["modeFirstInPrimaryRow"]
+    assert metrics["noPanelTitle"]
+    assert metrics["actionsOrder"]
+    assert metrics["folderIconPresent"]
     assert metrics["hiddenInScopeRow"]
     assert metrics["syncAfterHidden"]
     assert metrics["quickAfterSync"]
@@ -3858,15 +3952,20 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["quickBorderStyle"] == "solid"
     assert metrics["quickBorderWidth"] == "1px"
     assert metrics["pathInPrimaryRow"]
-    assert metrics["collapseRight"] <= metrics["titleLeft"]
+    assert metrics["collapseRight"] <= metrics["newFileLeft"]
+    assert metrics["newFileRight"] <= metrics["newFolderLeft"]
     assert metrics["hiddenRight"] <= metrics["syncLeft"]
     assert metrics["syncRight"] <= metrics["quickLeft"]
-    assert metrics["titleRight"] <= metrics["pathLeft"]
+    assert metrics["modeRight"] <= metrics["pathLeft"]
     assert metrics["pathLeft"] > metrics["primaryRowLeft"]
     assert metrics["pathWidth"] >= min(90, metrics["toolbarWidth"] / 4)
     assert metrics["pathRight"] <= metrics["copyLeft"]
-    assert metrics["copyRight"] <= metrics["modeLeft"]
-    assert metrics["modeRight"] <= metrics["closeLeft"]
+    assert metrics["copyRight"] <= metrics["closeLeft"]
+    assert metrics["modeButtonHorizontal"]
+    assert metrics["modeLabelsHorizontal"]
+    assert metrics["modeUsesCondensedControlFont"]
+    assert metrics["modeMaxButtonWidth"] <= 62
+    assert metrics["pathConsumesRemaining"]
     assert metrics["modeTexts"] == ["Finder", "Differ"]
     assert abs(metrics["closeRight"] - metrics["primaryRowRight"]) <= 1
     assert metrics["pathColor"] == metrics["textColor"]
@@ -3886,7 +3985,6 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
         const newFile = document.getElementById('new-file');
         const tree = document.querySelector('.file-explorer-tree-panel');
         const changes = document.querySelector('.file-explorer-changes-panel');
-        const diffTitle = document.querySelector('.file-explorer-panel-title.file-explorer-mode-diff-only');
         return {
           bodyFiles: document.body.classList.contains('file-explorer-mode-files'),
           bodyDiff: document.body.classList.contains('file-explorer-mode-diff'),
@@ -3897,7 +3995,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
           newFileDisplay: getComputedStyle(newFile).display,
           treeDisplay: getComputedStyle(tree).display,
           changesDisplay: getComputedStyle(changes).display,
-          diffTitleDisplay: getComputedStyle(diffTitle).display,
+          titleCount: document.querySelectorAll('.file-explorer-panel-title').length,
         };
         """
     )
@@ -3909,7 +4007,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
     assert before["newFileDisplay"] != "none"
     assert before["treeDisplay"] != "none"
     assert before["changesDisplay"] == "none"
-    assert before["diffTitleDisplay"] == "none"
+    assert before["titleCount"] == 0
 
     browser.find_element("css selector", "[data-file-explorer-mode-set='diff']").click()
     after = browser.execute_script(
@@ -3920,7 +4018,6 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
         const pane = document.querySelector('.file-explorer-pane');
         const tree = document.querySelector('.file-explorer-tree-panel');
         const changes = document.querySelector('.file-explorer-changes-panel');
-        const diffTitle = document.querySelector('.file-explorer-panel-title.file-explorer-mode-diff-only');
         const visible = selector => Array.from(document.querySelectorAll(selector)).filter(node => node.getClientRects().length > 0);
         const changesStyle = getComputedStyle(changes);
         const paneRect = pane.getBoundingClientRect();
@@ -3940,7 +4037,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
           changesMaxBlockSize: changesStyle.maxBlockSize,
           paneHeight: paneRect.height,
           changesHeight: changesRect.height,
-          diffTitleDisplay: getComputedStyle(diffTitle).display,
+          titleCount: document.querySelectorAll('.file-explorer-panel-title').length,
           visibleRootControls: visible('.file-explorer-root-mode-toggle-panel').length,
           visibleSessionSelects: visible('[data-session-files-session]').length,
           visibleSortSelects: visible('[data-session-files-sort]').length,
@@ -3962,7 +4059,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
     assert after["changesFlexGrow"] == "1"
     assert after["changesMaxBlockSize"] == "none"
     assert abs(after["changesHeight"] - after["paneHeight"]) <= 1
-    assert after["diffTitleDisplay"] != "none"
+    assert after["titleCount"] == 0
     assert after["visibleRootControls"] == 0
     assert after["visibleSessionSelects"] == 1
     assert after["visibleSortSelects"] == 1

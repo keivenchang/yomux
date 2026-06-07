@@ -1063,12 +1063,25 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
 // C5: a changed file can be touched by 0, 1, or several agents. Render an icon per agent from item.agents
 // (Claude, then Codex, then any others alphabetically), falling back to the legacy scalar item.agent. When
 // more than one agent appears, label the slot so screen readers announce all of them.
+function agentDisplayName(kind) {
+  return String(kind || '').toLowerCase() === 'codex' ? 'Codex' : (String(kind || '').toLowerCase() === 'claude' ? 'Claude' : String(kind || ''));
+}
+
+function changedFileAgentTitle(kind, item) {
+  const name = agentDisplayName(kind);
+  if (!name) return '';
+  const timeText = sessionFileRelativeTimeText(item?.mtime);
+  return timeText ? `modified by ${name} ${timeText}` : `modified by ${name}`;
+}
+
 function changeFileAgentsHtml(item) {
   const ordered = sessionFileAgentKinds(item);
-  const icons = ordered.map(kind => agentIcon(kind)).filter(Boolean);
+  const icons = ordered
+    .map(kind => agentIcon(kind, {label: changedFileAgentTitle(kind, item)}))
+    .filter(Boolean);
   if (!icons.length) return '';
-  const label = ordered.map(kind => kind.charAt(0).toUpperCase() + kind.slice(1)).join(', ');
-  const labelAttr = icons.length > 1 ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
+  const label = ordered.map(kind => changedFileAgentTitle(kind, item)).filter(Boolean).join(', ');
+  const labelAttr = icons.length > 1 && label ? ` aria-label="${esc(label)}"` : '';
   return `<span class="changes-file-agent"${labelAttr}>${icons.join('')}</span>`;
 }
 
@@ -1083,7 +1096,9 @@ function changeFileRowHtml(item, options = {}) {
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentSlotHtml = changeFileAgentsHtml(item);
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
-  const statusBadgeHtml = `<span class="changes-status changes-status-${esc(statusClass)}">${esc(statusKey)}</span>`;
+  const statusTitle = gitStatusBadgeTitle(statusKey);
+  const statusTitleAttr = statusTitle ? ` title="${esc(statusTitle)}" aria-label="${esc(statusTitle)}"` : '';
+  const statusBadgeHtml = `<span class="changes-status changes-status-${esc(statusClass)}"${statusTitleAttr}>${esc(statusKey)}</span>`;
   const metaHtml = [diffHtml, statusBadgeHtml, dateHtml].filter(Boolean).join('');
   // Row gets a git-* class for tinting (shared with Finder CSS rules)
   const gitRowClass = {m:'git-modified',t:'git-transcript',a:'git-staged',d:'git-deleted',u:'git-untracked',unknown:'git-untracked'}[statusClass] || 'git-transcript';
@@ -1934,14 +1949,11 @@ function createFileExplorerPanel() {
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
         <div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
-            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
-            <span class="file-explorer-panel-title file-explorer-mode-files-only">${esc(t('finder.label.finder'))}</span>
-            <span class="file-explorer-panel-title file-explorer-mode-diff-only">${esc(t('tab.changes'))}</span>
+            ${fileExplorerModeSwitcherHtml()}
             <input class="file-explorer-path-inline file-explorer-mode-files-only" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
             <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.copyPath'))}" aria-label="${esc(t('finder.toolbar.copyPath'))}"></button>
             <span class="file-explorer-toolbar-spacer"></span>
             ${fileExplorerChangesCollapseToggleHtml()}
-            ${fileExplorerModeSwitcherHtml()}
             ${paneFrameControlsGroupHtml(fileExplorerItemId, {
               groupClass: 'file-explorer-frame-controls',
               actions: false,
@@ -1960,8 +1972,9 @@ function createFileExplorerPanel() {
             <span class="file-explorer-toolbar-spacer"></span>
           </div>
           <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
+            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
             <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
-            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}">▣</button>
+            <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
             <select class="file-explorer-sort-select file-explorer-mode-files-only" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
               <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>

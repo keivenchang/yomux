@@ -7199,11 +7199,13 @@ function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload)
     let dir = normalizeDirectoryPath(dirnameOf(absPath));
     while (dir && dir !== '/') {
       const key = `${dir}\x1f${absPath}`;
-      const current = stats.get(dir) || {count: 0, agents: []};
+      const current = stats.get(dir) || {count: 0, agents: [], mtime: 0};
       if (!seen.has(key)) {
         seen.add(key);
         current.count += 1;
       }
+      const mtime = Number(file.mtime || 0);
+      if (Number.isFinite(mtime) && mtime > Number(current.mtime || 0)) current.mtime = mtime;
       for (const agent of agents) {
         if (!current.agents.includes(agent)) current.agents.push(agent);
       }
@@ -7336,6 +7338,22 @@ function fileTreeGitStatusBadgeClass(status) {
   return String(status || '').toUpperCase() === '?' ? 'file-tree-git-status-unknown' : '';
 }
 
+function gitStatusBadgeTitle(status) {
+  const key = String(status || '').toUpperCase();
+  const labels = {
+    M: 'modified',
+    A: 'added',
+    D: 'deleted',
+    T: 'touched by AI transcript',
+    '?': 'untracked',
+    U: 'untracked',
+    S: 'staged',
+    R: 'renamed',
+    C: 'copied',
+  };
+  return labels[key] ? `${key}: ${labels[key]}` : '';
+}
+
 function fileIconClassFor(name, kind = 'file') {
   if (kind === 'dir') return 'file-icon-dir';
   const lowerName = String(name || '').toLowerCase();
@@ -7458,8 +7476,13 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(statusText)].filter(Boolean).join(' '));
   if (status.textContent !== statusText) status.textContent = statusText;
   const statusTitle = options.gitStatusTitle || '';
-  if (statusTitle) status.title = statusTitle;
-  else status.removeAttribute('title');
+  if (statusTitle) {
+    status.setAttribute('title', statusTitle);
+    status.setAttribute('aria-label', statusTitle);
+  } else {
+    status.removeAttribute('title');
+    status.removeAttribute('aria-label');
+  }
   setHiddenIfChanged(status, !statusText);
   const dateText = options.dateText || '';
   if (date.textContent !== dateText) date.textContent = dateText;
@@ -7521,7 +7544,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const gitStatus = entry.kind === 'file'
     ? (options.sessionFilesMap ? (changedFile ? String(changedFile.status || 'M').toUpperCase() : '') : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
-  const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : '';
+  const gitStatusTitle = entry.kind === 'dir' && !differMode ? fileExplorerIndexBadgeTitle(fullPath) : gitStatusBadgeTitle(gitStatus);
   const gitClass = fileTreeGitStatusClass(gitStatus);
   for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
     row.classList.toggle(className, className === gitClass);
@@ -7800,12 +7823,21 @@ function updateFileTreeGitStatusRows() {
   document.querySelectorAll('.file-tree-row[data-path]').forEach(row => {
     const gitStatus = row.dataset.kind === 'file' ? fileTreeGitStatus(row.dataset.path) : '';
     const gitClass = fileTreeGitStatusClass(gitStatus);
-    for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged']) {
+    for (const className of ['git-modified', 'git-untracked', 'git-deleted', 'git-staged', 'git-transcript']) {
       row.classList.toggle(className, className === gitClass);
     }
     const status = row.querySelector(':scope > .file-tree-git-status');
     if (status) {
+      setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(gitStatus)].filter(Boolean).join(' '));
       status.textContent = gitStatus;
+      const title = gitStatusBadgeTitle(gitStatus);
+      if (title) {
+        status.setAttribute('title', title);
+        status.setAttribute('aria-label', title);
+      } else {
+        status.removeAttribute('title');
+        status.removeAttribute('aria-label');
+      }
       status.hidden = !gitStatus;
     }
     const entry = {
@@ -8126,7 +8158,7 @@ function updateFileExplorerIndexedDirectoryRows() {
       const badge = fileExplorerIndexBadgeText(path);
       if (status.textContent !== badge) status.textContent = badge;
       const title = fileExplorerIndexBadgeTitle(path);
-      if (title) status.title = title;
+      if (title) status.setAttribute('title', title);
       else status.removeAttribute('title');
       setHiddenIfChanged(status, !badge);
     }
@@ -12945,12 +12977,15 @@ function sessionAgentKind(session) {
   return kind === 'claude' || kind === 'codex' ? kind : '';
 }
 
-function agentIcon(kind) {
+function agentIcon(kind, options = {}) {
+  const name = kind === 'codex' ? 'Codex' : (kind === 'claude' ? 'Claude' : '');
+  const label = options.label || name;
+  const labelAttr = label ? ` aria-label="${esc(label)}" title="${esc(label)}"` : '';
   if (kind === 'codex') {
-    return `<span class="agent-icon codex" aria-label="Codex" title="Codex">${codexIcon()}</span>`;
+    return `<span class="agent-icon codex"${labelAttr}>${codexIcon()}</span>`;
   }
   if (kind === 'claude') {
-    return `<span class="agent-icon claude" aria-label="Claude" title="Claude">${claudeIcon()}</span>`;
+    return `<span class="agent-icon claude"${labelAttr}>${claudeIcon()}</span>`;
   }
   return '';
 }
@@ -17664,12 +17699,25 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
 // C5: a changed file can be touched by 0, 1, or several agents. Render an icon per agent from item.agents
 // (Claude, then Codex, then any others alphabetically), falling back to the legacy scalar item.agent. When
 // more than one agent appears, label the slot so screen readers announce all of them.
+function agentDisplayName(kind) {
+  return String(kind || '').toLowerCase() === 'codex' ? 'Codex' : (String(kind || '').toLowerCase() === 'claude' ? 'Claude' : String(kind || ''));
+}
+
+function changedFileAgentTitle(kind, item) {
+  const name = agentDisplayName(kind);
+  if (!name) return '';
+  const timeText = sessionFileRelativeTimeText(item?.mtime);
+  return timeText ? `modified by ${name} ${timeText}` : `modified by ${name}`;
+}
+
 function changeFileAgentsHtml(item) {
   const ordered = sessionFileAgentKinds(item);
-  const icons = ordered.map(kind => agentIcon(kind)).filter(Boolean);
+  const icons = ordered
+    .map(kind => agentIcon(kind, {label: changedFileAgentTitle(kind, item)}))
+    .filter(Boolean);
   if (!icons.length) return '';
-  const label = ordered.map(kind => kind.charAt(0).toUpperCase() + kind.slice(1)).join(', ');
-  const labelAttr = icons.length > 1 ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
+  const label = ordered.map(kind => changedFileAgentTitle(kind, item)).filter(Boolean).join(', ');
+  const labelAttr = icons.length > 1 && label ? ` aria-label="${esc(label)}"` : '';
   return `<span class="changes-file-agent"${labelAttr}>${icons.join('')}</span>`;
 }
 
@@ -17684,7 +17732,9 @@ function changeFileRowHtml(item, options = {}) {
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentSlotHtml = changeFileAgentsHtml(item);
   const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
-  const statusBadgeHtml = `<span class="changes-status changes-status-${esc(statusClass)}">${esc(statusKey)}</span>`;
+  const statusTitle = gitStatusBadgeTitle(statusKey);
+  const statusTitleAttr = statusTitle ? ` title="${esc(statusTitle)}" aria-label="${esc(statusTitle)}"` : '';
+  const statusBadgeHtml = `<span class="changes-status changes-status-${esc(statusClass)}"${statusTitleAttr}>${esc(statusKey)}</span>`;
   const metaHtml = [diffHtml, statusBadgeHtml, dateHtml].filter(Boolean).join('');
   // Row gets a git-* class for tinting (shared with Finder CSS rules)
   const gitRowClass = {m:'git-modified',t:'git-transcript',a:'git-staged',d:'git-deleted',u:'git-untracked',unknown:'git-untracked'}[statusClass] || 'git-transcript';
@@ -18535,14 +18585,11 @@ function createFileExplorerPanel() {
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
         <div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
-            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
-            <span class="file-explorer-panel-title file-explorer-mode-files-only">${esc(t('finder.label.finder'))}</span>
-            <span class="file-explorer-panel-title file-explorer-mode-diff-only">${esc(t('tab.changes'))}</span>
+            ${fileExplorerModeSwitcherHtml()}
             <input class="file-explorer-path-inline file-explorer-mode-files-only" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
             <button type="button" class="path-copy-button file-explorer-path-copy-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.copyPath'))}" aria-label="${esc(t('finder.toolbar.copyPath'))}"></button>
             <span class="file-explorer-toolbar-spacer"></span>
             ${fileExplorerChangesCollapseToggleHtml()}
-            ${fileExplorerModeSwitcherHtml()}
             ${paneFrameControlsGroupHtml(fileExplorerItemId, {
               groupClass: 'file-explorer-frame-controls',
               actions: false,
@@ -18561,8 +18608,9 @@ function createFileExplorerPanel() {
             <span class="file-explorer-toolbar-spacer"></span>
           </div>
           <div class="file-explorer-toolbar-row file-explorer-actions-row file-explorer-mode-files-only">
+            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-collapse title="${esc(t('finder.toolbar.collapseAll'))}" aria-label="${esc(t('finder.toolbar.collapseAll'))}">▤</button>
             <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
-            <button type="button" class="file-explorer-header-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}">▣</button>
+            <button type="button" class="file-explorer-header-action file-explorer-folder-action file-explorer-mode-files-only" data-file-explorer-new-folder title="${esc(t('finder.toolbar.newFolder'))}" aria-label="${esc(t('finder.toolbar.newFolder'))}"><span class="file-explorer-folder-icon" aria-hidden="true"></span></button>
             <span class="file-explorer-toolbar-spacer"></span>
             <select class="file-explorer-sort-select file-explorer-mode-files-only" data-file-explorer-tree-sort title="${esc(t('finder.toolbar.sort'))}" aria-label="${esc(t('finder.toolbar.sort'))}">
               <option value="az"${fileExplorerTreeSortMode === 'az' ? ' selected' : ''}>${esc(t('finder.sort.az'))}</option>

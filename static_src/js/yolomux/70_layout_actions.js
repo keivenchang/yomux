@@ -675,12 +675,15 @@ function sessionAgentKind(session) {
   return kind === 'claude' || kind === 'codex' ? kind : '';
 }
 
-function agentIcon(kind) {
+function agentIcon(kind, options = {}) {
+  const name = kind === 'codex' ? 'Codex' : (kind === 'claude' ? 'Claude' : '');
+  const label = options.label || name;
+  const labelAttr = label ? ` aria-label="${esc(label)}" title="${esc(label)}"` : '';
   if (kind === 'codex') {
-    return `<span class="agent-icon codex" aria-label="Codex" title="Codex">${codexIcon()}</span>`;
+    return `<span class="agent-icon codex"${labelAttr}>${codexIcon()}</span>`;
   }
   if (kind === 'claude') {
-    return `<span class="agent-icon claude" aria-label="Claude" title="Claude">${claudeIcon()}</span>`;
+    return `<span class="agent-icon claude"${labelAttr}>${claudeIcon()}</span>`;
   }
   return '';
 }

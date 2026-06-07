@@ -71,6 +71,14 @@
   --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
   --active-control-scrollbar-thumb: rgb(var(--active-accent-rgb) / 0.72);
+  --pane-scrollbar-thumb: rgba(190, 205, 218, 0.62);
+  --pane-scrollbar-track: rgba(255, 255, 255, 0.06);
+  --pane-scrollbar-thumb-active: var(--active-control-scrollbar-thumb);
+  --pane-scrollbar-track-active: rgba(255, 255, 255, 0.08);
+  --pane-scrollbar-corner: var(--pane-scrollbar-track);
+  --pane-scrollbar-size: 10px;
+  --pane-scrollbar-radius: 999px;
+  --pane-scrollbar-border: 2px solid transparent;
   --active-tab-muted-bg: color-mix(in srgb, var(--active-accent) 28%, var(--panel2));
   --active-tab-muted-hover-bg: color-mix(in srgb, var(--active-accent) 36%, var(--panel2));
   --active-tab-muted-border: color-mix(in srgb, var(--active-accent-bright) 64%, var(--line));
@@ -312,6 +320,11 @@ body.theme-light {
   --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
   --active-control-scrollbar-thumb: rgb(var(--active-accent-rgb) / 0.68);
+  --pane-scrollbar-thumb: rgba(82, 98, 116, 0.64);
+  --pane-scrollbar-track: rgba(15, 23, 42, 0.08);
+  --pane-scrollbar-thumb-active: var(--active-control-scrollbar-thumb);
+  --pane-scrollbar-track-active: rgba(15, 23, 42, 0.08);
+  --pane-scrollbar-corner: var(--pane-scrollbar-track);
   --active-tab-muted-bg: color-mix(in srgb, var(--active-accent-bright) 20%, var(--panel));
   --active-tab-muted-hover-bg: color-mix(in srgb, var(--active-accent-bright) 28%, var(--panel));
   --active-tab-muted-border: color-mix(in srgb, var(--active-accent-bright) 46%, var(--line));
@@ -2025,32 +2038,12 @@ body.theme-light .branch-link {
   background: var(--bg);
 }
 .preferences-scroll {
+  /* Preferences scrollbars must always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   flex: 1;
   min-height: 0;
   overflow: auto;
-  scrollbar-width: auto;
-  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(255, 255, 255, 0.06);
   padding: 10px;
-}
-.preferences-scroll::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-.preferences-scroll::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.06);
-}
-.preferences-scroll::-webkit-scrollbar-thumb {
-  min-height: 32px;
-  border: 2px solid transparent;
-  border-radius: 0;
-  background: var(--active-control-scrollbar-thumb);
-  background-clip: content-box;
-}
-body.theme-light .preferences-scroll {
-  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(15, 23, 42, 0.08);
-}
-body.theme-light .preferences-scroll::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.08);
 }
 .info-refresh {
   margin-inline-start: auto;
@@ -3841,6 +3834,162 @@ body.theme-light .drop-slot.drag-over {
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
+.panel:hover {
+  --pane-scrollbar-current-thumb: var(--pane-scrollbar-thumb-active);
+  --pane-scrollbar-current-track: var(--pane-scrollbar-track-active);
+}
+/* Pane scrollbars must always inherit a shared pane scrollbar contract from this block. Never customize
+   thumb/track colors in pane-specific CSS; add new pane scroll containers to this shared list instead. */
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+) {
+  scrollbar-width: auto;
+  scrollbar-color: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb)) var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar {
+  width: var(--pane-scrollbar-size);
+  height: var(--pane-scrollbar-size);
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar-track {
+  background: var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar-corner {
+  background: var(--pane-scrollbar-corner, var(--pane-scrollbar-current-track, var(--pane-scrollbar-track)));
+}
+:where(
+  .preferences-scroll,
+  .terminal .xterm-viewport,
+  .transcript-preview,
+  .summary-preview,
+  .event-list,
+  .info-list,
+  .yoagent-chat-history,
+  .yoagent-chat .markdown-body pre,
+  .yoagent-global .markdown-body pre,
+  .yoagent-session-summary .markdown-body pre,
+  .file-explorer-tree-panel,
+  .file-explorer-changes-panel,
+  .file-editor-raw-panel,
+  .file-editor-preview-pane,
+  .file-editor-preview-pane-panel,
+  .file-editor-image-panel,
+  .file-editor-dialog-body,
+  .file-editor-conflict-compare pre,
+  .file-editor-diff-codemirror .cm-mergeView,
+  .file-editor-codemirror .cm-scroller,
+  .file-editor-codemirror-panel .cm-scroller,
+  .file-editor-content .markdown-body pre,
+  .diff-ref-suggestion-popover,
+  .command-palette-results,
+  .keyboard-shortcuts-body
+)::-webkit-scrollbar-thumb {
+  background: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb));
+  border: var(--pane-scrollbar-border);
+  border-radius: var(--pane-scrollbar-radius);
+  background-clip: content-box;
+}
 .panel.empty-pane-panel {
   display: flex;
   grid-template-rows: none;
@@ -4966,32 +5115,11 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   box-sizing: content-box;
 }
 .terminal .xterm-viewport {
+  /* Terminal and YO!info scrollbars must always inherit a shared pane scrollbar rule from layout CSS;
+     never customize scrollbar colors or hover behavior here. */
+  --pane-scrollbar-track: transparent;
+  --pane-scrollbar-track-active: transparent;
   overflow-y: auto;
-  scrollbar-width: auto;
-  scrollbar-color: rgba(190, 205, 218, 0.62) transparent;
-}
-.terminal .xterm-viewport::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-.terminal .xterm-viewport::-webkit-scrollbar-track {
-  background: transparent;
-}
-.terminal .xterm-viewport::-webkit-scrollbar-thumb {
-  min-height: 32px;
-  border: 2px solid transparent;
-  border-radius: 0;
-  background: rgba(190, 205, 218, 0.62);
-  background-clip: content-box;
-}
-.panel:hover .terminal .xterm-viewport,
-.panel:focus-within .terminal .xterm-viewport {
-  scrollbar-color: var(--active-control-scrollbar-thumb) transparent;
-}
-.panel:hover .terminal .xterm-viewport::-webkit-scrollbar-thumb,
-.panel:focus-within .terminal .xterm-viewport::-webkit-scrollbar-thumb {
-  background: var(--active-control-scrollbar-thumb);
-  background-clip: content-box;
 }
 .terminal-context-menu {
   position: fixed;
@@ -5325,6 +5453,8 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   height: 20px;
 }
 .transcript-preview {
+  /* Scrollable YO!info bodies always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   min-height: 0;
   padding: 8px;
   overflow: auto;
@@ -5519,6 +5649,8 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   background: var(--pane-inactive-tab-bg-hover);
 }
 .info-list {
+  /* YO!info table scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   min-height: 0;
   overflow: auto;
   padding: 8px 10px;
@@ -5651,6 +5783,8 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border-color: color-mix(in srgb, var(--brand-green) 45%, var(--line));
 }
 .yoagent-chat-history {
+  /* YO!agent chat scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
+     customize scrollbar colors or hover behavior here. */
   min-height: 0;
   overflow: auto;
   display: flex;
@@ -7909,9 +8043,13 @@ body.theme-light .file-tree-rename-input {
   min-width: 0;
 }
 .file-explorer-primary-row .file-explorer-path-inline {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
+  min-inline-size: 0;
   max-width: none;
+}
+body:not(.file-explorer-mode-diff) .file-explorer-primary-row .file-explorer-toolbar-spacer {
+  flex: 0 0 0;
 }
 .file-explorer-panel-title {
   flex: 0 0 auto;
@@ -8010,34 +8148,12 @@ body.resizing-file-explorer-changes {
   user-select: none;
 }
 .file-explorer-tree-panel {
+  /* Finder/Differ/editor scrollbars must always inherit a shared pane scrollbar rule from layout CSS;
+     never customize scrollbar colors or hover behavior here. */
   flex: 1;
   min-height: 0;
   overflow: auto;
-  scrollbar-color: rgba(190, 205, 218, 0.62) rgba(255, 255, 255, 0.06);
   padding: 4px 0;
-}
-.file-explorer-tree-panel:hover,
-.file-explorer-tree-panel:focus-within {
-  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(255, 255, 255, 0.08);
-}
-.file-explorer-tree-panel::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-.file-explorer-tree-panel::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.06);
-}
-.file-explorer-tree-panel::-webkit-scrollbar-thumb {
-  min-height: 32px;
-  border: 2px solid transparent;
-  border-radius: 0;
-  background: rgba(190, 205, 218, 0.62);
-  background-clip: content-box;
-}
-.file-explorer-tree-panel:hover::-webkit-scrollbar-thumb,
-.file-explorer-tree-panel:focus-within::-webkit-scrollbar-thumb {
-  background: var(--active-control-scrollbar-thumb);
-  background-clip: content-box;
 }
 /* C15: route this inner Finder↔Modified-files split through the SHARED --pane-resizer-* tokens instead
    of the old special-cased hardcoded-green strip. At rest a thin yellow line (--pane-resizer-bg, the same
@@ -8080,72 +8196,21 @@ body.resizing-file-explorer-changes {
   overflow-y: scroll;
   overflow-x: auto;
   scrollbar-gutter: stable;
-  scrollbar-color: rgba(190, 205, 218, 0.62) rgba(255, 255, 255, 0.06);
   background: color-mix(in srgb, var(--panel2) 72%, var(--panel) 28%);
   padding: 0 5px 5px;
 }
 .file-explorer-changes-panel:hover,
 .file-explorer-changes-panel:focus-within {
   --pane-bar-bg: var(--pane-tab-strip-bg);
-  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(255, 255, 255, 0.08);
 }
 body.theme-light .file-explorer-pane,
 body.theme-light .file-explorer-tree-panel {
   color: var(--text);
   background: var(--panel);
 }
-body.theme-light .file-explorer-tree-panel {
-  scrollbar-color: rgba(82, 98, 116, 0.64) rgba(15, 23, 42, 0.08);
-}
-body.theme-light .file-explorer-tree-panel:hover,
-body.theme-light .file-explorer-tree-panel:focus-within {
-  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(15, 23, 42, 0.08);
-}
 body.theme-light .file-explorer-changes-panel {
   color: var(--text);
-  scrollbar-color: rgba(82, 98, 116, 0.64) rgba(15, 23, 42, 0.08);
   background: color-mix(in srgb, var(--panel2) 76%, var(--panel) 24%);
-}
-body.theme-light .file-explorer-changes-panel:hover,
-body.theme-light .file-explorer-changes-panel:focus-within {
-  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(15, 23, 42, 0.08);
-}
-.file-explorer-changes-panel::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-.file-explorer-changes-panel::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.06);
-}
-body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.08);
-}
-.file-explorer-changes-panel::-webkit-scrollbar-thumb {
-  min-height: 32px;
-  border: 2px solid transparent;
-  border-radius: 0;
-  background: rgba(190, 205, 218, 0.62);
-  background-clip: content-box;
-}
-.file-explorer-changes-panel:hover::-webkit-scrollbar-thumb,
-.file-explorer-changes-panel:focus-within::-webkit-scrollbar-thumb {
-  background: var(--active-control-scrollbar-thumb);
-  background-clip: content-box;
-}
-body.theme-light .file-explorer-tree-panel::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.08);
-}
-body.theme-light .file-explorer-tree-panel::-webkit-scrollbar-thumb,
-body.theme-light .file-explorer-changes-panel::-webkit-scrollbar-thumb {
-  background: rgba(82, 98, 116, 0.64);
-  background-clip: content-box;
-}
-body.theme-light .file-explorer-tree-panel:hover::-webkit-scrollbar-thumb,
-body.theme-light .file-explorer-tree-panel:focus-within::-webkit-scrollbar-thumb,
-body.theme-light .file-explorer-changes-panel:hover::-webkit-scrollbar-thumb,
-body.theme-light .file-explorer-changes-panel:focus-within::-webkit-scrollbar-thumb {
-  background: var(--active-control-scrollbar-thumb);
-  background-clip: content-box;
 }
 .file-explorer-changes-head {
   position: sticky;
@@ -8424,6 +8489,31 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   flex-basis: auto;
   padding: 0 5px;
 }
+.file-explorer-folder-action {
+  color: var(--muted);
+}
+.file-explorer-folder-icon {
+  position: relative;
+  display: inline-block;
+  width: 14px;
+  height: 11px;
+  border: 1.5px solid currentColor;
+  border-radius: 1px;
+  box-sizing: border-box;
+}
+.file-explorer-folder-icon::before {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: -5px;
+  width: 7px;
+  height: 5px;
+  border: 1.5px solid currentColor;
+  border-bottom: 0;
+  border-radius: 1px 1px 0 0;
+  box-sizing: border-box;
+  background: var(--panel);
+}
 .file-explorer-changes-collapse-toggle {
   font-size: var(--ui-font-size);
 }
@@ -8438,18 +8528,20 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 0;
   flex: 0 0 auto;
   height: 22px;
-  padding: 0 8px;
+  padding: 0 5px;
+  box-sizing: border-box;
   color: var(--pane-ctl-fg, var(--pc-control-fg));
   background: color-mix(in srgb, var(--active-control-bg) 18%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
   border: 1px solid color-mix(in srgb, var(--active-control-border) 45%, var(--pane-ctl-border, transparent));
   border-radius: 4px;
-  font-family: var(--mono-font);
+  font-family: var(--control-font);
   font-size: var(--ui-font-size-2xs);
+  font-stretch: condensed;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
@@ -9099,43 +9191,14 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 .file-editor-codemirror .cm-scroller,
 .file-editor-codemirror-panel .cm-scroller {
   scrollbar-gutter: stable;
-  scrollbar-width: auto;
-  scrollbar-color: var(--pane-tab-active-bg) rgba(255, 255, 255, 0.10);
-}
-.file-editor-codemirror .cm-scroller::-webkit-scrollbar,
-.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
-}
-.file-editor-codemirror .cm-scroller::-webkit-scrollbar-track,
-.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.10);
-}
-.file-editor-codemirror .cm-scroller::-webkit-scrollbar-corner,
-.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-corner {
-  background: rgba(255, 255, 255, 0.04);
-}
-.file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb,
-.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb {
-  background: var(--pane-tab-active-bg);
-  border: 2px solid rgba(7, 10, 14, 0.95);
-  border-radius: 6px;
-}
-.file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb:hover,
-.file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb:hover {
-  background: var(--pane-tab-active-bg);
-}
-.file-editor-panel:hover .file-editor-codemirror .cm-scroller,
-.file-editor-panel:focus-within .file-editor-codemirror .cm-scroller,
-.file-editor-panel:hover .file-editor-codemirror-panel .cm-scroller,
-.file-editor-panel:focus-within .file-editor-codemirror-panel .cm-scroller {
-  scrollbar-color: var(--pane-tab-active-bg) rgba(255, 255, 255, 0.10);
-}
-.file-editor-panel:hover .file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb,
-.file-editor-panel:focus-within .file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb,
-.file-editor-panel:hover .file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb,
-.file-editor-panel:focus-within .file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb {
-  background: var(--pane-tab-active-bg);
+  /* CodeMirror uses the shared pane scrollbar behavior. Only gutter geometry is local because the diff
+     overview rail is positioned next to this native scrollbar. */
+  --pane-scrollbar-size: 12px;
+  --pane-scrollbar-track: rgba(255, 255, 255, 0.10);
+  --pane-scrollbar-track-active: rgba(255, 255, 255, 0.10);
+  --pane-scrollbar-corner: rgba(255, 255, 255, 0.04);
+  --pane-scrollbar-border: 2px solid rgba(7, 10, 14, 0.95);
+  --pane-scrollbar-radius: 6px;
 }
 .file-editor-codemirror .cm-content ::selection,
 .file-editor-codemirror-panel .cm-content ::selection {
@@ -9180,15 +9243,10 @@ body.editor-theme-light .file-editor-codemirror .cm-scroller,
 body.editor-theme-light .file-editor-codemirror-panel .cm-scroller {
   color: var(--text) !important;
   background: var(--editor-bg) !important;
-}
-body.editor-theme-light .file-editor-codemirror .cm-scroller::-webkit-scrollbar-track,
-body.editor-theme-light .file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.16);
-}
-body.editor-theme-light .file-editor-codemirror .cm-scroller::-webkit-scrollbar-thumb,
-body.editor-theme-light .file-editor-codemirror-panel .cm-scroller::-webkit-scrollbar-thumb {
-  background: var(--pane-tab-active-bg);
-  border-color: rgba(255, 255, 255, 0.92);
+  --pane-scrollbar-track: rgba(15, 23, 42, 0.16);
+  --pane-scrollbar-track-active: rgba(15, 23, 42, 0.16);
+  --pane-scrollbar-corner: rgba(15, 23, 42, 0.10);
+  --pane-scrollbar-border: 2px solid rgba(255, 255, 255, 0.92);
 }
 body.editor-theme-light .file-editor-codemirror .cm-content,
 body.editor-theme-light .file-editor-codemirror-panel .cm-content {
