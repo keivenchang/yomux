@@ -33,20 +33,44 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
 
 def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     # #28: the roster's working/idle signal comes from the LIVE pane (a cheap visible-only capture),
-    # not transcript recency, while still discovering once and skipping the expensive prompt fan-out.
-    info = SessionInfo(session="6", panes=[], selected_pane=None, agents=[])
+    # not transcript recency, while still discovering once and skipping the expensive hybrid prompt fan-out.
+    info5 = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    info6 = SessionInfo(
+        session="6",
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session="6",
+                kind="codex",
+                pid=123,
+                pane_target="6:1.0",
+                command="codex",
+                cwd=None,
+                status=None,
+                session_id=None,
+                transcript=None,
+                error=None,
+            )
+        ],
+    )
     discover_calls = []
     capture_calls = []
-    pane_text = {"5": "working pane", "6": "idle pane"}
+    pane_text = {"5": "working pane", "6": "idle pane", "6:1.0": "approval pane"}
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["5", "6"], None))
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: (discover_calls.append(tuple(sessions)) or {"5": info, "6": info}, []))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: (discover_calls.append(tuple(sessions)) or {"5": info5, "6": info6}, []))
 
     def fake_capture(session, *_args, **kwargs):
         capture_calls.append((session, kwargs.get("visible_only")))
         return pane_text.get(session, "")
 
     monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", fake_capture)
-    monkeypatch.setattr(app_module.auto_approve_tmux, "agent_screen_state", lambda text: {"key": "working" if text == "working pane" else "idle", "text": ""})
+    monkeypatch.setattr(app_module.auto_approve_tmux, "agent_screen_state", lambda text: {"key": "approval" if text == "approval pane" else "working" if text == "working pane" else "idle", "text": text})
+    monkeypatch.setattr(
+        app_module.auto_approve_tmux,
+        "approval_prompt_state",
+        lambda text: {"visible": text == "approval pane", "type": "bash" if text == "approval pane" else "", "text": "Do you want to proceed?" if text == "approval pane" else "", "yes_selected": text == "approval pane", "action": ""},
+    )
     monkeypatch.setattr(app_module.auto_approve_tmux, "hybrid_approval_prompt_state", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("roster must not run the prompt-detection fan-out")))
     monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
     webapp = app_module.TmuxWebtermApp(["5", "6"])
@@ -57,11 +81,12 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
 
     assert status == HTTPStatus.OK
     assert discover_calls == [("5", "6")]  # discovered once for the whole roster, not per session
-    assert {session for session, _visible in capture_calls} == {"5", "6"}
+    assert {session for session, _visible in capture_calls} == {"5", "6:1.0"}
     assert all(visible_only is True for _session, visible_only in capture_calls)  # cheap visible-only capture only
     assert payload["sessions"]["5"]["screen"]["key"] == "working"  # live working pane spins
-    assert payload["sessions"]["6"]["screen"]["key"] == "idle"  # finished agent idle at prompt stops spinning
+    assert payload["sessions"]["6"]["screen"]["key"] == "approval"  # pending approval lights the roster
     assert payload["sessions"]["5"]["prompt"]["visible"] is False  # no live prompt fan-out in the roster
+    assert payload["sessions"]["6"]["prompt"]["visible"] is True
 
 
 def test_transcripts_payload_exposes_server_version(monkeypatch):
@@ -156,6 +181,52 @@ def test_prompt_and_screen_status_uses_transcript_activity_when_visible_pane_is_
     assert prompt["visible"] is False
     assert screen["key"] == "working"
     assert "Bash" in screen["text"]
+
+
+def test_prompt_and_screen_status_captures_discovered_agent_pane(monkeypatch):
+    info = SessionInfo(
+        session="6",
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session="6",
+                kind="codex",
+                pid=123,
+                pane_target="6:1.0",
+                command="codex",
+                cwd=None,
+                status=None,
+                session_id=None,
+                transcript=None,
+                error=None,
+            )
+        ],
+    )
+    capture_calls = []
+    hybrid_targets = []
+
+    def fake_capture(target, visible_only=False):
+        capture_calls.append((target, visible_only))
+        return "Do you want to proceed?\n❯ 1. Yes\n  2. No"
+
+    def fake_hybrid(target, _visible_text, pane_text=None, **_kwargs):
+        hybrid_targets.append((target, pane_text is not None))
+        return {"visible": True, "type": "bash", "text": "Do you want to proceed?", "yes_selected": True, "action": "approve"}
+
+    monkeypatch.setattr(app_module.auto_approve_tmux, "tmux_capture_pane", fake_capture)
+    monkeypatch.setattr(app_module.auto_approve_tmux, "hybrid_approval_prompt_state", fake_hybrid)
+    monkeypatch.setattr(app_module.auto_approve_tmux, "agent_screen_state", lambda _text: {"key": "approval", "text": "Do you want to proceed?"})
+    webapp = app_module.TmuxWebtermApp(["6"])
+    try:
+        prompt, screen = webapp.prompt_and_screen_status("6", discovered_sessions={"6": info})
+    finally:
+        webapp.control_server.stop()
+
+    assert prompt["visible"] is True
+    assert screen["key"] == "approval"
+    assert capture_calls == [("6:1.0", True), ("6:1.0", False)]
+    assert hybrid_targets == [("6", False), ("6", True)]
 
 
 def test_prompt_and_screen_status_reports_os_errors(monkeypatch):

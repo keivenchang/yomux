@@ -1424,6 +1424,18 @@ class TmuxWebtermApp:
         # caller re-acquires with a single atomic non-blocking flock, which is the only safe arbiter.
         return True
 
+    def auto_approve_capture_target(self, session: str, discovered_sessions: dict[str, SessionInfo] | None = None) -> str:
+        if discovered_sessions is None:
+            infos, _errors = discover_sessions([session])
+            info = infos.get(session)
+        else:
+            info = discovered_sessions.get(session)
+        if info is not None:
+            agent = next((item for item in info.agents if item.pane_target), None)
+            if agent is not None:
+                return agent.pane_target
+        return session
+
     def prompt_and_screen_status(
         self,
         session: str,
@@ -1431,30 +1443,29 @@ class TmuxWebtermApp:
         capture_pane: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         hidden_prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": ""}
+        target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
         if not capture_pane:
             # Roster path: derive working/idle from the LIVE pane via a cheap visible-only capture
-            # (no expensive prompt-detection or bash double-capture fan-out), NOT transcript recency —
-            # a finished agent idle at the prompt must report idle, and a working pane must report
-            # working, matching prompt_detector.visible_agent_working. discover_sessions still runs
-            # once for the whole roster (we do not re-discover per session).
+            # plus cheap prompt presence from the already-captured text. This avoids the expensive
+            # hybrid transcript / bash double-capture fan-out while still lighting roster approval badges.
             module = auto_approve_tmux
             try:
-                visible_text = module.tmux_capture_pane(session, visible_only=True)
+                visible_text = module.tmux_capture_pane(target, visible_only=True)
             except (OSError, subprocess.SubprocessError):
                 visible_text = None
             if visible_text is None:
                 return hidden_prompt, {"key": "idle", "text": ""}
-            return hidden_prompt, dict(module.agent_screen_state(visible_text))
+            return dict(module.approval_prompt_state(visible_text)), dict(module.agent_screen_state(visible_text))
         try:
             module = auto_approve_tmux
-            visible_text = module.tmux_capture_pane(session, visible_only=True)
+            visible_text = module.tmux_capture_pane(target, visible_only=True)
             if visible_text is None:
                 prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": "", "error": "failed to capture pane"}
                 screen = {"key": "disconnected", "text": "failed to capture pane"}
                 return prompt, screen
             prompt_state = module.hybrid_approval_prompt_state(session, visible_text, prompt_source=self.auto_approve_prompt_source())
             if prompt_state.get("visible") and prompt_state.get("type") == "bash":
-                pane_text = module.tmux_capture_pane(session)
+                pane_text = module.tmux_capture_pane(target)
                 prompt_state = module.hybrid_approval_prompt_state(session, visible_text, pane_text or visible_text, prompt_source=self.auto_approve_prompt_source())
             screen_state = module.agent_screen_state(visible_text)
             if screen_state.get("key") == "idle":

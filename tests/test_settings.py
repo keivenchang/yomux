@@ -23,7 +23,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
             "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "purple", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
-            "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_ms": 3000},
+            "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
             "performance": {"metadata_refresh_ms": 15000, "pane_state_refresh_ms": 1200},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
@@ -55,7 +55,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["file_explorer"]["image_preview_max_px"] == 1200
     assert settings["editor"]["autosave"] is True
     assert settings["editor"]["autosave_delay_seconds"] == 60
-    assert settings["file_explorer"]["refresh_ms"] == 3000
+    assert settings["file_explorer"]["refresh_seconds"] == 60
     assert settings["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
     assert settings["uploads"]["max_bytes"] == 512 * 1024 * 1024
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
@@ -154,9 +154,9 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     assert result["settings"]["appearance"]["ui_font_size"] == 20  # clamped to the max
     ok = save_settings({"appearance": {"ui_font_size": 14}}, path)
     assert ok["coerced"] == []
-    ring = save_settings({"appearance": {"pane_ring_opacity": 5}}, path)
+    ring = save_settings({"appearance": {"pane_ring_opacity": 20}}, path)
     assert ring["coerced"] == []
-    assert ring["settings"]["appearance"]["pane_ring_opacity"] == 5
+    assert ring["settings"]["appearance"]["pane_ring_opacity"] == 20
     clamped_ring = save_settings({"appearance": {"pane_ring_opacity": 1}}, path)
     assert "appearance.pane_ring_opacity" in clamped_ring["coerced"]
     assert clamped_ring["settings"]["appearance"]["pane_ring_opacity"] == 5
@@ -226,6 +226,15 @@ def test_watched_prs_and_watched_pr_refresh_defaults():
     d = default_settings()
     assert d["github"]["watched_prs"] == []
     assert d["performance"]["watched_pr_refresh_ms"] == 60000
+
+
+def test_file_explorer_refresh_uses_seconds_and_migrates_legacy_ms():
+    d = default_settings()
+    assert d["file_explorer"]["refresh_seconds"] == 15
+    migrated = sanitize_settings({"file_explorer": {"refresh_ms": 42000}})
+    assert migrated["file_explorer"]["refresh_seconds"] == 42
+    default_legacy = sanitize_settings({"file_explorer": {"refresh_ms": 3000}})
+    assert default_legacy["file_explorer"]["refresh_seconds"] == 15
 
 
 def test_notify_transitions_accepts_pr_keys_and_drops_unknown():

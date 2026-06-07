@@ -1820,7 +1820,7 @@ function preferenceSections() {
       {path: 'file_explorer.indexed_dirs', label: t('pref.file_explorer.indexed_dirs.label'), type: 'list', help: t('pref.file_explorer.indexed_dirs.help')},
       {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
       {path: 'file_explorer.companion_dirs', label: t('pref.file_explorer.companion_dirs.label'), type: 'list', help: t('pref.file_explorer.companion_dirs.help')},
-      {path: 'file_explorer.refresh_ms', label: t('pref.file_explorer.refresh_ms.label', {name: fileExplorerLabel()}), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.file_explorer.refresh_ms.help')},
+      {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
     {title: t('pref.section.uploads'), items: [
@@ -1968,7 +1968,7 @@ function preferenceSearchKeywordsForItem(item) {
   const add = terms => keywords.push(...terms);
   if (path.includes('font_size') || path === 'appearance.tab_width') add(['large', 'larger', 'big', 'bigger', 'huge', 'small', 'smaller', 'tiny', 'text', 'scale', 'zoom', 'wide', 'narrow']);
   if (/(_ms|_seconds|_delay|_refresh|_interval|duration|period|pulse|rotate|throttle|resize)/.test(path)) add(['duration', 'timeout', 'time', 'timing', 'milliseconds', 'seconds', 'speed', 'fast', 'slow', 'quick', 'lag', 'wait', 'debounce', 'period', 'rate', 'frequency', 'often']);
-  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_ms') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
+  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_seconds') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);

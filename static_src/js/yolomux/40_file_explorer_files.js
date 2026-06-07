@@ -258,14 +258,17 @@ function fileExplorerQuickAccessPaths() {
 }
 
 function displayQuickAccessPath(path) {
-  if (path === '~') return '~';
-  if (path === '/') return '/';
-  return basenameOf(path) || path;
+  const value = String(path || '').trim();
+  if (value === '~') return '~';
+  if (value === '/' || value === '/*') return '/*';
+  if (value.startsWith('/')) return normalizeDirectoryPath(value);
+  return value;
 }
 
 function expandQuickAccessPath(path) {
   const value = String(path || '').trim();
   if (value === '~') return homePath || '/';
+  if (value === '/' || value === '/*') return '/';
   if (value.startsWith('~/')) return normalizeDirectoryPath(`${homePath || ''}/${value.slice(2)}`);
   return value;
 }
@@ -1194,21 +1197,35 @@ function fileTreeChangedFile(path) {
   return files.find(item => item?.abs_path === path) || null;
 }
 
+function sessionFileAgentKinds(item) {
+  const raw = Array.isArray(item?.agents) ? item.agents : (item?.agent ? [item.agent] : []);
+  const order = {claude: 0, codex: 1};
+  const seen = new Set();
+  return raw
+    .map(value => String(value || '').toLowerCase())
+    .filter(value => value && !seen.has(value) && seen.add(value))
+    .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
+}
+
 function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload) {
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const absPath = sessionFileAbsolutePath(file);
     if (!absPath) continue;
+    const agents = sessionFileAgentKinds(file);
     let dir = normalizeDirectoryPath(dirnameOf(absPath));
     while (dir && dir !== '/') {
       const key = `${dir}\x1f${absPath}`;
+      const current = stats.get(dir) || {count: 0, agents: []};
       if (!seen.has(key)) {
         seen.add(key);
-        const current = stats.get(dir) || {count: 0};
         current.count += 1;
-        stats.set(dir, current);
       }
+      for (const agent of agents) {
+        if (!current.agents.includes(agent)) current.agents.push(agent);
+      }
+      stats.set(dir, current);
       const parent = normalizeDirectoryPath(dirnameOf(dir));
       if (!parent || parent === dir) break;
       dir = parent;
@@ -1333,6 +1350,10 @@ function fileTreeGitStatusClass(status) {
   return '';
 }
 
+function fileTreeGitStatusBadgeClass(status) {
+  return String(status || '').toUpperCase() === '?' ? 'file-tree-git-status-unknown' : '';
+}
+
 function fileIconClassFor(name, kind = 'file') {
   if (kind === 'dir') return 'file-icon-dir';
   const lowerName = String(name || '').toLowerCase();
@@ -1425,12 +1446,12 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     date.className = 'file-tree-date';
     row.appendChild(date);
   }
-  // Keep DOM order: icon → name → dir-count → agent → diff → status → date
-  if (name.nextSibling !== dirCount) row.insertBefore(dirCount, name.nextSibling);
-  if (dirCount.nextSibling !== agent) row.insertBefore(agent, dirCount.nextSibling);
-  if (agent.nextSibling !== diff) row.insertBefore(diff, agent.nextSibling);
-  if (diff.nextSibling !== status) row.insertBefore(status, diff.nextSibling);
-  if (status.nextSibling !== date) row.insertBefore(date, status.nextSibling);
+  // Keep DOM order: icon → name → agent → dir-count → diff → status → date.
+  if (name.nextElementSibling !== agent) row.insertBefore(agent, name.nextElementSibling);
+  if (agent.nextElementSibling !== dirCount) row.insertBefore(dirCount, agent.nextElementSibling);
+  if (dirCount.nextElementSibling !== diff) row.insertBefore(diff, dirCount.nextElementSibling);
+  if (diff.nextElementSibling !== status) row.insertBefore(status, diff.nextElementSibling);
+  if (status.nextElementSibling !== date) row.insertBefore(date, status.nextElementSibling);
   setClassNameIfChanged(icon, ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' '));
   if (icon.textContent !== iconText) icon.textContent = iconText;
   if (options.nameHtml) {
@@ -1452,6 +1473,7 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
   setHiddenIfChanged(diff, !diffParts.length);
   const statusText = options.gitStatus || '';
+  setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(statusText)].filter(Boolean).join(' '));
   if (status.textContent !== statusText) status.textContent = statusText;
   const statusTitle = options.gitStatusTitle || '';
   if (statusTitle) status.title = statusTitle;
@@ -1590,7 +1612,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     nameHtml: differMode ? null : displayName.html,
     dateText: fileTreeMtimeText(entry),
     diffParts: changedFile ? sessionFileDiffText(changedFile) : [],
-    agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : '',
+    agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
     dirCountText,
   });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
@@ -1814,6 +1836,14 @@ function updateFileTreeGitStatusRows() {
     row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(row.dataset.path));
     const changedAncestor = entry.kind === 'dir' ? (changedAncestorStats.get(row.dataset.path) || null) : null;
     row.classList.toggle('file-tree-row--changed-ancestor', Boolean(changedAncestor?.count));
+    const changedFile = entry.kind === 'file' ? fileTreeChangedFile(row.dataset.path) : null;
+    const agentHtml = changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : '');
+    const agent = row.querySelector(':scope > .file-tree-agent');
+    if (agent) {
+      if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
+      agent.hidden = !agentHtml;
+    }
+    row.classList.toggle('has-agent', Boolean(agentHtml));
     const dirCount = row.querySelector(':scope > .file-tree-dir-count');
     if (dirCount) {
       const dirCountText = changedAncestor?.count ? String(changedAncestor.count) : '';

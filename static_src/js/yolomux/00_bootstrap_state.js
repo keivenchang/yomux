@@ -383,7 +383,16 @@ let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_m
 let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms', 120);
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
-let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3001);
+function fileExplorerRefreshMsFromValues(secondsValue, legacyMsValue = 15001) {
+  const seconds = Number(secondsValue);
+  if (Number.isFinite(seconds)) return Math.max(1, Math.min(60, seconds)) * 1000 + 1;
+  const legacyMs = Number(legacyMsValue);
+  return Math.max(1000, Math.min(60000, Number.isFinite(legacyMs) ? legacyMs : 15001));
+}
+let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
+  initialSetting('file_explorer.refresh_seconds', 15),
+  initialSetting('file_explorer.refresh_ms', 15001),
+);
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);

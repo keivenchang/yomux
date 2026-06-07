@@ -942,7 +942,7 @@ def finder_click_toolbar_fixture_html():
                 <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only active" aria-pressed="true">Sync</button>
                 <div class="file-explorer-quick-access-panel file-explorer-mode-files-only">
                   <button type="button" class="file-explorer-quick-access-button">~</button>
-                  <button type="button" class="file-explorer-quick-access-button">/</button>
+                  <button type="button" class="file-explorer-quick-access-button">/*</button>
                   <button type="button" class="file-explorer-quick-access-button">/tmp</button>
                 </div>
                 <span class="file-explorer-toolbar-spacer"></span>
@@ -1940,6 +1940,20 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
             """
         )
     )
+    sync_root_metrics = browser.execute_script(
+        """
+        return {
+          mode: fileExplorerRootModeValue(),
+          syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
+          quickTexts: Array.from(new Set(Array.from(document.querySelectorAll('.file-explorer-quick-access-button')).map(button => button.textContent.trim()))),
+        };
+        """
+    )
+    assert sync_root_metrics == {
+        "mode": "sync",
+        "syncPressed": "true",
+        "quickTexts": ["~", "/*", "/tmp"],
+    }, sync_root_metrics
     browser.find_element("css selector", "#panel-5").click()
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -1962,6 +1976,7 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
               planRoot: fileExplorerSyncPlan('5').root,
               syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
               homePressed: document.querySelector('.file-explorer-quick-access-button[data-quick-path="~"]')?.getAttribute('aria-pressed') || '',
+              quickTexts: Array.from(new Set(Array.from(document.querySelectorAll('.file-explorer-quick-access-button')).map(button => button.textContent.trim()))),
             });
           }));
         });
@@ -1974,6 +1989,7 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
     assert manual_metrics["planRoot"] == "/home/test/yolomux.dev", manual_metrics
     assert manual_metrics["syncPressed"] == "false", manual_metrics
     assert manual_metrics["homePressed"] == "true", manual_metrics
+    assert manual_metrics["quickTexts"] == ["~", "/*", "/tmp"], manual_metrics
     browser.execute_script(
         """
         setFocusedTerminal('5', {userInitiated: true});
@@ -2014,6 +2030,59 @@ def test_sync_mode_quick_access_does_not_snap_back_until_explicit_input(browser,
             """
         )
     )
+
+
+def test_root_quick_access_star_alias_opens_slash(browser, tmp_path):
+    page = tmp_path / "live-runtime-root-quick-access-star.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "fixed", "quick_access_paths": ["~", "/*", "/tmp"]}},
+            fs_entries={
+                "/home/test": [{"name": "project", "kind": "dir"}],
+                "/": [{"name": "tmp", "kind": "dir"}],
+                "/tmp": [{"name": "scratch.txt", "kind": "file"}],
+            },
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+              const buttons = Array.from(document.querySelectorAll('.file-explorer-quick-access-button'));
+            return buttons.map(button => button.textContent.trim()).join('|') === '~|/*|/tmp'
+              && buttons.some(button => button.dataset.quickPath === '/*');
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        document.querySelector('.file-explorer-quick-access-button[data-quick-path="/*"]').click();
+        const wait = () => {
+          const root = document.querySelector('.file-explorer-path-inline')?.value || '';
+          if (root === '/') {
+            done({
+              root,
+              mode: fileExplorerRootModeValue(),
+              starPressed: document.querySelector('.file-explorer-quick-access-button[data-quick-path="/*"]')?.getAttribute('aria-pressed') || '',
+              texts: Array.from(new Set(Array.from(document.querySelectorAll('.file-explorer-quick-access-button')).map(button => button.textContent.trim()))),
+              paths: Array.from(new Set(Array.from(document.querySelectorAll('.file-explorer-quick-access-button')).map(button => button.dataset.quickPath || ''))),
+            });
+            return;
+          }
+          requestAnimationFrame(wait);
+        };
+        requestAnimationFrame(wait);
+        """
+    )
+    assert metrics == {
+        "root": "/",
+        "mode": "fixed",
+        "starPressed": "true",
+        "texts": ["~", "/*", "/tmp"],
+        "paths": ["~", "/*", "/tmp"],
+    }, metrics
 
 
 def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
@@ -2440,13 +2509,13 @@ def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
             borderColor: panelStyle.borderLeftColor,
           };
         };
-        return {five: applyOpacity(5), defaultish: applyOpacity(75)};
+        return {low: applyOpacity(5), defaultish: applyOpacity(75)};
         """
     )
-    assert metrics["five"]["activeOpacity"] == "5%", metrics
-    assert metrics["five"]["normalOpacity"] == "5%", metrics
+    assert metrics["low"]["activeOpacity"] == "5%", metrics
+    assert metrics["low"]["normalOpacity"] == "5%", metrics
     assert metrics["defaultish"]["activeOpacity"] == "75%", metrics
-    assert metrics["five"]["borderColor"] != metrics["defaultish"]["borderColor"], metrics
+    assert metrics["low"]["borderColor"] != metrics["defaultish"]["borderColor"], metrics
 
 
 def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
@@ -2491,9 +2560,15 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
         const prefsRange = document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]');
         const ringRange = document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]');
         const radio = document.querySelector('input[data-setting-path="appearance.date_time_hour_cycle"]');
+        const prefsScroll = document.querySelector('.preferences-scroll');
         const finderMode = document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]');
         const tabMeta = document.getElementById('tabMetaToggle');
         const notify = document.getElementById('notifyToggle');
+        const scrollProbe = document.createElement('div');
+        scrollProbe.style.background = 'var(--active-control-scrollbar-thumb)';
+        document.body.appendChild(scrollProbe);
+        const expectedScrollThumb = getComputedStyle(scrollProbe).backgroundColor;
+        scrollProbe.remove();
         return {
           errors: window.__bootErrors,
           rejections: window.__bootRejections,
@@ -2506,6 +2581,9 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
           prefsRangeAccent: getComputedStyle(prefsRange).accentColor,
           ringRangeAccent: getComputedStyle(ringRange).accentColor,
           radioAccent: getComputedStyle(radio).accentColor,
+          prefsScrollColor: getComputedStyle(prefsScroll).scrollbarColor,
+          prefsScrollThumb: getComputedStyle(prefsScroll, '::-webkit-scrollbar-thumb').backgroundColor,
+          expectedScrollThumb,
           finderModeBg: getComputedStyle(finderMode).backgroundColor,
           finderModeBorder: getComputedStyle(finderMode).borderTopColor,
           tabMetaBg: getComputedStyle(tabMeta).backgroundColor,
@@ -2526,6 +2604,9 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
     assert metrics["prefsRangeAccent"] == "rgb(59, 130, 246)", metrics
     assert metrics["ringRangeAccent"] == "rgb(59, 130, 246)", metrics
     assert metrics["radioAccent"] == "rgb(59, 130, 246)", metrics
+    assert metrics["expectedScrollThumb"] == "rgba(59, 130, 246, 0.72)", metrics
+    assert metrics["prefsScrollColor"].startswith(metrics["expectedScrollThumb"]), metrics
+    assert metrics["prefsScrollThumb"] == metrics["expectedScrollThumb"], metrics
     assert metrics["finderModeBg"] == "rgb(59, 130, 246)", metrics
     assert metrics["finderModeBorder"] == "rgb(59, 130, 246)", metrics
     assert metrics["tabMetaBg"] == "rgb(59, 130, 246)", metrics
@@ -3053,6 +3134,182 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     assert metrics["finalMode"] == "diff", json.dumps(metrics, sort_keys=True)
     assert metrics["finalTextLength"] == metrics["expectedTextLength"], metrics
     assert metrics["deletedRows"] > 0, metrics
+    assert "from=HEAD" in metrics["request"] and "to=current" in metrics["request"], metrics
+    assert metrics["errors"] == [], metrics
+
+
+def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser, tmp_path):
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+            "codeMirrorAssetUrl": bundle_uri,
+        },
+        separators=(",", ":"),
+    )
+    path = "/home/test/repo/clean.md"
+    content = "clean file\nunchanged line\n"
+    payload = json.dumps(
+        {
+            "diff": "",
+            "original": content,
+            "working": content,
+            "repo": "/home/test/repo",
+            "relative_path": "clean.md",
+            "from_ref": "HEAD",
+            "to_ref": "current",
+            "untracked": False,
+            "working_missing": False,
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "clean-diff-button-race.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        #mount {{ width: 920px; height: 520px; }}
+        .file-editor-panel {{ width: 920px; height: 520px; }}
+        .file-editor-codemirror-panel {{ height: 100%; }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="mount"></div>
+          <script>
+            window.__cleanDiffPayload = {payload};
+            window.__cleanDiffErrors = [];
+            window.addEventListener('error', event => window.__cleanDiffErrors.push(event.message || String(event.error || event)));
+            window.addEventListener('unhandledrejection', event => window.__cleanDiffErrors.push(String(event.reason || event)));
+            function jsonResponse(payload) {{
+              const text = JSON.stringify(payload);
+              return Promise.resolve({{ok: true, status: 200, headers: {{get: () => 'application/json'}}, json: async () => payload, text: async () => text}});
+            }}
+            window.fetch = async input => {{
+              const url = new URL(String(input), 'https://localhost');
+              if (url.pathname === '/api/fs/diff') {{
+                window.__cleanDiffRequest = url.search;
+                return new Promise(resolve => {{
+                  window.__resolveCleanDiffFetch = () => resolve(jsonResponse(window.__cleanDiffPayload));
+                }});
+              }}
+              return jsonResponse({{}});
+            }};
+          </script>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__cleanDiffReady = (async () => {{
+              const path = {json.dumps(path)};
+              const content = {json.dumps(content)};
+              const item = fileEditorItemFor(path);
+              setFileState(path, {{
+                kind: 'text',
+                content,
+                original: content,
+                dirty: false,
+                language: 'markdown',
+                gitTracked: true,
+                gitHasHistory: true,
+                gitHistory: [
+                  {{ref: 'HEAD', short: 'HEAD', subject: 'current file'}},
+                  {{ref: 'abc123def456', short: 'abc123d', subject: 'create file'}}
+                ],
+                diffLoaded: false,
+                diffUnavailable: false,
+                diff: '',
+                diffOriginal: '',
+              }});
+              setFileEditorViewMode(path, 'edit', item);
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.id = 'clean-diff-panel';
+              panel.classList.add('active-pane');
+              panelNodes.set(item, panel);
+              document.getElementById('mount').append(panel);
+              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const waitFor = async predicate => {{
+                for (let attempt = 0; attempt < 120; attempt += 1) {{
+                  if (predicate()) return true;
+                  await frame();
+                }}
+                return false;
+              }};
+              const snapshot = () => {{
+                const button = panel.querySelector('.file-editor-diff-panel');
+                const refs = panel.querySelector('.file-editor-diff-ref-panel');
+                const state = openFiles.get(path) || {{}};
+                return {{
+                  viewMode: editorViewModeFor(path, item),
+                  cmMode: panel._cmMode || '',
+                  buttonHidden: button?.hidden === true,
+                  buttonDisabled: button?.disabled === true,
+                  buttonTitle: button?.title || '',
+                  refsHidden: refs?.hidden === true,
+                  refsVisible: refs?.hidden === false,
+                  refsText: refs?.textContent || '',
+                  diffLoaded: state.diffLoaded === true,
+                  diffLoading: state.diffLoading === true,
+                  diffUnavailable: state.diffUnavailable === true,
+                  diffLength: String(state.diff || '').length,
+                }};
+              }};
+              renderFileEditorPanel(panel, item);
+              await waitFor(() => panel._cmMode === 'edit' && panel.querySelector('.file-editor-diff-panel')?.hidden === false);
+              const beforeClick = snapshot();
+              panel.querySelector('.file-editor-diff-panel').click();
+              await waitFor(() => window.__resolveCleanDiffFetch && openFiles.get(path)?.diffLoading === true);
+              await frame();
+              await frame();
+              const whileUnresolved = snapshot();
+              window.__resolveCleanDiffFetch();
+              await waitFor(() => openFiles.get(path)?.diffLoaded === true && openFiles.get(path)?.diffLoading === false && editorViewModeFor(path, item) === 'edit');
+              await frame();
+              await frame();
+              const afterCleanDiff = snapshot();
+              return {{
+                beforeClick,
+                whileUnresolved,
+                afterCleanDiff,
+                request: window.__cleanDiffRequest || '',
+                errors: window.__cleanDiffErrors,
+              }};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__cleanDiffReady.then(done, error => done({error: String(error), errors: window.__cleanDiffErrors || []}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["beforeClick"]["viewMode"] == "edit", metrics
+    assert metrics["beforeClick"]["buttonHidden"] is False, metrics
+    assert metrics["beforeClick"]["refsHidden"] is True, metrics
+    assert metrics["whileUnresolved"]["viewMode"] == "edit", metrics
+    assert metrics["whileUnresolved"]["buttonHidden"] is False, metrics
+    assert metrics["whileUnresolved"]["buttonDisabled"] is True, metrics
+    assert metrics["whileUnresolved"]["buttonTitle"] == "Loading diff", metrics
+    assert metrics["whileUnresolved"]["refsHidden"] is True, metrics
+    assert metrics["whileUnresolved"]["refsVisible"] is False, metrics
+    assert metrics["afterCleanDiff"]["viewMode"] == "edit", metrics
+    assert metrics["afterCleanDiff"]["buttonHidden"] is True, metrics
+    assert metrics["afterCleanDiff"]["refsHidden"] is True, metrics
+    assert metrics["afterCleanDiff"]["diffLoaded"] is True, metrics
+    assert metrics["afterCleanDiff"]["diffLoading"] is False, metrics
+    assert metrics["afterCleanDiff"]["diffUnavailable"] is False, metrics
+    assert metrics["afterCleanDiff"]["diffLength"] == 0, metrics
     assert "from=HEAD" in metrics["request"] and "to=current" in metrics["request"], metrics
     assert metrics["errors"] == [], metrics
 
@@ -3596,7 +3853,7 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["quickAfterSync"]
     assert metrics["syncText"] == "Sync"
     assert metrics["syncPressed"] == "true"
-    assert metrics["quickTexts"] == ["~", "/", "/tmp"]
+    assert metrics["quickTexts"] == ["~", "/*", "/tmp"]
     assert metrics["rootPressedCount"] == 1
     assert metrics["quickBorderStyle"] == "solid"
     assert metrics["quickBorderWidth"] == "1px"

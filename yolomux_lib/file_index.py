@@ -32,13 +32,14 @@ MAX_INDEX_FILES = 400_000
 # than this (stale-while-revalidate), which also prunes deleted files.
 INDEX_TTL_SECONDS = 120.0
 # C11: bump when the on-disk JSON shape changes so old/incompatible indexes rebuild for a clear reason.
-INDEX_FORMAT_VERSION = 1
+INDEX_FORMAT_VERSION = 2
 
 
-def _skip_signature(skip_dirs: set[str]) -> str:
+def _skip_signature(skip_dirs: set[str], exclude_signature: str = "") -> str:
     # C11: the set of skipped directories is part of what an index means; if it changes, the cached
     # index no longer matches the requested coverage and must rebuild.
-    return ",".join(sorted(skip_dirs))
+    suffix = f"|exclude:{exclude_signature}" if exclude_signature else ""
+    return ",".join(sorted(skip_dirs)) + suffix
 
 # (path, name, relative_path, size, mtime)
 IndexEntry = tuple[str, str, str, int, int]
@@ -52,6 +53,7 @@ class RootIndex:
         self.ready = False
         self.building = False
         self.truncated = False
+        self.signature = ""
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.lock = threading.Lock()
@@ -97,19 +99,28 @@ def _clear_tombstone(root: Path) -> None:
         pass
 
 
-def walk_root(root: Path, skip_dirs: set[str], stop_event: threading.Event | None = None) -> tuple[list[IndexEntry], bool]:
+def walk_root(
+    root: Path,
+    skip_dirs: set[str],
+    stop_event: threading.Event | None = None,
+    exclude_path: Callable[[Path], bool] | None = None,
+) -> tuple[list[IndexEntry], bool]:
     """Collect every regular file under root, skipping skip_dirs. Cancellable."""
     entries: list[IndexEntry] = []
     truncated = False
     for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
         if stop_event is not None and stop_event.is_set():
             return entries, True
-        dirs[:] = sorted((name for name in dirs if name not in skip_dirs), key=str.lower)
         current_path = Path(current)
+        dirs[:] = sorted((name for name in dirs if name not in skip_dirs), key=str.lower)
+        if exclude_path is not None:
+            dirs[:] = [name for name in dirs if not exclude_path(current_path / name)]
         for name in files:
             if len(entries) >= MAX_INDEX_FILES:
                 return entries, True
             path = current_path / name
+            if exclude_path is not None and exclude_path(path):
+                continue
             try:
                 st = path.lstat()
             except OSError:
@@ -124,12 +135,12 @@ def walk_root(root: Path, skip_dirs: set[str], stop_event: threading.Event | Non
     return entries, truncated
 
 
-def _persist(ri: RootIndex, skip_dirs: set[str]) -> None:
+def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "") -> None:
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": INDEX_FORMAT_VERSION,
-            "skip_signature": _skip_signature(skip_dirs),
+            "skip_signature": _skip_signature(skip_dirs, exclude_signature),
             "root": str(ri.root),
             "built_at": ri.built_at,
             "truncated": ri.truncated,
@@ -142,7 +153,7 @@ def _persist(ri: RootIndex, skip_dirs: set[str]) -> None:
         pass
 
 
-def _load_disk(root: Path, skip_dirs: set[str]) -> tuple[list[IndexEntry], float, bool] | None:
+def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> tuple[list[IndexEntry], float, bool] | None:
     try:
         raw = json.loads(_index_disk_path(root).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -150,7 +161,7 @@ def _load_disk(root: Path, skip_dirs: set[str]) -> tuple[list[IndexEntry], float
     if not isinstance(raw, dict) or raw.get("root") != str(root):
         return None
     # C11: reject indexes from an older format or a different skip-dir set so they rebuild cleanly.
-    if raw.get("version") != INDEX_FORMAT_VERSION or raw.get("skip_signature") != _skip_signature(skip_dirs):
+    if raw.get("version") != INDEX_FORMAT_VERSION or raw.get("skip_signature") != _skip_signature(skip_dirs, exclude_signature):
         return None
     entries_raw = raw.get("entries")
     if not isinstance(entries_raw, list):
@@ -159,9 +170,15 @@ def _load_disk(root: Path, skip_dirs: set[str]) -> tuple[list[IndexEntry], float
     return entries, float(raw.get("built_at") or 0.0), bool(raw.get("truncated"))
 
 
-def _run_build(ri: RootIndex, skip_dirs: set[str]) -> None:
+def _run_build(
+    ri: RootIndex,
+    skip_dirs: set[str],
+    exclude_path: Callable[[Path], bool] | None = None,
+    exclude_signature: str = "",
+) -> None:
     # C11: take a cross-process lock so a second server process does not duplicate the walk. If another
     # process holds it, leave whatever stale-but-ready disk copy we already loaded in place and bail.
+    expected_signature = _skip_signature(skip_dirs, exclude_signature)
     lock_fd = None
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
@@ -174,14 +191,15 @@ def _run_build(ri: RootIndex, skip_dirs: set[str]) -> None:
             return
         # Another process may have just finished while we waited for the lock — adopt a fresh disk copy
         # instead of re-walking.
-        disk = _load_disk(ri.root, skip_dirs)
+        disk = _load_disk(ri.root, skip_dirs, exclude_signature)
         if disk is not None and (time.time() - disk[1]) <= INDEX_TTL_SECONDS:
             with ri.lock:
                 ri.entries, ri.built_at, ri.truncated = disk
+                ri.signature = expected_signature
                 ri.ready = True
                 ri.building = False
             return
-        entries, truncated = walk_root(ri.root, skip_dirs, ri.stop_event)
+        entries, truncated = walk_root(ri.root, skip_dirs, ri.stop_event, exclude_path=exclude_path)
         if ri.stop_event.is_set():
             with ri.lock:
                 ri.building = False
@@ -190,9 +208,10 @@ def _run_build(ri: RootIndex, skip_dirs: set[str]) -> None:
             ri.entries = entries
             ri.truncated = truncated
             ri.built_at = time.time()
+            ri.signature = expected_signature
             ri.ready = True
             ri.building = False
-        _persist(ri, skip_dirs)
+        _persist(ri, skip_dirs, exclude_signature)
         # C11: a fresh build supersedes any prior unindex, so clear the tombstone.
         _clear_tombstone(ri.root)
     finally:
@@ -204,30 +223,53 @@ def _run_build(ri: RootIndex, skip_dirs: set[str]) -> None:
             os.close(lock_fd)
 
 
-def _start_build(ri: RootIndex, skip_dirs: set[str]) -> None:
+def _start_build(
+    ri: RootIndex,
+    skip_dirs: set[str],
+    exclude_path: Callable[[Path], bool] | None = None,
+    exclude_signature: str = "",
+) -> None:
     with ri.lock:
         if ri.building:
             return
         ri.building = True
         ri.stop_event = threading.Event()
-        thread = threading.Thread(target=_run_build, args=(ri, set(skip_dirs)), name=f"file-index-{ri.root.name}", daemon=True)
+        thread = threading.Thread(
+            target=_run_build,
+            args=(ri, set(skip_dirs), exclude_path, exclude_signature),
+            name=f"file-index-{ri.root.name}",
+            daemon=True,
+        )
         ri.thread = thread
     thread.start()
 
 
-def ensure_index(root: Path, skip_dirs: set[str]) -> RootIndex:
+def ensure_index(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_path: Callable[[Path], bool] | None = None,
+    exclude_signature: str = "",
+) -> RootIndex:
     """Return the RootIndex for root, seeding from disk and kicking off a
     background (re)build when missing or stale. May return a not-yet-ready index."""
     key = str(root)
+    expected_signature = _skip_signature(skip_dirs, exclude_signature)
     with _REGISTRY_LOCK:
         ri = _REGISTRY.get(key)
         if ri is None:
             ri = RootIndex(root)
             _REGISTRY[key] = ri
-            disk = _load_disk(root, skip_dirs)
+            disk = _load_disk(root, skip_dirs, exclude_signature)
             if disk is not None:
                 ri.entries, ri.built_at, ri.truncated = disk
+                ri.signature = expected_signature
                 ri.ready = True
+    with ri.lock:
+        if ri.ready and ri.signature != expected_signature:
+            ri.entries = []
+            ri.ready = False
+            ri.built_at = 0.0
+            ri.signature = ""
     # C11: if another process unindexed this root after our copy was built, drop the stale in-memory
     # index so we stop serving deleted-file results (a later explicit access rebuilds and clears the tomb).
     tomb = _tombstone_time(root)
@@ -237,11 +279,16 @@ def ensure_index(root: Path, skip_dirs: set[str]) -> RootIndex:
             ri.ready = False
             ri.built_at = 0.0
     if not ri.ready or (time.time() - ri.built_at) > INDEX_TTL_SECONDS:
-        _start_build(ri, skip_dirs)
+        _start_build(ri, skip_dirs, exclude_path=exclude_path, exclude_signature=exclude_signature)
     return ri
 
 
-def build_now(root: Path, skip_dirs: set[str]) -> RootIndex:
+def build_now(
+    root: Path,
+    skip_dirs: set[str],
+    exclude_path: Callable[[Path], bool] | None = None,
+    exclude_signature: str = "",
+) -> RootIndex:
     """Synchronously build (or rebuild) the index for root. Used at warm-up and in tests."""
     key = str(root)
     with _REGISTRY_LOCK:
@@ -250,7 +297,7 @@ def build_now(root: Path, skip_dirs: set[str]) -> RootIndex:
             ri = RootIndex(root)
             _REGISTRY[key] = ri
     ri.stop_event = threading.Event()
-    _run_build(ri, set(skip_dirs))
+    _run_build(ri, set(skip_dirs), exclude_path=exclude_path, exclude_signature=exclude_signature)
     return ri
 
 

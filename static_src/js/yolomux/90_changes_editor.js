@@ -941,15 +941,32 @@ function repoComparisonErrorHtml(repoInfo) {
   return repoInfo?.error ? `<span class="changes-repo-refs-error">${esc(repoInfo.error)}</span>` : '';
 }
 
-function changesSummaryHtml(files, session, loading, loaded) {
+function changesRepoCount(payload, files) {
+  const repos = new Set();
+  for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) {
+    const path = normalizeDirectoryPath(repo?.repo || '');
+    if (path) repos.add(path);
+  }
+  if (!repos.size) {
+    for (const file of Array.isArray(files) ? files : []) {
+      const path = normalizeDirectoryPath(file?.repo || '');
+      if (path) repos.add(path);
+    }
+  }
+  return repos.size;
+}
+
+function changesSummaryHtml(payload, files, session, loading, loaded) {
   if (loading) return t('changes.loading');
   if (!loaded) return t('changes.notLoaded');
   const fileCount = Array.isArray(files) ? files.length : 0;
+  const repoCount = changesRepoCount(payload, files);
+  const repos = tPlural('changes.repoCount', repoCount);
   const count = tPlural('changes.fileCount', fileCount);
   const {added, removed} = changeFileTotals(files);
   const scope = session ? t('changes.inSession', {session: sessionLabel(session)}) : '';
   const title = `+${added} -${removed} ${tPlural('changes.fileCount', fileCount)}`;
-  return `<span class="changes-summary-label">${esc(count)}${esc(scope)}</span><span class="changes-summary-totals" title="${esc(title)}"><span class="changes-diff-add">+${added}</span><span class="changes-diff-remove">-${removed}</span><span class="changes-repo-count">${fileCount}</span></span>`;
+  return `<span class="changes-summary-label">${esc(repos)}, ${esc(count)}${esc(scope)}</span><span class="changes-summary-totals" title="${esc(title)}"><span class="changes-diff-add">+${added}</span><span class="changes-diff-remove">-${removed}</span><span class="changes-repo-count">${fileCount}</span></span>`;
 }
 
 function changesRepoMetaHtml(repoInfo, options = {}) {
@@ -978,7 +995,7 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
     if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
     return '';
   }
-  const summary = changesSummaryHtml(files, payload?.session || '', loading, loaded);
+  const summary = changesSummaryHtml(payload, files, payload?.session || '', loading, loaded);
   return `<section class="changes-comparison-head">
     <div class="changes-comparison-summary">${summary}</div>
   </section>`;
@@ -1047,13 +1064,7 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
 // (Claude, then Codex, then any others alphabetically), falling back to the legacy scalar item.agent. When
 // more than one agent appears, label the slot so screen readers announce all of them.
 function changeFileAgentsHtml(item) {
-  const raw = Array.isArray(item.agents) ? item.agents : (item.agent ? [item.agent] : []);
-  const order = {claude: 0, codex: 1};
-  const seen = new Set();
-  const ordered = raw
-    .map(value => String(value || '').toLowerCase())
-    .filter(value => value && !seen.has(value) && seen.add(value))
-    .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
+  const ordered = sessionFileAgentKinds(item);
   const icons = ordered.map(kind => agentIcon(kind)).filter(Boolean);
   if (!icons.length) return '';
   const label = ordered.map(kind => kind.charAt(0).toUpperCase() + kind.slice(1)).join(', ');
@@ -2148,6 +2159,27 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   }
 }
 
+async function enterFileEditorDiffMode(path, panel, item) {
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return;
+  if (openFileDiffAvailable(state)) {
+    setFileEditorViewMode(path, 'diff', item);
+    renderFileEditorPanel(panel, item);
+    return;
+  }
+  const loadPromise = refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
+  renderFileEditorPanel(panel, item);
+  await loadPromise;
+  const current = openFiles.get(path);
+  if (!current || current.kind !== 'text' || panel.dataset.filePath !== path) return;
+  if (openFileDiffAvailable(current)) {
+    setFileEditorViewMode(path, 'diff', item);
+  } else {
+    setFileEditorViewMode(path, 'edit', item);
+  }
+  renderFileEditorPanel(panel, item);
+}
+
 function createFileEditorPanel(item) {
   const path = fileItemPath(item);
   const panel = document.createElement('article');
@@ -2225,6 +2257,10 @@ function createFileEditorPanel(item) {
     if (!editorViewModes.has(mode)) return;
     event.preventDefault();
     event.stopPropagation();
+    if (mode === 'diff' && editorViewModeFor(path, item) !== 'diff') {
+      enterFileEditorDiffMode(path, panel, item);
+      return;
+    }
     setFileEditorViewMode(path, mode, item);
     renderFileEditorPanel(panel, item);
   });
@@ -2259,8 +2295,11 @@ function createFileEditorPanel(item) {
     event.preventDefault();
     event.stopPropagation();
     const nextMode = editorViewModeFor(path, item) === 'diff' ? 'edit' : 'diff';
+    if (nextMode === 'diff') {
+      enterFileEditorDiffMode(path, panel, item);
+      return;
+    }
     setFileEditorViewMode(path, nextMode, item);
-    if (nextMode === 'diff') refreshOpenFileDiff(path, {silent: true});
     renderFileEditorPanel(panel, item);
   });
   panel.querySelector('.file-editor-diff-expand-panel')?.addEventListener('click', event => {
@@ -3300,7 +3339,11 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   container.classList.add('file-editor-diff-codemirror');
   // Await the deduped diff load in this generation. Falling back to a temporary edit view here creates
   // a second render path that can overwrite the diff view after the payload arrives.
-  if (!state.diffLoaded && !state.diffUnavailable) {
+  if (state.diffLoading && state._diffLoadingPromise) {
+    setFileEditorPanelStatus(panel, t('editor.diffLoading'), '');
+    await state._diffLoadingPromise;
+    if (panel._cmGeneration !== generation) return null;
+  } else if (!state.diffLoaded && !state.diffUnavailable) {
     setFileEditorPanelStatus(panel, t('editor.diffLoading'), '');
     await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
     if (panel._cmGeneration !== generation) return null;

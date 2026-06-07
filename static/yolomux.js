@@ -384,7 +384,16 @@ let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_m
 let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms', 120);
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
-let fileExplorerRefreshMs = initialSetting('file_explorer.refresh_ms', 3001);
+function fileExplorerRefreshMsFromValues(secondsValue, legacyMsValue = 15001) {
+  const seconds = Number(secondsValue);
+  if (Number.isFinite(seconds)) return Math.max(1, Math.min(60, seconds)) * 1000 + 1;
+  const legacyMs = Number(legacyMsValue);
+  return Math.max(1000, Math.min(60000, Number.isFinite(legacyMs) ? legacyMs : 15001));
+}
+let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
+  initialSetting('file_explorer.refresh_seconds', 15),
+  initialSetting('file_explorer.refresh_ms', 15001),
+);
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
 let fileExplorerNewEntryHighlightMs = initialSetting('file_explorer.new_entry_highlight_ms', 60000);
 let fileExplorerImagePreviewMaxPx = initialSetting('file_explorer.image_preview_max_px', 320);
@@ -3266,6 +3275,9 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   }
   if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
     return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
+  }
+  if (screenKey === 'approval') {
+    return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'));
   }
   if (screenKey === 'working') {
     return stateValue('working', screenText || stateReason('agentWorking'));
@@ -6228,14 +6240,17 @@ function fileExplorerQuickAccessPaths() {
 }
 
 function displayQuickAccessPath(path) {
-  if (path === '~') return '~';
-  if (path === '/') return '/';
-  return basenameOf(path) || path;
+  const value = String(path || '').trim();
+  if (value === '~') return '~';
+  if (value === '/' || value === '/*') return '/*';
+  if (value.startsWith('/')) return normalizeDirectoryPath(value);
+  return value;
 }
 
 function expandQuickAccessPath(path) {
   const value = String(path || '').trim();
   if (value === '~') return homePath || '/';
+  if (value === '/' || value === '/*') return '/';
   if (value.startsWith('~/')) return normalizeDirectoryPath(`${homePath || ''}/${value.slice(2)}`);
   return value;
 }
@@ -7164,21 +7179,35 @@ function fileTreeChangedFile(path) {
   return files.find(item => item?.abs_path === path) || null;
 }
 
+function sessionFileAgentKinds(item) {
+  const raw = Array.isArray(item?.agents) ? item.agents : (item?.agent ? [item.agent] : []);
+  const order = {claude: 0, codex: 1};
+  const seen = new Set();
+  return raw
+    .map(value => String(value || '').toLowerCase())
+    .filter(value => value && !seen.has(value) && seen.add(value))
+    .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
+}
+
 function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload) {
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const absPath = sessionFileAbsolutePath(file);
     if (!absPath) continue;
+    const agents = sessionFileAgentKinds(file);
     let dir = normalizeDirectoryPath(dirnameOf(absPath));
     while (dir && dir !== '/') {
       const key = `${dir}\x1f${absPath}`;
+      const current = stats.get(dir) || {count: 0, agents: []};
       if (!seen.has(key)) {
         seen.add(key);
-        const current = stats.get(dir) || {count: 0};
         current.count += 1;
-        stats.set(dir, current);
       }
+      for (const agent of agents) {
+        if (!current.agents.includes(agent)) current.agents.push(agent);
+      }
+      stats.set(dir, current);
       const parent = normalizeDirectoryPath(dirnameOf(dir));
       if (!parent || parent === dir) break;
       dir = parent;
@@ -7303,6 +7332,10 @@ function fileTreeGitStatusClass(status) {
   return '';
 }
 
+function fileTreeGitStatusBadgeClass(status) {
+  return String(status || '').toUpperCase() === '?' ? 'file-tree-git-status-unknown' : '';
+}
+
 function fileIconClassFor(name, kind = 'file') {
   if (kind === 'dir') return 'file-icon-dir';
   const lowerName = String(name || '').toLowerCase();
@@ -7395,12 +7428,12 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
     date.className = 'file-tree-date';
     row.appendChild(date);
   }
-  // Keep DOM order: icon → name → dir-count → agent → diff → status → date
-  if (name.nextSibling !== dirCount) row.insertBefore(dirCount, name.nextSibling);
-  if (dirCount.nextSibling !== agent) row.insertBefore(agent, dirCount.nextSibling);
-  if (agent.nextSibling !== diff) row.insertBefore(diff, agent.nextSibling);
-  if (diff.nextSibling !== status) row.insertBefore(status, diff.nextSibling);
-  if (status.nextSibling !== date) row.insertBefore(date, status.nextSibling);
+  // Keep DOM order: icon → name → agent → dir-count → diff → status → date.
+  if (name.nextElementSibling !== agent) row.insertBefore(agent, name.nextElementSibling);
+  if (agent.nextElementSibling !== dirCount) row.insertBefore(dirCount, agent.nextElementSibling);
+  if (dirCount.nextElementSibling !== diff) row.insertBefore(diff, dirCount.nextElementSibling);
+  if (diff.nextElementSibling !== status) row.insertBefore(status, diff.nextElementSibling);
+  if (status.nextElementSibling !== date) row.insertBefore(date, status.nextElementSibling);
   setClassNameIfChanged(icon, ['file-tree-icon', options.iconClass || ''].filter(Boolean).join(' '));
   if (icon.textContent !== iconText) icon.textContent = iconText;
   if (options.nameHtml) {
@@ -7422,6 +7455,7 @@ function updateFileTreeRowContents(row, iconText, nameText, options = {}) {
   if (diff.innerHTML !== diffHtml) diff.innerHTML = diffHtml;
   setHiddenIfChanged(diff, !diffParts.length);
   const statusText = options.gitStatus || '';
+  setClassNameIfChanged(status, ['file-tree-git-status', fileTreeGitStatusBadgeClass(statusText)].filter(Boolean).join(' '));
   if (status.textContent !== statusText) status.textContent = statusText;
   const statusTitle = options.gitStatusTitle || '';
   if (statusTitle) status.title = statusTitle;
@@ -7560,7 +7594,7 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
     nameHtml: differMode ? null : displayName.html,
     dateText: fileTreeMtimeText(entry),
     diffParts: changedFile ? sessionFileDiffText(changedFile) : [],
-    agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : '',
+    agentHtml: changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : ''),
     dirCountText,
   });
   if (entry.kind === 'file' && IMAGE_EXTENSIONS.has(fileExtensionOf(entry.name)) && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES) {
@@ -7784,6 +7818,14 @@ function updateFileTreeGitStatusRows() {
     row.classList.toggle('repo-non-main', entry.kind === 'dir' && entry.is_repo === true && fileTreeRepoBranchIsNonMain(row.dataset.path));
     const changedAncestor = entry.kind === 'dir' ? (changedAncestorStats.get(row.dataset.path) || null) : null;
     row.classList.toggle('file-tree-row--changed-ancestor', Boolean(changedAncestor?.count));
+    const changedFile = entry.kind === 'file' ? fileTreeChangedFile(row.dataset.path) : null;
+    const agentHtml = changedFile ? changeFileAgentsHtml(changedFile) : (changedAncestor ? changeFileAgentsHtml(changedAncestor) : '');
+    const agent = row.querySelector(':scope > .file-tree-agent');
+    if (agent) {
+      if (agent.innerHTML !== agentHtml) agent.innerHTML = agentHtml;
+      agent.hidden = !agentHtml;
+    }
+    row.classList.toggle('has-agent', Boolean(agentHtml));
     const dirCount = row.querySelector(':scope > .file-tree-dir-count');
     if (dirCount) {
       const dirCountText = changedAncestor?.count ? String(changedAncestor.count) : '';
@@ -10838,6 +10880,13 @@ function numberSetting(path, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function fileExplorerRefreshMsFromSettings() {
+  return fileExplorerRefreshMsFromValues(
+    numberSetting('file_explorer.refresh_seconds', Number.NaN),
+    numberSetting('file_explorer.refresh_ms', 15001),
+  );
+}
+
 function boolSetting(path, fallback) {
   const value = initialSetting(path, fallback);
   return value === true || value === 'true' || value === 1;
@@ -11052,7 +11101,7 @@ function applySettingsPayload(payload, options = {}) {
   menuHoverCloseDelayMs = hoverCloseDelayMs;
   tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
-  fileExplorerRefreshMs = numberSetting('file_explorer.refresh_ms', 3001);
+  fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings();
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
@@ -15945,7 +15994,7 @@ function preferenceSections() {
       {path: 'file_explorer.indexed_dirs', label: t('pref.file_explorer.indexed_dirs.label'), type: 'list', help: t('pref.file_explorer.indexed_dirs.help')},
       {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
       {path: 'file_explorer.companion_dirs', label: t('pref.file_explorer.companion_dirs.label'), type: 'list', help: t('pref.file_explorer.companion_dirs.help')},
-      {path: 'file_explorer.refresh_ms', label: t('pref.file_explorer.refresh_ms.label', {name: fileExplorerLabel()}), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.file_explorer.refresh_ms.help')},
+      {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
     {title: t('pref.section.uploads'), items: [
@@ -16093,7 +16142,7 @@ function preferenceSearchKeywordsForItem(item) {
   const add = terms => keywords.push(...terms);
   if (path.includes('font_size') || path === 'appearance.tab_width') add(['large', 'larger', 'big', 'bigger', 'huge', 'small', 'smaller', 'tiny', 'text', 'scale', 'zoom', 'wide', 'narrow']);
   if (/(_ms|_seconds|_delay|_refresh|_interval|duration|period|pulse|rotate|throttle|resize)/.test(path)) add(['duration', 'timeout', 'time', 'timing', 'milliseconds', 'seconds', 'speed', 'fast', 'slow', 'quick', 'lag', 'wait', 'debounce', 'period', 'rate', 'frequency', 'often']);
-  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_ms') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
+  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_seconds') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
@@ -17493,15 +17542,32 @@ function repoComparisonErrorHtml(repoInfo) {
   return repoInfo?.error ? `<span class="changes-repo-refs-error">${esc(repoInfo.error)}</span>` : '';
 }
 
-function changesSummaryHtml(files, session, loading, loaded) {
+function changesRepoCount(payload, files) {
+  const repos = new Set();
+  for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) {
+    const path = normalizeDirectoryPath(repo?.repo || '');
+    if (path) repos.add(path);
+  }
+  if (!repos.size) {
+    for (const file of Array.isArray(files) ? files : []) {
+      const path = normalizeDirectoryPath(file?.repo || '');
+      if (path) repos.add(path);
+    }
+  }
+  return repos.size;
+}
+
+function changesSummaryHtml(payload, files, session, loading, loaded) {
   if (loading) return t('changes.loading');
   if (!loaded) return t('changes.notLoaded');
   const fileCount = Array.isArray(files) ? files.length : 0;
+  const repoCount = changesRepoCount(payload, files);
+  const repos = tPlural('changes.repoCount', repoCount);
   const count = tPlural('changes.fileCount', fileCount);
   const {added, removed} = changeFileTotals(files);
   const scope = session ? t('changes.inSession', {session: sessionLabel(session)}) : '';
   const title = `+${added} -${removed} ${tPlural('changes.fileCount', fileCount)}`;
-  return `<span class="changes-summary-label">${esc(count)}${esc(scope)}</span><span class="changes-summary-totals" title="${esc(title)}"><span class="changes-diff-add">+${added}</span><span class="changes-diff-remove">-${removed}</span><span class="changes-repo-count">${fileCount}</span></span>`;
+  return `<span class="changes-summary-label">${esc(repos)}, ${esc(count)}${esc(scope)}</span><span class="changes-summary-totals" title="${esc(title)}"><span class="changes-diff-add">+${added}</span><span class="changes-diff-remove">-${removed}</span><span class="changes-repo-count">${fileCount}</span></span>`;
 }
 
 function changesRepoMetaHtml(repoInfo, options = {}) {
@@ -17530,7 +17596,7 @@ function changesComparisonHeaderHtml(payload, files, options = {}) {
     if (!loaded) return `<section class="changes-comparison-head compact">${esc(t('changes.notLoaded'))}</section>`;
     return '';
   }
-  const summary = changesSummaryHtml(files, payload?.session || '', loading, loaded);
+  const summary = changesSummaryHtml(payload, files, payload?.session || '', loading, loaded);
   return `<section class="changes-comparison-head">
     <div class="changes-comparison-summary">${summary}</div>
   </section>`;
@@ -17599,13 +17665,7 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
 // (Claude, then Codex, then any others alphabetically), falling back to the legacy scalar item.agent. When
 // more than one agent appears, label the slot so screen readers announce all of them.
 function changeFileAgentsHtml(item) {
-  const raw = Array.isArray(item.agents) ? item.agents : (item.agent ? [item.agent] : []);
-  const order = {claude: 0, codex: 1};
-  const seen = new Set();
-  const ordered = raw
-    .map(value => String(value || '').toLowerCase())
-    .filter(value => value && !seen.has(value) && seen.add(value))
-    .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
+  const ordered = sessionFileAgentKinds(item);
   const icons = ordered.map(kind => agentIcon(kind)).filter(Boolean);
   if (!icons.length) return '';
   const label = ordered.map(kind => kind.charAt(0).toUpperCase() + kind.slice(1)).join(', ');
@@ -18700,6 +18760,27 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   }
 }
 
+async function enterFileEditorDiffMode(path, panel, item) {
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return;
+  if (openFileDiffAvailable(state)) {
+    setFileEditorViewMode(path, 'diff', item);
+    renderFileEditorPanel(panel, item);
+    return;
+  }
+  const loadPromise = refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
+  renderFileEditorPanel(panel, item);
+  await loadPromise;
+  const current = openFiles.get(path);
+  if (!current || current.kind !== 'text' || panel.dataset.filePath !== path) return;
+  if (openFileDiffAvailable(current)) {
+    setFileEditorViewMode(path, 'diff', item);
+  } else {
+    setFileEditorViewMode(path, 'edit', item);
+  }
+  renderFileEditorPanel(panel, item);
+}
+
 function createFileEditorPanel(item) {
   const path = fileItemPath(item);
   const panel = document.createElement('article');
@@ -18777,6 +18858,10 @@ function createFileEditorPanel(item) {
     if (!editorViewModes.has(mode)) return;
     event.preventDefault();
     event.stopPropagation();
+    if (mode === 'diff' && editorViewModeFor(path, item) !== 'diff') {
+      enterFileEditorDiffMode(path, panel, item);
+      return;
+    }
     setFileEditorViewMode(path, mode, item);
     renderFileEditorPanel(panel, item);
   });
@@ -18811,8 +18896,11 @@ function createFileEditorPanel(item) {
     event.preventDefault();
     event.stopPropagation();
     const nextMode = editorViewModeFor(path, item) === 'diff' ? 'edit' : 'diff';
+    if (nextMode === 'diff') {
+      enterFileEditorDiffMode(path, panel, item);
+      return;
+    }
     setFileEditorViewMode(path, nextMode, item);
-    if (nextMode === 'diff') refreshOpenFileDiff(path, {silent: true});
     renderFileEditorPanel(panel, item);
   });
   panel.querySelector('.file-editor-diff-expand-panel')?.addEventListener('click', event => {
@@ -19852,7 +19940,11 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
   container.classList.add('file-editor-diff-codemirror');
   // Await the deduped diff load in this generation. Falling back to a temporary edit view here creates
   // a second render path that can overwrite the diff view after the payload arrives.
-  if (!state.diffLoaded && !state.diffUnavailable) {
+  if (state.diffLoading && state._diffLoadingPromise) {
+    setFileEditorPanelStatus(panel, t('editor.diffLoading'), '');
+    await state._diffLoadingPromise;
+    if (panel._cmGeneration !== generation) return null;
+  } else if (!state.diffLoaded && !state.diffUnavailable) {
     setFileEditorPanelStatus(panel, t('editor.diffLoading'), '');
     await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
     if (panel._cmGeneration !== generation) return null;

@@ -591,6 +591,8 @@ globalThis.__layoutTestApi = {
   setChangesFolderCollapsedForTest(keys) { changesFolderCollapsed = new Set((keys || []).map(String)); },
   rawFileUrl,
   rawFileDownloadUrl,
+  displayQuickAccessPath,
+  expandQuickAccessPath,
   markOpenFileDiffUnavailable,
   focusPreferencesSearch,
   renderPreferencesPanelsForTest: renderPreferencesPanels,
@@ -1918,8 +1920,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(updateBody.includes("name.textContent = nameText;\n    name.innerHTML = '';"), false, 'Finder row text must not be cleared after being written');
   assert.ok(updateBody.includes("name.innerHTML = '';\n    name.textContent = nameText;"), 'Finder row clears stale HTML before writing plain text');
   const sharedTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.file-tree-row\.has-agent \.file-tree-name\s*\{[^}]*flex:\s*1 1 auto[\s\S]*min-width:\s*0/.test(sharedTreeCss), 'file-tree rows with agent metadata keep the filename as the grow/shrink ellipsis column');
+  assert.ok(/\.file-tree-row\.has-agent \.file-tree-name\s*\{[^}]*flex:\s*1 1 0[\s\S]*min-width:\s*0/.test(sharedTreeCss), 'file-tree rows with agent metadata keep the filename as the remaining-space ellipsis column beside the agent marker');
   assert.equal(/\.file-tree-row\.has-agent \.file-tree-agent\s*\{[^}]*margin-inline-end:\s*auto/.test(sharedTreeCss), false, 'file-tree agent metadata must not use auto-margin that can push date columns out of view');
+  assert.ok(/\.file-tree-row:has\(> \.file-tree-dir-count:not\(\[hidden\]\)\) > \.file-tree-dir-count,[\s\S]*?margin-inline-start:\s*auto/.test(sharedTreeCss), 'Finder/Differ rows push the first right-side metadata column, not the AI marker, to the right edge');
   assert.ok(/\.file-tree-icon\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ file icons use a centered fixed box');
   assert.ok(/\.file-tree-diff\s*\{[^}]*justify-content:\s*flex-end[\s\S]*flex:\s*0 0 6\.5ch[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ diff counts reserve one shared column before the git status badge');
   assert.ok(/\.file-tree-git-status\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ git status badges use the same centered box');
@@ -2138,9 +2141,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const repoHead = changesHtml.slice(repoHeadStart, changesHtml.indexOf('</button>', repoHeadStart));
   assert.ok(/changes-repo-caret[\s\S]*changes-repo-title[^>]*>\/repo\/app<[\s\S]*changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+10<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>2<\/span>/.test(repoHead), 'repo disclosure header shows repo name, +added, -removed, and file count');
   assert.equal(/Behind|Ahead/.test(repoHead), false, 'ahead/behind stays out of the repo disclosure header');
-  assert.ok(changesHtml.includes('2 files changed in &#39;1&#39;'), 'Finder diff summary names the session explicitly');
+  assert.ok(changesHtml.includes('1 repo, 2 files changed in &#39;1&#39;'), 'Finder diff summary names repo count, file count, and session explicitly');
   assert.ok(/changes-repo-refs[\s\S]*changes-repo-compare-title[\s\S]*Comparing[\s\S]*data-diff-ref-from[\s\S]*to[\s\S]*data-diff-ref-to/.test(changesHtml), 'Finder diff shows a per-repo comparison row with inline FROM/TO controls');
-  assert.equal((changesHtml.match(/files changed in &#39;1&#39;/g) || []).length, 1, '#24: the file-count/+/- summary appears exactly once (in the comparison card), not duplicated in the toolbar');
+  assert.equal((changesHtml.match(/repo, 2 files changed in &#39;1&#39;/g) || []).length, 1, '#24: the repo/file-count/+/- summary appears exactly once (in the comparison card), not duplicated in the toolbar');
   assert.equal(changesHtml.includes('class="changes-summary"'), false, '#24: the standalone toolbar summary duplicate is removed');
   assert.ok(changesHtml.includes('class="changes-comparison-summary"'), '#24: the summary lives in the comparison card');
   assert.ok(changesHtml.includes('Behind 0 commits'), 'Finder diff shows behind count');
@@ -3141,6 +3144,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(finderPanelSource.includes('file-explorer-diff-row'), false, 'Differ title is folded into the shared primary row');
   assert.ok(/data-file-explorer-collapse[\s\S]*file-explorer-panel-title file-explorer-mode-files-only[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel[\s\S]*fileExplorerChangesCollapseToggleHtml\(\)[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders collapse, title, path, copy, Differ collapse toggle, segmented mode switcher, and close control');
   assert.ok(/file-explorer-toolbar-row file-explorer-scope-row[\s\S]*file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*file-explorer-quick-access-panel/.test(finderPanelSource), 'Finder scope row renders .*, Sync, then quick-root buttons');
+  assert.equal(api.displayQuickAccessPath('/'), '/*', 'Finder root quick-access button labels root as /*');
+  assert.equal(api.displayQuickAccessPath('/*'), '/*', 'Finder accepts /* as the root quick-access label');
+  assert.equal(api.expandQuickAccessPath('/'), '/', 'Finder / quick-access opens the root directory');
+  assert.equal(api.expandQuickAccessPath('/*'), '/', 'Finder /* quick-access opens the root directory, not a literal glob path');
+  assert.equal(api.displayQuickAccessPath('/tmp'), '/tmp', 'Finder quick-access labels absolute paths such as /tmp with their leading slash');
   assert.ok(/const modes = \[[\s\S]*mode: 'files'[\s\S]*mode: 'diff'[\s\S]*data-file-explorer-mode-set="\$\{esc\(item\.mode\)\}"/.test(finderPanelBundle), 'Finder/Differ switcher renders both mode buttons from one segmented source');
   assert.ok(finderPanelSource.includes("fileExplorerTreeDateButtonHtml('changes-date-toggle')"), 'Finder panel toolbar uses the shared date-mode button helper with the Differ sizing class');
   assert.ok(/file-explorer-sort-select[\s\S]*file-explorer-date-reload-cluster[\s\S]*fileExplorerTreeDateButtonHtml\('changes-date-toggle'\)[\s\S]*data-file-explorer-refresh[\s\S]*changes\.refresh/.test(finderPanelSource), 'Finder date-mode button and Reload form a trailing Ago/Reload cluster in the files-only action row');
@@ -3369,6 +3377,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.preferences-body\s*\{[^}]*overflow:\s*hidden/.test(preferencesCss), 'C3: .preferences-body (overlay-root) must not scroll (overflow:hidden)');
   assert.ok(!/\.preferences-body\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .preferences-body must NOT be overflow:auto');
   assert.ok(/\.preferences-scroll\s*\{[^}]*overflow:\s*auto/.test(preferencesCss), 'C3: .preferences-scroll is the scroll container');
+  assert.ok(/\.preferences-scroll\s*\{[^}]*scrollbar-color:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'Preferences scrollbar uses the active accent token instead of a gray native thumb');
+  assert.ok(/\.preferences-scroll::-webkit-scrollbar-thumb\s*\{[^}]*background:\s*var\(--active-control-scrollbar-thumb\)/.test(preferencesCss), 'Preferences WebKit scrollbar thumb uses the active accent token');
   assert.equal(/\.changes-body|\.changes-scroll/.test(preferencesCss), false, 'standalone Differ overlay/scroll containers are removed');
   assert.ok(/body\.theme-light \.app-menu-ui-icon\.active\s*\{[\s\S]*background:\s*var\(--active-control-bg\)/.test(preferencesCss), '#251: light mode gives the active app-menu icon button a light-tuned active-control fill (no dark square)');
   assert.ok(/body\.theme-light \.app-menu-tab-command[\s\S]*\{[\s\S]*color:\s*var\(--text\)/.test(preferencesCss), '#252: light mode forces dark text on the rich Tabs/Changes dropdown rows so they are not washed out');
@@ -3412,6 +3422,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(resetConfirmHtml.includes('preferences-global-reset confirming'), 'reset-all confirmation makes the warning visibly change');
   assert.ok(preferencesHtml.includes('preferences-setting-control setting-type-number'), 'number controls are identifiable for compact sizing');
   assert.ok(preferencesHtml.includes('data-setting-path="file_explorer.image_preview_max_px"'), 'preferences expose Finder image preview sizing');
+  assert.ok(/data-setting-path="file_explorer\.refresh_seconds"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Finder refresh interval is edited in seconds, not raw milliseconds');
+  assert.equal(preferencesHtml.includes('data-setting-path="file_explorer.refresh_ms"'), false, 'Finder refresh interval no longer exposes the legacy millisecond setting');
+  assert.ok(diffBundle.includes("fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings()"), 'Finder refresh interval is derived from the seconds setting at runtime');
+  assert.ok(/function fileExplorerRefreshMsFromValues\([\s\S]*Math\.max\(1,\s*Math\.min\(60,\s*seconds\)\)\s*\* 1000 \+ 1/.test(diffBundle), 'Finder refresh seconds convert through one shared odd-millisecond polling helper');
+  assert.ok(/function fileExplorerRefreshMsFromSettings\(\)[\s\S]*fileExplorerRefreshMsFromValues\([\s\S]*file_explorer\.refresh_seconds[\s\S]*file_explorer\.refresh_ms/.test(diffBundle), 'Finder refresh setting reads seconds with legacy millisecond fallback through the shared helper');
   assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
   api.setClientSettingsPatchForTest({uploads: {max_bytes: 64 * 1024 * 1024}});
   const largeUploadPreferencesHtml = api.preferencesPanelHtmlForTest('upload', []);
@@ -4290,6 +4305,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(syncCss.includes('--finder-session-touched-bg'), false, 'Finder Sync touched-dir marker no longer uses a background token');
   assert.equal(syncCss.includes('--finder-sync-expanded-bg'), false, 'Finder auto-expanded Sync marker no longer uses a background token');
   assert.ok(/\.file-tree-row\.file-tree-row--sync-expanded > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-repo > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-touched > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--changed-ancestor > \.file-tree-name\s*\{[\s\S]*?font-weight:\s*800/.test(syncCss), 'Finder Sync and changed-ancestor markers bold the row name instead of painting a background');
+  assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgba\(226,\s*232,\s*240,\s*0\.10\) !important[\s\S]*?color:\s*rgba\(226,\s*232,\s*240,\s*0\.46\)/.test(syncCss), 'dark Finder ? status badge is faint against a dark background');
+  assert.ok(/body\.theme-light \.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgba\(15,\s*23,\s*42,\s*0\.06\) !important[\s\S]*?color:\s*rgba\(15,\s*23,\s*42,\s*0\.36\)/.test(syncCss), 'light Finder ? status badge is faint against a light background');
+  assert.ok(/\.changes-status-unknown\s*\{[\s\S]*?background:\s*rgba\(226,\s*232,\s*240,\s*0\.10\)[\s\S]*?color:\s*rgba\(226,\s*232,\s*240,\s*0\.46\)/.test(syncCss), 'Differ ? status badge is faint-neutral in dark mode');
+  assert.ok(/body\.theme-light \.changes-status-unknown\s*\{[\s\S]*?background:\s*rgba\(15,\s*23,\s*42,\s*0\.06\)[\s\S]*?color:\s*rgba\(15,\s*23,\s*42,\s*0\.36\)/.test(syncCss), 'Differ ? status badge is faint-neutral in light mode');
   const scrollContainer = {
     clientHeight: 100,
     isConnected: true,
@@ -4395,15 +4414,30 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(gitTree.children[1].querySelector(':scope > .file-tree-diff').innerHTML.includes('changes-diff-add') && gitTree.children[1].querySelector(':scope > .file-tree-diff').innerHTML.includes('changes-diff-remove'), 'changed file diff stats in separate diff element with colored spans');
   assert.equal(gitTree.children[1].classList.contains('has-agent'), true, 'changed Finder rows with agent attribution use the inline-agent file-tree layout');
   assert.ok(gitTree.children[1].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'changed Finder rows render the same agent icon slot as Differ rows');
+  assert.equal(
+    gitTree.children[1].querySelector(':scope > .file-tree-name').nextElementSibling,
+    gitTree.children[1].querySelector(':scope > .file-tree-agent'),
+    'changed Finder rows place the AI marker immediately after the filename',
+  );
   assert.equal(gitTree.children[1].querySelector(':scope > .file-tree-git-status').textContent, 'M');
+  api.setFileExplorerSessionFilesPayloadForTest({
+    loaded: true,
+    repos: [],
+    files: [{abs_path: '/repo/screenshot.png', agent: 'codex', status: '?'}],
+  });
+  const unknownTree = new TestElement('unknown-tree');
+  unknownTree.setAttribute('role', 'tree');
+  api.renderTreeChildrenForTest(unknownTree, '/repo', [{name: 'screenshot.png', kind: 'file'}]);
+  assert.equal(unknownTree.children[0].querySelector(':scope > .file-tree-git-status').textContent, '?');
+  assert.equal(unknownTree.children[0].querySelector(':scope > .file-tree-git-status').classList.contains('file-tree-git-status-unknown'), true, 'Finder ? status badge uses a faint-neutral class');
 
   api.setFileExplorerSessionFilesPayloadForTest({
     loaded: true,
     repos: [],
     files: [
-      {abs_path: '/repo/A/B/C/F', status: 'M'},
-      {abs_path: '/repo/A/B/C/G', status: 'M'},
-      {abs_path: '/repo/A/B/D/H', status: 'A'},
+      {abs_path: '/repo/A/B/C/F', agents: ['codex'], status: 'M'},
+      {abs_path: '/repo/A/B/C/G', agent: 'claude', status: 'M'},
+      {abs_path: '/repo/A/B/D/H', agents: ['codex'], status: 'A'},
     ],
   });
   api.setFileExplorerExpandedForTest(['/repo/A', '/repo/A/B', '/repo/A/B/C', '/repo/A/B/D']);
@@ -4422,6 +4456,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-dir-count').textContent, '2', 'Finder changed ancestor C counts only its subtree');
   assert.equal(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-dir-count').textContent, '1', 'Finder changed ancestor D counts only its subtree');
   assert.ok(ancestorRows['/repo/A'].classList.contains('file-tree-row--changed-ancestor'), 'Finder changed ancestors are bold-marked');
+  assert.ok(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon claude'), 'Finder changed ancestor A inherits Claude marker from descendants');
+  assert.ok(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor A inherits Codex marker from descendants');
+  assert.ok(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon claude'), 'Finder changed ancestor C inherits Claude marker from descendants');
+  assert.ok(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor C inherits Codex marker from descendants');
+  assert.ok(!ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon claude'), 'Finder changed ancestor D only shows agents present in that subtree');
+  assert.ok(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor D inherits Codex marker from descendants');
+  assert.equal(
+    ancestorRows['/repo/A'].querySelector(':scope > .file-tree-name').nextElementSibling,
+    ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent'),
+    'Finder changed ancestors place the inherited AI marker immediately after the filename',
+  );
   assert.equal(ancestorRows['/repo/A/B/C/F'].classList.contains('file-tree-row--changed-ancestor'), false, 'changed leaf files do not get the ancestor marker');
 
   api.setFileExplorerSessionFilesPayloadForTest({loaded: true, repos: [], files: []});
@@ -5180,6 +5225,18 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.notEqual(api.sessionState('1', {agents: [{kind: 'codex', error: 'codex transcript not found by process fd or cwd'}]}).key, 'blocked');
   assert.notEqual(api.sessionState('1', {agents: [{kind: 'claude', error: 'missing /home/test/.claude/sessions/123.json'}]}).key, 'blocked');
   assert.equal(api.sessionState('1', {agents: [{kind: 'codex', error: 'worker crashed'}]}).key, 'blocked');
+}
+
+{
+  const api = loadYolomux('', ['1']);
+  api.setAutoApproveStateForTest('1', {
+    enabled: false,
+    prompt: {visible: false},
+    screen: {key: 'approval', text: 'Do you want to proceed?'},
+  });
+  const state = api.sessionState('1', {agents: [{kind: 'codex'}], panes: []});
+  assert.equal(state.key, 'needs-approval', 'roster screen approval state lights EXEC? even when prompt.visible is absent');
+  assert.equal(state.reason, 'Do you want to proceed?');
 }
 
 {
@@ -6412,7 +6469,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const appearanceHtml = sectionHtml(api.t('pref.section.appearance'));
   assert.ok(appearanceHtml.includes('data-setting-path="general.default_layout"'), 'Default layout is in Appearance');
   assert.ok(appearanceHtml.includes('Envy green'), 'Active color Green is labeled Envy green');
-  assert.ok(appearanceHtml.includes('Fresh sky'), 'Active color Blue is labeled Fresh sky');
+  assert.ok(appearanceHtml.includes('Deep ocean blue'), 'Active color Blue is labeled Deep ocean blue');
   assert.ok(appearanceHtml.includes('Blood orange'), 'Active color Orange is labeled Blood orange');
   assert.ok(appearanceHtml.includes('Solar gold'), 'Active color Yellow is labeled Solar gold');
   assert.ok(appearanceHtml.includes('Royal violet'), 'Active color Purple is labeled Royal violet');

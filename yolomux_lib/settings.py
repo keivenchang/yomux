@@ -101,7 +101,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "indexed_dirs": [],
         "index_refresh_seconds": 120,
         "companion_dirs": [],
-        "refresh_ms": 3000,
+        "refresh_seconds": 15,
         "new_entry_highlight_ms": 60000,
     },
     "uploads": {
@@ -177,7 +177,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("editor", "autosave_delay_seconds"): (0.5, 60),
     ("file_explorer", "image_preview_max_px"): (120, 1200),
     ("file_explorer", "index_refresh_seconds"): (0, 3600),
-    ("file_explorer", "refresh_ms"): (1000, 60000),
+    ("file_explorer", "refresh_seconds"): (1, 60),
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
     ("uploads", "max_bytes"): (1 * 1024 * 1024, 512 * 1024 * 1024),
 }
@@ -285,7 +285,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "image_open_mode"): "same-tab | new-tab. same-tab reuses one image viewer while browsing; new-tab keeps one image tab per file.",
     ("file_explorer", "image_preview_max_px"): "Pixels, 120-1200. Maximum width and height for hover image previews.",
     ("file_explorer", "quick_access_paths"): "List of paths for File Explorer shortcuts.",
-    ("file_explorer", "refresh_ms"): "Milliseconds, 1000-60000. Refreshes changed File Explorer directories and open files; client-side jitter avoids synchronized polling.",
+    ("file_explorer", "refresh_seconds"): "Seconds, 1-60. Refreshes changed File Explorer directories and open files; client-side jitter avoids synchronized polling.",
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
     ("uploads", "max_bytes"): "Bytes, 1048576-536870912. Maximum buffered browser upload size. Prefer rsync for large files.",
@@ -347,6 +347,14 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
         incoming = source.get(section, {})
         if not isinstance(incoming, dict):
             incoming = {}
+        if section == "file_explorer" and "refresh_seconds" not in incoming and "refresh_ms" in incoming:
+            incoming = dict(incoming)
+            try:
+                legacy_ms = float(incoming["refresh_ms"])
+            except (TypeError, ValueError):
+                legacy_ms = 3000
+            if round(legacy_ms) != 3000:
+                incoming["refresh_seconds"] = legacy_ms / 1000
         for key, default in values.items():
             present = key in incoming
             value = incoming.get(key, default)

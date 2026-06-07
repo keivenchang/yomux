@@ -73,11 +73,13 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs:
 - Inactive panes use a flat dim from the visually active pane, and that visual-active pane survives terminal blur.
 - Finder can switch between the file tree and a full-pane `Δ DIFF` mode; diff mode uses the Differ chrome with session selection, per-repo FROM/TO controls, and no create-file actions.
 - The Finder root toggle is `No Sync` / `Sync`, and defaults to `Sync`. In Sync mode, Finder follows the focused session's affected repos: if a session touches multiple nearby repos, Finder opens their common parent, expands each touched repo path, and bolds affected repo roots plus changed descendant directories; with no changed-file payload yet, or with a stale same-session payload from a different repo, it falls back to the session's git root, and a fresh session with no cwd opens home.
+- Finder browsing defaults to the filesystem root (`/`) instead of only home and `/tmp`; credential-heavy paths such as `.ssh`, `.gnupg`, `.aws`, `.config/gh`, token files, and registry config files are blocked and hidden from search/index results.
 - Finder file and diff rows share the same file date modes (`None`, `Date`, `Ago`); in Finder, the date toggle and Reload control sit together on the toolbar's right edge so row times line up under the date column.
 - Finder diff rows keep status, diff counts, and the time column visible by trimming long filenames first.
 - Editor diff rows use one consistent red or green fill for changed lines, including the cursor's active line.
 - Diff panes hold the loading state until the requested FROM/TO payload is ready, then render the diff without flashing a transient edit view.
 - The terminal border turns yellow for the focused pane.
+- Sessions waiting at a detected permission prompt show an attention badge in the roster even when YOLO auto-approval is off, so pending `Yes/No` prompts do not silently sit idle.
 
 The `YO` button toggles YOLO auto-approval for a tmux session. See [Agent permissions & YOLO](#agent-permissions--yolo).
 

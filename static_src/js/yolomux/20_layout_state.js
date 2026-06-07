@@ -883,6 +883,9 @@ function sessionState(session, info = transcriptMeta.sessions?.[session]) {
   if (!autoEnabled && /permission|approval|approve|confirm/.test(agentText)) {
     return stateValue('needs-approval', approvalPromptText || stateReason('approvalPromptVisible'));
   }
+  if (screenKey === 'approval') {
+    return stateValue('needs-approval', screenText || approvalPromptText || stateReason('approvalPromptVisible'));
+  }
   if (screenKey === 'working') {
     return stateValue('working', screenText || stateReason('agentWorking'));
   }

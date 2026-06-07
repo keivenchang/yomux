@@ -17,7 +17,29 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  scrollbar-width: auto;
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(255, 255, 255, 0.06);
   padding: 10px;
+}
+.preferences-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.preferences-scroll::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+}
+.preferences-scroll::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 0;
+  background: var(--active-control-scrollbar-thumb);
+  background-clip: content-box;
+}
+body.theme-light .preferences-scroll {
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(15, 23, 42, 0.08);
+}
+body.theme-light .preferences-scroll::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.08);
 }
 .info-refresh {
   margin-inline-start: auto;
@@ -550,6 +572,11 @@
      (pr-status-merged) across the app, so this badge must not be purple — it used to be violet, which
      read as a merged indicator next to the PR badges. */
   background: #2dd4bf;
+}
+.changes-status-unknown {
+  border: 1px solid rgba(226, 232, 240, 0.16);
+  background: rgba(226, 232, 240, 0.10);
+  color: rgba(226, 232, 240, 0.46);
 }
 .changes-file-icon {
   display: inline-flex;
@@ -1238,6 +1265,11 @@ body.theme-light .changes-file-row.git-deleted:not(.selected) .changes-file-name
 }
 body.theme-light .changes-file-row.git-staged:not(.selected) .changes-file-name {
   color: #2f7d20;
+}
+body.theme-light .changes-status-unknown {
+  border-color: rgba(15, 23, 42, 0.12);
+  background: rgba(15, 23, 42, 0.06);
+  color: rgba(15, 23, 42, 0.36);
 }
 body.theme-light .changes-file-row:hover {
   background: var(--active-control-soft-bg);

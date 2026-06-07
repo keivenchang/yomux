@@ -60,10 +60,34 @@ SEARCH_SKIP_DIRS = {
     ".ruff_cache", ".tox", ".venv", "venv", "node_modules", "__pycache__",
     "dist", "build", "target",
 }
+SEARCH_SECRET_EXCLUDE_SIGNATURE = "fs-secret-v1"
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
 FS_ROOTS_ENV = "YOLOMUX_FS_ROOTS"
+DEFAULT_FS_ROOTS = ("/",)
+SECRET_DIR_COMPONENTS = frozenset({
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+})
+SECRET_FILE_NAMES = frozenset({
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+})
+SECRET_DIR_SUFFIXES = (
+    (".config", "gh"),
+    (".config", "git"),
+)
+SECRET_FILE_SUFFIXES = (
+    (".config", "gitlab-token"),
+    (".cache", "huggingface", "token"),
+    (".docker", "config.json"),
+    (".ngc", "config"),
+)
 
 
 class FilesystemError(Exception):
@@ -114,7 +138,7 @@ def _path_is_within(path: Path, root: Path) -> bool:
 
 def _configured_fs_roots() -> tuple[Path, ...]:
     raw = os.environ.get(FS_ROOTS_ENV, "")
-    values = [item for item in raw.split(os.pathsep) if item.strip()] if raw else [str(Path.home()), "/tmp"]
+    values = [item for item in raw.split(os.pathsep) if item.strip()] if raw else list(DEFAULT_FS_ROOTS)
     roots: list[Path] = []
     for value in values:
         try:
@@ -156,7 +180,23 @@ def _path_is_secret(path: Path) -> bool:
     resolved = _normalized_scope_path(path)
     if any(resolved == secret for secret in _secret_exact_paths()):
         return True
-    return any(resolved == secret or _path_is_within(resolved, secret) for secret in _secret_directories())
+    if any(resolved == secret or _path_is_within(resolved, secret) for secret in _secret_directories()):
+        return True
+    parts = resolved.parts
+    if any(part in SECRET_DIR_COMPONENTS for part in parts):
+        return True
+    if resolved.name in SECRET_FILE_NAMES:
+        return True
+    for suffix in SECRET_DIR_SUFFIXES:
+        size = len(suffix)
+        for index in range(0, len(parts) - size + 1):
+            if parts[index:index + size] == suffix:
+                return True
+    for suffix in SECRET_FILE_SUFFIXES:
+        size = len(suffix)
+        if size <= len(parts) and parts[-size:] == suffix:
+            return True
+    return False
 
 
 def _ensure_path_allowed(path: Path) -> None:
@@ -280,6 +320,10 @@ def _entry_info(path: Path, name: str) -> dict[str, Any]:
     return info
 
 
+def _visible_directory_names(path: Path) -> list[str]:
+    return [name for name in os.listdir(path) if not _path_is_secret(path / name)]
+
+
 def list_directory(raw_path: str) -> dict[str, Any]:
     path = _validated_path(raw_path)
     if not path.exists():
@@ -287,7 +331,7 @@ def list_directory(raw_path: str) -> dict[str, Any]:
     if not path.is_dir():
         raise FilesystemError(f"not a directory: {path}", status=400)
     try:
-        entries = [_entry_info(path / name, name) for name in os.listdir(path)]
+        entries = [_entry_info(path / name, name) for name in _visible_directory_names(path)]
     except PermissionError as exc:
         raise FilesystemError(str(exc), status=403)
     entries.sort(key=lambda entry: (entry.get("kind") != "dir", str(entry.get("name", "")).lower()))
@@ -433,7 +477,7 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
             dirs[:] = []
             break
         dirs[:] = sorted(
-            [name for name in dirs if name not in SEARCH_SKIP_DIRS],
+            [name for name in dirs if name not in SEARCH_SKIP_DIRS and not _path_is_secret(Path(current) / name)],
             key=str.lower,
         )
         for name in sorted(files, key=str.lower):
@@ -442,7 +486,10 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
                 truncated = True
                 dirs[:] = []
                 break
-            entry = _search_file_entry(root, Path(current) / name, tokens)
+            path = Path(current) / name
+            if _path_is_secret(path):
+                continue
+            entry = _search_file_entry(root, path, tokens)
             if entry is not None:
                 results.append(entry)
         if visited_files > MAX_SEARCH_FILES:
@@ -464,7 +511,12 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
         # whole tree (no 20k/50k walk cap) and needs no per-query walk. Warm/refresh
         # it in the background; until it is ready we fall back to the live walk below
         # (stale-while-revalidate), so search never blocks on indexing.
-        index = file_index.ensure_index(root, SEARCH_SKIP_DIRS)
+        index = file_index.ensure_index(
+            root,
+            SEARCH_SKIP_DIRS,
+            exclude_path=_path_is_secret,
+            exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        )
         if tokens and index.ready:
             def _match(path_str: str, name: str, rel: str) -> dict[str, Any] | None:
                 sort_key = _search_entry_sort_key(Path(path_str), rel, tokens)
@@ -535,9 +587,9 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             visited_dirs = 1
             direct_names = sorted(os.listdir(root), key=str.lower)
             for name in direct_names:
-                if name in SEARCH_SKIP_DIRS:
-                    continue
                 path = root / name
+                if name in SEARCH_SKIP_DIRS or _path_is_secret(path):
+                    continue
                 if path.is_dir() and _directory_is_repo(path):
                     child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results)
                     visited_dirs += child_dirs
@@ -581,7 +633,12 @@ def index_status(raw_root: str) -> dict[str, Any]:
     root = _validated_path(raw_root)
     if not root.is_dir():
         raise FilesystemError(f"not a directory: {root}", status=400)
-    index = file_index.ensure_index(root, SEARCH_SKIP_DIRS)
+    index = file_index.ensure_index(
+        root,
+        SEARCH_SKIP_DIRS,
+        exclude_path=_path_is_secret,
+        exclude_signature=SEARCH_SECRET_EXCLUDE_SIGNATURE,
+    )
     with index.lock:
         ready = bool(index.ready)
         building = bool(index.building)

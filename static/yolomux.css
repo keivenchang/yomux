@@ -2028,7 +2028,29 @@ body.theme-light .branch-link {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  scrollbar-width: auto;
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(255, 255, 255, 0.06);
   padding: 10px;
+}
+.preferences-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.preferences-scroll::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+}
+.preferences-scroll::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 0;
+  background: var(--active-control-scrollbar-thumb);
+  background-clip: content-box;
+}
+body.theme-light .preferences-scroll {
+  scrollbar-color: var(--active-control-scrollbar-thumb) rgba(15, 23, 42, 0.08);
+}
+body.theme-light .preferences-scroll::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.08);
 }
 .info-refresh {
   margin-inline-start: auto;
@@ -2561,6 +2583,11 @@ body.theme-light .branch-link {
      (pr-status-merged) across the app, so this badge must not be purple — it used to be violet, which
      read as a merged indicator next to the PR badges. */
   background: #2dd4bf;
+}
+.changes-status-unknown {
+  border: 1px solid rgba(226, 232, 240, 0.16);
+  background: rgba(226, 232, 240, 0.10);
+  color: rgba(226, 232, 240, 0.46);
 }
 .changes-file-icon {
   display: inline-flex;
@@ -3249,6 +3276,11 @@ body.theme-light .changes-file-row.git-deleted:not(.selected) .changes-file-name
 }
 body.theme-light .changes-file-row.git-staged:not(.selected) .changes-file-name {
   color: #2f7d20;
+}
+body.theme-light .changes-status-unknown {
+  border-color: rgba(15, 23, 42, 0.12);
+  background: rgba(15, 23, 42, 0.06);
+  color: rgba(15, 23, 42, 0.36);
 }
 body.theme-light .changes-file-row:hover {
   background: var(--active-control-soft-bg);
@@ -6838,15 +6870,28 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   text-shadow: none;
 }
 .file-tree-name {
-  flex: 1;
+  flex: 1 1 0;
   min-width: 0;
+  max-inline-size: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   color: currentColor;
 }
 .file-tree-row.has-agent .file-tree-name {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
+}
+.file-tree-dir-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 1.5ch;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 700;
+  line-height: 1;
 }
 .file-tree-diff {
   display: inline-flex;
@@ -6864,6 +6909,12 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   align-items: center;
   gap: 2px;
   flex: 0 0 auto;
+}
+.file-tree-row:has(> .file-tree-dir-count:not([hidden])) > .file-tree-dir-count,
+.file-tree-row:not(:has(> .file-tree-dir-count:not([hidden]))):has(> .file-tree-diff:not([hidden])) > .file-tree-diff,
+.file-tree-row:not(:has(> .file-tree-dir-count:not([hidden]))):not(:has(> .file-tree-diff:not([hidden]))):has(> .file-tree-git-status:not([hidden])) > .file-tree-git-status,
+.file-tree-row:not(:has(> .file-tree-dir-count:not([hidden]))):not(:has(> .file-tree-diff:not([hidden]))):not(:has(> .file-tree-git-status:not([hidden]))):has(> .file-tree-date:not([hidden])) > .file-tree-date {
+  margin-inline-start: auto;
 }
 .file-tree-agent .agent-icon {
   width: 16px;
@@ -6898,6 +6949,11 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   overflow: hidden;
   text-overflow: clip;
   white-space: nowrap;
+}
+.file-tree-git-status.file-tree-git-status-unknown {
+  border: 1px solid rgba(226, 232, 240, 0.16);
+  background: rgba(226, 232, 240, 0.10) !important;
+  color: rgba(226, 232, 240, 0.46);
 }
 .file-tree-date {
   display: inline-flex;
@@ -6990,6 +7046,11 @@ body.theme-light .file-tree-row.git-deleted:not(.selected) .file-tree-name {
 }
 body.theme-light .file-tree-row.git-staged:not(.selected) .file-tree-name {
   color: #2f7d20;
+}
+body.theme-light .file-tree-git-status.file-tree-git-status-unknown {
+  border-color: rgba(15, 23, 42, 0.12);
+  background: rgba(15, 23, 42, 0.06) !important;
+  color: rgba(15, 23, 42, 0.36);
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
   color: #64748b;

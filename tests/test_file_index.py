@@ -18,6 +18,15 @@ def _make_tree(root):
     (skipped / "ignored.js").write_text("z", encoding="utf-8")
 
 
+def _build_filesystem_index(root):
+    return file_index.build_now(
+        root,
+        SEARCH_SKIP_DIRS,
+        exclude_path=filesystem._path_is_secret,
+        exclude_signature=filesystem.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+    )
+
+
 def test_walk_root_collects_files_and_skips_skip_dirs(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
@@ -48,7 +57,7 @@ def test_search_files_uses_index_to_find_deep_file(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     _make_tree(tmp_path)
-    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    _build_filesystem_index(tmp_path)
     payload = filesystem.search_files(str(tmp_path), query="deep_target", limit=50, recursive=True)
     relative_paths = [entry["relative_path"] for entry in payload["files"]]
     assert "a/b/c/deep_target.md" in relative_paths
@@ -58,7 +67,7 @@ def test_index_status_warms_and_reports_state(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     _make_tree(tmp_path)
-    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    _build_filesystem_index(tmp_path)
     status = filesystem.index_status(str(tmp_path))
     assert status["root"] == str(tmp_path)
     assert status["ready"] is True
@@ -80,13 +89,58 @@ def test_load_disk_rejects_stale_format_or_skip_signature(tmp_path, monkeypatch)
     assert file_index._load_disk(tmp_path, SEARCH_SKIP_DIRS) is None
 
 
+def test_inmemory_index_rebuilds_when_exclude_signature_changes(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    (tmp_path / "visible.txt").write_text("ok", encoding="utf-8")
+    secret = tmp_path / ".ssh" / "id_rsa"
+    secret.parent.mkdir()
+    secret.write_text("secret", encoding="utf-8")
+    initial = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    assert any(name == "id_rsa" for _p, name, _r, _s, _m in initial.entries)
+
+    filtered = file_index.build_now(
+        tmp_path,
+        SEARCH_SKIP_DIRS,
+        exclude_path=lambda path: ".ssh" in path.parts,
+        exclude_signature="test-secret-filter",
+    )
+
+    assert filtered.signature.endswith("|exclude:test-secret-filter")
+    assert any(name == "visible.txt" for _p, name, _r, _s, _m in filtered.entries)
+    assert all(name != "id_rsa" for _p, name, _r, _s, _m in filtered.entries)
+
+
+def test_ensure_index_drops_ready_cache_when_exclude_signature_changes(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    (tmp_path / "visible.txt").write_text("ok", encoding="utf-8")
+    secret = tmp_path / ".ssh" / "id_rsa"
+    secret.parent.mkdir()
+    secret.write_text("secret", encoding="utf-8")
+    initial = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    assert initial.ready is True
+    assert any(name == "id_rsa" for _p, name, _r, _s, _m in initial.entries)
+    monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: None)
+
+    filtered = file_index.ensure_index(
+        tmp_path,
+        SEARCH_SKIP_DIRS,
+        exclude_path=lambda path: ".ssh" in path.parts,
+        exclude_signature="test-secret-filter",
+    )
+
+    assert filtered.ready is False
+    assert filtered.entries == []
+
+
 def test_empty_query_serves_recent_from_index_without_cold_walk(tmp_path, monkeypatch):
     # C11: an empty query on a ready full-tree index returns a capped recent slice (state "ready") instead
     # of cold-walking the tree.
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     _make_tree(tmp_path)
-    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    _build_filesystem_index(tmp_path)
     payload = filesystem.search_files(str(tmp_path), query="", limit=50, recursive=True)
     assert payload["index_state"] == "ready"
     names = {entry["name"] for entry in payload["files"]}
@@ -110,7 +164,7 @@ def test_empty_query_returns_warming_when_index_not_ready(tmp_path, monkeypatch)
     class _NotReady:
         ready = False
         building = True
-    monkeypatch.setattr(file_index, "ensure_index", lambda root, skip: _NotReady())
+    monkeypatch.setattr(file_index, "ensure_index", lambda *args, **kwargs: _NotReady())
 
     def _boom(*_args, **_kwargs):
         raise AssertionError("warming index must not cold-walk")
@@ -126,7 +180,7 @@ def test_index_status_reports_rich_state(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     _make_tree(tmp_path)
-    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    _build_filesystem_index(tmp_path)
     status = filesystem.index_status(str(tmp_path))
     assert status["state"] == "ready"
     assert status["ready"] is True

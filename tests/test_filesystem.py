@@ -52,19 +52,21 @@ def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
     assert entries["repo"]["repo"]["branch"] == "feature/repo-row"
 
 
-def test_list_directory_rejects_root_outside_default_allowlist():
+def test_list_directory_allows_root_by_default(monkeypatch):
+    monkeypatch.delenv(filesystem.FS_ROOTS_ENV, raising=False)
+    payload = filesystem.list_directory("/")
+    assert payload["path"] == "/"
+    assert payload["parent"] is None
+
+
+def test_filesystem_allowlist_env_can_narrow_scope(monkeypatch, tmp_path):
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(tmp_path))
     with pytest.raises(FilesystemError) as info:
         filesystem.list_directory("/")
     assert info.value.status == 403
 
 
-def test_filesystem_allowlist_can_include_root(monkeypatch):
-    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, "/")
-    payload = filesystem.list_directory("/")
-    assert payload["parent"] is None
-
-
-def test_filesystem_blocks_secret_paths(monkeypatch, tmp_path):
+def test_filesystem_blocks_home_secret_paths(monkeypatch, tmp_path):
     home = tmp_path / "home"
     secret = home / ".ssh" / "id_rsa"
     secret.parent.mkdir(parents=True)
@@ -74,6 +76,41 @@ def test_filesystem_blocks_secret_paths(monkeypatch, tmp_path):
     with pytest.raises(FilesystemError) as info:
         filesystem.read_file(str(secret))
     assert info.value.status == 403
+
+
+def test_list_directory_hides_secret_entries(tmp_path):
+    visible = tmp_path / "visible.txt"
+    visible.write_text("ok", encoding="utf-8")
+    for path in (
+        tmp_path / ".ssh" / "id_rsa",
+        tmp_path / ".config" / "gh" / "hosts.yml",
+        tmp_path / ".config" / "git" / "config",
+        tmp_path / ".config" / "gitlab-token",
+        tmp_path / ".cache" / "huggingface" / "token",
+        tmp_path / ".docker" / "config.json",
+        tmp_path / ".ngc" / "config",
+        tmp_path / ".netrc",
+        tmp_path / ".npmrc",
+        tmp_path / ".pypirc",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("secret\n", encoding="utf-8")
+
+    names = {entry["name"] for entry in filesystem.list_directory(str(tmp_path))["entries"]}
+
+    assert "visible.txt" in names
+    assert ".ssh" not in names
+    assert ".netrc" not in names
+    assert ".npmrc" not in names
+    assert ".pypirc" not in names
+    config_names = {entry["name"] for entry in filesystem.list_directory(str(tmp_path / ".config"))["entries"]}
+    assert "gh" not in config_names
+    assert "git" not in config_names
+    assert "gitlab-token" not in config_names
+    docker_names = {entry["name"] for entry in filesystem.list_directory(str(tmp_path / ".docker"))["entries"]}
+    ngc_names = {entry["name"] for entry in filesystem.list_directory(str(tmp_path / ".ngc"))["entries"]}
+    assert "config.json" not in docker_names
+    assert "config" not in ngc_names
 
 
 def test_filesystem_blocks_symlink_escape_from_allowed_root(monkeypatch, tmp_path):
@@ -117,6 +154,65 @@ def test_filesystem_blocks_exact_secret_files(monkeypatch, tmp_path):
         with pytest.raises(FilesystemError) as info:
             filesystem.read_file(str(secret))
         assert info.value.status == 403
+
+
+def test_filesystem_blocks_secret_patterns_outside_home(tmp_path):
+    secret_paths = [
+        tmp_path / ".ssh" / "id_rsa",
+        tmp_path / ".gnupg" / "private-keys-v1.d" / "key",
+        tmp_path / ".aws" / "credentials",
+        tmp_path / ".azure" / "accessTokens.json",
+        tmp_path / ".kube" / "config",
+        tmp_path / ".config" / "gh" / "hosts.yml",
+        tmp_path / ".config" / "git" / "credentials",
+        tmp_path / ".config" / "gitlab-token",
+        tmp_path / ".cache" / "huggingface" / "token",
+        tmp_path / ".docker" / "config.json",
+        tmp_path / ".ngc" / "config",
+        tmp_path / ".netrc",
+        tmp_path / ".npmrc",
+        tmp_path / ".pypirc",
+    ]
+    for path in secret_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("secret\n", encoding="utf-8")
+
+    for path in secret_paths:
+        with pytest.raises(FilesystemError) as info:
+            filesystem.read_file(str(path))
+        assert info.value.status == 403
+
+
+def test_filesystem_allows_non_secret_docker_like_directories(tmp_path):
+    compose = tmp_path / ".docker" / "compose.yaml"
+    compose.parent.mkdir()
+    compose.write_text("services: {}\n", encoding="utf-8")
+
+    payload = filesystem.read_file(str(compose))
+
+    assert payload["content"] == "services: {}\n"
+
+
+def test_search_files_skips_secret_paths(tmp_path):
+    visible = tmp_path / "visible-target.txt"
+    visible.write_text("target\n", encoding="utf-8")
+    secrets = [
+        tmp_path / ".ssh" / "secret-target.txt",
+        tmp_path / ".config" / "gh" / "secret-target.txt",
+        tmp_path / ".config" / "gitlab-token",
+        tmp_path / ".docker" / "config.json",
+        tmp_path / ".ngc" / "config",
+        tmp_path / ".netrc",
+    ]
+    for path in secrets:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("target\n", encoding="utf-8")
+
+    payload = filesystem.search_files(str(tmp_path), "target", 50, recursive=True)
+    paths = {item["path"] for item in payload["files"]}
+
+    assert str(visible) in paths
+    assert all(str(path) not in paths for path in secrets)
 
 
 def test_read_raw_streams_image_with_mime_type(tmp_path):

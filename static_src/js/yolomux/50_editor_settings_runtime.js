@@ -394,6 +394,13 @@ function numberSetting(path, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function fileExplorerRefreshMsFromSettings() {
+  return fileExplorerRefreshMsFromValues(
+    numberSetting('file_explorer.refresh_seconds', Number.NaN),
+    numberSetting('file_explorer.refresh_ms', 15001),
+  );
+}
+
 function boolSetting(path, fallback) {
   const value = initialSetting(path, fallback);
   return value === true || value === 'true' || value === 1;
@@ -608,7 +615,7 @@ function applySettingsPayload(payload, options = {}) {
   menuHoverCloseDelayMs = hoverCloseDelayMs;
   tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
-  fileExplorerRefreshMs = numberSetting('file_explorer.refresh_ms', 3001);
+  fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings();
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
