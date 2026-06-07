@@ -281,7 +281,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -311,7 +310,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -341,7 +339,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -370,7 +367,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -399,7 +395,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -625,10 +620,10 @@ body.theme-light .drop-slot.drag-over {
 .panel.typing-ready-pane.needs-blocked-pane {
   --panel-ring-color: #ff3347;
 }
-/* preview-linked shows an ambient green tint ONLY when no higher state owns the ring (the :not() chain
-   makes it mutually exclusive, so active/needs override it). Folded into the unified --panel-ring-color. */
+/* preview-linked shows an ambient active-accent tint ONLY when no higher state owns the ring (the :not()
+   chain makes it mutually exclusive, so active/needs override it). Folded into --panel-ring-color. */
 .panel.preview-linked:not(.active-pane):not(.typing-ready-pane):not(.needs-input-pane):not(.needs-exec-pane):not(.needs-blocked-pane) {
-  --panel-ring-color: var(--brand-green);
+  --panel-ring-color: var(--pane-tab-panel-ring);
 }
 /* needs-* panes PULSE the red ring (the keyframes drive border-color directly on the gutter border). */
 .panel.needs-input-pane,
@@ -1144,7 +1139,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
     22px 18px 34px rgba(0, 0, 0, 0.58),
     0 34px 62px rgba(0, 0, 0, 0.66),
     0 8px 16px rgba(0, 0, 0, 0.52),
-    0 0 0 1px rgba(154, 214, 98, 0.12);
+    0 0 0 1px var(--active-control-focus-ring);
 }
 .pane-tab.popover-open {
   z-index: var(--z-pane-modal);
@@ -1409,7 +1404,7 @@ body.theme-light .tab.active {
   background: var(--pane-tab-yolo-bg);
   border-color: var(--pane-tab-yolo-border);
   font-weight: 700;
-  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.28), 0 0 14px var(--auto-glow);
+  box-shadow: 0 0 0 1px rgb(var(--active-accent-rgb) / 0.28), 0 0 14px var(--active-control-focus-ring);
 }
 body.theme-light .panel.empty-pane-panel {
   background: #edf2f8;

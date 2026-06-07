@@ -200,6 +200,8 @@ def pc_controls_fixture_html():
         <div class="file-explorer-tree-panel">
           <div id="collapsed-dir" class="file-tree-row kind-dir" aria-expanded="false"><span class="file-tree-icon">▸</span><span class="file-tree-name">Alpha</span></div>
           <div id="expanded-dir" class="file-tree-row kind-dir expanded" aria-expanded="true"><span class="file-tree-icon">▾</span><span class="file-tree-name">Bravo</span></div>
+          <div id="selected-file-row" class="file-tree-row kind-file selected"><span class="file-tree-icon">M</span><span class="file-tree-name">clicked.md</span></div>
+          <div id="current-file-row" class="file-tree-row kind-file current-file"><span class="file-tree-icon">M</span><span class="file-tree-name">README.md</span></div>
           <div id="repo-dir" class="file-tree-row kind-dir is-repo repo-non-main"><span class="file-tree-icon">▸</span><span class="file-tree-name">yolomux <span class="file-tree-repo-meta">[<span class="file-tree-repo-branch">feature/repo-row</span> <span class="file-tree-repo-delta">+5/-3</span>]</span></span></div>
         </div>
         <div id="test-context-menu" class="terminal-context-menu" style="top: 220px; left: 24px;"></div>
@@ -316,7 +318,7 @@ def codemirror_editor_controls_fixture_html():
               <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
               <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
               <button type="button" class="file-editor-blame-panel" aria-pressed="true"><span class="file-editor-icon file-editor-icon-blame"></span></button>
-              <button type="button" class="file-editor-diff-panel active"><span class="file-editor-icon file-editor-icon-diff"></span></button>
+              <button type="button" class="file-editor-diff-panel active">ΔDiff</button>
               <button type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
               <button type="button" class="file-editor-theme-panel theme-light" data-editor-theme="light"><span class="file-editor-icon file-editor-icon-theme"></span></button>
               <button type="button" class="file-editor-reload-panel">Reload</button>
@@ -393,7 +395,9 @@ def editor_diff_ref_toolbar_fixture_html():
       <body>
         <article class="panel file-editor-panel active-pane">
           <div class="file-editor-toolbar" role="toolbar">
-            <button id="diff-button" type="button" class="file-editor-diff-panel active" aria-pressed="true"><span class="file-editor-icon file-editor-icon-diff"></span></button>
+            <button id="gutter-button" type="button" class="file-editor-gutter-panel active" aria-pressed="true">#</button>
+            <button id="diff-button" type="button" class="file-editor-diff-panel active" aria-pressed="true">ΔDiff</button>
+            <button id="diff-expand-button" type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
             <span id="diff-ref-panel" class="file-editor-diff-ref-panel">
               <span class="diff-ref-controls compact" data-diff-ref-controls data-diff-ref-repo="/repo/app">
                 <label class="diff-ref-control">FROM <input id="from-ref" class="diff-ref-input" data-diff-ref-from value="abcdef123"></label>
@@ -923,9 +927,9 @@ def finder_click_toolbar_fixture_html():
             <div class="pane-tabs" hidden></div>
             <div class="file-explorer-toolbar">
               <div class="file-explorer-toolbar-row file-explorer-primary-row">
-                <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / Differ">
+                <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / ΔDiff">
                   <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="files" aria-pressed="true"><span class="file-explorer-mode-label">Finder</span></button>
-                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">Differ</span></button>
+                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">ΔDiff</span></button>
                 </span>
                 <label class="file-explorer-diff-session-control file-explorer-mode-diff-only changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
                 <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
@@ -1624,7 +1628,7 @@ def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_tok
     assert metrics["panelMode"] == "diff"
     assert metrics["filesPressed"] == "false"
     assert metrics["diffPressed"] == "true"
-    assert metrics["modeTexts"] == ["Finder", "Differ"]
+    assert metrics["modeTexts"] == ["Finder", "ΔDiff"]
     assert metrics["treeDisplay"] == "none"
     assert metrics["changesDisplay"] != "none"
     assert metrics["titleCount"] == 0
@@ -2516,12 +2520,12 @@ def test_active_pane_ring_opacity_follows_preference(browser, tmp_path):
     assert metrics["low"]["borderColor"] != metrics["defaultish"]["borderColor"], metrics
 
 
-def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
+def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=__files__,1,__prefs__&layout=row@32(slot1,row@56(left,right))&tabs=slot1:__files__;left:1;right:__prefs__")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return document.querySelector('select[data-setting-path="appearance.active_color"]') !== null
+            return document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="blue"]') !== null
               && document.querySelector('#panel-1 .pane-tab.active') !== null
               && document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]') !== null
               && document.querySelector('input[data-setting-path="appearance.inactive_pane_opacity"]') !== null
@@ -2536,9 +2540,9 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
         document.getElementById('tabMetaToggle')?.classList.add('active');
         const notify = document.getElementById('notifyToggle');
         notify?.classList.add('notify-toggle', 'active');
-        const select = document.querySelector('select[data-setting-path="appearance.active_color"]');
-        select.value = 'blue';
-        select.dispatchEvent(new Event('change', {bubbles: true}));
+        const radio = document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="blue"]');
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change', {bubbles: true}));
         """
     )
     WebDriverWait(browser, 5).until(
@@ -2562,6 +2566,24 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
         const finderMode = document.querySelector('#panel-__files__ .file-explorer-mode-toggle[aria-pressed="true"]');
         const tabMeta = document.getElementById('tabMetaToggle');
         const notify = document.getElementById('notifyToggle');
+        const mdProbe = document.createElement('div');
+        mdProbe.className = 'markdown-body';
+        mdProbe.innerHTML = '<h1>Probe</h1>';
+        document.body.appendChild(mdProbe);
+        const cmProbe = document.createElement('div');
+        cmProbe.className = 'cm-content';
+        cmProbe.innerHTML = '<span class="md-heading"># Probe</span>';
+        document.body.appendChild(cmProbe);
+        const yoloProbe = document.createElement('span');
+        yoloProbe.className = 'session-yolo-marker active';
+        yoloProbe.textContent = 'YO';
+        document.body.appendChild(yoloProbe);
+        const shortcutProbe = document.createElement('section');
+        shortcutProbe.className = 'keyboard-shortcuts-section';
+        shortcutProbe.innerHTML = '<h3>APP</h3>';
+        document.body.appendChild(shortcutProbe);
+        const activeSwatch = document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="blue"]').closest('.preferences-radio').querySelector('.preferences-radio-swatch');
+        const activeSwatchLabel = activeSwatch.closest('.preferences-radio');
         const scrollProbe = document.createElement('div');
         scrollProbe.style.background = 'var(--active-control-scrollbar-thumb)';
         document.body.appendChild(scrollProbe);
@@ -2569,6 +2591,19 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
         scrollProbe.style.background = 'var(--pane-scrollbar-thumb)';
         const expectedNeutralScrollThumb = getComputedStyle(scrollProbe).backgroundColor;
         scrollProbe.remove();
+        const metrics = {
+          markdownHeadingColor: getComputedStyle(mdProbe.querySelector('h1')).color,
+          cmHeadingColor: getComputedStyle(cmProbe.querySelector('.md-heading')).color,
+          yoloBg: getComputedStyle(yoloProbe).backgroundColor,
+          yoloBorder: getComputedStyle(yoloProbe).borderTopColor,
+          shortcutHeadingColor: getComputedStyle(shortcutProbe.querySelector('h3')).color,
+          swatchDisplay: getComputedStyle(activeSwatchLabel).display,
+          swatchRadius: getComputedStyle(activeSwatch).borderRadius,
+        };
+        mdProbe.remove();
+        cmProbe.remove();
+        yoloProbe.remove();
+        shortcutProbe.remove();
         return {
           errors: window.__bootErrors,
           rejections: window.__bootRejections,
@@ -2590,6 +2625,13 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
           tabMetaBg: getComputedStyle(tabMeta).backgroundColor,
           tabMetaBorder: getComputedStyle(tabMeta).borderTopColor,
           notifyBg: getComputedStyle(notify).backgroundColor,
+          markdownHeadingColor: metrics.markdownHeadingColor,
+          cmHeadingColor: metrics.cmHeadingColor,
+          yoloBg: metrics.yoloBg,
+          yoloBorder: metrics.yoloBorder,
+          shortcutHeadingColor: metrics.shortcutHeadingColor,
+          swatchDisplay: metrics.swatchDisplay,
+          swatchRadius: metrics.swatchRadius,
           settingsPosts: window.__bootFetches.filter(item => item.method === 'POST' && item.path === '/api/settings').length,
         };
         """
@@ -2613,6 +2655,13 @@ def test_active_color_select_recolors_live_pane_chrome(browser, tmp_path):
     assert metrics["tabMetaBg"] == "rgb(59, 130, 246)", metrics
     assert metrics["tabMetaBorder"] == "rgb(59, 130, 246)", metrics
     assert metrics["notifyBg"] == "rgb(59, 130, 246)", metrics
+    assert metrics["markdownHeadingColor"] == "rgb(59, 130, 246)", metrics
+    assert metrics["cmHeadingColor"] == "rgb(59, 130, 246)", metrics
+    assert metrics["yoloBg"] == "rgb(59, 130, 246)", metrics
+    assert metrics["yoloBorder"] == "rgb(59, 130, 246)", metrics
+    assert metrics["shortcutHeadingColor"] == "rgb(59, 130, 246)", metrics
+    assert metrics["swatchDisplay"] == "grid", metrics
+    assert metrics["swatchRadius"] == "2px 0px 0px 2px", metrics
     assert metrics["settingsPosts"] >= 1, metrics
     ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
     WebDriverWait(browser, 2).until(
@@ -3066,12 +3115,12 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     page.write_text(
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
-        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
         #mount {{ width: 920px; height: 640px; }}
         .file-editor-panel {{ width: 920px; height: 640px; }}
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
-        <body class="theme-dark editor-theme-dark">
+        <body class="theme-light theme-resolved-light editor-theme-light">
           <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>
@@ -3250,12 +3299,12 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
     page.write_text(
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
-        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
         #mount {{ width: 920px; height: 520px; }}
         .file-editor-panel {{ width: 920px; height: 520px; }}
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
-        <body class="theme-dark editor-theme-dark">
+        <body class="theme-light theme-resolved-light editor-theme-light">
           <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>
@@ -3424,36 +3473,55 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
             window.__previewToolbarReady = (() => {{
               const path = '/home/test/repo/DONE.md';
               const item = fileEditorItemFor(path);
+              const previewItem = filePreviewItemFor(path);
               setFileState(path, {{
                 kind: 'text',
                 content: '# Done\\n\\nSearchable preview text\\n',
                 original: '# Done\\n\\nSearchable preview text\\n',
                 dirty: false,
                 language: 'markdown',
+                externalChanged: true,
                 gitTracked: true,
                 gitHasHistory: true,
                 gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
               }});
               addFileEditorTabItem(path, item);
+              addFilePreviewTabItem(path, previewItem);
               const panel = createFileEditorPanel(item);
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
-              const snapshot = mode => {{
-                setFileEditorViewMode(path, mode, item);
-                renderFileEditorPanel(panel, item);
+              const snapshot = (mode, targetItem = item) => {{
+                setFileEditorViewMode(path, mode, targetItem);
+                renderFileEditorPanel(panel, targetItem);
                 const toolbar = panel.querySelector('.file-editor-toolbar')?.getBoundingClientRect();
                 const font = panel.querySelector('.file-editor-preview-font-panel')?.getBoundingClientRect();
                 return {{
                   gutterHidden: panel.querySelector('.file-editor-gutter-panel')?.hidden === true,
                   wrapHidden: panel.querySelector('.file-editor-wrap-panel')?.hidden === true,
                   findHidden: panel.querySelector('.file-editor-find-panel')?.hidden === true,
+                  modeHidden: panel.querySelector('.file-editor-mode-control-panel')?.hidden === true,
+                  blameHidden: panel.querySelector('.file-editor-blame-panel')?.hidden === true,
+                  diffHidden: panel.querySelector('.file-editor-diff-panel')?.hidden === true,
+                  diffExpandHidden: panel.querySelector('.file-editor-diff-expand-panel')?.hidden === true,
+                  diffRefsHidden: panel.querySelector('.file-editor-diff-ref-panel')?.hidden === true,
+                  crossSplitHidden: panel.querySelector('.file-editor-cross-split-panel')?.hidden === true,
+                  reloadHidden: panel.querySelector('.file-editor-reload-panel')?.hidden === true,
+                  saveHidden: panel.querySelector('.file-editor-save-panel')?.hidden === true,
+                  themeHidden: panel.querySelector('.file-editor-theme-panel')?.hidden === true,
                   previewHidden: panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
                   fontHidden: panel.querySelector('.file-editor-preview-font-panel')?.hidden === true,
                   fontCenterDelta: toolbar && font ? Math.abs((font.left + font.width / 2) - (toolbar.left + toolbar.width / 2)) : 999,
                 }};
               }};
+              setFileEditorViewMode(path, 'edit', item);
+              renderFileEditorPanel(panel, item);
+              layoutSlots.slot1 = {{tabs: [item, previewItem], active: previewItem}};
+              updatePanelSlot(panel, previewItem, 'slot1');
+              const viaPreviewTab = snapshot('preview', previewItem);
               return {{
                 preview: snapshot('preview'),
+                previewTab: viaPreviewTab,
+                previewTabLayoutItem: panel.dataset.layoutItem,
                 split: snapshot('split'),
                 edit: snapshot('edit'),
               }};
@@ -3468,14 +3536,123 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["preview"]["gutterHidden"] is True, metrics
     assert metrics["preview"]["wrapHidden"] is True, metrics
     assert metrics["preview"]["findHidden"] is True, metrics
+    assert metrics["preview"]["modeHidden"] is True, metrics
+    assert metrics["preview"]["blameHidden"] is True, metrics
+    assert metrics["preview"]["diffHidden"] is True, metrics
+    assert metrics["preview"]["diffExpandHidden"] is True, metrics
+    assert metrics["preview"]["diffRefsHidden"] is True, metrics
+    assert metrics["preview"]["crossSplitHidden"] is True, metrics
+    assert metrics["preview"]["reloadHidden"] is True, metrics
+    assert metrics["preview"]["saveHidden"] is True, metrics
+    assert metrics["preview"]["themeHidden"] is False, metrics
     assert metrics["preview"]["fontHidden"] is False, metrics
     assert metrics["preview"]["fontCenterDelta"] <= 1.5, metrics
+    assert metrics["previewTabLayoutItem"].startswith("file-preview:"), metrics
+    assert metrics["previewTab"]["gutterHidden"] is True, metrics
+    assert metrics["previewTab"]["diffHidden"] is True, metrics
+    assert metrics["previewTab"]["diffRefsHidden"] is True, metrics
+    assert metrics["previewTab"]["saveHidden"] is True, metrics
+    assert metrics["previewTab"]["themeHidden"] is False, metrics
+    assert metrics["previewTab"]["fontHidden"] is False, metrics
+    assert metrics["split"]["modeHidden"] is False, metrics
     assert metrics["split"]["gutterHidden"] is False, metrics
     assert metrics["split"]["wrapHidden"] is False, metrics
     assert metrics["split"]["findHidden"] is False, metrics
+    assert metrics["split"]["saveHidden"] is False, metrics
+    assert metrics["edit"]["modeHidden"] is False, metrics
     assert metrics["edit"]["gutterHidden"] is False, metrics
     assert metrics["edit"]["wrapHidden"] is False, metrics
     assert metrics["edit"]["findHidden"] is False, metrics
+    assert metrics["edit"]["saveHidden"] is False, metrics
+
+
+def test_editor_and_pure_preview_keep_linked_rings_in_both_focus_directions(browser, tmp_path):
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "preview-linked-rings.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
+        <style>
+        body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; height: 560px; background: #11151d; }}
+        .file-editor-panel {{ min-width: 0; height: 520px; }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__previewRingMetrics = (() => {{
+              applyActiveColor('orange');
+              const path = '/home/test/repo/README.md';
+              const item = fileEditorItemFor(path);
+              const previewItem = filePreviewItemFor(path);
+              const content = '# README\\n\\nLinked preview\\n';
+              setFileState(path, {{
+                kind: 'text',
+                content,
+                original: content,
+                dirty: false,
+                language: 'markdown',
+                gitTracked: true,
+                gitHasHistory: true,
+                gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
+              }});
+              addFileEditorTabItem(path, item);
+              addFilePreviewTabItem(path, previewItem);
+              setFileEditorViewMode(path, 'edit', item);
+              setFileEditorViewMode(path, 'preview', previewItem);
+              layoutSlots[layoutTreeKey] = splitNode('row', leafNode('slot1'), leafNode('slot2'), 50);
+              layoutSlots.slot1 = {{tabs: [item], active: item}};
+              layoutSlots.slot2 = {{tabs: [previewItem], active: previewItem}};
+              activeSessions = [item, previewItem];
+              const editorPanel = createFileEditorPanel(item);
+              const previewPanel = createFileEditorPanel(previewItem);
+              panelNodes.set(item, editorPanel);
+              panelNodes.set(previewItem, previewPanel);
+              document.body.append(editorPanel, previewPanel);
+              renderFileEditorPanel(editorPanel, item);
+              renderFileEditorPanel(previewPanel, previewItem);
+              const read = () => ({{
+                editorActive: editorPanel.classList.contains('active-pane'),
+                editorLinked: editorPanel.classList.contains('preview-linked'),
+                editorRing: getComputedStyle(editorPanel).borderLeftColor,
+                previewActive: previewPanel.classList.contains('active-pane'),
+                previewLinked: previewPanel.classList.contains('preview-linked'),
+                previewRing: getComputedStyle(previewPanel).borderLeftColor,
+                activeAccent: getComputedStyle(document.documentElement).getPropertyValue('--active-accent').trim(),
+              }});
+              setFocusedPanelItem(item);
+              const editorFocused = read();
+              setFocusedPanelItem(previewItem);
+              const previewFocused = read();
+              return {{editorFocused, previewFocused}};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script("return window.__previewRingMetrics")
+    assert metrics["editorFocused"]["editorActive"] is True, metrics
+    assert metrics["editorFocused"]["previewLinked"] is True, metrics
+    assert metrics["editorFocused"]["editorLinked"] is False, metrics
+    assert metrics["previewFocused"]["previewActive"] is True, metrics
+    assert metrics["previewFocused"]["editorLinked"] is True, metrics
+    assert metrics["previewFocused"]["previewLinked"] is False, metrics
+    assert metrics["previewFocused"]["activeAccent"] == "#f97316", metrics
+    assert metrics["previewFocused"]["editorRing"] == metrics["previewFocused"]["previewRing"], metrics
 
 
 def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path):
@@ -3500,17 +3677,22 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
     page.write_text(
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
-        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
         #mount {{ width: 920px; height: 520px; }}
         .file-editor-panel {{ width: 920px; height: 520px; }}
         .file-editor-codemirror-panel {{ height: 100%; }}
         </style></head>
-        <body class="theme-dark editor-theme-dark">
+        <body class="theme-light theme-resolved-light editor-theme-light">
           <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
           <div id="mount"></div>
           <script>{app_bundle_before_boot_script()}</script>
           <script>
             window.__markdownColorReady = (async () => {{
+              applyActiveColor('blue');
+              setFileEditorThemeMode('yolomux-light');
+              codeMirrorLanguageExtension = function() {{
+                return [{{notARealCodeMirrorExtension: true}}];
+              }};
               const path = '/home/test/repo/README.md';
               const content = '# YOLOmux\\n\\n**bold** and [link](README.md)\\n';
               const item = fileEditorItemFor(path);
@@ -3536,17 +3718,31 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
                 await frame();
               }}
               const heading = panel.querySelector('.cm-content .md-heading');
+              const visibleHeading = heading?.querySelector('span') || heading;
               const bold = panel.querySelector('.cm-content .md-bold');
               const link = panel.querySelector('.cm-content .md-link');
+              setFileEditorThemeMode('yolomux-dark');
+              for (let attempt = 0; attempt < 20; attempt += 1) await frame();
+              const headingAfterTheme = panel.querySelector('.cm-content .md-heading');
+              const boldAfterTheme = panel.querySelector('.cm-content .md-bold');
+              const linkAfterTheme = panel.querySelector('.cm-content .md-link');
               const root = getComputedStyle(document.documentElement);
               return {{
                 cmMode: panel._cmMode || '',
                 plainFallback: panel._cmPlainFallback === true,
                 headingText: heading?.textContent || '',
                 headingColor: heading ? getComputedStyle(heading).color : '',
+                headingBg: heading ? getComputedStyle(heading).backgroundColor : '',
+                visibleHeadingColor: visibleHeading ? getComputedStyle(visibleHeading).color : '',
+                visibleHeadingBg: visibleHeading ? getComputedStyle(visibleHeading).backgroundColor : '',
+                afterHeadingText: headingAfterTheme?.textContent || '',
+                afterHeadingColor: headingAfterTheme ? getComputedStyle(headingAfterTheme).color : '',
+                afterHeadingBg: headingAfterTheme ? getComputedStyle(headingAfterTheme).backgroundColor : '',
                 expectedHeading: root.getPropertyValue('--markdown-heading').trim(),
                 hasBold: Boolean(bold),
                 hasLink: Boolean(link),
+                hasBoldAfterTheme: Boolean(boldAfterTheme),
+                hasLinkAfterTheme: Boolean(linkAfterTheme),
               }};
             }})();
           </script>
@@ -3562,11 +3758,124 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
     )
     assert "error" not in metrics, metrics
     assert metrics["cmMode"] == "edit", metrics
+    assert metrics["plainFallback"] is True, metrics
     assert metrics["headingText"].startswith("# YOLOmux"), metrics
-    assert metrics["headingColor"] != "", metrics
-    assert metrics["headingColor"] != "rgb(203, 213, 225)", metrics
+    assert metrics["headingColor"] == "rgb(37, 99, 235)", metrics
+    assert metrics["headingBg"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["visibleHeadingColor"] == "rgb(37, 99, 235)", metrics
+    assert metrics["visibleHeadingBg"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBold"] is True, metrics
     assert metrics["hasLink"] is True, metrics
+    assert metrics["afterHeadingText"].startswith("# YOLOmux"), metrics
+    assert metrics["afterHeadingColor"] == "rgb(37, 99, 235)", metrics
+    assert metrics["afterHeadingBg"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["hasBoldAfterTheme"] is True, metrics
+    assert metrics["hasLinkAfterTheme"] is True, metrics
+
+
+def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browser, tmp_path):
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+            "codeMirrorAssetUrl": bundle_uri,
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "editor-search-toggle.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        #mount {{ width: 920px; height: 520px; }}
+        .file-editor-panel {{ width: 920px; height: 520px; }}
+        .file-editor-codemirror-panel {{ height: 100%; }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="mount"></div>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__searchToggleReady = (async () => {{
+              const path = '/home/test/repo/app.py';
+              const content = 'alpha\\nbeta\\nalpha\\n';
+              const item = fileEditorItemFor(path);
+              setFileState(path, {{
+                kind: 'text',
+                content,
+                original: content,
+                dirty: false,
+                language: 'python',
+                gitTracked: true,
+                gitHasHistory: true,
+                gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
+              }});
+              setFileEditorViewMode(path, 'edit', item);
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.classList.add('active-pane');
+              document.getElementById('mount').append(panel);
+              renderFileEditorPanel(panel, item);
+              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              const waitFor = async predicate => {{
+                for (let attempt = 0; attempt < 160; attempt += 1) {{
+                  if (predicate()) return true;
+                  await frame();
+                }}
+                return false;
+              }};
+              await waitFor(() => panel._cmView && panel.querySelector('.file-editor-find-panel')?.hidden === false);
+              const button = panel.querySelector('.file-editor-find-panel');
+              const before = {{
+                pressed: button.getAttribute('aria-pressed'),
+                bg: getComputedStyle(button).backgroundColor,
+                panelOpen: Boolean(panel.querySelector('.cm-search')),
+              }};
+              button.click();
+              await waitFor(() => button.getAttribute('aria-pressed') === 'true' && panel.querySelector('.cm-search'));
+              const opened = {{
+                pressed: button.getAttribute('aria-pressed'),
+                bg: getComputedStyle(button).backgroundColor,
+                panelOpen: Boolean(panel.querySelector('.cm-search')),
+              }};
+              button.click();
+              await waitFor(() => button.getAttribute('aria-pressed') === 'false' && !panel.querySelector('.cm-search'));
+              const closed = {{
+                pressed: button.getAttribute('aria-pressed'),
+                bg: getComputedStyle(button).backgroundColor,
+                panelOpen: Boolean(panel.querySelector('.cm-search')),
+              }};
+              return {{before, opened, closed}};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__searchToggleReady.then(done, error => done({error: String(error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["before"]["pressed"] == "false", metrics
+    assert metrics["before"]["panelOpen"] is False, metrics
+    assert metrics["opened"]["pressed"] == "true", metrics
+    assert metrics["opened"]["panelOpen"] is True, metrics
+    assert metrics["opened"]["bg"] != metrics["before"]["bg"], metrics
+    assert metrics["closed"]["pressed"] == "false", metrics
+    assert metrics["closed"]["panelOpen"] is False, metrics
+    assert metrics["closed"]["bg"] == metrics["before"]["bg"], metrics
 
 
 def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(browser, tmp_path):
@@ -3750,6 +4059,42 @@ def test_finder_differ_row_hover_and_embedded_refresh_are_visible_in_light_mode(
     assert hover_tokens["hoverBg"] == "rgb(255, 242, 168)"
     assert row_metrics["background"] == hover_tokens["hoverBg"]
     assert hover_tokens["hoverBorder"] in row_metrics["boxShadow"]
+
+
+def test_finder_sync_current_file_reuses_selected_row_colors(browser, tmp_path):
+    load_pc_controls_fixture(browser, tmp_path)
+    metrics = browser.execute_script(
+        """
+        const read = () => {
+          const selected = getComputedStyle(document.getElementById('selected-file-row'));
+          const current = getComputedStyle(document.getElementById('current-file-row'));
+          const selectedName = getComputedStyle(document.querySelector('#selected-file-row .file-tree-name'));
+          const currentName = getComputedStyle(document.querySelector('#current-file-row .file-tree-name'));
+          return {
+            selectedColor: selected.color,
+            currentColor: current.color,
+            selectedNameColor: selectedName.color,
+            currentNameColor: currentName.color,
+            selectedBg: selected.backgroundColor,
+            currentBg: current.backgroundColor,
+            selectedShadow: selected.boxShadow,
+            currentShadow: current.boxShadow,
+          };
+        };
+        document.body.classList.remove('theme-light');
+        document.body.classList.add('theme-dark');
+        const dark = read();
+        document.body.classList.remove('theme-dark');
+        document.body.classList.add('theme-light');
+        const light = read();
+        return {dark, light};
+        """
+    )
+    for theme in ("dark", "light"):
+        assert metrics[theme]["currentColor"] == metrics[theme]["selectedColor"], metrics
+        assert metrics[theme]["currentNameColor"] == metrics[theme]["selectedNameColor"], metrics
+        assert metrics[theme]["currentBg"] == metrics[theme]["selectedBg"], metrics
+        assert metrics[theme]["currentShadow"] == metrics[theme]["selectedShadow"], metrics
 
 
 def test_finder_differ_status_badges_share_one_column(browser, tmp_path):
@@ -4163,7 +4508,7 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["modeUsesCondensedControlFont"]
     assert metrics["modeMaxButtonWidth"] <= 62
     assert metrics["pathConsumesRemaining"]
-    assert metrics["modeTexts"] == ["Finder", "Differ"]
+    assert metrics["modeTexts"] == ["Finder", "ΔDiff"]
     assert abs(metrics["closeRight"] - metrics["primaryRowRight"]) <= 1
     assert metrics["pathColor"] == metrics["textColor"]
     assert metrics["scopeRowTop"] >= metrics["primaryRowBottom"]
@@ -4200,7 +4545,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
     assert not before["bodyDiff"]
     assert before["filesPressed"] == "true"
     assert before["diffPressed"] == "false"
-    assert before["texts"] == ["Finder", "Differ"]
+    assert before["texts"] == ["Finder", "ΔDiff"]
     assert before["newFileDisplay"] != "none"
     assert before["treeDisplay"] != "none"
     assert before["changesDisplay"] == "none"
@@ -4248,7 +4593,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
     assert after["panelMode"] == "diff"
     assert after["filesPressed"] == "false"
     assert after["diffPressed"] == "true"
-    assert after["texts"] == ["Finder", "Differ"]
+    assert after["texts"] == ["Finder", "ΔDiff"]
     assert after["diffButtonBg"] != before["diffButtonBg"]
     assert after["newFileDisplay"] == "none"
     assert after["treeDisplay"] == "none"
@@ -4304,20 +4649,33 @@ def test_platform_controls_use_pc_glyphs(browser, tmp_path):
     assert browser.execute_script("return getComputedStyle(document.getElementById('idle-yolo')).animationName") == "none"
     triangle_sizes = browser.execute_script(
         """
+        const root = document.documentElement;
         const collapsed = getComputedStyle(document.querySelector('#collapsed-dir > .file-tree-icon'));
         const expanded = getComputedStyle(document.querySelector('#expanded-dir > .file-tree-icon'));
+        const defaultWidth = document.querySelector('#collapsed-dir > .file-tree-icon').getBoundingClientRect().width;
+        const defaultFontSize = Number.parseFloat(collapsed.fontSize);
+        root.style.setProperty('--file-explorer-font-size', '8px');
+        const smallIcon = document.querySelector('#collapsed-dir > .file-tree-icon');
+        const smallStyle = getComputedStyle(smallIcon);
+        const smallWidth = smallIcon.getBoundingClientRect().width;
+        const smallFontSize = Number.parseFloat(smallStyle.fontSize);
+        root.style.removeProperty('--file-explorer-font-size');
         return {
           collapsedSize: Number.parseFloat(collapsed.fontSize),
           expandedSize: Number.parseFloat(expanded.fontSize),
-          collapsedWidth: document.querySelector('#collapsed-dir > .file-tree-icon').getBoundingClientRect().width,
+          collapsedWidth: defaultWidth,
+          defaultFontSize,
+          smallWidth,
+          smallFontSize,
           expandedColor: expanded.color,
           collapsedColor: collapsed.color,
         };
         """
     )
-    assert triangle_sizes["collapsedSize"] >= 16
-    assert triangle_sizes["expandedSize"] >= 16
-    assert triangle_sizes["collapsedWidth"] >= 20
+    assert triangle_sizes["collapsedSize"] > 0
+    assert triangle_sizes["expandedSize"] > 0
+    assert triangle_sizes["smallWidth"] < triangle_sizes["collapsedWidth"]
+    assert triangle_sizes["smallFontSize"] < triangle_sizes["defaultFontSize"]
     assert triangle_sizes["expandedColor"] != triangle_sizes["collapsedColor"]
     dots_center_delta = browser.execute_script(
         """
@@ -4472,6 +4830,7 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
         const findStyle = getComputedStyle(document.querySelector('.file-editor-find-panel'));
         const previewStyle = getComputedStyle(document.querySelector('[data-editor-mode="preview"]'));
         const closeStyle = getComputedStyle(document.querySelector('.file-editor-panel-close'));
+        const searchCloseStyle = getComputedStyle(document.querySelector('.cm-dialog-close'));
         const syntaxProbe = Array.from(document.querySelectorAll('#light-syntax-probe span')).map(node => {
           const style = getComputedStyle(node);
           return {color: style.color, background: style.backgroundColor, border: style.borderTopColor};
@@ -4560,6 +4919,8 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
           findBg: findStyle.backgroundColor,
           previewBg: previewStyle.backgroundColor,
           closeBg: closeStyle.backgroundColor,
+          searchCloseColor: searchCloseStyle.color,
+          searchCloseBg: searchCloseStyle.backgroundColor,
           syntaxColorCount: new Set(syntaxProbe.map(item => item.color)).size,
           keywordColor: syntaxProbe[0].color,
           stringColor: syntaxProbe[1].color,
@@ -4634,6 +4995,8 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["wrapBg"] != metrics["findBg"]
     assert metrics["closeBg"] != metrics["editorBg"]
     assert metrics["closeBg"] != "rgb(255, 235, 233)"
+    assert metrics["searchCloseColor"] != "rgb(255, 255, 255)"
+    assert metrics["searchCloseColor"] != metrics["searchCloseBg"]
     assert metrics["syntaxColorCount"] >= 6
     assert metrics["keywordColor"] != metrics["stringColor"]
     assert metrics["functionColor"] != metrics["keywordColor"]
@@ -4663,7 +5026,9 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
     metrics = browser.execute_script(
         """
         const toolbar = document.querySelector('.file-editor-toolbar').getBoundingClientRect();
+        const gutter = document.getElementById('gutter-button').getBoundingClientRect();
         const diff = document.getElementById('diff-button').getBoundingClientRect();
+        const expand = document.getElementById('diff-expand-button').getBoundingClientRect();
         const diffStyle = getComputedStyle(document.getElementById('diff-button'));
         const panel = document.getElementById('diff-ref-panel').getBoundingClientRect();
         const controls = document.querySelector('[data-diff-ref-controls]').getBoundingClientRect();
@@ -4675,8 +5040,13 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
         return {
           toolbarLeft: toolbar.left,
           toolbarRight: toolbar.right,
+          gutterLeft: gutter.left,
+          gutterRight: gutter.right,
           diffLeft: diff.left,
           diffRight: diff.right,
+          diffText: document.getElementById('diff-button').textContent.trim(),
+          expandLeft: expand.left,
+          expandRight: expand.right,
           diffBg: diffStyle.backgroundColor,
           diffBorder: diffStyle.borderTopColor,
           panelRight: panel.right,
@@ -4692,8 +5062,11 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
         };
         """
     )
-    assert metrics["diffLeft"] <= metrics["toolbarLeft"] + 8, metrics
-    assert 0 <= metrics["panelLeft"] - metrics["diffRight"] <= 6, metrics
+    assert metrics["gutterLeft"] <= metrics["toolbarLeft"] + 8, metrics
+    assert 0 <= metrics["diffLeft"] - metrics["gutterRight"] <= 6, metrics
+    assert metrics["diffText"] == "ΔDiff", metrics
+    assert 0 <= metrics["expandLeft"] - metrics["diffRight"] <= 6, metrics
+    assert 0 <= metrics["panelLeft"] - metrics["expandRight"] <= 6, metrics
     assert metrics["diffBg"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["diffBorder"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["resetDisplay"] != "none"

@@ -9,6 +9,14 @@
   direction: rtl;
   text-align: start;
 }
+.file-editor-panel {
+  --editor-toolbar-control-fg: var(--editor-scheme-muted);
+  --editor-toolbar-control-bg: color-mix(in srgb, var(--editor-scheme-panel2) 82%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  --editor-toolbar-control-border: color-mix(in srgb, var(--editor-scheme-line) 74%, var(--pane-ctl-border, var(--pane-tab-control-border)));
+  --editor-toolbar-control-hover-fg: var(--editor-scheme-fg);
+  --editor-toolbar-control-hover-bg: color-mix(in srgb, var(--editor-scheme-line) 38%, var(--editor-toolbar-control-bg));
+  --editor-toolbar-control-hover-border: color-mix(in srgb, var(--editor-scheme-muted) 70%, var(--editor-toolbar-control-border));
+}
 .file-editor-html-preview {
   display: block;
   flex: 1 1 auto;
@@ -570,7 +578,6 @@ body.editor-theme-light .file-editor-image {
    transcript summary) — the file-editor preview's `pre` is handled separately under
    `body.editor-theme-light .file-editor-content` so a dark editor keeps a dark block. */
 body.theme-light .yoagent-message-body pre,
-body.theme-light .yoagent-session-summary-body pre,
 body.theme-light .summary-preview pre {
   color: #1f2937;
   background: #f3f6fa;
@@ -1469,6 +1476,19 @@ body.editor-theme-light .file-editor-content {
 .file-editor-toolbar[hidden] {
   display: none;
 }
+.file-editor-panel.file-editor-pure-preview .file-editor-mode-control-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-gutter-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-wrap-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-find-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-blame-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-diff-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-diff-expand-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-diff-ref-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-cross-split-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-reload-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-save-panel {
+  display: none;
+}
 .file-editor-diff-ref-panel {
   /* Diff and FROM/TO own the LEFT side of the editor info bar; everything after them stays right. */
   order: -1;
@@ -1521,8 +1541,8 @@ body.editor-theme-light .file-editor-content {
   padding: 0 4px;
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: 3px;
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  color: var(--editor-toolbar-control-fg);
+  background: var(--editor-toolbar-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .file-editor-preview-font-panel button:disabled {
@@ -1548,10 +1568,10 @@ body.editor-theme-light .file-editor-content {
   height: 20px;
   flex: 0 0 auto;
   padding: 0 3px;
-  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border: 1px solid var(--editor-toolbar-control-border);
   border-radius: 3px;
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  color: var(--editor-toolbar-control-fg);
+  background: var(--editor-toolbar-control-bg);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
 }
@@ -1566,7 +1586,6 @@ body.editor-theme-light .file-editor-content {
 .file-editor-wrap-panel,
 .file-editor-gutter-panel,
 .file-editor-find-panel,
-.file-editor-diff-panel,
 .file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
 .file-editor-blame-panel,
@@ -1579,10 +1598,22 @@ body.editor-theme-light .file-editor-content {
   padding: 0;
   line-height: 1;
 }
+.file-editor-gutter-panel {
+  order: -4;
+}
 .file-editor-diff-panel {
+  order: -3;
+  width: auto;
+  min-width: 44px;
+  padding: 0 5px;
+}
+.file-editor-diff-expand-panel {
   order: -2;
 }
 .file-editor-toolbar:has(.file-editor-diff-ref-panel[hidden]) .file-editor-diff-panel:not([hidden]) {
+  margin-inline-end: auto;
+}
+.file-editor-toolbar:has(.file-editor-diff-panel[hidden]) .file-editor-gutter-panel:not([hidden]) {
   margin-inline-end: auto;
 }
 .file-editor-reload-panel {
@@ -1630,15 +1661,16 @@ body.editor-theme-light .file-editor-content {
 .file-editor-cross-split-panel:hover,
 .file-editor-theme-panel:hover,
 .file-editor-reload-panel:hover {
-  color: var(--pc-control-hover-fg);
-  border-color: var(--pane-tab-control-hover-border);
-  background: var(--pane-tab-control-hover-bg);
+  color: var(--editor-toolbar-control-hover-fg);
+  border-color: var(--editor-toolbar-control-hover-border);
+  background: var(--editor-toolbar-control-hover-bg);
 }
 .file-editor-mode-control-panel button.active,
 .file-editor-gutter-panel.active,
 .file-editor-gutter-panel[aria-pressed="true"],
 .file-editor-wrap-panel.active,
 .file-editor-wrap-panel[aria-pressed="true"],
+.file-editor-find-panel[aria-pressed="true"],
 .file-editor-diff-panel.active,
 .file-editor-diff-panel[aria-pressed="true"] {
   color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
@@ -2238,6 +2270,16 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search label:has(input
   background: var(--active-control-bg);
   border-color: var(--active-control-border);
 }
+body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close,
+body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close {
+  color: var(--lt-text);
+  background: transparent;
+}
+body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close:hover,
+body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close:hover {
+  color: var(--lt-text);
+  background: var(--lt-code-inline-bg);
+}
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-search-count,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-count {
   color: var(--lt-markdown-heading);
@@ -2318,7 +2360,12 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 .file-editor-code-preview .md-heading,
 .cm-content .md-heading {
   color: var(--markdown-heading);
+  background: var(--markdown-heading-bg);
   font-weight: 700;
+}
+.cm-content .md-heading * {
+  color: inherit;
+  background: inherit;
 }
 .file-editor-raw-panel .md-heading-1,
 .file-editor-code-preview .md-heading-1,

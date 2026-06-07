@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+import re
 from typing import Any
 
 from .common import AgentInfo
@@ -735,6 +736,81 @@ def yoagent_session_section(index: int, summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def yoagent_question_requests_session_list(question: str) -> bool:
+    text = str(question or "").lower()
+    list_phrases = [
+        "list sessions",
+        "list all sessions",
+        "list every session",
+        "enumerate sessions",
+        "enumerate all sessions",
+        "show sessions",
+        "show all sessions",
+        "one by one",
+        "all sessions",
+        "every session",
+        "each session",
+        "per session",
+        "session by session",
+    ]
+    return any(phrase in text for phrase in list_phrases)
+
+
+def yoagent_question_named_sessions(question: str) -> set[str]:
+    text = str(question or "").lower()
+    return set(re.findall(r"\bsession\s+([A-Za-z0-9_.-]{1,64})\b", text))
+
+
+def yoagent_rank_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(summaries, key=lambda summary: (0 if summary.get("active") else 1, -summary_last_activity_ts(summary)))
+
+
+def yoagent_default_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = yoagent_rank_summaries(summaries)
+    active = [summary for summary in ranked if summary.get("active")]
+    if active:
+        return active[:3]
+    return ranked[:1]
+
+
+def yoagent_work_advice_line(summary: dict[str, Any]) -> str:
+    title = yoagent_topic_title(summary)
+    state = str(summary.get("activity_label") or ("active" if summary.get("active") else "idle"))
+    last = str(summary.get("last_activity_text") or "").strip()
+    files = files_sentence(summary.get("files") or {})
+    details = [state]
+    if last:
+        details.append(f"last worked {last}")
+    details.append(files)
+    ci = str(summary.get("ci") or summary.get("status_text") or "").strip()
+    if ci:
+        details.append(truncate_text(ci, 120))
+    return f"- **{title}:** {'; '.join(part for part in details if part)}."
+
+
+def yoagent_default_pending_lines(summaries: list[dict[str, Any]]) -> list[str]:
+    if not summaries:
+        return []
+    ranked = yoagent_rank_summaries(summaries)
+    target = ranked[0] if ranked else None
+    pending: list[str] = []
+    if target:
+        work = summary_work_label(target)
+        last = str(target.get("last_activity_text") or "").strip()
+        recency = f" It was last active {last}." if last else ""
+        if target.get("active"):
+            pending.append(f"- Keep the active work on {work} moving until it reaches a clean stopping point.{recency}")
+        else:
+            pending.append(f"- Resume {work} first; it has the freshest available context.{recency}")
+    stale = stale_summary(summaries)
+    if stale:
+        work = summary_work_label(stale)
+        last = str(stale.get("last_activity_text") or "").strip()
+        suffix = f" for {last}" if last else ""
+        pending.append(f"- Stale work: {work} has not been touched{suffix}; ask for a quick summary before resuming, or close it if it is no longer useful.")
+    return pending
+
+
 def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any], settings: dict[str, Any] | None = None, locale: str = "en") -> str:
     # DOIT.8 Phase 3: localize the FIXED framing of the no-agent fallback (prefix, no-activity headline,
     # "Open / pending:"). The generated per-session activity prose stays English — its sentence assembly
@@ -754,26 +830,38 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
                 continue
             # Real payloads carry "session"; fall back to the dict key so the section title is labeled.
             all_summaries.append(summary if summary.get("session") else {**summary, "session": key})
-    # If the question names specific sessions, focus on those; otherwise report every session.
-    selected = [summary for summary in all_summaries if summary.get("session") and str(summary.get("session")) in question_text]
-    chosen = selected or all_summaries
-    # Active sessions first, then freshest by last-activity timestamp, so the report leads with live work.
-    chosen = sorted(chosen, key=lambda summary: (0 if summary.get("active") else 1, -summary_last_activity_ts(summary)))
+    # Session detail is opt-in: only expose session ids when the user explicitly asks for sessions or
+    # names a concrete "session N". Default answers stay task/advice-shaped.
+    named_sessions = yoagent_question_named_sessions(question)
+    selected = [summary for summary in all_summaries if summary.get("session") and str(summary.get("session")).lower() in named_sessions]
+    if selected:
+        chosen = yoagent_rank_summaries(selected)
+    elif yoagent_question_requests_session_list(question):
+        chosen = yoagent_rank_summaries(all_summaries)
+    else:
+        chosen = yoagent_default_summaries(all_summaries)
     prefix = server_string(locale, "det.noBackend")
     out = [prefix, "", headline]
     if not chosen:
         return "\n".join(out).strip()
     out.append("")
-    for index, summary in enumerate(chosen, start=1):
-        out.extend(yoagent_session_section(index, summary))
-        out.append("")
-    pending: list[str] = []
-    recommendation = global_recommendation_sentence(all_summaries)
-    if recommendation:
-        pending.append(f"- {recommendation}")
-    stale = stale_work_sentence(all_summaries)
-    if stale:
-        pending.append(f"- {stale}")
+    include_session_details = bool(selected) or yoagent_question_requests_session_list(question)
+    if include_session_details:
+        for index, summary in enumerate(chosen, start=1):
+            out.extend(yoagent_session_section(index, summary))
+            out.append("")
+        pending: list[str] = []
+        recommendation = global_recommendation_sentence(all_summaries)
+        if recommendation:
+            pending.append(f"- {recommendation}")
+        stale = stale_work_sentence(all_summaries)
+        if stale:
+            pending.append(f"- {stale}")
+    else:
+        out.append("**Priority:**")
+        for summary in chosen:
+            out.append(yoagent_work_advice_line(summary))
+        pending = yoagent_default_pending_lines(all_summaries)
     if pending:
         out.append(f'**{server_string(locale, "det.openPending")}**')
         out.extend(pending)

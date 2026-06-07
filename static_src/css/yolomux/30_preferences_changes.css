@@ -762,12 +762,61 @@
   justify-content: start;
   padding-inline-start: var(--preferences-control-left-indent);
 }
+.preferences-radio-group.has-swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  align-items: center;
+  column-gap: 16px;
+  row-gap: 6px;
+}
 .preferences-radio {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   cursor: pointer;
   color: var(--text);
+}
+.preferences-radio.has-swatches {
+  display: inline-grid;
+  grid-template-columns: 18px 34px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 6px;
+  min-width: 0;
+}
+.preferences-radio.has-swatches input[type="radio"] {
+  justify-self: center;
+}
+.preferences-radio-swatches {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 34px;
+}
+.preferences-radio-swatches.joined {
+  gap: 0;
+}
+.preferences-radio-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: var(--preferences-radio-swatch);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch {
+  border-radius: 0;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch + .preferences-radio-swatch {
+  margin-inline-start: -1px;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch:first-child {
+  border-start-start-radius: 2px;
+  border-end-start-radius: 2px;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch:last-child {
+  border-start-end-radius: 2px;
+  border-end-end-radius: 2px;
 }
 .preferences-radio input[type="radio"] {
   cursor: pointer;
@@ -783,6 +832,13 @@
 }
 .preferences-setting-row--wide {
   grid-template-columns: minmax(0, 1fr);
+}
+.preferences-setting-note {
+  grid-template-columns: minmax(0, 1fr);
+  padding-block: 6px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel2) 78%, transparent);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
 .preferences-setting-advisory {
   grid-column: 1 / -1;
@@ -1131,7 +1187,7 @@ body.theme-light .command-palette-view-chip {
 }
 .keyboard-shortcuts-section h3 {
   margin: 0 0 6px;
-  color: var(--brand-green);
+  color: var(--active-accent-bright);
   font: 800 var(--ui-font-size-xs)/1.1 var(--mono-font);
   text-transform: uppercase;
 }
@@ -1337,7 +1393,7 @@ body.theme-light .keyboard-shortcut-row kbd {
   grid-column: 1 / -1;
   width: 100%;
   margin-inline-start: 0;
-  min-height: min(34vh, 15lh);
+  min-height: 5lh;
 }
 /* #38: long-value text/select fields (e.g. the upload filename template, the YOLO rule path) render
    as full-width --wide rows so the whole value is visible instead of clipping at the 24ch cap. */
@@ -1351,6 +1407,9 @@ body.theme-light .keyboard-shortcut-row kbd {
 }
 .preferences-setting-control textarea {
   resize: vertical;
+}
+.preferences-setting-control textarea[data-setting-autosize="true"] {
+  overflow-y: hidden;
 }
 .preferences-setting-suffix,
 .preferences-setting-help {
@@ -1485,7 +1544,7 @@ body.theme-light .command-palette-keybinding {
   color: #586072;
 }
 body.theme-light .keyboard-shortcuts-section h3 {
-  color: #5f9800;
+  color: var(--active-accent-bright);
 }
 body.theme-light .keyboard-shortcuts-close:hover,
 body.theme-light .keyboard-shortcuts-close:focus-visible {

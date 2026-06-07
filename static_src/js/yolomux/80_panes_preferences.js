@@ -1246,7 +1246,7 @@ function createInfoPanel() {
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.innerHTML = `
       <div class="panel-head">
-        ${virtualPanelControlsHtml(infoItemId, infoTabLabel())}
+        ${virtualPanelControlsHtml(infoItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
@@ -1347,7 +1347,6 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(`panel-${info
     node.title = label;
     node.setAttribute('aria-label', label);
   };
-  setLabel(panel.querySelector('.virtual-panel-controls .terminal-tab'), infoLabel);
   const minimizeLabel = t('pane.minimize');
   const expandLabel = t('pane.expand');
   panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
@@ -1483,31 +1482,6 @@ function globalActivitySummaryHtml() {
     ${refreshBar}
     ${headline ? activitySummaryMarkdownBlockHtml(headline, 'yoagent-headline') : activitySummaryLinesHtml([], {empty: t('yoagent.emptyGlobal')})}
     ${activitySummaryLinesHtml(detailLines)}
-  </section>`;
-}
-
-function yoagentSessionSummariesHtml() {
-  const sessions = activitySummaryPayload?.sessions || {};
-  const order = Array.isArray(activitySummaryPayload?.session_order) ? activitySummaryPayload.session_order : Object.keys(sessions);
-  const rows = order
-    .map(session => {
-      const summary = sessions?.[session];
-      if (!summary?.local) return '';
-      const status = summary.active ? 'active' : 'idle';
-      const files = summary.files?.count ? t('yoagent.files', {count: summary.files.count, added: summary.files.added || 0, removed: summary.files.removed || 0}) : t('yoagent.noFiles');
-      return `<article class="yoagent-session-summary ${esc(status)}">
-        <div class="yoagent-session-summary-head">
-          <span>${esc(t('yoagent.sessionLabel', {session}))}</span>
-          <span>${esc(summary.agent_label || summary.agent || t('yoagent.agentFallback'))}</span>
-          <span>${esc(files)}</span>
-        </div>
-        <div class="yoagent-session-summary-body markdown-body" data-yoagent-summary-markdown>${esc(summary.local)}</div>
-      </article>`;
-    })
-    .filter(Boolean)
-    .join('');
-  return `<section class="yoagent-session-summaries" aria-label="${esc(t('yoagent.perSessionAria'))}">
-    ${rows || `<div class="yoagent-empty">${esc(t('yoagent.emptyPerSession'))}</div>`}
   </section>`;
 }
 
@@ -1726,6 +1700,33 @@ function editorSchemePreferenceChoices(options = {}) {
     });
 }
 
+function globalThemePreferenceChoices() {
+  return [
+    {value: 'system', label: t('pref.appearance.theme.system')},
+    {value: 'dark', label: t('pref.appearance.theme.dark')},
+    {value: 'light', label: t('pref.appearance.theme.light')},
+  ];
+}
+
+function activeColorPreferenceChoice(value, label) {
+  const preset = ACTIVE_COLOR_PRESETS[value];
+  const swatches = preset
+    ? [preset.dark.bright, preset.light.bright]
+    : ['#86d600', '#4f9e3a'];
+  return {value, label, swatches, joinedSwatches: true};
+}
+
+function activeColorPreferenceChoices() {
+  return [
+    activeColorPreferenceChoice('green', t('pref.appearance.active_color.green')),
+    activeColorPreferenceChoice('blue', t('pref.appearance.active_color.blue')),
+    activeColorPreferenceChoice('orange', t('pref.appearance.active_color.orange')),
+    activeColorPreferenceChoice('yellow', t('pref.appearance.active_color.yellow')),
+    activeColorPreferenceChoice('purple', t('pref.appearance.active_color.purple')),
+    activeColorPreferenceChoice('white', t('pref.appearance.active_color.white')),
+  ];
+}
+
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
@@ -1751,27 +1752,17 @@ function preferenceSections() {
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
     ]},
     {title: t('pref.section.appearance'), items: [
-      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: [
-        {value: 'system', label: t('pref.appearance.theme.system')},
-        {value: 'dark', label: t('pref.appearance.theme.dark')},
-        {value: 'light', label: t('pref.appearance.theme.light')},
-      ], help: t('pref.appearance.theme.help')},
+      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
       {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
       {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
+      {type: 'note', text: t('pref.appearance.font_sizes.note')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
       {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
       {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
       {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'range', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
       {path: 'appearance.inactive_pane_opacity', label: t('pref.appearance.inactive_pane_opacity.label'), type: 'range', min: 0, max: 100, step: 5, suffix: '%', help: t('pref.appearance.inactive_pane_opacity.help')},
-      {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'select', choices: [
-        {value: 'green', label: t('pref.appearance.active_color.green')},
-        {value: 'blue', label: t('pref.appearance.active_color.blue')},
-        {value: 'orange', label: t('pref.appearance.active_color.orange')},
-        {value: 'yellow', label: t('pref.appearance.active_color.yellow')},
-        {value: 'purple', label: t('pref.appearance.active_color.purple')},
-        {value: 'white', label: t('pref.appearance.active_color.white')},
-      ], help: t('pref.appearance.active_color.help')},
+      {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'radio', choices: activeColorPreferenceChoices(), help: t('pref.appearance.active_color.help')},
       {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
       {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
@@ -1785,11 +1776,11 @@ function preferenceSections() {
         {value: 'light', label: t('pref.appearance.terminal_theme.light')},
       ], help: t('pref.appearance.terminal_theme.help')},
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
+      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
+      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 8, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
       {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
       {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
       {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
-      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
-      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 8, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
       {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'radio', choices: [
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
@@ -2001,7 +1992,7 @@ function preferenceSearchKeywordsForItem(item) {
 
 function preferenceSearchHaystack(item) {
   const choices = Array.isArray(item.choices) ? item.choices.map(choice => [preferenceChoiceValue(choice), preferenceChoiceLabel(choice), preferenceChoiceGroup(choice)]).flat() : [];
-  return [item.label, item.path, item.help, item.suffix, item.keywords, choices, preferenceSearchKeywordsForItem(item)]
+  return [item.label, item.path, item.help, item.text, item.suffix, item.keywords, choices, preferenceSearchKeywordsForItem(item)]
     .flat(Infinity)
     .filter(Boolean)
     .join(' ')
@@ -2072,6 +2063,9 @@ function preferenceSelectOptionsHtml(item, value) {
 
 function preferenceControlHtml(item, query = '') {
   if (!preferenceItemMatches(item, query)) return '';
+  if (item.type === 'note') {
+    return `<div class="preferences-setting-row preferences-setting-note">${esc(item.text || '')}</div>`;
+  }
   const value = preferenceValue(item.path);
   const defaultValue = preferenceDefault(item.path);
   const disabled = readOnlyMode ? ' disabled' : '';
@@ -2093,21 +2087,26 @@ function preferenceControlHtml(item, query = '') {
     // #260: plain radio-button group (replaced the macOS-style theme-cards). One input + label per
     // choice; each input carries data-setting-path so the shared change handler -> savePreferenceControl
     // persists it (and live-applies appearance.theme). The current value is checked.
-    const radios = (item.choices || []).map(choice => {
+    const choices = item.choices || [];
+    const groupHasSwatches = choices.some(choice => Array.isArray(choice?.swatches));
+    const radios = choices.map(choice => {
       const choiceValue = String(preferenceChoiceValue(choice));
       const selected = String(value) === choiceValue;
       const radioId = `${controlId}-${choiceValue.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
-      return `<label class="preferences-radio" for="${esc(radioId)}">
+      const swatches = Array.isArray(choice?.swatches)
+        ? `<span class="preferences-radio-swatches${choice.joinedSwatches ? ' joined' : ''}" aria-hidden="true">${choice.swatches.map(color => `<span class="preferences-radio-swatch" style="--preferences-radio-swatch:${esc(color)}"></span>`).join('')}</span>`
+        : '';
+      return `<label class="preferences-radio${swatches ? ' has-swatches' : ''}" for="${esc(radioId)}">
         <input type="radio" id="${esc(radioId)}" name="${esc(controlId)}" value="${esc(choiceValue)}" data-setting-path="${esc(item.path)}" data-setting-type="radio"${selected ? ' checked' : ''}${disabled}>
-        <span>${esc(preferenceChoiceLabel(choice))}</span>
+        ${swatches}<span>${esc(preferenceChoiceLabel(choice))}</span>
       </label>`;
     }).join('');
-    control = `<div class="preferences-radio-group" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
+    control = `<div class="preferences-radio-group${groupHasSwatches ? ' has-swatches' : ''}" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
     control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
   } else if (item.type === 'textarea') {
-    control = `<textarea ${baseAttrs} rows="12">${esc(String(value || ''))}</textarea>`;
+    control = `<textarea ${baseAttrs} rows="3" data-setting-autosize="true">${esc(String(value || ''))}</textarea>`;
   } else {
     control = `<input type="text" ${baseAttrs} value="${esc(value)}">`;
   }
@@ -2139,7 +2138,7 @@ function preferenceAdvisoryHtml(item, value) {
 }
 
 function preferencesAllDefault() {
-  return preferenceSections().every(section => section.items.every(item => (
+  return preferenceSections().every(section => section.items.filter(item => item.path).every(item => (
     JSON.stringify(preferenceValue(item.path)) === JSON.stringify(preferenceDefault(item.path))
   )));
 }
@@ -2202,7 +2201,7 @@ function createPreferencesPanel() {
   panel.id = `panel-${prefsItemId}`;
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(prefsItemId, t('tab.preferences'))}
+        ${virtualPanelControlsHtml(prefsItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
@@ -2293,8 +2292,19 @@ function renderPreferencesPanels(options = {}) {
       }
     }
     bindPreferencesPanel(panel);
+    autosizePreferenceTextareas(panel);
     if (options.focusSearch) focusPreferencesSearch(panel);
   }
+}
+
+function autosizePreferenceTextarea(textarea) {
+  if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
+  textarea.style.height = 'auto';
+  textarea.style.height = `${textarea.scrollHeight}px`;
+}
+
+function autosizePreferenceTextareas(root) {
+  root.querySelectorAll?.('textarea[data-setting-autosize="true"]').forEach(autosizePreferenceTextarea);
 }
 
 function bindPreferencesPanel(panel) {
@@ -2310,6 +2320,9 @@ function bindPreferencesPanel(panel) {
     }
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
+    if (control.dataset.settingAutosize === 'true') {
+      autosizePreferenceTextarea(control);
+    }
     if (control.dataset.settingType === 'number') {
       validatePreferenceNumberControl(control);
       return;

@@ -102,9 +102,9 @@
   border-color: #ff7a86;
 }
 .session-state-yolo-approval {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: #9be33d;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .session-state-blocked,
 .session-state-disconnected {
@@ -420,14 +420,14 @@ body.theme-light .ci-indicator.branch-indicator {
   max-height: calc(100vh - var(--topbar-height) - var(--popover-edge-gap));
   overflow: auto;
   padding: 8px 10px;
-  color: #eefbe6;
+  color: var(--text);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size);
   font-stretch: normal;
   line-height: 1.25;
   font-weight: 400;
-  background: #081f08;
-  border: 1px solid rgba(95, 150, 42, 0.64);
+  background: var(--panel2);
+  border: 1px solid var(--active-control-soft-border);
   border-radius: 8px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
   transform: translateY(-2px);
@@ -444,23 +444,21 @@ body.theme-light .ci-indicator.branch-indicator {
   width: 10px;
   height: 10px;
   transform: rotate(45deg);
-  background: #081f08;
-  border-inline-start: 1px solid rgba(95, 150, 42, 0.64);
-  border-top: 1px solid rgba(95, 150, 42, 0.64);
+  background: var(--panel2);
+  border-inline-start: 1px solid var(--active-control-soft-border);
+  border-top: 1px solid var(--active-control-soft-border);
 }
-/* Light mode: the dark-green popover (#081f08 + pale-green text) is unreadable on
-   white. Repaint as a light card with dark text and re-tint the muted text cluster
-   so every label/value/desc/legend line meets contrast (DOIT.12 B5 — highest fix). */
+/* Light mode: use a neutral card with the active accent only as border/labels. */
 body.theme-light .session-popover {
   color: #1f2937;
   background: #ffffff;
-  border-color: rgba(95, 150, 42, 0.45);
+  border-color: var(--active-control-soft-border);
   box-shadow: 0 18px 50px rgba(15, 23, 42, 0.16);
 }
 body.theme-light .session-popover::before {
   background: #ffffff;
-  border-inline-start-color: rgba(95, 150, 42, 0.45);
-  border-top-color: rgba(95, 150, 42, 0.45);
+  border-inline-start-color: var(--active-control-soft-border);
+  border-top-color: var(--active-control-soft-border);
 }
 body.theme-light .popover-row {
   border-top-color: rgba(15, 23, 42, 0.10);
@@ -495,7 +493,7 @@ body.theme-light .branch-link {
 }
 .popover-subtitle {
   margin-top: 1px;
-  color: #bddcaf;
+  color: var(--muted);
   font: inherit;
   display: flex;
   align-items: center;
@@ -511,14 +509,14 @@ body.theme-light .branch-link {
   grid-template-columns: 62px minmax(0, 1fr);
   gap: 6px;
   padding: 2px 0;
-  border-top: 1px solid rgba(180, 230, 140, 0.22);
+  border-top: 1px solid var(--line);
 }
 .popover-row.compact {
   grid-template-columns: 44px minmax(0, 0.8fr) 44px minmax(0, 1fr);
   gap: 6px 8px;
 }
 .popover-label {
-  color: #a2c98d;
+  color: var(--active-accent-bright);
   font-weight: 500;
 }
 .popover-value {
@@ -542,10 +540,10 @@ body.theme-light .branch-link {
   white-space: nowrap;
 }
 .session-popover .meta-muted {
-  color: #b5d2a7;
+  color: var(--muted);
 }
 .session-popover .meta-sep {
-  color: #87aa76;
+  color: var(--muted);
 }
 .drag-image {
   opacity: 0.50 !important;
@@ -555,9 +553,9 @@ body.theme-light .branch-link {
   width: min(36ch, 42vw, var(--popover-max-inline-size));
   max-width: min(36ch, 42vw, var(--popover-max-inline-size));
   padding: 4px 6px;
-  color: #eefbe6;
-  background: rgba(8, 31, 8, 0.96);
-  border: 1px solid rgba(118, 185, 0, 0.72);
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 96%, black 4%);
+  border: 1px solid var(--active-control-soft-border);
   border-radius: 4px;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.40);
   opacity: 0.82 !important;
@@ -575,13 +573,13 @@ body.theme-light .branch-link {
   object-fit: contain;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(180, 230, 140, 0.26);
+  border: 1px solid var(--active-control-soft-border);
 }
 .file-drag-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #eaf6df;
+  color: var(--active-accent-bright);
   font-family: var(--tab-font);
   font-size: var(--ui-font-size-xl);
   font-weight: 700;
@@ -595,7 +593,7 @@ body.theme-light .branch-link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #f6ffe8;
+  color: var(--text);
   font: 600 var(--ui-font-size-2xs)/1.15 var(--ui-font);
 }
 .file-drag-path,
@@ -603,11 +601,11 @@ body.theme-light .branch-link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #bddcaf;
+  color: var(--muted);
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
 }
 .file-drag-more {
-  color: #9fc68f;
+  color: var(--muted);
 }
 .state-legend {
   display: flex;
@@ -618,12 +616,12 @@ body.theme-light .branch-link {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #dbeed2;
+  color: var(--muted);
   font-size: var(--ui-font-size-xs);
   white-space: nowrap;
 }
 .popover-desc {
-  color: #e5f6dc;
+  color: var(--text);
   line-height: 1.35;
 }
 .popover-desc-title {
@@ -631,7 +629,7 @@ body.theme-light .branch-link {
 }
 .popover-desc-body {
   margin-top: 4px;
-  color: #bddcaf;
+  color: var(--muted);
 }
 .popover-desc-line + .popover-desc-line {
   margin-top: 4px;

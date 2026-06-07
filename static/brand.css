@@ -1,5 +1,7 @@
 :root {
-  --brand-primary-green: var(--brand-green, #76b900);
+  --brand-primary-green: var(--active-control-bg, var(--brand-green, #76b900));
+  --brand-yolo-text: var(--active-control-text, #071000);
+  --brand-yolo-border: var(--active-control-border, #9be33d);
 }
 .brand-title {
   font-weight: 700;
@@ -27,9 +29,9 @@
   justify-content: center;
   margin-right: 1px;
   padding: 0 0 1px;
-  color: #071000;
+  color: var(--brand-yolo-text);
   background: var(--brand-primary-green);
-  border: 1px solid rgba(155, 227, 61, 0.08);
+  border: 1px solid var(--brand-yolo-border);
   border-radius: 3px;
   line-height: 1;
 }

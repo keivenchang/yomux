@@ -99,10 +99,8 @@ function panelControlsHtml(session, options = {}) {
         </div>`;
 }
 
-function virtualPanelControlsHtml(session, label) {
-  const safeLabel = label || itemLabel(session);
+function virtualPanelControlsHtml(session) {
   return `<div class="tabs virtual-panel-controls" role="tablist">
-          <button class="tab active terminal-tab" type="button" title="${esc(safeLabel)}" aria-label="${esc(safeLabel)}">${esc(safeLabel)}</button>
           ${paneFrameControlsHtml(session, {actions: false, close: false})}
         </div>`;
 }
@@ -416,10 +414,8 @@ function yoagentChatInputIsFocused(node = document.getElementById('yoagent-conte
 function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-content')) {
   if (!node) return false;
   const globalRegion = node.querySelector('.yoagent-global');
-  const sessionsRegion = node.querySelector('.yoagent-session-summaries');
-  if (!globalRegion || !sessionsRegion) return false;
+  if (!globalRegion) return false;
   globalRegion.outerHTML = globalActivitySummaryHtml();
-  sessionsRegion.outerHTML = yoagentSessionSummariesHtml();
   renderYoagentMessageMarkdown(node);
   return true;
 }
@@ -447,8 +443,8 @@ function yoagentInlineMarkdown(text) {
 }
 
 function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
-  // Render assistant chat replies AND per-session summary cards through the Markdown pipeline so bold
-  // titles, code, lists, and links display formatted. Without marked.js the escaped-text fallback stays.
+  // Render assistant chat replies through the Markdown pipeline so bold titles, code, lists, and links
+  // display formatted. Without marked.js the escaped-text fallback stays.
   if (!node || typeof window.marked === 'undefined') return;
   (node.querySelectorAll?.('.yoagent-global [data-yoagent-global-markdown]') || []).forEach(body => {
     renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
@@ -457,12 +453,6 @@ function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-co
   (node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || []).forEach(body => {
     renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
     body.removeAttribute('data-yoagent-markdown');
-  });
-  // Per-session summary bodies embed the agent's own transcript markdown (## headings etc.): downgrade
-  // headings to inline bold so a long heading does not blow up the card.
-  (node.querySelectorAll?.('.yoagent-session-summary-body[data-yoagent-summary-markdown]') || []).forEach(body => {
-    renderMarkdownPreviewInto(body, yoagentInlineMarkdown(body.textContent || ''));
-    body.removeAttribute('data-yoagent-summary-markdown');
   });
 }
 
@@ -479,7 +469,7 @@ function renderYoagentPanel(options = {}) {
     return;
   }
   if (options.summaryOnly && refreshYoagentSummaryRegions(node)) return;
-  node.innerHTML = `${globalActivitySummaryHtml()}${yoagentSessionSummariesHtml()}${yoagentChatHtml()}`;
+  node.innerHTML = `${globalActivitySummaryHtml()}${yoagentChatHtml()}`;
   renderYoagentMessageMarkdown(node);
   if (options.scrollBottom !== false) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));
@@ -1127,9 +1117,10 @@ function hideUploadResult(session) {
 
 function updatePanelSlot(panel, session, slot) {
   panel.dataset.slot = slot;
+  panel.dataset.layoutItem = session;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session);
+  if (isFileEditorItem(session) || isFilePreviewItem(session)) renderFileEditorPanel(panel, session);
   updatePaneExpandButton(panel, session);
   updatePaneTabStrip(panel, slot);
   updatePanelInactiveOverlays();

@@ -265,15 +265,13 @@ def test_bootstrap_json_escapes_breakout_chars_without_html_entities():
     match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     assert match, "bootstrap script tag is present"
     raw = match.group(1)
-    # The YO!agent answer-format default contains <topic>; it must NOT be HTML-entity-escaped (that
-    # would leave literal &lt;topic&gt; after JSON.parse) and must NOT contain a raw </script> breakout.
-    assert "&lt;topic&gt;" not in raw
-    assert "\\u003ctopic\\u003e" in raw
+    # The YO!agent answer-format default is embedded as JSON, not HTML; it must not contain a raw
+    # </script> breakout or HTML-entity escaped text that would survive JSON.parse.
+    assert "&lt;" not in raw
     assert "</script>" not in raw
-    # The breakout chars round-trip back to literal <, >, & through JSON.parse (json.loads here).
     parsed = json.loads(raw)
     fmt = parsed["settingsPayload"]["settings"]["yoagent"]["format"]
-    assert "<topic>" in fmt
+    assert "Do not include session ids" in fmt
     assert "&lt;" not in fmt
 
 

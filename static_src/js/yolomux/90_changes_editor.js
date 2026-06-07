@@ -1095,6 +1095,7 @@ function changeFileRowHtml(item, options = {}) {
   const name = item.__displayName || basenameOf(absPath || item.path || '');
   const rel = item.path || absPath;
   const parentLabel = changeFileParentLabel(rel);
+  const detail = item.uploaded === true ? '' : (parentLabel || rel);
   const timeText = sessionFileDisplayTimeText(item.mtime);
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentSlotHtml = changeFileAgentsHtml(item);
@@ -1120,7 +1121,7 @@ function changeFileRowHtml(item, options = {}) {
     : ' disabled';
   return `<button type="button" class="changes-file-row${compactClass} ${gitRowClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
     <span class="changes-file-icon ${esc(iconClass)}" aria-hidden="true">${esc(icon)}</span>
-    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span><span class="changes-file-path">${esc(parentLabel || rel)}</span></span>
+    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span>${detail ? `<span class="changes-file-path">${esc(detail)}</span>` : ''}</span>
     <span class="changes-file-meta">${metaHtml}</span>
   </button>`;
 }
@@ -1218,7 +1219,7 @@ function fileExplorerTreeDateButtonHtml(extraClass = '') {
   const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
   const active = mode !== 'none';
   const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass, active ? 'active' : ''].filter(Boolean).join(' ');
-  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeLabel(mode))}</button>`;
+  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>`;
 }
 
 function sessionFilesSortSelectHtml(extraClass = '') {
@@ -1363,12 +1364,16 @@ function fileExplorerModeButtonTitle(mode) {
   return mode === 'diff' ? t('changes.show') : t('changes.hide');
 }
 
+function fileExplorerModeButtonLabel(mode) {
+  return mode === 'diff' ? 'ΔDiff' : t('finder.label.finder');
+}
+
 function fileExplorerModeSwitcherHtml() {
   const modes = [
-    {mode: 'files', label: t('finder.label.finder')},
-    {mode: 'diff', label: t('tab.changes')},
+    {mode: 'files', label: fileExplorerModeButtonLabel('files')},
+    {mode: 'diff', label: fileExplorerModeButtonLabel('diff')},
   ];
-  const aria = `${t('finder.label.finder')} / ${t('tab.changes')}`;
+  const aria = `${fileExplorerModeButtonLabel('files')} / ${fileExplorerModeButtonLabel('diff')}`;
   return `<span class="file-explorer-mode-switcher" role="group" aria-label="${esc(aria)}">${modes.map(item => `
               <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="${esc(item.mode)}" title="${esc(fileExplorerModeButtonTitle(item.mode))}" aria-label="${esc(item.label)}" aria-pressed="${fileExplorerMode === item.mode ? 'true' : 'false'}"><span class="file-explorer-mode-label">${esc(item.label)}</span></button>`).join('')}</span>`;
 }
@@ -1387,7 +1392,7 @@ function applyFileExplorerMode(panel = null) {
     const active = mode === fileExplorerMode;
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     btn.title = fileExplorerModeButtonTitle(mode);
-    btn.setAttribute('aria-label', mode === 'diff' ? t('tab.changes') : t('finder.label.finder'));
+    btn.setAttribute('aria-label', fileExplorerModeButtonLabel(mode));
   });
   document.querySelectorAll('[data-file-explorer-mode-toggle]').forEach(btn => {
     btn.setAttribute('aria-pressed', fileExplorerMode === 'diff' ? 'true' : 'false');
@@ -1987,7 +1992,7 @@ function createFileExplorerPanel() {
           </div>
           <div class="file-explorer-toolbar-row file-explorer-scope-row file-explorer-mode-files-only">
             <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.syncLabel'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
+            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.syncTitle'))}" aria-label="${esc(t('finder.toolbar.syncTitle'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
             <div class="file-explorer-quick-access-panel file-explorer-mode-files-only" aria-label="${esc(t('finder.toolbar.quickPaths'))}"></div>
             <span class="file-explorer-toolbar-spacer"></span>
           </div>
@@ -2251,9 +2256,9 @@ function createFileEditorPanel(item) {
         </span>
         <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
         <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" aria-pressed="false" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden><span class="file-editor-icon file-editor-icon-blame" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden>ΔDiff</button>
         <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${diffExpandUnchanged ? 'true' : 'false'}" hidden>↕</button>
         <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
@@ -2318,7 +2323,7 @@ function createFileEditorPanel(item) {
   panel.querySelector('.file-editor-find-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    openEditorFind(panel);
+    toggleEditorFind(panel);
   });
   panel.querySelector('.file-editor-blame-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -2867,7 +2872,7 @@ function reconfigureCodeMirrorPanelTheme(panel) {
   const compartment = panel?._cmThemeCompartment;
   const views = Array.isArray(panel?._cmThemeViews) ? panel._cmThemeViews : [];
   if (!api || !path || !compartment || !views.length) return false;
-  const extensions = panel?._cmPlainFallback ? [codeMirrorThemeExtension(api)] : codeMirrorThemeExtensions(api, path);
+  const extensions = codeMirrorThemeExtensions(api, path);
   const effect = compartment.reconfigure(extensions);
   for (const view of views) {
     try { view.dispatch({effects: effect}); } catch (_) {}
@@ -3647,10 +3652,12 @@ function renderFileEditorPanel(panel, item) {
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   const themeButton = panel.querySelector('.file-editor-theme-panel');
   const blameButton = panel.querySelector('.file-editor-blame-panel');
+  const saveButton = panel.querySelector('.file-editor-save-panel');
   const content = panel.querySelector('.file-editor-content');
   const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
   updateEditorThemeButton(themeButton);
   if (!state) {
+    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -3660,6 +3667,7 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.loading) {
+    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -3670,6 +3678,7 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
+    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -3698,7 +3707,10 @@ function renderFileEditorPanel(panel, item) {
     setFileEditorViewMode(path, 'edit', item);
   }
   const mode = editorViewModeFor(path, item);
+  const purePreviewMode = mode === 'preview';
+  panel.classList.toggle('file-editor-pure-preview', purePreviewMode);
   updateEditorModeControl(modeControl, path, state, item);
+  if (modeControl && purePreviewMode) modeControl.hidden = true;
   if (previewFontPanel) {
     previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path) || (mode !== 'preview' && mode !== 'split');
     updateEditorPreviewFontControls(previewFontPanel);
@@ -3711,18 +3723,20 @@ function renderFileEditorPanel(panel, item) {
     wrapButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
     updateEditorWrapButton(wrapButton);
   }
-  updateEditorFindButton(findButton, state);
+  updateEditorFindButton(findButton, state, panel);
   if (findButton && (isFilePreviewItem(item) || mode === 'preview')) findButton.hidden = true;
-  // Blame and Diff are one git-backed toolbar pair: show both together for files with real file history,
-  // or hide both for files outside git / untracked / creation-only / confirmed-clean.
+  // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
+  // Blame stays available in normal edit mode for clean files with useful history.
   updateFileEditorBlameButton(blameButton, path, state, item);
   updateFileEditorDiffButton(diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
+  if (purePreviewMode) setElementsHidden([blameButton, diffButton, diffExpandButton], true);
   if (crossSplitButton) {
-    crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
+    crossSplitButton.hidden = purePreviewMode || isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
   }
+  setElementsHidden([reloadButton, saveButton], purePreviewMode);
   if (diffRefPanel) {
-    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+    diffRefPanel.hidden = purePreviewMode || mode !== 'diff' || state.kind !== 'text';
     // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
     // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
     const diffRepo = fileRepoForPath(path);
@@ -4717,9 +4731,16 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
 
 function updateLinkedFilePreviewRings() {
   for (const panel of panelNodes.values()) panel.classList.remove('preview-linked');
-  if (!focusedPanelItem || isFilePreviewItem(focusedPanelItem)) return;
-  const path = isFileEditorItem(focusedPanelItem) ? fileItemPath(focusedPanelItem) : '';
+  if (!focusedPanelItem) return;
+  const path = (isFileEditorItem(focusedPanelItem) || isFilePreviewItem(focusedPanelItem)) ? fileItemPath(focusedPanelItem) : '';
   if (!path) return;
+  if (isFilePreviewItem(focusedPanelItem)) {
+    const editorItem = fileEditorItemFor(path);
+    if (!itemIsActivePaneTab(editorItem)) return;
+    const editorPanel = panelNodes.get(editorItem);
+    if (editorPanel) editorPanel.classList.add('preview-linked');
+    return;
+  }
   const previewItem = filePreviewItemFor(path);
   if (!itemIsActivePaneTab(previewItem)) return;
   const previewPanel = panelNodes.get(previewItem);

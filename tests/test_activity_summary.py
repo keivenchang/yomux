@@ -227,7 +227,7 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert "No AI backend is answering" in reply
     assert "Set or log in a Claude/Codex backend" in reply
     assert "Your most recent work is about editor fixes" in reply
-    # New multi-section shape: a bold numbered section per session + an Open / pending tail.
+    # Direct status shape: focus on the asked-about session plus an Open / pending tail.
     assert "**1. editor fixes" in reply
     assert "(session 5)**" in reply
     assert "- Codex gpt-5.5 is active" in reply
@@ -260,7 +260,7 @@ def test_yoagent_help_primer_and_deterministic_help_answers():
     assert "No recent work." in fallback_reply
 
 
-def test_deterministic_yoagent_reply_emits_multi_section_structure():
+def test_deterministic_yoagent_reply_prioritizes_active_work_without_listing_every_session():
     now = time.time()
     activity = {
         "global": {"headline": "Two AI agents are working across yolomux and dynamo.", "lines": []},
@@ -295,18 +295,24 @@ def test_deterministic_yoagent_reply_emits_multi_section_structure():
         "errors": [],
     }
     reply = deterministic_yoagent_reply("what is happening?", activity, {})
-    # Numbered, bold, one section per session, active first.
-    assert "**1. tab approval badge — yolomux · PR #12345 (session 5)**" in reply
-    assert "**2. stale refactor — dynamo (session 9)**" in reply
-    assert reply.index("(session 5)") < reply.index("(session 9)")
-    # Sub-bullets carry agent/state, file totals, CI.
-    assert "- Codex gpt-5.5 is active; last worked 2 minutes ago" in reply
-    assert "- 3 files changed (+12/-4)" in reply
-    assert "- CI: CI passing" in reply
-    # Closing Open / pending section with a recommendation and the stale session.
+    # Default answers prioritize active/fresh work as topic/advice, without exposing session ids.
+    assert "**Priority:**" in reply
+    assert "- **tab approval badge — yolomux · PR #12345:**" in reply
+    assert "3 files changed (+12/-4)" in reply
+    assert "CI passing" in reply
+    assert "(session 5)" not in reply
+    assert "session 9" not in reply
+    # Closing Open / pending section gives advice without default session inventory.
     assert "**Open / pending:**" in reply
-    assert "Recommendation:" in reply
-    assert "session 9" in reply.split("**Open / pending:**", 1)[1]
+    assert "Keep the active work" in reply
+    assert "Stale work: stale refactor" in reply.split("**Open / pending:**", 1)[1]
+    list_reply = deterministic_yoagent_reply("list all sessions", activity, {})
+    assert "**1. tab approval badge — yolomux · PR #12345 (session 5)**" in list_reply
+    assert "**2. stale refactor — dynamo (session 9)**" in list_reply
+    assert list_reply.index("(session 5)") < list_reply.index("(session 9)")
+    named_reply = deterministic_yoagent_reply("what is session 5 doing?", activity, {})
+    assert "**1. tab approval badge — yolomux · PR #12345 (session 5)**" in named_reply
+    assert "(session 9)" not in named_reply
 
 
 def test_changed_file_totals_coerces_numeric_strings_and_ignores_bools():

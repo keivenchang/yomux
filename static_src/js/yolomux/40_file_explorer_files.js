@@ -241,7 +241,8 @@ function fileExplorerRootModeButtons() {
 
 function syncFileExplorerRootModeButton(button) {
   const label = t('finder.toolbar.syncLabel');
-  syncPressedButton(button, fileExplorerRootMode === 'sync', {labelOn: label, labelOff: label});
+  const title = t('finder.toolbar.syncTitle');
+  syncPressedButton(button, fileExplorerRootMode === 'sync', {labelOn: title, labelOff: title});
   if (button) button.textContent = label;
 }
 
@@ -1234,6 +1235,7 @@ function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload)
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
+    if (!sessionFileIsDifferVisible(file)) continue;
     const absPath = sessionFileAbsolutePath(file);
     if (!absPath) continue;
     const agents = sessionFileAgentKinds(file);
@@ -3888,7 +3890,8 @@ function codeMirrorHighlightExtension(api) {
     ...scheme.syntax,
     text: scheme.fg,
     muted: scheme.syntax.comment,
-    headingBg: scheme.syntax.headingBg,
+    heading: 'var(--markdown-heading)',
+    headingBg: 'var(--markdown-heading-bg)',
   };
   const tags = (...items) => items.filter(Boolean);
   const headingStyle = {tag: tags(t.heading, t.heading1, t.heading2), color: palette.heading, fontWeight: '700'};
@@ -4404,6 +4407,7 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
     render() {
       const panel = this.view.dom?.querySelector?.('.cm-search');
       this.bindPanel(panel);
+      syncCodeMirrorFindButtonForView(this.view);
       if (!panel) return;
       const next = panel.querySelector?.('.cm-button[name="next"]');
       const previous = panel.querySelector?.('.cm-button[name="prev"]');
@@ -4438,6 +4442,21 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
       this.bindPanel(null);
     }
   });
+}
+
+function codeMirrorSearchPanelForHost(host = null) {
+  if (!host) return null;
+  return host._cmView?.dom?.querySelector?.('.cm-search') || host.querySelector?.('.cm-search') || null;
+}
+
+function codeMirrorSearchPanelOpenForHost(host = null) {
+  return Boolean(codeMirrorSearchPanelForHost(host));
+}
+
+function syncCodeMirrorFindButtonForView(view) {
+  const panel = view?.dom?.closest?.('.file-editor-panel');
+  const button = panel?.querySelector?.('.file-editor-find-panel');
+  if (button) button.setAttribute('aria-pressed', codeMirrorSearchPanelOpenForHost(panel) ? 'true' : 'false');
 }
 
 function openCodeMirrorFindForView(api, view) {

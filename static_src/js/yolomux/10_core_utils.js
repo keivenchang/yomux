@@ -571,6 +571,11 @@ function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateMode) {
   return t(`finder.dateMode.${normalized}`);
 }
 
+function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateMode) {
+  const normalized = normalizeFileExplorerTreeDateMode(mode);
+  return normalized === 'none' ? t('finder.dateMode.date') : fileExplorerTreeDateModeLabel(normalized);
+}
+
 function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
   return t('finder.dateMode.title', {
     mode: fileExplorerTreeDateModeLabel(mode),
@@ -587,7 +592,7 @@ function syncFileExplorerTreeDateButton(button) {
   button.classList.toggle('active', active);
   button.dataset.dateMode = mode;
   button.setAttribute('aria-pressed', active ? 'true' : 'false');
-  button.textContent = fileExplorerTreeDateModeLabel(mode);
+  button.textContent = fileExplorerTreeDateModeButtonLabel(mode);
   const label = fileExplorerTreeDateModeTitle(mode);
   button.title = label;
   button.setAttribute('aria-label', label);
@@ -856,10 +861,15 @@ function fuzzySearchScore(query, fields) {
 
 function fuzzyHighlightHtml(query, text) {
   const value = String(text ?? '');
-  const token = String(query || '').trim().split(/\s+/).filter(Boolean)[0] || '';
-  const match = fuzzySubsequenceMatch(token, value);
-  if (!match || !match.indexes.length) return esc(value);
-  const indexes = new Set(match.indexes);
+  // Highlight EVERY query token's subsequence match, not just the first — mirrors fuzzySearchScore, which
+  // scores all tokens. So "pa exploration" highlights both "PA" and "exploration", not only "pa".
+  const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
+  const indexes = new Set();
+  for (const token of tokens) {
+    const match = fuzzySubsequenceMatch(token, value);
+    if (match) for (const matchIndex of match.indexes) indexes.add(matchIndex);
+  }
+  if (!indexes.size) return esc(value);
   const chars = Array.from(value);
   const parts = [];
   let index = 0;

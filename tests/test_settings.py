@@ -4,6 +4,7 @@ import threading
 
 from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from yolomux_lib.common import UPLOAD_MAX_BYTES
+from yolomux_lib.settings import LEGACY_YOAGENT_DEFAULTS
 from yolomux_lib.settings import default_settings
 from yolomux_lib.settings import read_settings_file
 from yolomux_lib.settings import save_settings
@@ -17,6 +18,20 @@ def test_pane_spacing_default_is_4px():
     assert default_settings()["appearance"]["pane_spacing"] == 4
     assert default_settings()["appearance"]["pane_ring_opacity"] == 75
     assert default_settings()["appearance"]["inactive_pane_opacity"] == 60
+
+
+def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text():
+    settings = sanitize_settings({"yoagent": LEGACY_YOAGENT_DEFAULTS.copy()})
+    defaults = default_settings()["yoagent"]
+
+    assert settings["yoagent"]["system_prompt"] == defaults["system_prompt"]
+    assert settings["yoagent"]["intro"] == defaults["intro"]
+    assert settings["yoagent"]["format"] == defaults["format"]
+
+    custom = sanitize_settings({"yoagent": {**LEGACY_YOAGENT_DEFAULTS, "intro": "Custom intro"}})
+    assert custom["yoagent"]["system_prompt"] == defaults["system_prompt"]
+    assert custom["yoagent"]["intro"] == "Custom intro"
+    assert custom["yoagent"]["format"] == defaults["format"]
 
 
 def test_sanitize_settings_clamps_numbers_and_choices():
@@ -83,8 +98,9 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "auto"
     assert "normal human status update" in payload["settings"]["yoagent"]["system_prompt"]
-    assert "structured status report" in payload["settings"]["yoagent"]["intro"]
-    assert "numbered list with ONE item per session" in payload["settings"]["yoagent"]["format"]
+    assert "recommend what to work on next" in payload["settings"]["yoagent"]["intro"]
+    assert "Do not mention session ids" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "Do not include session ids" in payload["settings"]["yoagent"]["format"]
     assert "Open / pending:" in payload["settings"]["yoagent"]["format"]
     assert path.exists()
     assert "YOLOmux user preferences" in path.read_text()

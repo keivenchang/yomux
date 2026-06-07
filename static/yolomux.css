@@ -55,10 +55,8 @@
   --pane-inactive-tab-border: var(--active-tab-muted-border);
   --pane-tab-text: #dfe6ef;
   /* DOIT.41: ONE source accent that every ACTIVE/FOCUSED surface derives from (active tab, focused-pane
-     ring + glow, chrome strip, file selection, hover tints). Swapped by the appearance.active_color
-     preference; Green is the default = the brand-green values below, so this refactor is a no-op.
-     NOTE: YOLO (--pane-tab-yolo-*, --auto-glow) and editor syntax greens deliberately do NOT derive
-     from this — YOLO stays brand green so a non-green accent never disguises auto-approve state. */
+     ring + glow, chrome strip, file selection, hover tints, YO marker, and Markdown headings). Swapped
+     by the appearance.active_color preference; Green is the default = the brand-green values below. */
   --active-accent: #76b900;          /* solid: ring, glow, strip, alpha tints */
   --active-accent-rgb: 118 185 0;    /* triple → rgb(var(--active-accent-rgb) / α) for every alpha use */
   --active-accent-bright: #86d600;   /* active-tab fill + border */
@@ -96,9 +94,9 @@
      row (.panel-detail-row) read via --pane-bar-bg. Derived from the active accent so it flips with the
      active-color preference and the theme. */
   --pane-tab-strip-bg: var(--active-accent-dim);
-  --pane-tab-yolo-text: #071000;
-  --pane-tab-yolo-bg: #76b900;
-  --pane-tab-yolo-border: #9be33d;
+  --pane-tab-yolo-text: var(--active-control-text);
+  --pane-tab-yolo-bg: var(--active-control-bg);
+  --pane-tab-yolo-border: var(--active-control-border);
   --pane-tab-panel-ring: var(--active-accent);
   --pane-tab-panel-ring-shadow: rgb(var(--active-accent-rgb) / 0.95);
   --pane-tab-panel-ring-width: 4px;
@@ -205,7 +203,7 @@
   --text-selection-bg: #2563eb;
   --editor-active-line: rgba(255, 255, 255, 0.04);
   --editor-line-number: #9aa5b1;
-  --markdown-heading: #d2ff8a;
+  --markdown-heading: var(--active-accent-bright);
   --markdown-link: #7ee9ff;
   --markdown-strong: #fff0a6;
   --markdown-emphasis: #ffd27e;
@@ -246,7 +244,7 @@
   --lt-editor-bg: #ffffff;
   --lt-editor-gutter-bg: #f6f8fa;
   --lt-editor-preview-bg: #fff6df;
-  --lt-markdown-heading: #0f3d22;
+  --lt-markdown-heading: var(--active-accent-bright);
   --lt-markdown-heading-bg: #fffdf7;
   --lt-markdown-link: #075985;
   --lt-markdown-strong: #1f2328;
@@ -1450,9 +1448,9 @@ body.theme-light .latency-meter {
   border-color: #ff7a86;
 }
 .session-state-yolo-approval {
-  color: #081205;
-  background: var(--brand-green);
-  border-color: #9be33d;
+  color: var(--active-control-text);
+  background: var(--active-control-bg);
+  border-color: var(--active-control-border);
 }
 .session-state-blocked,
 .session-state-disconnected {
@@ -1768,14 +1766,14 @@ body.theme-light .ci-indicator.branch-indicator {
   max-height: calc(100vh - var(--topbar-height) - var(--popover-edge-gap));
   overflow: auto;
   padding: 8px 10px;
-  color: #eefbe6;
+  color: var(--text);
   font-family: var(--ui-font);
   font-size: var(--ui-font-size);
   font-stretch: normal;
   line-height: 1.25;
   font-weight: 400;
-  background: #081f08;
-  border: 1px solid rgba(95, 150, 42, 0.64);
+  background: var(--panel2);
+  border: 1px solid var(--active-control-soft-border);
   border-radius: 8px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
   transform: translateY(-2px);
@@ -1792,23 +1790,21 @@ body.theme-light .ci-indicator.branch-indicator {
   width: 10px;
   height: 10px;
   transform: rotate(45deg);
-  background: #081f08;
-  border-inline-start: 1px solid rgba(95, 150, 42, 0.64);
-  border-top: 1px solid rgba(95, 150, 42, 0.64);
+  background: var(--panel2);
+  border-inline-start: 1px solid var(--active-control-soft-border);
+  border-top: 1px solid var(--active-control-soft-border);
 }
-/* Light mode: the dark-green popover (#081f08 + pale-green text) is unreadable on
-   white. Repaint as a light card with dark text and re-tint the muted text cluster
-   so every label/value/desc/legend line meets contrast (DOIT.12 B5 — highest fix). */
+/* Light mode: use a neutral card with the active accent only as border/labels. */
 body.theme-light .session-popover {
   color: #1f2937;
   background: #ffffff;
-  border-color: rgba(95, 150, 42, 0.45);
+  border-color: var(--active-control-soft-border);
   box-shadow: 0 18px 50px rgba(15, 23, 42, 0.16);
 }
 body.theme-light .session-popover::before {
   background: #ffffff;
-  border-inline-start-color: rgba(95, 150, 42, 0.45);
-  border-top-color: rgba(95, 150, 42, 0.45);
+  border-inline-start-color: var(--active-control-soft-border);
+  border-top-color: var(--active-control-soft-border);
 }
 body.theme-light .popover-row {
   border-top-color: rgba(15, 23, 42, 0.10);
@@ -1843,7 +1839,7 @@ body.theme-light .branch-link {
 }
 .popover-subtitle {
   margin-top: 1px;
-  color: #bddcaf;
+  color: var(--muted);
   font: inherit;
   display: flex;
   align-items: center;
@@ -1859,14 +1855,14 @@ body.theme-light .branch-link {
   grid-template-columns: 62px minmax(0, 1fr);
   gap: 6px;
   padding: 2px 0;
-  border-top: 1px solid rgba(180, 230, 140, 0.22);
+  border-top: 1px solid var(--line);
 }
 .popover-row.compact {
   grid-template-columns: 44px minmax(0, 0.8fr) 44px minmax(0, 1fr);
   gap: 6px 8px;
 }
 .popover-label {
-  color: #a2c98d;
+  color: var(--active-accent-bright);
   font-weight: 500;
 }
 .popover-value {
@@ -1890,10 +1886,10 @@ body.theme-light .branch-link {
   white-space: nowrap;
 }
 .session-popover .meta-muted {
-  color: #b5d2a7;
+  color: var(--muted);
 }
 .session-popover .meta-sep {
-  color: #87aa76;
+  color: var(--muted);
 }
 .drag-image {
   opacity: 0.50 !important;
@@ -1903,9 +1899,9 @@ body.theme-light .branch-link {
   width: min(36ch, 42vw, var(--popover-max-inline-size));
   max-width: min(36ch, 42vw, var(--popover-max-inline-size));
   padding: 4px 6px;
-  color: #eefbe6;
-  background: rgba(8, 31, 8, 0.96);
-  border: 1px solid rgba(118, 185, 0, 0.72);
+  color: var(--text);
+  background: color-mix(in srgb, var(--panel2) 96%, black 4%);
+  border: 1px solid var(--active-control-soft-border);
   border-radius: 4px;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.40);
   opacity: 0.82 !important;
@@ -1923,13 +1919,13 @@ body.theme-light .branch-link {
   object-fit: contain;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(180, 230, 140, 0.26);
+  border: 1px solid var(--active-control-soft-border);
 }
 .file-drag-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #eaf6df;
+  color: var(--active-accent-bright);
   font-family: var(--tab-font);
   font-size: var(--ui-font-size-xl);
   font-weight: 700;
@@ -1943,7 +1939,7 @@ body.theme-light .branch-link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #f6ffe8;
+  color: var(--text);
   font: 600 var(--ui-font-size-2xs)/1.15 var(--ui-font);
 }
 .file-drag-path,
@@ -1951,11 +1947,11 @@ body.theme-light .branch-link {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #bddcaf;
+  color: var(--muted);
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
 }
 .file-drag-more {
-  color: #9fc68f;
+  color: var(--muted);
 }
 .state-legend {
   display: flex;
@@ -1966,12 +1962,12 @@ body.theme-light .branch-link {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #dbeed2;
+  color: var(--muted);
   font-size: var(--ui-font-size-xs);
   white-space: nowrap;
 }
 .popover-desc {
-  color: #e5f6dc;
+  color: var(--text);
   line-height: 1.35;
 }
 .popover-desc-title {
@@ -1979,7 +1975,7 @@ body.theme-light .branch-link {
 }
 .popover-desc-body {
   margin-top: 4px;
-  color: #bddcaf;
+  color: var(--muted);
 }
 .popover-desc-line + .popover-desc-line {
   margin-top: 4px;
@@ -2788,12 +2784,61 @@ body.theme-light .branch-link {
   justify-content: start;
   padding-inline-start: var(--preferences-control-left-indent);
 }
+.preferences-radio-group.has-swatches {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  align-items: center;
+  column-gap: 16px;
+  row-gap: 6px;
+}
 .preferences-radio {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   cursor: pointer;
   color: var(--text);
+}
+.preferences-radio.has-swatches {
+  display: inline-grid;
+  grid-template-columns: 18px 34px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 6px;
+  min-width: 0;
+}
+.preferences-radio.has-swatches input[type="radio"] {
+  justify-self: center;
+}
+.preferences-radio-swatches {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 34px;
+}
+.preferences-radio-swatches.joined {
+  gap: 0;
+}
+.preferences-radio-swatch {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: var(--preferences-radio-swatch);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch {
+  border-radius: 0;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch + .preferences-radio-swatch {
+  margin-inline-start: -1px;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch:first-child {
+  border-start-start-radius: 2px;
+  border-end-start-radius: 2px;
+}
+.preferences-radio-swatches.joined .preferences-radio-swatch:last-child {
+  border-start-end-radius: 2px;
+  border-end-end-radius: 2px;
 }
 .preferences-radio input[type="radio"] {
   cursor: pointer;
@@ -2809,6 +2854,13 @@ body.theme-light .branch-link {
 }
 .preferences-setting-row--wide {
   grid-template-columns: minmax(0, 1fr);
+}
+.preferences-setting-note {
+  grid-template-columns: minmax(0, 1fr);
+  padding-block: 6px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel2) 78%, transparent);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
 .preferences-setting-advisory {
   grid-column: 1 / -1;
@@ -3157,7 +3209,7 @@ body.theme-light .command-palette-view-chip {
 }
 .keyboard-shortcuts-section h3 {
   margin: 0 0 6px;
-  color: var(--brand-green);
+  color: var(--active-accent-bright);
   font: 800 var(--ui-font-size-xs)/1.1 var(--mono-font);
   text-transform: uppercase;
 }
@@ -3363,7 +3415,7 @@ body.theme-light .keyboard-shortcut-row kbd {
   grid-column: 1 / -1;
   width: 100%;
   margin-inline-start: 0;
-  min-height: min(34vh, 15lh);
+  min-height: 5lh;
 }
 /* #38: long-value text/select fields (e.g. the upload filename template, the YOLO rule path) render
    as full-width --wide rows so the whole value is visible instead of clipping at the 24ch cap. */
@@ -3377,6 +3429,9 @@ body.theme-light .keyboard-shortcut-row kbd {
 }
 .preferences-setting-control textarea {
   resize: vertical;
+}
+.preferences-setting-control textarea[data-setting-autosize="true"] {
+  overflow-y: hidden;
 }
 .preferences-setting-suffix,
 .preferences-setting-help {
@@ -3511,7 +3566,7 @@ body.theme-light .command-palette-keybinding {
   color: #586072;
 }
 body.theme-light .keyboard-shortcuts-section h3 {
-  color: #5f9800;
+  color: var(--active-accent-bright);
 }
 body.theme-light .keyboard-shortcuts-close:hover,
 body.theme-light .keyboard-shortcuts-close:focus-visible {
@@ -3858,7 +3913,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -3888,7 +3942,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -3918,7 +3971,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -3947,7 +3999,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -3976,7 +4027,6 @@ body.theme-light .drop-slot.drag-over {
   .yoagent-chat-history,
   .yoagent-chat .markdown-body pre,
   .yoagent-global .markdown-body pre,
-  .yoagent-session-summary .markdown-body pre,
   .file-explorer-tree-panel,
   .file-explorer-changes-panel,
   .file-editor-raw-panel,
@@ -4202,10 +4252,10 @@ body.theme-light .drop-slot.drag-over {
 .panel.typing-ready-pane.needs-blocked-pane {
   --panel-ring-color: #ff3347;
 }
-/* preview-linked shows an ambient green tint ONLY when no higher state owns the ring (the :not() chain
-   makes it mutually exclusive, so active/needs override it). Folded into the unified --panel-ring-color. */
+/* preview-linked shows an ambient active-accent tint ONLY when no higher state owns the ring (the :not()
+   chain makes it mutually exclusive, so active/needs override it). Folded into --panel-ring-color. */
 .panel.preview-linked:not(.active-pane):not(.typing-ready-pane):not(.needs-input-pane):not(.needs-exec-pane):not(.needs-blocked-pane) {
-  --panel-ring-color: var(--brand-green);
+  --panel-ring-color: var(--pane-tab-panel-ring);
 }
 /* needs-* panes PULSE the red ring (the keyframes drive border-color directly on the gutter border). */
 .panel.needs-input-pane,
@@ -4721,7 +4771,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
     22px 18px 34px rgba(0, 0, 0, 0.58),
     0 34px 62px rgba(0, 0, 0, 0.66),
     0 8px 16px rgba(0, 0, 0, 0.52),
-    0 0 0 1px rgba(154, 214, 98, 0.12);
+    0 0 0 1px var(--active-control-focus-ring);
 }
 .pane-tab.popover-open {
   z-index: var(--z-pane-modal);
@@ -4986,7 +5036,7 @@ body.theme-light .tab.active {
   background: var(--pane-tab-yolo-bg);
   border-color: var(--pane-tab-yolo-border);
   font-weight: 700;
-  box-shadow: 0 0 0 1px rgba(118, 185, 0, 0.28), 0 0 14px var(--auto-glow);
+  box-shadow: 0 0 0 1px rgb(var(--active-accent-rgb) / 0.28), 0 0 14px var(--active-control-focus-ring);
 }
 body.theme-light .panel.empty-pane-panel {
   background: #edf2f8;
@@ -5663,6 +5713,10 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   overflow: auto;
   padding: 8px 10px;
 }
+.yoagent-list {
+  display: flex;
+  flex-direction: column;
+}
 .yoagent-global {
   width: 100%;
   min-width: 0;
@@ -5672,7 +5726,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   color: #dfe6ef;
   background: #151d24;
   border: 1px solid #314154;
-  border-inline-start: 3px solid var(--brand-green);
+  border-inline-start: 3px solid var(--active-accent-bright);
   border-radius: 4px;
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
@@ -5690,7 +5744,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   height: 3px;
   margin: 2px 0 7px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--brand-green) 12%, var(--panel2));
+  background: color-mix(in srgb, var(--active-control-bg) 12%, var(--panel2));
   border-radius: 999px;
 }
 .yoagent-refresh-progress::before {
@@ -5699,8 +5753,8 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   inset-block: 0;
   left: -35%;
   width: 35%;
-  background: var(--brand-green);
-  box-shadow: 0 0 12px color-mix(in srgb, var(--brand-green) 65%, transparent);
+  background: var(--active-control-bg);
+  box-shadow: 0 0 12px var(--active-control-focus-ring);
   animation: yoagent-refresh-sweep 1s linear infinite;
 }
 @keyframes yoagent-refresh-sweep {
@@ -5724,38 +5778,6 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-global .markdown-body {
   white-space: normal;
 }
-.yoagent-session-summaries {
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  display: grid;
-  gap: 6px;
-  margin: 0 0 10px;
-}
-.yoagent-session-summary {
-  padding: 7px 9px;
-  color: var(--text);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-inline-start: 3px solid var(--inactive-tab-border);
-  border-radius: 4px;
-}
-.yoagent-session-summary.active {
-  border-left-color: var(--brand-green);
-}
-.yoagent-session-summary-head {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 4px;
-  color: var(--muted);
-  font: 800 var(--ui-font-size-2xs)/1.2 var(--mono-font);
-  text-transform: uppercase;
-}
-.yoagent-session-summary-body {
-  overflow-wrap: anywhere;
-  font: var(--ui-font-size-sm)/1.35 var(--ui-font);
-}
 .yoagent-chat {
   width: 100%;
   min-width: 0;
@@ -5763,6 +5785,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   display: grid;
   grid-template-rows: minmax(140px, 1fr) auto;
   gap: 8px;
+  margin-top: auto;
   padding: 8px 10px;
   color: var(--text);
   background: var(--panel);
@@ -5788,7 +5811,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-chat-clear:hover:not(:disabled),
 .yoagent-chat-clear:focus-visible {
   color: var(--text);
-  border-color: color-mix(in srgb, var(--brand-green) 45%, var(--line));
+  border-color: var(--active-control-soft-border);
 }
 .yoagent-chat-history {
   /* YO!agent chat scrollbars always inherit a shared pane scrollbar rule from layout CSS; never
@@ -5873,7 +5896,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   background: var(--panel2);
 }
 .yoagent-message.user {
-  border-color: color-mix(in srgb, var(--brand-green) 45%, var(--line));
+  border-color: var(--active-control-soft-border);
 }
 .yoagent-message-role {
   color: var(--muted);
@@ -5903,7 +5926,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   border-radius: 14px;
 }
 .yoagent-chat-form:focus-within {
-  border-color: color-mix(in srgb, var(--brand-green) 55%, var(--line));
+  border-color: var(--active-control-border);
 }
 .yoagent-chat-input {
   min-width: 0;
@@ -5939,7 +5962,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
   height: 9px;
   flex: 0 0 auto;
   border-radius: 50%;
-  border: 2px solid var(--brand-green);
+  border: 2px solid var(--active-control-bg);
 }
 .yoagent-backend-pill select {
   height: 22px;
@@ -5985,8 +6008,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .yoagent-chat-send-icon { width: 16px; height: 16px; }
 /* YO!agent rendered code blocks: soft rounded boxes (not the editor's near-black slab). */
 .yoagent-chat .markdown-body pre,
-.yoagent-global .markdown-body pre,
-.yoagent-session-summary .markdown-body pre {
+.yoagent-global .markdown-body pre {
   background: color-mix(in srgb, var(--panel2) 60%, var(--bg));
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -6005,7 +6027,6 @@ body.theme-light .yoagent-global {
   border-color: var(--line);
 }
 body.theme-light .yoagent-chat,
-body.theme-light .yoagent-session-summary,
 body.theme-light .yoagent-message {
   color: #111827;
   background: #ffffff;
@@ -6018,28 +6039,23 @@ body.theme-light .yoagent-line {
 }
 body.theme-light .yoagent-generated,
 body.theme-light .yoagent-empty,
-body.theme-light .yoagent-session-summary-head,
 body.theme-light .yoagent-message-role {
   color: #475569;
 }
 body.theme-light .yoagent-message-body.markdown-body,
-body.theme-light .yoagent-global .markdown-body,
-body.theme-light .yoagent-session-summary-body.markdown-body {
+body.theme-light .yoagent-global .markdown-body {
   color: #111827;
 }
 body.theme-light .yoagent-chat .markdown-body strong,
-body.theme-light .yoagent-global .markdown-body strong,
-body.theme-light .yoagent-session-summary .markdown-body strong {
+body.theme-light .yoagent-global .markdown-body strong {
   color: #111827;
 }
 body.theme-light .yoagent-chat .markdown-body em,
-body.theme-light .yoagent-global .markdown-body em,
-body.theme-light .yoagent-session-summary .markdown-body em {
+body.theme-light .yoagent-global .markdown-body em {
   color: #374151;
 }
 body.theme-light .yoagent-chat .markdown-body :not(pre) > code,
-body.theme-light .yoagent-global .markdown-body :not(pre) > code,
-body.theme-light .yoagent-session-summary .markdown-body :not(pre) > code {
+body.theme-light .yoagent-global .markdown-body :not(pre) > code {
   color: #0f4c81;
   background: #eef6ff;
   border-color: #8ab4f8;
@@ -6048,15 +6064,13 @@ body.theme-light .yoagent-session-summary .markdown-body :not(pre) > code {
    light box + dark text (the shared `.markdown-body pre` is dark-only and only the file editor had a
    light override). Matches the soft gray code boxes in mockup 044. */
 body.theme-light .yoagent-chat .markdown-body pre,
-body.theme-light .yoagent-global .markdown-body pre,
-body.theme-light .yoagent-session-summary .markdown-body pre {
+body.theme-light .yoagent-global .markdown-body pre {
   background: #f3f4f6;
   border-color: #e4e7ec;
   color: #1f2328;
 }
 body.theme-light .yoagent-chat .markdown-body pre code,
-body.theme-light .yoagent-global .markdown-body pre code,
-body.theme-light .yoagent-session-summary .markdown-body pre code {
+body.theme-light .yoagent-global .markdown-body pre code {
   color: #1f2328;
 }
 .info-row {
@@ -6403,15 +6417,15 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .about-brand-yo {
   padding: 3px 6px 5px;
-  color: #071000;
-  background: var(--brand-green);
+  color: var(--pane-tab-yolo-text);
+  background: var(--pane-tab-yolo-bg);
   border-radius: 4px;
   transform-origin: center;
   animation: yolo-marker-rotate var(--yolo-rotation-duration, 20s) linear infinite;
   animation-delay: var(--yolo-rotate-delay, 0s);
 }
 .about-brand-lo {
-  color: var(--brand-green);
+  color: var(--pane-tab-yolo-bg);
 }
 .about-brand-m {
   color: #3b82f6;
@@ -6702,7 +6716,9 @@ body.theme-light .modal.about-open {
   padding: 4px 0;
 }
 .file-tree-row {
-  --file-tree-row-control-size: max(18px, calc(var(--file-explorer-font-size) + 1px));
+  --file-tree-row-control-size: calc(var(--file-explorer-font-size) + 2px);
+  --file-tree-icon-size: calc(var(--file-explorer-font-size) + 2px);
+  --file-tree-icon-font-size: max(6px, calc(var(--file-explorer-font-size) - 1px));
   --file-tree-date-column-width: 16ch;
   box-sizing: border-box;
   display: flex;
@@ -6732,9 +6748,9 @@ body.theme-light .modal.about-open {
   box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-tree-row.current-file:not(.selected) {
-  color: var(--text);
-  background: var(--active-control-soft-bg);
-  box-shadow: inset 3px 0 0 var(--active-control-soft-border);
+  color: var(--file-selection-text);
+  background: var(--file-selection-bg);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px var(--active-control-focus-ring);
 }
 .file-tree-row.current-directory:not(.selected) {
   color: var(--text);
@@ -6793,6 +6809,14 @@ body.theme-light .modal.about-open {
 }
 .file-tree-row.kind-file .file-tree-name {
   color: var(--muted);
+}
+.file-tree-row.selected,
+.file-tree-row.current-file:not(.selected) {
+  color: var(--file-selection-text);
+}
+.file-tree-row.selected .file-tree-name,
+.file-tree-row.current-file:not(.selected) .file-tree-name {
+  color: currentColor;
 }
 .file-tree-row.is-repo .file-tree-name {
   color: var(--accent-gold);
@@ -6870,11 +6894,11 @@ body.theme-light .modal.about-open {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 max(20px, calc(var(--file-explorer-font-size) + 2px));
-  width: max(20px, calc(var(--file-explorer-font-size) + 2px));
-  height: max(18px, calc(var(--file-explorer-font-size) + 2px));
+  flex: 0 0 var(--file-tree-icon-size);
+  width: var(--file-tree-icon-size);
+  height: var(--file-tree-icon-size);
   text-align: center;
-  font-size: max(var(--ui-font-size-xs), calc(var(--file-explorer-font-size) - 2px));
+  font-size: var(--file-tree-icon-font-size);
   line-height: 1;
   border-radius: 3px;
 }
@@ -6925,7 +6949,7 @@ body.theme-light .modal.about-open {
   color: #94a3b8;
 }
 .file-tree-row.kind-dir > .file-tree-icon {
-  font-size: 1.28em;
+  font-size: 1.18em;
   font-weight: 800;
   line-height: 1;
   color: #8b95a5;
@@ -6995,9 +7019,13 @@ body.theme-light .server-update-banner-reload:focus-visible {
 body.theme-light .file-tree-row.selected {
   box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
 }
-body.theme-light .file-tree-row.current-file:not(.selected),
 body.theme-light .file-tree-row.current-directory:not(.selected) {
   color: #1f2937;
+}
+body.theme-light .file-tree-row.current-file:not(.selected) {
+  color: var(--file-selection-text);
+  background: var(--file-selection-bg);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
 }
 body.theme-light .file-tree-row.repo-non-main:not(.selected) .file-tree-name {
   color: #b06a00;
@@ -7059,17 +7087,17 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   margin-inline-start: auto;
 }
 .file-tree-agent .agent-icon {
-  width: 16px;
-  min-width: 16px;
-  height: 14px;
+  width: calc(var(--file-explorer-font-size) + 3px);
+  min-width: calc(var(--file-explorer-font-size) + 3px);
+  height: calc(var(--file-explorer-font-size) + 1px);
   margin: 0;
   padding: 0;
   vertical-align: 0;
 }
 .file-tree-agent .agent-icon svg {
-  flex-basis: 14px;
-  width: 14px;
-  height: 14px;
+  flex-basis: calc(var(--file-explorer-font-size) + 1px);
+  width: calc(var(--file-explorer-font-size) + 1px);
+  height: calc(var(--file-explorer-font-size) + 1px);
 }
 .file-tree-git-status {
   display: inline-flex;
@@ -7084,7 +7112,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   border-radius: 3px;
   color: #061207;
   font-family: var(--mono-font);
-  font-size: max(var(--ui-font-size-xs), calc(var(--file-explorer-font-size) - 2px));
+  font-size: max(6px, calc(var(--file-explorer-font-size) - 2px));
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0;
@@ -7166,8 +7194,9 @@ body.theme-light .file-explorer-path-inline.invalid {
   color: var(--bad);
 }
 body.theme-light .file-tree-row.current-file:not(.selected) {
-  color: var(--text);
-  background: var(--active-control-soft-bg);
+  color: var(--file-selection-text);
+  background: var(--file-selection-bg);
+  box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
 }
 body.theme-light .file-tree-row.current-directory:not(.selected) {
   color: var(--text);
@@ -7302,6 +7331,11 @@ body.theme-light .file-tree-children::before {
   border-color: var(--active-control-border);
   background: var(--active-control-bg);
 }
+.file-explorer-date-toggle[data-date-mode="none"] {
+  text-decoration-line: line-through;
+  text-decoration-thickness: 2px;
+  text-decoration-color: currentColor;
+}
 .file-explorer-quick-access,
 .file-explorer-quick-access-panel {
   display: inline-flex;
@@ -7361,6 +7395,14 @@ body.theme-light .file-tree-children::before {
   white-space: nowrap;
   direction: rtl;
   text-align: start;
+}
+.file-editor-panel {
+  --editor-toolbar-control-fg: var(--editor-scheme-muted);
+  --editor-toolbar-control-bg: color-mix(in srgb, var(--editor-scheme-panel2) 82%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  --editor-toolbar-control-border: color-mix(in srgb, var(--editor-scheme-line) 74%, var(--pane-ctl-border, var(--pane-tab-control-border)));
+  --editor-toolbar-control-hover-fg: var(--editor-scheme-fg);
+  --editor-toolbar-control-hover-bg: color-mix(in srgb, var(--editor-scheme-line) 38%, var(--editor-toolbar-control-bg));
+  --editor-toolbar-control-hover-border: color-mix(in srgb, var(--editor-scheme-muted) 70%, var(--editor-toolbar-control-border));
 }
 .file-editor-html-preview {
   display: block;
@@ -7923,7 +7965,6 @@ body.editor-theme-light .file-editor-image {
    transcript summary) — the file-editor preview's `pre` is handled separately under
    `body.editor-theme-light .file-editor-content` so a dark editor keeps a dark block. */
 body.theme-light .yoagent-message-body pre,
-body.theme-light .yoagent-session-summary-body pre,
 body.theme-light .summary-preview pre {
   color: #1f2937;
   background: #f3f6fa;
@@ -8822,6 +8863,19 @@ body.editor-theme-light .file-editor-content {
 .file-editor-toolbar[hidden] {
   display: none;
 }
+.file-editor-panel.file-editor-pure-preview .file-editor-mode-control-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-gutter-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-wrap-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-find-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-blame-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-diff-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-diff-expand-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-diff-ref-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-cross-split-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-reload-panel,
+.file-editor-panel.file-editor-pure-preview .file-editor-save-panel {
+  display: none;
+}
 .file-editor-diff-ref-panel {
   /* Diff and FROM/TO own the LEFT side of the editor info bar; everything after them stays right. */
   order: -1;
@@ -8874,8 +8928,8 @@ body.editor-theme-light .file-editor-content {
   padding: 0 4px;
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: 3px;
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  color: var(--editor-toolbar-control-fg);
+  background: var(--editor-toolbar-control-bg);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .file-editor-preview-font-panel button:disabled {
@@ -8901,10 +8955,10 @@ body.editor-theme-light .file-editor-content {
   height: 20px;
   flex: 0 0 auto;
   padding: 0 3px;
-  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
+  border: 1px solid var(--editor-toolbar-control-border);
   border-radius: 3px;
-  color: var(--pane-ctl-fg, var(--pc-control-fg));
-  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  color: var(--editor-toolbar-control-fg);
+  background: var(--editor-toolbar-control-bg);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
 }
@@ -8919,7 +8973,6 @@ body.editor-theme-light .file-editor-content {
 .file-editor-wrap-panel,
 .file-editor-gutter-panel,
 .file-editor-find-panel,
-.file-editor-diff-panel,
 .file-editor-diff-expand-panel,
 .file-editor-cross-split-panel,
 .file-editor-blame-panel,
@@ -8932,10 +8985,22 @@ body.editor-theme-light .file-editor-content {
   padding: 0;
   line-height: 1;
 }
+.file-editor-gutter-panel {
+  order: -4;
+}
 .file-editor-diff-panel {
+  order: -3;
+  width: auto;
+  min-width: 44px;
+  padding: 0 5px;
+}
+.file-editor-diff-expand-panel {
   order: -2;
 }
 .file-editor-toolbar:has(.file-editor-diff-ref-panel[hidden]) .file-editor-diff-panel:not([hidden]) {
+  margin-inline-end: auto;
+}
+.file-editor-toolbar:has(.file-editor-diff-panel[hidden]) .file-editor-gutter-panel:not([hidden]) {
   margin-inline-end: auto;
 }
 .file-editor-reload-panel {
@@ -8983,15 +9048,16 @@ body.editor-theme-light .file-editor-content {
 .file-editor-cross-split-panel:hover,
 .file-editor-theme-panel:hover,
 .file-editor-reload-panel:hover {
-  color: var(--pc-control-hover-fg);
-  border-color: var(--pane-tab-control-hover-border);
-  background: var(--pane-tab-control-hover-bg);
+  color: var(--editor-toolbar-control-hover-fg);
+  border-color: var(--editor-toolbar-control-hover-border);
+  background: var(--editor-toolbar-control-hover-bg);
 }
 .file-editor-mode-control-panel button.active,
 .file-editor-gutter-panel.active,
 .file-editor-gutter-panel[aria-pressed="true"],
 .file-editor-wrap-panel.active,
 .file-editor-wrap-panel[aria-pressed="true"],
+.file-editor-find-panel[aria-pressed="true"],
 .file-editor-diff-panel.active,
 .file-editor-diff-panel[aria-pressed="true"] {
   color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
@@ -9591,6 +9657,16 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search label:has(input
   background: var(--active-control-bg);
   border-color: var(--active-control-border);
 }
+body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close,
+body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close {
+  color: var(--lt-text);
+  background: transparent;
+}
+body.editor-theme-light .file-editor-codemirror .cm-search .cm-dialog-close:hover,
+body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-dialog-close:hover {
+  color: var(--lt-text);
+  background: var(--lt-code-inline-bg);
+}
 body.editor-theme-light .file-editor-codemirror .cm-search .cm-search-count,
 body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-count {
   color: var(--lt-markdown-heading);
@@ -9671,7 +9747,12 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 .file-editor-code-preview .md-heading,
 .cm-content .md-heading {
   color: var(--markdown-heading);
+  background: var(--markdown-heading-bg);
   font-weight: 700;
+}
+.cm-content .md-heading * {
+  color: inherit;
+  background: inherit;
 }
 .file-editor-raw-panel .md-heading-1,
 .file-editor-code-preview .md-heading-1,

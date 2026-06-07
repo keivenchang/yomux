@@ -381,7 +381,6 @@ globalThis.__layoutTestApi = {
     else diffRefsByRepo[repo] = {from: refs.from, to: refs.to};
   },
   globalActivitySummaryHtml,
-  yoagentSessionSummariesHtml,
   yoagentChatHtml,
   setYoagentDraftForTest(value) { yoagentDraft = String(value || ''); },
   setYoagentBusyForTest(value) { yoagentBusy = Boolean(value); },
@@ -508,6 +507,7 @@ globalThis.__layoutTestApi = {
   editorViewModeFor,
   editorPreviewModeAvailable,
   setFileEditorViewMode,
+  fileEditorBlameControlsVisible,
   updateFileEditorBlameButton,
   updateFileEditorDiffButton,
   updateFileEditorDiffExpandButton,
@@ -518,6 +518,7 @@ globalThis.__layoutTestApi = {
   sessionFileRelativeTimeText,
   sessionFileDisplayTimeText,
   fileExplorerTreeDateModeLabel,
+  fileExplorerTreeDateModeButtonLabel,
   fileExplorerTreeDateModeTitle,
   fileExplorerTreeDateModeForTest() { return fileExplorerTreeDateMode; },
   setFileExplorerTreeDateModeForTest(value) { fileExplorerTreeDateMode = normalizeFileExplorerTreeDateMode(value); },
@@ -1455,16 +1456,20 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, {kind: 'text', gitTracked: false}, codeItem), false, 'non-git files show neither Diff nor Blame');
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, {kind: 'text', gitTracked: true, gitHasHistory: false}, codeItem), false, 'creation-only files show neither Diff nor Blame');
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, {kind: 'text', gitTracked: true, gitHasHistory: true}, codeItem), false, 'stale history booleans without file-level history show neither Diff nor Blame');
-  assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), false, 'files with history but no diff show neither Diff nor Blame after the no-diff result is known');
-  assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({}), codeItem), true, 'files with history and unknown diff state show the Diff/Blame pair');
+  assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), false, 'files with history but no diff hide Diff after the no-diff result is known');
+  assert.equal(api.fileEditorBlameControlsVisible(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), true, 'clean files with useful history still offer Blame in normal edit mode');
+  assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({}), codeItem), true, 'files with history and unknown diff state show the Diff control');
   const blameButton = new TestElement('blame-button');
   api.setFileEditorViewMode(codePath, 'edit', codeItem);
   api.updateFileEditorBlameButton(blameButton, codePath, trackedHistoryState({}), codeItem);
   assert.equal(blameButton.hidden, false, 'Blame is visible in normal edit mode for files with useful history');
   assert.equal(blameButton.disabled, false, 'Blame is clickable only in normal edit mode');
+  api.updateFileEditorBlameButton(blameButton, codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem);
+  assert.equal(blameButton.hidden, false, 'Blame remains visible for clean files with useful history');
+  assert.equal(blameButton.disabled, false, 'Blame remains clickable in normal edit mode after Diff confirms a clean file');
   api.setFileEditorViewMode(codePath, 'diff', codeItem);
   api.updateFileEditorBlameButton(blameButton, codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem);
-  assert.equal(blameButton.hidden, false, 'Blame stays visible beside Diff when file history actions are available');
+  assert.equal(blameButton.hidden, false, 'Blame stays visible for files with useful history');
   assert.equal(blameButton.disabled, true, 'Blame is not clickable in diff mode');
   const mdPath = '/repo/app/README.md';
   const mdItem = api.fileEditorItemFor(mdPath);
@@ -1499,6 +1504,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(diffExpandButton.hidden, false, 'Expand unchanged is shown only for an active loaded diff');
   assert.equal(diffExpandButton.disabled, false, 'Expand unchanged is clickable for an active loaded diff');
   assert.equal(diffExpandButton.attributes['aria-pressed'], 'false', 'Expand unchanged reflects the persisted toggle state');
+  assert.ok(/updateFileEditorDiffExpandButton\(diffExpandButton, path, state, item\);\s*if \(purePreviewMode\) setElementsHidden\(\[blameButton, diffButton, diffExpandButton\], true\);/.test(source), 'rendering does not unhide Expand unchanged after its dedicated visibility updater hides it outside Diff mode');
   const noHistoryPath = '/repo/app/DOIT.37.md';
   api.setOpenFileStateForTest(noHistoryPath, {kind: 'text', gitTracked: true, gitHasHistory: false, gitHistory: []});
   assert.deepStrictEqual([...api.fileDiffRefHistoryItems(noHistoryPath)], [], 'file editor ref history is empty when the file has no file-level history');
@@ -1627,7 +1633,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function setInfoSubTab[\s\S]*?writeStoredInfoSubTab\(next\)/.test(source), '#40: switching the sub-tab persists it (remembered across reloads)');
   assert.ok(/function openInfoSubTab[\s\S]*?selectSession\(infoItemId\)/.test(source), '#40: opening YO!agent activates the merged info pane');
   assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)[\s\S]*?renderInfoPanel\(\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, allowBusyRebuild: options\.localeChange === true\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)/.test(source), '#40/#50: a language switch relabels persistent YO!info chrome and forces busy YO!agent UI to rebuild in the new locale');
-  assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?virtual-panel-controls \.terminal-tab[\s\S]*?info\.subtitle[\s\S]*?querySelectorAll\('\[data-info-subtab\]'\)[\s\S]*?button\.dataset\.infoSubtab === 'yoagent'[\s\S]*?data-info-refresh[\s\S]*?data-yoagent-refresh/.test(source), '#40/#50: the persistent YO!info/YO!agent sub-tab chrome and actions are localized in place by data attribute');
+  assert.equal(/function virtualPanelControlsHtml\(session\)[\s\S]*terminal-tab/.test(source), false, '#40: Preferences and YO!info virtual pane controls do not render a redundant active-tab pill');
+  assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?info\.subtitle[\s\S]*?querySelectorAll\('\[data-info-subtab\]'\)[\s\S]*?button\.dataset\.infoSubtab === 'yoagent'[\s\S]*?data-info-refresh[\s\S]*?data-yoagent-refresh/.test(source), '#40/#50: the persistent YO!info/YO!agent sub-tab chrome and actions are localized in place by data attribute');
   assert.ok(/let i18nApplyLocaleRequestId = 0/.test(source) && /async function applyLocale[\s\S]*?\+\+i18nApplyLocaleRequestId[\s\S]*?if \(requestId !== i18nApplyLocaleRequestId\) return/.test(source), '#50: overlapping language transitions cannot let an older catalog load repaint after the newer language choice');
   // DOIT.8 Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
   assert.ok(source.includes("esc(t('brand.marker'))"), 'the YO marker glyph renders via t(brand.marker)');
@@ -1821,6 +1828,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(pop.includes('/repo/app'), 'repo popover shows the repo root path');
   assert.equal(api.repoInfoPopoverHtml({}), '', 'no popover html without a repo root');
   assert.ok(/\.file-tree-repo-popover\s*\{[^}]*position:\s*fixed/.test(css), 'the repo hover popover is a styled floating element');
+  assert.ok(/\.session-popover\s*\{[\s\S]*background:\s*var\(--panel2\)[\s\S]*border:\s*1px solid var\(--active-control-soft-border\)/.test(css), 'session/tab popovers use a neutral card with theme-accent border, not a hardcoded green card');
+  assert.ok(/\.popover-label\s*\{[\s\S]*color:\s*var\(--active-accent-bright\)/.test(css), 'session/tab popover labels follow the active theme color');
+  assert.equal(/#081f08|#bddcaf|#a2c98d|rgba\(118,\s*185,\s*0,\s*0\.72\)/.test(css), false, 'old hardcoded green popup palette is gone');
   assert.ok(/\.file-tree-repo-ahead/.test(css) && /\.file-tree-repo-dirty/.test(css), 'inline ahead/dirty markers are styled');
 }
 
@@ -1953,7 +1963,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(/\.file-tree-row\.has-agent \.file-tree-agent\s*\{[^}]*margin-inline-end:\s*auto/.test(sharedTreeCss), false, 'file-tree agent metadata must not use auto-margin that can push date columns out of view');
   assert.ok(/\.changes-file-list\s*\{[^}]*display:\s*grid[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)[\s\S]*min-inline-size:\s*0/.test(sharedTreeCss), 'Differ file-list grid constrains shared file-tree rows to the pane width instead of max-content clipping the date column');
   assert.ok(/\.file-tree-row:has\(> \.file-tree-dir-count:not\(\[hidden\]\)\) > \.file-tree-dir-count,[\s\S]*?margin-inline-start:\s*auto/.test(sharedTreeCss), 'Finder/Differ rows push the first right-side metadata column, not the AI marker, to the right edge');
-  assert.ok(/\.file-tree-icon\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ file icons use a centered fixed box');
+  assert.ok(/--file-tree-row-control-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(sharedTreeCss), 'Finder/Differ row controls scale from the Finder font size');
+  assert.ok(/--file-tree-icon-size:\s*calc\(var\(--file-explorer-font-size\) \+ 2px\)/.test(sharedTreeCss), 'Finder/Differ icon boxes scale from the Finder font size');
+  assert.equal(/--file-tree-row-control-size:\s*max\(18px/.test(sharedTreeCss), false, 'Finder/Differ row controls must not keep the old fixed 18px minimum');
+  assert.ok(/\.file-tree-icon\s*\{[^}]*display:\s*inline-flex[\s\S]*flex:\s*0 0 var\(--file-tree-icon-size\)[\s\S]*font-size:\s*var\(--file-tree-icon-font-size\)[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ file icons use a centered box that follows the Finder font size');
+  assert.ok(/\.file-tree-agent \.agent-icon\s*\{[^}]*width:\s*calc\(var\(--file-explorer-font-size\) \+ 3px\)[\s\S]*height:\s*calc\(var\(--file-explorer-font-size\) \+ 1px\)/.test(sharedTreeCss), 'Finder/Differ AI markers scale with the Finder font size instead of pinning the row height');
   assert.ok(/\.file-tree-diff\s*\{[^}]*justify-content:\s*flex-end[\s\S]*flex:\s*0 0 6\.5ch[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ diff counts reserve one shared column before the git status badge');
   assert.ok(/\.file-tree-git-status\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ git status badges use the same centered box');
   assert.ok(/\.file-tree-git-status\s*\{[^}]*overflow:\s*hidden[\s\S]*white-space:\s*nowrap/.test(sharedTreeCss), 'Finder/Differ status badges cannot spill into the date column');
@@ -1966,6 +1980,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("data-yolo-rule-open"), 'Preferences exposes an Open button for the YOLO rule file');
   assert.ok(source.includes("apiFetchJson('/api/yoagent/reset'"), 'YO!agent clear conversation resets the server-side CLI session');
   assert.ok(source.includes("renderYoagentPanel({preserveDraft: false, scrollBottom: true})"), 'YO!agent send/clear clears the draft and scrolls chat to the bottom');
+  assert.equal(source.includes('yoagentSessionSummariesHtml'), false, 'YO!agent default panel does not render the per-session SESSION detail card list');
   assert.ok(source.includes('draggable="true" data-open-change-file='), 'Modified-files rows are draggable as file payloads');
   assert.ok(source.includes("event.dataTransfer.setData('application/x-yolomux-file'"), 'Modified-files drag carries the same file payload as Finder drag');
   assert.ok(source.includes("'Allow index'"), 'Finder directory context menu exposes Allow index');
@@ -1988,6 +2003,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('refreshOpenEditorThemePanels'), 'global/editor theme changes update already-open CodeMirror panels');
   assert.ok(source.includes('function reconfigureCodeMirrorPanelTheme'), 'open CodeMirror panels reconfigure their theme compartment');
   assert.ok(source.includes('&& api?.Compartment'), 'CodeMirror API validation requires Compartment for in-place theme updates');
+  assert.equal(source.includes("panel?._cmPlainFallback ? [codeMirrorThemeExtension(api)]"), false, 'plain CodeMirror fallback theme toggles keep Markdown fallback syntax decorations');
   assert.equal(source.includes('scheme: activeEditorScheme().id'), false, 'CodeMirror config signatures do not force panel rebuilds on theme-only changes');
   assert.ok(source.includes('function yoagentChatNetworkError'), 'YO!agent chat distinguishes network failures from normal HTTP errors');
   assert.ok(source.includes('focusInput: true'), 'YO!agent chat refocuses the input after responses and retryable failures');
@@ -2014,12 +2030,19 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(css), '#42: the editor panel grid reserves a row for the toolbar between tabs and body');
   assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');
   // Editor toolbar alignment: Diff/FROM-TO left, preview font centered, the rest right-aligned.
-  assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor toolbar puts Diff at the left edge before FROM/TO');
+  assert.ok(/\.file-editor-gutter-panel\s*\{[^}]*order:\s*-4/.test(css), 'editor toolbar puts # at the far-left edge');
+  assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-3[\s\S]*min-width:\s*44px/.test(css), 'editor toolbar puts ΔDiff after # and gives it text-button width');
+  assert.ok(/\.file-editor-diff-expand-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor toolbar puts diff expand immediately after ΔDiff');
   assert.ok(/\.file-editor-toolbar:has\(\.file-editor-diff-ref-panel\[hidden\]\) \.file-editor-diff-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), 'editor toolbar lets Diff alone own the left side when FROM/TO is hidden');
+  assert.ok(/\.file-editor-toolbar:has\(\.file-editor-diff-panel\[hidden\]\) \.file-editor-gutter-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), 'editor toolbar keeps # on the left even when Diff is hidden');
   assert.ok(/\.file-editor-preview-font-panel\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%[\s\S]*transform:\s*translateX\(-50%\)/.test(css), 'preview font-size control is centered in the editor toolbar');
   assert.ok(/\.file-editor-toolbar\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(css), '#3: editor toolbar background matches the pane chrome bar (--pane-bar-bg: bright focused / gray unfocused)');
   assert.ok(/\.file-editor-diff-panel\.active,[\s\S]*?\.file-editor-diff-panel\[aria-pressed="true"\]\s*\{[\s\S]*?background:\s*var\(--pane-ctl-pressed-bg/.test(css), 'Diff active state uses the shared pressed control color');
-  assert.ok(/\.file-editor-gutter-panel\.active,[\s\S]*?\.file-editor-wrap-panel\[aria-pressed="true"\]/.test(css), '# and wrap active states share the pressed control treatment');
+  const editorPressedStart = css.indexOf('.file-editor-mode-control-panel button.active');
+  const editorPressedBlock = css.slice(editorPressedStart, css.indexOf('{', editorPressedStart));
+  assert.ok(editorPressedBlock.includes('.file-editor-gutter-panel.active') && editorPressedBlock.includes('.file-editor-find-panel[aria-pressed="true"]') && editorPressedBlock.includes('.file-editor-wrap-panel[aria-pressed="true"]'), '#, Search, and wrap active states share the pressed control treatment');
+  assert.ok(source.includes('>ΔDiff</button>'), 'editor Diff toolbar button renders as ΔDiff text');
+  assert.ok(source.includes('toggleEditorFind(panel);'), 'Search toolbar button toggles the CodeMirror search panel');
   assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
   assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
   assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
@@ -2032,7 +2055,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('function focusCommandPaletteTarget'), 'command palette has one shared post-run focus helper');
   assert.ok(source.includes('focusCommandPaletteTarget(item);'), 'command palette applies deterministic focus after async tab/session actions');
   assert.ok(source.includes('targetItem: item,'), 'command palette tab entries carry their layout focus target');
-  assert.ok(source.includes("const defaultLightEditorScheme = 'yolomux-light';"), 'light editor defaults to the brand YOLOmux Light scheme (green headings, matching dark)');
+  assert.ok(source.includes("const defaultLightEditorScheme = 'yolomux-light';"), 'light editor defaults to the brand YOLOmux Light scheme');
   assert.ok(source.includes("else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);"), 'plain file opens reset stale diff mode back to edit');
   assert.ok(source.includes('applyMarkdownSourceLines(container, text);'), 'Markdown preview source anchors are attached after parsing');
   assert.ok(source.includes('function codeMirrorMarkdownFallbackSyntaxExtension'), 'Markdown edit mode has a parser-independent CodeMirror coloring fallback');
@@ -2041,6 +2064,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/gutterButton\.hidden = isFilePreviewItem\(item\) \|\| state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview-only editor mode hides the line-number button because no CodeMirror gutter is shown');
   assert.ok(/wrapButton\.hidden = isFilePreviewItem\(item\) \|\| state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview-only editor mode hides the wrap button because no CodeMirror editor is shown');
   assert.ok(/findButton && \(isFilePreviewItem\(item\) \|\| mode === 'preview'\)/.test(source), 'preview-only editor mode hides Search because the CodeMirror search panel is not available there');
+  assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\) \|\| isFilePreviewItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session\)/.test(source), 'switching a pane to a pure preview tab re-renders editor chrome as preview-only');
 }
 
 {
@@ -2361,7 +2385,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(uploadedCollapsedHtml.includes('Uploaded files (1)'), 'uploaded files render under a named disclosure group');
   assert.equal(uploadedCollapsedHtml.includes('20260531-028.png</span>'), false, 'uploaded files are collapsed by default');
   api.setUploadedFilesCollapsedForTest(false);
-  assert.ok(api.fileExplorerChangesPanelHtml().includes('20260531-028.png</span>'), 'expanded uploaded group shows uploaded rows');
+  const uploadedExpandedHtml = api.fileExplorerChangesPanelHtml();
+  assert.ok(uploadedExpandedHtml.includes('20260531-028.png</span>'), 'expanded uploaded group shows uploaded rows');
+  assert.equal(/changes-file-path[^>]*>20260531-028\.png</.test(uploadedExpandedHtml), false, 'uploaded Differ rows do not repeat the basename as the secondary path line');
   api.setFileExplorerModeForTest('files');
   api.setFileExplorerSessionFilesPayloadForTest({
     session: '1',
@@ -2432,7 +2458,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(api.fileExplorerChangesPanelHtml().includes('class="changes-title"'), 'Finder modified-files header has a responsive title cell');
   assert.ok(api.fileExplorerChangesPanelHtml().includes('diff-ref-controls compact'), 'Finder modified-files panel exposes compact diff refs');
   // C8/C13 follow-up: Finder embedded Differ now uses the same compact select control pattern as Finder's
-  // own A-Z/Z-A/New/Old sort control, defaulting to New.
+  // own A-Z/Z-A/recent/oldest sort control, defaulting to recent.
   const finderSortPanel = api.fileExplorerChangesPanelHtml();
   assert.ok(/<select class="[^"]*file-explorer-sort-select[^"]*changes-sort-select[^"]*changes-sort-select-compact[^"]*"[^>]*data-session-files-sort/.test(finderSortPanel), 'Finder embedded Differ sort uses the shared compact select styling');
   const sortLabels = {az: 'finder.sort.az', za: 'finder.sort.za', newest: 'finder.sort.newest', oldest: 'finder.sort.oldest'};
@@ -2440,7 +2466,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     const label = api.t(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.ok(new RegExp(`<option value="${value}"[^>]*>${label}</option>`).test(finderSortPanel), `Finder embedded Differ sort offers ${value}`);
   }
-  assert.ok(new RegExp(`<option value="newest"[^>]* selected[^>]*>${api.t('finder.sort.newest')}</option>`).test(finderSortPanel), 'Finder embedded Differ sort defaults to New');
+  assert.ok(new RegExp(`<option value="newest"[^>]* selected[^>]*>${api.t('finder.sort.newest')}</option>`).test(finderSortPanel), 'Finder embedded Differ sort defaults to recent');
   assert.equal(/changes-sort-toggle|changes-sort-seg|changes-sort-divider/.test(finderSortPanel), false, 'Finder embedded Differ no longer uses a separate segmented sort control');
   const sortItems = [
     {path: 'b.txt', repo: '/repo/app', mtime: 100},
@@ -2452,9 +2478,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.setSessionFilesSortModeForTest('za');
   assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['c.txt', 'b.txt', 'a.txt'], 'Differ Z-A sorts by path descending');
   api.setSessionFilesSortModeForTest('newest');
-  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['a.txt', 'b.txt', 'c.txt'], 'Differ New sorts by newest mtime first');
+  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['a.txt', 'b.txt', 'c.txt'], 'Differ recent sorts by newest mtime first');
   api.setSessionFilesSortModeForTest('oldest');
-  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['c.txt', 'b.txt', 'a.txt'], 'Differ Old sorts by oldest mtime first');
+  assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['c.txt', 'b.txt', 'a.txt'], 'Differ oldest sorts by oldest mtime first');
   api.setSessionFilesSortModeForTest('mtime');
   assert.deepEqual(api.sortedSessionFiles(sortItems).map(item => item.path), ['a.txt', 'b.txt', 'c.txt'], 'legacy Differ mtime value maps to New');
   api.setSessionFilesSortModeForTest('name');
@@ -2567,6 +2593,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/body\.theme-light \.file-explorer-changes-panel \.changes-refresh[\s\S]*?\{\s*background:\s*transparent/.test(changedFilesCss), 'light-mode embedded Differ refresh is not a blank white square');
   assert.ok(changedFilesCss.includes('--file-hover-bg: #fff2a8'), 'light-mode Finder/Differ row hover uses a yellow highlighter fill');
   assert.ok(/\.file-tree-row:not\(\.selected\):hover\s*\{[\s\S]*background:\s*var\(--file-hover-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-hover-border\)/.test(changedFilesCss), 'Finder/Differ hover rows use the shared yellow highlighter tokens without overriding selected rows');
+  assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync current file reuses the selected-row color tokens');
   assert.ok(changedFilesCss.includes('flex-wrap: wrap;'), 'Finder toolbar wraps instead of clipping quick-access controls');
   assert.ok(/\.file-explorer-quick-access,\s*\.file-explorer-quick-access-panel\s*\{[\s\S]*flex:\s*0 0 auto/.test(changedFilesCss), 'Finder quick-access buttons do not shrink out of view');
   const fakeChangesScroll = {scrollTop: 45, scrollLeft: 3, innerHTML: ''};
@@ -3184,6 +3211,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-explorer-toolbar-row\s*\{[\s\S]*inline-size:\s*100%/.test(preferencesCss), 'Finder toolbar rows span the pane width');
   assert.ok(/\.file-explorer-toolbar-spacer\s*\{[\s\S]*flex:\s*1 1 auto/.test(preferencesCss), 'Finder toolbar uses explicit spacers to pin right-side controls');
   assert.ok(/\.file-explorer-actions-row \.file-explorer-date-reload-cluster\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder row 3 keeps date and reload grouped');
+  assert.ok(/\.file-explorer-date-toggle\[data-date-mode="none"\]\s*\{[\s\S]*text-decoration-line:\s*line-through/.test(preferencesCss), 'Finder/Differ None date mode renders as crossed-out Date');
   assert.ok(/\.file-explorer-primary-row \.file-explorer-path-inline\s*\{[\s\S]*flex:\s*1 1 0[\s\S]*min-width:\s*0[\s\S]*min-inline-size:\s*0/.test(preferencesCss), 'Finder path fills the primary row and can shrink without wrapping controls');
   assert.ok(/body:not\(\.file-explorer-mode-diff\) \.file-explorer-primary-row \.file-explorer-toolbar-spacer\s*\{[\s\S]*flex:\s*0 0 0/.test(preferencesCss), 'Finder files mode lets the path input consume the space before Copy and close');
   assert.ok(/\.file-explorer-mode-switcher\s*\{[\s\S]*display:\s*inline-flex/.test(preferencesCss), 'Finder/Differ mode switcher is a segmented inline control');
@@ -3205,6 +3233,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerModeSwitcherHtml\(\)[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)[\s\S]*<input class="file-explorer-path-inline file-explorer-mode-files-only"[\s\S]*file-explorer-path-copy-panel[\s\S]*fileExplorerChangesCollapseToggleHtml\(\)[\s\S]*file-explorer-frame-controls/.test(finderPanelSource), 'Finder panel primary row renders mode switcher, diff-mode Session select, path, copy, Differ collapse toggle, and close control');
   assert.ok(/function fileExplorerDiffSessionControlHtml[\s\S]*file-explorer-diff-session-control file-explorer-mode-diff-only changes-control[\s\S]*changes\.session[\s\S]*sessionFilesSessionSelectHtml\(session/.test(finderPanelBundle), 'Differ mode keeps the Session dropdown in the top Finder/Differ row');
   assert.ok(/file-explorer-toolbar-row file-explorer-scope-row[\s\S]*file-explorer-hidden-toggle file-explorer-hidden-toggle-panel[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*file-explorer-quick-access-panel/.test(finderPanelSource), 'Finder scope row renders .*, Sync, then quick-root buttons');
+  assert.ok(finderPanelBundle.includes("t('finder.toolbar.syncTitle')"), 'Finder Sync button has a dedicated tooltip/aria label string');
+  assert.ok(finderPanelSource.includes('title="${esc(t(\'finder.toolbar.syncTitle\'))}"') && finderPanelSource.includes('${esc(t(\'finder.toolbar.syncLabel\'))}</button>'), 'Finder Sync panel button uses the full tooltip while keeping the compact visible label');
   assert.equal(api.displayQuickAccessPath('/'), '/*', 'Finder root quick-access button labels root as /*');
   assert.equal(api.displayQuickAccessPath('/*'), '/*', 'Finder accepts /* as the root quick-access label');
   assert.equal(api.expandQuickAccessPath('/'), '/', 'Finder / quick-access opens the root directory');
@@ -3390,10 +3420,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesCss.includes('var(--code-diff-remove) 32%'), '#250: dark diff removed-line fill is a muted soft tint (not the old saturated 76% block)');
   assert.ok(preferencesCss.includes('var(--code-diff-add) 30%'), '#250: dark diff added-line fill is a muted soft tint (not the old saturated 74% block)');
   assert.ok(preferencesCss.includes('.file-editor-icon-side-split'), 'cross-pane side preview has a distinct icon');
-  assert.ok(preferencesCss.includes('.panel.preview-linked:not(.active-pane)'), 'paired side-preview pane gets a thinner linked ring');
+  assert.ok(/\.panel\.preview-linked:not\(\.active-pane\)[\s\S]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'paired side-preview pane uses the same active-color ring token as the focused pane');
   assert.ok(/\.yoagent-global\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent global summary fits narrow panes');
-  assert.ok(/\.yoagent-session-summaries\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent session summaries fit narrow panes');
+  assert.ok(/\.yoagent-list\s*\{[\s\S]*display:\s*flex[\s\S]*flex-direction:\s*column/.test(preferencesCss), 'YO!agent content column can push the chat section to the bottom');
   assert.ok(/\.yoagent-chat\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent chat fits narrow panes');
+  assert.ok(/\.yoagent-chat\s*\{[\s\S]*margin-top:\s*auto/.test(preferencesCss), 'YO!agent chat stays at the bottom of the summary view when there is spare height');
+  assert.ok(/\.yoagent-global\s*\{[\s\S]*border-inline-start:\s*3px solid var\(--active-accent-bright\)/.test(preferencesCss), 'YO!agent global summary accent follows the active theme color');
+  assert.equal(/\.yoagent-(?:global|refresh|session|chat|message|backend)[\s\S]{0,260}var\(--brand-green\)/.test(preferencesCss), false, 'YO!agent summary/chat accents do not hardcode the green theme token');
   assert.ok(/\.yoagent-chat\.empty\s*\{[\s\S]*grid-template-rows:\s*auto auto/.test(preferencesCss), 'empty YO!agent chat does not stretch an empty history row');
   assert.ok(preferencesCss.includes('body.editor-cursor-block .file-editor-codemirror .cm-cursor'), 'block cursor styling is available for CodeMirror');
   assert.ok(/\.preferences-setting-control\s*\{[^}]*--preferences-control-left-indent:\s*14px/.test(preferencesCss), 'Preferences controls share the 14px left inset');
@@ -3539,12 +3572,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave_delay_seconds"'), 'preferences expose editor autosave delay');
   assert.ok(preferencesHtml.includes('data-setting-path="yoagent.backend"'), 'preferences expose YO!agent backend');
   assert.ok(preferencesHtml.includes('data-setting-path="yoagent.system_prompt"'), 'preferences expose YO!agent prompt');
-  assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.system_prompt"[\s\S]*rows="12"/.test(preferencesHtml), 'YO!agent system prompt renders as a tall full-width row');
-  assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.intro"[\s\S]*rows="12"/.test(preferencesHtml), 'YO!agent intro renders as a tall full-width row');
-  assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.format"[\s\S]*rows="12"/.test(preferencesHtml), 'YO!agent format renders as a tall full-width row');
+  assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.system_prompt"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent system prompt renders as an autosizing full-width row');
+  assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.intro"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent intro renders as an autosizing full-width row');
+  assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.format"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent format renders as an autosizing full-width row');
   assert.ok(/data-setting-path="file_explorer\.quick_access_paths"[\s\S]*data-setting-type="list"[\s\S]*rows="3"/.test(preferencesHtml), 'list settings keep compact textarea rows');
   assert.ok(/\.preferences-setting-row--wide\s*\{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(preferencesCss), 'wide preference rows stack to one column');
-  assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control textarea\s*\{[\s\S]*grid-column:\s*1 \/ -1[\s\S]*min-height:\s*min\(34vh, 15lh\)/.test(preferencesCss), 'wide textarea controls span the row and stay tall');
+  assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control textarea\s*\{[\s\S]*grid-column:\s*1 \/ -1[\s\S]*min-height:\s*5lh/.test(preferencesCss), 'wide textarea controls span the row with a compact autosize floor');
+  assert.ok(/function autosizePreferenceTextarea\([\s\S]*scrollHeight/.test(diffBundle), 'Preferences autosize textareas resize from their content height');
+  assert.ok(/textarea\[data-setting-autosize="true"\]\s*\{[^}]*overflow-y:\s*hidden/.test(preferencesCss), 'autosizing Preferences textareas do not show stale inner scrollbars');
   // #38: long-value text fields (upload filename template, YOLO rule path) render as full-width --wide
   // rows so the whole value shows instead of clipping at the old 24ch cap.
   assert.ok(/preferences-setting-row preferences-setting-row--wide"><label class="preferences-setting-label" for="preference-uploads-filename_template"/.test(preferencesHtml), '#38: the upload filename template is a full-width row so its long value is not clipped');
@@ -3553,6 +3588,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const radioModePaths = new Map([
     ['general.default_layout', ['single', 'grid', 'wall']],
     ['appearance.theme', ['system', 'dark', 'light']],
+    ['appearance.active_color', ['green', 'blue', 'orange', 'yellow', 'purple', 'white']],
     ['appearance.terminal_theme', ['follow-app', 'dark', 'light']],
     ['appearance.date_time_hour_cycle', ['24', '12']],
     ['appearance.editor_cursor_style', ['line', 'block']],
@@ -3571,6 +3607,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     }
   }
   assert.ok(preferencesHtml.includes('>Same Tab<'), 'string radio labels are humanized');
+  assert.equal(/data-setting-path="appearance\.theme"[\s\S]{0,180}preferences-radio-swatches/.test(preferencesHtml), false, 'Global color theme radios do not show color swatches');
+  assert.equal(/<select[^>]*data-setting-path="appearance\.active_color"/.test(preferencesHtml), false, 'Active color renders as radios, not a select');
+  assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#86d600[\s\S]*--preferences-radio-swatch:#4f9e3a/.test(preferencesHtml), 'Active color Green radio shows joined actual dark/light accent swatches');
+  assert.ok(/\.preferences-radio-group\.has-swatches\s*\{[\s\S]*display:\s*grid[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(148px,\s*1fr\)\)/.test(preferencesCss), 'swatched Preferences radio groups use a shared grid so wrapped rows align');
+  assert.ok(/\.preferences-radio\.has-swatches\s*\{[\s\S]*grid-template-columns:\s*18px 34px minmax\(0,\s*1fr\)/.test(preferencesCss), 'swatched Preferences radios align radio, color chips, and label in fixed columns');
+  assert.ok(/\.preferences-radio-swatch\s*\{[\s\S]*border-radius:\s*2px/.test(preferencesCss), 'Preferences color swatches are boxed, not round dots');
+  assert.ok(/\.preferences-radio-swatches\.joined\s*\{[\s\S]*gap:\s*0/.test(preferencesCss), 'Preferences active-color swatches are connected into one segmented box');
+  assert.ok(/\.keyboard-shortcuts-section h3\s*\{[\s\S]*color:\s*var\(--active-accent-bright\)/.test(preferencesCss), 'Keyboard shortcuts section headers follow the active theme color');
   assert.ok(preferencesHtml.includes('>New Tab<'), 'hyphenated string radio labels are humanized');
   // "No agent" (deterministic) is no longer a selectable backend — Auto still falls back to it internally,
   // but it is never offered as a pick in Preferences or the composer pill.
@@ -3604,6 +3648,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     api.setFileExplorerTreeDateModeForTest('none');
     assert.equal(api.sessionFileDisplayTimeText(timestamp), '', 'file-tree date mode None hides Finder/Differ timestamps');
     assert.equal(api.fileExplorerTreeDateModeLabel('none'), 'None', 'file-tree date mode None label uses the source locale catalog');
+    assert.equal(api.fileExplorerTreeDateModeButtonLabel('none'), 'Date', 'file-tree date mode None button shows crossed-out Date text');
     assert.equal(api.fileExplorerTreeDateModeLabel('date'), 'Date', 'file-tree date mode Date label uses the source locale catalog');
     assert.equal(api.fileExplorerTreeDateModeLabel('relative'), 'Ago', 'file-tree date mode Ago label uses the source locale catalog');
     assert.equal(api.fileExplorerTreeDateModeTitle('relative'), 'Date display: Ago. Click to cycle None, Date, Ago.', 'file-tree date mode tooltip uses localized catalog text');
@@ -3672,7 +3717,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.setFileEditorThemeMode('github-light');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--editor-scheme-bg'), '#ffffff');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--code-keyword'), '#cf222e');
-  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-markdown-heading'), '#6f42c1');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-markdown-heading'), 'var(--active-accent-bright)');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--markdown-heading'), 'var(--active-accent-bright)');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-markdown-heading-bg'), 'var(--active-control-soft-bg)');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--markdown-heading-bg'), 'var(--active-control-soft-bg)');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-code-inline'), '#a40e26');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-code-inline-bg'), '#fff1d6');
   assert.notEqual(api.activeEditorSchemeForTest().syntax.heading, api.activeEditorSchemeForTest().syntax.link);
@@ -3905,6 +3953,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesCss.includes('.modal.about-open'), 'About modal has compact modal chrome');
   assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
   assert.ok(/\.about-brand-yo\s*\{[\s\S]*animation:\s*yolo-marker-rotate/.test(preferencesCss), 'About YO glyph spins with the shared YOLO marker animation');
+  assert.ok(/\.about-brand-yo\s*\{[\s\S]*background:\s*var\(--pane-tab-yolo-bg\)/.test(preferencesCss), 'About YO glyph follows the active theme color');
+  const brandCss = fs.readFileSync('static/brand.css', 'utf8');
+  assert.ok(/--brand-primary-green:\s*var\(--active-control-bg/.test(brandCss), 'topbar YOLOmux wordmark follows the active theme color');
   assert.equal(api.testElementForId('closeModal').textContent || 'X', 'X', 'About modal close button is an X');
   assert.ok(fs.readFileSync('yolomux_lib/web.py', 'utf8').includes('<button id="closeModal" title="Close" aria-label="Close">X</button>'), 'HTML shell renders the modal close button as X');
   // DOIT.8: File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
@@ -4031,6 +4082,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('item.splitRun'), 'command palette supports split-open actions');
   assert.ok(source.includes('function updateLinkedFilePreviewRings()'), 'side-preview ring state is centralized');
   assert.ok(source.includes("previewPanel.classList.add('preview-linked')"), 'focused editors mark their paired side-preview pane');
+  assert.ok(source.includes("editorPanel.classList.add('preview-linked')"), 'focused pure-preview panes mark their paired editor pane');
+  assert.equal(/if \(!focusedPanelItem \|\| isFilePreviewItem\(focusedPanelItem\)\) return/.test(source), false, 'focused pure-preview panes keep their editor counterpart linked');
   const focusStart = source.indexOf('function setFocusedPanelItem(');
   const focusEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusStart);
   assert.ok(source.slice(focusStart, focusEnd).includes('const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);'), 'explicit Finder sync is driven by clicked tmux panes and clicked editors');
@@ -4525,6 +4578,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
       {abs_path: '/repo/A/B/C/F', agents: ['codex'], status: 'M', mtime: 1},
       {abs_path: '/repo/A/B/C/G', agent: 'claude', status: 'M', mtime: 2},
       {abs_path: '/repo/A/B/D/H', agents: ['codex'], status: 'A', mtime: 3},
+      {abs_path: '/repo/A/B/D/touched-only.py', agent: 'claude', status: 'T', mtime: 4, source: 'transcript'},
     ],
   });
   api.setFileExplorerExpandedForTest(['/repo/A', '/repo/A/B', '/repo/A/B/C', '/repo/A/B/D']);
@@ -4541,7 +4595,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-dir-count').textContent, '3', 'Finder changed ancestor A shows total changed descendants');
   assert.equal(ancestorRows['/repo/A/B'].querySelector(':scope > .file-tree-dir-count').textContent, '3', 'Finder changed ancestor B shows total changed descendants');
   assert.equal(ancestorRows['/repo/A/B/C'].querySelector(':scope > .file-tree-dir-count').textContent, '2', 'Finder changed ancestor C counts only its subtree');
-  assert.equal(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-dir-count').textContent, '1', 'Finder changed ancestor D counts only its subtree');
+  assert.equal(ancestorRows['/repo/A/B/D'].querySelector(':scope > .file-tree-dir-count').textContent, '1', 'Finder changed ancestor badges ignore transcript-only touched files with no diff');
   assert.ok(ancestorRows['/repo/A'].classList.contains('file-tree-row--changed-ancestor'), 'Finder changed ancestors are bold-marked');
   assert.ok(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon claude'), 'Finder changed ancestor A inherits Claude marker from descendants');
   assert.ok(ancestorRows['/repo/A'].querySelector(':scope > .file-tree-agent').innerHTML.includes('agent-icon codex'), 'Finder changed ancestor A inherits Codex marker from descendants');
@@ -5753,8 +5807,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     },
   });
   assert.ok(api.globalActivitySummaryHtml().includes('YO!agent'), 'global activity summary uses the YO agent label');
-  assert.ok(api.yoagentSessionSummariesHtml().includes('session alpha'), 'YO!agent renders per-session summaries');
-  assert.ok(api.yoagentSessionSummariesHtml().includes('Codex session alpha is active'), 'YO!agent per-session summary uses the local roll-up');
+  assert.equal(api.globalActivitySummaryHtml().includes('Session alpha'), false, 'YO!agent default panel does not expose the per-session SESSION detail list');
   assert.equal(api.yoagentChatHtml().includes('data-yoagent-chat-form'), false, 'No-agent YO!agent hides the chat form');
   assert.ok(api.yoagentChatHtml().includes('Set a Claude or Codex backend in Preferences to chat.'), 'No-agent YO!agent points users to backend settings');
   api.setClientSettingsPatchForTest({yoagent: {backend: 'claude'}});
@@ -6107,9 +6160,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.yoagent-backend-pill\s*\{/.test(css), 'backend pill is styled as a pill');
   assert.ok(/\.yoagent-chat \.markdown-body pre[\s\S]*?border-radius:\s*8px/.test(css), 'YO!agent code blocks are soft rounded boxes');
   assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body pre/.test(css), 'YO!agent code blocks get a light box + dark text in light mode');
-  assert.ok(/body\.theme-light \.yoagent-message-body\.markdown-body,[\s\S]*?\.yoagent-session-summary-body\.markdown-body\s*\{[^}]*color:\s*#111827/.test(css), 'YO!agent light-mode markdown bodies use dark app text instead of editor markdown colors');
-  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body strong,[\s\S]*?\.yoagent-session-summary \.markdown-body strong\s*\{[^}]*color:\s*#111827/.test(css), 'YO!agent light-mode bold text is readable, not white-on-light');
-  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body :not\(pre\) > code,[\s\S]*?\.yoagent-session-summary \.markdown-body :not\(pre\) > code\s*\{[^}]*color:\s*#0f4c81/.test(css), 'YO!agent light-mode inline code uses a readable app-blue chip');
+  assert.ok(/body\.theme-light \.yoagent-message-body\.markdown-body,[\s\S]*?\.yoagent-global \.markdown-body\s*\{[^}]*color:\s*#111827/.test(css), 'YO!agent light-mode markdown bodies use dark app text instead of editor markdown colors');
+  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body strong,[\s\S]*?\.yoagent-global \.markdown-body strong\s*\{[^}]*color:\s*#111827/.test(css), 'YO!agent light-mode bold text is readable, not white-on-light');
+  assert.ok(/body\.theme-light \.yoagent-chat \.markdown-body :not\(pre\) > code,[\s\S]*?\.yoagent-global \.markdown-body :not\(pre\) > code\s*\{[^}]*color:\s*#0f4c81/.test(css), 'YO!agent light-mode inline code uses a readable app-blue chip');
   // Rendered-markdown chat bodies drop pre-wrap so bullet lists are tightly spaced (the preserved
   // newlines between/inside the generated <ul><li> HTML were widening them).
   assert.ok(/\.yoagent-message-body\.markdown-body\s*\{[^}]*white-space:\s*normal/.test(css), 'rendered markdown chat bodies use white-space:normal so bullets are not widely spaced');
@@ -6144,17 +6197,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 }
 
 {
-  // DOIT.6 #29: per-session summary renders markdown; block headings downgrade to inline bold.
+  // DOIT.6 #129: the yoagent markdown normalizer tightens loose lists / collapses blank-line runs.
   const api = loadYolomux('', ['1']);
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.equal(api.yoagentInlineMarkdown('## Ant-brain session summary\nbody'), '**Ant-brain session summary**\nbody', '#29: ## headings become inline bold (no big h2)');
-  assert.equal(api.yoagentInlineMarkdown('### Goal ###\n- a'), '**Goal**\n- a', '#29: closed ATX headings downgrade and keep list markers');
-  assert.equal(api.yoagentInlineMarkdown('**Goal:** ship it `now`'), '**Goal:** ship it `now`', '#29: inline emphasis/code is left intact');
-  // The summary body is flagged for the markdown pass (like chat) and that pass handles it.
-  assert.ok(source.includes('yoagent-session-summary-body markdown-body" data-yoagent-summary-markdown'), '#29: the summary body is flagged for markdown rendering');
-  assert.ok(/\.yoagent-session-summary-body\[data-yoagent-summary-markdown\]/.test(source), '#29: renderYoagentMessageMarkdown renders the summary card body');
-  assert.ok(/renderMarkdownPreviewInto\(body, yoagentInlineMarkdown\(/.test(source), '#29: summary markdown is heading-downgraded before rendering');
-  // DOIT.6 #129: the yoagent markdown normalizer tightens loose lists / collapses blank-line runs.
   assert.equal(api.yoagentTightMarkdown('- a\n\n- b\n\n- c'), '- a\n- b\n- c', '#129: blank lines between adjacent list items are stripped (tight list)');
   assert.equal(api.yoagentTightMarkdown('1. a\n\n2. b'), '1. a\n2. b', '#129: ordered-list item gaps are stripped too');
   assert.equal(api.yoagentTightMarkdown('lead\n\n\n\nmore'), 'lead\n\nmore', '#129: runs of 2+ blank lines collapse to one');
@@ -6216,7 +6261,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const api = loadYolomux('', ['1']);
   api.setActiveLocaleForTest('en');
   const html = api.preferencesPanelHtmlForTest('');
-  assert.ok(/data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders as an Appearance preference');
+  assert.ok(/data-preference-section="Terminal \/ Editor"[\s\S]*data-setting-path="appearance\.preview_font_size"/.test(html), 'preview font size renders in Terminal / Editor preferences');
   assert.ok(html.includes('Preview font size'), 'preview font size preference has a label');
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes("let editorPreviewFontSize = initialSetting('appearance.preview_font_size', editorFontSize + 1);"), 'preview font size defaults one larger than editor font during bootstrap');
@@ -6299,7 +6344,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.16'), false, '#259 follow-up: the too-dark light overlay alpha is gone');
     assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.13'), false, '#259 follow-up: the still-too-dark light overlay alpha is gone');
     // #258 follow-up: Diff sits left of FROM/TO; FROM/TO then pushes the remaining tools right.
-    assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor info bar: Diff sits left of FROM/TO');
+    assert.ok(/\.file-editor-gutter-panel\s*\{[^}]*order:\s*-4/.test(css), 'editor info bar: # sits at the left edge');
+    assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-3/.test(css), 'editor info bar: ΔDiff sits left of FROM/TO');
+    assert.ok(/\.file-editor-diff-expand-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor info bar: expand sits to the right of ΔDiff');
     assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*order:\s*-1[^}]*margin-inline-end:\s*auto/.test(css), 'editor info bar: FROM/TO sits after Diff and pushes remaining buttons right');
     assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*min-width:\s*max-content[^}]*overflow:\s*visible/.test(css), 'editor info bar: FROM/TO/reset is intrinsic-width and not clipped');
     assert.equal(css.includes('max-width: min(32vw, 190px)'), false, 'editor info bar: the old too-narrow 190px clipping cap is gone');
@@ -6443,7 +6490,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // pseudo-locale accents them and NO plain-English label/help from any section leaks through.
   for (const key of [
     'pref.appearance.theme.label', 'pref.appearance.terminal_theme.help',
-    'pref.appearance.date_time_hour_cycle.label',
+    'pref.appearance.date_time_hour_cycle.label', 'pref.appearance.font_sizes.note',
     'pref.performance.metadata_refresh_ms.label', 'pref.notifications.throttle_seconds.label',
     'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',
     'pref.yoagent.backend.label', 'pref.yolo.dry_run.label',
@@ -6451,7 +6498,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.ok(html.includes(enXA[key]), `pseudo-locale renders ${key}`);
   }
   for (const englishLeak of [
-    'Global color theme', 'Metadata refresh interval', 'Notification throttle',
+    'Global color theme', 'Editor/Terminal font sizes are in Terminal / Editor.', 'Metadata refresh interval', 'Notification throttle',
     'Terminal scrollback', 'Upload size cap', 'YO!agent backend', 'Dry run',
   ]) {
     assert.equal(html.includes(englishLeak), false, `no plain-English "${englishLeak}" leaks under the pseudo-locale`);
@@ -6494,6 +6541,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.equal(/上午|下午|[AP]\.?M\.?/i.test(localizedDate), false, `${locale} Finder date defaults to a 24-hour clock`);
     assert.ok(/\d{2}:\d{2}/.test(localizedDate), `${locale} Finder date includes a two-digit clock`);
     assert.equal(api.fileExplorerTreeDateModeLabel('none'), catalog['finder.dateMode.none'], `${locale} Finder/Differ None date-mode button is localized`);
+    assert.equal(api.fileExplorerTreeDateModeButtonLabel('none'), catalog['finder.dateMode.date'], `${locale} Finder/Differ None date-mode button shows localized crossed-out Date`);
     assert.equal(api.fileExplorerTreeDateModeLabel('date'), catalog['finder.dateMode.date'], `${locale} Finder/Differ Date date-mode button is localized`);
     assert.equal(api.fileExplorerTreeDateModeLabel('relative'), catalog['finder.dateMode.relative'], `${locale} Finder/Differ Ago date-mode button is localized`);
     assert.equal(api.fileExplorerTreeDateModeTitle('relative').includes('None'), false, `${locale} Finder/Differ date-mode tooltip does not leak English None`);
@@ -6564,12 +6612,18 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(appearanceHtml.includes('Solar gold'), 'Active color Yellow is labeled Solar gold');
   assert.ok(appearanceHtml.includes('Royal violet'), 'Active color Purple is labeled Royal violet');
   assert.ok(appearanceHtml.includes('Moon white'), 'Active color White is labeled Moon white');
+  assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.active_color"/.test(appearanceHtml), 'Active color Blue renders as a radio');
+  assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#3b82f6[\s\S]*--preferences-radio-swatch:#2563eb/.test(appearanceHtml), 'Active color Blue radio shows connected actual dark/light accent swatches');
+  assert.ok(appearanceHtml.includes('preferences-setting-note') && appearanceHtml.includes('Editor/Terminal font sizes are in Terminal / Editor.'), 'Appearance shows a note after Finder font size pointing editor/terminal font sizes to Terminal / Editor');
+  assert.ok(/data-setting-path="appearance\.file_explorer_font_size"[\s\S]*preferences-setting-note[\s\S]*data-setting-path="appearance\.tab_width"/.test(appearanceHtml), 'Appearance font-size note sits directly after Finder font size');
   assert.ok(/data-setting-path="appearance\.pane_ring_opacity"[^>]*data-setting-type="range"[^>]*min="5"[^>]*max="100"/.test(appearanceHtml), 'Pane ring opacity renders as a 5-100 Appearance slider');
   assert.equal(appearanceHtml.includes('data-setting-path="appearance.inactive_pane_gradient"'), false, 'Inactive pane gradient is removed from Appearance');
   assert.ok(/data-setting-path="appearance\.inactive_pane_opacity"[^>]*data-setting-type="range"[^>]*min="0"[^>]*max="100"/.test(appearanceHtml), 'Inactive pane opacity renders as a 0-100 Appearance slider');
   const appearancePaths = [...appearanceHtml.matchAll(/data-setting-path="([^"]+)"/g)].map(match => match[1]);
   assert.equal(appearancePaths.at(-1), 'appearance.date_time_hour_cycle', '12-hour / 24-hour Date/time clock is the last Appearance item');
-  assert.ok(sectionHtml(api.t('pref.section.terminal_editor')).includes('data-setting-path="appearance.terminal_theme"'), 'Terminal / Editor follows Appearance and owns terminal/editor-specific controls');
+  const terminalEditorHtml = sectionHtml(api.t('pref.section.terminal_editor'));
+  assert.ok(terminalEditorHtml.includes('data-setting-path="appearance.terminal_theme"'), 'Terminal / Editor follows Appearance and owns terminal/editor-specific controls');
+  assert.ok(/data-setting-path="appearance\.terminal_font_size"[\s\S]*data-setting-path="appearance\.editor_font_size"[\s\S]*data-setting-path="appearance\.preview_font_size"[\s\S]*data-setting-path="terminal_editor\.scrollback"/.test(terminalEditorHtml), 'Terminal / Editor groups Terminal, Editor, and Preview font sizes together before scrollback');
   assert.equal(sectionHtml(api.t('pref.section.general')).includes('data-setting-path="general.default_layout"'), false, 'Default layout no longer lives in General');
   assert.equal(sectionHtml(api.t('pref.section.general')).includes('data-setting-path="general.reload_on_update"'), false, 'Notify on server update no longer lives in General');
   // DOIT.29: the GitHub section carries the watched-PRs list field.
@@ -7089,11 +7143,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('blameAllLines: fileEditorBlameAllLines'), 'DOIT.26: blame-all-lines is in the editor config signature');
   assert.ok(/if \(fileEditorBlameAllLines\)[\s\S]{0,260}view\.visibleRanges/.test(source), 'DOIT.26: all-lines blame decorates every visible line');
   assert.ok(source.includes('data-setting-path="editor.blame_all_lines"') || source.includes("path: 'editor.blame_all_lines'"), 'DOIT.26: Preferences exposes the all-lines blame toggle');
-  // Blame + Diff buttons are a single git-history pair: adjacent in markup, same visibility predicate.
+  // Blame + Diff buttons are adjacent git-history controls, but Blame stays available after Diff learns
+  // a file is clean so inline blame still works in normal edit mode.
   assert.ok(/file-editor-blame-panel[\s\S]{0,260}file-editor-diff-panel/.test(source), 'Blame and Diff buttons are adjacent toolbar controls');
   assert.ok(/function fileStateHasUsefulGitHistory[\s\S]*state\?\.gitTracked === true[\s\S]*state\?\.gitHasHistory === true[\s\S]*state\.gitHistory\.length > 1/.test(source), 'file-history metadata requires an actual multi-commit file history');
-  assert.ok(/function fileEditorGitActionControlsVisible[\s\S]*fileStateHasUsefulGitHistory\(state\)[\s\S]*confirmedNoDiff/.test(source), 'shared git-action predicate hides both controls for non-git, creation-only, stale-history, or confirmed-clean files');
-  assert.ok(source.includes('updateFileEditorBlameButton(blameButton, path, state, item);'), 'blame button uses the shared git-action visibility helper');
+  assert.ok(/function fileEditorGitActionControlsVisible[\s\S]*fileStateHasUsefulGitHistory\(state\)[\s\S]*confirmedNoDiff/.test(source), 'Diff visibility hides non-git, creation-only, stale-history, or confirmed-clean files');
+  assert.ok(/function fileEditorBlameControlsVisible[\s\S]*fileStateHasUsefulGitHistory\(state\)/.test(source), 'Blame visibility depends on useful file history, not current diff availability');
+  assert.ok(/function updateFileEditorBlameButton[\s\S]*fileEditorBlameControlsVisible\(path, state, item\)/.test(source), 'blame button uses the blame-specific history visibility helper');
   assert.ok(/function updateFileEditorBlameButton[\s\S]*editorViewModeFor\(path, item\) === 'edit'[\s\S]*button\.disabled = !visible \|\| !editable/.test(source), 'Blame is clickable only in normal edit mode');
   assert.ok(/file-editor-blame-panel'\)\?\.addEventListener\('click'[\s\S]*event\.currentTarget\?\.disabled\) return/.test(source), 'disabled Blame clicks do not toggle the global blame preference');
   assert.ok(source.includes('button.hidden = !fileEditorGitActionControlsVisible(path, state, item);'), 'diff button uses the shared git-action visibility predicate');

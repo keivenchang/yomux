@@ -54,10 +54,8 @@
   --pane-inactive-tab-border: var(--active-tab-muted-border);
   --pane-tab-text: #dfe6ef;
   /* DOIT.41: ONE source accent that every ACTIVE/FOCUSED surface derives from (active tab, focused-pane
-     ring + glow, chrome strip, file selection, hover tints). Swapped by the appearance.active_color
-     preference; Green is the default = the brand-green values below, so this refactor is a no-op.
-     NOTE: YOLO (--pane-tab-yolo-*, --auto-glow) and editor syntax greens deliberately do NOT derive
-     from this — YOLO stays brand green so a non-green accent never disguises auto-approve state. */
+     ring + glow, chrome strip, file selection, hover tints, YO marker, and Markdown headings). Swapped
+     by the appearance.active_color preference; Green is the default = the brand-green values below. */
   --active-accent: #76b900;          /* solid: ring, glow, strip, alpha tints */
   --active-accent-rgb: 118 185 0;    /* triple → rgb(var(--active-accent-rgb) / α) for every alpha use */
   --active-accent-bright: #86d600;   /* active-tab fill + border */
@@ -95,9 +93,9 @@
      row (.panel-detail-row) read via --pane-bar-bg. Derived from the active accent so it flips with the
      active-color preference and the theme. */
   --pane-tab-strip-bg: var(--active-accent-dim);
-  --pane-tab-yolo-text: #071000;
-  --pane-tab-yolo-bg: #76b900;
-  --pane-tab-yolo-border: #9be33d;
+  --pane-tab-yolo-text: var(--active-control-text);
+  --pane-tab-yolo-bg: var(--active-control-bg);
+  --pane-tab-yolo-border: var(--active-control-border);
   --pane-tab-panel-ring: var(--active-accent);
   --pane-tab-panel-ring-shadow: rgb(var(--active-accent-rgb) / 0.95);
   --pane-tab-panel-ring-width: 4px;
@@ -204,7 +202,7 @@
   --text-selection-bg: #2563eb;
   --editor-active-line: rgba(255, 255, 255, 0.04);
   --editor-line-number: #9aa5b1;
-  --markdown-heading: #d2ff8a;
+  --markdown-heading: var(--active-accent-bright);
   --markdown-link: #7ee9ff;
   --markdown-strong: #fff0a6;
   --markdown-emphasis: #ffd27e;
@@ -245,7 +243,7 @@
   --lt-editor-bg: #ffffff;
   --lt-editor-gutter-bg: #f6f8fa;
   --lt-editor-preview-bg: #fff6df;
-  --lt-markdown-heading: #0f3d22;
+  --lt-markdown-heading: var(--active-accent-bright);
   --lt-markdown-heading-bg: #fffdf7;
   --lt-markdown-link: #075985;
   --lt-markdown-strong: #1f2328;

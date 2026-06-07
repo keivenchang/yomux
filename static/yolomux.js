@@ -1540,6 +1540,11 @@ function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateMode) {
   return t(`finder.dateMode.${normalized}`);
 }
 
+function fileExplorerTreeDateModeButtonLabel(mode = fileExplorerTreeDateMode) {
+  const normalized = normalizeFileExplorerTreeDateMode(mode);
+  return normalized === 'none' ? t('finder.dateMode.date') : fileExplorerTreeDateModeLabel(normalized);
+}
+
 function fileExplorerTreeDateModeTitle(mode = fileExplorerTreeDateMode) {
   return t('finder.dateMode.title', {
     mode: fileExplorerTreeDateModeLabel(mode),
@@ -1556,7 +1561,7 @@ function syncFileExplorerTreeDateButton(button) {
   button.classList.toggle('active', active);
   button.dataset.dateMode = mode;
   button.setAttribute('aria-pressed', active ? 'true' : 'false');
-  button.textContent = fileExplorerTreeDateModeLabel(mode);
+  button.textContent = fileExplorerTreeDateModeButtonLabel(mode);
   const label = fileExplorerTreeDateModeTitle(mode);
   button.title = label;
   button.setAttribute('aria-label', label);
@@ -1825,10 +1830,15 @@ function fuzzySearchScore(query, fields) {
 
 function fuzzyHighlightHtml(query, text) {
   const value = String(text ?? '');
-  const token = String(query || '').trim().split(/\s+/).filter(Boolean)[0] || '';
-  const match = fuzzySubsequenceMatch(token, value);
-  if (!match || !match.indexes.length) return esc(value);
-  const indexes = new Set(match.indexes);
+  // Highlight EVERY query token's subsequence match, not just the first — mirrors fuzzySearchScore, which
+  // scores all tokens. So "pa exploration" highlights both "PA" and "exploration", not only "pa".
+  const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
+  const indexes = new Set();
+  for (const token of tokens) {
+    const match = fuzzySubsequenceMatch(token, value);
+    if (match) for (const matchIndex of match.indexes) indexes.add(matchIndex);
+  }
+  if (!indexes.size) return esc(value);
   const chars = Array.from(value);
   const parts = [];
   let index = 0;
@@ -4893,7 +4903,12 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   const type = tabTypeForItem(item);
   if (type?.detail) return type.detail(item);
-  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
+  const detail = tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
+  // A non-numeric tmux session name (e.g. "PA exploration") is shown in the tab label only as its
+  // assigned number (e.g. "9"), so the real name is otherwise invisible. Surface it in the menu/search
+  // detail so a result like label "9" reads "9 · PA exploration · main · …" and is identifiable.
+  if (numericSessionName(item) === null) return detail ? `${item} · ${detail}` : String(item);
+  return detail;
 }
 
 function menuTabRowHtml(item, options = {}) {
@@ -6223,7 +6238,8 @@ function fileExplorerRootModeButtons() {
 
 function syncFileExplorerRootModeButton(button) {
   const label = t('finder.toolbar.syncLabel');
-  syncPressedButton(button, fileExplorerRootMode === 'sync', {labelOn: label, labelOff: label});
+  const title = t('finder.toolbar.syncTitle');
+  syncPressedButton(button, fileExplorerRootMode === 'sync', {labelOn: title, labelOff: title});
   if (button) button.textContent = label;
 }
 
@@ -7216,6 +7232,7 @@ function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesPayload)
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
+    if (!sessionFileIsDifferVisible(file)) continue;
     const absPath = sessionFileAbsolutePath(file);
     if (!absPath) continue;
     const agents = sessionFileAgentKinds(file);
@@ -9870,7 +9887,8 @@ function codeMirrorHighlightExtension(api) {
     ...scheme.syntax,
     text: scheme.fg,
     muted: scheme.syntax.comment,
-    headingBg: scheme.syntax.headingBg,
+    heading: 'var(--markdown-heading)',
+    headingBg: 'var(--markdown-heading-bg)',
   };
   const tags = (...items) => items.filter(Boolean);
   const headingStyle = {tag: tags(t.heading, t.heading1, t.heading2), color: palette.heading, fontWeight: '700'};
@@ -10386,6 +10404,7 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
     render() {
       const panel = this.view.dom?.querySelector?.('.cm-search');
       this.bindPanel(panel);
+      syncCodeMirrorFindButtonForView(this.view);
       if (!panel) return;
       const next = panel.querySelector?.('.cm-button[name="next"]');
       const previous = panel.querySelector?.('.cm-button[name="prev"]');
@@ -10420,6 +10439,21 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
       this.bindPanel(null);
     }
   });
+}
+
+function codeMirrorSearchPanelForHost(host = null) {
+  if (!host) return null;
+  return host._cmView?.dom?.querySelector?.('.cm-search') || host.querySelector?.('.cm-search') || null;
+}
+
+function codeMirrorSearchPanelOpenForHost(host = null) {
+  return Boolean(codeMirrorSearchPanelForHost(host));
+}
+
+function syncCodeMirrorFindButtonForView(view) {
+  const panel = view?.dom?.closest?.('.file-editor-panel');
+  const button = panel?.querySelector?.('.file-editor-find-panel');
+  if (button) button.setAttribute('aria-pressed', codeMirrorSearchPanelOpenForHost(panel) ? 'true' : 'false');
 }
 
 function openCodeMirrorFindForView(api, view) {
@@ -10720,8 +10754,8 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
-    '--markdown-heading': syntax.heading,
-    '--markdown-heading-bg': syntax.headingBg || scheme.panel2,
+    '--markdown-heading': 'var(--active-accent-bright)',
+    '--markdown-heading-bg': 'var(--active-control-soft-bg)',
     '--markdown-link': syntax.link,
     '--markdown-strong': syntax.strong,
     '--markdown-emphasis': syntax.emphasis,
@@ -10750,8 +10784,8 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--lt-editor-bg': scheme.bg,
     '--lt-editor-gutter-bg': scheme.gutterBg,
     '--lt-editor-preview-bg': scheme.previewBg,
-    '--lt-markdown-heading': syntax.heading,
-    '--lt-markdown-heading-bg': syntax.headingBg || scheme.panel2,
+    '--lt-markdown-heading': 'var(--active-accent-bright)',
+    '--lt-markdown-heading-bg': 'var(--active-control-soft-bg)',
     '--lt-markdown-link': syntax.link,
     '--lt-markdown-strong': syntax.strong,
     '--lt-markdown-emphasis': syntax.emphasis,
@@ -10850,7 +10884,7 @@ function updateEditorWrapButton(button) {
   setFileEditorIcon(button, 'file-editor-icon-wrap');
 }
 
-function updateEditorFindButton(button, state) {
+function updateEditorFindButton(button, state, host = null) {
   if (!button) return;
   const visible = state?.kind === 'text';
   button.hidden = !visible;
@@ -10858,6 +10892,7 @@ function updateEditorFindButton(button, state) {
   const label = `Find in file (${appShortcutText('F')})`;
   button.title = label;
   button.setAttribute('aria-label', label);
+  button.setAttribute('aria-pressed', codeMirrorSearchPanelOpenForHost(host) ? 'true' : 'false');
   setFileEditorIcon(button, 'file-editor-icon-find');
 }
 
@@ -10868,9 +10903,13 @@ function fileEditorGitActionControlsVisible(path, state, item = null) {
   return active || !confirmedNoDiff;
 }
 
+function fileEditorBlameControlsVisible(path, state, item = null) {
+  return !isFilePreviewItem(item) && state?.kind === 'text' && fileStateHasUsefulGitHistory(state);
+}
+
 function updateFileEditorBlameButton(button, path, state, item = null) {
   if (!button) return;
-  const visible = fileEditorGitActionControlsVisible(path, state, item);
+  const visible = fileEditorBlameControlsVisible(path, state, item);
   const editable = editorViewModeFor(path, item) === 'edit';
   button.hidden = !visible;
   button.disabled = !visible || !editable;
@@ -10894,7 +10933,7 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   button.disabled = !active && loading;
   const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('editor.diff'));
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
-  setFileEditorIcon(button, 'file-editor-icon-diff');
+  button.textContent = 'ΔDiff';
 }
 
 function updateFileEditorDiffExpandButton(button, path, state, item = null) {
@@ -10916,11 +10955,36 @@ async function openEditorFind(host = null) {
   }
   try {
     const api = await loadCodeMirrorApi();
-    if (openCodeMirrorFindForView(api, view)) return true;
+    if (openCodeMirrorFindForView(api, view)) {
+      syncCodeMirrorFindButtonForView(view);
+      return true;
+    }
   } catch (error) {
     status(`Find unavailable: ${error}`, 'error');
   }
   return false;
+}
+
+async function closeEditorFind(host = null) {
+  const view = host?._cmView || null;
+  if (!view) return false;
+  try {
+    const api = await loadCodeMirrorApi();
+    if (api?.closeSearchPanel) {
+      api.closeSearchPanel(view);
+    } else {
+      codeMirrorSearchPanelForHost(host)?.querySelector?.('.cm-dialog-close')?.click?.();
+    }
+    syncCodeMirrorFindButtonForView(view);
+    return true;
+  } catch (error) {
+    setFileEditorPanelStatus(host, `Find unavailable: ${error}`, 'error');
+  }
+  return false;
+}
+
+async function toggleEditorFind(host = null) {
+  return codeMirrorSearchPanelOpenForHost(host) ? closeEditorFind(host) : openEditorFind(host);
 }
 
 function applyEditorWrapPreference() {
@@ -10962,7 +11026,7 @@ async function applyEditorBlamePreference() {
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
-    if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorGitActionControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
+    if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorBlameControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
     renderFileEditorPanel(panel, item);
   }
 }
@@ -15561,7 +15625,7 @@ function createInfoPanel() {
   panel.dataset.infoSubtab = infoPanelSubTab;
   panel.innerHTML = `
       <div class="panel-head">
-        ${virtualPanelControlsHtml(infoItemId, infoTabLabel())}
+        ${virtualPanelControlsHtml(infoItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
@@ -15662,7 +15726,6 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(`panel-${info
     node.title = label;
     node.setAttribute('aria-label', label);
   };
-  setLabel(panel.querySelector('.virtual-panel-controls .terminal-tab'), infoLabel);
   const minimizeLabel = t('pane.minimize');
   const expandLabel = t('pane.expand');
   panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
@@ -15798,31 +15861,6 @@ function globalActivitySummaryHtml() {
     ${refreshBar}
     ${headline ? activitySummaryMarkdownBlockHtml(headline, 'yoagent-headline') : activitySummaryLinesHtml([], {empty: t('yoagent.emptyGlobal')})}
     ${activitySummaryLinesHtml(detailLines)}
-  </section>`;
-}
-
-function yoagentSessionSummariesHtml() {
-  const sessions = activitySummaryPayload?.sessions || {};
-  const order = Array.isArray(activitySummaryPayload?.session_order) ? activitySummaryPayload.session_order : Object.keys(sessions);
-  const rows = order
-    .map(session => {
-      const summary = sessions?.[session];
-      if (!summary?.local) return '';
-      const status = summary.active ? 'active' : 'idle';
-      const files = summary.files?.count ? t('yoagent.files', {count: summary.files.count, added: summary.files.added || 0, removed: summary.files.removed || 0}) : t('yoagent.noFiles');
-      return `<article class="yoagent-session-summary ${esc(status)}">
-        <div class="yoagent-session-summary-head">
-          <span>${esc(t('yoagent.sessionLabel', {session}))}</span>
-          <span>${esc(summary.agent_label || summary.agent || t('yoagent.agentFallback'))}</span>
-          <span>${esc(files)}</span>
-        </div>
-        <div class="yoagent-session-summary-body markdown-body" data-yoagent-summary-markdown>${esc(summary.local)}</div>
-      </article>`;
-    })
-    .filter(Boolean)
-    .join('');
-  return `<section class="yoagent-session-summaries" aria-label="${esc(t('yoagent.perSessionAria'))}">
-    ${rows || `<div class="yoagent-empty">${esc(t('yoagent.emptyPerSession'))}</div>`}
   </section>`;
 }
 
@@ -16041,6 +16079,33 @@ function editorSchemePreferenceChoices(options = {}) {
     });
 }
 
+function globalThemePreferenceChoices() {
+  return [
+    {value: 'system', label: t('pref.appearance.theme.system')},
+    {value: 'dark', label: t('pref.appearance.theme.dark')},
+    {value: 'light', label: t('pref.appearance.theme.light')},
+  ];
+}
+
+function activeColorPreferenceChoice(value, label) {
+  const preset = ACTIVE_COLOR_PRESETS[value];
+  const swatches = preset
+    ? [preset.dark.bright, preset.light.bright]
+    : ['#86d600', '#4f9e3a'];
+  return {value, label, swatches, joinedSwatches: true};
+}
+
+function activeColorPreferenceChoices() {
+  return [
+    activeColorPreferenceChoice('green', t('pref.appearance.active_color.green')),
+    activeColorPreferenceChoice('blue', t('pref.appearance.active_color.blue')),
+    activeColorPreferenceChoice('orange', t('pref.appearance.active_color.orange')),
+    activeColorPreferenceChoice('yellow', t('pref.appearance.active_color.yellow')),
+    activeColorPreferenceChoice('purple', t('pref.appearance.active_color.purple')),
+    activeColorPreferenceChoice('white', t('pref.appearance.active_color.white')),
+  ];
+}
+
 function preferenceSections() {
   return [
     {title: t('pref.section.general'), items: [
@@ -16066,27 +16131,17 @@ function preferenceSections() {
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
     ]},
     {title: t('pref.section.appearance'), items: [
-      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: [
-        {value: 'system', label: t('pref.appearance.theme.system')},
-        {value: 'dark', label: t('pref.appearance.theme.dark')},
-        {value: 'light', label: t('pref.appearance.theme.light')},
-      ], help: t('pref.appearance.theme.help')},
+      {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
       {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
       {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
+      {type: 'note', text: t('pref.appearance.font_sizes.note')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
       {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
       {path: 'appearance.pane_spacing', label: t('pref.appearance.pane_spacing.label'), type: 'number', min: 0, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.pane_spacing.help')},
       {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'range', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
       {path: 'appearance.inactive_pane_opacity', label: t('pref.appearance.inactive_pane_opacity.label'), type: 'range', min: 0, max: 100, step: 5, suffix: '%', help: t('pref.appearance.inactive_pane_opacity.help')},
-      {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'select', choices: [
-        {value: 'green', label: t('pref.appearance.active_color.green')},
-        {value: 'blue', label: t('pref.appearance.active_color.blue')},
-        {value: 'orange', label: t('pref.appearance.active_color.orange')},
-        {value: 'yellow', label: t('pref.appearance.active_color.yellow')},
-        {value: 'purple', label: t('pref.appearance.active_color.purple')},
-        {value: 'white', label: t('pref.appearance.active_color.white')},
-      ], help: t('pref.appearance.active_color.help')},
+      {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'radio', choices: activeColorPreferenceChoices(), help: t('pref.appearance.active_color.help')},
       {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
       {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
@@ -16100,11 +16155,11 @@ function preferenceSections() {
         {value: 'light', label: t('pref.appearance.terminal_theme.light')},
       ], help: t('pref.appearance.terminal_theme.help')},
       {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
+      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
+      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 8, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
       {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
       {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
       {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
-      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
-      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 8, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
       {path: 'appearance.editor_cursor_style', label: t('pref.appearance.editor_cursor_style.label'), type: 'radio', choices: [
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
@@ -16316,7 +16371,7 @@ function preferenceSearchKeywordsForItem(item) {
 
 function preferenceSearchHaystack(item) {
   const choices = Array.isArray(item.choices) ? item.choices.map(choice => [preferenceChoiceValue(choice), preferenceChoiceLabel(choice), preferenceChoiceGroup(choice)]).flat() : [];
-  return [item.label, item.path, item.help, item.suffix, item.keywords, choices, preferenceSearchKeywordsForItem(item)]
+  return [item.label, item.path, item.help, item.text, item.suffix, item.keywords, choices, preferenceSearchKeywordsForItem(item)]
     .flat(Infinity)
     .filter(Boolean)
     .join(' ')
@@ -16387,6 +16442,9 @@ function preferenceSelectOptionsHtml(item, value) {
 
 function preferenceControlHtml(item, query = '') {
   if (!preferenceItemMatches(item, query)) return '';
+  if (item.type === 'note') {
+    return `<div class="preferences-setting-row preferences-setting-note">${esc(item.text || '')}</div>`;
+  }
   const value = preferenceValue(item.path);
   const defaultValue = preferenceDefault(item.path);
   const disabled = readOnlyMode ? ' disabled' : '';
@@ -16408,21 +16466,26 @@ function preferenceControlHtml(item, query = '') {
     // #260: plain radio-button group (replaced the macOS-style theme-cards). One input + label per
     // choice; each input carries data-setting-path so the shared change handler -> savePreferenceControl
     // persists it (and live-applies appearance.theme). The current value is checked.
-    const radios = (item.choices || []).map(choice => {
+    const choices = item.choices || [];
+    const groupHasSwatches = choices.some(choice => Array.isArray(choice?.swatches));
+    const radios = choices.map(choice => {
       const choiceValue = String(preferenceChoiceValue(choice));
       const selected = String(value) === choiceValue;
       const radioId = `${controlId}-${choiceValue.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
-      return `<label class="preferences-radio" for="${esc(radioId)}">
+      const swatches = Array.isArray(choice?.swatches)
+        ? `<span class="preferences-radio-swatches${choice.joinedSwatches ? ' joined' : ''}" aria-hidden="true">${choice.swatches.map(color => `<span class="preferences-radio-swatch" style="--preferences-radio-swatch:${esc(color)}"></span>`).join('')}</span>`
+        : '';
+      return `<label class="preferences-radio${swatches ? ' has-swatches' : ''}" for="${esc(radioId)}">
         <input type="radio" id="${esc(radioId)}" name="${esc(controlId)}" value="${esc(choiceValue)}" data-setting-path="${esc(item.path)}" data-setting-type="radio"${selected ? ' checked' : ''}${disabled}>
-        <span>${esc(preferenceChoiceLabel(choice))}</span>
+        ${swatches}<span>${esc(preferenceChoiceLabel(choice))}</span>
       </label>`;
     }).join('');
-    control = `<div class="preferences-radio-group" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
+    control = `<div class="preferences-radio-group${groupHasSwatches ? ' has-swatches' : ''}" role="radiogroup" aria-label="${esc(item.label)}">${radios}</div>`;
   } else if (item.type === 'list') {
     const text = Array.isArray(value) ? value.join('\n') : String(value || '');
     control = `<textarea ${baseAttrs} rows="3">${esc(text)}</textarea>`;
   } else if (item.type === 'textarea') {
-    control = `<textarea ${baseAttrs} rows="12">${esc(String(value || ''))}</textarea>`;
+    control = `<textarea ${baseAttrs} rows="3" data-setting-autosize="true">${esc(String(value || ''))}</textarea>`;
   } else {
     control = `<input type="text" ${baseAttrs} value="${esc(value)}">`;
   }
@@ -16454,7 +16517,7 @@ function preferenceAdvisoryHtml(item, value) {
 }
 
 function preferencesAllDefault() {
-  return preferenceSections().every(section => section.items.every(item => (
+  return preferenceSections().every(section => section.items.filter(item => item.path).every(item => (
     JSON.stringify(preferenceValue(item.path)) === JSON.stringify(preferenceDefault(item.path))
   )));
 }
@@ -16517,7 +16580,7 @@ function createPreferencesPanel() {
   panel.id = `panel-${prefsItemId}`;
   panel.innerHTML = `
       <div class="panel-head preferences-panel-head">
-        ${virtualPanelControlsHtml(prefsItemId, t('tab.preferences'))}
+        ${virtualPanelControlsHtml(prefsItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
       </div>
       <div class="panel-detail-row">
@@ -16608,8 +16671,19 @@ function renderPreferencesPanels(options = {}) {
       }
     }
     bindPreferencesPanel(panel);
+    autosizePreferenceTextareas(panel);
     if (options.focusSearch) focusPreferencesSearch(panel);
   }
+}
+
+function autosizePreferenceTextarea(textarea) {
+  if (!textarea || textarea.dataset.settingAutosize !== 'true') return;
+  textarea.style.height = 'auto';
+  textarea.style.height = `${textarea.scrollHeight}px`;
+}
+
+function autosizePreferenceTextareas(root) {
+  root.querySelectorAll?.('textarea[data-setting-autosize="true"]').forEach(autosizePreferenceTextarea);
 }
 
 function bindPreferencesPanel(panel) {
@@ -16625,6 +16699,9 @@ function bindPreferencesPanel(panel) {
     }
     const control = event.target.closest('[data-setting-path]');
     if (!control || !panel.contains(control)) return;
+    if (control.dataset.settingAutosize === 'true') {
+      autosizePreferenceTextarea(control);
+    }
     if (control.dataset.settingType === 'number') {
       validatePreferenceNumberControl(control);
       return;
@@ -17837,6 +17914,7 @@ function changeFileRowHtml(item, options = {}) {
   const name = item.__displayName || basenameOf(absPath || item.path || '');
   const rel = item.path || absPath;
   const parentLabel = changeFileParentLabel(rel);
+  const detail = item.uploaded === true ? '' : (parentLabel || rel);
   const timeText = sessionFileDisplayTimeText(item.mtime);
   const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
   const agentSlotHtml = changeFileAgentsHtml(item);
@@ -17862,7 +17940,7 @@ function changeFileRowHtml(item, options = {}) {
     : ' disabled';
   return `<button type="button" class="changes-file-row${compactClass} ${gitRowClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
     <span class="changes-file-icon ${esc(iconClass)}" aria-hidden="true">${esc(icon)}</span>
-    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span><span class="changes-file-path">${esc(parentLabel || rel)}</span></span>
+    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span>${detail ? `<span class="changes-file-path">${esc(detail)}</span>` : ''}</span>
     <span class="changes-file-meta">${metaHtml}</span>
   </button>`;
 }
@@ -17960,7 +18038,7 @@ function fileExplorerTreeDateButtonHtml(extraClass = '') {
   const mode = normalizeFileExplorerTreeDateMode(fileExplorerTreeDateMode);
   const active = mode !== 'none';
   const classes = ['file-explorer-header-action', 'file-explorer-date-toggle', extraClass, active ? 'active' : ''].filter(Boolean).join(' ');
-  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeLabel(mode))}</button>`;
+  return `<button type="button" class="${esc(classes)}" data-file-explorer-tree-dates data-date-mode="${esc(mode)}" title="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-label="${esc(fileExplorerTreeDateModeTitle(mode))}" aria-pressed="${active ? 'true' : 'false'}">${esc(fileExplorerTreeDateModeButtonLabel(mode))}</button>`;
 }
 
 function sessionFilesSortSelectHtml(extraClass = '') {
@@ -18105,12 +18183,16 @@ function fileExplorerModeButtonTitle(mode) {
   return mode === 'diff' ? t('changes.show') : t('changes.hide');
 }
 
+function fileExplorerModeButtonLabel(mode) {
+  return mode === 'diff' ? 'ΔDiff' : t('finder.label.finder');
+}
+
 function fileExplorerModeSwitcherHtml() {
   const modes = [
-    {mode: 'files', label: t('finder.label.finder')},
-    {mode: 'diff', label: t('tab.changes')},
+    {mode: 'files', label: fileExplorerModeButtonLabel('files')},
+    {mode: 'diff', label: fileExplorerModeButtonLabel('diff')},
   ];
-  const aria = `${t('finder.label.finder')} / ${t('tab.changes')}`;
+  const aria = `${fileExplorerModeButtonLabel('files')} / ${fileExplorerModeButtonLabel('diff')}`;
   return `<span class="file-explorer-mode-switcher" role="group" aria-label="${esc(aria)}">${modes.map(item => `
               <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="${esc(item.mode)}" title="${esc(fileExplorerModeButtonTitle(item.mode))}" aria-label="${esc(item.label)}" aria-pressed="${fileExplorerMode === item.mode ? 'true' : 'false'}"><span class="file-explorer-mode-label">${esc(item.label)}</span></button>`).join('')}</span>`;
 }
@@ -18129,7 +18211,7 @@ function applyFileExplorerMode(panel = null) {
     const active = mode === fileExplorerMode;
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     btn.title = fileExplorerModeButtonTitle(mode);
-    btn.setAttribute('aria-label', mode === 'diff' ? t('tab.changes') : t('finder.label.finder'));
+    btn.setAttribute('aria-label', fileExplorerModeButtonLabel(mode));
   });
   document.querySelectorAll('[data-file-explorer-mode-toggle]').forEach(btn => {
     btn.setAttribute('aria-pressed', fileExplorerMode === 'diff' ? 'true' : 'false');
@@ -18729,7 +18811,7 @@ function createFileExplorerPanel() {
           </div>
           <div class="file-explorer-toolbar-row file-explorer-scope-row file-explorer-mode-files-only">
             <button type="button" class="file-explorer-hidden-toggle file-explorer-hidden-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.hidden'))}" aria-pressed="${fileExplorerShowHidden ? 'true' : 'false'}">.*</button>
-            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.syncLabel'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
+            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel file-explorer-mode-files-only" title="${esc(t('finder.toolbar.syncTitle'))}" aria-label="${esc(t('finder.toolbar.syncTitle'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
             <div class="file-explorer-quick-access-panel file-explorer-mode-files-only" aria-label="${esc(t('finder.toolbar.quickPaths'))}"></div>
             <span class="file-explorer-toolbar-spacer"></span>
           </div>
@@ -18993,9 +19075,9 @@ function createFileEditorPanel(item) {
         </span>
         <button type="button" class="file-editor-gutter-panel" title="${esc(t('editor.toggleLineNumbers'))}" aria-label="${esc(t('editor.toggleLineNumbers'))}" hidden>#</button>
         <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" aria-pressed="false" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden><span class="file-editor-icon file-editor-icon-blame" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden><span class="file-editor-icon file-editor-icon-diff" aria-hidden="true"></span></button>
+        <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden>ΔDiff</button>
         <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${diffExpandUnchanged ? 'true' : 'false'}" hidden>↕</button>
         <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
@@ -19060,7 +19142,7 @@ function createFileEditorPanel(item) {
   panel.querySelector('.file-editor-find-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    openEditorFind(panel);
+    toggleEditorFind(panel);
   });
   panel.querySelector('.file-editor-blame-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -19609,7 +19691,7 @@ function reconfigureCodeMirrorPanelTheme(panel) {
   const compartment = panel?._cmThemeCompartment;
   const views = Array.isArray(panel?._cmThemeViews) ? panel._cmThemeViews : [];
   if (!api || !path || !compartment || !views.length) return false;
-  const extensions = panel?._cmPlainFallback ? [codeMirrorThemeExtension(api)] : codeMirrorThemeExtensions(api, path);
+  const extensions = codeMirrorThemeExtensions(api, path);
   const effect = compartment.reconfigure(extensions);
   for (const view of views) {
     try { view.dispatch({effects: effect}); } catch (_) {}
@@ -20389,10 +20471,12 @@ function renderFileEditorPanel(panel, item) {
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   const themeButton = panel.querySelector('.file-editor-theme-panel');
   const blameButton = panel.querySelector('.file-editor-blame-panel');
+  const saveButton = panel.querySelector('.file-editor-save-panel');
   const content = panel.querySelector('.file-editor-content');
   const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
   updateEditorThemeButton(themeButton);
   if (!state) {
+    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -20402,6 +20486,7 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.loading) {
+    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -20412,6 +20497,7 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
+    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -20440,7 +20526,10 @@ function renderFileEditorPanel(panel, item) {
     setFileEditorViewMode(path, 'edit', item);
   }
   const mode = editorViewModeFor(path, item);
+  const purePreviewMode = mode === 'preview';
+  panel.classList.toggle('file-editor-pure-preview', purePreviewMode);
   updateEditorModeControl(modeControl, path, state, item);
+  if (modeControl && purePreviewMode) modeControl.hidden = true;
   if (previewFontPanel) {
     previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path) || (mode !== 'preview' && mode !== 'split');
     updateEditorPreviewFontControls(previewFontPanel);
@@ -20453,18 +20542,20 @@ function renderFileEditorPanel(panel, item) {
     wrapButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
     updateEditorWrapButton(wrapButton);
   }
-  updateEditorFindButton(findButton, state);
+  updateEditorFindButton(findButton, state, panel);
   if (findButton && (isFilePreviewItem(item) || mode === 'preview')) findButton.hidden = true;
-  // Blame and Diff are one git-backed toolbar pair: show both together for files with real file history,
-  // or hide both for files outside git / untracked / creation-only / confirmed-clean.
+  // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
+  // Blame stays available in normal edit mode for clean files with useful history.
   updateFileEditorBlameButton(blameButton, path, state, item);
   updateFileEditorDiffButton(diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
+  if (purePreviewMode) setElementsHidden([blameButton, diffButton, diffExpandButton], true);
   if (crossSplitButton) {
-    crossSplitButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
+    crossSplitButton.hidden = purePreviewMode || isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
   }
+  setElementsHidden([reloadButton, saveButton], purePreviewMode);
   if (diffRefPanel) {
-    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+    diffRefPanel.hidden = purePreviewMode || mode !== 'diff' || state.kind !== 'text';
     // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
     // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
     const diffRepo = fileRepoForPath(path);
@@ -21459,9 +21550,16 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
 
 function updateLinkedFilePreviewRings() {
   for (const panel of panelNodes.values()) panel.classList.remove('preview-linked');
-  if (!focusedPanelItem || isFilePreviewItem(focusedPanelItem)) return;
-  const path = isFileEditorItem(focusedPanelItem) ? fileItemPath(focusedPanelItem) : '';
+  if (!focusedPanelItem) return;
+  const path = (isFileEditorItem(focusedPanelItem) || isFilePreviewItem(focusedPanelItem)) ? fileItemPath(focusedPanelItem) : '';
   if (!path) return;
+  if (isFilePreviewItem(focusedPanelItem)) {
+    const editorItem = fileEditorItemFor(path);
+    if (!itemIsActivePaneTab(editorItem)) return;
+    const editorPanel = panelNodes.get(editorItem);
+    if (editorPanel) editorPanel.classList.add('preview-linked');
+    return;
+  }
   const previewItem = filePreviewItemFor(path);
   if (!itemIsActivePaneTab(previewItem)) return;
   const previewPanel = panelNodes.get(previewItem);
@@ -21701,10 +21799,8 @@ function panelControlsHtml(session, options = {}) {
         </div>`;
 }
 
-function virtualPanelControlsHtml(session, label) {
-  const safeLabel = label || itemLabel(session);
+function virtualPanelControlsHtml(session) {
   return `<div class="tabs virtual-panel-controls" role="tablist">
-          <button class="tab active terminal-tab" type="button" title="${esc(safeLabel)}" aria-label="${esc(safeLabel)}">${esc(safeLabel)}</button>
           ${paneFrameControlsHtml(session, {actions: false, close: false})}
         </div>`;
 }
@@ -22018,10 +22114,8 @@ function yoagentChatInputIsFocused(node = document.getElementById('yoagent-conte
 function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-content')) {
   if (!node) return false;
   const globalRegion = node.querySelector('.yoagent-global');
-  const sessionsRegion = node.querySelector('.yoagent-session-summaries');
-  if (!globalRegion || !sessionsRegion) return false;
+  if (!globalRegion) return false;
   globalRegion.outerHTML = globalActivitySummaryHtml();
-  sessionsRegion.outerHTML = yoagentSessionSummariesHtml();
   renderYoagentMessageMarkdown(node);
   return true;
 }
@@ -22049,8 +22143,8 @@ function yoagentInlineMarkdown(text) {
 }
 
 function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
-  // Render assistant chat replies AND per-session summary cards through the Markdown pipeline so bold
-  // titles, code, lists, and links display formatted. Without marked.js the escaped-text fallback stays.
+  // Render assistant chat replies through the Markdown pipeline so bold titles, code, lists, and links
+  // display formatted. Without marked.js the escaped-text fallback stays.
   if (!node || typeof window.marked === 'undefined') return;
   (node.querySelectorAll?.('.yoagent-global [data-yoagent-global-markdown]') || []).forEach(body => {
     renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
@@ -22059,12 +22153,6 @@ function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-co
   (node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || []).forEach(body => {
     renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
     body.removeAttribute('data-yoagent-markdown');
-  });
-  // Per-session summary bodies embed the agent's own transcript markdown (## headings etc.): downgrade
-  // headings to inline bold so a long heading does not blow up the card.
-  (node.querySelectorAll?.('.yoagent-session-summary-body[data-yoagent-summary-markdown]') || []).forEach(body => {
-    renderMarkdownPreviewInto(body, yoagentInlineMarkdown(body.textContent || ''));
-    body.removeAttribute('data-yoagent-summary-markdown');
   });
 }
 
@@ -22081,7 +22169,7 @@ function renderYoagentPanel(options = {}) {
     return;
   }
   if (options.summaryOnly && refreshYoagentSummaryRegions(node)) return;
-  node.innerHTML = `${globalActivitySummaryHtml()}${yoagentSessionSummariesHtml()}${yoagentChatHtml()}`;
+  node.innerHTML = `${globalActivitySummaryHtml()}${yoagentChatHtml()}`;
   renderYoagentMessageMarkdown(node);
   if (options.scrollBottom !== false) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));
@@ -22729,9 +22817,10 @@ function hideUploadResult(session) {
 
 function updatePanelSlot(panel, session, slot) {
   panel.dataset.slot = slot;
+  panel.dataset.layoutItem = session;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session);
+  if (isFileEditorItem(session) || isFilePreviewItem(session)) renderFileEditorPanel(panel, session);
   updatePaneExpandButton(panel, session);
   updatePaneTabStrip(panel, slot);
   updatePanelInactiveOverlays();

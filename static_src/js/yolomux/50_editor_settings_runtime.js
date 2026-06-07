@@ -97,8 +97,8 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
-    '--markdown-heading': syntax.heading,
-    '--markdown-heading-bg': syntax.headingBg || scheme.panel2,
+    '--markdown-heading': 'var(--active-accent-bright)',
+    '--markdown-heading-bg': 'var(--active-control-soft-bg)',
     '--markdown-link': syntax.link,
     '--markdown-strong': syntax.strong,
     '--markdown-emphasis': syntax.emphasis,
@@ -127,8 +127,8 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--lt-editor-bg': scheme.bg,
     '--lt-editor-gutter-bg': scheme.gutterBg,
     '--lt-editor-preview-bg': scheme.previewBg,
-    '--lt-markdown-heading': syntax.heading,
-    '--lt-markdown-heading-bg': syntax.headingBg || scheme.panel2,
+    '--lt-markdown-heading': 'var(--active-accent-bright)',
+    '--lt-markdown-heading-bg': 'var(--active-control-soft-bg)',
     '--lt-markdown-link': syntax.link,
     '--lt-markdown-strong': syntax.strong,
     '--lt-markdown-emphasis': syntax.emphasis,
@@ -227,7 +227,7 @@ function updateEditorWrapButton(button) {
   setFileEditorIcon(button, 'file-editor-icon-wrap');
 }
 
-function updateEditorFindButton(button, state) {
+function updateEditorFindButton(button, state, host = null) {
   if (!button) return;
   const visible = state?.kind === 'text';
   button.hidden = !visible;
@@ -235,6 +235,7 @@ function updateEditorFindButton(button, state) {
   const label = `Find in file (${appShortcutText('F')})`;
   button.title = label;
   button.setAttribute('aria-label', label);
+  button.setAttribute('aria-pressed', codeMirrorSearchPanelOpenForHost(host) ? 'true' : 'false');
   setFileEditorIcon(button, 'file-editor-icon-find');
 }
 
@@ -245,9 +246,13 @@ function fileEditorGitActionControlsVisible(path, state, item = null) {
   return active || !confirmedNoDiff;
 }
 
+function fileEditorBlameControlsVisible(path, state, item = null) {
+  return !isFilePreviewItem(item) && state?.kind === 'text' && fileStateHasUsefulGitHistory(state);
+}
+
 function updateFileEditorBlameButton(button, path, state, item = null) {
   if (!button) return;
-  const visible = fileEditorGitActionControlsVisible(path, state, item);
+  const visible = fileEditorBlameControlsVisible(path, state, item);
   const editable = editorViewModeFor(path, item) === 'edit';
   button.hidden = !visible;
   button.disabled = !visible || !editable;
@@ -271,7 +276,7 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   button.disabled = !active && loading;
   const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('editor.diff'));
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
-  setFileEditorIcon(button, 'file-editor-icon-diff');
+  button.textContent = 'ΔDiff';
 }
 
 function updateFileEditorDiffExpandButton(button, path, state, item = null) {
@@ -293,11 +298,36 @@ async function openEditorFind(host = null) {
   }
   try {
     const api = await loadCodeMirrorApi();
-    if (openCodeMirrorFindForView(api, view)) return true;
+    if (openCodeMirrorFindForView(api, view)) {
+      syncCodeMirrorFindButtonForView(view);
+      return true;
+    }
   } catch (error) {
     status(`Find unavailable: ${error}`, 'error');
   }
   return false;
+}
+
+async function closeEditorFind(host = null) {
+  const view = host?._cmView || null;
+  if (!view) return false;
+  try {
+    const api = await loadCodeMirrorApi();
+    if (api?.closeSearchPanel) {
+      api.closeSearchPanel(view);
+    } else {
+      codeMirrorSearchPanelForHost(host)?.querySelector?.('.cm-dialog-close')?.click?.();
+    }
+    syncCodeMirrorFindButtonForView(view);
+    return true;
+  } catch (error) {
+    setFileEditorPanelStatus(host, `Find unavailable: ${error}`, 'error');
+  }
+  return false;
+}
+
+async function toggleEditorFind(host = null) {
+  return codeMirrorSearchPanelOpenForHost(host) ? closeEditorFind(host) : openEditorFind(host);
 }
 
 function applyEditorWrapPreference() {
@@ -339,7 +369,7 @@ async function applyEditorBlamePreference() {
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
-    if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorGitActionControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
+    if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorBlameControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
     renderFileEditorPanel(panel, item);
   }
 }

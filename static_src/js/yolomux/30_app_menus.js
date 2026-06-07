@@ -105,7 +105,12 @@ function orderedPaneItems(items = activePaneItems()) {
 function menuTabDetail(item) {
   const type = tabTypeForItem(item);
   if (type?.detail) return type.detail(item);
-  return tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
+  const detail = tabMenuDetailText(item, transcriptMeta.sessions?.[item]);
+  // A non-numeric tmux session name (e.g. "PA exploration") is shown in the tab label only as its
+  // assigned number (e.g. "9"), so the real name is otherwise invisible. Surface it in the menu/search
+  // detail so a result like label "9" reads "9 · PA exploration · main · …" and is identifiable.
+  if (numericSessionName(item) === null) return detail ? `${item} · ${detail}` : String(item);
+  return detail;
 }
 
 function menuTabRowHtml(item, options = {}) {
