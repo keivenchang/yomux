@@ -6779,6 +6779,17 @@ function fileTreeRepoPopoverNode() {
   return node;
 }
 
+let fileTreeRepoPopoverTimer = null;
+let fileTreeRepoPopoverHoverToken = 0;
+
+function cancelFileTreeRepoPopoverTimer() {
+  if (fileTreeRepoPopoverTimer) {
+    clearTimeout(fileTreeRepoPopoverTimer);
+    fileTreeRepoPopoverTimer = null;
+  }
+  fileTreeRepoPopoverHoverToken += 1;
+}
+
 function showFileTreeRepoPopover(row, repo) {
   if (!repo?.root) return;
   const node = fileTreeRepoPopoverNode();
@@ -6796,9 +6807,21 @@ function showFileTreeRepoPopover(row, repo) {
 }
 
 function hideFileTreeRepoPopover() {
+  cancelFileTreeRepoPopoverTimer();
   fileTreeRepoPopoverPath = null;
   const node = document.getElementById('fileTreeRepoPopover');
   if (node) node.hidden = true;
+}
+
+function scheduleRepoRowHoverPopover(row, path) {
+  cancelFileTreeRepoPopoverTimer();
+  const token = fileTreeRepoPopoverHoverToken;
+  const delay = Math.max(0, Number(popoverShowDelayMs) || 0);
+  fileTreeRepoPopoverTimer = setTimeout(() => {
+    fileTreeRepoPopoverTimer = null;
+    if (token !== fileTreeRepoPopoverHoverToken || !row?.isConnected) return;
+    showRepoRowHoverPopover(row, path);
+  }, delay);
 }
 
 async function showRepoRowHoverPopover(row, path) {
@@ -7551,9 +7574,10 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   }
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
-    row.onmouseenter = () => showRepoRowHoverPopover(row, fullPath);
+    row.onmouseenter = () => scheduleRepoRowHoverPopover(row, fullPath);
     row.onmouseleave = () => hideFileTreeRepoPopover();
   } else if (!differMode) {
+    cancelFileTreeRepoPopoverTimer();
     row.onmouseenter = null;
     row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
@@ -7692,6 +7716,10 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
 
 function renderTreeChildren(container, parentPath, entries, depth, options = {}) {
   if (!container) return;
+  // Step the .file-tree-children::before guide line per nesting level: rows indent 14px/level
+  // (updateFileTreeRow padding-left = base + depth*14), and the children wrappers are NOT physically
+  // indented, so without this the fixed-left guide stacks every level at one x and only level 1 shows.
+  container.style.setProperty('--tree-depth', String(depth));
   cacheFileExplorerRepoInfoEntries(parentPath, entries);
   const renderOptions = {
     ...options,
@@ -10156,6 +10184,83 @@ function codeMirrorMarkdownStrongExtension(api, path) {
   });
 }
 
+function codeMirrorMarkdownFallbackSyntaxExtension(api, path) {
+  if (codeMirrorLanguageName(path) !== 'markdown' || !api.ViewPlugin || !api.Decoration) return [];
+  const markByClass = new Map();
+  const mark = className => {
+    if (!markByClass.has(className)) markByClass.set(className, api.Decoration.mark({class: className}));
+    return markByClass.get(className);
+  };
+  const addInlineMarks = (ranges, lineText, lineFrom) => {
+    const inlinePatterns = [
+      ['md-code', /`[^`\n]+`/g],
+      ['md-bold', /\*\*[^*\n]+\*\*|__[^_\n]+__/g],
+      ['md-link', /\[[^\]\n]+\]\([^)]+\)/g],
+      ['md-html', /<\/?[A-Za-z][^>\n]*?>/g],
+      ['md-italic', /(^|[^\w*])(\*[^*\s\n][^*\n]*\*|_[^_\s\n][^_\n]*_)/g, 2],
+    ];
+    for (const [className, pattern, groupIndex] of inlinePatterns) {
+      pattern.lastIndex = 0;
+      let match;
+      while ((match = pattern.exec(lineText))) {
+        const text = groupIndex ? match[groupIndex] : match[0];
+        if (!text) continue;
+        const groupOffset = groupIndex ? match[0].indexOf(text) : 0;
+        const from = lineFrom + match.index + groupOffset;
+        const to = from + text.length;
+        if (to > from) ranges.push(mark(className).range(from, to));
+      }
+    }
+  };
+  return api.ViewPlugin.fromClass(class {
+    constructor(view) {
+      this.decorations = this.build(view);
+    }
+
+    update(update) {
+      if (update.docChanged || update.viewportChanged) this.decorations = this.build(update.view);
+    }
+
+    build(view) {
+      const ranges = [];
+      let inFence = false;
+      const doc = view.state.doc;
+      const visibleRanges = view.visibleRanges?.length ? view.visibleRanges : [{from: 0, to: doc.length}];
+      for (const visible of visibleRanges) {
+        const startLine = doc.lineAt(visible.from).number;
+        const endLine = doc.lineAt(Math.max(visible.from, visible.to)).number;
+        for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
+          const line = doc.line(lineNo);
+          const text = line.text;
+          const fence = /^\s*(```|~~~)/.test(text);
+          if (fence) {
+            ranges.push(mark('md-fence').range(line.from, line.to));
+            inFence = !inFence;
+            continue;
+          }
+          if (inFence) {
+            ranges.push(mark('md-codeblock').range(line.from, line.to));
+            continue;
+          }
+          const heading = text.match(/^(\s{0,3})(#{1,6})(\s+.*)$/);
+          if (heading) {
+            ranges.push(mark(`md-heading md-heading-${heading[2].length}`).range(line.from, line.to));
+            continue;
+          }
+          if (/^\s*>\s?/.test(text)) ranges.push(mark('md-blockquote').range(line.from, line.to));
+          const list = text.match(/^\s*(?:[-*+]|\d+\.)\s+/);
+          if (list) ranges.push(mark('md-list-marker').range(line.from, line.from + list[0].length));
+          addInlineMarks(ranges, text, line.from);
+        }
+      }
+      ranges.sort((left, right) => left.from - right.from || (left.startSide || 0) - (right.startSide || 0) || left.to - right.to);
+      return api.Decoration.set(ranges, true);
+    }
+  }, {
+    decorations: plugin => plugin.decorations,
+  });
+}
+
 // DOIT.6 #150: parseUnifiedDiffLineClasses + codeMirrorDiffLineExtension were removed. The edit view no
 // longer paints inline diff decorations (cm-yolomux-diff-add / deletion markers); changes are shown
 // ONLY in the explicit diff VIEW (the MergeView built by ensureCodeMirrorDiffPanel, with its own
@@ -10766,8 +10871,9 @@ function fileEditorGitActionControlsVisible(path, state, item = null) {
 function updateFileEditorBlameButton(button, path, state, item = null) {
   if (!button) return;
   const visible = fileEditorGitActionControlsVisible(path, state, item);
+  const editable = editorViewModeFor(path, item) === 'edit';
   button.hidden = !visible;
-  button.disabled = !visible;
+  button.disabled = !visible || !editable;
   syncPressedButton(button, fileEditorBlameEnabled, {
     labelOn: t('editor.blame.toggle'),
     labelOff: t('editor.blame.toggle'),
@@ -10856,7 +10962,7 @@ async function applyEditorBlamePreference() {
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
-    if (fileEditorBlameEnabled && fileEditorGitActionControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
+    if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorGitActionControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
     renderFileEditorPanel(panel, item);
   }
 }
@@ -18842,7 +18948,7 @@ async function enterFileEditorDiffMode(path, panel, item) {
   await loadPromise;
   const current = openFiles.get(path);
   if (!current || current.kind !== 'text' || panel.dataset.filePath !== path) return;
-  if (openFileDiffAvailable(current)) {
+  if (openFileDiffAvailable(current) || fileStateHasUsefulGitHistory(current)) {
     setFileEditorViewMode(path, 'diff', item);
   } else {
     setFileEditorViewMode(path, 'edit', item);
@@ -18959,6 +19065,7 @@ function createFileEditorPanel(item) {
   panel.querySelector('.file-editor-blame-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
+    if (event.currentTarget?.disabled) return;
     toggleFileEditorBlame();  // DOIT.26: inline git blame on/off (persisted, fetches + re-renders editors)
   });
   panel.querySelector('.file-editor-diff-panel')?.addEventListener('click', event => {
@@ -19367,6 +19474,7 @@ function codeMirrorThemeExtensions(api, path) {
     codeMirrorHighlightExtension(api),
     codeMirrorHtmlSemanticEmphasisExtension(api, path),
     codeMirrorMarkdownStrongExtension(api, path),
+    codeMirrorMarkdownFallbackSyntaxExtension(api, path),
     codeMirrorThemeExtension(api),
   ];
 }
@@ -19420,7 +19528,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     defaultKeymap,
     safeCodeMirrorExtension('read only', () => api.EditorState.readOnly.of(readOnlyMode)),
     safeCodeMirrorExtension('editable', () => api.EditorView.editable.of(!readOnlyMode)),
-    codeMirrorThemeOnlyExtensions(api, panel),
+    codeMirrorThemedExtensions(api, panel, path),
     codeMirrorWorkingUpdateExtension(api, panel, path),
   ];
 }
@@ -20199,6 +20307,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       });
       panel._cmPath = path;
       panel._cmSignature = signature;
+      panel._cmMode = 'edit';
       panel._cmPlainFallback = Boolean(createdState.plain);
       panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
@@ -20337,15 +20446,15 @@ function renderFileEditorPanel(panel, item) {
     updateEditorPreviewFontControls(previewFontPanel);
   }
   if (gutterButton) {
-    gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text';
+    gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
     updateEditorGutterButton(gutterButton);
   }
   if (wrapButton) {
-    wrapButton.hidden = isFilePreviewItem(item) || state.kind !== 'text';
+    wrapButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
     updateEditorWrapButton(wrapButton);
   }
   updateEditorFindButton(findButton, state);
-  if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
+  if (findButton && (isFilePreviewItem(item) || mode === 'preview')) findButton.hidden = true;
   // Blame and Diff are one git-backed toolbar pair: show both together for files with real file history,
   // or hide both for files outside git / untracked / creation-only / confirmed-clean.
   updateFileEditorBlameButton(blameButton, path, state, item);

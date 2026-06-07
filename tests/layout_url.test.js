@@ -508,6 +508,7 @@ globalThis.__layoutTestApi = {
   editorViewModeFor,
   editorPreviewModeAvailable,
   setFileEditorViewMode,
+  updateFileEditorBlameButton,
   updateFileEditorDiffButton,
   updateFileEditorDiffExpandButton,
   codeMirrorConfigSignature,
@@ -1456,6 +1457,23 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, {kind: 'text', gitTracked: true, gitHasHistory: true}, codeItem), false, 'stale history booleans without file-level history show neither Diff nor Blame');
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), false, 'files with history but no diff show neither Diff nor Blame after the no-diff result is known');
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({}), codeItem), true, 'files with history and unknown diff state show the Diff/Blame pair');
+  const blameButton = new TestElement('blame-button');
+  api.setFileEditorViewMode(codePath, 'edit', codeItem);
+  api.updateFileEditorBlameButton(blameButton, codePath, trackedHistoryState({}), codeItem);
+  assert.equal(blameButton.hidden, false, 'Blame is visible in normal edit mode for files with useful history');
+  assert.equal(blameButton.disabled, false, 'Blame is clickable only in normal edit mode');
+  api.setFileEditorViewMode(codePath, 'diff', codeItem);
+  api.updateFileEditorBlameButton(blameButton, codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem);
+  assert.equal(blameButton.hidden, false, 'Blame stays visible beside Diff when file history actions are available');
+  assert.equal(blameButton.disabled, true, 'Blame is not clickable in diff mode');
+  const mdPath = '/repo/app/README.md';
+  const mdItem = api.fileEditorItemFor(mdPath);
+  api.setFileEditorViewMode(mdPath, 'split', mdItem);
+  api.updateFileEditorBlameButton(blameButton, mdPath, trackedHistoryState({}), mdItem);
+  assert.equal(blameButton.disabled, true, 'Blame is not clickable in split mode');
+  api.setFileEditorViewMode(mdPath, 'preview', mdItem);
+  api.updateFileEditorBlameButton(blameButton, mdPath, trackedHistoryState({}), mdItem);
+  assert.equal(blameButton.disabled, true, 'Blame is not clickable in preview mode');
   api.setFileEditorViewMode(codePath, 'diff', codeItem);
   assert.equal(api.fileEditorGitActionControlsVisible(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), true, 'active diff mode keeps the paired git controls visible so Exit diff remains available');
   // DOIT.45 (RECURRING): pressing DIFF on a git-tracked file with useful history but a CLEAN working tree
@@ -1465,6 +1483,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.diffModeShouldFallBackToEdit(codePath, trackedHistoryState({diffLoaded: true, diff: ''}), codeItem), false, 'DOIT.45: a clean file WITH useful git history stays in diff mode so the FROM/TO ref picker stays reachable');
   assert.equal(api.diffModeShouldFallBackToEdit(codePath, {kind: 'text', gitTracked: true, gitHasHistory: false, gitHistory: [], diffLoaded: true, diff: ''}, codeItem), true, 'DOIT.45: a file WITHOUT useful history still falls back to edit when its diff is empty');
   assert.equal(api.diffModeShouldFallBackToEdit(codePath, trackedHistoryState({diffLoaded: true, diff: 'diff --git a/a b/a'}), codeItem), false, 'DOIT.45: a file with a real diff stays in diff mode (control)');
+  assert.ok(/async function enterFileEditorDiffMode[\s\S]*openFileDiffAvailable\(current\) \|\| fileStateHasUsefulGitHistory\(current\)[\s\S]*setFileEditorViewMode\(path, 'diff', item\)/.test(source), 'DOIT.45: pressing Diff keeps clean files with useful history in diff mode after the default diff load finishes');
   api.updateFileEditorDiffButton(diffButton, codePath, {kind: 'text', gitTracked: false, diffLoaded: true, diff: 'diff --git a/a b/a'}, codeItem);
   assert.equal(diffButton.hidden, true, 'untracked files stay diff-button-free even in diff mode');
   const diffExpandButton = new TestElement('diff-expand-button');
@@ -1620,6 +1639,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/removeAttentionAlert\(id\), options\.countdownMs \|\| toastDurationMs/.test(source), '#85: toast removal uses options.countdownMs');
   assert.ok(/function confirmSessionGoneOrReconnect[\s\S]*?if \(item\.confirmingGone\) return;[\s\S]*?item\.confirmingGone = true/.test(source), '#86: reconnect confirmation has an in-flight guard');
   assert.ok(/function showFileTreeRepoPopover[\s\S]*?clampToViewport\(/.test(source), '#87: the repo popover is clamped to the viewport');
+  assert.ok(/function scheduleRepoRowHoverPopover[\s\S]*?setTimeout\([\s\S]*?showRepoRowHoverPopover\(row, path\)/.test(source), '#87: repo directory hover popovers are delayed through the shared popover delay timer');
+  assert.equal(source.includes('row.onmouseenter = () => showRepoRowHoverPopover(row, fullPath);'), false, '#87: repo directory hover must not open the popover immediately on mouseenter');
   assert.ok(/function fileEntryChanged[\s\S]*?state\.size == null \|\| entry\.size == null\) return true/.test(source), '#88: unknown-size equal-mtime entries are treated as changed');
   // #73: the item-keyed editor maps are cleaned up on close + migrated on rename (no unbounded growth),
   // and the per-pane LRU timestamp survives a session rename.
@@ -1928,8 +1949,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(updateBody.includes("name.textContent = nameText;\n    name.innerHTML = '';"), false, 'Finder row text must not be cleared after being written');
   assert.ok(updateBody.includes("name.innerHTML = '';\n    name.textContent = nameText;"), 'Finder row clears stale HTML before writing plain text');
   const sharedTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.file-tree-row\.has-agent \.file-tree-name\s*\{[^}]*flex:\s*1 1 0[\s\S]*min-width:\s*0/.test(sharedTreeCss), 'file-tree rows with agent metadata keep the filename as the remaining-space ellipsis column beside the agent marker');
+  assert.ok(/\.file-tree-row\.has-agent \.file-tree-name\s*\{[^}]*flex:\s*0 1 auto[\s\S]*min-width:\s*0/.test(sharedTreeCss), 'file-tree rows with agent metadata keep the AI marker directly beside the filename while allowing the filename to ellipsize');
   assert.equal(/\.file-tree-row\.has-agent \.file-tree-agent\s*\{[^}]*margin-inline-end:\s*auto/.test(sharedTreeCss), false, 'file-tree agent metadata must not use auto-margin that can push date columns out of view');
+  assert.ok(/\.changes-file-list\s*\{[^}]*display:\s*grid[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)[\s\S]*min-inline-size:\s*0/.test(sharedTreeCss), 'Differ file-list grid constrains shared file-tree rows to the pane width instead of max-content clipping the date column');
   assert.ok(/\.file-tree-row:has\(> \.file-tree-dir-count:not\(\[hidden\]\)\) > \.file-tree-dir-count,[\s\S]*?margin-inline-start:\s*auto/.test(sharedTreeCss), 'Finder/Differ rows push the first right-side metadata column, not the AI marker, to the right edge');
   assert.ok(/\.file-tree-icon\s*\{[^}]*display:\s*inline-flex[\s\S]*align-items:\s*center[\s\S]*justify-content:\s*center[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ file icons use a centered fixed box');
   assert.ok(/\.file-tree-diff\s*\{[^}]*justify-content:\s*flex-end[\s\S]*flex:\s*0 0 6\.5ch[\s\S]*line-height:\s*1/.test(sharedTreeCss), 'Finder/Differ diff counts reserve one shared column before the git status badge');
@@ -1991,9 +2013,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorTabsIdx)), '#42: the editor tab strip is uncluttered — only tabs + frame controls remain');
   assert.ok(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(css), '#42: the editor panel grid reserves a row for the toolbar between tabs and body');
   assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');
-  // #3 (image 008): editor tool buttons right-aligned, and the toolbar reads like the pane tab-strip bar.
-  assert.ok(/\.file-editor-toolbar\s*\{[^}]*justify-content:\s*flex-end/.test(css), '#3: editor toolbar buttons are right-aligned');
+  // Editor toolbar alignment: Diff/FROM-TO left, preview font centered, the rest right-aligned.
+  assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor toolbar puts Diff at the left edge before FROM/TO');
+  assert.ok(/\.file-editor-toolbar:has\(\.file-editor-diff-ref-panel\[hidden\]\) \.file-editor-diff-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), 'editor toolbar lets Diff alone own the left side when FROM/TO is hidden');
+  assert.ok(/\.file-editor-preview-font-panel\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%[\s\S]*transform:\s*translateX\(-50%\)/.test(css), 'preview font-size control is centered in the editor toolbar');
   assert.ok(/\.file-editor-toolbar\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(css), '#3: editor toolbar background matches the pane chrome bar (--pane-bar-bg: bright focused / gray unfocused)');
+  assert.ok(/\.file-editor-diff-panel\.active,[\s\S]*?\.file-editor-diff-panel\[aria-pressed="true"\]\s*\{[\s\S]*?background:\s*var\(--pane-ctl-pressed-bg/.test(css), 'Diff active state uses the shared pressed control color');
+  assert.ok(/\.file-editor-gutter-panel\.active,[\s\S]*?\.file-editor-wrap-panel\[aria-pressed="true"\]/.test(css), '# and wrap active states share the pressed control treatment');
   assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
   assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
   assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
@@ -2009,6 +2035,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("const defaultLightEditorScheme = 'yolomux-light';"), 'light editor defaults to the brand YOLOmux Light scheme (green headings, matching dark)');
   assert.ok(source.includes("else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);"), 'plain file opens reset stale diff mode back to edit');
   assert.ok(source.includes('applyMarkdownSourceLines(container, text);'), 'Markdown preview source anchors are attached after parsing');
+  assert.ok(source.includes('function codeMirrorMarkdownFallbackSyntaxExtension'), 'Markdown edit mode has a parser-independent CodeMirror coloring fallback');
+  assert.ok(/function codeMirrorThemeExtensions[\s\S]*codeMirrorMarkdownFallbackSyntaxExtension\(api, path\)/.test(source), 'Markdown fallback coloring is wired into live CodeMirror edit views');
+  assert.ok(css.includes('.cm-content .md-heading'), 'Markdown fallback color classes apply inside CodeMirror edit content');
+  assert.ok(/gutterButton\.hidden = isFilePreviewItem\(item\) \|\| state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview-only editor mode hides the line-number button because no CodeMirror gutter is shown');
+  assert.ok(/wrapButton\.hidden = isFilePreviewItem\(item\) \|\| state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview-only editor mode hides the wrap button because no CodeMirror editor is shown');
+  assert.ok(/findButton && \(isFilePreviewItem\(item\) \|\| mode === 'preview'\)/.test(source), 'preview-only editor mode hides Search because the CodeMirror search panel is not available there');
 }
 
 {
@@ -6266,8 +6298,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.equal(css.includes('--inactive-pane-overlay-rgb: 124 82 88'), false, '#259: the earlier warm/red tint is gone (superseded by gray)');
     assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.16'), false, '#259 follow-up: the too-dark light overlay alpha is gone');
     assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.13'), false, '#259 follow-up: the still-too-dark light overlay alpha is gone');
-    // #258: the editor diff FROM/TO group is pushed to the right edge of the toolbar.
-    assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*order:\s*-1[^}]*margin-inline-end:\s*auto/.test(css), 'editor info bar: FROM/TO sits left (order:-1) and pushes all buttons right (margin-inline-end:auto)');
+    // #258 follow-up: Diff sits left of FROM/TO; FROM/TO then pushes the remaining tools right.
+    assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor info bar: Diff sits left of FROM/TO');
+    assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*order:\s*-1[^}]*margin-inline-end:\s*auto/.test(css), 'editor info bar: FROM/TO sits after Diff and pushes remaining buttons right');
     assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*min-width:\s*max-content[^}]*overflow:\s*visible/.test(css), 'editor info bar: FROM/TO/reset is intrinsic-width and not clipped');
     assert.equal(css.includes('max-width: min(32vw, 190px)'), false, 'editor info bar: the old too-narrow 190px clipping cap is gone');
     assert.ok(/\.file-tab-parent\s*\{[^}]*text-overflow:\s*ellipsis/.test(css), 'duplicate file-tab parent suffix is styled as compact muted metadata');
@@ -7061,6 +7094,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function fileStateHasUsefulGitHistory[\s\S]*state\?\.gitTracked === true[\s\S]*state\?\.gitHasHistory === true[\s\S]*state\.gitHistory\.length > 1/.test(source), 'file-history metadata requires an actual multi-commit file history');
   assert.ok(/function fileEditorGitActionControlsVisible[\s\S]*fileStateHasUsefulGitHistory\(state\)[\s\S]*confirmedNoDiff/.test(source), 'shared git-action predicate hides both controls for non-git, creation-only, stale-history, or confirmed-clean files');
   assert.ok(source.includes('updateFileEditorBlameButton(blameButton, path, state, item);'), 'blame button uses the shared git-action visibility helper');
+  assert.ok(/function updateFileEditorBlameButton[\s\S]*editorViewModeFor\(path, item\) === 'edit'[\s\S]*button\.disabled = !visible \|\| !editable/.test(source), 'Blame is clickable only in normal edit mode');
+  assert.ok(/file-editor-blame-panel'\)\?\.addEventListener\('click'[\s\S]*event\.currentTarget\?\.disabled\) return/.test(source), 'disabled Blame clicks do not toggle the global blame preference');
   assert.ok(source.includes('button.hidden = !fileEditorGitActionControlsVisible(path, state, item);'), 'diff button uses the shared git-action visibility predicate');
   assert.ok(source.includes('state.gitTracked = payload.git_tracked === true'), 'editor state carries the git_tracked flag from /api/fs/read through the shared normalizer');
 }

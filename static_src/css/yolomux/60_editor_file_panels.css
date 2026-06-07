@@ -508,9 +508,10 @@ body.editor-theme-light .file-editor-image {
   min-width: 20px;
   width: 20px;
   padding: 0;
-  border-inline-end: 1px solid var(--line);
+  border-inline-end: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: 0;
-  color: var(--muted);
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   line-height: 1;
@@ -520,15 +521,9 @@ body.editor-theme-light .file-editor-image {
 }
 .file-editor-mode-control button:hover,
 .file-editor-mode-control button.active {
-  color: #9fd8ff;
-  background: rgba(159, 216, 255, 0.09);
+  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
+  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
 }
-.file-editor-diff-panel.active {
-  color: #9fd8ff;
-  border-color: rgba(159, 216, 255, 0.72);
-  background: rgba(159, 216, 255, 0.12);
-}
-
 /* Rendered markdown preview pane */
 .file-editor-preview-pane {
   position: absolute;
@@ -1454,12 +1449,10 @@ body.editor-theme-light .file-editor-content {
 /* #42: editor controls (# / wrap / find / FROM-TO / diff / theme / save) render on a dedicated
    info line BELOW the tab strip instead of cramming the tabs. */
 .file-editor-toolbar {
+  position: relative;
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  /* #3 (image 008): the editor tool buttons (#, wrap, find, theme, save) sit on the RIGHT, and the
-     toolbar reads like the pane's tab-strip "bar" (same --pane-tab-strip-bg). In diff mode the FROM/TO
-     panel keeps its order:-1 + margin-inline-end:auto, which already pushes the buttons to the right. */
   justify-content: flex-end;
   gap: 2px;
   min-height: 26px;
@@ -1477,9 +1470,7 @@ body.editor-theme-light .file-editor-content {
   display: none;
 }
 .file-editor-diff-ref-panel {
-  /* FROM/TO sits at the LEFT of the editor info bar (image 040); `order:-1` moves it ahead of the
-     toggle/action button groups in the flex row, and `margin-inline-end:auto` pushes ALL of those
-     buttons to the RIGHT. (Supersedes the earlier FROM/TO-right placement.) */
+  /* Diff and FROM/TO own the LEFT side of the editor info bar; everything after them stays right. */
   order: -1;
   margin-inline-end: auto;
   display: inline-flex;
@@ -1508,6 +1499,9 @@ body.editor-theme-light .file-editor-content {
   display: none;
 }
 .file-editor-preview-font-panel {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
   height: 20px;
   flex: 0 0 auto;
   display: inline-flex;
@@ -1525,9 +1519,10 @@ body.editor-theme-light .file-editor-content {
   height: 20px;
   min-width: 24px;
   padding: 0 4px;
-  border: 1px solid transparent;
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: 3px;
-  color: inherit;
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .file-editor-preview-font-panel button:disabled {
@@ -1553,9 +1548,10 @@ body.editor-theme-light .file-editor-content {
   height: 20px;
   flex: 0 0 auto;
   padding: 0 3px;
-  border: 1px solid transparent;
+  border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: 3px;
-  color: var(--muted);
+  color: var(--pane-ctl-fg, var(--pc-control-fg));
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
 }
@@ -1566,7 +1562,6 @@ body.editor-theme-light .file-editor-content {
   align-items: center;
   justify-content: center;
   padding: 0;
-  color: var(--good);
 }
 .file-editor-wrap-panel,
 .file-editor-gutter-panel,
@@ -1584,6 +1579,12 @@ body.editor-theme-light .file-editor-content {
   padding: 0;
   line-height: 1;
 }
+.file-editor-diff-panel {
+  order: -2;
+}
+.file-editor-toolbar:has(.file-editor-diff-ref-panel[hidden]) .file-editor-diff-panel:not([hidden]) {
+  margin-inline-end: auto;
+}
 .file-editor-reload-panel {
   display: inline-flex;
   align-items: center;
@@ -1594,9 +1595,9 @@ body.editor-theme-light .file-editor-content {
    is a dim ::after on the cursor's current line — colored by the editor scheme's --code-comment token
    (theme-aware, the same gray Cursor uses), never selectable/copied as code. */
 .file-editor-blame-panel[aria-pressed="true"] {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
+  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
+  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
+  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
 }
 .cm-line[data-blame]::after {
   content: " " attr(data-blame);
@@ -1610,33 +1611,45 @@ body.editor-theme-light .file-editor-content {
 }
 /* B4: the diff expand/collapse-all toggle goes green when ON (showing all context), like a pressed control. */
 .file-editor-diff-expand-panel[aria-pressed="true"] {
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  border-color: var(--active-control-border);
+  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
+  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
+  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
 }
 .file-editor-save-panel:disabled {
   opacity: 0.44;
   cursor: default;
 }
 .file-editor-mode-control-panel button:hover,
-.file-editor-mode-control-panel button.active,
 .file-editor-preview-font-panel button:not(:disabled):hover,
 .file-editor-gutter-panel:hover,
-.file-editor-gutter-panel.active,
 .file-editor-wrap-panel:hover,
-.file-editor-wrap-panel.active,
 .file-editor-find-panel:hover,
+.file-editor-blame-panel:not([aria-pressed="true"]):not(:disabled):hover,
+.file-editor-diff-panel:not([aria-pressed="true"]):hover,
 .file-editor-diff-expand-panel:not([aria-pressed="true"]):hover,
 .file-editor-cross-split-panel:hover,
 .file-editor-theme-panel:hover,
 .file-editor-reload-panel:hover {
-  color: #9fd8ff;
-  border-color: #9fd8ff;
-  background: rgba(159, 216, 255, 0.08);
+  color: var(--pc-control-hover-fg);
+  border-color: var(--pane-tab-control-hover-border);
+  background: var(--pane-tab-control-hover-bg);
 }
+.file-editor-mode-control-panel button.active,
+.file-editor-gutter-panel.active,
+.file-editor-gutter-panel[aria-pressed="true"],
 .file-editor-wrap-panel.active,
-.file-editor-gutter-panel.active {
-  background: rgba(159, 216, 255, 0.10);
+.file-editor-wrap-panel[aria-pressed="true"],
+.file-editor-diff-panel.active,
+.file-editor-diff-panel[aria-pressed="true"] {
+  color: var(--pane-ctl-pressed-fg, var(--pane-tab-active-text));
+  background: var(--pane-ctl-pressed-bg, var(--pane-tab-active-bg));
+  border-color: var(--pane-ctl-pressed-border, var(--pane-tab-active-border));
+  font-weight: 700;
+}
+.file-editor-theme-panel.theme-dark,
+.file-editor-theme-panel.theme-light {
+  background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
+  border-color: var(--pane-ctl-border, var(--pane-tab-control-border));
 }
 .file-editor-theme-panel.theme-dark {
   box-shadow: inset 0 0 0 1px rgba(159, 216, 255, 0.14);
@@ -2302,21 +2315,25 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   tab-size: 4;
 }
 .file-editor-raw-panel .md-heading,
-.file-editor-code-preview .md-heading {
+.file-editor-code-preview .md-heading,
+.cm-content .md-heading {
   color: var(--markdown-heading);
   font-weight: 700;
 }
 .file-editor-raw-panel .md-heading-1,
-.file-editor-code-preview .md-heading-1 {
+.file-editor-code-preview .md-heading-1,
+.cm-content .md-heading-1 {
   color: var(--markdown-heading);
 }
 .file-editor-raw-panel .md-bold,
-.file-editor-code-preview .md-bold {
+.file-editor-code-preview .md-bold,
+.cm-content .md-bold {
   color: var(--markdown-strong);
   font-weight: 700;
 }
 .file-editor-raw-panel .md-italic,
-.file-editor-code-preview .md-italic {
+.file-editor-code-preview .md-italic,
+.cm-content .md-italic {
   color: var(--markdown-emphasis);
   font-style: italic;
 }
@@ -2325,15 +2342,20 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
 .file-editor-raw-panel .md-fence,
 .file-editor-code-preview .md-code,
 .file-editor-code-preview .md-codeblock,
-.file-editor-code-preview .md-fence {
+.file-editor-code-preview .md-fence,
+.cm-content .md-code,
+.cm-content .md-codeblock,
+.cm-content .md-fence {
   color: var(--code-inline);
 }
 .file-editor-raw-panel .md-link,
-.file-editor-code-preview .md-link {
+.file-editor-code-preview .md-link,
+.cm-content .md-link {
   color: var(--markdown-link);
 }
 .file-editor-raw-panel .md-code,
-.file-editor-code-preview .md-code {
+.file-editor-code-preview .md-code,
+.cm-content .md-code {
   color: var(--code-inline);
   background: var(--code-inline-bg);
   border: 1px solid var(--code-inline-border);
@@ -2341,13 +2363,15 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   padding: 0 2px;
 }
 body.editor-theme-light .file-editor-raw-panel .md-code,
-body.editor-theme-light .file-editor-code-preview .md-code {
+body.editor-theme-light .file-editor-code-preview .md-code,
+body.editor-theme-light .cm-content .md-code {
   color: var(--lt-code-inline);
   background: var(--lt-code-inline-bg);
   border-color: var(--lt-code-inline-border);
 }
 .file-editor-raw-panel .md-html,
-.file-editor-code-preview .md-html {
+.file-editor-code-preview .md-html,
+.cm-content .md-html {
   color: var(--code-tag);
 }
 .file-editor-raw-panel .md-blockquote,
@@ -2355,7 +2379,9 @@ body.editor-theme-light .file-editor-code-preview .md-code {
 .file-editor-raw-panel .code-comment,
 .file-editor-code-preview .md-blockquote,
 .file-editor-code-preview .md-list-marker,
-.file-editor-code-preview .code-comment {
+.file-editor-code-preview .code-comment,
+.cm-content .md-blockquote,
+.cm-content .md-list-marker {
   color: var(--code-comment);
 }
 .file-editor-raw-panel .code-keyword,

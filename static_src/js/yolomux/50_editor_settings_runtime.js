@@ -248,8 +248,9 @@ function fileEditorGitActionControlsVisible(path, state, item = null) {
 function updateFileEditorBlameButton(button, path, state, item = null) {
   if (!button) return;
   const visible = fileEditorGitActionControlsVisible(path, state, item);
+  const editable = editorViewModeFor(path, item) === 'edit';
   button.hidden = !visible;
-  button.disabled = !visible;
+  button.disabled = !visible || !editable;
   syncPressedButton(button, fileEditorBlameEnabled, {
     labelOn: t('editor.blame.toggle'),
     labelOff: t('editor.blame.toggle'),
@@ -338,7 +339,7 @@ async function applyEditorBlamePreference() {
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
-    if (fileEditorBlameEnabled && fileEditorGitActionControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
+    if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorGitActionControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
     renderFileEditorPanel(panel, item);
   }
 }

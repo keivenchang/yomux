@@ -393,6 +393,7 @@ def editor_diff_ref_toolbar_fixture_html():
       <body>
         <article class="panel file-editor-panel active-pane">
           <div class="file-editor-toolbar" role="toolbar">
+            <button id="diff-button" type="button" class="file-editor-diff-panel active" aria-pressed="true"><span class="file-editor-icon file-editor-icon-diff"></span></button>
             <span id="diff-ref-panel" class="file-editor-diff-ref-panel">
               <span class="diff-ref-controls compact" data-diff-ref-controls data-diff-ref-repo="/repo/app">
                 <label class="diff-ref-control">FROM <input id="from-ref" class="diff-ref-input" data-diff-ref-from value="abcdef123"></label>
@@ -1061,7 +1062,7 @@ def file_tree_status_alignment_fixture_html():
             <span class="file-tree-agent"><span class="agent-icon codex">A</span></span>
             <span class="file-tree-diff"><span class="changes-diff-add">+66</span></span>
             <span class="file-tree-git-status">M</span>
-            <span class="file-tree-date">&lt;1 m</span>
+            <span class="file-tree-date">Jun 6, 21:44</span>
           </div>
         </div>
       </body>
@@ -3318,6 +3319,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
               const snapshot = () => {{
                 const button = panel.querySelector('.file-editor-diff-panel');
                 const refs = panel.querySelector('.file-editor-diff-ref-panel');
+                const refInputs = Array.from(refs?.querySelectorAll('.diff-ref-input') || []).map(input => input.value || '');
                 const state = openFiles.get(path) || {{}};
                 return {{
                   viewMode: editorViewModeFor(path, item),
@@ -3328,6 +3330,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
                   refsHidden: refs?.hidden === true,
                   refsVisible: refs?.hidden === false,
                   refsText: refs?.textContent || '',
+                  refInputs,
                   diffLoaded: state.diffLoaded === true,
                   diffLoading: state.diffLoading === true,
                   diffUnavailable: state.diffUnavailable === true,
@@ -3343,7 +3346,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
               await frame();
               const whileUnresolved = snapshot();
               window.__resolveCleanDiffFetch();
-              await waitFor(() => openFiles.get(path)?.diffLoaded === true && openFiles.get(path)?.diffLoading === false && editorViewModeFor(path, item) === 'edit');
+              await waitFor(() => openFiles.get(path)?.diffLoaded === true && openFiles.get(path)?.diffLoading === false && editorViewModeFor(path, item) === 'diff');
               await frame();
               await frame();
               const afterCleanDiff = snapshot();
@@ -3376,15 +3379,194 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
     assert metrics["whileUnresolved"]["buttonTitle"] == "Loading diff", metrics
     assert metrics["whileUnresolved"]["refsHidden"] is True, metrics
     assert metrics["whileUnresolved"]["refsVisible"] is False, metrics
-    assert metrics["afterCleanDiff"]["viewMode"] == "edit", metrics
-    assert metrics["afterCleanDiff"]["buttonHidden"] is True, metrics
-    assert metrics["afterCleanDiff"]["refsHidden"] is True, metrics
+    assert metrics["afterCleanDiff"]["viewMode"] == "diff", metrics
+    assert metrics["afterCleanDiff"]["buttonHidden"] is False, metrics
+    assert metrics["afterCleanDiff"]["refsHidden"] is False, metrics
+    assert metrics["afterCleanDiff"]["refsVisible"] is True, metrics
+    assert metrics["afterCleanDiff"]["refInputs"][:2] == ["HEAD", "current"], metrics
     assert metrics["afterCleanDiff"]["diffLoaded"] is True, metrics
     assert metrics["afterCleanDiff"]["diffLoading"] is False, metrics
     assert metrics["afterCleanDiff"]["diffUnavailable"] is False, metrics
     assert metrics["afterCleanDiff"]["diffLength"] == 0, metrics
     assert "from=HEAD" in metrics["request"] and "to=current" in metrics["request"], metrics
     assert metrics["errors"] == [], metrics
+
+
+def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_path):
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "preview-toolbar.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        #mount {{ width: 920px; height: 520px; }}
+        .file-editor-panel {{ width: 920px; height: 520px; }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="mount"></div>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__previewToolbarReady = (() => {{
+              const path = '/home/test/repo/DONE.md';
+              const item = fileEditorItemFor(path);
+              setFileState(path, {{
+                kind: 'text',
+                content: '# Done\\n\\nSearchable preview text\\n',
+                original: '# Done\\n\\nSearchable preview text\\n',
+                dirty: false,
+                language: 'markdown',
+                gitTracked: true,
+                gitHasHistory: true,
+                gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
+              }});
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.classList.add('active-pane');
+              document.getElementById('mount').append(panel);
+              const snapshot = mode => {{
+                setFileEditorViewMode(path, mode, item);
+                renderFileEditorPanel(panel, item);
+                const toolbar = panel.querySelector('.file-editor-toolbar')?.getBoundingClientRect();
+                const font = panel.querySelector('.file-editor-preview-font-panel')?.getBoundingClientRect();
+                return {{
+                  gutterHidden: panel.querySelector('.file-editor-gutter-panel')?.hidden === true,
+                  wrapHidden: panel.querySelector('.file-editor-wrap-panel')?.hidden === true,
+                  findHidden: panel.querySelector('.file-editor-find-panel')?.hidden === true,
+                  previewHidden: panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
+                  fontHidden: panel.querySelector('.file-editor-preview-font-panel')?.hidden === true,
+                  fontCenterDelta: toolbar && font ? Math.abs((font.left + font.width / 2) - (toolbar.left + toolbar.width / 2)) : 999,
+                }};
+              }};
+              return {{
+                preview: snapshot('preview'),
+                split: snapshot('split'),
+                edit: snapshot('edit'),
+              }};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script("return window.__previewToolbarReady")
+    assert metrics["preview"]["previewHidden"] is False, metrics
+    assert metrics["preview"]["gutterHidden"] is True, metrics
+    assert metrics["preview"]["wrapHidden"] is True, metrics
+    assert metrics["preview"]["findHidden"] is True, metrics
+    assert metrics["preview"]["fontHidden"] is False, metrics
+    assert metrics["preview"]["fontCenterDelta"] <= 1.5, metrics
+    assert metrics["split"]["gutterHidden"] is False, metrics
+    assert metrics["split"]["wrapHidden"] is False, metrics
+    assert metrics["split"]["findHidden"] is False, metrics
+    assert metrics["edit"]["gutterHidden"] is False, metrics
+    assert metrics["edit"]["wrapHidden"] is False, metrics
+    assert metrics["edit"]["findHidden"] is False, metrics
+
+
+def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path):
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+            "codeMirrorAssetUrl": bundle_uri,
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "markdown-edit-color.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #11151d; }}
+        #mount {{ width: 920px; height: 520px; }}
+        .file-editor-panel {{ width: 920px; height: 520px; }}
+        .file-editor-codemirror-panel {{ height: 100%; }}
+        </style></head>
+        <body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="mount"></div>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__markdownColorReady = (async () => {{
+              const path = '/home/test/repo/README.md';
+              const content = '# YOLOmux\\n\\n**bold** and [link](README.md)\\n';
+              const item = fileEditorItemFor(path);
+              setFileState(path, {{
+                kind: 'text',
+                content,
+                original: content,
+                dirty: false,
+                language: 'markdown',
+                gitTracked: true,
+                gitHasHistory: true,
+                gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
+              }});
+              setFileEditorViewMode(path, 'edit', item);
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.classList.add('active-pane');
+              document.getElementById('mount').append(panel);
+              renderFileEditorPanel(panel, item);
+              const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+              for (let attempt = 0; attempt < 120; attempt += 1) {{
+                if (panel.querySelector('.cm-content .md-heading')) break;
+                await frame();
+              }}
+              const heading = panel.querySelector('.cm-content .md-heading');
+              const bold = panel.querySelector('.cm-content .md-bold');
+              const link = panel.querySelector('.cm-content .md-link');
+              const root = getComputedStyle(document.documentElement);
+              return {{
+                cmMode: panel._cmMode || '',
+                plainFallback: panel._cmPlainFallback === true,
+                headingText: heading?.textContent || '',
+                headingColor: heading ? getComputedStyle(heading).color : '',
+                expectedHeading: root.getPropertyValue('--markdown-heading').trim(),
+                hasBold: Boolean(bold),
+                hasLink: Boolean(link),
+              }};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__markdownColorReady.then(done, error => done({error: String(error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["cmMode"] == "edit", metrics
+    assert metrics["headingText"].startswith("# YOLOmux"), metrics
+    assert metrics["headingColor"] != "", metrics
+    assert metrics["headingColor"] != "rgb(203, 213, 225)", metrics
+    assert metrics["hasBold"] is True, metrics
+    assert metrics["hasLink"] is True, metrics
 
 
 def test_topbar_finder_and_modified_files_headers_hover_accent_in_light_mode(browser, tmp_path):
@@ -3637,12 +3819,15 @@ def test_differ_long_filename_ellipsizes_before_date_column(browser, tmp_path):
     metrics = browser.execute_script(
         """
         const row = document.getElementById('status-row-long');
+        const shortRow = document.getElementById('status-row-m');
         const tree = row.parentElement;
         const name = row.querySelector('.file-tree-name');
         const agent = row.querySelector('.file-tree-agent');
         const diff = row.querySelector('.file-tree-diff');
         const status = row.querySelector('.file-tree-git-status');
         const date = row.querySelector('.file-tree-date');
+        const shortName = shortRow.querySelector('.file-tree-name');
+        const shortAgent = shortRow.querySelector('.file-tree-agent');
         const rowRect = row.getBoundingClientRect();
         const treeRect = tree.getBoundingClientRect();
         const nameRect = name.getBoundingClientRect();
@@ -3650,6 +3835,8 @@ def test_differ_long_filename_ellipsizes_before_date_column(browser, tmp_path):
         const diffRect = diff.getBoundingClientRect();
         const statusRect = status.getBoundingClientRect();
         const dateRect = date.getBoundingClientRect();
+        const shortNameRect = shortName.getBoundingClientRect();
+        const shortAgentRect = shortAgent.getBoundingClientRect();
         return {
           treeRight: treeRect.right,
           rowRight: rowRect.right,
@@ -3665,15 +3852,20 @@ def test_differ_long_filename_ellipsizes_before_date_column(browser, tmp_path):
           nameScrollWidth: name.scrollWidth,
           nameFlex: getComputedStyle(name).flex,
           agentMarginInlineEnd: getComputedStyle(agent).marginInlineEnd,
+          shortNameRight: shortNameRect.right,
+          shortAgentLeft: shortAgentRect.left,
+          shortNameFlex: getComputedStyle(shortName).flex,
         };
         """
     )
     assert metrics["dateRight"] <= metrics["treeRight"] + 0.5, metrics
     assert metrics["dateScrollWidth"] <= metrics["dateClientWidth"] + 1, metrics
     assert metrics["nameScrollWidth"] > metrics["nameClientWidth"] + 1, metrics
-    assert metrics["nameFlex"].startswith("1 1"), metrics
+    assert metrics["nameFlex"].startswith("0 1"), metrics
+    assert metrics["shortNameFlex"].startswith("0 1"), metrics
     assert metrics["agentMarginInlineEnd"] == "0px", metrics
     assert metrics["nameRight"] <= metrics["agentLeft"] + 0.5, metrics
+    assert metrics["shortAgentLeft"] - metrics["shortNameRight"] <= 8, metrics
     assert metrics["agentLeft"] <= metrics["diffLeft"] <= metrics["statusLeft"] <= metrics["dateLeft"], metrics
 
 
@@ -4435,10 +4627,11 @@ def test_codemirror_editor_controls_are_sized_and_aligned(browser, tmp_path):
     assert metrics["themeBorderColor"] != "rgba(0, 0, 0, 0)"
     assert metrics["themeColor"] != metrics["editorColor"]
     assert metrics["wrapBorderColor"] != "rgba(0, 0, 0, 0)"
-    assert metrics["themeBg"] == "rgba(0, 0, 0, 0)"
+    assert metrics["themeBg"] != "rgba(0, 0, 0, 0)"
     assert metrics["wrapBg"] not in ("rgb(255, 255, 255)", "rgb(221, 244, 255)")
-    assert metrics["findBg"] == "rgba(0, 0, 0, 0)"
-    assert metrics["previewBg"] == "rgba(0, 0, 0, 0)"
+    assert metrics["findBg"] != "rgba(0, 0, 0, 0)"
+    assert metrics["previewBg"] != "rgba(0, 0, 0, 0)"
+    assert metrics["wrapBg"] != metrics["findBg"]
     assert metrics["closeBg"] != metrics["editorBg"]
     assert metrics["closeBg"] != "rgb(255, 235, 233)"
     assert metrics["syntaxColorCount"] >= 6
@@ -4470,6 +4663,8 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
     metrics = browser.execute_script(
         """
         const toolbar = document.querySelector('.file-editor-toolbar').getBoundingClientRect();
+        const diff = document.getElementById('diff-button').getBoundingClientRect();
+        const diffStyle = getComputedStyle(document.getElementById('diff-button'));
         const panel = document.getElementById('diff-ref-panel').getBoundingClientRect();
         const controls = document.querySelector('[data-diff-ref-controls]').getBoundingClientRect();
         const to = document.getElementById('to-ref').getBoundingClientRect();
@@ -4478,8 +4673,14 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
         const panelStyle = getComputedStyle(document.getElementById('diff-ref-panel'));
         const hit = document.elementFromPoint(reset.left + reset.width / 2, reset.top + reset.height / 2);
         return {
+          toolbarLeft: toolbar.left,
           toolbarRight: toolbar.right,
+          diffLeft: diff.left,
+          diffRight: diff.right,
+          diffBg: diffStyle.backgroundColor,
+          diffBorder: diffStyle.borderTopColor,
           panelRight: panel.right,
+          panelLeft: panel.left,
           controlsRight: controls.right,
           toRight: to.right,
           resetLeft: reset.left,
@@ -4491,6 +4692,10 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
         };
         """
     )
+    assert metrics["diffLeft"] <= metrics["toolbarLeft"] + 8, metrics
+    assert 0 <= metrics["panelLeft"] - metrics["diffRight"] <= 6, metrics
+    assert metrics["diffBg"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["diffBorder"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["resetDisplay"] != "none"
     assert metrics["resetWidth"] >= 18
     assert metrics["panelOverflow"] == "visible"

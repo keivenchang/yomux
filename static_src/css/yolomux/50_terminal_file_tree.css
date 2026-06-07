@@ -1959,7 +1959,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   text-shadow: none;
 }
 .file-tree-name {
-  flex: 1 1 0;
+  flex: 0 1 auto;
   min-width: 0;
   max-inline-size: 100%;
   overflow: hidden;
@@ -1967,7 +1967,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   color: currentColor;
 }
 .file-tree-row.has-agent .file-tree-name {
-  flex: 1 1 0;
+  flex: 0 1 auto;
   min-width: 0;
 }
 .file-tree-dir-count {
@@ -2079,7 +2079,7 @@ body.theme-light .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 15px;
+  left: calc(15px + (var(--tree-depth, 1) - 1) * 14px);
   border-inline-start: 1px solid var(--tree-indent-line);
   pointer-events: none;
 }

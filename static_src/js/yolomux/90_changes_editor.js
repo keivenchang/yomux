@@ -2206,7 +2206,7 @@ async function enterFileEditorDiffMode(path, panel, item) {
   await loadPromise;
   const current = openFiles.get(path);
   if (!current || current.kind !== 'text' || panel.dataset.filePath !== path) return;
-  if (openFileDiffAvailable(current)) {
+  if (openFileDiffAvailable(current) || fileStateHasUsefulGitHistory(current)) {
     setFileEditorViewMode(path, 'diff', item);
   } else {
     setFileEditorViewMode(path, 'edit', item);
@@ -2323,6 +2323,7 @@ function createFileEditorPanel(item) {
   panel.querySelector('.file-editor-blame-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
+    if (event.currentTarget?.disabled) return;
     toggleFileEditorBlame();  // DOIT.26: inline git blame on/off (persisted, fetches + re-renders editors)
   });
   panel.querySelector('.file-editor-diff-panel')?.addEventListener('click', event => {
@@ -2731,6 +2732,7 @@ function codeMirrorThemeExtensions(api, path) {
     codeMirrorHighlightExtension(api),
     codeMirrorHtmlSemanticEmphasisExtension(api, path),
     codeMirrorMarkdownStrongExtension(api, path),
+    codeMirrorMarkdownFallbackSyntaxExtension(api, path),
     codeMirrorThemeExtension(api),
   ];
 }
@@ -2784,7 +2786,7 @@ function codeMirrorPlainEditableExtensions(api, panel, path, options = {}) {
     defaultKeymap,
     safeCodeMirrorExtension('read only', () => api.EditorState.readOnly.of(readOnlyMode)),
     safeCodeMirrorExtension('editable', () => api.EditorView.editable.of(!readOnlyMode)),
-    codeMirrorThemeOnlyExtensions(api, panel),
+    codeMirrorThemedExtensions(api, panel, path),
     codeMirrorWorkingUpdateExtension(api, panel, path),
   ];
 }
@@ -3563,6 +3565,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       });
       panel._cmPath = path;
       panel._cmSignature = signature;
+      panel._cmMode = 'edit';
       panel._cmPlainFallback = Boolean(createdState.plain);
       panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
@@ -3701,15 +3704,15 @@ function renderFileEditorPanel(panel, item) {
     updateEditorPreviewFontControls(previewFontPanel);
   }
   if (gutterButton) {
-    gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text';
+    gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
     updateEditorGutterButton(gutterButton);
   }
   if (wrapButton) {
-    wrapButton.hidden = isFilePreviewItem(item) || state.kind !== 'text';
+    wrapButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
     updateEditorWrapButton(wrapButton);
   }
   updateEditorFindButton(findButton, state);
-  if (findButton && isFilePreviewItem(item)) findButton.hidden = true;
+  if (findButton && (isFilePreviewItem(item) || mode === 'preview')) findButton.hidden = true;
   // Blame and Diff are one git-backed toolbar pair: show both together for files with real file history,
   // or hide both for files outside git / untracked / creation-only / confirmed-clean.
   updateFileEditorBlameButton(blameButton, path, state, item);
