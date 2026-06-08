@@ -486,7 +486,7 @@ def session_files_payload_for_info(
                 touched_by_rel[rel_path] = metadata
         repo_entries: list[dict[str, Any]] = []
         for rel_path, status in statuses.items():
-            path = (repo / rel_path).resolve(strict=False)
+            path = repo / rel_path
             counts = numstat.get(rel_path, {})
             added = counts.get("added")
             removed = counts.get("removed")
@@ -500,7 +500,7 @@ def session_files_payload_for_info(
         for rel_path, metadata in touched_by_rel.items():
             if rel_path in statuses:
                 continue
-            path = (repo / rel_path).resolve(strict=False)
+            path = repo / rel_path
             repo_entries.append(session_file_entry(
                 info.session,
                 metadata.get("agents", []),

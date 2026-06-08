@@ -4543,11 +4543,22 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
   <title>${esc(title)}</title>
   <link rel="stylesheet" href="${esc(cssHref)}">
   <style>
-    html, body { min-height: 100%; margin: 0; }
+    html {
+      min-height: 100%;
+      margin: 0;
+      overflow: auto;
+    }
+    body.file-preview-popout-window {
+      min-height: 100%;
+      height: auto;
+      margin: 0;
+      display: block !important;
+      grid-template-rows: none !important;
+      overflow: auto;
+    }
     body.file-preview-popout-window {
       background: var(--editor-preview-bg, var(--bg, #ffffff));
       color: var(--text, #111827);
-      overflow: auto;
     }
     .file-preview-popout-shell {
       box-sizing: border-box;
@@ -4607,7 +4618,14 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     .file-preview-popout-window .file-editor-preview-pane-panel {
       position: static !important;
       inset: auto !important;
+      left: auto !important;
+      right: auto !important;
+      top: auto !important;
+      bottom: auto !important;
       display: block !important;
+      box-sizing: border-box;
+      width: 100% !important;
+      max-width: 100%;
       min-height: auto;
       max-height: none;
       height: auto;

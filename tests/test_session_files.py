@@ -251,6 +251,43 @@ def test_git_status_labels_untracked_question_distinct_from_staged_add_A(tmp_pat
     assert statuses["loose.txt"] == "?"
 
 
+def test_session_files_payload_preserves_untracked_symlink_paths(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    target = repo / "lib" / "parsers" / "REASONING_CASES.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Reasoning\n", encoding="utf-8")
+    git(repo, "add", "lib/parsers/REASONING_CASES.md")
+    git(repo, "commit", "-m", "base")
+    staged_link = repo / ".stage-v2" / "lib" / "parsers" / "REASONING_CASES.md"
+    staged_link.parent.mkdir(parents=True)
+    staged_link.symlink_to(target)
+    pane = PaneInfo(
+        session="s1",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="s1:0.0",
+        current_path=str(repo),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+    by_path = {item["path"]: item for item in payload["files"]}
+
+    assert "lib/parsers/REASONING_CASES.md" not in by_path
+    assert by_path[".stage-v2/lib/parsers/REASONING_CASES.md"]["status"] == "?"
+    assert by_path[".stage-v2/lib/parsers/REASONING_CASES.md"]["abs_path"] == str(staged_link)
+
+
 def test_git_numstat_parses_paths_with_tabs(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

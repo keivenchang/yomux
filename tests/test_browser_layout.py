@@ -4276,8 +4276,8 @@ def test_diff_overview_matches_actual_todo_codemirror_rows(browser, tmp_path):
             "toA": 147096,
             "endA": 147095,
             "fromB": 2235,
-            "toB": 45505,
-            "endB": 45504,
+            "toB": 45532,
+            "endB": 45531,
         }
     ]
     assert metrics["rows"]["bands"] == [

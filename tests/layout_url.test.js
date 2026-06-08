@@ -2067,7 +2067,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-editor-gutter-panel\s*\{[^}]*order:\s*-4/.test(css), 'editor toolbar puts # at the far-left edge');
   assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-3[\s\S]*min-width:\s*44px/.test(css), 'editor toolbar puts ΔDiff after # and gives it text-button width');
   assert.ok(/\.file-editor-diff-expand-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor toolbar puts diff expand immediately after ΔDiff');
-  assert.ok(/\.file-editor-toolbar:has\(\.file-editor-diff-ref-panel\[hidden\]\) \.file-editor-diff-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), 'editor toolbar lets Diff alone own the left side when FROM/TO is hidden');
+  assert.equal(/\.file-editor-toolbar:has\(\.file-editor-diff-ref-panel\[hidden\]\) \.file-editor-diff-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), false, 'editor toolbar keeps ΔDiff immediately beside # when FROM/TO is hidden');
   assert.ok(/\.file-editor-toolbar:has\(\.file-editor-diff-panel\[hidden\]\) \.file-editor-gutter-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), 'editor toolbar keeps # on the left even when Diff is hidden');
   assert.ok(/\.file-editor-preview-font-panel\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%[\s\S]*transform:\s*translateX\(-50%\)/.test(css), 'preview font-size control is centered in the editor toolbar');
   assert.ok(/\.file-editor-toolbar\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(css), '#3: editor toolbar background matches the pane chrome bar (--pane-bar-bg: bright focused / gray unfocused)');
@@ -6719,6 +6719,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('.file-preview-popout-window.editor-theme-light .markdown-body pre'), 'preview pop-out has light-theme code block rules outside .file-editor-content');
   assert.ok(source.includes('.file-preview-popout-window .markdown-body'), 'preview pop-out sets readable body text in its standalone document');
   assert.ok(source.includes('position: static !important;'), 'preview pop-out resets the in-pane absolute preview positioning');
+  assert.ok(source.includes('display: block !important;') && source.includes('grid-template-rows: none !important;'), 'preview pop-out resets the app body grid layout');
+  assert.ok(source.includes('width: 100% !important;') && source.includes('left: auto !important;'), 'preview pop-out resets split-preview geometry that would clip content to the right half');
 }
 
 {
