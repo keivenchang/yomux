@@ -1351,8 +1351,9 @@ function fileTreeMtimeText(entry) {
   return sessionFileDisplayTimeText(entry?.mtime);
 }
 
-function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode) {
-  const visible = entries.filter(entry => fileExplorerShowHidden || !entry.name.startsWith('.'));
+function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, options = {}) {
+  const includeHidden = options.includeHidden === true;
+  const visible = entries.filter(entry => includeHidden || fileExplorerShowHidden || !entry.name.startsWith('.'));
   const mode = ['az', 'za', 'newest', 'oldest'].includes(sortMode) ? sortMode : 'az';
   const direction = mode === 'za' ? -1 : 1;
   return visible.sort((left, right) => {
@@ -1747,7 +1748,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     changedAncestorStats: options.changedAncestorStats instanceof Map ? options.changedAncestorStats : fileTreeChangedAncestorStats(),
   };
   const entriesByDir = renderOptions.entriesByDir instanceof Map ? renderOptions.entriesByDir : null;
-  const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode);
+  const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode, {includeHidden: renderOptions.includeHidden === true});
   const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
   const nextNodes = [];
   for (const entry of visible) {

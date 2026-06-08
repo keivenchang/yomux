@@ -166,11 +166,12 @@ function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
   }
 }
 
-function updateEditorThemeButton(button) {
+function updateEditorThemeButton(button, options = {}) {
   if (!button) return;
+  const includeVanilla = options.includeVanilla !== false;
   const scheme = activeEditorScheme();
   const previewState = editorPreviewThemeState();
-  const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' ? 'vanilla' : 'dark');
+  const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' && includeVanilla ? 'vanilla' : 'dark');
   button.classList.toggle('theme-dark', previewState === 'dark');
   button.classList.toggle('theme-light', previewState === 'light');
   button.classList.toggle('theme-vanilla', previewState === 'vanilla');
@@ -232,13 +233,14 @@ function setFileEditorPreviewDisplayMode(mode) {
   applyEditorThemeMode({refreshEditors: true});
 }
 
-function cycleEditorThemeMode() {
+function cycleEditorThemeMode(options = {}) {
+  const includeVanilla = options.includeVanilla !== false;
   const previewState = editorPreviewThemeState();
   if (previewState === 'dark') {
     setFileEditorThemeMode(configuredEditorSchemeForMode(false));
     return;
   }
-  if (previewState === 'light') {
+  if (previewState === 'light' && includeVanilla) {
     setFileEditorPreviewDisplayMode('vanilla');
     return;
   }
@@ -305,7 +307,7 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   button.disabled = !active && loading;
   const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('editor.diff'));
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
-  button.textContent = 'ΔDiff';
+  button.textContent = 'Differ';
 }
 
 function updateFileEditorDiffExpandButton(button, path, state, item = null) {

@@ -318,7 +318,7 @@ def codemirror_editor_controls_fixture_html():
               <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
               <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
               <button type="button" class="file-editor-blame-panel" aria-pressed="true"><span class="file-editor-icon file-editor-icon-blame"></span></button>
-              <button type="button" class="file-editor-diff-panel active">ΔDiff</button>
+              <button type="button" class="file-editor-diff-panel active">Differ</button>
               <button type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
               <button type="button" class="file-editor-theme-panel theme-light" data-editor-theme="light"><span class="file-editor-icon file-editor-icon-theme"></span></button>
               <button type="button" class="file-editor-reload-panel">Reload</button>
@@ -396,7 +396,7 @@ def editor_diff_ref_toolbar_fixture_html():
         <article class="panel file-editor-panel active-pane">
           <div class="file-editor-toolbar" role="toolbar">
             <button id="gutter-button" type="button" class="file-editor-gutter-panel active" aria-pressed="true">#</button>
-            <button id="diff-button" type="button" class="file-editor-diff-panel active" aria-pressed="true">ΔDiff</button>
+            <button id="diff-button" type="button" class="file-editor-diff-panel active" aria-pressed="true">Differ</button>
             <button id="diff-expand-button" type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
             <span id="diff-ref-panel" class="file-editor-diff-ref-panel">
               <span class="diff-ref-controls compact" data-diff-ref-controls data-diff-ref-repo="/repo/app">
@@ -927,9 +927,9 @@ def finder_click_toolbar_fixture_html():
             <div class="pane-tabs" hidden></div>
             <div class="file-explorer-toolbar">
               <div class="file-explorer-toolbar-row file-explorer-primary-row">
-                <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / ΔDiff">
+                <span class="file-explorer-mode-switcher" role="group" aria-label="Finder / Differ">
                   <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="files" aria-pressed="true"><span class="file-explorer-mode-label">Finder</span></button>
-                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">ΔDiff</span></button>
+                  <button type="button" class="file-explorer-mode-toggle" data-file-explorer-mode-set="diff" aria-pressed="false"><span class="file-explorer-mode-label">Differ</span></button>
                 </span>
                 <label class="file-explorer-diff-session-control file-explorer-mode-diff-only changes-control">Session: <select class="file-explorer-diff-session-select" data-session-files-session><option>project1</option></select></label>
                 <input class="file-explorer-path-inline file-explorer-mode-files-only" value="/home/keivenc/yolomux.dev/static_src/js/yolomux">
@@ -1628,7 +1628,7 @@ def test_legacy_changes_url_opens_finder_diff_mode(browser, tmp_path, legacy_tok
     assert metrics["panelMode"] == "diff"
     assert metrics["filesPressed"] == "false"
     assert metrics["diffPressed"] == "true"
-    assert metrics["modeTexts"] == ["Finder", "ΔDiff"]
+    assert metrics["modeTexts"] == ["Finder", "Differ"]
     assert metrics["treeDisplay"] == "none"
     assert metrics["changesDisplay"] != "none"
     assert metrics["titleCount"] == 0
@@ -3077,7 +3077,7 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     assert "transparent" not in metrics["dark"]["addToken"], metrics
     assert "transparent" not in metrics["dark"]["removeToken"], metrics
     assert metrics["light"]["added"] == metrics["light"]["activeAdded"], metrics
-    assert metrics["light"]["addToken"] == "#d2f0d6", metrics
+    assert metrics["light"]["addToken"] == "#bfeac8", metrics
 
 
 def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_path):
@@ -4514,7 +4514,7 @@ def test_finder_path_is_first_and_readable_in_wrapped_toolbar(browser, tmp_path)
     assert metrics["modeUsesCondensedControlFont"]
     assert metrics["modeMaxButtonWidth"] <= 62
     assert metrics["pathConsumesRemaining"]
-    assert metrics["modeTexts"] == ["Finder", "ΔDiff"]
+    assert metrics["modeTexts"] == ["Finder", "Differ"]
     assert abs(metrics["closeRight"] - metrics["primaryRowRight"]) <= 1
     assert metrics["pathColor"] == metrics["textColor"]
     assert metrics["scopeRowTop"] >= metrics["primaryRowBottom"]
@@ -4551,7 +4551,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
     assert not before["bodyDiff"]
     assert before["filesPressed"] == "true"
     assert before["diffPressed"] == "false"
-    assert before["texts"] == ["Finder", "ΔDiff"]
+    assert before["texts"] == ["Finder", "Differ"]
     assert before["newFileDisplay"] != "none"
     assert before["treeDisplay"] != "none"
     assert before["changesDisplay"] == "none"
@@ -4599,7 +4599,7 @@ def test_finder_diff_mode_toggle_fills_pane(browser, tmp_path):
     assert after["panelMode"] == "diff"
     assert after["filesPressed"] == "false"
     assert after["diffPressed"] == "true"
-    assert after["texts"] == ["Finder", "ΔDiff"]
+    assert after["texts"] == ["Finder", "Differ"]
     assert after["diffButtonBg"] != before["diffButtonBg"]
     assert after["newFileDisplay"] == "none"
     assert after["treeDisplay"] == "none"
@@ -5070,7 +5070,7 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
     )
     assert metrics["gutterLeft"] <= metrics["toolbarLeft"] + 8, metrics
     assert 0 <= metrics["diffLeft"] - metrics["gutterRight"] <= 6, metrics
-    assert metrics["diffText"] == "ΔDiff", metrics
+    assert metrics["diffText"] == "Differ", metrics
     assert 0 <= metrics["expandLeft"] - metrics["diffRight"] <= 6, metrics
     assert 0 <= metrics["panelLeft"] - metrics["expandRight"] <= 6, metrics
     assert metrics["diffBg"] != "rgba(0, 0, 0, 0)", metrics

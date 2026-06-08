@@ -57,7 +57,7 @@ To add a read-only guest account, uncomment (or add) a `readonly` entry:
 YOLOmux follows terminal-app terminology (iTerm2-style):
 
 - **Pane** — a visible split region of the layout. The workspace has a left and right side; each side is one full-height pane or two stacked, for up to four panes. A pane holds one or more tabs but shows ONE at a time.
-- **Tab** — the thing shown inside a pane. Tab types: **tmux session** (terminal), **Finder / File Explorer** (file browser with `Δ DIFF` mode), **File** (text editor or image viewer), **Preferences**, and **YO!agent**.
+- **Tab** — the thing shown inside a pane. Tab types: **tmux session** (terminal), **Finder / File Explorer** (file browser with `Differ` mode), **File** (text editor or image viewer), **Preferences**, and **YO!agent**.
 
 When a Tab is a tmux session, that session has its own internal hierarchy — tmux windows (`Ctrl-b n/p`) and tmux panes (`Ctrl-b %/"`) — which belong to tmux, not YOLOmux. Watch the overloaded word **pane**: a YOLOmux Pane is a browser layout split, a tmux pane is a split inside a tmux window.
 
@@ -71,13 +71,13 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs:
 - The pane toolbar steps through the focused session's tmux windows (`<` / `>`), shows transcripts (`Tx`), asks for an AI summary (`AI`), and opens the event log (`Log`).
 - In dark mode, the focused pane's tab strip brightens so the active pane is easier to pick out at a glance; light mode keeps the same pane strip color.
 - Inactive panes use a flat dim from the visually active pane, and that visual-active pane survives terminal blur.
-- Finder can switch between the file tree and a full-pane `Δ DIFF` mode; diff mode uses the Differ chrome with session selection, per-repo FROM/TO controls, and no create-file actions.
+- Finder can switch between the file tree and a full-pane `Differ` mode; diff mode uses the Differ chrome with session selection, per-repo FROM/TO controls, and no create-file actions.
 - The Finder root toggle is `No Sync` / `Sync`, and defaults to `Sync`. In Sync mode, Finder follows the focused session's affected repos: if a session touches multiple nearby repos, Finder opens their common parent, expands each touched repo path, and bolds affected repo roots plus changed descendant directories; with no changed-file payload yet, or with a stale same-session payload from a different repo, it falls back to the session's git root, and a fresh session with no cwd opens home.
 - Finder browsing defaults to the filesystem root (`/`) instead of only home and `/tmp`; credential-heavy paths such as `.ssh`, `.gnupg`, `.aws`, `.config/gh`, token files, and registry config files are blocked and hidden from search/index results.
 - Finder file and diff rows share the same file date modes (`None`, `Date`, `Ago`); in Finder, the date toggle and Reload control sit together on the toolbar's right edge so row times line up under the date column.
 - Finder diff rows keep status, diff counts, and the time column visible by trimming long filenames first.
 - Editor diff rows use one consistent red or green fill for changed lines, including the cursor's active line.
-- The file editor's `Δ DIFF` toggle opens a diff view with a FROM/TO sha picker for any git-tracked file with commit history, including a file with no uncommitted changes. The default HEAD-vs-working diff for a clean file is empty, but diff mode stays open so you can pick two refs to compare; it only falls back to the editor for files git cannot diff.
+- The file editor's `Differ` toggle opens a diff view with a FROM/TO sha picker for any git-tracked file with commit history, including a file with no uncommitted changes. The default HEAD-vs-working diff for a clean file is empty, but diff mode stays open so you can pick two refs to compare; it only falls back to the editor for files git cannot diff.
 - Diff panes hold the loading state until the requested FROM/TO payload is ready, then render the diff without flashing a transient edit view.
 - The terminal border turns yellow for the focused pane.
 - Sessions waiting at a detected permission prompt show an attention badge in the roster even when YOLO auto-approval is off, so pending `Yes/No` prompts do not silently sit idle.

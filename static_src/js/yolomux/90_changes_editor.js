@@ -91,6 +91,10 @@ function sessionFilesRequestQueryString() {
   return `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
 }
 
+function sessionFilesCacheKey(session) {
+  return `${String(session || '')}\x1f${sessionFilesRequestQueryString()}`;
+}
+
 const diffRefSuggestionLimit = 60;
 const diffRefPopoverCompactLimit = 12;
 const diffRefPopoverFullLimit = 18;
@@ -329,8 +333,8 @@ function positionDiffRefPopover(input, compact) {
   if (!rect) return;
   const viewportWidth = Math.max(320, window.innerWidth || document.documentElement?.clientWidth || 1024);
   const viewportHeight = Math.max(240, window.innerHeight || document.documentElement?.clientHeight || 720);
-  const minWidth = compact ? 420 : 520;
-  const maxWidth = compact ? 620 : 760;
+  const minWidth = Math.min(compact ? 880 : 960, viewportWidth - 16);
+  const maxWidth = compact ? 1040 : 1120;
   const width = Math.min(maxWidth, viewportWidth - 16, Math.max(minWidth, rect.width));
   const left = Math.max(8, Math.min(rect.left, viewportWidth - width - 8));
   const top = Math.min(rect.bottom + 4, viewportHeight - 48);
@@ -548,7 +552,7 @@ function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
-  const cached = fileExplorerSessionFilesCache.get(session);
+  const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
   if (fileExplorerMode === 'diff' && cached?.payload) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
     fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
@@ -672,7 +676,7 @@ async function fetchSessionFiles(options = {}) {
     renderPaneTabStrips();
   }
   try {
-    // C6: ΔDiff follows selected refs; Finder file mode must stay tied to the current worktree so it
+    // C6: Differ follows selected refs; Finder file mode must stay tied to the current worktree so it
     // does not paint historical diff badges after the repo is clean.
     const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${sessionFilesRequestQueryString()}`);
     const payload = await response.json().catch(() => ({}));
@@ -692,7 +696,7 @@ async function fetchSessionFiles(options = {}) {
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload);
     setSessionFilesSignatureForDestination(destination, signature);
-    fileExplorerSessionFilesCache.set(session, {payload: nextPayload, signature});
+    fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
     if (!options.silent) statusOk(`loaded ${nextPayload.files.length} changed file${nextPayload.files.length === 1 ? '' : 's'}`);
   } catch (err) {
     const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [String(err)], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
@@ -971,6 +975,12 @@ function changesRepoCount(payload, files) {
       if (path) repos.add(path);
     }
   }
+  if (!repos.size) {
+    for (const repoInfo of Array.isArray(payload?.repos) ? payload.repos : []) {
+      const path = normalizeDirectoryPath(repoInfo?.repo || '');
+      if (path && repoHasExplicitComparison(repoInfo)) repos.add(path);
+    }
+  }
   return repos.size;
 }
 
@@ -1001,6 +1011,16 @@ function repoPayloadByPath(payload) {
   const map = new Map();
   for (const repo of Array.isArray(payload?.repos) ? payload.repos : []) map.set(repo.repo || 'Outside repo', repo);
   return map;
+}
+
+function repoHasExplicitComparison(repoInfo) {
+  const from = cleanDiffRef(repoInfo?.from_ref, 'default');
+  const to = cleanDiffRef(repoInfo?.to_ref, 'base');
+  return from !== 'default' || to !== 'base';
+}
+
+function payloadHasExplicitRepoSections(payload) {
+  return Array.isArray(payload?.repos) && payload.repos.some(repoHasExplicitComparison);
 }
 
 function changesComparisonHeaderHtml(payload, files, options = {}) {
@@ -1073,6 +1093,7 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
     compact: options.compact,
     repoForDiffer: repoPath,
     treeSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
+    includeHidden: true,
   });
 }
 
@@ -1146,7 +1167,15 @@ function renderChangesGroups(groupsEl, files, options = {}) {
   const {regular, uploaded} = splitUploadedSessionFiles(files);
   const payload = options.payload || {};
   const repoMap = repoPayloadByPath(payload);
-  const groups = groupedSessionFiles(regular);
+  const groups = new Map(groupedSessionFiles(regular));
+  if (options.includeEmptyRepoSections === true) {
+    for (const repoInfo of Array.isArray(payload?.repos) ? payload.repos : []) {
+      const repo = repoInfo?.repo || 'Outside repo';
+      if (repo && repo !== 'Outside repo' && !groups.has(repo) && repoHasExplicitComparison(repoInfo)) {
+        groups.set(repo, []);
+      }
+    }
+  }
   const compact = options.compact === true;
   // Index existing sections by repo key so we can reuse DOM nodes
   const existing = new Map();
@@ -1155,7 +1184,7 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     if (key) existing.set(key, child);
   }
   const nextNodes = [];
-  for (const [repo, repoFiles] of groups) {
+  for (const [repo, repoFiles] of groups.entries()) {
     let section = existing.get(repo);
     if (!section) {
       section = document.createElement('section');
@@ -1200,7 +1229,11 @@ function renderChangesGroups(groupsEl, files, options = {}) {
         section.append(fileList);
       }
       fileList.hidden = false;
-      renderChangedFileList(fileList, repo, repoFiles, {compact});
+      if (repoFiles.length) {
+        renderChangedFileList(fileList, repo, repoFiles, {compact});
+      } else {
+        fileList.innerHTML = `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>`;
+      }
     } else if (fileList) {
       fileList.hidden = true;
     }
@@ -1280,8 +1313,9 @@ function fileExplorerChangesPanelStaticHtml(options = {}) {
   const loaded = payload.loaded === true;
   const session = payload.session || fileExplorerSessionFilesTargetSession();
   const errorHtml = (payload.errors || []).map(error => `<div class="changes-error">${esc(error)}</div>`).join('');
-  const empty = !loading && loaded && !files.length ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   const full = options.full === true || fileExplorerMode === 'diff';
+  const showEmptyRepoSections = full && !files.length && payloadHasExplicitRepoSections(payload);
+  const empty = !loading && loaded && !files.length && !showEmptyRepoSections ? `<div class="changes-empty">${esc(t('changes.emptyModified'))}</div>` : '';
   if (full) {
     return `
       <div class="changes-toolbar file-explorer-diff-toolbar">
@@ -1365,7 +1399,11 @@ function changesGroupsSnapshotHtml(files, options = {}) {
 
 function fileExplorerChangesPanelHtml() {
   const staticHtml = fileExplorerChangesPanelStaticHtml();
-  const groupsHtml = changesGroupsSnapshotHtml(fileExplorerDifferFiles(), {payload: fileExplorerSessionFilesPayload, compact: fileExplorerMode !== 'diff'});
+  const groupsHtml = changesGroupsSnapshotHtml(fileExplorerDifferFiles(), {
+    payload: fileExplorerSessionFilesPayload,
+    compact: fileExplorerMode !== 'diff',
+    includeEmptyRepoSections: fileExplorerMode === 'diff',
+  });
   return staticHtml.replace('<div class="changes-groups"></div>', groupsHtml);
 }
 
@@ -1378,7 +1416,7 @@ function fileExplorerModeButtonTitle(mode) {
 }
 
 function fileExplorerModeButtonLabel(mode) {
-  return mode === 'diff' ? 'ΔDiff' : t('finder.label.finder');
+  return mode === 'diff' ? 'Differ' : t('finder.label.finder');
 }
 
 function fileExplorerModeSwitcherHtml() {
@@ -1470,6 +1508,7 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
     if (refs?.from_ref || refs?.to_ref) return {fromRef: refs.from_ref, toRef: refs.to_ref};
     return {};
   })();
+  noteFileExplorerChangesSessionInteraction(ownerSession);
   if (normalizedStatus === 'D') {
     await openFilesSetAndShow(path, {
       mtime: 0,
@@ -2132,7 +2171,11 @@ function renderFileExplorerChangesPanel(panel, options = {}) {
       changes,
       fileExplorerChangesPanelStaticHtml({full: fileExplorerMode === 'diff'}),
       fileExplorerDifferFiles(),
-      {payload: fileExplorerSessionFilesPayload, compact: fileExplorerMode !== 'diff'},
+      {
+        payload: fileExplorerSessionFilesPayload,
+        compact: fileExplorerMode !== 'diff',
+        includeEmptyRepoSections: fileExplorerMode === 'diff',
+      },
       {force: options.force === true},
     );
   }
@@ -2273,7 +2316,7 @@ function createFileEditorPanel(item) {
         <button type="button" class="file-editor-wrap-panel" title="${esc(t('editor.toggleWordWrap'))}" aria-label="${esc(t('editor.toggleWordWrap'))}" hidden><span class="file-editor-icon file-editor-icon-wrap" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" aria-pressed="false" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
         <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden><span class="file-editor-icon file-editor-icon-blame" aria-hidden="true"></span></button>
-        <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden>ΔDiff</button>
+        <button type="button" class="file-editor-diff-panel" title="${esc(t('editor.diff'))}" aria-label="${esc(t('editor.diff'))}" hidden>Differ</button>
         <button type="button" class="file-editor-diff-expand-panel" title="${esc(t('editor.diffExpand'))}" aria-label="${esc(t('editor.diffExpand'))}" aria-pressed="${diffExpandUnchanged ? 'true' : 'false'}" hidden>↕</button>
         <span class="file-editor-diff-ref-panel" hidden>${diffRefControlsHtml({compact: true})}</span>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
@@ -2434,7 +2477,8 @@ function createFileEditorPanel(item) {
   panel.querySelector('.file-editor-theme-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    cycleEditorThemeMode();
+    const mode = editorViewModeFor(path, item);
+    cycleEditorThemeMode({includeVanilla: mode === 'preview' || mode === 'split'});
   });
   panel.querySelector('.file-editor-preview-pane-panel')?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'preview'));
   renderFileEditorPanel(panel, item);
@@ -3677,7 +3721,8 @@ function renderFileEditorPanel(panel, item) {
   const saveButton = panel.querySelector('.file-editor-save-panel');
   const content = panel.querySelector('.file-editor-content');
   const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, popoutPreviewButton, reloadButton];
-  updateEditorThemeButton(themeButton);
+  let mode = editorViewModeFor(path, item);
+  updateEditorThemeButton(themeButton, {includeVanilla: mode === 'preview' || mode === 'split'});
   if (!state) {
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
@@ -3725,7 +3770,8 @@ function renderFileEditorPanel(panel, item) {
   if (diffModeShouldFallBackToEdit(path, state, item)) {
     setFileEditorViewMode(path, 'edit', item);
   }
-  const mode = editorViewModeFor(path, item);
+  mode = editorViewModeFor(path, item);
+  updateEditorThemeButton(themeButton, {includeVanilla: mode === 'preview' || mode === 'split'});
   updateEditorModeControl(modeControl, path, state, item);
   if (previewFontPanel) {
     previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path) || (mode !== 'preview' && mode !== 'split');

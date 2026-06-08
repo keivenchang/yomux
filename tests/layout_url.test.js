@@ -371,6 +371,7 @@ globalThis.__layoutTestApi = {
   setDiffExpandUnchangedForTest(value) { diffExpandUnchanged = value === true; },
   fileExplorerChangesPanelHtml,
   fileExplorerSessionFilesTargetSessionForTest: fileExplorerSessionFilesTargetSession,
+  sessionFilesCacheKeyForTest: sessionFilesCacheKey,
   noteFileExplorerChangesSessionInteractionForTest: noteFileExplorerChangesSessionInteraction,
   setFileExplorerChangesSelectedSessionForTest(value) { fileExplorerChangesSelectedSession = String(value || ''); },
   changeFileRowHtml,
@@ -596,8 +597,8 @@ globalThis.__layoutTestApi = {
   renderEditorPreviewPane,
   openFileIsMissing,
   setOpenFileStateForTest(path, state) { openFiles.set(path, state); },
-  renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = []) {
-    renderTreeChildren(container, parentPath, entries, depth, {entriesByDir: new Map(entriesByDirPairs)});
+  renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = [], options = {}) {
+    renderTreeChildren(container, parentPath, entries, depth, {...options, entriesByDir: new Map(entriesByDirPairs)});
   },
   setFileExplorerRepoInfoForTest(path, repo) {
     fileExplorerRepoInfoCache.set(normalizeDirectoryPath(path), repo);
@@ -1912,6 +1913,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const api = loadYolomux('', ['5']);
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
   // #1: light-theme overrides exist for the badge chips, incl. a readable (non-transparent) review-required.
+  assert.ok(/\.ci-indicator\.pr-review-required\s*\{[^}]*color:\s*#172033[\s\S]*background:\s*#e7ebf1[\s\S]*opacity:\s*1/.test(css), '#6: review-required chip is filled with dark text, readable on bright active tabs');
   assert.ok(/body\.theme-light \.ci-indicator\.pr-review-required\s*\{[^}]*background:\s*#e7ebf1/.test(css), '#6: review-required chip is legible (light fill) in light theme');
   assert.ok(/body\.theme-light \.ci-indicator\.pr-number-chip/.test(css) && /body\.theme-light \.ci-indicator\.pr-review-approved/.test(css), '#6: light-theme overrides cover number + review chips');
   // #2: the ready-review "PR" state pill is dropped (PR chips convey it now); other states still render.
@@ -2065,9 +2067,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');
   // Editor toolbar alignment: Diff/FROM-TO left, preview font centered, the rest right-aligned.
   assert.ok(/\.file-editor-gutter-panel\s*\{[^}]*order:\s*-4/.test(css), 'editor toolbar puts # at the far-left edge');
-  assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-3[\s\S]*min-width:\s*44px/.test(css), 'editor toolbar puts ΔDiff after # and gives it text-button width');
-  assert.ok(/\.file-editor-diff-expand-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor toolbar puts diff expand immediately after ΔDiff');
-  assert.equal(/\.file-editor-toolbar:has\(\.file-editor-diff-ref-panel\[hidden\]\) \.file-editor-diff-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), false, 'editor toolbar keeps ΔDiff immediately beside # when FROM/TO is hidden');
+  assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-3[\s\S]*min-width:\s*44px/.test(css), 'editor toolbar puts Differ after # and gives it text-button width');
+  assert.ok(/\.file-editor-diff-expand-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor toolbar puts diff expand immediately after Differ');
+  assert.equal(/\.file-editor-toolbar:has\(\.file-editor-diff-ref-panel\[hidden\]\) \.file-editor-diff-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), false, 'editor toolbar keeps Differ immediately beside # when FROM/TO is hidden');
   assert.ok(/\.file-editor-toolbar:has\(\.file-editor-diff-panel\[hidden\]\) \.file-editor-gutter-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), 'editor toolbar keeps # on the left even when Diff is hidden');
   assert.ok(/\.file-editor-preview-font-panel\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%[\s\S]*transform:\s*translateX\(-50%\)/.test(css), 'preview font-size control is centered in the editor toolbar');
   assert.ok(/\.file-editor-toolbar\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(css), '#3: editor toolbar background matches the pane chrome bar (--pane-bar-bg: bright focused / gray unfocused)');
@@ -2075,7 +2077,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const editorPressedStart = css.indexOf('.file-editor-mode-control-panel button.active');
   const editorPressedBlock = css.slice(editorPressedStart, css.indexOf('{', editorPressedStart));
   assert.ok(editorPressedBlock.includes('.file-editor-gutter-panel.active') && editorPressedBlock.includes('.file-editor-find-panel[aria-pressed="true"]') && editorPressedBlock.includes('.file-editor-wrap-panel[aria-pressed="true"]'), '#, Search, and wrap active states share the pressed control treatment');
-  assert.ok(source.includes('>ΔDiff</button>'), 'editor Diff toolbar button renders as ΔDiff text');
+  assert.ok(source.includes('>Differ</button>'), 'editor Diff toolbar button renders as Differ text');
   assert.ok(source.includes('toggleEditorFind(panel);'), 'Search toolbar button toggles the CodeMirror search panel');
   assert.ok(source.includes('const currentText = String(state.content || \'\');'), 'plain CodeMirror editor mode owns its current text value');
   assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
@@ -2336,8 +2338,23 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/status\.textContent !== statusText[\s\S]*date\.textContent !== dateText/.test(changedFilesSource), 'Differ/Finder metadata slots avoid rewriting unchanged status/date text');
   assert.ok(/setClassNameIfChanged\(icon,[\s\S]*file-icon-dir-indexed/.test(changedFilesSource), 'indexed directory icon class is not rewritten when unchanged');
   assert.ok(changedFilesSource.includes('showDiffRefPicker(diffRefInput, {showAll: true})'), 'clicking/focusing a filled ref input still shows available options');
+  assert.ok(/const minWidth = Math\.min\(compact \? 880 : 960, viewportWidth - 16\)/.test(changedFilesSource), 'diff-ref popup is wide enough for normal 80-char commit subjects');
+  assert.ok(/const maxWidth = compact \? 1040 : 1120/.test(changedFilesSource), 'diff-ref popup can expand beyond the old narrow 620px cap');
   assert.ok(/document\.addEventListener\('scroll', event =>[\s\S]*positionDiffRefPopover\(diffRefPopoverInput, context\.compact\)/.test(changedFilesSource), 'scrolling around an open diff-ref popup repositions it instead of closing it');
   assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
+  api.setFileExplorerSessionFilesPayloadForTest({
+    session: '1',
+    loaded: true,
+    errors: [],
+    refs_by_repo: {'/repo/app': [{ref: 'HEAD', short: 'HEAD', subject: 'base commit'}, {ref: 'current', short: 'current', subject: 'working tree'}]},
+    repos: [{repo: '/repo/app', count: 0, touched_count: 1, added: 0, removed: 0, from_ref: 'HEAD', to_ref: 'current', behind: 0, ahead: 0}],
+    files: [],
+  });
+  const emptyExplicitRepoHtml = api.fileExplorerChangesPanelHtml();
+  assert.ok(emptyExplicitRepoHtml.includes('/repo/app'), 'Differ keeps an explicit repo section visible even when the selected refs have zero file diffs');
+  assert.ok(/changes-repo-refs[\s\S]*data-diff-ref-from[\s\S]*data-diff-ref-to/.test(emptyExplicitRepoHtml), 'empty explicit repo section still exposes FROM/TO controls');
+  assert.ok(emptyExplicitRepoHtml.includes('No Differ results for this session.'), 'empty explicit repo section explains that the selected refs have no visible file rows');
+  assert.equal(emptyExplicitRepoHtml.includes('data-open-change-file='), false, 'empty explicit repo section does not invent transcript-only file rows');
   assert.ok(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), 'modified-file rows open from a double-click handler');
   const compactChangeHtml = api.changeFileRowHtml(
     {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
@@ -2352,6 +2369,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(changedFilesSource.includes("const isTouchedOnly = normalizedStatus === 'T';"), 'touched-only transcript rows are recognized separately from diffable rows');
   assert.ok(changedFilesSource.includes("const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';"), 'added/untracked/touched rows open through editable mode first');
   assert.ok(changedFilesSource.includes("viewMode: initialMode"), 'non-diff rows fall back to normal editor mode instead of forcing diff');
+  assert.ok(/async function openChangedFileInDiff\([^]*?const payloadRepoRefs = \(\(\) => \{[^]*?\}\)\(\);[\s\S]*?noteFileExplorerChangesSessionInteraction\(ownerSession\)[\s\S]*?openFileInEditor/.test(changedFilesSource), 'opening a changed-file row commits its owner session to the Differ panel after preserving row FROM/TO refs');
   const touchedOnlyHtml = api.changeFileRowHtml({session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/merged.py', abs_path: '/repo/app/src/merged.py', mtime: 100, source: 'transcript'}, {compact: true});
   assert.ok(touchedOnlyHtml.includes('changes-status-t') && touchedOnlyHtml.includes('>T</span>'), 'touched-only transcript rows carry a neutral T status badge');
   assert.ok(/changes-status[^>]*title="T: touched by AI transcript"[^>]*aria-label="T: touched by AI transcript"[^>]*>T<\/span>/.test(touchedOnlyHtml), 'touched-only T badge explains itself on hover');
@@ -2437,6 +2455,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   });
   assert.ok(api.fileExplorerChangesPanelHtml().includes('Differ:'), 'Finder embeds a Differ panel');
   assert.ok(/class="changes-title">Differ: &#39;1&#39;<\/span>/.test(api.fileExplorerChangesPanelHtml()), 'C7: the embedded Differ title uses the compact session title');
+  api.setFileExplorerModeForTest('diff');
+  api.setDiffRefsByRepoForTest('/repo/app', {from: 'abc1111', to: 'current'});
+  const firstDiffCacheKey = api.sessionFilesCacheKeyForTest('1');
+  api.setDiffRefsByRepoForTest('/repo/app', {from: 'def2222', to: 'current'});
+  const secondDiffCacheKey = api.sessionFilesCacheKeyForTest('1');
+  assert.notEqual(firstDiffCacheKey, secondDiffCacheKey, 'Differ cache key changes when repo FROM/TO refs change for the same session');
+  api.setDiffRefsByRepoForTest('/repo/app', null);
+  api.setFileExplorerModeForTest('files');
   {
     const stickyApi = loadYolomux('', ['1', '2']);
     stickyApi.setFileExplorerChangesSelectedSessionForTest('1');
@@ -3104,6 +3130,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(appSource.includes('sessionFilesTargetSession({followActive: true})'), false, 'Finder Modified-files session selection never follows passive hover/autofocus');
   assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'explicit session interactions can commit the Finder Modified-files target');
   assert.ok(/function activatePaneTab\([^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'clicking a tmux pane tab commits the Finder Modified-files target');
+  assert.ok(/function activatePaneTab\([^]*?isFileEditorItem\(session\)[^]*?openFileOwnerSessionsForPath\(fileItemPath\(session\)\)[^]*?owners\.length === 1[^]*?noteFileExplorerChangesSessionInteraction\(owners\[0\]\)/.test(appSource), 'clicking a single-owner file tab commits that owner session to the Differ target');
   const terminalInputStart = appSource.indexOf('function startTerminal(');
   const terminalInputEnd = appSource.indexOf('function updateTypingIndicator(', terminalInputStart);
   const terminalInputBody = appSource.slice(terminalInputStart, terminalInputEnd);
@@ -3111,7 +3138,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(terminalInputBody.includes("container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal paste commits the Finder Modified-files target');
   assert.equal(/term\.onData\(data => \{[^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder because hover focus can emit focus/mouse reports');
   assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'explicit session changes force a fresh Finder modified-files fetch even if an older request is in flight');
-  assert.ok(/fileExplorerMode === 'diff' && cached\?\.payload/.test(appSource), 'Finder file mode does not repaint stale cached Differ/session modified-file payloads before the fresh fetch returns');
+  assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
+  assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
+  assert.ok(/fileExplorerSessionFilesCache\.set\(sessionFilesCacheKey\(session\), \{payload: nextPayload, signature\}\)/.test(appSource), 'Differ stores cached payloads under the same ref-aware key it reads');
   assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
   assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesPayload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
   assert.ok(/function sessionFilesRequestQueryString\(\)[\s\S]*fileExplorerMode !== 'diff'[\s\S]*from=HEAD&to=current[\s\S]*diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}/.test(appSource), 'Finder file mode requests only current worktree status while Differ follows selected refs');
@@ -3359,8 +3388,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-explorer-changes-head\s*\{[\s\S]*z-index:\s*6[\s\S]*box-shadow:\s*0 2px 0 var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Finder Modified-files sticky header covers content below without adding a top band');
   assert.ok(/\.diff-ref-suggestion-popover\s*\{[\s\S]*max-height:\s*min\(320px,\s*42vh\)/.test(preferencesCss), 'diff-ref suggestions use a compact custom popup, not the browser-native datalist');
   assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*height:\s*24px/.test(preferencesCss), 'diff-ref popup rows are compact one-line options');
-  assert.ok(changedFilesSource.includes('const minWidth = compact ? 420 : 520'), 'diff-ref popup reserves width for commit subjects');
-  assert.ok(changedFilesSource.includes('const maxWidth = compact ? 620 : 760'), 'diff-ref popup width is capped for the viewport');
+  assert.ok(/const minWidth = Math\.min\(compact \? 880 : 960, viewportWidth - 16\)/.test(changedFilesSource), 'diff-ref popup reserves enough width for normal 80-character commit subjects');
+  assert.ok(/const maxWidth = compact \? 1040 : 1120/.test(changedFilesSource), 'diff-ref popup width is capped for the viewport without truncating normal subjects');
   assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*#dc2626[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button is red in dark mode');
   assert.ok(/body\.theme-light \.server-update-banner-reload\s*\{[\s\S]*background:\s*#dc2626[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button is red in light mode');
   assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
@@ -3465,8 +3494,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesCss.includes('--code-diff-remove: #ff7b72'), 'dark diff remove base is a brighter vivid red');
   assert.equal(preferencesCss.includes('--code-diff-add: #98c379'), false, 'muted one-dark diff green must not return as the YOLOmux dark default');
   assert.equal(preferencesCss.includes('--code-diff-remove: #e06c75'), false, 'muted one-dark diff red must not return as the YOLOmux dark default');
-  assert.ok(preferencesCss.includes('var(--code-diff-remove) 32%'), '#250: dark diff removed-line fill is a muted soft tint (not the old saturated 76% block)');
-  assert.ok(preferencesCss.includes('var(--code-diff-add) 30%'), '#250: dark diff added-line fill is a muted soft tint (not the old saturated 74% block)');
+  assert.ok(preferencesCss.includes('--diff-remove-line-bg: #540c06'), '#250: dark diff removed-line fill matches the sampled deep maroon guide');
+  assert.ok(preferencesCss.includes('--diff-add-line-bg: #2b5d16'), '#250: dark diff added-line fill matches the sampled deep green guide');
   assert.ok(preferencesCss.includes('.file-editor-icon-popout-preview'), 'preview pop-out has a distinct icon');
   assert.equal(preferencesCss.includes('preview-linked'), false, 'old paired side-preview ring styling is removed');
   assert.ok(/\.yoagent-global\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent global summary fits narrow panes');
@@ -3528,13 +3557,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(/\.file-explorer-changes-panel:hover,[\s\S]*?\.file-explorer-changes-panel:focus-within\s*\{[\s\S]*scrollbar-color:/.test(preferencesCss), false, 'Modified-files no longer has local hover scrollbar coloring');
   assert.equal(/\.panel\.changes-panel|\.changes-scroll/.test(preferencesCss), false, 'standalone Differ scrollbar CSS is removed');
   assert.equal(/\.panel:hover \.terminal \.xterm-viewport[\s\S]*?\{[\s\S]*?scrollbar-color:/.test(preferencesCss), false, 'terminal no longer has a local hover scrollbar color rule');
-  assert.ok(/--diff-add-line-bg:\s*color-mix\(in srgb,\s*var\(--code-diff-add\)\s*30%,\s*var\(--editor-scheme-bg\)\)/.test(preferencesCss), '#250: diff added lines use a muted opaque green fill over the dark bg');
+  assert.ok(/--diff-add-line-bg:\s*#2b5d16/.test(preferencesCss), '#250: diff added lines use the sampled opaque green fill over the dark bg');
   assert.ok(/\.file-editor-diff-codemirror \.cm-content \.cm-activeLine\s*\{[^}]*background:\s*var\(--diff-full-line-bg,\s*transparent\)/.test(preferencesCss), 'diff active lines keep the same red/green fill as their neighboring changed lines');
-  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#d2f0d6/.test(preferencesCss), 'light diff added lines use the pleasant soft green (image 025)');
-  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#fbe5e5/.test(preferencesCss), 'light diff removed lines use the pleasant soft pink (image 025)');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(preferencesCss), 'light diff added lines use a more visible green fill');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(preferencesCss), 'light diff removed lines use a more visible red fill');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine,[\s\S]*?\.cm-deletedLine\s*\{[\s\S]*color:\s*#3b0a0a/.test(preferencesCss), 'light diff removed lines force dark red text on the stronger red fill');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*#7f1d1d[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses dark red on a distinct red fill (image 055)');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedText\s*\{[\s\S]*color:\s*#064e3b[\s\S]*background:\s*#b9e7c2/.test(preferencesCss), 'light diff added inline text uses dark green on a distinct green fill');
-  assert.ok(/--diff-remove-line-bg:\s*color-mix\(in srgb,\s*var\(--code-diff-remove\)\s*32%,\s*var\(--editor-scheme-bg\)\)/.test(preferencesCss), '#250: diff removed lines use a muted opaque red fill over the dark bg');
+  assert.ok(/--diff-remove-line-bg:\s*#540c06/.test(preferencesCss), '#250: diff removed lines use the sampled opaque red fill over the dark bg');
   // DOIT.16 C3: a .panel-overlay-root must NOT be the scroll container (else the inactive-pane dim
   // scrolls away). The overlay-root bodies are overflow:hidden; the scrolling lives on inner wrappers.
   assert.ok(/\.preferences-body\s*\{[^}]*overflow:\s*hidden/.test(preferencesCss), 'C3: .preferences-body (overlay-root) must not scroll (overflow:hidden)');
@@ -3797,6 +3827,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.editorPreviewThemeStateForTest(), 'dark', 'theme toggle moves vanilla preview back to dark preview');
   assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
   assert.equal(api.fileEditorThemeModeForTest(), 'dark', 'vanilla leaves by restoring a dark editor scheme');
+  api.setFileEditorThemeMode('dark');
+  api.cycleEditorThemeMode({includeVanilla: false});
+  assert.equal(api.editorPreviewThemeStateForTest(), 'light', 'edit/diff theme toggle moves dark to light');
+  assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
+  api.cycleEditorThemeMode({includeVanilla: false});
+  assert.equal(api.editorPreviewThemeStateForTest(), 'dark', 'edit/diff theme toggle moves light back to dark without vanilla');
+  assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
   api.setFileEditorThemeMode('light');
   assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'legacy light storage value maps to the YOLOmux Light default');
   assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'YOLOmux Light uses a bright white editor background');
@@ -4640,6 +4677,29 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(unknownStatus.textContent, '?');
   assert.equal(unknownStatus.classList.contains('file-tree-git-status-unknown'), true, 'Finder ? status badge uses a faint-neutral class');
   assert.equal(unknownStatus.getAttribute('title'), '?: untracked', 'Finder ? status badge explains itself on hover');
+
+  const hiddenFile = {abs_path: '/repo/.github/workflows/ci.yml', repo: '/repo', path: '.github/workflows/ci.yml', status: 'M', added: 41, removed: 0};
+  api.setFileExplorerSessionFilesPayloadForTest({loaded: true, repos: [], files: [hiddenFile]});
+  const hiddenFinderTree = new TestElement('hidden-finder-tree');
+  hiddenFinderTree.setAttribute('role', 'tree');
+  api.renderTreeChildrenForTest(hiddenFinderTree, '/repo', [{name: '.github', kind: 'dir'}]);
+  assert.equal(hiddenFinderTree.children.length, 0, 'Finder still hides dot-directories when hidden-files is off');
+  const hiddenDifferTree = new TestElement('hidden-differ-tree');
+  hiddenDifferTree.setAttribute('role', 'tree');
+  api.renderTreeChildrenForTest(hiddenDifferTree, '/repo', [{name: '.github', kind: 'dir'}], 0, [
+    ['/repo/.github', [{name: 'workflows', kind: 'dir'}]],
+    ['/repo/.github/workflows', [{name: 'ci.yml', kind: 'file'}]],
+  ], {
+    differMode: true,
+    includeHidden: true,
+  });
+  const hiddenDifferRows = Object.fromEntries(hiddenDifferTree.querySelectorAll('.file-tree-row[data-path]').map(row => [row.dataset.path, row]));
+  assert.ok(hiddenDifferRows['/repo/.github'], 'Differ renders changed hidden ancestors even when Finder hidden-files is off');
+  assert.ok(hiddenDifferRows['/repo/.github/workflows/ci.yml'], 'Differ renders changed files under hidden directories');
+  const hiddenDifferHtml = api.fileExplorerChangesPanelHtml();
+  assert.ok(hiddenDifferHtml.includes('data-path="/repo/.github"'), 'rendered Differ panel includes hidden changed ancestors');
+  assert.ok(hiddenDifferHtml.includes('data-open-change-file="/repo/.github/workflows/ci.yml"'), 'rendered Differ panel opens changed files under hidden directories');
+  assert.ok(/data-open-change-file="\/repo\/\.github\/workflows\/ci\.yml"[\s\S]*changes-diff-add">\+41</.test(hiddenDifferHtml), 'Differ shows the hidden file numstat');
 
   api.setFileExplorerSessionFilesPayloadForTest({
     loaded: true,
@@ -6428,8 +6488,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.equal(css.includes('--inactive-pane-overlay-alpha: 0.13'), false, '#259 follow-up: the still-too-dark light overlay alpha is gone');
     // #258 follow-up: Diff sits left of FROM/TO; FROM/TO then pushes the remaining tools right.
     assert.ok(/\.file-editor-gutter-panel\s*\{[^}]*order:\s*-4/.test(css), 'editor info bar: # sits at the left edge');
-    assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-3/.test(css), 'editor info bar: ΔDiff sits left of FROM/TO');
-    assert.ok(/\.file-editor-diff-expand-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor info bar: expand sits to the right of ΔDiff');
+    assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-3/.test(css), 'editor info bar: Differ sits left of FROM/TO');
+    assert.ok(/\.file-editor-diff-expand-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor info bar: expand sits to the right of Differ');
     assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*order:\s*-1[^}]*margin-inline-end:\s*auto/.test(css), 'editor info bar: FROM/TO sits after Diff and pushes remaining buttons right');
     assert.ok(/\.file-editor-diff-ref-panel\s*\{[^}]*min-width:\s*max-content[^}]*overflow:\s*visible/.test(css), 'editor info bar: FROM/TO/reset is intrinsic-width and not clipped');
     assert.equal(css.includes('max-width: min(32vw, 190px)'), false, 'editor info bar: the old too-narrow 190px clipping cap is gone');
@@ -6668,7 +6728,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(tips.length, 14, 'startup helper catalog includes the initial tip set');
   assert.ok(tips.some(tip => tip.title === 'Drag files into terminals'), 'startup helper catalog includes file drag/drop');
   assert.ok(tips.some(tip => tip.title === 'Ask YO!agent for direction'), 'startup helper catalog includes YO!agent guidance');
-  assert.ok(tips.some(tip => tip.title === 'Review agent changes'), 'startup helper catalog includes ΔDiff');
+  assert.ok(tips.some(tip => tip.title === 'Review agent changes'), 'startup helper catalog includes Differ');
   assert.equal(api.readStartupHelperIndex(tips.length), 0, 'startup helper index defaults to first tip');
   api.writeStartupHelperIndex(15);
   assert.equal(api.readStartupHelperIndex(tips.length), 1, 'startup helper index wraps by catalog length');

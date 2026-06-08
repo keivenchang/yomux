@@ -402,6 +402,65 @@ def test_session_files_payload_accepts_explicit_commit_refs(tmp_path):
     assert payload["repos"][0]["ahead"] == 1
 
 
+def test_session_files_payload_explicit_current_ref_matches_plain_git_diff(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "one")
+    older = git(repo, "rev-parse", "HEAD").stdout.strip()
+    tracked.write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "loose.txt").write_text("not in plain git diff\n", encoding="utf-8")
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text('{"msg":"*** Begin Patch\\n*** Update File: loose.txt\\n"}\n', encoding="utf-8")
+    pane = PaneInfo(
+        session="s1",
+        window="0",
+        pane="0",
+        pane_id="%1",
+        target="s1:0.0",
+        current_path=str(repo),
+        command="zsh",
+        active=True,
+        window_active=True,
+        title="",
+        pid=11,
+    )
+    info = SessionInfo(session="s1", panes=[pane], selected_pane=pane, agents=[agent("codex", rollout, repo)])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), from_ref=older, to_ref="current")
+
+    assert [item["path"] for item in payload["files"]] == ["tracked.txt"]
+    assert payload["files"][0]["added"] == 1
+    assert payload["files"][0]["removed"] == 0
+    assert payload["repos"][0]["count"] == 1
+    assert payload["repos"][0]["added"] == 1
+    assert payload["repos"][0]["removed"] == 0
+
+
+def test_git_numstat_does_not_use_copy_detection_for_plain_diff_counts(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    source = repo / "source.txt"
+    source.write_text("a\nb\nc\nd\ne\nf\ng\nh\n", encoding="utf-8")
+    git(repo, "add", "source.txt")
+    git(repo, "commit", "-m", "base")
+    copied = repo / "copied.txt"
+    copied.write_text("a\nb\nc\nd\ne\nf\ng\nchanged\nnew\n", encoding="utf-8")
+    git(repo, "add", "copied.txt")
+
+    counts = session_files.git_numstat(repo, "HEAD")
+
+    assert counts["copied.txt"] == {"added": 9, "removed": 0}
+
+
 def test_session_files_payload_falls_back_when_requested_ref_is_unknown_in_repo(tmp_path):
     repo1 = tmp_path / "repo1"
     repo2 = tmp_path / "repo2"

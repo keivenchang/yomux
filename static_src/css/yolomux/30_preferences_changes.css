@@ -198,6 +198,13 @@
 .diff-ref-suggestion-option.active {
   background: var(--active-control-soft-bg);
 }
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-subject,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-subject,
+.diff-ref-suggestion-option:hover .diff-ref-suggestion-meta,
+.diff-ref-suggestion-option.active .diff-ref-suggestion-meta {
+  color: var(--text);
+  opacity: 0.95;
+}
 .diff-ref-suggestion-ref {
   min-width: 0;
   overflow: hidden;

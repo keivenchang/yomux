@@ -620,6 +620,10 @@ function activatePaneTab(side, session, options = {}) {
   if (options.userInitiated === true && isTmuxSession(session)) {
     noteFileExplorerChangesSessionInteraction(session);
   }
+  if (options.userInitiated === true && isFileEditorItem(session)) {
+    const owners = openFileOwnerSessionsForPath(fileItemPath(session));
+    if (owners.length === 1) noteFileExplorerChangesSessionInteraction(owners[0]);
+  }
   recordTabActivation(session);
   const previous = activeItemForSide(side);
   if (previous && previous !== session && typeof captureFileEditorPanelViewStateForItem === 'function') {

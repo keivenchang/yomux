@@ -1356,10 +1356,8 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 }
 .file-editor-diff-codemirror {
   position: relative;
-  /* #250: a changed line should read as a soft tint, not a saturated block. Muted mix strength over
-     the dark editor bg (was 74%/76% — far too vibrant); the light variant below is already soft. */
-  --diff-add-line-bg: color-mix(in srgb, var(--code-diff-add) 30%, var(--editor-scheme-bg));
-  --diff-remove-line-bg: color-mix(in srgb, var(--code-diff-remove) 32%, var(--editor-scheme-bg));
+  --diff-add-line-bg: #2b5d16;
+  --diff-remove-line-bg: #540c06;
 }
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;
@@ -1460,11 +1458,18 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 body.editor-theme-light .file-editor-diff-codemirror {
   --code-diff-add: #00a152;
   --code-diff-remove: #d81f32;
-  /* Light diff: the pleasant soft green/pink palette the user picked (image 025) — clearly visible
-     on the white editor but light enough for dark code text on top (was the near-white #e6ffec/
-     #ffebe9). */
-  --diff-add-line-bg: #d2f0d6;
-  --diff-remove-line-bg: #fbe5e5;
+  --diff-add-line-bg: #bfeac8;
+  --diff-remove-line-bg: #f3b7b7;
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine {
+  color: #3b0a0a;
+}
+body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine *,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk *,
+body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine * {
+  color: #3b0a0a;
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedText,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk .cm-deletedText {

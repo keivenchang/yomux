@@ -331,11 +331,11 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   border-color: #ff7a86;
 }
 .ci-indicator.pr-review-required {
-  color: #c4ccd6;
-  background: transparent;
-  border-color: var(--line);
+  color: #172033;
+  background: #e7ebf1;
+  border-color: #aab4c4;
   text-decoration: line-through;
-  opacity: 0.85;
+  opacity: 1;
 }
 .ci-indicator.branch-indicator {
   color: #071321;

@@ -190,7 +190,7 @@ def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = No
         if error:
             return [], False, error
         if newer == "current":
-            return [older], True, ""
+            return [older], older == "HEAD", ""
         return [older, newer], False, ""
     return [base or git_diff_base(repo)], True, ""
 
@@ -227,7 +227,7 @@ def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = 
     diff_args, include_untracked, error = git_diff_args(repo, base, from_ref, to_ref)
     if error:
         return statuses, error
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--name-status", "-z", "--find-renames", "--find-copies", *diff_args], timeout=5.0)
+    diff = run_cmd(["git", "-C", str(repo), "diff", "--name-status", "-z", "--find-renames", *diff_args], timeout=5.0)
     if diff.returncode == 0:
         parts = diff.stdout.split("\0")
         index = 0
@@ -276,7 +276,7 @@ def git_numstat(repo: Path, base: str | None = None, from_ref: str | None = None
     diff_args, _, error = git_diff_args(repo, base, from_ref, to_ref)
     if error:
         return counts
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", "-z", "--find-renames", "--find-copies", *diff_args], timeout=5.0)
+    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", "-z", "--find-renames", *diff_args], timeout=5.0)
     if diff.returncode != 0:
         return counts
     parts = diff.stdout.split("\0")
@@ -499,6 +499,8 @@ def session_files_payload_for_info(
             repo_entries.append(session_file_entry(info.session, agents, status, path, repo, "git", added, removed))
         for rel_path, metadata in touched_by_rel.items():
             if rel_path in statuses:
+                continue
+            if repo_refs_active:
                 continue
             path = repo / rel_path
             repo_entries.append(session_file_entry(
