@@ -74,9 +74,20 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
+  if (fileEditorPreviewDisplayMode === 'vanilla') return 'Vanilla preview';
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
   if (mode === editorThemeInheritMode) return `Inherit global theme (${scheme.label})`;
   return `${scheme.label} editor scheme`;
+}
+
+function editorPreviewThemeState() {
+  if (fileEditorPreviewDisplayMode === 'vanilla') return 'vanilla';
+  return activeEditorScheme().dark ? 'dark' : 'light';
+}
+
+function editorPreviewThemeStateLabel(state = editorPreviewThemeState()) {
+  if (state === 'vanilla') return 'Vanilla preview';
+  return state === 'light' ? 'Light preview' : 'Dark preview';
 }
 
 function editorSchemeCssVariables(scheme = activeEditorScheme()) {
@@ -160,13 +171,14 @@ function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
 function updateEditorThemeButton(button) {
   if (!button) return;
   const scheme = activeEditorScheme();
-  const nextScheme = EDITOR_SCHEMES[configuredEditorSchemeForMode(!scheme.dark)] || scheme;
-  button.classList.toggle('theme-dark', scheme.dark);
-  button.classList.toggle('theme-light', !scheme.dark);
-  button.dataset.editorTheme = scheme.id;
-  button.setAttribute('aria-pressed', scheme.dark ? 'false' : 'true');
-  const nextAction = fileEditorThemeMode === editorThemeInheritMode ? `override to ${nextScheme.label}` : 'return to global theme';
-  button.title = `${editorThemeLabel()}; ${nextAction}`;
+  const previewState = editorPreviewThemeState();
+  const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' ? 'vanilla' : 'dark');
+  button.classList.toggle('theme-dark', previewState === 'dark');
+  button.classList.toggle('theme-light', previewState === 'light');
+  button.classList.toggle('theme-vanilla', previewState === 'vanilla');
+  button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
+  button.setAttribute('aria-pressed', previewState === 'dark' ? 'false' : 'true');
+  button.title = `${editorThemeLabel()}; next: ${editorPreviewThemeStateLabel(nextState)}`;
   button.setAttribute('aria-label', editorThemeLabel());
   setFileEditorIcon(button, 'file-editor-icon-theme');
 }
@@ -196,10 +208,11 @@ function refreshOpenEditorThemePanels() {
 function applyEditorThemeMode(options = {}) {
   const scheme = activeEditorScheme();
   applyEditorSchemeCssVariables(scheme);
-  document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light');
+  document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light', 'editor-preview-vanilla');
   EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
   document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light');
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
+  document.body?.classList.toggle('editor-preview-vanilla', fileEditorPreviewDisplayMode === 'vanilla');
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
 }
@@ -207,15 +220,32 @@ function applyEditorThemeMode(options = {}) {
 function setFileEditorThemeMode(mode) {
   fileEditorThemeMode = normalizeEditorThemeMode(mode);
   writeStoredEditorThemeMode(fileEditorThemeMode);
+  if (fileEditorPreviewDisplayMode !== 'theme') {
+    fileEditorPreviewDisplayMode = 'theme';
+    writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
+  }
+  applyEditorThemeMode({refreshEditors: true});
+}
+
+function setFileEditorPreviewDisplayMode(mode) {
+  fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(mode);
+  writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
   applyEditorThemeMode({refreshEditors: true});
 }
 
 function cycleEditorThemeMode() {
-  if (fileEditorThemeMode === editorThemeInheritMode) {
-    setFileEditorThemeMode(configuredEditorSchemeForMode(!activeEditorScheme().dark));
-  } else {
-    setFileEditorThemeMode(editorThemeInheritMode);
+  const previewState = editorPreviewThemeState();
+  if (previewState === 'dark') {
+    setFileEditorThemeMode(configuredEditorSchemeForMode(false));
+    return;
   }
+  if (previewState === 'light') {
+    setFileEditorPreviewDisplayMode('vanilla');
+    return;
+  }
+  fileEditorPreviewDisplayMode = 'theme';
+  writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
+  setFileEditorThemeMode(configuredEditorSchemeForMode(true));
 }
 
 function updateEditorWrapButton(button) {
@@ -663,6 +693,7 @@ function applySettingsPayload(payload, options = {}) {
   const previousBlameAllLines = fileEditorBlameAllLines;
   fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
   autoFocusEnabled = boolSetting('general.auto_focus', false);
+  startupHelpersEnabled = boolSetting('general.startup_helpers', true);
   const previousEditorSchemeId = activeEditorScheme().id;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));

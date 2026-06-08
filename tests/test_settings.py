@@ -106,13 +106,15 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["appearance"]["terminal_theme"] == "follow-app"
     assert payload["settings"]["appearance"]["date_time_hour_cycle"] == "24"
     assert payload["settings"]["appearance"]["tab_width"] == 180
+    assert payload["settings"]["general"]["startup_helpers"] is True
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "auto"
     assert payload["settings"]["yoagent"]["auto_refresh"] is False
     assert payload["settings"]["yoagent"]["refresh_interval_seconds"] == 120
     assert "normal status-update style" in payload["settings"]["yoagent"]["system_prompt"]
-    assert "You may run tools" in payload["settings"]["yoagent"]["system_prompt"]
-    assert "run scoped tools" in payload["settings"]["yoagent"]["intro"]
+    assert "explicit admin UI paths" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "autonomous command-sending tools" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "If needed facts are missing" in payload["settings"]["yoagent"]["intro"]
     assert "recommend what to work on next" in payload["settings"]["yoagent"]["intro"]
     assert "refer to it as tmux session `<session-name>`" in payload["settings"]["yoagent"]["system_prompt"]
     assert "use one Markdown table with columns" in payload["settings"]["yoagent"]["format"]

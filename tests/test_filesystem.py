@@ -501,12 +501,25 @@ def test_write_file_mtime_conflict_uses_nanoseconds(tmp_path):
     target.write_text("a", encoding="utf-8")
     base_ns = 1_800_000_000_123_456_000
     os.utime(target, ns=(base_ns, base_ns))
-    os.utime(target, ns=(base_ns + 1, base_ns + 1))
+    actual_ns = base_ns + filesystem.MTIME_NS_CONFLICT_TOLERANCE + 1
+    os.utime(target, ns=(actual_ns, actual_ns))
 
     with pytest.raises(FilesystemError) as info:
         filesystem.write_file(str(target), "b", expected_mtime=base_ns)
 
     assert info.value.status == 409
+
+
+def test_write_file_accepts_tiny_nanosecond_mtime_drift(tmp_path):
+    target = tmp_path / "race-ns-jitter.txt"
+    target.write_text("a", encoding="utf-8")
+    base_ns = 1_800_000_000_123_456_000
+    os.utime(target, ns=(base_ns, base_ns))
+    os.utime(target, ns=(base_ns + 85, base_ns + 85))
+
+    result = filesystem.write_file(str(target), "b", expected_mtime=base_ns)
+
+    assert result["size"] == 1
 
 
 def test_write_file_accepts_legacy_second_mtime(tmp_path):

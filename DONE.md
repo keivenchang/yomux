@@ -4,6 +4,20 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 detail (file/symbol, fix, tests) lives in the git commit history on `main`. Each item shipped to
 dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 
+## 2026-06-07
+
+### DOIT.48 startup helper tips
+- Added a lightweight startup helper that shows one delayed feature tip after app load for admin users with helpers enabled. The tip catalog covers drag/drop, image prompts, YO!agent, YO auto-approval, YOLO rules, `ΔDiff`, Finder Sync/Reload, editor ref diffs, notifications, watched PRs, quick search, Markdown Preview, and rsync for large uploads. The helper uses the existing toast renderer, rotates serially through localStorage, never focuses controls, offers `Next tip`, `Hide this`, and `Turn off helpers forever`, and persists the forever-off choice through `general.startup_helpers`. Preferences can re-enable it from General. Added source/runtime guards plus settings coverage.
+
+### DOIT.47 YO!agent capability boundary
+- Grounded YO!agent capability answers in a backend capability inventory. Activity payloads and prompt context now state that YOLOmux can read tmux panes, poll sessions, monitor prompts/PRs/files, notify on configured transitions, and send tmux input only through explicit admin UI paths; YO!agent chat itself must not claim autonomous command-sending tools. Updated default/reset prompt text and locale prompt catalogs, preserved legacy prompt migration, and added regressions for prompt context plus deterministic capability answers.
+
+### DOIT.46 Finder/Differ dark tree readability
+- Brightened the Finder/Differ changes tree in dark mode without changing light mode: the shared guide-line token now uses a stronger slate alpha, repo headers use a changes-scoped dark background token, and the light theme resets both tokens to the existing values. Added layout URL guards for the dark guide line, scoped repo-head token, and light-mode unchanged contract.
+
+### DOIT.43 YO!agent rolling transcript summaries
+- Added disabled-by-default YO!agent background transcript summaries: per-session rolling state persists in YOLOmux state, updates from transcript deltas after quiet intervals, prunes dead sessions, pins cheap CLI backends, exposes `yoagent.auto_refresh` and `yoagent.refresh_interval_seconds`, and injects cached rolling summaries into YO!agent context. Added backend/settings/UI regressions for delta-only updates, idempotent no-op ticks, disabled-by-default behavior, bounded settings, and Preferences visibility.
+
 ## 2026-06-06
 
 ### DOIT.45 editor diff + FROM/TO ref picker on clean files

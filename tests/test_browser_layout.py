@@ -2296,7 +2296,7 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     assert "/home/test/yolomux.dev/other" in restored_metrics["expandedSet"], restored_metrics
 
 
-def test_fixed_finder_does_not_follow_editor_clicks(browser, tmp_path):
+def test_fixed_finder_reveals_clicked_editor_file_without_changing_root(browser, tmp_path):
     fs_entries = {
         "/home/test": [{"name": "repo-a", "kind": "dir"}, {"name": "repo-b", "kind": "dir"}],
         "/home/test/repo-a": [{"name": "src", "kind": "dir"}],
@@ -2331,6 +2331,13 @@ def test_fixed_finder_does_not_follow_editor_clicks(browser, tmp_path):
         )
     )
     browser.find_element("css selector", '.file-editor-panel[data-file-path="/home/test/repo-a/src/a.md"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-panel .file-explorer-tree-panel .file-tree-row[data-path="/home/test/repo-a/src/a.md"]') !== null;
+            """
+        )
+    )
     click_a_metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -2350,8 +2357,8 @@ def test_fixed_finder_does_not_follow_editor_clicks(browser, tmp_path):
         "root": "/home/test",
         "mode": "fixed",
         "syncPressed": "false",
-        "repoAExpanded": "false",
-        "fileAVisible": False,
+        "repoAExpanded": "true",
+        "fileAVisible": True,
     }, click_a_metrics
     ActionChains(browser).move_to_element(browser.find_element("css selector", '.file-editor-panel[data-file-path="/home/test/repo-b/other/b.md"]')).perform()
     hover_metrics = browser.execute_async_script(
@@ -2372,6 +2379,13 @@ def test_fixed_finder_does_not_follow_editor_clicks(browser, tmp_path):
     assert hover_metrics["repoBExpanded"] == "false", hover_metrics
     assert hover_metrics["otherVisible"] is False, hover_metrics
     browser.find_element("css selector", '.file-editor-panel[data-file-path="/home/test/repo-b/other/b.md"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-panel .file-explorer-tree-panel .file-tree-row[data-path="/home/test/repo-b/other/b.md"]') !== null;
+            """
+        )
+    )
     click_b_metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -2391,8 +2405,8 @@ def test_fixed_finder_does_not_follow_editor_clicks(browser, tmp_path):
         "root": "/home/test",
         "mode": "fixed",
         "syncPressed": "false",
-        "repoBExpanded": "false",
-        "fileBVisible": False,
+        "repoBExpanded": "true",
+        "fileBVisible": True,
     }, click_b_metrics
 
 
@@ -3564,6 +3578,105 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["edit"]["wrapHidden"] is False, metrics
     assert metrics["edit"]["findHidden"] is False, metrics
     assert metrics["edit"]["saveHidden"] is False, metrics
+
+
+def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser, tmp_path):
+    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
+    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "strings": {"en": strings},
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "preview-vanilla.html"
+    page.write_text(
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; height: auto; min-height: 0; background: #ffffff; }}
+        #mount {{ width: 760px; height: 420px; }}
+        .file-editor-panel {{ width: 760px; height: 420px; }}
+        </style></head>
+        <body class="theme-light theme-resolved-light editor-theme-light">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
+          <div id="mount"></div>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.marked = {{
+              parse() {{
+                return '<h1>Heading</h1><p><strong>Bold</strong> and <a href="https://example.com">link</a></p><pre><code>const x = 1;</code></pre>';
+              }}
+            }};
+            window.hljs = {{
+              highlightElement(block) {{
+                block.innerHTML = '<span class="hljs-keyword" style="color: rgb(255, 0, 0)">const</span> x = 1;';
+              }}
+            }};
+            window.__previewVanillaReady = (() => {{
+              const path = '/home/test/repo/README.md';
+              const content = '# Heading\\n\\n**Bold** and [link](https://example.com)\\n\\n```js\\nconst x = 1;\\n```\\n';
+              const item = fileEditorItemFor(path);
+              setFileEditorThemeMode('yolomux-light');
+              setFileState(path, {{
+                kind: 'text',
+                content,
+                original: content,
+                dirty: false,
+                language: 'markdown',
+              }});
+              setFileEditorViewMode(path, 'preview', item);
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.classList.add('active-pane');
+              document.getElementById('mount').append(panel);
+              renderFileEditorPanel(panel, item);
+              const preview = panel.querySelector('.file-editor-preview-pane-panel');
+              const read = () => {{
+                const heading = getComputedStyle(preview.querySelector('h1'));
+                const link = getComputedStyle(preview.querySelector('a'));
+                const codeSpan = preview.querySelector('pre code span');
+                return {{
+                  previewBg: getComputedStyle(preview).backgroundColor,
+                  previewColor: getComputedStyle(preview).color,
+                  headingColor: heading.color,
+                  headingBg: heading.backgroundColor,
+                  linkColor: link.color,
+                  codeSpanColor: codeSpan ? getComputedStyle(codeSpan).color : '',
+                  vanillaClass: preview.classList.contains('vanilla-preview-body'),
+                  buttonTheme: panel.querySelector('.file-editor-theme-panel')?.dataset.editorTheme || '',
+                  buttonTitle: panel.querySelector('.file-editor-theme-panel')?.title || '',
+                }};
+              }};
+              const normal = read();
+              setFileEditorPreviewDisplayMode('vanilla');
+              const vanilla = read();
+              return {{normal, vanilla}};
+            }})();
+          </script>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri())
+    metrics = browser.execute_script("return window.__previewVanillaReady")
+    assert metrics["normal"]["vanillaClass"] is False, metrics
+    assert metrics["normal"]["headingColor"] != "rgb(17, 24, 39)", metrics
+    assert metrics["normal"]["codeSpanColor"] == "rgb(255, 0, 0)", metrics
+    assert metrics["vanilla"]["vanillaClass"] is True, metrics
+    assert metrics["vanilla"]["previewBg"] == "rgb(255, 255, 255)", metrics
+    assert metrics["vanilla"]["previewColor"] == "rgb(17, 24, 39)", metrics
+    assert metrics["vanilla"]["headingColor"] == "rgb(17, 24, 39)", metrics
+    assert metrics["vanilla"]["headingBg"] == "rgba(0, 0, 0, 0)", metrics
+    assert metrics["vanilla"]["linkColor"] == "rgb(6, 69, 173)", metrics
+    assert metrics["vanilla"]["codeSpanColor"] in ("rgb(17, 24, 39)", ""), metrics
+    assert metrics["vanilla"]["buttonTheme"] == "vanilla", metrics
+    assert "Vanilla preview" in metrics["vanilla"]["buttonTitle"], metrics
 
 
 def test_editor_and_pure_preview_keep_linked_rings_in_both_focus_directions(browser, tmp_path):

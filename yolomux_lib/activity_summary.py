@@ -25,9 +25,9 @@ from .settings import LEGACY_YOAGENT_DEFAULTS
 
 ACTIVITY_SUMMARY_FORMAT_VERSION = 4
 YOAGENT_CONTEXT_GUARD = (
-    "Use the supplied YOLOmux concepts and activity context as the starting point. You may run tools "
-    "such as ls, git status, or transcript inspection when that helps answer the user's question. "
-    "Keep tool use scoped to the relevant tmux session, repo, and transcript paths, and do not invent missing facts."
+    "Use the supplied YOLOmux concepts, activity context, and capability facts as the starting point. "
+    "YO!agent chat does not currently have autonomous command-sending tools. If needed facts are missing, "
+    "say what the user can inspect in YOLOmux instead of inventing details."
 )
 YOAGENT_README_PATH = Path(__file__).resolve().parents[1] / "README.md"
 YOAGENT_HELP_PRIMER_MAX_CHARS = 8_000
@@ -588,7 +588,13 @@ def build_global_activity_summary(session_summaries: list[dict[str, Any]], error
 def yoagent_context_lines(activity_payload: dict[str, Any]) -> list[str]:
     global_summary = activity_payload.get("global") if isinstance(activity_payload, dict) else {}
     sessions = activity_payload.get("sessions") if isinstance(activity_payload, dict) else {}
+    capabilities = activity_payload.get("capabilities") if isinstance(activity_payload, dict) else {}
     lines: list[str] = []
+    if isinstance(capabilities, dict):
+        for line in capabilities.get("lines") or []:
+            text = str(line or "").strip()
+            if text:
+                lines.append(f"capability: {text}")
     if isinstance(global_summary, dict):
         headline = str(global_summary.get("headline") or "").strip()
         if headline:
@@ -630,6 +636,26 @@ def yoagent_context_lines(activity_payload: dict[str, Any]) -> list[str]:
 
 
 YOAGENT_HISTORY_TURN_LIMIT = 4
+
+YOAGENT_CAPABILITY_LINES = [
+    "YOLOmux can read tmux panes through captured pane text, transcript metadata, and session activity summaries.",
+    "YOLOmux can poll sessions, prompt state, filesystem changes, watched PRs, and cached YO!agent rolling transcript summaries.",
+    "YOLOmux can send tmux input through explicit admin UI paths such as the browser terminal bridge and YOLO approval keys; YO!agent chat itself does not currently have autonomous command-sending tools.",
+    "YOLOmux can monitor prompts and session attention through YOLO workers, prompt detectors, state badges, event logs, and watched PR polling.",
+    "YOLOmux can notify through in-page toasts and browser notifications when Notify is enabled and a configured transition fires.",
+]
+
+
+def yoagent_capabilities_payload() -> dict[str, Any]:
+    return {
+        "read_tmux": True,
+        "poll_sessions": True,
+        "monitor": True,
+        "notify": True,
+        "send_tmux_input": "explicit-admin-ui-only",
+        "yoagent_autonomous_tools": False,
+        "lines": YOAGENT_CAPABILITY_LINES,
+    }
 
 
 def yoagent_localized_setting(settings: dict[str, Any], key: str, locale: str) -> str:
@@ -703,6 +729,18 @@ def deterministic_yoagent_help_reply(question: str) -> str:
     text = str(question or "").lower()
     if not text:
         return ""
+    wants_capabilities = (
+        any(phrase in text for phrase in ["capability", "capabilities", "what can", "can you", "can it", "tools", "send command", "send commands"])
+        and any(word in text for word in ["tmux", "pane", "poll", "monitor", "notify", "command", "session", "yo!agent", "yoagent", "agent"])
+    )
+    if wants_capabilities:
+        return "\n".join([
+            "YOLOmux can read tmux panes, poll live session state, monitor prompts/PRs/files, and notify when configured transitions need attention.",
+            "",
+            "It can also send tmux input through explicit admin UI paths: the browser terminal bridge sends what the user types, and YOLO approval workers send bounded approval keys. YO!agent chat itself does not currently have autonomous command-sending tools, so it should not claim it can directly run commands in another tmux pane.",
+            "",
+            "**Open / pending:** A safe future tool layer should be admin-only, session-scoped, audited in the event log, and confirmation-gated for command sends.",
+        ])
     wants_context = any(phrase in text for phrase in ["where do your insights", "where does your insight", "where do you get", "context come", "context comes", "no summary", "no insight", "no transcript", "session 7"])
     if wants_context:
         return YOAGENT_CONTEXT_CHAIN_PRIMER

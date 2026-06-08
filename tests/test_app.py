@@ -411,6 +411,33 @@ def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):
     assert "tmux session `5`" in payload["context_lines"][1]
 
 
+def test_yoagent_capability_question_is_grounded_and_readonly(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.warm_metadata_cache_async = lambda sessions: None
+    monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
+    monkeypatch.setattr(webapp, "activity_summary_payload", lambda: {
+        "generated_at": "2026-05-31T00:00:00+00:00",
+        "session_order": ["5"],
+        "global": {"headline": "You have 1 AI agent working on editor fixes across yolomux."},
+        "capabilities": app_module.yoagent_capabilities_payload(),
+        "sessions": {},
+        "errors": [],
+    })
+    try:
+        payload, status = webapp.yoagent_chat({"message": "Can YO!agent read, poll, monitor, notify, and send commands to tmux panes?"})
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert "can read tmux panes" in payload["answer"]
+    assert "poll live session state" in payload["answer"]
+    assert "notify when configured transitions" in payload["answer"]
+    assert "explicit admin UI paths" in payload["answer"]
+    assert "does not currently have autonomous command-sending tools" in payload["answer"]
+    assert any("capability: YOLOmux can read tmux panes" in line for line in payload["context_lines"])
+    assert any("YO!agent chat itself does not currently have autonomous command-sending tools" in line for line in payload["context_lines"])
+
+
 def test_yoagent_cli_auth_failure_is_actionable(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None

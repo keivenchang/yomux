@@ -28,6 +28,13 @@ from . import file_index
 MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
 MAX_WRITE_BYTES = 5 * 1024 * 1024  # 5 MB cap on file write
 BINARY_SNIFF_BYTES = 8 * 1024  # bytes inspected for NUL when classifying
+# Save conflict detection compares the mtime captured when YOLOmux loaded the file with the mtime on
+# disk at save time. Some filesystems and browser/JSON round trips cannot preserve nanosecond mtimes
+# exactly: JavaScript Number cannot represent current epoch nanoseconds safely, and remote/synced
+# filesystems can report tiny timestamp drift without changing content. The tolerance is deliberately
+# small: 10 ms absorbs precision/rounding jitter like the observed 85 ns drift, while still treating
+# normal editor/tool writes as real conflicts so YOLOmux does not overwrite newer disk content.
+MTIME_NS_CONFLICT_TOLERANCE = 10_000_000
 
 TEXT_EXTENSIONS = {
     ".rs", ".py", ".md", ".txt", ".json", ".js", ".ts", ".tsx", ".jsx",
@@ -775,7 +782,7 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
         actual_stat = path.stat()
         actual = int(actual_stat.st_mtime_ns)
         actual_legacy = int(actual_stat.st_mtime)
-        if expected_mtime not in {actual, actual_legacy}:
+        if not _mtime_matches_expected(int(expected_mtime), actual, actual_legacy):
             raise FilesystemError(
                 f"file changed on disk (expected mtime {expected_mtime}, got {actual})",
                 status=409,
@@ -791,6 +798,12 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
         "mtime": int(file_stat.st_mtime),
         "mtime_ns": int(file_stat.st_mtime_ns),
     }
+
+
+def _mtime_matches_expected(expected: int, actual_ns: int, actual_legacy: int) -> bool:
+    if expected == actual_legacy:
+        return True
+    return abs(expected - actual_ns) <= MTIME_NS_CONFLICT_TOLERANCE
 
 
 def _validated_child_name(raw_name: str) -> str:

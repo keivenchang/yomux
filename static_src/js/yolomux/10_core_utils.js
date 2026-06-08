@@ -514,6 +514,10 @@ function normalizeEditorThemeMode(value) {
   return normalizeEditorSchemeId(normalized);
 }
 
+function normalizeEditorPreviewDisplayMode(value) {
+  return String(value || '').trim().toLowerCase() === 'vanilla' ? 'vanilla' : 'theme';
+}
+
 function normalizeEditorSchemeForMode(value, dark) {
   const id = normalizeEditorSchemeId(value);
   const scheme = EDITOR_SCHEMES[id];
@@ -541,6 +545,14 @@ function readStoredEditorThemeMode() {
 
 function writeStoredEditorThemeMode(mode) {
   storageSet(fileEditorThemeModeStorageKey, normalizeEditorThemeMode(mode));
+}
+
+function readStoredEditorPreviewDisplayMode() {
+  return normalizeEditorPreviewDisplayMode(storageGet(fileEditorPreviewDisplayModeStorageKey) || 'theme');
+}
+
+function writeStoredEditorPreviewDisplayMode(mode) {
+  storageSet(fileEditorPreviewDisplayModeStorageKey, normalizeEditorPreviewDisplayMode(mode));
 }
 
 function readConfiguredEditorScheme() {

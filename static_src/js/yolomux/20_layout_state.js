@@ -2038,6 +2038,89 @@ function showToast(title, lines, options = {}) {
   return node;
 }
 
+function startupHelperCatalog() {
+  return [
+    {title: t('startupHelper.tip.dragFiles.title'), lines: [t('startupHelper.tip.dragFiles.body')]},
+    {title: t('startupHelper.tip.imageDrag.title'), lines: [t('startupHelper.tip.imageDrag.body')]},
+    {title: t('startupHelper.tip.yoagentQuestions.title'), lines: [t('startupHelper.tip.yoagentQuestions.body')]},
+    {title: t('startupHelper.tip.yoloAutoApprove.title'), lines: [t('startupHelper.tip.yoloAutoApprove.body')]},
+    {title: t('startupHelper.tip.yoloRules.title'), lines: [t('startupHelper.tip.yoloRules.body')]},
+    {title: t('startupHelper.tip.diffView.title'), lines: [t('startupHelper.tip.diffView.body')]},
+    {title: t('startupHelper.tip.finderSync.title'), lines: [t('startupHelper.tip.finderSync.body')]},
+    {title: t('startupHelper.tip.finderReload.title'), lines: [t('startupHelper.tip.finderReload.body')]},
+    {title: t('startupHelper.tip.editorDiff.title'), lines: [t('startupHelper.tip.editorDiff.body')]},
+    {title: t('startupHelper.tip.notifications.title'), lines: [t('startupHelper.tip.notifications.body')]},
+    {title: t('startupHelper.tip.watchedPrs.title'), lines: [t('startupHelper.tip.watchedPrs.body')]},
+    {title: t('startupHelper.tip.quickOpen.title'), lines: [t('startupHelper.tip.quickOpen.body')]},
+    {title: t('startupHelper.tip.markdownPreview.title'), lines: [t('startupHelper.tip.markdownPreview.body')]},
+    {title: t('startupHelper.tip.largeUpload.title'), lines: [t('startupHelper.tip.largeUpload.body')]},
+  ];
+}
+
+function readStartupHelperIndex(count) {
+  const parsed = Number(storageGet(startupHelperIndexStorageKey, '0'));
+  if (!Number.isFinite(parsed) || count <= 0) return 0;
+  return Math.max(0, Math.floor(parsed)) % count;
+}
+
+function writeStartupHelperIndex(index) {
+  storageSet(startupHelperIndexStorageKey, Math.max(0, Math.floor(Number(index) || 0)));
+}
+
+function startupHelperAction(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    onClick?.();
+  });
+  return button;
+}
+
+function closeStartupHelperToast(node) {
+  removeAttentionAlert(Number(node?.dataset?.alertId || 0));
+}
+
+function showStartupHelperTip(options = {}) {
+  if (readOnlyMode || !startupHelpersEnabled) return null;
+  const tips = startupHelperCatalog();
+  if (!tips.length) return null;
+  const index = readStartupHelperIndex(tips.length);
+  const tip = tips[index];
+  writeStartupHelperIndex((index + 1) % tips.length);
+  let node = null;
+  const nextAction = startupHelperAction(t('startupHelper.action.next'), () => {
+    closeStartupHelperToast(node);
+    showStartupHelperTip({manual: true});
+  });
+  const hideAction = startupHelperAction(t('startupHelper.action.hide'), () => {
+    closeStartupHelperToast(node);
+  });
+  const offAction = startupHelperAction(t('startupHelper.action.offForever'), () => {
+    startupHelpersEnabled = false;
+    closeStartupHelperToast(node);
+    saveSettingsPatch(settingPatch('general.startup_helpers', false))
+      .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
+      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+  });
+  node = showToast(tip.title, tip.lines, {
+    className: 'attention-alert toast startup-helper-toast',
+    actions: [nextAction, hideAction, offAction],
+    countdownMs: options.manual ? toastDurationMs : Math.max(toastDurationMs, 12000),
+  });
+  if (node) node.dataset.toastKind = 'startup-helper';
+  return node;
+}
+
+function scheduleStartupHelperTip() {
+  if (readOnlyMode || !startupHelpersEnabled) return;
+  if (location.protocol === 'file:') return;
+  window.setTimeout(() => {
+    showStartupHelperTip();
+  }, 1400);
+}
+
 function displayToastContainer(session) {
   const sessionContainer = session ? document.getElementById(`panel-toasts-${session}`) : null;
   if (sessionContainer && sessionContainer.isConnected !== false) return sessionContainer;

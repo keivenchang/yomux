@@ -163,6 +163,12 @@ def test_transcript_file_signature_uses_nanosecond_mtime(tmp_path):
 
 def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     activity = {
+        "capabilities": {
+            "lines": [
+                "YOLOmux can read tmux panes through captured pane text, transcript metadata, and session activity summaries.",
+                "YOLOmux can send tmux input through explicit admin UI paths; YO!agent chat itself does not currently have autonomous command-sending tools.",
+            ],
+        },
         "global": {
             "headline": "Your most recent work is about editor fixes, and you are currently making changes to yolomux in order to finish editor fixes. So far: 2 files changed (+7/-1); 1 of 1 AI agent is active.",
             "lines": [
@@ -210,11 +216,13 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     lines = yoagent_context_lines(activity)
 
     assert any("tmux session `5` directory: yolomux" in line and "Codex gpt-5.5 is active" in line for line in lines)
+    assert any("capability: YOLOmux can read tmux panes" in line for line in lines)
+    assert any("autonomous command-sending tools" in line for line in lines)
     assert any("transcript summary (working): The transcript says this session is wiring clickable session links" in line for line in lines)
     assert any("last worked: 2 hours ago" in line for line in lines)
     assert "Use facts only." in prompt
-    assert "You may run tools" in prompt
-    assert "transcript inspection" in prompt
+    assert "YO!agent chat does not currently have autonomous command-sending tools" in prompt
+    assert "You may run tools" not in prompt
     assert "YOLOmux concepts:" in prompt
     assert "Pane" in prompt
     assert "Context sourcing chain" in prompt
@@ -223,7 +231,7 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert "status?" in prompt
     assert "Activity summary changed" in changed_resume
     assert "YOLOmux concepts:" in changed_resume
-    assert "You may run tools" in changed_resume
+    assert "YO!agent chat does not currently have autonomous command-sending tools" in changed_resume
     assert "M static/yolomux.js" in changed_resume
     assert "Activity summary is unchanged" in unchanged_resume
     assert "M static/yolomux.js" not in unchanged_resume

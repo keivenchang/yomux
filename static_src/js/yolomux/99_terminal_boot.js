@@ -2054,6 +2054,7 @@ async function boot() {
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();
+  scheduleStartupHelperTip();
   installDevAutoReload();
 }
 

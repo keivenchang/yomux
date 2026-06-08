@@ -32,6 +32,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "language": "system",
         "reload_on_update": False,
         "reload_on_update_auto": False,
+        "startup_helpers": True,
     },
     "appearance": {
         "theme": "dark",
@@ -113,8 +114,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "invocation": "cli",
         "auto_refresh": False,
         "refresh_interval_seconds": 120,
-        "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Use the supplied YOLOmux concepts and activity context as the starting point. Answer the user's question directly in a normal status-update style. Prioritize fresh work, blockers, PR/CI state, dirty repos, changed files, and likely next actions. You may run tools such as ls, git status, or transcript inspection when that helps answer the user's question. Keep tool use scoped to the relevant tmux session, repo, and transcript paths. Whenever you discuss session-specific work, refer to it as tmux session `<session-name>` and pair that name with its full directory or repo path enclosed in backticks. If the agent/model matters, say tmux session `<session-name>` with <agent/model> about ... . Avoid session inventories unless the user asks about a session, asks for a summary, asks to list/enumerate sessions, or asks for all sessions. Do not invent missing facts.",
-        "intro": "Use the live AI agent activity only as much as the user asked for. When useful, run scoped tools such as ls, git status, or transcript inspection to verify details before answering. If the user is unsure what to do, recommend what to work on next based on freshness, importance, blockers, PR/CI state, dirty repos, changed files, and stale work.",
+        "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Use the supplied YOLOmux concepts, activity context, and capability facts as the starting point. Answer the user's question directly in a normal status-update style. Prioritize fresh work, blockers, PR/CI state, dirty repos, changed files, and likely next actions. YOLOmux can read tmux panes, poll sessions, monitor prompts/PRs/files, notify on configured transitions, and send tmux input through explicit admin UI paths. YO!agent chat itself does not currently have autonomous command-sending tools, so do not claim you can directly run commands in another tmux pane. Whenever you discuss session-specific work, refer to it as tmux session `<session-name>` and pair that name with its full directory or repo path enclosed in backticks. If the agent/model matters, say tmux session `<session-name>` with <agent/model> about ... . Avoid session inventories unless the user asks about a session, asks for a summary, asks to list/enumerate sessions, or asks for all sessions. Do not invent missing facts.",
+        "intro": "Use the live AI agent activity only as much as the user asked for. If needed facts are missing, say what the user can inspect in YOLOmux instead of inventing details. If the user is unsure what to do, recommend what to work on next based on freshness, importance, blockers, PR/CI state, dirty repos, changed files, and stale work.",
         "format": "Reply in Markdown. Default shape: a short direct answer, then optional bullets for the top relevant topics or next actions. Include repo/directory and important files when they matter. Include session names only when the user asks about a specific session, asks for a summary, or asks to list/enumerate/show all sessions. For summary/list answers, use one Markdown table with columns: tmux session, full path, last worked, details. In the tmux session column, show only the session name as a Markdown link with code-formatted text, like [`2`](?yoagent-session=2). Do not repeat the words tmux session inside table cells. In the full path column, use absolute full directory/repo paths enclosed in backticks, e.g. `/home/<user>/repo`. In the last worked column, use compact recency such as `9 hrs ago` or `5 min ago`. In the details column, write 1-2 factual sentences about what that session is doing. If there are 6 sessions, emit 6 table rows. End with `**Open / pending:**` only for concrete next actions or blockers.",
     },
     "yolo": {
@@ -125,7 +126,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 LEGACY_YOAGENT_DEFAULTS = {
-    "system_prompt": DEFAULT_SETTINGS["yoagent"]["system_prompt"],
+    "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Use the supplied YOLOmux concepts and activity context as the starting point. Answer the user's question directly in a normal status-update style. Prioritize fresh work, blockers, PR/CI state, dirty repos, changed files, and likely next actions. You may run tools such as ls, git status, or transcript inspection when that helps answer the user's question. Keep tool use scoped to the relevant tmux session, repo, and transcript paths. Whenever you discuss session-specific work, refer to it as tmux session `<session-name>` and pair that name with its full directory or repo path enclosed in backticks. If the agent/model matters, say tmux session `<session-name>` with <agent/model> about ... . Avoid session inventories unless the user asks about a session, asks for a summary, asks to list/enumerate sessions, or asks for all sessions. Do not invent missing facts.",
     "intro": "Summarize the live AI agent activity only as much as the user asked for. Lead with the freshest or most important task, especially active sessions, recent edits, blocked work, PRs, CI, or dirty repos. Stale or old sessions should be mentioned only in a short follow-up paragraph unless the user explicitly asks for a full list.",
     "format": "Reply in Markdown. Default shape: a short direct answer, then optional bullets only for the top relevant <topic> items. Do not create one item per session unless the user asks to list, enumerate, or show all sessions. When the user does ask for a list, use one numbered item per session/topic, with a bold title and one or two short factual sub-bullets. End with `**Open / pending:**` only when there are concrete next actions, blockers, or stale sessions worth calling out. Name repos, tickets, PRs, and session ids when they matter; omit unsupported details.",
 }
@@ -135,6 +136,7 @@ LEGACY_YOAGENT_PROMPT_MARKERS = {
         "report only from the supplied agent activity context",
         "Do not run tools or inspect ~/.claude",
         "transcript directories, or any filesystem path",
+        "You may run tools such as ls",
     ],
     "intro": [
         "Keep stale or old work out of the default answer",
@@ -261,6 +263,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
     ("general", "reload_on_update"): "true/false. Default false. When true, an open client shows a 'New version available' banner once the server ships a newer YOLOMUX_VERSION.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).",
+    ("general", "startup_helpers"): "true/false. Default true. When true, a small startup tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn helpers off forever.",
     ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",
     ("file_explorer", "index_refresh_seconds"): "Seconds, 0-3600. How often the quick-open index is proactively refreshed in the background. 0 = only rebuild when you search.",
     ("file_explorer", "companion_dirs"): "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Useful for companion repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates.",

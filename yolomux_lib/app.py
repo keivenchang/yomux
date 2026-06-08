@@ -26,6 +26,7 @@ from .activity_summary import build_session_activity_summary
 from .activity_summary import build_yoagent_chat_prompt
 from .activity_summary import build_yoagent_resume_prompt
 from .activity_summary import deterministic_yoagent_reply
+from .activity_summary import yoagent_capabilities_payload
 from .activity_summary import yoagent_context_lines
 from .auto_approve_worker import AutoApproveWorker
 from .auto_approve_worker import auto_approve_lock_message
@@ -330,6 +331,7 @@ class TmuxWebtermApp:
             "session_order": [session for session in self.sessions if session in summaries],
             "sessions": summaries,
             "global": build_global_activity_summary(ordered_summaries, errors),
+            "capabilities": yoagent_capabilities_payload(),
             "errors": errors,
             "locale": locale,
             "yoagent_summaries": {

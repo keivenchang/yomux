@@ -400,6 +400,24 @@
   border-color: var(--line);
   color: var(--muted);
 }
+.file-editor-theme-panel.theme-vanilla .file-editor-icon-theme::before {
+  border-radius: 3px;
+}
+.file-editor-theme-panel.theme-vanilla .file-editor-icon-theme::after {
+  content: "V";
+  inset: 50% auto auto 50%;
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: currentColor;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  opacity: 1;
+  transform: translate(-50%, -50%);
+}
 .file-editor-wrap:hover,
 .file-editor-wrap.active,
 .file-editor-gutter:hover,
@@ -421,6 +439,12 @@
   background: transparent;
   border-color: #c69a15;
   box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
+}
+.file-editor-theme-panel.theme-vanilla {
+  color: #111827;
+  background: #ffffff;
+  border-color: #cbd5e1;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.12);
 }
 .file-editor-wrap.active,
 .file-editor-gutter.active {
@@ -608,6 +632,77 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
 .markdown-body th, .markdown-body td { border: 1px solid var(--line); padding: 4px 8px; }
 .markdown-body th { background: var(--panel2); }
 .markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+.file-editor-preview-pane.vanilla-preview-body,
+.file-editor-preview-pane-panel.vanilla-preview-body {
+  background: #ffffff;
+  color: #111827;
+  font-family: Arial, Helvetica, sans-serif;
+  line-height: 1.45;
+}
+.file-editor-preview-pane.vanilla-preview-body h1,
+.file-editor-preview-pane.vanilla-preview-body h2,
+.file-editor-preview-pane.vanilla-preview-body h3,
+.file-editor-preview-pane.vanilla-preview-body h4,
+.file-editor-preview-pane.vanilla-preview-body h5,
+.file-editor-preview-pane.vanilla-preview-body h6,
+.file-editor-preview-pane-panel.vanilla-preview-body h1,
+.file-editor-preview-pane-panel.vanilla-preview-body h2,
+.file-editor-preview-pane-panel.vanilla-preview-body h3,
+.file-editor-preview-pane-panel.vanilla-preview-body h4,
+.file-editor-preview-pane-panel.vanilla-preview-body h5,
+.file-editor-preview-pane-panel.vanilla-preview-body h6 {
+  color: #111827;
+  background: transparent;
+}
+.file-editor-preview-pane.vanilla-preview-body a,
+.file-editor-preview-pane-panel.vanilla-preview-body a {
+  color: #0645ad;
+}
+.file-editor-preview-pane.vanilla-preview-body strong,
+.file-editor-preview-pane.vanilla-preview-body em,
+.file-editor-preview-pane-panel.vanilla-preview-body strong,
+.file-editor-preview-pane-panel.vanilla-preview-body em {
+  color: inherit;
+}
+.file-editor-preview-pane.vanilla-preview-body code,
+.file-editor-preview-pane-panel.vanilla-preview-body code {
+  color: #111827;
+  background: #f6f8fa;
+  border-color: #d0d7de;
+}
+.file-editor-preview-pane.vanilla-preview-body pre,
+.file-editor-preview-pane-panel.vanilla-preview-body pre {
+  color: #111827;
+  background: #f6f8fa;
+  border-color: #d0d7de;
+}
+.file-editor-preview-pane.vanilla-preview-body pre code,
+.file-editor-preview-pane-panel.vanilla-preview-body pre code,
+.file-editor-preview-pane.vanilla-preview-body pre code *,
+.file-editor-preview-pane-panel.vanilla-preview-body pre code * {
+  color: inherit !important;
+  background: transparent !important;
+  border-color: transparent;
+}
+.file-editor-preview-pane.vanilla-preview-body blockquote,
+.file-editor-preview-pane-panel.vanilla-preview-body blockquote {
+  color: #4b5563;
+  border-inline-start-color: #d0d7de;
+}
+.file-editor-preview-pane.vanilla-preview-body th,
+.file-editor-preview-pane-panel.vanilla-preview-body th {
+  background: #f6f8fa;
+}
+.file-editor-preview-pane.vanilla-preview-body th,
+.file-editor-preview-pane.vanilla-preview-body td,
+.file-editor-preview-pane-panel.vanilla-preview-body th,
+.file-editor-preview-pane-panel.vanilla-preview-body td {
+  border-color: #d0d7de;
+}
+.file-editor-preview-pane.vanilla-preview-body hr,
+.file-editor-preview-pane-panel.vanilla-preview-body hr {
+  border-top-color: #d0d7de;
+}
 .markdown-source-anchor {
   display: inline-block;
   width: 0;
@@ -1679,7 +1774,8 @@ body.editor-theme-light .file-editor-content {
   font-weight: 700;
 }
 .file-editor-theme-panel.theme-dark,
-.file-editor-theme-panel.theme-light {
+.file-editor-theme-panel.theme-light,
+.file-editor-theme-panel.theme-vanilla {
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
   border-color: var(--pane-ctl-border, var(--pane-tab-control-border));
 }
@@ -1688,6 +1784,12 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-theme-panel.theme-light {
   box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.20);
+}
+.file-editor-theme-panel.theme-vanilla {
+  color: #111827;
+  background: #ffffff;
+  border-color: #cbd5e1;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.12);
 }
 .file-editor-find-panel:disabled {
   opacity: 0.42;
@@ -1770,6 +1872,42 @@ body.editor-theme-light .file-editor-content .markdown-body pre {
   color: var(--lt-text);
   background: var(--lt-panel);
   border-color: var(--lt-line);
+}
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body {
+  background: #ffffff;
+  color: #111827;
+}
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h1,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h2,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h3,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h4,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h5,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body h6 {
+  color: #111827;
+  background: transparent;
+}
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body a {
+  color: #0645ad;
+}
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body strong,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body em {
+  color: inherit;
+}
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body code {
+  color: #111827;
+  background: #f6f8fa;
+  border-color: #d0d7de;
+}
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre {
+  color: #111827;
+  background: #f6f8fa;
+  border-color: #d0d7de;
+}
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code,
+body.editor-theme-light .file-editor-content .markdown-body.vanilla-preview-body pre code * {
+  color: inherit !important;
+  background: transparent !important;
+  border-color: transparent;
 }
 body.editor-theme-light .file-editor-raw-panel .md-heading,
 body.editor-theme-light .file-editor-code-preview .md-heading {

@@ -247,6 +247,7 @@ let fileExplorerRepoInfoCacheLoaded = false;
 let fileExplorerRootMode = readStoredFileExplorerRootMode();
 let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
+const fileEditorPreviewDisplayModeStorageKey = 'yolomux.fileEditorPreviewDisplayMode.v1';
 let fileEditorWrapEnabled = readStoredEditorWrap();
 // DOIT.26: inline git blame (Cursor-style). Persisted toggle + a per-path cache of the /api/blame payload.
 let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
@@ -256,6 +257,7 @@ let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 // B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
 let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
+let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
 let fileEditorCursorStyle = 'block';  // C3: default caret is block; saved 'line' choices round-trip via settings
 let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cursor) | 'theme' (per-scheme caret)
 let fileEditorAutosaveEnabled = false;
@@ -354,6 +356,7 @@ const pasteCounters = new Map();
 const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
+const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // DOIT.6 #40: YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
@@ -405,6 +408,7 @@ let editorPreviewFontSize = initialSetting('appearance.preview_font_size', edito
 let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
 let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
 let autoFocusEnabled = initialSetting('general.auto_focus', false);
+let startupHelpersEnabled = initialSetting('general.startup_helpers', true) !== false;
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;

@@ -1866,6 +1866,26 @@ function updateFileExplorerCurrentFileHighlight() {
   });
 }
 
+function scheduleFileExplorerActiveFileReveal(path = activeFile) {
+  if (!path) {
+    updateFileExplorerCurrentFileHighlight();
+    return;
+  }
+  const target = normalizeDirectoryPath(path);
+  const root = normalizeDirectoryPath(currentFileExplorerRoot());
+  updateFileExplorerCurrentFileHighlight();
+  if (!fileExplorerIsOpen() || !pathIsInsideDirectory(target, root)) return;
+  if (!fileExplorerTreeContainers().some(container => container.querySelector?.('.file-tree-row[data-path]'))) return;
+  const generation = ++fileExplorerSyncGeneration;
+  const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
+  schedule(() => {
+    if (generation !== fileExplorerSyncGeneration) return;
+    expandFileExplorerTreesToPath(target, root, generation, {auto: true}).catch(error => {
+      console.warn('Finder active file reveal failed', error);
+    });
+  });
+}
+
 function updateFileTreeGitStatusRows() {
   const changedAncestorStats = fileTreeChangedAncestorStats();
   document.querySelectorAll('.file-tree-row[data-path]').forEach(row => {
@@ -2406,7 +2426,10 @@ function bindFileExplorerHeaderActions(container = document) {
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) {
       if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
-      else refreshFileExplorerTrees();
+      else {
+        refreshFileExplorerTrees();
+        fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+      }
     } else if (action.matches('[data-file-explorer-collapse]')) {
       collapseAllFileExplorerDirectories();
     }
@@ -2720,11 +2743,28 @@ function filePayloadMtime(payload) {
   return Number(payload?.mtime_ns || payload?.mtime || 0);
 }
 
+// Keep this in sync with yolomux_lib.filesystem.MTIME_NS_CONFLICT_TOLERANCE. The file watcher compares
+// mtimes returned by /api/fs/read and /api/fs/list, then decides whether to mark an open editor as stale.
+// Current epoch nanosecond mtimes are larger than Number.MAX_SAFE_INTEGER, so the browser can round them;
+// remote/synced filesystems can also report tiny mtime drift for unchanged content. A 10 ms window covers
+// those precision/transport edge cases without turning the watcher into a broad race window where a real
+// external write shortly after open is silently ignored.
+const FILE_MTIME_NS_CHANGE_TOLERANCE = 10000000;
+const FILE_MTIME_NS_MIN_VALUE = 1000000000000000;
+
+function fileMtimesMatch(left, right) {
+  const leftMtime = Number(left || 0);
+  const rightMtime = Number(right || 0);
+  if (leftMtime === rightMtime) return true;
+  if (Math.max(Math.abs(leftMtime), Math.abs(rightMtime)) < FILE_MTIME_NS_MIN_VALUE) return false;
+  return Math.abs(leftMtime - rightMtime) <= FILE_MTIME_NS_CHANGE_TOLERANCE;
+}
+
 function fileEntryChanged(state, entry) {
   if (!state || !entry) return true;
   const stateMtime = Number(state.mtime || 0);
   const entryMtime = fileEntryMtime(entry);
-  if (stateMtime !== entryMtime) return true;
+  if (!fileMtimesMatch(stateMtime, entryMtime)) return true;
   // DOIT.6 #88: equal mtimes but an UNKNOWN size on either side — do NOT assert "unchanged" (an
   // equal-mtime content change with no size would be missed); treat it as changed so the caller re-stats.
   if (state.size == null || entry.size == null) return true;
@@ -3244,7 +3284,7 @@ function showFileEditorPaneForPath(path, options = {}) {
   activeFile = path;
   const replacementSlots = setOpenFileOwner(path, item, options);
   syncFileLayoutItems();
-  updateFileExplorerCurrentFileHighlight();
+  scheduleFileExplorerActiveFileReveal(path);
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
   return openFileEditorPane(path, {...options, item});
 }

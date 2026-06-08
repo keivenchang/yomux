@@ -248,6 +248,7 @@ let fileExplorerRepoInfoCacheLoaded = false;
 let fileExplorerRootMode = readStoredFileExplorerRootMode();
 let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
+const fileEditorPreviewDisplayModeStorageKey = 'yolomux.fileEditorPreviewDisplayMode.v1';
 let fileEditorWrapEnabled = readStoredEditorWrap();
 // DOIT.26: inline git blame (Cursor-style). Persisted toggle + a per-path cache of the /api/blame payload.
 let fileEditorBlameEnabled = storageGet('yolomux.editorBlame') === '1';
@@ -257,6 +258,7 @@ let fileEditorLineNumbersEnabled = readStoredEditorLineNumbers();
 // B4 (DOIT.12): when true the diff shows ALL context (no collapsed "N unchanged lines" folds). Persisted.
 let diffExpandUnchanged = storageGet('yolomux.diffExpandUnchanged') === '1';
 let fileEditorThemeMode = readStoredEditorThemeMode();
+let fileEditorPreviewDisplayMode = readStoredEditorPreviewDisplayMode();
 let fileEditorCursorStyle = 'block';  // C3: default caret is block; saved 'line' choices round-trip via settings
 let fileEditorCursorColor = 'yellow';  // 'yellow' (match the active terminal cursor) | 'theme' (per-scheme caret)
 let fileEditorAutosaveEnabled = false;
@@ -355,6 +357,7 @@ const pasteCounters = new Map();
 const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
+const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // DOIT.6 #40: YO!info and YO!agent are merged into one pane with an in-pane sub-tab toggle; the chosen
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
@@ -406,6 +409,7 @@ let editorPreviewFontSize = initialSetting('appearance.preview_font_size', edito
 let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
 let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
 let autoFocusEnabled = initialSetting('general.auto_focus', false);
+let startupHelpersEnabled = initialSetting('general.startup_helpers', true) !== false;
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;
@@ -1485,6 +1489,10 @@ function normalizeEditorThemeMode(value) {
   return normalizeEditorSchemeId(normalized);
 }
 
+function normalizeEditorPreviewDisplayMode(value) {
+  return String(value || '').trim().toLowerCase() === 'vanilla' ? 'vanilla' : 'theme';
+}
+
 function normalizeEditorSchemeForMode(value, dark) {
   const id = normalizeEditorSchemeId(value);
   const scheme = EDITOR_SCHEMES[id];
@@ -1512,6 +1520,14 @@ function readStoredEditorThemeMode() {
 
 function writeStoredEditorThemeMode(mode) {
   storageSet(fileEditorThemeModeStorageKey, normalizeEditorThemeMode(mode));
+}
+
+function readStoredEditorPreviewDisplayMode() {
+  return normalizeEditorPreviewDisplayMode(storageGet(fileEditorPreviewDisplayModeStorageKey) || 'theme');
+}
+
+function writeStoredEditorPreviewDisplayMode(mode) {
+  storageSet(fileEditorPreviewDisplayModeStorageKey, normalizeEditorPreviewDisplayMode(mode));
 }
 
 function readConfiguredEditorScheme() {
@@ -4441,6 +4457,89 @@ function showToast(title, lines, options = {}) {
   // reconnect toast animates over that, not the fixed toastDurationMs) so the bar and removal align.
   attentionAlertTimers.set(id, window.setTimeout(() => removeAttentionAlert(id), options.countdownMs || toastDurationMs));
   return node;
+}
+
+function startupHelperCatalog() {
+  return [
+    {title: t('startupHelper.tip.dragFiles.title'), lines: [t('startupHelper.tip.dragFiles.body')]},
+    {title: t('startupHelper.tip.imageDrag.title'), lines: [t('startupHelper.tip.imageDrag.body')]},
+    {title: t('startupHelper.tip.yoagentQuestions.title'), lines: [t('startupHelper.tip.yoagentQuestions.body')]},
+    {title: t('startupHelper.tip.yoloAutoApprove.title'), lines: [t('startupHelper.tip.yoloAutoApprove.body')]},
+    {title: t('startupHelper.tip.yoloRules.title'), lines: [t('startupHelper.tip.yoloRules.body')]},
+    {title: t('startupHelper.tip.diffView.title'), lines: [t('startupHelper.tip.diffView.body')]},
+    {title: t('startupHelper.tip.finderSync.title'), lines: [t('startupHelper.tip.finderSync.body')]},
+    {title: t('startupHelper.tip.finderReload.title'), lines: [t('startupHelper.tip.finderReload.body')]},
+    {title: t('startupHelper.tip.editorDiff.title'), lines: [t('startupHelper.tip.editorDiff.body')]},
+    {title: t('startupHelper.tip.notifications.title'), lines: [t('startupHelper.tip.notifications.body')]},
+    {title: t('startupHelper.tip.watchedPrs.title'), lines: [t('startupHelper.tip.watchedPrs.body')]},
+    {title: t('startupHelper.tip.quickOpen.title'), lines: [t('startupHelper.tip.quickOpen.body')]},
+    {title: t('startupHelper.tip.markdownPreview.title'), lines: [t('startupHelper.tip.markdownPreview.body')]},
+    {title: t('startupHelper.tip.largeUpload.title'), lines: [t('startupHelper.tip.largeUpload.body')]},
+  ];
+}
+
+function readStartupHelperIndex(count) {
+  const parsed = Number(storageGet(startupHelperIndexStorageKey, '0'));
+  if (!Number.isFinite(parsed) || count <= 0) return 0;
+  return Math.max(0, Math.floor(parsed)) % count;
+}
+
+function writeStartupHelperIndex(index) {
+  storageSet(startupHelperIndexStorageKey, Math.max(0, Math.floor(Number(index) || 0)));
+}
+
+function startupHelperAction(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    onClick?.();
+  });
+  return button;
+}
+
+function closeStartupHelperToast(node) {
+  removeAttentionAlert(Number(node?.dataset?.alertId || 0));
+}
+
+function showStartupHelperTip(options = {}) {
+  if (readOnlyMode || !startupHelpersEnabled) return null;
+  const tips = startupHelperCatalog();
+  if (!tips.length) return null;
+  const index = readStartupHelperIndex(tips.length);
+  const tip = tips[index];
+  writeStartupHelperIndex((index + 1) % tips.length);
+  let node = null;
+  const nextAction = startupHelperAction(t('startupHelper.action.next'), () => {
+    closeStartupHelperToast(node);
+    showStartupHelperTip({manual: true});
+  });
+  const hideAction = startupHelperAction(t('startupHelper.action.hide'), () => {
+    closeStartupHelperToast(node);
+  });
+  const offAction = startupHelperAction(t('startupHelper.action.offForever'), () => {
+    startupHelpersEnabled = false;
+    closeStartupHelperToast(node);
+    saveSettingsPatch(settingPatch('general.startup_helpers', false))
+      .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
+      .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
+  });
+  node = showToast(tip.title, tip.lines, {
+    className: 'attention-alert toast startup-helper-toast',
+    actions: [nextAction, hideAction, offAction],
+    countdownMs: options.manual ? toastDurationMs : Math.max(toastDurationMs, 12000),
+  });
+  if (node) node.dataset.toastKind = 'startup-helper';
+  return node;
+}
+
+function scheduleStartupHelperTip() {
+  if (readOnlyMode || !startupHelpersEnabled) return;
+  if (location.protocol === 'file:') return;
+  window.setTimeout(() => {
+    showStartupHelperTip();
+  }, 1400);
 }
 
 function displayToastContainer(session) {
@@ -7865,6 +7964,26 @@ function updateFileExplorerCurrentFileHighlight() {
   });
 }
 
+function scheduleFileExplorerActiveFileReveal(path = activeFile) {
+  if (!path) {
+    updateFileExplorerCurrentFileHighlight();
+    return;
+  }
+  const target = normalizeDirectoryPath(path);
+  const root = normalizeDirectoryPath(currentFileExplorerRoot());
+  updateFileExplorerCurrentFileHighlight();
+  if (!fileExplorerIsOpen() || !pathIsInsideDirectory(target, root)) return;
+  if (!fileExplorerTreeContainers().some(container => container.querySelector?.('.file-tree-row[data-path]'))) return;
+  const generation = ++fileExplorerSyncGeneration;
+  const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
+  schedule(() => {
+    if (generation !== fileExplorerSyncGeneration) return;
+    expandFileExplorerTreesToPath(target, root, generation, {auto: true}).catch(error => {
+      console.warn('Finder active file reveal failed', error);
+    });
+  });
+}
+
 function updateFileTreeGitStatusRows() {
   const changedAncestorStats = fileTreeChangedAncestorStats();
   document.querySelectorAll('.file-tree-row[data-path]').forEach(row => {
@@ -8405,7 +8524,10 @@ function bindFileExplorerHeaderActions(container = document) {
     else if (action.matches('[data-file-explorer-new-folder]')) createFileExplorerFolder();
     else if (action.matches('[data-file-explorer-refresh]')) {
       if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
-      else refreshFileExplorerTrees();
+      else {
+        refreshFileExplorerTrees();
+        fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+      }
     } else if (action.matches('[data-file-explorer-collapse]')) {
       collapseAllFileExplorerDirectories();
     }
@@ -8719,11 +8841,28 @@ function filePayloadMtime(payload) {
   return Number(payload?.mtime_ns || payload?.mtime || 0);
 }
 
+// Keep this in sync with yolomux_lib.filesystem.MTIME_NS_CONFLICT_TOLERANCE. The file watcher compares
+// mtimes returned by /api/fs/read and /api/fs/list, then decides whether to mark an open editor as stale.
+// Current epoch nanosecond mtimes are larger than Number.MAX_SAFE_INTEGER, so the browser can round them;
+// remote/synced filesystems can also report tiny mtime drift for unchanged content. A 10 ms window covers
+// those precision/transport edge cases without turning the watcher into a broad race window where a real
+// external write shortly after open is silently ignored.
+const FILE_MTIME_NS_CHANGE_TOLERANCE = 10000000;
+const FILE_MTIME_NS_MIN_VALUE = 1000000000000000;
+
+function fileMtimesMatch(left, right) {
+  const leftMtime = Number(left || 0);
+  const rightMtime = Number(right || 0);
+  if (leftMtime === rightMtime) return true;
+  if (Math.max(Math.abs(leftMtime), Math.abs(rightMtime)) < FILE_MTIME_NS_MIN_VALUE) return false;
+  return Math.abs(leftMtime - rightMtime) <= FILE_MTIME_NS_CHANGE_TOLERANCE;
+}
+
 function fileEntryChanged(state, entry) {
   if (!state || !entry) return true;
   const stateMtime = Number(state.mtime || 0);
   const entryMtime = fileEntryMtime(entry);
-  if (stateMtime !== entryMtime) return true;
+  if (!fileMtimesMatch(stateMtime, entryMtime)) return true;
   // DOIT.6 #88: equal mtimes but an UNKNOWN size on either side — do NOT assert "unchanged" (an
   // equal-mtime content change with no size would be missed); treat it as changed so the caller re-stats.
   if (state.size == null || entry.size == null) return true;
@@ -9243,7 +9382,7 @@ function showFileEditorPaneForPath(path, options = {}) {
   activeFile = path;
   const replacementSlots = setOpenFileOwner(path, item, options);
   syncFileLayoutItems();
-  updateFileExplorerCurrentFileHighlight();
+  scheduleFileExplorerActiveFileReveal(path);
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
   return openFileEditorPane(path, {...options, item});
 }
@@ -10733,9 +10872,20 @@ function setFileEditorIcon(button, iconClass) {
 }
 
 function editorThemeLabel(mode = fileEditorThemeMode) {
+  if (fileEditorPreviewDisplayMode === 'vanilla') return 'Vanilla preview';
   const scheme = mode === editorThemeInheritMode ? activeEditorScheme() : (EDITOR_SCHEMES[normalizeEditorSchemeId(mode)] || EDITOR_SCHEMES.dark);
   if (mode === editorThemeInheritMode) return `Inherit global theme (${scheme.label})`;
   return `${scheme.label} editor scheme`;
+}
+
+function editorPreviewThemeState() {
+  if (fileEditorPreviewDisplayMode === 'vanilla') return 'vanilla';
+  return activeEditorScheme().dark ? 'dark' : 'light';
+}
+
+function editorPreviewThemeStateLabel(state = editorPreviewThemeState()) {
+  if (state === 'vanilla') return 'Vanilla preview';
+  return state === 'light' ? 'Light preview' : 'Dark preview';
 }
 
 function editorSchemeCssVariables(scheme = activeEditorScheme()) {
@@ -10819,13 +10969,14 @@ function applyEditorSchemeCssVariables(scheme = activeEditorScheme()) {
 function updateEditorThemeButton(button) {
   if (!button) return;
   const scheme = activeEditorScheme();
-  const nextScheme = EDITOR_SCHEMES[configuredEditorSchemeForMode(!scheme.dark)] || scheme;
-  button.classList.toggle('theme-dark', scheme.dark);
-  button.classList.toggle('theme-light', !scheme.dark);
-  button.dataset.editorTheme = scheme.id;
-  button.setAttribute('aria-pressed', scheme.dark ? 'false' : 'true');
-  const nextAction = fileEditorThemeMode === editorThemeInheritMode ? `override to ${nextScheme.label}` : 'return to global theme';
-  button.title = `${editorThemeLabel()}; ${nextAction}`;
+  const previewState = editorPreviewThemeState();
+  const nextState = previewState === 'dark' ? 'light' : (previewState === 'light' ? 'vanilla' : 'dark');
+  button.classList.toggle('theme-dark', previewState === 'dark');
+  button.classList.toggle('theme-light', previewState === 'light');
+  button.classList.toggle('theme-vanilla', previewState === 'vanilla');
+  button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
+  button.setAttribute('aria-pressed', previewState === 'dark' ? 'false' : 'true');
+  button.title = `${editorThemeLabel()}; next: ${editorPreviewThemeStateLabel(nextState)}`;
   button.setAttribute('aria-label', editorThemeLabel());
   setFileEditorIcon(button, 'file-editor-icon-theme');
 }
@@ -10855,10 +11006,11 @@ function refreshOpenEditorThemePanels() {
 function applyEditorThemeMode(options = {}) {
   const scheme = activeEditorScheme();
   applyEditorSchemeCssVariables(scheme);
-  document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light');
+  document.body?.classList.remove('editor-theme-system', 'editor-theme-dark', 'editor-theme-light', 'editor-preview-vanilla');
   EDITOR_SCHEME_IDS.forEach(id => document.body?.classList.remove(`editor-scheme-${id}`));
   document.body?.classList.add(scheme.dark ? 'editor-theme-dark' : 'editor-theme-light');
   document.body?.classList.add(`editor-scheme-${scheme.id}`);
+  document.body?.classList.toggle('editor-preview-vanilla', fileEditorPreviewDisplayMode === 'vanilla');
   document.querySelectorAll('.file-editor-theme-panel').forEach(updateEditorThemeButton);
   if (options.refreshEditors) refreshOpenEditorThemePanels();
 }
@@ -10866,15 +11018,32 @@ function applyEditorThemeMode(options = {}) {
 function setFileEditorThemeMode(mode) {
   fileEditorThemeMode = normalizeEditorThemeMode(mode);
   writeStoredEditorThemeMode(fileEditorThemeMode);
+  if (fileEditorPreviewDisplayMode !== 'theme') {
+    fileEditorPreviewDisplayMode = 'theme';
+    writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
+  }
+  applyEditorThemeMode({refreshEditors: true});
+}
+
+function setFileEditorPreviewDisplayMode(mode) {
+  fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(mode);
+  writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
   applyEditorThemeMode({refreshEditors: true});
 }
 
 function cycleEditorThemeMode() {
-  if (fileEditorThemeMode === editorThemeInheritMode) {
-    setFileEditorThemeMode(configuredEditorSchemeForMode(!activeEditorScheme().dark));
-  } else {
-    setFileEditorThemeMode(editorThemeInheritMode);
+  const previewState = editorPreviewThemeState();
+  if (previewState === 'dark') {
+    setFileEditorThemeMode(configuredEditorSchemeForMode(false));
+    return;
   }
+  if (previewState === 'light') {
+    setFileEditorPreviewDisplayMode('vanilla');
+    return;
+  }
+  fileEditorPreviewDisplayMode = 'theme';
+  writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
+  setFileEditorThemeMode(configuredEditorSchemeForMode(true));
 }
 
 function updateEditorWrapButton(button) {
@@ -11322,6 +11491,7 @@ function applySettingsPayload(payload, options = {}) {
   const previousBlameAllLines = fileEditorBlameAllLines;
   fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
   autoFocusEnabled = boolSetting('general.auto_focus', false);
+  startupHelpersEnabled = boolSetting('general.startup_helpers', true);
   const previousEditorSchemeId = activeEditorScheme().id;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
@@ -16241,6 +16411,7 @@ function preferenceSections() {
         {value: 'en-XA', label: t('pref.general.language.pseudo')},
       ], help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
+      {path: 'general.startup_helpers', label: t('pref.general.startup_helpers.label'), type: 'boolean', help: t('pref.general.startup_helpers.help')},
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
     ]},
     {title: t('pref.section.appearance'), items: [
@@ -17014,6 +17185,11 @@ function sessionFilesRefsQuery() {
   return Object.keys(map).length ? `&refs=${encodeURIComponent(JSON.stringify(map))}` : '';
 }
 
+function sessionFilesRequestQueryString() {
+  if (fileExplorerMode !== 'diff') return 'from=HEAD&to=current';
+  return `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
+}
+
 const diffRefSuggestionLimit = 60;
 const diffRefPopoverCompactLimit = 12;
 const diffRefPopoverFullLimit = 18;
@@ -17461,14 +17637,22 @@ function emptySessionFilesPayload(session = '', loaded = true) {
   return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: diffRefFrom, to_ref: diffRefTo, loaded};
 }
 
+function sessionFilesPayloadIsFinderWorktree(payload, session = '') {
+  if (!payload || payload.loaded !== true) return false;
+  if (session && String(payload.session || '') !== String(session)) return false;
+  return (payload.from_ref || 'HEAD') === 'HEAD' && (payload.to_ref || 'current') === 'current';
+}
+
 function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
   const cached = fileExplorerSessionFilesCache.get(session);
-  if (cached?.payload) {
+  if (fileExplorerMode === 'diff' && cached?.payload) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
     fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
+  } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesPayload, session)) {
+    fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(fileExplorerSessionFilesPayload);
   } else {
     const pendingPayload = emptySessionFilesPayload(session, false);
     setSessionFilesPayloadForDestination('finder', pendingPayload);
@@ -17587,9 +17771,9 @@ async function fetchSessionFiles(options = {}) {
     renderPaneTabStrips();
   }
   try {
-    // C6: scalar from/to is the global default; sessionFilesRefsQuery() adds per-repo overrides so each
-    // repo compares its own graph in one round-trip.
-    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${diffRefQueryString()}${sessionFilesRefsQuery()}`);
+    // C6: ΔDiff follows selected refs; Finder file mode must stay tied to the current worktree so it
+    // does not paint historical diff badges after the repo is clean.
+    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${sessionFilesRequestQueryString()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     const nextPayload = {
@@ -18338,7 +18522,7 @@ function setFileExplorerMode(mode, options = {}) {
   writeStoredFileExplorerMode(fileExplorerMode);
   applyFileExplorerMode();
   renderFileExplorerChangesPanels({force: true});
-  if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   return true;
 }
 
@@ -19206,6 +19390,11 @@ function createFileEditorPanel(item) {
         <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-cursor-status"></span></div>
       </div>`;
   bindPanelShell(panel, item);
+  panel.addEventListener('click', event => {
+    if (event.defaultPrevented) return;
+    if (event.target?.closest?.('button, a, input, textarea, select, [data-diff-ref-input]')) return;
+    scheduleFileExplorerActiveFileReveal(path);
+  });
   panel.querySelectorAll('button').forEach(button => {
     button.addEventListener('pointerdown', event => event.stopPropagation());
   });
@@ -20560,8 +20749,10 @@ function diffModeShouldFallBackToEdit(path, state, item = null) {
 function renderFileEditorPanel(panel, item) {
   const path = fileItemPath(item);
   captureFileEditorPanelViewState(item, panel);
+  const previousActiveFile = activeFile;
   activeFile = path;
-  updateFileExplorerCurrentFileHighlight();
+  if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
+  else updateFileExplorerCurrentFileHighlight();
   const state = openFiles.get(path);
   updateFileEditorPanelChrome(panel, path);
   const codeMirrorPane = panel.querySelector('.file-editor-codemirror-panel');
@@ -21152,7 +21343,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath) {
       container.addEventListener('click', handleMarkdownPreviewLinkClick);
     }
   }
-  if (typeof window.hljs !== 'undefined') {
+  if (fileEditorPreviewDisplayMode !== 'vanilla' && typeof window.hljs !== 'undefined') {
     container.querySelectorAll('pre code').forEach(block => {
       try { window.hljs.highlightElement(block); } catch (_) {}
     });
@@ -21348,19 +21539,22 @@ function renderEditorPreviewPane(container, path, text) {
   container.classList.toggle('markdown-body', isMarkdownPath(path));
   container.classList.toggle('html-preview-body', isHtmlPath(path));
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
+  container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
   if (isMarkdownPath(path)) {
     // DOIT.9 fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
     // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
     // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
     // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
-    if (container._previewPath !== path || container._previewText !== text) {
+    if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode) {
       container._previewPath = path;
       container._previewText = text;
+      container._previewDisplayMode = fileEditorPreviewDisplayMode;
       renderMarkdownPreviewInto(container, text, path);
     }
   } else {
     container._previewPath = null;
     container._previewText = null;
+    container._previewDisplayMode = null;
     if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
     else renderEditorCodePreviewInto(container, path, text);
   }
@@ -23863,6 +24057,7 @@ async function boot() {
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();
+  scheduleStartupHelperTip();
   installDevAutoReload();
 }
 

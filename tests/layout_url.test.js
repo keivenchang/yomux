@@ -247,6 +247,12 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))},
   });
   const elements = new Map();
+  const storage = new Map();
+  const localStorage = {
+    getItem(key) { return storage.has(String(key)) ? storage.get(String(key)) : null; },
+    setItem(key, value) { storage.set(String(key), String(value)); },
+    removeItem(key) { storage.delete(String(key)); },
+  };
   const element = id => {
     if (!elements.has(id)) elements.set(id, new TestElement(id));
     const node = elements.get(id);
@@ -286,8 +292,10 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       addEventListener() {},
       innerHeight: 800,
       innerWidth: 1200,
+      localStorage,
       removeEventListener() {},
     },
+    localStorage,
   };
   context.globalThis = context;
   vm.createContext(context);
@@ -300,6 +308,10 @@ globalThis.__layoutTestApi = {
   appShortcutText,
   aboutBrandHtml,
   showAboutModal,
+  startupHelperCatalog,
+  readStartupHelperIndex,
+  writeStartupHelperIndex,
+  showStartupHelperTip,
   t,
   tPlural,
   yoagentInlineMarkdown,
@@ -528,10 +540,13 @@ globalThis.__layoutTestApi = {
   configuredEditorSchemeForMode,
   editorSchemeCssVariables,
   editorThemeLabel,
+  editorPreviewThemeStateForTest: editorPreviewThemeState,
   applyEditorCursorStyle,
   setFileEditorThemeMode,
+  setFileEditorPreviewDisplayMode,
   cycleEditorThemeMode,
   fileEditorThemeModeForTest() { return fileEditorThemeMode; },
+  fileEditorPreviewDisplayModeForTest() { return fileEditorPreviewDisplayMode; },
   fileEditorCursorStyleForTest() { return fileEditorCursorStyle; },
   setFileEditorCursorStyleForTest(value) { fileEditorCursorStyle = value; },
   editorVisualHighlightHtml,
@@ -1194,6 +1209,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); }'), 'Markdown table headers get a readable preview background');
   assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }'), 'Markdown thematic breaks render as preview rules');
+  assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*#ffffff[\s\S]*color:\s*#111827/.test(editorCss), 'vanilla preview uses a neutral white email-friendly surface');
+  assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*#111827[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
+  assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*#0645ad/.test(editorCss), 'vanilla preview links use a conventional blue instead of scheme colors');
+  assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body pre code \*[\s\S]*color:\s*inherit !important/.test(editorCss), 'vanilla preview strips syntax token colors inside code blocks');
   assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-comment'));
   assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-variable'));
   assert.ok(api.simpleCodeSyntaxHtml('json', '{"name": "yolomux", "ok": true}').includes('code-attr'));
@@ -2612,6 +2631,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(changedFilesCss.includes('--file-hover-bg: #fff2a8'), 'light-mode Finder/Differ row hover uses a yellow highlighter fill');
   assert.ok(/\.file-tree-row:not\(\.selected\):hover\s*\{[\s\S]*background:\s*var\(--file-hover-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-hover-border\)/.test(changedFilesCss), 'Finder/Differ hover rows use the shared yellow highlighter tokens without overriding selected rows');
   assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync current file reuses the selected-row color tokens');
+  assert.ok(c9Src.includes('function scheduleFileExplorerActiveFileReveal('), 'Finder active-file reveal uses a shared helper');
+  assert.ok(/function showFileEditorPaneForPath\([\s\S]*?scheduleFileExplorerActiveFileReveal\(path\)/.test(c9Src), 'opening an editor file reveals it in the current Finder root');
+  assert.ok(/const previousActiveFile = activeFile;[\s\S]*?if \(previousActiveFile !== path\) scheduleFileExplorerActiveFileReveal\(path\)/.test(c9Src), 'switching editor tabs reveals the newly active file without re-expanding on every render');
   assert.ok(changedFilesCss.includes('flex-wrap: wrap;'), 'Finder toolbar wraps instead of clipping quick-access controls');
   assert.ok(/\.file-explorer-quick-access,\s*\.file-explorer-quick-access-panel\s*\{[\s\S]*flex:\s*0 0 auto/.test(changedFilesCss), 'Finder quick-access buttons do not shrink out of view');
   const fakeChangesScroll = {scrollTop: 45, scrollLeft: 3, innerHTML: ''};
@@ -3087,6 +3109,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(terminalInputBody.includes("container.addEventListener('paste', () => noteTerminalExplicitInput(session), {capture: true});"), 'terminal paste commits the Finder Modified-files target');
   assert.equal(/term\.onData\(data => \{[^]*?noteFileExplorerChangesSessionInteraction\(session\)/.test(terminalInputBody), false, 'xterm data transport does not commit Finder because hover focus can emit focus/mouse reports');
   assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true\}\)/.test(appSource), 'explicit session changes force a fresh Finder modified-files fetch even if an older request is in flight');
+  assert.ok(/fileExplorerMode === 'diff' && cached\?\.payload/.test(appSource), 'Finder file mode does not repaint stale cached Differ/session modified-file payloads before the fresh fetch returns');
+  assert.ok(/function sessionFilesPayloadIsFinderWorktree\([\s\S]*from_ref \|\| 'HEAD'[\s\S]*to_ref \|\| 'current'/.test(appSource), 'Finder file mode can preserve an already-loaded HEAD/current payload for sync planning');
+  assert.ok(/fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree\(fileExplorerSessionFilesPayload, session\)/.test(appSource), 'Finder file mode does not blank the current worktree payload when committing a session');
+  assert.ok(/function sessionFilesRequestQueryString\(\)[\s\S]*fileExplorerMode !== 'diff'[\s\S]*from=HEAD&to=current[\s\S]*diffRefQueryString\(\)\}\$\{sessionFilesRefsQuery\(\)\}/.test(appSource), 'Finder file mode requests only current worktree status while Differ follows selected refs');
+  assert.ok(/function setFileExplorerMode\([\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'switching back from Differ to Finder forces a fresh worktree-status fetch');
+  assert.ok(/refreshFileExplorerTrees\(\);\s*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(appSource), 'Finder Reload refreshes the modified-file overlay as well as the directory tree');
   assert.equal(appSource.includes("state.kind === 'text' && !fileEditorAutosaveEnabled"), false, 'clean external file changes auto-reload even when autosave is off');
   assert.equal(appSource.includes('data-file-editor-close'), false, 'pane frame close uses the pane-close path, not active file-tab close');
   assert.equal(filesTab.includes('agent-icon file'), false);
@@ -3754,10 +3782,19 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.notEqual(api.activeEditorSchemeForTest().syntax.heading, api.activeEditorSchemeForTest().syntax.link);
   assert.notEqual(api.activeEditorSchemeForTest().syntax.inlineCode, api.activeEditorSchemeForTest().syntax.heading);
   assert.equal(api.editorThemeLabel(), 'GitHub Light editor scheme');
+  api.setFileEditorThemeMode('dark');
+  assert.equal(api.editorPreviewThemeStateForTest(), 'dark');
   api.cycleEditorThemeMode();
-  assert.equal(api.fileEditorThemeModeForTest(), 'inherit', 'theme toggle clears an explicit editor override back to global inheritance');
+  assert.equal(api.editorPreviewThemeStateForTest(), 'light', 'theme toggle moves dark preview to light preview');
+  assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
   api.cycleEditorThemeMode();
-  assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'theme toggle uses the default YOLOmux Light scheme from inherited dark mode (DOIT.6 #34)');
+  assert.equal(api.editorPreviewThemeStateForTest(), 'vanilla', 'theme toggle moves light preview to vanilla preview');
+  assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla');
+  assert.equal(api.editorThemeLabel(), 'Vanilla preview');
+  api.cycleEditorThemeMode();
+  assert.equal(api.editorPreviewThemeStateForTest(), 'dark', 'theme toggle moves vanilla preview back to dark preview');
+  assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme');
+  assert.equal(api.fileEditorThemeModeForTest(), 'dark', 'vanilla leaves by restoring a dark editor scheme');
   api.setFileEditorThemeMode('light');
   assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'legacy light storage value maps to the YOLOmux Light default');
   assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'YOLOmux Light uses a bright white editor background');
@@ -3765,6 +3802,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#64748b', 'YOLOmux Light uses muted-gray comments');
   assert.equal(api.activeEditorSchemeForTest().syntax.string, '#00843d', 'YOLOmux Light strings are visibly green, not near-black green');
   assert.equal(api.activeEditorSchemeForTest().syntax.heading, '#0f3d22', '#34: YOLOmux Light markdown headings are dark green (matching dark mode), not maroon');
+  api.setFileEditorPreviewDisplayMode('vanilla');
+  assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla', 'vanilla preview mode is stored separately from the editor scheme');
+  api.setFileEditorThemeMode('github-light');
+  assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'theme', 'choosing a concrete editor theme exits vanilla preview mode');
   api.setFileEditorCursorStyleForTest('block');
   api.applyEditorCursorStyle();
   assert.ok(api.bodyClassListForTest().contains('editor-cursor-block'), 'block cursor style marks the body');
@@ -5309,6 +5350,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   ]));
   assert.equal(api.fileEntryChanged({mtime: 10, size: 1}, {mtime: 10, size: 1}), false);
   assert.equal(api.fileEntryChanged({mtime: 10, size: 1}, {mtime: 11, size: 1}), true);
+  assert.equal(api.fileEntryChanged({mtime: 1780806618930051800, size: 1}, {mtime_ns: 1780806618930051885, size: 1}), false);
+  assert.equal(api.fileEntryChanged({mtime: 1780806618930051800, size: 1}, {mtime_ns: 1780806618950051800, size: 1}), true);
   assert.equal(api.fileEntryChanged({mtime: 10, size: 1}, {mtime: 10, size: 2}), true);
 }
 
@@ -6613,6 +6656,38 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const generalHtml = api.preferencesPanelHtmlForTest('');
   assert.ok(generalHtml.includes('data-setting-path="general.language"'), '#51: the language field is present');
   assert.ok(generalHtml.indexOf('data-setting-path="general.language"') < generalHtml.indexOf('data-setting-path="general.auto_focus"'), '#51: the language field is the first General row (before auto-focus)');
+}
+
+{
+  // DOIT.48: startup helper tips are a persisted General preference, rotate serially through
+  // localStorage, use the shared toast path, and do not render for readonly users.
+  const api = loadYolomux('', ['1']);
+  api.setActiveLocaleForTest('en');
+  const tips = api.startupHelperCatalog();
+  assert.equal(tips.length, 14, 'startup helper catalog includes the initial tip set');
+  assert.ok(tips.some(tip => tip.title === 'Drag files into terminals'), 'startup helper catalog includes file drag/drop');
+  assert.ok(tips.some(tip => tip.title === 'Ask YO!agent for direction'), 'startup helper catalog includes YO!agent guidance');
+  assert.ok(tips.some(tip => tip.title === 'Review agent changes'), 'startup helper catalog includes ΔDiff');
+  assert.equal(api.readStartupHelperIndex(tips.length), 0, 'startup helper index defaults to first tip');
+  api.writeStartupHelperIndex(15);
+  assert.equal(api.readStartupHelperIndex(tips.length), 1, 'startup helper index wraps by catalog length');
+  const generalHtml = api.preferencesPanelHtmlForTest('');
+  assert.ok(generalHtml.includes('data-setting-path="general.startup_helpers"'), 'Startup helper tips setting renders in General');
+  assert.ok(generalHtml.indexOf('data-setting-path="general.auto_focus"') < generalHtml.indexOf('data-setting-path="general.startup_helpers"'), 'Startup helper setting follows Auto-focus');
+  const src = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+  assert.ok(src.includes("if (readOnlyMode || !startupHelpersEnabled) return null;"), 'startup helper does not render in readonly or disabled mode');
+  assert.ok(src.includes("writeStartupHelperIndex((index + 1) % tips.length)"), 'startup helper advances the localStorage index when shown');
+  assert.ok(src.includes("showStartupHelperTip({manual: true})"), 'Next tip action shows the next helper');
+  assert.ok(src.includes("saveSettingsPatch(settingPatch('general.startup_helpers', false))"), 'Turn off forever persists the General setting');
+  const helperStart = src.indexOf('function showStartupHelperTip');
+  const helperEnd = src.indexOf('function scheduleStartupHelperTip');
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, 'startup helper function block is present');
+  assert.equal(src.slice(helperStart, helperEnd).includes('.focus('), false, 'startup helper code does not steal focus');
+  const bootSrc = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+  assert.ok(/installRuntimeIntervals\(\);\s*scheduleStartupHelperTip\(\);/.test(bootSrc), 'startup helper is scheduled after initial boot intervals');
+  assert.ok(src.includes("if (location.protocol === 'file:') return;"), 'startup helper is skipped in file:// browser fixtures');
+  const settingsSrc = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
+  assert.ok(settingsSrc.includes('"startup_helpers": True'), 'startup helper setting defaults on server-side');
 }
 
 {

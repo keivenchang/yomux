@@ -86,6 +86,11 @@ function sessionFilesRefsQuery() {
   return Object.keys(map).length ? `&refs=${encodeURIComponent(JSON.stringify(map))}` : '';
 }
 
+function sessionFilesRequestQueryString() {
+  if (fileExplorerMode !== 'diff') return 'from=HEAD&to=current';
+  return `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
+}
+
 const diffRefSuggestionLimit = 60;
 const diffRefPopoverCompactLimit = 12;
 const diffRefPopoverFullLimit = 18;
@@ -533,14 +538,22 @@ function emptySessionFilesPayload(session = '', loaded = true) {
   return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: diffRefFrom, to_ref: diffRefTo, loaded};
 }
 
+function sessionFilesPayloadIsFinderWorktree(payload, session = '') {
+  if (!payload || payload.loaded !== true) return false;
+  if (session && String(payload.session || '') !== String(session)) return false;
+  return (payload.from_ref || 'HEAD') === 'HEAD' && (payload.to_ref || 'current') === 'current';
+}
+
 function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
   const cached = fileExplorerSessionFilesCache.get(session);
-  if (cached?.payload) {
+  if (fileExplorerMode === 'diff' && cached?.payload) {
     setSessionFilesPayloadForDestination('finder', cached.payload);
     fileExplorerSessionFilesPayloadSignature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
+  } else if (fileExplorerMode !== 'diff' && sessionFilesPayloadIsFinderWorktree(fileExplorerSessionFilesPayload, session)) {
+    fileExplorerSessionFilesPayloadSignature = sessionFilesPayloadSignatureForPayload(fileExplorerSessionFilesPayload);
   } else {
     const pendingPayload = emptySessionFilesPayload(session, false);
     setSessionFilesPayloadForDestination('finder', pendingPayload);
@@ -659,9 +672,9 @@ async function fetchSessionFiles(options = {}) {
     renderPaneTabStrips();
   }
   try {
-    // C6: scalar from/to is the global default; sessionFilesRefsQuery() adds per-repo overrides so each
-    // repo compares its own graph in one round-trip.
-    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${diffRefQueryString()}${sessionFilesRefsQuery()}`);
+    // C6: ΔDiff follows selected refs; Finder file mode must stay tied to the current worktree so it
+    // does not paint historical diff badges after the repo is clean.
+    const response = await apiFetch(`/api/session-files?session=${encodeURIComponent(session)}&hours=24&${sessionFilesRequestQueryString()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || response.status);
     const nextPayload = {
@@ -1410,7 +1423,7 @@ function setFileExplorerMode(mode, options = {}) {
   writeStoredFileExplorerMode(fileExplorerMode);
   applyFileExplorerMode();
   renderFileExplorerChangesPanels({force: true});
-  if (fileExplorerMode === 'diff') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   return true;
 }
 
@@ -2278,6 +2291,11 @@ function createFileEditorPanel(item) {
         <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-cursor-status"></span></div>
       </div>`;
   bindPanelShell(panel, item);
+  panel.addEventListener('click', event => {
+    if (event.defaultPrevented) return;
+    if (event.target?.closest?.('button, a, input, textarea, select, [data-diff-ref-input]')) return;
+    scheduleFileExplorerActiveFileReveal(path);
+  });
   panel.querySelectorAll('button').forEach(button => {
     button.addEventListener('pointerdown', event => event.stopPropagation());
   });
@@ -3632,8 +3650,10 @@ function diffModeShouldFallBackToEdit(path, state, item = null) {
 function renderFileEditorPanel(panel, item) {
   const path = fileItemPath(item);
   captureFileEditorPanelViewState(item, panel);
+  const previousActiveFile = activeFile;
   activeFile = path;
-  updateFileExplorerCurrentFileHighlight();
+  if (previousActiveFile !== path) scheduleFileExplorerActiveFileReveal(path);
+  else updateFileExplorerCurrentFileHighlight();
   const state = openFiles.get(path);
   updateFileEditorPanelChrome(panel, path);
   const codeMirrorPane = panel.querySelector('.file-editor-codemirror-panel');
@@ -4224,7 +4244,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath) {
       container.addEventListener('click', handleMarkdownPreviewLinkClick);
     }
   }
-  if (typeof window.hljs !== 'undefined') {
+  if (fileEditorPreviewDisplayMode !== 'vanilla' && typeof window.hljs !== 'undefined') {
     container.querySelectorAll('pre code').forEach(block => {
       try { window.hljs.highlightElement(block); } catch (_) {}
     });
@@ -4420,19 +4440,22 @@ function renderEditorPreviewPane(container, path, text) {
   container.classList.toggle('markdown-body', isMarkdownPath(path));
   container.classList.toggle('html-preview-body', isHtmlPath(path));
   container.classList.toggle('code-preview-body', !isMarkdownPath(path) && !isHtmlPath(path));
+  container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
   if (isMarkdownPath(path)) {
     // DOIT.9 fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
     // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
     // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
     // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
-    if (container._previewPath !== path || container._previewText !== text) {
+    if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode) {
       container._previewPath = path;
       container._previewText = text;
+      container._previewDisplayMode = fileEditorPreviewDisplayMode;
       renderMarkdownPreviewInto(container, text, path);
     }
   } else {
     container._previewPath = null;
     container._previewText = null;
+    container._previewDisplayMode = null;
     if (isHtmlPath(path)) renderHtmlPreviewInto(container, path, text);
     else renderEditorCodePreviewInto(container, path, text);
   }
