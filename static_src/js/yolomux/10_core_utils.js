@@ -86,10 +86,17 @@ function normalizedFileGitHistory(value) {
 function applyFileGitMetadata(state, payload) {
   if (!state || typeof state !== 'object' || !payload || typeof payload !== 'object') return state;
   const gitHistory = normalizedFileGitHistory(payload.git_history);
+  state.gitRoot = payload.git_root ? normalizeDirectoryPath(payload.git_root) : '';
   state.gitTracked = payload.git_tracked === true;
   state.gitHistory = gitHistory;
   state.gitHasHistory = payload.git_has_history === true && gitHistory.length > 1;
   return state;
+}
+
+function fileStateHasRepo(path, state) {
+  const root = state?.gitRoot ? normalizeDirectoryPath(state.gitRoot) : '';
+  const normalized = normalizeDirectoryPath(path || '');
+  return Boolean(root && normalized && pathIsInsideDirectory(normalized, root));
 }
 
 function fileStateHasUsefulGitHistory(state) {

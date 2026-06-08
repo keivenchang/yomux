@@ -395,20 +395,35 @@ def editor_diff_ref_toolbar_fixture_html():
       <body>
         <article class="panel file-editor-panel active-pane">
           <div class="file-editor-toolbar" role="toolbar">
-            <button id="gutter-button" type="button" class="file-editor-gutter-panel active" aria-pressed="true">#</button>
-            <button id="diff-button" type="button" class="file-editor-diff-panel active" aria-pressed="true">Differ</button>
-            <button id="diff-expand-button" type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
-            <span id="diff-ref-panel" class="file-editor-diff-ref-panel">
-              <span class="diff-ref-controls compact" data-diff-ref-controls data-diff-ref-repo="/repo/app">
-                <label class="diff-ref-control">FROM <input id="from-ref" class="diff-ref-input" data-diff-ref-from value="abcdef123"></label>
-                <label class="diff-ref-control">TO <input id="to-ref" class="diff-ref-input" data-diff-ref-to value="current"></label>
-                <button id="reset-ref" type="button" class="diff-ref-reset" data-diff-ref-reset title="Reset" aria-label="Reset">↺</button>
+            <div class="file-editor-toolbar-zone file-editor-toolbar-left">
+              <button id="gutter-button" type="button" class="file-editor-gutter-panel active" aria-pressed="true">#</button>
+              <button id="diff-button" type="button" class="file-editor-diff-panel active" aria-pressed="true">Differ</button>
+              <button id="diff-expand-button" type="button" class="file-editor-diff-expand-panel" aria-pressed="true">↕</button>
+              <span id="diff-ref-panel" class="file-editor-diff-ref-panel">
+                <span class="diff-ref-controls compact" data-diff-ref-controls data-diff-ref-repo="/repo/app">
+                  <label class="diff-ref-control">FROM <input id="from-ref" class="diff-ref-input" data-diff-ref-from value="abcdef123"></label>
+                  <label class="diff-ref-control">TO <input id="to-ref" class="diff-ref-input" data-diff-ref-to value="current"></label>
+                  <button id="reset-ref" type="button" class="diff-ref-reset" data-diff-ref-reset title="Reset" aria-label="Reset">↺</button>
+                </span>
               </span>
-            </span>
-            <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
-            <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
-            <button type="button" class="file-editor-theme-panel"><span class="file-editor-icon file-editor-icon-theme"></span></button>
-            <button type="button" class="file-editor-save-panel"><span class="file-editor-icon file-editor-icon-save"></span></button>
+            </div>
+            <div class="file-editor-toolbar-zone file-editor-toolbar-center">
+              <span id="font-panel" class="file-editor-preview-font-panel">
+                <button type="button">A-</button><span class="file-editor-preview-font-value">16</span><button type="button">A+</button>
+              </span>
+            </div>
+            <div class="file-editor-toolbar-zone file-editor-toolbar-right">
+              <div id="mode-control" class="file-editor-mode-control file-editor-mode-control-panel" role="group">
+                <button type="button" data-editor-mode="edit"><span class="file-editor-icon file-editor-icon-edit"></span></button>
+                <button type="button" data-editor-mode="preview"><span class="file-editor-icon file-editor-icon-eye"></span></button>
+                <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
+                <button type="button" class="file-editor-popout-preview-panel"><span class="file-editor-icon file-editor-icon-popout-preview"></span></button>
+              </div>
+              <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
+              <button type="button" class="file-editor-find-panel"><span class="file-editor-icon file-editor-icon-find"></span></button>
+              <button type="button" class="file-editor-theme-panel"><span class="file-editor-icon file-editor-icon-theme"></span></button>
+              <button type="button" class="file-editor-save-panel"><span class="file-editor-icon file-editor-icon-save"></span></button>
+            </div>
           </div>
         </article>
       </body>
@@ -1823,6 +1838,134 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
     assert not any(row["hasExpanded"] or row["hasRepo"] or row["hasTouched"] for row in cleared), cleared
 
 
+def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
+    path = "/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"
+    session_files_payload = {
+        "session": "2",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/home/test/dynamo/frontend-crates"}],
+        "files": [
+            {
+                "repo": "/home/test/dynamo/frontend-crates",
+                "path": "conformance/utils/tests/parity/reasoning/table.py",
+                "abs_path": path,
+            },
+        ],
+    }
+    fs_entries = {
+        "/home/test": [{"name": "dynamo", "kind": "dir"}],
+        "/home/test/dynamo": [{"name": "frontend-crates", "kind": "dir"}],
+        "/home/test/dynamo/frontend-crates": [{"name": "conformance", "kind": "dir"}],
+        "/home/test/dynamo/frontend-crates/conformance": [{"name": "utils", "kind": "dir"}],
+        "/home/test/dynamo/frontend-crates/conformance/utils": [{"name": "tests", "kind": "dir"}],
+        "/home/test/dynamo/frontend-crates/conformance/utils/tests": [{"name": "parity", "kind": "dir"}],
+        "/home/test/dynamo/frontend-crates/conformance/utils/tests/parity": [{"name": "reasoning", "kind": "dir"}],
+        "/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning": [{"name": "table.py", "kind": "file"}],
+    }
+    page = tmp_path / "live-runtime-sync-editor-file-root.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"file_explorer": {"root_mode": "sync"}},
+            sessions=["1", "2"],
+            transcript_sessions={
+                "1": {"current_path": "/home/test/yolomux.dev", "git_root": "/home/test/yolomux.dev"},
+                "2": {"current_path": "/home/test/dynamo/frontend-crates", "git_root": "/home/test/dynamo/frontend-crates"},
+            },
+            session_files_payload=session_files_payload,
+            fs_entries=fs_entries,
+        ),
+        encoding="utf-8",
+    )
+    browser.get(
+        page.as_uri()
+        + "?sessions=files,1,2"
+        + "&layout=row@35(slot1,left)"
+        + f"&tabs=slot1:files;left:file:{path}"
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test'
+              && document.querySelector('.file-editor-panel[data-file-path="/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"]');
+            """
+        )
+    )
+    browser.find_element("css selector", f'.file-editor-panel[data-file-path="{path}"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            return document.querySelector('.file-explorer-path-inline')?.value === '/home/test/dynamo/frontend-crates'
+              && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"]') !== null;
+            """
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        const path = '/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py';
+        return {
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+          root: document.querySelector('.file-explorer-path-inline')?.value || '',
+          mode: fileExplorerRootModeValue(),
+          plan: fileExplorerSyncPlanForFile(path),
+          fileVisible: tree.querySelector(`.file-tree-row[data-path="${path}"]`) !== null,
+          fileCurrent: tree.querySelector(`.file-tree-row[data-path="${path}"]`)?.classList.contains('current-file') || false,
+          expandedSet: Array.from(fileExplorerExpanded),
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert metrics["root"] == "/home/test/dynamo/frontend-crates", metrics
+    assert metrics["mode"] == "sync", metrics
+    assert metrics["plan"]["root"] == "/home/test/dynamo/frontend-crates", metrics
+    assert metrics["plan"]["session"] == "2", metrics
+    assert metrics["plan"]["expandPaths"] == [path], metrics
+    assert metrics["fileVisible"] is True, metrics
+    assert metrics["fileCurrent"] is True, metrics
+    assert "/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning" in metrics["expandedSet"], metrics
+    collapsed = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance"]').click();
+        requestAnimationFrame(() => requestAnimationFrame(() => done({
+          conformanceExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance"]')?.getAttribute('aria-expanded') || '',
+          manualCollapsed: Array.from(fileExplorerSyncManualCollapsedPaths),
+        })));
+        """
+    )
+    assert collapsed["conformanceExpanded"] == "false", collapsed
+    assert "/home/test/dynamo/frontend-crates/conformance" in collapsed["manualCollapsed"], collapsed
+    browser.find_element("css selector", f'.file-editor-panel[data-file-path="{path}"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            return tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance"]')?.getAttribute('aria-expanded') === 'true'
+              && tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py"]') !== null;
+            """
+        )
+    )
+    reveal_after_manual_collapse = browser.execute_script(
+        """
+        const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+        const filePath = '/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py';
+        return {
+          conformanceExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/dynamo/frontend-crates/conformance"]')?.getAttribute('aria-expanded') || '',
+          fileVisible: tree.querySelector(`.file-tree-row[data-path="${filePath}"]`) !== null,
+          manualCollapsed: Array.from(fileExplorerSyncManualCollapsedPaths),
+        };
+        """
+    )
+    assert reveal_after_manual_collapse["conformanceExpanded"] == "true", reveal_after_manual_collapse
+    assert reveal_after_manual_collapse["fileVisible"] is True, reveal_after_manual_collapse
+    assert "/home/test/dynamo/frontend-crates/conformance" not in reveal_after_manual_collapse["manualCollapsed"], reveal_after_manual_collapse
+
+
 def test_sync_mode_remembers_collapsed_parent_directory(browser, tmp_path):
     session_files_payload = {
         "session": "1",
@@ -3169,6 +3312,7 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
                 original: current,
                 dirty: false,
                 language: 'markdown',
+                gitRoot: {json.dumps(str(REPO_ROOT))},
                 gitTracked: true,
                 gitHasHistory: true,
                 gitHistory: [{{sha: 'HEAD'}}],
@@ -3353,6 +3497,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
                 original: content,
                 dirty: false,
                 language: 'markdown',
+                gitRoot: '/home/test/repo',
                 gitTracked: true,
                 gitHasHistory: true,
                 gitHistory: [
@@ -3494,6 +3639,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
                 dirty: false,
                 language: 'markdown',
                 externalChanged: true,
+                gitRoot: '/home/test/repo',
                 gitTracked: true,
                 gitHasHistory: true,
                 gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
@@ -3708,6 +3854,7 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
                 original: content,
                 dirty: false,
                 language: 'markdown',
+                gitRoot: '/home/test/repo',
                 gitTracked: true,
                 gitHasHistory: true,
                 gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
@@ -3821,6 +3968,7 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
                 original: content,
                 dirty: false,
                 language: 'python',
+                gitRoot: '/home/test/repo',
                 gitTracked: true,
                 gitHasHistory: true,
                 gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
@@ -5032,9 +5180,14 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
     metrics = browser.execute_script(
         """
         const toolbar = document.querySelector('.file-editor-toolbar').getBoundingClientRect();
+        const leftZone = document.querySelector('.file-editor-toolbar-left').getBoundingClientRect();
+        const centerZone = document.querySelector('.file-editor-toolbar-center').getBoundingClientRect();
+        const rightZone = document.querySelector('.file-editor-toolbar-right').getBoundingClientRect();
         const gutter = document.getElementById('gutter-button').getBoundingClientRect();
         const diff = document.getElementById('diff-button').getBoundingClientRect();
         const expand = document.getElementById('diff-expand-button').getBoundingClientRect();
+        const font = document.getElementById('font-panel').getBoundingClientRect();
+        const mode = document.getElementById('mode-control').getBoundingClientRect();
         const diffStyle = getComputedStyle(document.getElementById('diff-button'));
         const panel = document.getElementById('diff-ref-panel').getBoundingClientRect();
         const controls = document.querySelector('[data-diff-ref-controls]').getBoundingClientRect();
@@ -5046,6 +5199,12 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
         return {
           toolbarLeft: toolbar.left,
           toolbarRight: toolbar.right,
+          toolbarCenter: toolbar.left + toolbar.width / 2,
+          leftZoneLeft: leftZone.left,
+          leftZoneRight: leftZone.right,
+          centerZoneCenter: centerZone.left + centerZone.width / 2,
+          rightZoneLeft: rightZone.left,
+          rightZoneRight: rightZone.right,
           gutterLeft: gutter.left,
           gutterRight: gutter.right,
           diffLeft: diff.left,
@@ -5053,6 +5212,9 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
           diffText: document.getElementById('diff-button').textContent.trim(),
           expandLeft: expand.left,
           expandRight: expand.right,
+          fontCenter: font.left + font.width / 2,
+          modeLeft: mode.left,
+          modeRight: mode.right,
           diffBg: diffStyle.backgroundColor,
           diffBorder: diffStyle.borderTopColor,
           panelRight: panel.right,
@@ -5068,6 +5230,12 @@ def test_editor_diff_ref_reset_is_visible_and_hittable(browser, tmp_path):
         };
         """
     )
+    assert metrics["leftZoneLeft"] <= metrics["toolbarLeft"] + 8, metrics
+    assert abs(metrics["centerZoneCenter"] - metrics["toolbarCenter"]) <= 2, metrics
+    assert abs(metrics["fontCenter"] - metrics["toolbarCenter"]) <= 2, metrics
+    assert metrics["rightZoneRight"] >= metrics["toolbarRight"] - 8, metrics
+    assert metrics["modeLeft"] >= metrics["centerZoneCenter"] + 20, metrics
+    assert metrics["modeLeft"] >= metrics["leftZoneRight"], metrics
     assert metrics["gutterLeft"] <= metrics["toolbarLeft"] + 8, metrics
     assert 0 <= metrics["diffLeft"] - metrics["gutterRight"] <= 6, metrics
     assert metrics["diffText"] == "Differ", metrics

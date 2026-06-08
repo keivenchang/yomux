@@ -271,14 +271,14 @@ function updateEditorFindButton(button, state, host = null) {
 }
 
 function fileEditorGitActionControlsVisible(path, state, item = null) {
-  if (state?.kind !== 'text' || !fileStateHasUsefulGitHistory(state)) return false;
+  if (state?.kind !== 'text' || !fileStateHasRepo(path, state) || !fileStateHasUsefulGitHistory(state)) return false;
   const active = editorViewModeFor(path, item) === 'diff';
   const confirmedNoDiff = state?.diffLoaded === true && !openFileDiffAvailable(state);
   return active || !confirmedNoDiff;
 }
 
 function fileEditorBlameControlsVisible(path, state, item = null) {
-  return state?.kind === 'text' && fileStateHasUsefulGitHistory(state);
+  return state?.kind === 'text' && fileStateHasRepo(path, state) && fileStateHasUsefulGitHistory(state);
 }
 
 function updateFileEditorBlameButton(button, path, state, item = null) {
@@ -303,8 +303,9 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
   // confirmed there is nothing to diff, and never while in diff mode.
   // Hide the git action pair for files with no useful file history (outside git, untracked, or only
   // the creation commit): there is no meaningful older file version to diff/blame against.
-  button.hidden = !fileEditorGitActionControlsVisible(path, state, item);
-  button.disabled = !active && loading;
+  const visible = fileEditorGitActionControlsVisible(path, state, item);
+  button.hidden = !visible;
+  button.disabled = !visible || (!active && loading);
   const label = !active && loading ? t('editor.diffLoading') : (active ? t('editor.diffExit') : t('editor.diff'));
   syncPressedButton(button, active, {labelOn: label, labelOff: label});
   button.textContent = 'Differ';

@@ -621,8 +621,10 @@ function activatePaneTab(side, session, options = {}) {
     noteFileExplorerChangesSessionInteraction(session);
   }
   if (options.userInitiated === true && isFileEditorItem(session)) {
-    const owners = openFileOwnerSessionsForPath(fileItemPath(session));
-    if (owners.length === 1) noteFileExplorerChangesSessionInteraction(owners[0]);
+    const path = fileItemPath(session);
+    const owners = openFileOwnerSessionsForPath(path);
+    const owner = changedFileOwnerSessionForPath(path, {owners}) || (owners.length === 1 ? owners[0] : '');
+    if (owner) noteFileExplorerChangesSessionInteraction(owner);
   }
   recordTabActivation(session);
   const previous = activeItemForSide(side);

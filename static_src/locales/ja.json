@@ -644,7 +644,7 @@
   "toast.closeAlert": "通知を閉じる",
   "toast.keep": "保持",
   "toast.keepAlert": "通知を表示したままにする",
-  "startupHelper.action.hide": "Hide this",
+  "startupHelper.action.hide": "Hide",
   "startupHelper.action.next": "Next tip",
   "startupHelper.action.offForever": "Turn off Tips forever",
   "startupHelper.defaultAction": "try a YOLOmux feature",

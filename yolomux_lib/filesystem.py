@@ -752,7 +752,8 @@ def read_file(raw_path: str) -> dict[str, Any]:
         content = raw.decode("utf-8")
     except UnicodeDecodeError:
         content = raw.decode("utf-8", errors="replace")
-    git_tracked = git_tracks_path(path)
+    git_root = git_root_for_path(path)
+    git_tracked = git_tracks_path(path) if git_root else False
     git_history = git_file_history(path) if git_tracked else []
     return {
         "path": str(path),
@@ -762,6 +763,7 @@ def read_file(raw_path: str) -> dict[str, Any]:
         "content": content,
         "extension": path.suffix.lower(),
         "is_text_extension": path.suffix.lower() in TEXT_EXTENSIONS,
+        "git_root": git_root,
         "git_tracked": git_tracked,
         "git_history": git_history,
         "git_has_history": len(git_history) > 1,

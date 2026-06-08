@@ -550,6 +550,24 @@ function fileExplorerSyncPlan(preferredItem = null) {
   return {session, root: normalizedRoot, expandPaths, affectedDirs: Array.from(new Set(affectedDirs.map(path => normalizeDirectoryPath(path))))};
 }
 
+function fileExplorerSyncPlanForFile(path) {
+  const target = normalizeDirectoryPath(path || '');
+  if (!target) return {session: '', root: '', expandPaths: [], affectedDirs: []};
+  const repo = typeof fileRepoForPath === 'function' ? normalizeDirectoryPath(fileRepoForPath(target)) : '';
+  const currentRoot = normalizeDirectoryPath(currentFileExplorerRoot());
+  let root = repo && pathIsInsideDirectory(target, repo) ? repo : '';
+  if (!root && currentRoot && pathIsInsideDirectory(target, currentRoot) && target !== currentRoot) root = currentRoot;
+  if (!root) root = normalizeDirectoryPath(dirnameOf(target));
+  const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
+  const expandPaths = root && target !== root && pathIsInsideDirectory(target, root) ? [target] : [];
+  return {
+    session,
+    root,
+    expandPaths,
+    affectedDirs: [normalizeDirectoryPath(dirnameOf(target))].filter(Boolean),
+  };
+}
+
 function fileExplorerSyncPlanSignature(plan) {
   if (!plan?.root) return '';
   return [plan.session || '', plan.root, ...(plan.expandPaths || [])].join('\x1f');
@@ -960,9 +978,11 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   if (explicit) fileExplorerManualSelectionActive = false;
   if (options.explicit === true && isTmuxSession(preferredItem)) rememberFileExplorerExplicitSyncSession(preferredItem);
   const explicitSession = fileExplorerExplicitSyncSessionTarget();
-  const syncItem = isTmuxSession(preferredItem) ? preferredItem : explicitSession;
-  if (!syncItem || syncItem !== explicitSession) return;
-  const syncPlan = fileExplorerSyncPlan(syncItem);
+  const fileSyncPath = explicit && isFileEditorItem(preferredItem) ? fileItemPath(preferredItem) : '';
+  if (fileSyncPath) forgetFileExplorerSyncManualCollapse(fileSyncPath);
+  const syncItem = fileSyncPath ? preferredItem : (isTmuxSession(preferredItem) ? preferredItem : explicitSession);
+  if (!syncItem || (!fileSyncPath && syncItem !== explicitSession)) return;
+  const syncPlan = fileSyncPath ? fileExplorerSyncPlanForFile(fileSyncPath) : fileExplorerSyncPlan(syncItem);
   const expandPaths = fileExplorerSyncExpansionPaths(syncPlan);
   const syncSignature = fileExplorerSyncPlanSignature(syncPlan);
   if (
@@ -973,7 +993,10 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
     const interactionGeneration = fileExplorerInteractionGeneration;
     requestAnimationFrame(() => {
       if (interactionGeneration !== fileExplorerInteractionGeneration) return;
-      syncFileExplorerRootToActiveTmux(syncItem).catch(error => {
+      const syncPromise = fileSyncPath
+        ? syncFileExplorerRootToActiveFile(fileSyncPath)
+        : syncFileExplorerRootToActiveTmux(syncItem);
+      syncPromise.catch(error => {
         console.warn('Finder root sync failed', error);
       });
     });
@@ -987,7 +1010,16 @@ function cancelPendingFileExplorerActiveSync() {
 
 async function syncFileExplorerRootToActiveTmux(preferredItem = null) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
-  const plan = fileExplorerSyncPlan(preferredItem);
+  return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem);
+}
+
+async function syncFileExplorerRootToActiveFile(path) {
+  if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
+  forgetFileExplorerSyncManualCollapse(path);
+  return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path));
+}
+
+async function syncFileExplorerRootToPlan(plan, preferredItem = null) {
   const signature = fileExplorerSyncPlanSignature(plan);
   const expandPaths = fileExplorerSyncExpansionPaths(plan);
   if (!plan.root || fileExplorerSyncPathInFlight === signature) return false;
@@ -2238,7 +2270,8 @@ function fileExplorerIndexedSearchRoots(defaultRoot = fileQuickOpenRootForSearch
   const defaultPath = normalizeStoredFileExplorerIndexedDir(defaultRoot);
   const indexedRoots = fileExplorerIndexedRootList();
   const defaultCoveredByIndexed = defaultPath && indexedRoots.some(root => root !== defaultPath && pathIsInsideDirectory(defaultPath, root));
-  const roots = defaultPath && !defaultCoveredByIndexed ? [defaultPath] : [];
+  const defaultHasIndexedDescendant = defaultPath && indexedRoots.some(root => root !== defaultPath && pathIsInsideDirectory(root, defaultPath));
+  const roots = defaultPath && !defaultCoveredByIndexed && !defaultHasIndexedDescendant ? [defaultPath] : [];
   for (const indexedRoot of indexedRoots) {
     if (!roots.includes(indexedRoot)) roots.push(indexedRoot);
   }
@@ -3315,6 +3348,7 @@ function applyOpenFileDiffPayload(state, payload) {
   state.diffWorking = payload.working || '';
   state.diffWorkingError = payload.working_error || '';
   state.diffRepo = payload.repo || '';
+  if (!state.gitRoot && payload.repo) state.gitRoot = normalizeDirectoryPath(payload.repo);
   state.diffRelativePath = payload.relative_path || '';
   state.diffFromRef = payload.from_ref || '';
   state.diffToRef = payload.to_ref || '';
@@ -3397,6 +3431,7 @@ async function refreshOpenFileGitMetadata(path) {
   } catch (_error) {
     const current = openFiles.get(path);
     if (current && current.kind === 'text') {
+      current.gitRoot = '';
       current.gitTracked = false;
       current.gitHistory = [];
       current.gitHasHistory = false;

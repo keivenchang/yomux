@@ -403,10 +403,13 @@ def test_read_file_reports_git_tracked(tmp_path):
     untracked = tmp_path / "untracked.txt"
     untracked.write_text("new\n", encoding="utf-8")
     tracked_payload = filesystem.read_file(str(tracked))
+    untracked_payload = filesystem.read_file(str(untracked))
     assert tracked_payload["git_tracked"] is True
+    assert tracked_payload["git_root"] == str(tmp_path)
     assert tracked_payload["git_has_history"] is False
     assert len(tracked_payload["git_history"]) == 1
-    assert filesystem.read_file(str(untracked))["git_tracked"] is False
+    assert untracked_payload["git_root"] == str(tmp_path)
+    assert untracked_payload["git_tracked"] is False
 
 
 def test_read_file_reports_file_level_git_history(tmp_path):
@@ -430,7 +433,9 @@ def test_read_file_reports_file_level_git_history(tmp_path):
 def test_read_file_outside_repo_is_not_tracked(tmp_path):
     file_path = tmp_path / "loose.txt"
     file_path.write_text("loose\n", encoding="utf-8")
-    assert filesystem.read_file(str(file_path))["git_tracked"] is False
+    payload = filesystem.read_file(str(file_path))
+    assert payload["git_root"] == ""
+    assert payload["git_tracked"] is False
 
 
 def test_read_file_rejects_binary(tmp_path):

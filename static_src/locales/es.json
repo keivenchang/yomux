@@ -644,7 +644,7 @@
   "toast.closeAlert": "Cerrar alerta",
   "toast.keep": "Mantener",
   "toast.keepAlert": "Mantener alerta visible",
-  "startupHelper.action.hide": "Hide this",
+  "startupHelper.action.hide": "Hide",
   "startupHelper.action.next": "Next tip",
   "startupHelper.action.offForever": "Turn off Tips forever",
   "startupHelper.defaultAction": "try a YOLOmux feature",

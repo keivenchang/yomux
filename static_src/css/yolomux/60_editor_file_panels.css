@@ -1573,10 +1573,28 @@ body.editor-theme-light .file-editor-content {
 .file-editor-toolbar[hidden] {
   display: none;
 }
+.file-editor-toolbar-zone {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.file-editor-toolbar-left {
+  flex: 0 1 auto;
+}
+.file-editor-toolbar-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  justify-content: center;
+}
+.file-editor-toolbar-right {
+  flex: 0 1 auto;
+  margin-inline-start: auto;
+  justify-content: flex-end;
+}
 .file-editor-diff-ref-panel {
-  /* Diff and FROM/TO own the LEFT side of the editor info bar; everything after them stays right. */
-  order: -1;
-  margin-inline-end: auto;
   display: inline-flex;
   align-items: center;
   flex: 0 1 auto;
@@ -1603,9 +1621,6 @@ body.editor-theme-light .file-editor-content {
   display: none;
 }
 .file-editor-preview-font-panel {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
   height: 20px;
   flex: 0 0 auto;
   display: inline-flex;
@@ -1682,26 +1697,10 @@ body.editor-theme-light .file-editor-content {
   padding: 0;
   line-height: 1;
 }
-.file-editor-gutter-panel {
-  order: -4;
-}
 .file-editor-diff-panel {
-  order: -3;
   width: auto;
   min-width: 44px;
   padding: 0 5px;
-}
-.file-editor-diff-expand-panel {
-  order: -2;
-}
-.file-editor-toolbar:has(.file-editor-diff-ref-panel[hidden]) .file-editor-diff-expand-panel:not([hidden]) {
-  margin-inline-end: auto;
-}
-.file-editor-toolbar:has(.file-editor-diff-ref-panel[hidden]):has(.file-editor-diff-expand-panel[hidden]) .file-editor-diff-panel:not([hidden]) {
-  margin-inline-end: auto;
-}
-.file-editor-toolbar:has(.file-editor-diff-panel[hidden]) .file-editor-gutter-panel:not([hidden]) {
-  margin-inline-end: auto;
 }
 .file-editor-reload-panel {
   display: inline-flex;

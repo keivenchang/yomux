@@ -644,7 +644,7 @@
   "toast.closeAlert": "알림 닫기",
   "toast.keep": "유지",
   "toast.keepAlert": "알림 계속 표시",
-  "startupHelper.action.hide": "Hide this",
+  "startupHelper.action.hide": "Hide",
   "startupHelper.action.next": "Next tip",
   "startupHelper.action.offForever": "Turn off Tips forever",
   "startupHelper.defaultAction": "try a YOLOmux feature",

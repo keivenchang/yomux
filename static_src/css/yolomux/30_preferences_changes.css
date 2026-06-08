@@ -137,9 +137,9 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 22px;
+  min-width: 46px;
   height: 24px;
-  padding: 0;
+  padding: 0 7px;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--panel2);
@@ -153,7 +153,8 @@
 }
 .diff-ref-controls.compact .diff-ref-reset {
   height: 20px;
-  width: 20px;
+  min-width: 44px;
+  padding: 0 6px;
 }
 .diff-ref-suggestion-popover {
   position: fixed;

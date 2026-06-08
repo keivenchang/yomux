@@ -2112,9 +2112,6 @@ function showStartupHelperTip(options = {}) {
     showStartupHelperTip({manual: true});
   };
   const navAction = startupHelperNavigationGroup(index, tips.length, showRelativeTip);
-  const hideAction = startupHelperAction(t('startupHelper.action.hide'), () => {
-    closeStartupHelperToast(node);
-  });
   const offAction = startupHelperAction(t('startupHelper.action.offForever'), () => {
     startupHelpersEnabled = false;
     closeStartupHelperToast(node);
@@ -2125,7 +2122,7 @@ function showStartupHelperTip(options = {}) {
   node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
     className: 'attention-alert toast startup-helper-toast',
     container: displayToastContainer(focusedPanelItem),
-    actions: [navAction, hideAction, offAction],
+    actions: [navAction, offAction],
     countdownMs: 45000,
   });
   if (node) node.dataset.toastKind = 'startup-helper';
@@ -2171,7 +2168,7 @@ function showAttentionAlert(session, state) {
     sessionNotificationTitle(session, state),
     state.reason,
     {
-      container: attentionAlerts,
+      container: displayToastContainer(session),
       onClick: () => selectSession(session, {userInitiated: true}),
     },
   );

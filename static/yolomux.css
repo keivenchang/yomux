@@ -2159,9 +2159,9 @@ body.theme-light .branch-link {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 22px;
+  min-width: 46px;
   height: 24px;
-  padding: 0;
+  padding: 0 7px;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--panel2);
@@ -2175,7 +2175,8 @@ body.theme-light .branch-link {
 }
 .diff-ref-controls.compact .diff-ref-reset {
   height: 20px;
-  width: 20px;
+  min-width: 44px;
+  padding: 0 6px;
 }
 .diff-ref-suggestion-popover {
   position: fixed;
@@ -8995,10 +8996,28 @@ body.editor-theme-light .file-editor-content {
 .file-editor-toolbar[hidden] {
   display: none;
 }
+.file-editor-toolbar-zone {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.file-editor-toolbar-left {
+  flex: 0 1 auto;
+}
+.file-editor-toolbar-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  justify-content: center;
+}
+.file-editor-toolbar-right {
+  flex: 0 1 auto;
+  margin-inline-start: auto;
+  justify-content: flex-end;
+}
 .file-editor-diff-ref-panel {
-  /* Diff and FROM/TO own the LEFT side of the editor info bar; everything after them stays right. */
-  order: -1;
-  margin-inline-end: auto;
   display: inline-flex;
   align-items: center;
   flex: 0 1 auto;
@@ -9025,9 +9044,6 @@ body.editor-theme-light .file-editor-content {
   display: none;
 }
 .file-editor-preview-font-panel {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
   height: 20px;
   flex: 0 0 auto;
   display: inline-flex;
@@ -9104,26 +9120,10 @@ body.editor-theme-light .file-editor-content {
   padding: 0;
   line-height: 1;
 }
-.file-editor-gutter-panel {
-  order: -4;
-}
 .file-editor-diff-panel {
-  order: -3;
   width: auto;
   min-width: 44px;
   padding: 0 5px;
-}
-.file-editor-diff-expand-panel {
-  order: -2;
-}
-.file-editor-toolbar:has(.file-editor-diff-ref-panel[hidden]) .file-editor-diff-expand-panel:not([hidden]) {
-  margin-inline-end: auto;
-}
-.file-editor-toolbar:has(.file-editor-diff-ref-panel[hidden]):has(.file-editor-diff-expand-panel[hidden]) .file-editor-diff-panel:not([hidden]) {
-  margin-inline-end: auto;
-}
-.file-editor-toolbar:has(.file-editor-diff-panel[hidden]) .file-editor-gutter-panel:not([hidden]) {
-  margin-inline-end: auto;
 }
 .file-editor-reload-panel {
   display: inline-flex;

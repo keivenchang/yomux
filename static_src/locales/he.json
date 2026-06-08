@@ -644,7 +644,7 @@
   "toast.closeAlert": "סגור התראה",
   "toast.keep": "השאר",
   "toast.keepAlert": "השאר התראה גלויה",
-  "startupHelper.action.hide": "Hide this",
+  "startupHelper.action.hide": "Hide",
   "startupHelper.action.next": "Next tip",
   "startupHelper.action.offForever": "Turn off Tips forever",
   "startupHelper.defaultAction": "try a YOLOmux feature",
