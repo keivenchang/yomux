@@ -64,6 +64,7 @@ Use `-n auto` for full local pytest runs; pytest-xdist is already in `requiremen
 ```bash
 python3 -m py_compile yolomux.py tmux_wall.py auto_approve_tmux.py yolomux_lib/*.py
 python3 -m pytest tests -n auto -q
+python3 -m pytest tests -m "not socket" -q   # fast lane for restricted sandboxes
 python3 tools/static_build.py --check
 node --check static/yolomux.js
 node --check static/tmux-wall.js

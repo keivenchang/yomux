@@ -2775,7 +2775,6 @@ function filePanelItemsForPath(path) {
   const items = [];
   if (sharedImageViewerPath === path) items.push(imageViewerItemFor(path));
   items.push(...fileEditorTabItemsForPath(path));
-  items.push(...filePreviewTabItemsForPath(path));
   return items;
 }
 
@@ -2785,7 +2784,6 @@ function openFilePathHasOwner(path) {
 
 function removeFilePanelOwner(path, item) {
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
-  else if (isFilePreviewItem(item)) removeFilePreviewTabItem(path, item);
   else removeFileEditorTabItem(path, item);
   fileEditorViewModesForPath(path).delete(item);
   // DOIT.6 #73: also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
@@ -2838,8 +2836,6 @@ function setOpenFileOwner(path, item, options = {}) {
   rememberOpenFileOwner(path, options.ownerSession);
   if (isImageViewerItem(item)) {
     replacementSlots = replaceSharedImageViewerPath(path);
-  } else if (isFilePreviewItem(item)) {
-    addFilePreviewTabItem(path, item);
   } else {
     addFileEditorTabItem(path, item);
   }
@@ -3424,7 +3420,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   };
   const alreadyOpen = Boolean(openFiles.get(fullPath)?.kind);
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
-  else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
+  else setFileEditorViewMode(fullPath, 'edit', item);
   recordEditorNav(item);   // DOIT.21: push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
     await refreshOpenFileGitMetadata(fullPath);
@@ -3469,42 +3465,6 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     showFileOpenError(fullPath, err);
     return null;
   }
-}
-
-async function openFileCrossPaneSplit(path) {
-  if (!path || !editorPreviewModeAvailable(path)) return;
-  const editorItem = fileEditorItemFor(path);
-  const previewItem = filePreviewItemFor(path);
-  setFileEditorViewMode(path, 'edit', editorItem);
-  setFileEditorViewMode(path, 'preview', previewItem);
-  if (!openFiles.get(path)?.kind || !fileHasEditorTab(path)) {
-    await openFileInEditor(path, {name: basenameOf(path)}, {item: editorItem});
-  } else {
-    setOpenFileOwner(path, editorItem);
-    await openFileEditorPane(path, {item: editorItem});
-  }
-  const editorSlot = slotForSession(editorItem) || largestPaneSlotForFileEditor() || slotForNewSession();
-  const previewSlot = largestPaneSlotForFileEditor(new Set([editorSlot]));
-  setOpenFileOwner(path, previewItem);
-  if (slotForSession(previewItem)) {
-    activatePaneTab(slotForSession(previewItem), previewItem);
-  } else if (previewSlot) {
-    await openFileEditorPane(path, {
-      item: previewItem,
-      targetSlot: previewSlot,
-    });
-  } else {
-    await openFileEditorPane(path, {
-      item: previewItem,
-      targetSlot: editorSlot,
-      targetZone: 'right',
-      pct: defaultSplitPercent,
-    });
-  }
-  const finalEditorSlot = slotForSession(editorItem);
-  if (finalEditorSlot) activatePaneTab(finalEditorSlot, editorItem);
-  renderSessionButtons();
-  renderPaneTabStrips();
 }
 
 async function openFileStateFromDisk(path, entry = null) {
@@ -4654,17 +4614,14 @@ function renameOpenFilePath(oldPath, newPath) {
   if (!oldPath || !newPath || oldPath === newPath || !openFiles.has(oldPath)) return;
   const oldItem = fileEditorItemFor(oldPath);
   const newItem = fileEditorItemFor(newPath);
-  const oldPreviewItem = filePreviewItemFor(oldPath);
-  const newPreviewItem = filePreviewItemFor(newPath);
   const state = fileStateFor(oldPath);
-  const wasInLayout = itemInLayout(oldItem) || itemInLayout(oldPreviewItem);
-  const panelItems = [oldItem, oldPreviewItem].filter(item => panelNodes.has(item));
+  const wasInLayout = itemInLayout(oldItem);
+  const panelItems = [oldItem].filter(item => panelNodes.has(item));
   deleteFileState(oldPath);
   setFileState(newPath, state);
   if (state.editorTabItems.delete(oldItem)) state.editorTabItems.add(newItem);
-  if (state.previewTabItems.delete(oldPreviewItem)) state.previewTabItems.add(newPreviewItem);
   const viewModes = state.viewMode;
-  for (const [oldKey, newKey] of [[oldItem, newItem], [oldPreviewItem, newPreviewItem]]) {
+  for (const [oldKey, newKey] of [[oldItem, newItem]]) {
     if (viewModes.has(oldKey)) {
       viewModes.set(newKey, viewModes.get(oldKey));
       viewModes.delete(oldKey);
@@ -4691,7 +4648,7 @@ function renameOpenFilePath(oldPath, newPath) {
   }
   if (activeFile === oldPath) activeFile = newPath;
   syncFileLayoutItems();
-  if (wasInLayout) applyLayoutSlots(layoutWithReplacedItems(new Map([[oldItem, newItem], [oldPreviewItem, newPreviewItem]])), {focusSession: newItem});
+  if (wasInLayout) applyLayoutSlots(layoutWithReplacedItems(new Map([[oldItem, newItem]])), {focusSession: newItem});
   else {
     renderSessionButtons();
     renderPaneTabStrips();

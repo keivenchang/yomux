@@ -1177,7 +1177,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(api.fileEditorPaneTabHtml(item).includes('>1</span>'), 'single owning session is shown in file tab');
   api.setOpenFileOwner('/home/keivenc/review.json', item, {ownerSession: '2'});
   assert.ok(api.fileEditorPaneTabHtml(item).includes('>multi</span>'), 'multi-session file tabs distinguish duplicate names');
-  assert.ok(api.fileEditorPaneTabHtml('file-preview:/home/keivenc/review.json').includes('file-tab-kind'), 'preview tabs are visually distinguishable from same-path editor tabs');
+  assert.equal(api.TAB_TYPES.some(type => type.key === 'file-preview'), false, 'side-preview file tabs are removed; preview uses the pop-out window');
   const duplicateParents = api.fileTabParentDisambiguators([
     api.fileEditorItemFor('/repo/app/src/config.json'),
     api.fileEditorItemFor('/repo/lib/src/config.json'),
@@ -1523,7 +1523,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(diffExpandButton.hidden, false, 'Expand unchanged is shown only for an active loaded diff');
   assert.equal(diffExpandButton.disabled, false, 'Expand unchanged is clickable for an active loaded diff');
   assert.equal(diffExpandButton.attributes['aria-pressed'], 'false', 'Expand unchanged reflects the persisted toggle state');
-  assert.ok(/updateFileEditorDiffExpandButton\(diffExpandButton, path, state, item\);\s*if \(purePreviewMode\) setElementsHidden\(\[blameButton, diffButton, diffExpandButton\], true\);/.test(source), 'rendering does not unhide Expand unchanged after its dedicated visibility updater hides it outside Diff mode');
+  assert.ok(/updateFileEditorDiffExpandButton\(diffExpandButton, path, state, item\);\s*if \(popoutPreviewButton\)/.test(source), 'rendering leaves Expand unchanged visibility owned by its dedicated updater');
   const noHistoryPath = '/repo/app/DOIT.37.md';
   api.setOpenFileStateForTest(noHistoryPath, {kind: 'text', gitTracked: true, gitHasHistory: false, gitHistory: []});
   assert.deepStrictEqual([...api.fileDiffRefHistoryItems(noHistoryPath)], [], 'file editor ref history is empty when the file has no file-level history');
@@ -2090,15 +2090,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('focusCommandPaletteTarget(item);'), 'command palette applies deterministic focus after async tab/session actions');
   assert.ok(source.includes('targetItem: item,'), 'command palette tab entries carry their layout focus target');
   assert.ok(source.includes("const defaultLightEditorScheme = 'yolomux-light';"), 'light editor defaults to the brand YOLOmux Light scheme');
-  assert.ok(source.includes("else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);"), 'plain file opens reset stale diff mode back to edit');
+  assert.ok(source.includes("else setFileEditorViewMode(fullPath, 'edit', item);"), 'plain file opens reset stale diff mode back to edit');
   assert.ok(source.includes('applyMarkdownSourceLines(container, text);'), 'Markdown preview source anchors are attached after parsing');
   assert.ok(source.includes('function codeMirrorMarkdownFallbackSyntaxExtension'), 'Markdown edit mode has a parser-independent CodeMirror coloring fallback');
   assert.ok(/function codeMirrorThemeExtensions[\s\S]*codeMirrorMarkdownFallbackSyntaxExtension\(api, path\)/.test(source), 'Markdown fallback coloring is wired into live CodeMirror edit views');
   assert.ok(css.includes('.cm-content .md-heading'), 'Markdown fallback color classes apply inside CodeMirror edit content');
-  assert.ok(/gutterButton\.hidden = isFilePreviewItem\(item\) \|\| state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview-only editor mode hides the line-number button because no CodeMirror gutter is shown');
-  assert.ok(/wrapButton\.hidden = isFilePreviewItem\(item\) \|\| state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview-only editor mode hides the wrap button because no CodeMirror editor is shown');
-  assert.ok(/findButton && \(isFilePreviewItem\(item\) \|\| mode === 'preview'\)/.test(source), 'preview-only editor mode hides Search because the CodeMirror search panel is not available there');
-  assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\) \|\| isFilePreviewItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session\)/.test(source), 'switching a pane to a pure preview tab re-renders editor chrome as preview-only');
+  assert.ok(/gutterButton\.hidden = state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview mode hides the line-number button because no CodeMirror gutter is shown');
+  assert.ok(/wrapButton\.hidden = state\.kind !== 'text' \|\| mode === 'preview'/.test(source), 'preview mode hides the wrap button because no CodeMirror editor is shown');
+  assert.ok(/findButton && mode === 'preview'/.test(source), 'preview mode hides Search because the CodeMirror search panel is not available there');
+  assert.equal(source.includes('file-editor-pure-preview'), false, 'old side-preview-only editor mode class is removed');
+  assert.equal(source.includes('isFilePreviewItem'), false, 'old file-preview tab type is removed from runtime');
+  assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session\)/.test(source), 'switching a pane to a file editor tab re-renders editor chrome');
 }
 
 {
@@ -2201,7 +2203,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 {
   const api = loadYolomux('', ['1', '2']);
   api.setFileExplorerTreeDateModeForTest('date');
-  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,image-viewer,file-editor,file-preview');
+  assert.equal(api.TAB_TYPES.map(type => type.key).join(','), 'info,files,preferences,image-viewer,file-editor');
   // #40: YO!info and YO!agent are merged into the single info item; the legacy yoagent/yosup aliases
   // resolve to it so saved layouts and bookmarked ?…=yoagent URLs open the merged pane.
   assert.equal(api.resolveLayoutItem('yoagent'), api.infoItemId, 'yoagent alias resolves to the merged YO!info item');
@@ -3221,19 +3223,19 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.layoutParamValue(api.currentSlots()), finderLayoutBeforeToggle, 'app shortcut restores the prior Finder position and split size');
   assert.equal(api.focusedPanelItemForTest(), '1', 'restoring Finder keeps focus on the active terminal');
 
-  const sidePreviewEditorItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
-  const sidePreviewSlots = api.emptyLayoutSlots();
-  sidePreviewSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 20);
-  sidePreviewSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
-  sidePreviewSlots.slot1 = api.paneStateWithTabs([sidePreviewEditorItem], sidePreviewEditorItem);
-  sidePreviewSlots.slot2 = api.paneStateWithTabs(['1'], '1');
-  api.setLayoutSlotsForTest(sidePreviewSlots);
+  const fileEditorItem = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
+  const fileEditorSlots = api.emptyLayoutSlots();
+  fileEditorSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50), 20);
+  fileEditorSlots.left = api.paneStateWithTabs(['__files__'], '__files__');
+  fileEditorSlots.slot1 = api.paneStateWithTabs([fileEditorItem], fileEditorItem);
+  fileEditorSlots.slot2 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(fileEditorSlots);
   api.setLayoutColumnRectsForTest({
     left: {left: 0, right: 220, top: 0, bottom: 800, width: 220, height: 800},
     slot1: {left: 230, right: 580, top: 0, bottom: 800, width: 350, height: 800},
     slot2: {left: 590, right: 1190, top: 0, bottom: 800, width: 600, height: 800},
   });
-  assert.equal(api.largestPaneSlotForFileEditor(['slot1']), 'slot2', 'side preview chooses the next biggest existing non-Finder pane');
+  assert.equal(api.largestPaneSlotForFileEditor(['slot1']), 'slot2', 'file editor helpers choose the next biggest existing non-Finder pane');
 
   const delayHtml = api.preferencesPanelHtmlForTest('delay', ['Performance']);
   assert.ok(delayHtml.includes('data-preference-section="Performance"'), 'delay search shows Performance');
@@ -3456,7 +3458,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
   assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
   assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*#1d4ed8/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
-  assert.ok(/\.file-editor-cross-split-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'side preview button shares the compact editor toolbar button sizing rule');
+  assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'pop-out preview button shares the compact editor toolbar button sizing rule');
   assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
   assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
   assert.ok(preferencesCss.includes('--code-diff-add: #56d364'), 'dark diff add base is a brighter vivid green');
@@ -3465,8 +3467,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(preferencesCss.includes('--code-diff-remove: #e06c75'), false, 'muted one-dark diff red must not return as the YOLOmux dark default');
   assert.ok(preferencesCss.includes('var(--code-diff-remove) 32%'), '#250: dark diff removed-line fill is a muted soft tint (not the old saturated 76% block)');
   assert.ok(preferencesCss.includes('var(--code-diff-add) 30%'), '#250: dark diff added-line fill is a muted soft tint (not the old saturated 74% block)');
-  assert.ok(preferencesCss.includes('.file-editor-icon-side-split'), 'cross-pane side preview has a distinct icon');
-  assert.ok(/\.panel\.preview-linked:not\(\.active-pane\)[\s\S]*--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(preferencesCss), 'paired side-preview pane uses the same active-color ring token as the focused pane');
+  assert.ok(preferencesCss.includes('.file-editor-icon-popout-preview'), 'preview pop-out has a distinct icon');
+  assert.equal(preferencesCss.includes('preview-linked'), false, 'old paired side-preview ring styling is removed');
   assert.ok(/\.yoagent-global\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent global summary fits narrow panes');
   assert.ok(/\.yoagent-list\s*\{[\s\S]*display:\s*flex[\s\S]*flex-direction:\s*column/.test(preferencesCss), 'YO!agent content column can push the chat section to the bottom');
   assert.ok(/\.yoagent-chat\s*\{[\s\S]*min-width:\s*0/.test(preferencesCss), 'YO!agent chat fits narrow panes');
@@ -3773,10 +3775,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.setFileEditorThemeMode('github-light');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--editor-scheme-bg'), '#ffffff');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--code-keyword'), '#cf222e');
-  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-markdown-heading'), 'var(--active-accent-bright)');
-  assert.equal(api.documentElementStyleForTest().getPropertyValue('--markdown-heading'), 'var(--active-accent-bright)');
-  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-markdown-heading-bg'), 'var(--active-control-soft-bg)');
-  assert.equal(api.documentElementStyleForTest().getPropertyValue('--markdown-heading-bg'), 'var(--active-control-soft-bg)');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-markdown-heading'), 'var(--active-accent)');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--markdown-heading'), 'var(--active-accent)');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-markdown-heading-bg'), 'transparent');
+  assert.equal(api.documentElementStyleForTest().getPropertyValue('--markdown-heading-bg'), 'transparent');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-code-inline'), '#a40e26');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--lt-code-inline-bg'), '#fff1d6');
   assert.notEqual(api.activeEditorSchemeForTest().syntax.heading, api.activeEditorSchemeForTest().syntax.link);
@@ -4143,16 +4145,15 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // A non-dirty editor reloads disk changes silently (the prompt is only for the genuine unsaved-edits conflict).
   assert.ok(/function promptExternalChangeBeforeEditing[\s\S]*?if \(!state\.dirty\) \{[\s\S]*?reloadOpenFileFromDisk\(path, \{force: true\}\)/.test(source), 'a non-dirty editor reloads external disk changes silently (no dialog)');
   const splitButtonIndex = source.indexOf('data-editor-mode="split"');
-  const sidePreviewButtonIndex = source.indexOf('file-editor-cross-split-panel');
+  const popoutPreviewButtonIndex = source.indexOf('file-editor-popout-preview-panel');
   const modeSeparatorIndex = source.indexOf('data-editor-toolbar-separator="mode"');
-  assert.ok(splitButtonIndex > 0 && sidePreviewButtonIndex > splitButtonIndex && sidePreviewButtonIndex < modeSeparatorIndex, 'Open side preview sits directly in the editor mode button group after Split view');
+  assert.ok(splitButtonIndex > 0 && popoutPreviewButtonIndex > splitButtonIndex && popoutPreviewButtonIndex < modeSeparatorIndex, 'Preview pop-out sits directly in the editor mode button group after Split view');
   assert.ok(source.includes('editor.autosave_delay_seconds'), 'editor autosave delay is a persisted preference');
   assert.ok(source.includes('(commandPaletteIndex + 1) % commandPaletteItemsCache.length'), 'command palette arrow navigation wraps down');
   assert.ok(source.includes('item.splitRun'), 'command palette supports split-open actions');
-  assert.ok(source.includes('function updateLinkedFilePreviewRings()'), 'side-preview ring state is centralized');
-  assert.ok(source.includes("previewPanel.classList.add('preview-linked')"), 'focused editors mark their paired side-preview pane');
-  assert.ok(source.includes("editorPanel.classList.add('preview-linked')"), 'focused pure-preview panes mark their paired editor pane');
-  assert.equal(/if \(!focusedPanelItem \|\| isFilePreviewItem\(focusedPanelItem\)\) return/.test(source), false, 'focused pure-preview panes keep their editor counterpart linked');
+  assert.equal(source.includes('function updateLinkedFilePreviewRings()'), false, 'old side-preview ring updater is removed');
+  assert.equal(source.includes("previewPanel.classList.add('preview-linked')"), false, 'focused editors no longer mark paired side-preview panes');
+  assert.equal(source.includes("editorPanel.classList.add('preview-linked')"), false, 'old pure-preview pane ring marker is removed');
   const focusStart = source.indexOf('function setFocusedPanelItem(');
   const focusEnd = source.indexOf('function clearPendingFileEditorFocusExcept(', focusStart);
   assert.ok(source.slice(focusStart, focusEnd).includes('const explicitFinderSync = isTmuxSession(item) || isFileEditorItem(item);'), 'explicit Finder sync is driven by clicked tmux panes and clicked editors');
@@ -5596,7 +5597,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   ]) {
     assert.equal(source.includes(obsolete), false, `F1: removed obsolete path-keyed container ${obsolete}`);
   }
-  assert.ok(/function setFileState[\s\S]*editorTabItems[\s\S]*previewTabItems[\s\S]*ownerSessions[\s\S]*viewMode[\s\S]*imageMode[\s\S]*blame[\s\S]*conflictDialogOpen/.test(source), 'F1: replacing file content preserves per-path side state on the fileState record');
+  assert.ok(/function setFileState[\s\S]*editorTabItems[\s\S]*ownerSessions[\s\S]*viewMode[\s\S]*imageMode[\s\S]*blame[\s\S]*conflictDialogOpen/.test(source), 'F1: replacing file content preserves per-path side state on the fileState record');
   assert.ok(/function removeOpenFile[\s\S]*deleteFileState\(path\)/.test(source), 'F1: closing the last owner deletes one fileState record');
   assert.ok(/function renameOpenFilePath[\s\S]*deleteFileState\(oldPath\)[\s\S]*setFileState\(newPath, state\)/.test(source), 'F1: rename moves one fileState record');
 }
@@ -6355,7 +6356,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("saveSettingsPatch(settingPatch('appearance.preview_font_size', next))"), 'preview font toolbar persists the setting');
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(/\.file-editor-preview-pane\s*\{[^}]*font-size:\s*var\(--editor-preview-font-size\)/.test(css), 'rendered preview pane uses the preview font variable');
-  assert.ok(/\.file-editor-preview-pane-panel\s*\{[^}]*font-size:\s*var\(--editor-preview-font-size\)/.test(css), 'split/side preview pane uses the preview font variable');
+  assert.ok(/\.file-editor-preview-pane-panel\s*\{[^}]*font-size:\s*var\(--editor-preview-font-size\)/.test(css), 'split/preview pane uses the preview font variable');
   assert.ok(/\.file-editor-raw-panel\s*\{[^}]*font-size:\s*var\(--editor-font-size\)/.test(css), 'raw editor pane keeps the editor font variable');
   const settingsSource = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
   assert.ok(settingsSource.includes('"preview_font_size": 14'), 'preview font size default is 14');
@@ -6679,15 +6680,45 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(src.includes("writeStartupHelperIndex((index + 1) % tips.length)"), 'startup helper advances the localStorage index when shown');
   assert.ok(src.includes("showStartupHelperTip({manual: true})"), 'Next tip action shows the next helper');
   assert.ok(src.includes("saveSettingsPatch(settingPatch('general.startup_helpers', false))"), 'Turn off forever persists the General setting');
+  assert.ok(src.includes('startupHelperPromptTitle(index, tips.length, tip)'), 'startup helper title includes tip number, total, and action prompt');
+  assert.ok(src.includes('container: displayToastContainer(focusedPanelItem)'), 'startup helper renders in the focused pane toast stack, below pane tabs');
+  assert.ok(src.includes("startupHelperAction('<', () => showRelativeTip(-1)"), 'startup helper has a previous-tip arrow control');
+  assert.ok(src.includes("startupHelperAction('>', () => showRelativeTip(1)"), 'startup helper has a next-tip arrow control');
+  assert.ok(src.includes('countdownMs: 30000'), 'startup helper stays visible for 30 seconds');
   const helperStart = src.indexOf('function showStartupHelperTip');
   const helperEnd = src.indexOf('function scheduleStartupHelperTip');
   assert.ok(helperStart >= 0 && helperEnd > helperStart, 'startup helper function block is present');
   assert.equal(src.slice(helperStart, helperEnd).includes('.focus('), false, 'startup helper code does not steal focus');
+  const helperCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
+  assert.ok(/\.panel-toast-stack \.startup-helper-toast\s*\{[\s\S]*?align-self:\s*flex-end/.test(helperCss), 'startup helper toast is pane-local and right-aligned below the pane tab strip');
+  assert.ok(/\.startup-helper-nav\s*\{[\s\S]*?display:\s*inline-flex/.test(helperCss), 'startup helper navigation is a compact arrow group');
   const bootSrc = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
   assert.ok(/installRuntimeIntervals\(\);\s*scheduleStartupHelperTip\(\);/.test(bootSrc), 'startup helper is scheduled after initial boot intervals');
   assert.ok(src.includes("if (location.protocol === 'file:') return;"), 'startup helper is skipped in file:// browser fixtures');
   const settingsSrc = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
   assert.ok(settingsSrc.includes('"startup_helpers": True'), 'startup helper setting defaults on server-side');
+}
+
+{
+  // User screenshot 20260608-004: pane tabs should sit tight to the pane border and to each other.
+  const css = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+  assert.ok(/\.panel-head\s*\{[\s\S]*?padding:\s*2px 1px 0;/.test(css), 'pane tab strip has a 1px left/right edge gap');
+  assert.ok(/\.pane-tab\s*\{[\s\S]*?margin:\s*0 1px 0 0;/.test(css), 'pane tabs have a 1px horizontal gap');
+}
+
+{
+  // Pop-out previews must derive readable light-editor text inside their own document; copied inline
+  // aliases like --text/--editor-scheme-fg override the pop-out's editor-theme-light remap.
+  const source = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
+  const start = source.indexOf('function previewPopoutVariableStyle()');
+  const end = source.indexOf('function previewPopoutToolbarHtml()');
+  assert.ok(start >= 0 && end > start, 'previewPopoutVariableStyle exists');
+  const variableBlock = source.slice(start, end);
+  assert.equal(variableBlock.includes("'--text'"), false, 'preview pop-out does not copy --text inline');
+  assert.ok(variableBlock.includes("['--editor-scheme-fg', '--popout-editor-scheme-fg']"), 'preview pop-out aliases active editor text instead of copying it onto --text');
+  assert.ok(source.includes('.file-preview-popout-window.editor-theme-light .markdown-body pre'), 'preview pop-out has light-theme code block rules outside .file-editor-content');
+  assert.ok(source.includes('.file-preview-popout-window .markdown-body'), 'preview pop-out sets readable body text in its standalone document');
+  assert.ok(source.includes('position: static !important;'), 'preview pop-out resets the in-pane absolute preview positioning');
 }
 
 {

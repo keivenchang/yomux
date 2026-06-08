@@ -7,11 +7,15 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 from urllib.parse import urlparse
 
+import pytest
+
 from yolomux_lib import common
 from yolomux_lib import server_auth
 from yolomux_lib import web
 from yolomux_lib.server import Handler
 from yolomux_lib.server import TmuxWebtermHTTPServer
+
+pytestmark = pytest.mark.socket
 
 
 def active_auth_yaml() -> str:

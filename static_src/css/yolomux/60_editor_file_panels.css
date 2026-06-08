@@ -213,27 +213,24 @@
   background: currentColor;
   transform: translate(-50%, -50%);
 }
-.file-editor-icon-side-split::before {
+.file-editor-icon-popout-preview::before {
   content: "";
   position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 13px;
-  height: 10px;
+  top: 52%;
+  left: 48%;
+  width: 10px;
+  height: 8px;
   border: 1.5px solid currentColor;
   border-radius: 2px;
   transform: translate(-50%, -50%);
 }
-.file-editor-icon-side-split::after {
-  content: "";
+.file-editor-icon-popout-preview::after {
+  content: "↗";
   position: absolute;
-  top: 50%;
-  left: calc(50% + 3px);
-  width: 4px;
-  height: 6px;
-  border: 1.5px solid currentColor;
-  border-inline-start: 0;
-  transform: translate(-50%, -50%);
+  top: 0;
+  right: 0;
+  font: 800 10px/1 var(--mono-font);
+  color: currentColor;
 }
 .file-editor-icon-theme::before {
   content: "";
@@ -1571,19 +1568,6 @@ body.editor-theme-light .file-editor-content {
 .file-editor-toolbar[hidden] {
   display: none;
 }
-.file-editor-panel.file-editor-pure-preview .file-editor-mode-control-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-gutter-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-wrap-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-find-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-blame-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-diff-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-diff-expand-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-diff-ref-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-cross-split-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-reload-panel,
-.file-editor-panel.file-editor-pure-preview .file-editor-save-panel {
-  display: none;
-}
 .file-editor-diff-ref-panel {
   /* Diff and FROM/TO own the LEFT side of the editor info bar; everything after them stays right. */
   order: -1;
@@ -1657,7 +1641,7 @@ body.editor-theme-light .file-editor-content {
 .file-editor-diff-expand-panel,
 .file-editor-theme-panel,
 .file-editor-reload-panel,
-.file-editor-cross-split-panel,
+.file-editor-popout-preview-panel,
 .file-editor-blame-panel,
 .file-editor-save-panel {
   height: 20px;
@@ -1682,7 +1666,7 @@ body.editor-theme-light .file-editor-content {
 .file-editor-gutter-panel,
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
-.file-editor-cross-split-panel,
+.file-editor-popout-preview-panel,
 .file-editor-blame-panel,
 .file-editor-theme-panel {
   min-width: 20px;
@@ -1753,7 +1737,7 @@ body.editor-theme-light .file-editor-content {
 .file-editor-blame-panel:not([aria-pressed="true"]):not(:disabled):hover,
 .file-editor-diff-panel:not([aria-pressed="true"]):hover,
 .file-editor-diff-expand-panel:not([aria-pressed="true"]):hover,
-.file-editor-cross-split-panel:hover,
+.file-editor-popout-preview-panel:hover,
 .file-editor-theme-panel:hover,
 .file-editor-reload-panel:hover {
   color: var(--editor-toolbar-control-hover-fg);
@@ -1866,7 +1850,7 @@ body.editor-theme-light {
 }
 body.editor-theme-light .file-editor-content .markdown-body h1,
 body.editor-theme-light .file-editor-content .markdown-body h2 {
-  background: var(--lt-markdown-heading-bg);
+  background: transparent;
 }
 body.editor-theme-light .file-editor-content .markdown-body pre {
   color: var(--lt-text);

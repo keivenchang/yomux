@@ -312,7 +312,7 @@ def codemirror_editor_controls_fixture_html():
                 <button type="button" data-editor-mode="edit"><span class="file-editor-icon file-editor-icon-edit"></span></button>
                 <button type="button" data-editor-mode="preview"><span class="file-editor-icon file-editor-icon-eye"></span></button>
                 <button type="button" data-editor-mode="split"><span class="file-editor-icon file-editor-icon-split"></span></button>
-                <button type="button" class="file-editor-cross-split-panel"><span class="file-editor-icon file-editor-icon-side-split"></span></button>
+                <button type="button" class="file-editor-popout-preview-panel"><span class="file-editor-icon file-editor-icon-popout-preview"></span></button>
               </div>
               <button type="button" class="file-editor-gutter-panel active">#</button>
               <button type="button" class="file-editor-wrap-panel active"><span class="file-editor-icon file-editor-icon-wrap"></span></button>
@@ -3487,7 +3487,6 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
             window.__previewToolbarReady = (() => {{
               const path = '/home/test/repo/DONE.md';
               const item = fileEditorItemFor(path);
-              const previewItem = filePreviewItemFor(path);
               setFileState(path, {{
                 kind: 'text',
                 content: '# Done\\n\\nSearchable preview text\\n',
@@ -3500,13 +3499,12 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
                 gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
               }});
               addFileEditorTabItem(path, item);
-              addFilePreviewTabItem(path, previewItem);
               const panel = createFileEditorPanel(item);
               panel.classList.add('active-pane');
               document.getElementById('mount').append(panel);
-              const snapshot = (mode, targetItem = item) => {{
-                setFileEditorViewMode(path, mode, targetItem);
-                renderFileEditorPanel(panel, targetItem);
+              const snapshot = mode => {{
+                setFileEditorViewMode(path, mode, item);
+                renderFileEditorPanel(panel, item);
                 const toolbar = panel.querySelector('.file-editor-toolbar')?.getBoundingClientRect();
                 const font = panel.querySelector('.file-editor-preview-font-panel')?.getBoundingClientRect();
                 return {{
@@ -3518,7 +3516,7 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
                   diffHidden: panel.querySelector('.file-editor-diff-panel')?.hidden === true,
                   diffExpandHidden: panel.querySelector('.file-editor-diff-expand-panel')?.hidden === true,
                   diffRefsHidden: panel.querySelector('.file-editor-diff-ref-panel')?.hidden === true,
-                  crossSplitHidden: panel.querySelector('.file-editor-cross-split-panel')?.hidden === true,
+                  popoutHidden: panel.querySelector('.file-editor-popout-preview-panel')?.hidden === true,
                   reloadHidden: panel.querySelector('.file-editor-reload-panel')?.hidden === true,
                   saveHidden: panel.querySelector('.file-editor-save-panel')?.hidden === true,
                   themeHidden: panel.querySelector('.file-editor-theme-panel')?.hidden === true,
@@ -3529,13 +3527,8 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
               }};
               setFileEditorViewMode(path, 'edit', item);
               renderFileEditorPanel(panel, item);
-              layoutSlots.slot1 = {{tabs: [item, previewItem], active: previewItem}};
-              updatePanelSlot(panel, previewItem, 'slot1');
-              const viaPreviewTab = snapshot('preview', previewItem);
               return {{
                 preview: snapshot('preview'),
-                previewTab: viaPreviewTab,
-                previewTabLayoutItem: panel.dataset.layoutItem,
                 split: snapshot('split'),
                 edit: snapshot('edit'),
               }};
@@ -3550,24 +3543,13 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["preview"]["gutterHidden"] is True, metrics
     assert metrics["preview"]["wrapHidden"] is True, metrics
     assert metrics["preview"]["findHidden"] is True, metrics
-    assert metrics["preview"]["modeHidden"] is True, metrics
-    assert metrics["preview"]["blameHidden"] is True, metrics
-    assert metrics["preview"]["diffHidden"] is True, metrics
+    assert metrics["preview"]["modeHidden"] is False, metrics
     assert metrics["preview"]["diffExpandHidden"] is True, metrics
     assert metrics["preview"]["diffRefsHidden"] is True, metrics
-    assert metrics["preview"]["crossSplitHidden"] is True, metrics
-    assert metrics["preview"]["reloadHidden"] is True, metrics
-    assert metrics["preview"]["saveHidden"] is True, metrics
+    assert metrics["preview"]["popoutHidden"] is False, metrics
     assert metrics["preview"]["themeHidden"] is False, metrics
     assert metrics["preview"]["fontHidden"] is False, metrics
     assert metrics["preview"]["fontCenterDelta"] <= 1.5, metrics
-    assert metrics["previewTabLayoutItem"].startswith("file-preview:"), metrics
-    assert metrics["previewTab"]["gutterHidden"] is True, metrics
-    assert metrics["previewTab"]["diffHidden"] is True, metrics
-    assert metrics["previewTab"]["diffRefsHidden"] is True, metrics
-    assert metrics["previewTab"]["saveHidden"] is True, metrics
-    assert metrics["previewTab"]["themeHidden"] is False, metrics
-    assert metrics["previewTab"]["fontHidden"] is False, metrics
     assert metrics["split"]["modeHidden"] is False, metrics
     assert metrics["split"]["gutterHidden"] is False, metrics
     assert metrics["split"]["wrapHidden"] is False, metrics
@@ -3679,95 +3661,6 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
     assert "Vanilla preview" in metrics["vanilla"]["buttonTitle"], metrics
 
 
-def test_editor_and_pure_preview_keep_linked_rings_in_both_focus_directions(browser, tmp_path):
-    css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
-    strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
-    bootstrap = json.dumps(
-        {
-            "sessions": [],
-            "availableAgents": [],
-            "accessRole": "admin",
-            "homePath": "/home/test",
-            "repoRoot": str(REPO_ROOT),
-            "maxSessionTabs": 99,
-            "serverHostname": "test-host",
-            "strings": {"en": strings},
-        },
-        separators=(",", ":"),
-    )
-    page = tmp_path / "preview-linked-rings.html"
-    page.write_text(
-        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style>
-        <style>
-        body {{ margin: 0; padding: 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; height: 560px; background: #11151d; }}
-        .file-editor-panel {{ min-width: 0; height: 520px; }}
-        </style></head>
-        <body class="theme-dark editor-theme-dark">
-          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
-          <script>{app_bundle_before_boot_script()}</script>
-          <script>
-            window.__previewRingMetrics = (() => {{
-              applyActiveColor('orange');
-              const path = '/home/test/repo/README.md';
-              const item = fileEditorItemFor(path);
-              const previewItem = filePreviewItemFor(path);
-              const content = '# README\\n\\nLinked preview\\n';
-              setFileState(path, {{
-                kind: 'text',
-                content,
-                original: content,
-                dirty: false,
-                language: 'markdown',
-                gitTracked: true,
-                gitHasHistory: true,
-                gitHistory: [{{ref: 'HEAD'}}, {{ref: 'abc123def'}}],
-              }});
-              addFileEditorTabItem(path, item);
-              addFilePreviewTabItem(path, previewItem);
-              setFileEditorViewMode(path, 'edit', item);
-              setFileEditorViewMode(path, 'preview', previewItem);
-              layoutSlots[layoutTreeKey] = splitNode('row', leafNode('slot1'), leafNode('slot2'), 50);
-              layoutSlots.slot1 = {{tabs: [item], active: item}};
-              layoutSlots.slot2 = {{tabs: [previewItem], active: previewItem}};
-              activeSessions = [item, previewItem];
-              const editorPanel = createFileEditorPanel(item);
-              const previewPanel = createFileEditorPanel(previewItem);
-              panelNodes.set(item, editorPanel);
-              panelNodes.set(previewItem, previewPanel);
-              document.body.append(editorPanel, previewPanel);
-              renderFileEditorPanel(editorPanel, item);
-              renderFileEditorPanel(previewPanel, previewItem);
-              const read = () => ({{
-                editorActive: editorPanel.classList.contains('active-pane'),
-                editorLinked: editorPanel.classList.contains('preview-linked'),
-                editorRing: getComputedStyle(editorPanel).borderLeftColor,
-                previewActive: previewPanel.classList.contains('active-pane'),
-                previewLinked: previewPanel.classList.contains('preview-linked'),
-                previewRing: getComputedStyle(previewPanel).borderLeftColor,
-                activeAccent: getComputedStyle(document.documentElement).getPropertyValue('--active-accent').trim(),
-              }});
-              setFocusedPanelItem(item);
-              const editorFocused = read();
-              setFocusedPanelItem(previewItem);
-              const previewFocused = read();
-              return {{editorFocused, previewFocused}};
-            }})();
-          </script>
-        </body></html>""",
-        encoding="utf-8",
-    )
-    browser.get(page.as_uri())
-    metrics = browser.execute_script("return window.__previewRingMetrics")
-    assert metrics["editorFocused"]["editorActive"] is True, metrics
-    assert metrics["editorFocused"]["previewLinked"] is True, metrics
-    assert metrics["editorFocused"]["editorLinked"] is False, metrics
-    assert metrics["previewFocused"]["previewActive"] is True, metrics
-    assert metrics["previewFocused"]["editorLinked"] is True, metrics
-    assert metrics["previewFocused"]["previewLinked"] is False, metrics
-    assert metrics["previewFocused"]["activeAccent"] == "#f97316", metrics
-    assert metrics["previewFocused"]["editorRing"] == metrics["previewFocused"]["previewRing"], metrics
-
-
 def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path):
     css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
     bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
@@ -3874,14 +3767,14 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
     assert metrics["plainFallback"] is True, metrics
     assert metrics["headingText"].startswith("# YOLOmux"), metrics
     assert metrics["headingColor"] == "rgb(37, 99, 235)", metrics
-    assert metrics["headingBg"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["headingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["visibleHeadingColor"] == "rgb(37, 99, 235)", metrics
-    assert metrics["visibleHeadingBg"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["visibleHeadingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBold"] is True, metrics
     assert metrics["hasLink"] is True, metrics
     assert metrics["afterHeadingText"].startswith("# YOLOmux"), metrics
     assert metrics["afterHeadingColor"] == "rgb(37, 99, 235)", metrics
-    assert metrics["afterHeadingBg"] != "rgba(0, 0, 0, 0)", metrics
+    assert metrics["afterHeadingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBoldAfterTheme"] is True, metrics
     assert metrics["hasLinkAfterTheme"] is True, metrics
 

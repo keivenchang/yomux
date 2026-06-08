@@ -243,8 +243,8 @@
   --lt-editor-bg: #ffffff;
   --lt-editor-gutter-bg: #f6f8fa;
   --lt-editor-preview-bg: #fff6df;
-  --lt-markdown-heading: var(--active-accent-bright);
-  --lt-markdown-heading-bg: #fffdf7;
+  --lt-markdown-heading: var(--active-accent);
+  --lt-markdown-heading-bg: transparent;
   --lt-markdown-link: #075985;
   --lt-markdown-strong: #1f2328;
   --lt-markdown-emphasis: #953800;
@@ -446,7 +446,7 @@ body.theme-light {
 .file-editor-diff-expand-panel,
 .file-editor-theme-panel,
 .file-editor-reload-panel,
-.file-editor-cross-split-panel,
+.file-editor-popout-preview-panel,
 .file-editor-blame-panel,
 .file-editor-save-panel,
 .pane-tab-close,

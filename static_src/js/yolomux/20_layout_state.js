@@ -691,7 +691,6 @@ function openFileEditorItems() {
   for (const [path, state] of openFiles.entries()) {
     normalizeFileStateRecord(state);
     for (const item of state.editorTabItems) items.push(item);
-    for (const item of state.previewTabItems) items.push(item);
   }
   return items;
 }
@@ -712,26 +711,6 @@ function registerFileEditorLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
   const item = fileEditorItemFor(path);
   addFileEditorTabItem(path, item);
-  if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
-    syncFileLayoutItems();
-    return item;
-  }
-  ensureFileState(path, {
-      mtime: 0,
-      kind: 'file',
-      original: '',
-      content: '',
-      dirty: false,
-      loading: true,
-  });
-  syncFileLayoutItems();
-  return item;
-}
-
-function registerFilePreviewLayoutItem(path) {
-  if (!path || !path.startsWith('/')) return null;
-  const item = filePreviewItemFor(path);
-  addFilePreviewTabItem(path, item);
   if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
     syncFileLayoutItems();
     return item;
@@ -775,7 +754,6 @@ function resolveLayoutItem(value) {
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
   if (type?.prefix === fileEditorItemPrefix) return registerFileEditorLayoutItem(text.slice(fileEditorItemPrefix.length)) || text;
-  if (type?.prefix === filePreviewItemPrefix) return registerFilePreviewLayoutItem(text.slice(filePreviewItemPrefix.length)) || text;
   if (type?.id) return type.id;
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
@@ -1293,10 +1271,8 @@ function commandPaletteViewModeLabel(mode) {
 }
 
 function commandPaletteCommandItems() {
-  // DOIT.22: a single file can be open as TWO layout items (the editor tab AND the preview tab) — the
-  // old map emitted two IDENTICAL palette rows (same name + path). Group FILE items by path and emit
-  // ONE row per file, surfacing which views are open as edit/preview/diff chips; non-file tabs (sessions,
-  // Finder/Info/Prefs/Changes) stay one row each. Selecting the row focuses the editor view (default).
+  // Group FILE items by path and emit ONE row per file; non-file tabs (sessions, Finder/Info/Prefs)
+  // stay one row each.
   const tabRow = (item, extra = {}) => ({
     group: t('palette.group.tabs'),
     label: itemLabel(item),
@@ -1318,10 +1294,8 @@ function commandPaletteCommandItems() {
   }
   for (const [path, items] of fileGroups) {
     if (items.length === 1) { tabItems.push(tabRow(items[0])); continue; }
-    // editor + preview of the same file → ONE row; focus the editor view, chip the open views' modes.
-    const editorItem = items.find(it => !isFilePreviewItem(it)) || items[0];
-    // DOIT.22 follow-up: each chip is clickable to jump to that exact view — carry the mode + the layout
-    // item that view lives in (the editor item for edit/diff, the preview item for preview).
+    const editorItem = items[0];
+    // Each chip is clickable to jump to that exact view — carry the mode + the layout item.
     const viewModes = [];
     const seenModes = new Set();
     for (const it of items) {
@@ -2067,15 +2041,57 @@ function writeStartupHelperIndex(index) {
   storageSet(startupHelperIndexStorageKey, Math.max(0, Math.floor(Number(index) || 0)));
 }
 
-function startupHelperAction(label, onClick) {
+function startupHelperWrappedIndex(index, count) {
+  if (!Number.isFinite(Number(index)) || count <= 0) return 0;
+  return ((Math.floor(Number(index)) % count) + count) % count;
+}
+
+function startupHelperAction(label, onClick, options = {}) {
   const button = document.createElement('button');
   button.type = 'button';
   button.textContent = label;
+  if (options.className) button.className = options.className;
+  if (options.title) button.title = options.title;
+  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
   button.addEventListener('click', event => {
     event.stopPropagation();
     onClick?.();
   });
   return button;
+}
+
+function startupHelperNavigationGroup(index, total, showRelativeTip) {
+  const group = document.createElement('span');
+  group.className = 'startup-helper-nav';
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', 'Tip navigation');
+  group.append(
+    startupHelperAction('<', () => showRelativeTip(-1), {
+      className: 'startup-helper-nav-button',
+      title: 'Previous tip',
+      ariaLabel: 'Previous tip',
+    }),
+    startupHelperAction('>', () => showRelativeTip(1), {
+      className: 'startup-helper-nav-button',
+      title: t('startupHelper.action.next'),
+      ariaLabel: t('startupHelper.action.next'),
+    }),
+  );
+  return group;
+}
+
+function startupHelperPromptAction(title) {
+  const text = String(title || '').trim();
+  if (!text) return t('startupHelper.defaultAction');
+  return text.charAt(0).toLowerCase() + text.slice(1);
+}
+
+function startupHelperPromptTitle(index, total, tip) {
+  return t('startupHelper.titleTemplate', {
+    index: index + 1,
+    total,
+    action: startupHelperPromptAction(tip?.title),
+  });
 }
 
 function closeStartupHelperToast(node) {
@@ -2090,10 +2106,12 @@ function showStartupHelperTip(options = {}) {
   const tip = tips[index];
   writeStartupHelperIndex((index + 1) % tips.length);
   let node = null;
-  const nextAction = startupHelperAction(t('startupHelper.action.next'), () => {
+  const showRelativeTip = delta => {
     closeStartupHelperToast(node);
+    writeStartupHelperIndex(startupHelperWrappedIndex(index + delta, tips.length));
     showStartupHelperTip({manual: true});
-  });
+  };
+  const navAction = startupHelperNavigationGroup(index, tips.length, showRelativeTip);
   const hideAction = startupHelperAction(t('startupHelper.action.hide'), () => {
     closeStartupHelperToast(node);
   });
@@ -2104,10 +2122,11 @@ function showStartupHelperTip(options = {}) {
       .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
       .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
   });
-  node = showToast(tip.title, tip.lines, {
+  node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
     className: 'attention-alert toast startup-helper-toast',
-    actions: [nextAction, hideAction, offAction],
-    countdownMs: options.manual ? toastDurationMs : Math.max(toastDurationMs, 12000),
+    container: displayToastContainer(focusedPanelItem),
+    actions: [navAction, hideAction, offAction],
+    countdownMs: 30000,
   });
   if (node) node.dataset.toastKind = 'startup-helper';
   return node;

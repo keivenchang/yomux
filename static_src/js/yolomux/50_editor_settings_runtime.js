@@ -3,7 +3,6 @@ function editorViewModeKey(path, item = null) {
 }
 
 function editorViewModeFor(path, item = null) {
-  if (isFilePreviewItem(item)) return 'preview';
   const modes = fileEditorViewModesForPath(path);
   const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
@@ -14,14 +13,13 @@ function editorViewModeFor(path, item = null) {
 
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
-  if (isFilePreviewItem(item)) mode = 'preview';
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
   if (!control) return;
-  const visible = !isFilePreviewItem(item) && state?.kind === 'text' && editorPreviewModeAvailable(path);
+  const visible = state?.kind === 'text' && editorPreviewModeAvailable(path);
   control.hidden = !visible;
   if (!visible) return;
   const mode = editorViewModeFor(path, item);
@@ -108,8 +106,8 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
-    '--markdown-heading': 'var(--active-accent-bright)',
-    '--markdown-heading-bg': 'var(--active-control-soft-bg)',
+    '--markdown-heading': 'var(--active-accent)',
+    '--markdown-heading-bg': 'transparent',
     '--markdown-link': syntax.link,
     '--markdown-strong': syntax.strong,
     '--markdown-emphasis': syntax.emphasis,
@@ -138,8 +136,8 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--lt-editor-bg': scheme.bg,
     '--lt-editor-gutter-bg': scheme.gutterBg,
     '--lt-editor-preview-bg': scheme.previewBg,
-    '--lt-markdown-heading': 'var(--active-accent-bright)',
-    '--lt-markdown-heading-bg': 'var(--active-control-soft-bg)',
+    '--lt-markdown-heading': 'var(--active-accent)',
+    '--lt-markdown-heading-bg': 'transparent',
     '--lt-markdown-link': syntax.link,
     '--lt-markdown-strong': syntax.strong,
     '--lt-markdown-emphasis': syntax.emphasis,
@@ -203,6 +201,7 @@ function refreshOpenEditorThemePanels() {
       renderFileEditorPanel(panel, item);
     }
   });
+  if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();
 }
 
 function applyEditorThemeMode(options = {}) {
@@ -270,14 +269,14 @@ function updateEditorFindButton(button, state, host = null) {
 }
 
 function fileEditorGitActionControlsVisible(path, state, item = null) {
-  if (isFilePreviewItem(item) || state?.kind !== 'text' || !fileStateHasUsefulGitHistory(state)) return false;
+  if (state?.kind !== 'text' || !fileStateHasUsefulGitHistory(state)) return false;
   const active = editorViewModeFor(path, item) === 'diff';
   const confirmedNoDiff = state?.diffLoaded === true && !openFileDiffAvailable(state);
   return active || !confirmedNoDiff;
 }
 
 function fileEditorBlameControlsVisible(path, state, item = null) {
-  return !isFilePreviewItem(item) && state?.kind === 'text' && fileStateHasUsefulGitHistory(state);
+  return state?.kind === 'text' && fileStateHasUsefulGitHistory(state);
 }
 
 function updateFileEditorBlameButton(button, path, state, item = null) {
@@ -312,7 +311,7 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
 function updateFileEditorDiffExpandButton(button, path, state, item = null) {
   if (!button) return;
   const activeDiff = editorViewModeFor(path, item) === 'diff';
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || !activeDiff || !openFileDiffAvailable(state);
+  button.hidden = state?.kind !== 'text' || !activeDiff || !openFileDiffAvailable(state);
   button.disabled = button.hidden || state?.diffLoading === true;
   button.setAttribute('aria-pressed', diffExpandUnchanged ? 'true' : 'false');
 }

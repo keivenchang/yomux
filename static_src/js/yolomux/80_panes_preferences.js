@@ -660,8 +660,7 @@ function maybeLoadFileTabForPopover(tab, item) {
 function ensureFileTabStateForItem(item) {
   const path = fileItemPath(item);
   if (!path) return null;
-  if (isFilePreviewItem(item)) addFilePreviewTabItem(path, item);
-  else if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
+  if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
   let state = fileStateFor(path);
   if (!state || !state.kind) {
     state = ensureFileState(path, {
@@ -677,7 +676,7 @@ function ensureFileTabStateForItem(item) {
 }
 
 function refreshFilePopoversForPath(path) {
-  for (const item of [imageViewerItemFor(path), fileEditorItemFor(path), filePreviewItemFor(path)]) {
+  for (const item of [imageViewerItemFor(path), fileEditorItemFor(path)]) {
     document.querySelectorAll(`.pane-tab[data-pane-tab="${cssEscape(item)}"]`).forEach(tab => refreshFileTabPopover(tab, item));
   }
 }
@@ -746,9 +745,8 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
   const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('filetab.modified'))}" aria-label="${esc(t('filetab.modified'))}"></span>` : '';
   const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
-  const kind = isFilePreviewItem(item) ? `<span class="file-tab-kind" title="${esc(t('tab.previewOnly'))}">${esc(t('tab.preview'))}</span>` : '';
   const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}${kind}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
 }
 
 function tmuxPaneTabHtml(session, info, state, auto) {

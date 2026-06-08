@@ -15,7 +15,7 @@ function sessionForFileRepo(path) {
 function sessionFilesTargetSession(options = {}) {
   if (options.followActive) {
     const activeItem = currentActiveMenuItem();
-    const activePath = isFileEditorItem(activeItem) || isFilePreviewItem(activeItem) || isImageViewerItem(activeItem)
+    const activePath = isFileEditorItem(activeItem) || isImageViewerItem(activeItem)
       ? fileItemPath(activeItem)
       : '';
     const fileSession = sessionForFileRepo(activePath || '');
@@ -1968,6 +1968,7 @@ function setEditorPreviewFontSize(value) {
   editorPreviewFontSize = next;
   applyCssSettings();
   updateEditorPreviewFontControls();
+  refreshFilePreviewPopouts();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
     .then(() => { statusEl.textContent = 'saved appearance.preview_font_size'; })
     .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
@@ -2195,6 +2196,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   setFileEditorPanelStatus(panel, status.message, status.level);
   renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
   renderLinkedFilePreviewPanels(panel, path, state.content);
+  updateFilePreviewPopout(path, state.content);
   syncFileEditorSplitScroll(panel, 'editor');
   const item = fileEditorPanelItem(panel);
   if (item && panel?.contains?.(document.activeElement)) {
@@ -2259,7 +2261,7 @@ function createFileEditorPanel(item) {
           <button type="button" data-editor-mode="edit" title="${esc(t('editor.mode.edit'))}" aria-label="${esc(t('editor.mode.edit'))}"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
           <button type="button" data-editor-mode="preview" title="${esc(t('editor.mode.preview'))}" aria-label="${esc(t('editor.mode.preview'))}"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
           <button type="button" data-editor-mode="split" title="${esc(t('editor.mode.split'))}" aria-label="${esc(t('editor.mode.split'))}"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
-          <button type="button" class="file-editor-cross-split-panel" title="${esc(t('editor.sidePreview'))}" aria-label="${esc(t('editor.sidePreview'))}" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
+          <button type="button" class="file-editor-popout-preview-panel" title="${esc(t('editor.popoutPreview'))}" aria-label="${esc(t('editor.popoutPreview'))}" hidden><span class="file-editor-icon file-editor-icon-popout-preview" aria-hidden="true"></span></button>
         </div>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
         <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}" hidden>
@@ -2424,10 +2426,10 @@ function createFileEditorPanel(item) {
     const path = controls?.dataset?.diffRefPath || '';
     setRepoDiffRefs(repo, 'HEAD', 'current', {path});
   });
-  panel.querySelector('.file-editor-cross-split-panel')?.addEventListener('click', event => {
+  panel.querySelector('.file-editor-popout-preview-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    openFileCrossPaneSplit(path);
+    openFilePreviewPopout(path, panel);
   });
   panel.querySelector('.file-editor-theme-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -3668,16 +3670,15 @@ function renderFileEditorPanel(panel, item) {
   const diffButton = panel.querySelector('.file-editor-diff-panel');
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   const diffExpandButton = panel.querySelector('.file-editor-diff-expand-panel');
-  const crossSplitButton = panel.querySelector('.file-editor-cross-split-panel');
+  const popoutPreviewButton = panel.querySelector('.file-editor-popout-preview-panel');
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   const themeButton = panel.querySelector('.file-editor-theme-panel');
   const blameButton = panel.querySelector('.file-editor-blame-panel');
   const saveButton = panel.querySelector('.file-editor-save-panel');
   const content = panel.querySelector('.file-editor-content');
-  const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
+  const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, popoutPreviewButton, reloadButton];
   updateEditorThemeButton(themeButton);
   if (!state) {
-    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -3687,7 +3688,6 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.loading) {
-    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -3698,7 +3698,6 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
-    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -3727,36 +3726,31 @@ function renderFileEditorPanel(panel, item) {
     setFileEditorViewMode(path, 'edit', item);
   }
   const mode = editorViewModeFor(path, item);
-  const purePreviewMode = mode === 'preview';
-  panel.classList.toggle('file-editor-pure-preview', purePreviewMode);
   updateEditorModeControl(modeControl, path, state, item);
-  if (modeControl && purePreviewMode) modeControl.hidden = true;
   if (previewFontPanel) {
     previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path) || (mode !== 'preview' && mode !== 'split');
     updateEditorPreviewFontControls(previewFontPanel);
   }
   if (gutterButton) {
-    gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
+    gutterButton.hidden = state.kind !== 'text' || mode === 'preview';
     updateEditorGutterButton(gutterButton);
   }
   if (wrapButton) {
-    wrapButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
+    wrapButton.hidden = state.kind !== 'text' || mode === 'preview';
     updateEditorWrapButton(wrapButton);
   }
   updateEditorFindButton(findButton, state, panel);
-  if (findButton && (isFilePreviewItem(item) || mode === 'preview')) findButton.hidden = true;
+  if (findButton && mode === 'preview') findButton.hidden = true;
   // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
   // Blame stays available in normal edit mode for clean files with useful history.
   updateFileEditorBlameButton(blameButton, path, state, item);
   updateFileEditorDiffButton(diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
-  if (purePreviewMode) setElementsHidden([blameButton, diffButton, diffExpandButton], true);
-  if (crossSplitButton) {
-    crossSplitButton.hidden = purePreviewMode || isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
+  if (popoutPreviewButton) {
+    popoutPreviewButton.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path);
   }
-  setElementsHidden([reloadButton, saveButton], purePreviewMode);
   if (diffRefPanel) {
-    diffRefPanel.hidden = purePreviewMode || mode !== 'diff' || state.kind !== 'text';
+    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
     // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
     // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
     const diffRepo = fileRepoForPath(path);
@@ -3891,7 +3885,7 @@ function loadFileEditorState(path, panel, item) {
 function updateFileEditorPanelChrome(panel, path) {
   const state = openFiles.get(path);
   const item = panel?.dataset?.layoutItem || '';
-  const previewOnly = isFilePreviewItem(item);
+  const previewOnly = false;
   panel.classList.toggle('dirty', !!state?.dirty);
   const dirtyDot = panel.querySelector('.file-editor-title .file-tab-dirty');
   if (dirtyDot) dirtyDot.hidden = !state?.dirty;
@@ -3957,10 +3951,10 @@ async function activateNavItem(item) {
     activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
     return true;
   }
-  if (isFileEditorItem(item) || isFilePreviewItem(item)) {
+  if (isFileEditorItem(item)) {
     const path = fileItemPath(item);
     if (path) {
-      await openFileInEditor(path, basenameOf(path), {item, viewMode: isFilePreviewItem(item) ? 'preview' : undefined});
+      await openFileInEditor(path, basenameOf(path), {item});
       return true;
     }
   }
@@ -4462,6 +4456,320 @@ function renderEditorPreviewPane(container, path, text) {
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }
 
+const filePreviewPopouts = new Map();
+
+function currentStylesheetHref(match) {
+  const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+    .find(item => String(item.getAttribute('href') || '').includes(match));
+  return link ? link.href : '';
+}
+
+function previewPopoutBodyClassName() {
+  const keep = ['theme-light', 'theme-dark', 'editor-theme-light', 'editor-theme-dark', 'editor-preview-vanilla'];
+  const classes = keep.filter(name => document.body?.classList?.contains(name));
+  classes.push('file-preview-popout-window');
+  return classes.join(' ');
+}
+
+function previewPopoutVariableStyle() {
+  const root = getComputedStyle(document.documentElement);
+  const names = [
+    '--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text',
+    '--active-control-bg', '--active-control-border', '--active-control-text',
+    '--editor-preview-font-size', '--editor-line-height',
+    '--lt-editor-bg', '--lt-editor-preview-bg', '--lt-text', '--lt-muted', '--lt-line',
+    '--lt-panel', '--lt-panel2', '--lt-markdown-heading', '--lt-markdown-heading-bg',
+    '--lt-markdown-link', '--lt-markdown-strong', '--lt-markdown-emphasis',
+    '--lt-code-inline', '--lt-code-inline-bg', '--lt-code-inline-border',
+    '--markdown-heading', '--markdown-heading-bg', '--markdown-link', '--markdown-strong',
+    '--markdown-emphasis', '--code-inline', '--code-inline-bg', '--code-inline-border',
+  ];
+  const aliases = [
+    ['--editor-scheme-bg', '--popout-editor-scheme-bg'],
+    ['--editor-scheme-fg', '--popout-editor-scheme-fg'],
+    ['--editor-scheme-muted', '--popout-editor-scheme-muted'],
+    ['--editor-scheme-line', '--popout-editor-scheme-line'],
+    ['--editor-scheme-panel', '--popout-editor-scheme-panel'],
+    ['--editor-scheme-panel2', '--popout-editor-scheme-panel2'],
+    ['--editor-scheme-preview-bg', '--popout-editor-scheme-preview-bg'],
+  ];
+  const copied = names
+    .map(name => {
+      const value = root.getPropertyValue(name).trim();
+      return value ? `${name}: ${value}` : '';
+    });
+  const aliased = aliases.map(([source, target]) => {
+    const value = root.getPropertyValue(source).trim();
+    return value ? `${target}: ${value}` : '';
+  });
+  return [...copied, ...aliased].filter(Boolean)
+    .join('; ');
+}
+
+function previewPopoutToolbarHtml() {
+  return `
+      <div class="file-preview-popout-controls" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}">
+        <button type="button" data-preview-popout-theme title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
+        <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}">
+          <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
+          <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
+          <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
+        </span>
+      </div>`;
+}
+
+function renderedPreviewSnapshot(path, text) {
+  const scratch = document.createElement('div');
+  scratch.className = 'file-editor-preview-pane-panel';
+  renderEditorPreviewPane(scratch, path, text);
+  scratch.hidden = false;
+  return {
+    className: scratch.className,
+    html: scratch.innerHTML,
+  };
+}
+
+function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
+  const doc = previewWindow?.document;
+  if (!doc) return false;
+  const title = `${basenameOf(path)} preview`;
+  const cssHref = currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
+  doc.open();
+  doc.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(title)}</title>
+  <link rel="stylesheet" href="${esc(cssHref)}">
+  <style>
+    html, body { min-height: 100%; margin: 0; }
+    body.file-preview-popout-window {
+      background: var(--editor-preview-bg, var(--bg, #ffffff));
+      color: var(--text, #111827);
+      overflow: auto;
+    }
+    .file-preview-popout-shell {
+      box-sizing: border-box;
+      width: min(100%, 1040px);
+      margin: 0 auto;
+      padding: 20px 24px 36px;
+    }
+    .file-preview-popout-title {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 8px 0 12px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid var(--border, #d1d5db);
+      background: var(--editor-preview-bg, var(--bg, #ffffff));
+      color: var(--text, #111827);
+      font: 600 13px/1.3 var(--font, system-ui, sans-serif);
+    }
+    .file-preview-popout-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+    .file-preview-popout-controls > button {
+      min-width: 24px;
+      width: 24px;
+      height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid var(--active-control-border, #76b900);
+      border-radius: 4px;
+      color: var(--active-control-bg, #76b900);
+      background: transparent;
+      cursor: pointer;
+    }
+    .file-preview-popout-controls .file-editor-preview-font-panel {
+      display: inline-flex;
+    }
+    .file-preview-popout-title span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-preview-popout-title small {
+      color: var(--muted, #6b7280);
+      font: 500 11px/1.2 var(--font, system-ui, sans-serif);
+      white-space: nowrap;
+    }
+    .file-preview-popout-window .file-editor-preview-pane-panel {
+      position: static !important;
+      inset: auto !important;
+      display: block !important;
+      min-height: auto;
+      max-height: none;
+      height: auto;
+      overflow: visible;
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+    .file-preview-popout-window {
+      --editor-scheme-bg: var(--popout-editor-scheme-bg);
+      --editor-scheme-fg: var(--popout-editor-scheme-fg);
+      --editor-scheme-muted: var(--popout-editor-scheme-muted);
+      --editor-scheme-line: var(--popout-editor-scheme-line);
+      --editor-scheme-panel: var(--popout-editor-scheme-panel);
+      --editor-scheme-panel2: var(--popout-editor-scheme-panel2);
+      --editor-scheme-preview-bg: var(--popout-editor-scheme-preview-bg);
+      --bg: var(--editor-scheme-bg, #0f131a);
+      --panel: var(--editor-scheme-panel, #151b24);
+      --panel2: var(--editor-scheme-panel2, #1b2432);
+      --text: var(--editor-scheme-fg, #e4e8ee);
+      --muted: var(--editor-scheme-muted, #8b95a5);
+      --line: var(--editor-scheme-line, #2a3444);
+      --editor-preview-bg: var(--editor-scheme-preview-bg, var(--bg));
+    }
+    .file-preview-popout-window .markdown-body {
+      color: var(--text, #111827);
+      background: transparent;
+    }
+    .file-preview-popout-window.editor-theme-light {
+      --editor-scheme-bg: var(--lt-editor-bg);
+      --editor-scheme-fg: var(--lt-text);
+      --editor-scheme-muted: var(--lt-muted);
+      --editor-scheme-line: var(--lt-line);
+      --editor-scheme-panel: var(--lt-panel);
+      --editor-scheme-panel2: var(--lt-panel2);
+      --editor-scheme-preview-bg: var(--lt-editor-preview-bg);
+    }
+    .file-preview-popout-window.editor-theme-light .markdown-body {
+      --markdown-heading: var(--lt-markdown-heading);
+      --markdown-heading-bg: var(--lt-markdown-heading-bg);
+      --markdown-link: var(--lt-markdown-link);
+      --markdown-strong: var(--lt-markdown-strong);
+      --markdown-emphasis: var(--lt-markdown-emphasis);
+      --code-inline: var(--lt-code-inline);
+      --code-inline-bg: var(--lt-code-inline-bg);
+      --code-inline-border: var(--lt-code-inline-border);
+    }
+    .file-preview-popout-window.editor-theme-light .markdown-body pre {
+      color: var(--lt-text);
+      background: var(--lt-panel);
+      border-color: var(--lt-line);
+    }
+    .file-preview-popout-window.editor-theme-light .markdown-body pre code {
+      color: inherit;
+      background: transparent;
+      border: 0;
+    }
+    @media (max-width: 640px) {
+      .file-preview-popout-shell { padding: 12px 14px 28px; }
+    }
+  </style>
+</head>
+<body class="${esc(previewPopoutBodyClassName())}" style="${esc(previewPopoutVariableStyle())}">
+  <main class="file-preview-popout-shell">
+    <header class="file-preview-popout-title"><span>${esc(compactHomePath(path))}</span>${previewPopoutToolbarHtml()}</header>
+    <article data-preview-root class="${esc(snapshot.className)}">${snapshot.html}</article>
+  </main>
+</body>
+</html>`);
+  doc.close();
+  bindFilePreviewPopoutControls(path, previewWindow);
+  return true;
+}
+
+function updateFilePreviewPopoutControls(path, previewWindow) {
+  const doc = previewWindow?.document;
+  if (!doc) return;
+  doc.body?.setAttribute('style', previewPopoutVariableStyle());
+  const themeButton = doc.querySelector('[data-preview-popout-theme]');
+  if (themeButton) updateEditorThemeButton(themeButton);
+  updateEditorPreviewFontControls(doc);
+}
+
+function bindFilePreviewPopoutControls(path, previewWindow) {
+  const doc = previewWindow?.document;
+  if (!doc || doc._yolomuxPreviewControlsBound) return;
+  doc._yolomuxPreviewControlsBound = true;
+  doc.querySelector('[data-preview-popout-theme]')?.addEventListener('click', event => {
+    event.preventDefault();
+    cycleEditorThemeMode();
+    refreshFilePreviewPopouts();
+  });
+  doc.querySelector('.file-editor-preview-font-panel')?.addEventListener('click', event => {
+    const button = event.target?.closest?.('[data-editor-preview-font-step]');
+    if (!button) return;
+    event.preventDefault();
+    setEditorPreviewFontSize(editorPreviewFontSize + Number(button.dataset.editorPreviewFontStep || 0));
+    refreshFilePreviewPopouts();
+  });
+  updateFilePreviewPopoutControls(path, previewWindow);
+}
+
+function updateFilePreviewPopout(path, text) {
+  const record = filePreviewPopouts.get(path);
+  if (!record) return false;
+  const previewWindow = record.window;
+  if (!previewWindow || previewWindow.closed) {
+    filePreviewPopouts.delete(path);
+    return false;
+  }
+  const snapshot = renderedPreviewSnapshot(path, text);
+  try {
+    const doc = previewWindow.document;
+    const root = doc?.querySelector?.('[data-preview-root]');
+    if (!root) return writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
+    root.className = snapshot.className;
+    root.innerHTML = snapshot.html;
+    doc.body.className = previewPopoutBodyClassName();
+    updateFilePreviewPopoutControls(path, previewWindow);
+    doc.title = `${basenameOf(path)} preview`;
+    return true;
+  } catch (_) {
+    filePreviewPopouts.delete(path);
+    return false;
+  }
+}
+
+function refreshFilePreviewPopouts() {
+  for (const path of Array.from(filePreviewPopouts.keys())) {
+    const state = openFiles.get(path);
+    if (state?.kind === 'text') updateFilePreviewPopout(path, state.content);
+    else filePreviewPopouts.delete(path);
+  }
+}
+
+function openFilePreviewPopout(path, panel = null) {
+  if (!path || !editorPreviewModeAvailable(path)) return;
+  syncOpenFileContentFromPanels(path, panel);
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return;
+  const existing = filePreviewPopouts.get(path)?.window;
+  if (existing && !existing.closed) {
+    updateFilePreviewPopout(path, state.content);
+    existing.focus?.();
+    return;
+  }
+  const previewWindow = window.open('', `yolomux-preview-${encodeURIComponent(path)}`, 'popup,width=980,height=900');
+  if (!previewWindow) {
+    statusErr('preview pop-out was blocked by the browser');
+    return;
+  }
+  try {
+    filePreviewPopouts.set(path, {window: previewWindow});
+    writeFilePreviewPopoutDocument(path, previewWindow, renderedPreviewSnapshot(path, state.content));
+    previewWindow.focus?.();
+  } catch (error) {
+    filePreviewPopouts.delete(path);
+    try { previewWindow.close(); } catch (_) {}
+    statusErr(`preview pop-out failed: ${esc(error)}`);
+  }
+}
+
 function markdownInlineHighlightHtml(escaped) {
   return escaped
     .replace(/(`[^`]+`)/g, '<span class="md-code">$1</span>')
@@ -4752,38 +5060,6 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
   }
 }
 
-function updateLinkedFilePreviewRings() {
-  for (const panel of panelNodes.values()) panel.classList.remove('preview-linked');
-  if (!focusedPanelItem) return;
-  const path = (isFileEditorItem(focusedPanelItem) || isFilePreviewItem(focusedPanelItem)) ? fileItemPath(focusedPanelItem) : '';
-  if (!path) return;
-  if (isFilePreviewItem(focusedPanelItem)) {
-    const editorItem = fileEditorItemFor(path);
-    if (!itemIsActivePaneTab(editorItem)) return;
-    const editorPanel = panelNodes.get(editorItem);
-    if (editorPanel) editorPanel.classList.add('preview-linked');
-    return;
-  }
-  const previewItem = filePreviewItemFor(path);
-  if (!itemIsActivePaneTab(previewItem)) return;
-  const previewPanel = panelNodes.get(previewItem);
-  if (previewPanel) previewPanel.classList.add('preview-linked');
-}
-
-function syncCrossPaneFileEditorScroll(host, source) {
-  const path = fileEditorPanelPath(host);
-  if (!path || !fileEditorSourceCanDrive(host, source)) return;
-  const line = fileEditorSourceLineForScroll(host, source);
-  if (!line) return;
-  const preferredTarget = source === 'preview' ? 'editor' : 'preview';
-  const fallbackTarget = preferredTarget === 'editor' ? 'preview' : 'editor';
-  for (const panel of fileEditorPanelsForPath(path)) {
-    if (panel === host || fileEditorScrollSyncBlocked(panel)) continue;
-    if (scrollFileEditorPanelToSourceLine(panel, preferredTarget, line)) continue;
-    scrollFileEditorPanelToSourceLine(panel, fallbackTarget, line);
-  }
-}
-
 function syncFileEditorInPaneSplitScroll(host, source) {
   const content = host.querySelector?.('.file-editor-content');
   if (!content?.classList?.contains('split-preview')) return false;
@@ -4831,7 +5107,6 @@ function syncFileEditorSplitScroll(host, source) {
   const canDrive = fileEditorSourceCanDrive(host, source);
   if (!canDrive) return;
   syncFileEditorInPaneSplitScroll(host, source);
-  syncCrossPaneFileEditorScroll(host, source);
 }
 
 function refreshEditorPreviews() {
@@ -4841,6 +5116,7 @@ function refreshEditorPreviews() {
     const state = openFiles.get(path);
     if (state?.kind === 'text') {
       renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      updateFilePreviewPopout(path, state.content);
     }
   }
 }

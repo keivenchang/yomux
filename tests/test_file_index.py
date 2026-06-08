@@ -39,6 +39,25 @@ def test_walk_root_collects_files_and_skips_skip_dirs(tmp_path, monkeypatch):
     assert truncated is False
 
 
+def test_walk_root_skips_symlinked_files_and_dirs(tmp_path, monkeypatch):
+    _clear_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    (real_dir / "target.txt").write_text("real\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside.txt").write_text("outside\n", encoding="utf-8")
+    (tmp_path / "link-dir").symlink_to(outside, target_is_directory=True)
+    (tmp_path / "link-file.txt").symlink_to(real_dir / "target.txt")
+
+    entries, truncated = file_index.walk_root(tmp_path, SEARCH_SKIP_DIRS)
+    relative_paths = {rel for _path, _name, rel, _size, _mtime in entries}
+
+    assert relative_paths == {"real/target.txt", "outside/outside.txt"}
+    assert truncated is False
+
+
 def test_build_persists_to_disk_and_reloads(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")

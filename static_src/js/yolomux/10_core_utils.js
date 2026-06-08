@@ -71,7 +71,6 @@ function readStoredJson(key, fallback = null) {
 function normalizeFileStateRecord(state) {
   if (!state || typeof state !== 'object') state = {};
   if (!(state.editorTabItems instanceof Set)) state.editorTabItems = new Set();
-  if (!(state.previewTabItems instanceof Set)) state.previewTabItems = new Set();
   if (!(state.ownerSessions instanceof Set)) state.ownerSessions = new Set();
   if (!(state.viewMode instanceof Map)) state.viewMode = new Map();
   if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = '';
@@ -122,7 +121,6 @@ function setFileState(path, state) {
   const previous = fileStateFor(path);
   if (previous && previous !== state && state && typeof state === 'object') {
     if (!(state.editorTabItems instanceof Set)) state.editorTabItems = previous.editorTabItems;
-    if (!(state.previewTabItems instanceof Set)) state.previewTabItems = previous.previewTabItems;
     if (!(state.ownerSessions instanceof Set)) state.ownerSessions = previous.ownerSessions;
     if (!(state.viewMode instanceof Map)) state.viewMode = previous.viewMode;
     if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = previous.imageMode;
@@ -143,10 +141,6 @@ function fileEditorTabItemsForPath(path) {
   return Array.from(fileStateFor(path)?.editorTabItems || []);
 }
 
-function filePreviewTabItemsForPath(path) {
-  return Array.from(fileStateFor(path)?.previewTabItems || []);
-}
-
 function fileHasEditorTab(path) {
   return fileEditorTabItemsForPath(path).length > 0;
 }
@@ -156,17 +150,8 @@ function addFileEditorTabItem(path, item = fileEditorItemFor(path)) {
   if (state && item) state.editorTabItems.add(item);
 }
 
-function addFilePreviewTabItem(path, item = filePreviewItemFor(path)) {
-  const state = ensureFileState(path);
-  if (state && item) state.previewTabItems.add(item);
-}
-
 function removeFileEditorTabItem(path, item = fileEditorItemFor(path)) {
   fileStateFor(path)?.editorTabItems.delete(item);
-}
-
-function removeFilePreviewTabItem(path, item = filePreviewItemFor(path)) {
-  fileStateFor(path)?.previewTabItems.delete(item);
 }
 
 function fileEditorViewModesForPath(path, create = false) {
@@ -802,7 +787,6 @@ function updatePanelInactiveOverlays() {
     panel.classList.toggle('focused-pane', item === activeItem);
     panel.classList.toggle('active-pane', item === activeItem);
   }
-  if (typeof updateLinkedFilePreviewRings === 'function') updateLinkedFilePreviewRings();
   // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
   if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
 }

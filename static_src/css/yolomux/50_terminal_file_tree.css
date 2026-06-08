@@ -324,6 +324,25 @@
   margin-top: 6px;
   justify-content: flex-end;
 }
+.startup-helper-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+.toast .startup-helper-nav-button {
+  min-width: 28px;
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  font: 800 var(--ui-font-size-sm)/1 var(--ui-font);
+}
+.toast .startup-helper-nav-button:first-child {
+  border-radius: 8px 0 0 8px;
+}
+.toast .startup-helper-nav-button:last-child {
+  margin-inline-start: -1px;
+  border-radius: 0 8px 8px 0;
+}
 .panel-toast-stack {
   position: absolute;
   left: 8px;
@@ -340,6 +359,10 @@
 .panel-toast-stack .toast {
   width: 100%;
   pointer-events: auto;
+}
+.panel-toast-stack .startup-helper-toast {
+  width: min(720px, 100%);
+  align-self: flex-end;
 }
 .upload-result {
   width: 100%;

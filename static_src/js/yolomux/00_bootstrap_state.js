@@ -226,7 +226,7 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.toml': 'ini', '.ini': 'ini', '.cfg': 'ini',
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
-const fileState = new Map();  // path -> open-file content plus editor tab/preview/owner/mode/blame state
+const fileState = new Map();  // path -> open-file content plus editor tab/owner/mode/blame state
 const openFiles = fileState;  // compatibility alias during the file-state migration
 const fileExplorerDirectorySignatures = new Map();
 const fileExplorerKnownEntryNames = new Map();
@@ -441,10 +441,8 @@ const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
-const filePreviewItemPrefix = 'file-preview:';
 const imageViewerItemPrefix = 'image:';
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
-function filePreviewItemFor(path) { return filePreviewItemPrefix + path; }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
 const TAB_TYPES = [
   {
@@ -538,23 +536,6 @@ const TAB_TYPES = [
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 1,
   },
-  {
-    key: 'file-preview',
-    prefix: filePreviewItemPrefix,
-    match: item => typeof item === 'string' && item.startsWith(filePreviewItemPrefix),
-    label: item => basenameOf(fileItemPath(item)),
-    shortLabel: () => 'Preview',
-    terminalTitle: () => 'unavailable for file preview',
-    sortRank: 0.76,
-    param: item => item,
-    detail: item => compactHomePath(fileItemPath(item)),
-    rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
-    createPanel: item => createFileEditorPanel(item),
-    className: () => 'file-editor-item file-preview-item',
-    icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
-    prunePriority: () => 1,
-  },
 ];
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }
 function tabTypeForParam(value) {
@@ -565,14 +546,12 @@ function tabTypeParam(type, item) { return typeof type?.param === 'function' ? t
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
-function isFilePreviewItem(item) { return tabTypeForItem(item)?.key === 'file-preview'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
-  return key === 'file-editor' || key === 'image-viewer' || key === 'file-preview';
+  return key === 'file-editor' || key === 'image-viewer';
 }
 function fileItemPath(item) {
   if (isImageViewerItem(item)) return item.slice(imageViewerItemPrefix.length);
-  if (isFilePreviewItem(item)) return item.slice(filePreviewItemPrefix.length);
   return tabTypeForItem(item)?.key === 'file-editor' ? item.slice(fileEditorItemPrefix.length) : null;
 }
 function normalizedImageOpenMode(mode = fileExplorerImageOpenMode) {

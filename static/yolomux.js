@@ -227,7 +227,7 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.toml': 'ini', '.ini': 'ini', '.cfg': 'ini',
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
-const fileState = new Map();  // path -> open-file content plus editor tab/preview/owner/mode/blame state
+const fileState = new Map();  // path -> open-file content plus editor tab/owner/mode/blame state
 const openFiles = fileState;  // compatibility alias during the file-state migration
 const fileExplorerDirectorySignatures = new Map();
 const fileExplorerKnownEntryNames = new Map();
@@ -442,10 +442,8 @@ const fileExplorerItemId = '__files__';
 const prefsItemId = '__prefs__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
-const filePreviewItemPrefix = 'file-preview:';
 const imageViewerItemPrefix = 'image:';
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
-function filePreviewItemFor(path) { return filePreviewItemPrefix + path; }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
 const TAB_TYPES = [
   {
@@ -539,23 +537,6 @@ const TAB_TYPES = [
     minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 1,
   },
-  {
-    key: 'file-preview',
-    prefix: filePreviewItemPrefix,
-    match: item => typeof item === 'string' && item.startsWith(filePreviewItemPrefix),
-    label: item => basenameOf(fileItemPath(item)),
-    shortLabel: () => 'Preview',
-    terminalTitle: () => 'unavailable for file preview',
-    sortRank: 0.76,
-    param: item => item,
-    detail: item => compactHomePath(fileItemPath(item)),
-    rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
-    createPanel: item => createFileEditorPanel(item),
-    className: () => 'file-editor-item file-preview-item',
-    icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
-    prunePriority: () => 1,
-  },
 ];
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }
 function tabTypeForParam(value) {
@@ -566,14 +547,12 @@ function tabTypeParam(type, item) { return typeof type?.param === 'function' ? t
 function isFileExplorerItem(item) { return tabTypeForItem(item)?.key === 'files'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
-function isFilePreviewItem(item) { return tabTypeForItem(item)?.key === 'file-preview'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
-  return key === 'file-editor' || key === 'image-viewer' || key === 'file-preview';
+  return key === 'file-editor' || key === 'image-viewer';
 }
 function fileItemPath(item) {
   if (isImageViewerItem(item)) return item.slice(imageViewerItemPrefix.length);
-  if (isFilePreviewItem(item)) return item.slice(filePreviewItemPrefix.length);
   return tabTypeForItem(item)?.key === 'file-editor' ? item.slice(fileEditorItemPrefix.length) : null;
 }
 function normalizedImageOpenMode(mode = fileExplorerImageOpenMode) {
@@ -1046,7 +1025,6 @@ function readStoredJson(key, fallback = null) {
 function normalizeFileStateRecord(state) {
   if (!state || typeof state !== 'object') state = {};
   if (!(state.editorTabItems instanceof Set)) state.editorTabItems = new Set();
-  if (!(state.previewTabItems instanceof Set)) state.previewTabItems = new Set();
   if (!(state.ownerSessions instanceof Set)) state.ownerSessions = new Set();
   if (!(state.viewMode instanceof Map)) state.viewMode = new Map();
   if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = '';
@@ -1097,7 +1075,6 @@ function setFileState(path, state) {
   const previous = fileStateFor(path);
   if (previous && previous !== state && state && typeof state === 'object') {
     if (!(state.editorTabItems instanceof Set)) state.editorTabItems = previous.editorTabItems;
-    if (!(state.previewTabItems instanceof Set)) state.previewTabItems = previous.previewTabItems;
     if (!(state.ownerSessions instanceof Set)) state.ownerSessions = previous.ownerSessions;
     if (!(state.viewMode instanceof Map)) state.viewMode = previous.viewMode;
     if (!Object.prototype.hasOwnProperty.call(state, 'imageMode')) state.imageMode = previous.imageMode;
@@ -1118,10 +1095,6 @@ function fileEditorTabItemsForPath(path) {
   return Array.from(fileStateFor(path)?.editorTabItems || []);
 }
 
-function filePreviewTabItemsForPath(path) {
-  return Array.from(fileStateFor(path)?.previewTabItems || []);
-}
-
 function fileHasEditorTab(path) {
   return fileEditorTabItemsForPath(path).length > 0;
 }
@@ -1131,17 +1104,8 @@ function addFileEditorTabItem(path, item = fileEditorItemFor(path)) {
   if (state && item) state.editorTabItems.add(item);
 }
 
-function addFilePreviewTabItem(path, item = filePreviewItemFor(path)) {
-  const state = ensureFileState(path);
-  if (state && item) state.previewTabItems.add(item);
-}
-
 function removeFileEditorTabItem(path, item = fileEditorItemFor(path)) {
   fileStateFor(path)?.editorTabItems.delete(item);
-}
-
-function removeFilePreviewTabItem(path, item = filePreviewItemFor(path)) {
-  fileStateFor(path)?.previewTabItems.delete(item);
 }
 
 function fileEditorViewModesForPath(path, create = false) {
@@ -1777,7 +1741,6 @@ function updatePanelInactiveOverlays() {
     panel.classList.toggle('focused-pane', item === activeItem);
     panel.classList.toggle('active-pane', item === activeItem);
   }
-  if (typeof updateLinkedFilePreviewRings === 'function') updateLinkedFilePreviewRings();
   // Re-color the active terminal's cursor yellow (and revert the rest) whenever focus moves.
   if (typeof refreshActiveTerminalCursor === 'function') refreshActiveTerminalCursor();
 }
@@ -3112,7 +3075,6 @@ function openFileEditorItems() {
   for (const [path, state] of openFiles.entries()) {
     normalizeFileStateRecord(state);
     for (const item of state.editorTabItems) items.push(item);
-    for (const item of state.previewTabItems) items.push(item);
   }
   return items;
 }
@@ -3133,26 +3095,6 @@ function registerFileEditorLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
   const item = fileEditorItemFor(path);
   addFileEditorTabItem(path, item);
-  if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
-    syncFileLayoutItems();
-    return item;
-  }
-  ensureFileState(path, {
-      mtime: 0,
-      kind: 'file',
-      original: '',
-      content: '',
-      dirty: false,
-      loading: true,
-  });
-  syncFileLayoutItems();
-  return item;
-}
-
-function registerFilePreviewLayoutItem(path) {
-  if (!path || !path.startsWith('/')) return null;
-  const item = filePreviewItemFor(path);
-  addFilePreviewTabItem(path, item);
   if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
     syncFileLayoutItems();
     return item;
@@ -3196,7 +3138,6 @@ function resolveLayoutItem(value) {
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
   if (type?.prefix === fileEditorItemPrefix) return registerFileEditorLayoutItem(text.slice(fileEditorItemPrefix.length)) || text;
-  if (type?.prefix === filePreviewItemPrefix) return registerFilePreviewLayoutItem(text.slice(filePreviewItemPrefix.length)) || text;
   if (type?.id) return type.id;
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
@@ -3714,10 +3655,8 @@ function commandPaletteViewModeLabel(mode) {
 }
 
 function commandPaletteCommandItems() {
-  // DOIT.22: a single file can be open as TWO layout items (the editor tab AND the preview tab) — the
-  // old map emitted two IDENTICAL palette rows (same name + path). Group FILE items by path and emit
-  // ONE row per file, surfacing which views are open as edit/preview/diff chips; non-file tabs (sessions,
-  // Finder/Info/Prefs/Changes) stay one row each. Selecting the row focuses the editor view (default).
+  // Group FILE items by path and emit ONE row per file; non-file tabs (sessions, Finder/Info/Prefs)
+  // stay one row each.
   const tabRow = (item, extra = {}) => ({
     group: t('palette.group.tabs'),
     label: itemLabel(item),
@@ -3739,10 +3678,8 @@ function commandPaletteCommandItems() {
   }
   for (const [path, items] of fileGroups) {
     if (items.length === 1) { tabItems.push(tabRow(items[0])); continue; }
-    // editor + preview of the same file → ONE row; focus the editor view, chip the open views' modes.
-    const editorItem = items.find(it => !isFilePreviewItem(it)) || items[0];
-    // DOIT.22 follow-up: each chip is clickable to jump to that exact view — carry the mode + the layout
-    // item that view lives in (the editor item for edit/diff, the preview item for preview).
+    const editorItem = items[0];
+    // Each chip is clickable to jump to that exact view — carry the mode + the layout item.
     const viewModes = [];
     const seenModes = new Set();
     for (const it of items) {
@@ -4488,15 +4425,57 @@ function writeStartupHelperIndex(index) {
   storageSet(startupHelperIndexStorageKey, Math.max(0, Math.floor(Number(index) || 0)));
 }
 
-function startupHelperAction(label, onClick) {
+function startupHelperWrappedIndex(index, count) {
+  if (!Number.isFinite(Number(index)) || count <= 0) return 0;
+  return ((Math.floor(Number(index)) % count) + count) % count;
+}
+
+function startupHelperAction(label, onClick, options = {}) {
   const button = document.createElement('button');
   button.type = 'button';
   button.textContent = label;
+  if (options.className) button.className = options.className;
+  if (options.title) button.title = options.title;
+  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
   button.addEventListener('click', event => {
     event.stopPropagation();
     onClick?.();
   });
   return button;
+}
+
+function startupHelperNavigationGroup(index, total, showRelativeTip) {
+  const group = document.createElement('span');
+  group.className = 'startup-helper-nav';
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', 'Tip navigation');
+  group.append(
+    startupHelperAction('<', () => showRelativeTip(-1), {
+      className: 'startup-helper-nav-button',
+      title: 'Previous tip',
+      ariaLabel: 'Previous tip',
+    }),
+    startupHelperAction('>', () => showRelativeTip(1), {
+      className: 'startup-helper-nav-button',
+      title: t('startupHelper.action.next'),
+      ariaLabel: t('startupHelper.action.next'),
+    }),
+  );
+  return group;
+}
+
+function startupHelperPromptAction(title) {
+  const text = String(title || '').trim();
+  if (!text) return t('startupHelper.defaultAction');
+  return text.charAt(0).toLowerCase() + text.slice(1);
+}
+
+function startupHelperPromptTitle(index, total, tip) {
+  return t('startupHelper.titleTemplate', {
+    index: index + 1,
+    total,
+    action: startupHelperPromptAction(tip?.title),
+  });
 }
 
 function closeStartupHelperToast(node) {
@@ -4511,10 +4490,12 @@ function showStartupHelperTip(options = {}) {
   const tip = tips[index];
   writeStartupHelperIndex((index + 1) % tips.length);
   let node = null;
-  const nextAction = startupHelperAction(t('startupHelper.action.next'), () => {
+  const showRelativeTip = delta => {
     closeStartupHelperToast(node);
+    writeStartupHelperIndex(startupHelperWrappedIndex(index + delta, tips.length));
     showStartupHelperTip({manual: true});
-  });
+  };
+  const navAction = startupHelperNavigationGroup(index, tips.length, showRelativeTip);
   const hideAction = startupHelperAction(t('startupHelper.action.hide'), () => {
     closeStartupHelperToast(node);
   });
@@ -4525,10 +4506,11 @@ function showStartupHelperTip(options = {}) {
       .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
       .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
   });
-  node = showToast(tip.title, tip.lines, {
+  node = showToast(startupHelperPromptTitle(index, tips.length, tip), tip.lines, {
     className: 'attention-alert toast startup-helper-toast',
-    actions: [nextAction, hideAction, offAction],
-    countdownMs: options.manual ? toastDurationMs : Math.max(toastDurationMs, 12000),
+    container: displayToastContainer(focusedPanelItem),
+    actions: [navAction, hideAction, offAction],
+    countdownMs: 30000,
   });
   if (node) node.dataset.toastKind = 'startup-helper';
   return node;
@@ -8873,7 +8855,6 @@ function filePanelItemsForPath(path) {
   const items = [];
   if (sharedImageViewerPath === path) items.push(imageViewerItemFor(path));
   items.push(...fileEditorTabItemsForPath(path));
-  items.push(...filePreviewTabItemsForPath(path));
   return items;
 }
 
@@ -8883,7 +8864,6 @@ function openFilePathHasOwner(path) {
 
 function removeFilePanelOwner(path, item) {
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
-  else if (isFilePreviewItem(item)) removeFilePreviewTabItem(path, item);
   else removeFileEditorTabItem(path, item);
   fileEditorViewModesForPath(path).delete(item);
   // DOIT.6 #73: also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
@@ -8936,8 +8916,6 @@ function setOpenFileOwner(path, item, options = {}) {
   rememberOpenFileOwner(path, options.ownerSession);
   if (isImageViewerItem(item)) {
     replacementSlots = replaceSharedImageViewerPath(path);
-  } else if (isFilePreviewItem(item)) {
-    addFilePreviewTabItem(path, item);
   } else {
     addFileEditorTabItem(path, item);
   }
@@ -9522,7 +9500,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   };
   const alreadyOpen = Boolean(openFiles.get(fullPath)?.kind);
   if (options.viewMode) setFileEditorViewMode(fullPath, options.viewMode, item);
-  else if (!isFilePreviewItem(item)) setFileEditorViewMode(fullPath, 'edit', item);
+  else setFileEditorViewMode(fullPath, 'edit', item);
   recordEditorNav(item);   // DOIT.21: push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
     await refreshOpenFileGitMetadata(fullPath);
@@ -9567,42 +9545,6 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     showFileOpenError(fullPath, err);
     return null;
   }
-}
-
-async function openFileCrossPaneSplit(path) {
-  if (!path || !editorPreviewModeAvailable(path)) return;
-  const editorItem = fileEditorItemFor(path);
-  const previewItem = filePreviewItemFor(path);
-  setFileEditorViewMode(path, 'edit', editorItem);
-  setFileEditorViewMode(path, 'preview', previewItem);
-  if (!openFiles.get(path)?.kind || !fileHasEditorTab(path)) {
-    await openFileInEditor(path, {name: basenameOf(path)}, {item: editorItem});
-  } else {
-    setOpenFileOwner(path, editorItem);
-    await openFileEditorPane(path, {item: editorItem});
-  }
-  const editorSlot = slotForSession(editorItem) || largestPaneSlotForFileEditor() || slotForNewSession();
-  const previewSlot = largestPaneSlotForFileEditor(new Set([editorSlot]));
-  setOpenFileOwner(path, previewItem);
-  if (slotForSession(previewItem)) {
-    activatePaneTab(slotForSession(previewItem), previewItem);
-  } else if (previewSlot) {
-    await openFileEditorPane(path, {
-      item: previewItem,
-      targetSlot: previewSlot,
-    });
-  } else {
-    await openFileEditorPane(path, {
-      item: previewItem,
-      targetSlot: editorSlot,
-      targetZone: 'right',
-      pct: defaultSplitPercent,
-    });
-  }
-  const finalEditorSlot = slotForSession(editorItem);
-  if (finalEditorSlot) activatePaneTab(finalEditorSlot, editorItem);
-  renderSessionButtons();
-  renderPaneTabStrips();
 }
 
 async function openFileStateFromDisk(path, entry = null) {
@@ -10752,17 +10694,14 @@ function renameOpenFilePath(oldPath, newPath) {
   if (!oldPath || !newPath || oldPath === newPath || !openFiles.has(oldPath)) return;
   const oldItem = fileEditorItemFor(oldPath);
   const newItem = fileEditorItemFor(newPath);
-  const oldPreviewItem = filePreviewItemFor(oldPath);
-  const newPreviewItem = filePreviewItemFor(newPath);
   const state = fileStateFor(oldPath);
-  const wasInLayout = itemInLayout(oldItem) || itemInLayout(oldPreviewItem);
-  const panelItems = [oldItem, oldPreviewItem].filter(item => panelNodes.has(item));
+  const wasInLayout = itemInLayout(oldItem);
+  const panelItems = [oldItem].filter(item => panelNodes.has(item));
   deleteFileState(oldPath);
   setFileState(newPath, state);
   if (state.editorTabItems.delete(oldItem)) state.editorTabItems.add(newItem);
-  if (state.previewTabItems.delete(oldPreviewItem)) state.previewTabItems.add(newPreviewItem);
   const viewModes = state.viewMode;
-  for (const [oldKey, newKey] of [[oldItem, newItem], [oldPreviewItem, newPreviewItem]]) {
+  for (const [oldKey, newKey] of [[oldItem, newItem]]) {
     if (viewModes.has(oldKey)) {
       viewModes.set(newKey, viewModes.get(oldKey));
       viewModes.delete(oldKey);
@@ -10789,7 +10728,7 @@ function renameOpenFilePath(oldPath, newPath) {
   }
   if (activeFile === oldPath) activeFile = newPath;
   syncFileLayoutItems();
-  if (wasInLayout) applyLayoutSlots(layoutWithReplacedItems(new Map([[oldItem, newItem], [oldPreviewItem, newPreviewItem]])), {focusSession: newItem});
+  if (wasInLayout) applyLayoutSlots(layoutWithReplacedItems(new Map([[oldItem, newItem]])), {focusSession: newItem});
   else {
     renderSessionButtons();
     renderPaneTabStrips();
@@ -10801,7 +10740,6 @@ function editorViewModeKey(path, item = null) {
 }
 
 function editorViewModeFor(path, item = null) {
-  if (isFilePreviewItem(item)) return 'preview';
   const modes = fileEditorViewModesForPath(path);
   const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
@@ -10812,14 +10750,13 @@ function editorViewModeFor(path, item = null) {
 
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
-  if (isFilePreviewItem(item)) mode = 'preview';
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
   if (!control) return;
-  const visible = !isFilePreviewItem(item) && state?.kind === 'text' && editorPreviewModeAvailable(path);
+  const visible = state?.kind === 'text' && editorPreviewModeAvailable(path);
   control.hidden = !visible;
   if (!visible) return;
   const mode = editorViewModeFor(path, item);
@@ -10906,8 +10843,8 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
-    '--markdown-heading': 'var(--active-accent-bright)',
-    '--markdown-heading-bg': 'var(--active-control-soft-bg)',
+    '--markdown-heading': 'var(--active-accent)',
+    '--markdown-heading-bg': 'transparent',
     '--markdown-link': syntax.link,
     '--markdown-strong': syntax.strong,
     '--markdown-emphasis': syntax.emphasis,
@@ -10936,8 +10873,8 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--lt-editor-bg': scheme.bg,
     '--lt-editor-gutter-bg': scheme.gutterBg,
     '--lt-editor-preview-bg': scheme.previewBg,
-    '--lt-markdown-heading': 'var(--active-accent-bright)',
-    '--lt-markdown-heading-bg': 'var(--active-control-soft-bg)',
+    '--lt-markdown-heading': 'var(--active-accent)',
+    '--lt-markdown-heading-bg': 'transparent',
     '--lt-markdown-link': syntax.link,
     '--lt-markdown-strong': syntax.strong,
     '--lt-markdown-emphasis': syntax.emphasis,
@@ -11001,6 +10938,7 @@ function refreshOpenEditorThemePanels() {
       renderFileEditorPanel(panel, item);
     }
   });
+  if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();
 }
 
 function applyEditorThemeMode(options = {}) {
@@ -11068,14 +11006,14 @@ function updateEditorFindButton(button, state, host = null) {
 }
 
 function fileEditorGitActionControlsVisible(path, state, item = null) {
-  if (isFilePreviewItem(item) || state?.kind !== 'text' || !fileStateHasUsefulGitHistory(state)) return false;
+  if (state?.kind !== 'text' || !fileStateHasUsefulGitHistory(state)) return false;
   const active = editorViewModeFor(path, item) === 'diff';
   const confirmedNoDiff = state?.diffLoaded === true && !openFileDiffAvailable(state);
   return active || !confirmedNoDiff;
 }
 
 function fileEditorBlameControlsVisible(path, state, item = null) {
-  return !isFilePreviewItem(item) && state?.kind === 'text' && fileStateHasUsefulGitHistory(state);
+  return state?.kind === 'text' && fileStateHasUsefulGitHistory(state);
 }
 
 function updateFileEditorBlameButton(button, path, state, item = null) {
@@ -11110,7 +11048,7 @@ function updateFileEditorDiffButton(button, path, state, item = null) {
 function updateFileEditorDiffExpandButton(button, path, state, item = null) {
   if (!button) return;
   const activeDiff = editorViewModeFor(path, item) === 'diff';
-  button.hidden = isFilePreviewItem(item) || state?.kind !== 'text' || !activeDiff || !openFileDiffAvailable(state);
+  button.hidden = state?.kind !== 'text' || !activeDiff || !openFileDiffAvailable(state);
   button.disabled = button.hidden || state?.diffLoading === true;
   button.setAttribute('aria-pressed', diffExpandUnchanged ? 'true' : 'false');
 }
@@ -15211,8 +15149,7 @@ function maybeLoadFileTabForPopover(tab, item) {
 function ensureFileTabStateForItem(item) {
   const path = fileItemPath(item);
   if (!path) return null;
-  if (isFilePreviewItem(item)) addFilePreviewTabItem(path, item);
-  else if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
+  if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
   let state = fileStateFor(path);
   if (!state || !state.kind) {
     state = ensureFileState(path, {
@@ -15228,7 +15165,7 @@ function ensureFileTabStateForItem(item) {
 }
 
 function refreshFilePopoversForPath(path) {
-  for (const item of [imageViewerItemFor(path), fileEditorItemFor(path), filePreviewItemFor(path)]) {
+  for (const item of [imageViewerItemFor(path), fileEditorItemFor(path)]) {
     document.querySelectorAll(`.pane-tab[data-pane-tab="${cssEscape(item)}"]`).forEach(tab => refreshFileTabPopover(tab, item));
   }
 }
@@ -15297,9 +15234,8 @@ function fileEditorPaneTabHtml(item, options = {}) {
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
   const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('filetab.modified'))}" aria-label="${esc(t('filetab.modified'))}"></span>` : '';
   const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
-  const kind = isFilePreviewItem(item) ? `<span class="file-tab-kind" title="${esc(t('tab.previewOnly'))}">${esc(t('tab.preview'))}</span>` : '';
   const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}${kind}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
 }
 
 function tmuxPaneTabHtml(session, info, state, auto) {
@@ -17114,7 +17050,7 @@ function sessionForFileRepo(path) {
 function sessionFilesTargetSession(options = {}) {
   if (options.followActive) {
     const activeItem = currentActiveMenuItem();
-    const activePath = isFileEditorItem(activeItem) || isFilePreviewItem(activeItem) || isImageViewerItem(activeItem)
+    const activePath = isFileEditorItem(activeItem) || isImageViewerItem(activeItem)
       ? fileItemPath(activeItem)
       : '';
     const fileSession = sessionForFileRepo(activePath || '');
@@ -19067,6 +19003,7 @@ function setEditorPreviewFontSize(value) {
   editorPreviewFontSize = next;
   applyCssSettings();
   updateEditorPreviewFontControls();
+  refreshFilePreviewPopouts();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
     .then(() => { statusEl.textContent = 'saved appearance.preview_font_size'; })
     .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
@@ -19294,6 +19231,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   setFileEditorPanelStatus(panel, status.message, status.level);
   renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
   renderLinkedFilePreviewPanels(panel, path, state.content);
+  updateFilePreviewPopout(path, state.content);
   syncFileEditorSplitScroll(panel, 'editor');
   const item = fileEditorPanelItem(panel);
   if (item && panel?.contains?.(document.activeElement)) {
@@ -19358,7 +19296,7 @@ function createFileEditorPanel(item) {
           <button type="button" data-editor-mode="edit" title="${esc(t('editor.mode.edit'))}" aria-label="${esc(t('editor.mode.edit'))}"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
           <button type="button" data-editor-mode="preview" title="${esc(t('editor.mode.preview'))}" aria-label="${esc(t('editor.mode.preview'))}"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
           <button type="button" data-editor-mode="split" title="${esc(t('editor.mode.split'))}" aria-label="${esc(t('editor.mode.split'))}"><span class="file-editor-icon file-editor-icon-split" aria-hidden="true"></span></button>
-          <button type="button" class="file-editor-cross-split-panel" title="${esc(t('editor.sidePreview'))}" aria-label="${esc(t('editor.sidePreview'))}" hidden><span class="file-editor-icon file-editor-icon-side-split" aria-hidden="true"></span></button>
+          <button type="button" class="file-editor-popout-preview-panel" title="${esc(t('editor.popoutPreview'))}" aria-label="${esc(t('editor.popoutPreview'))}" hidden><span class="file-editor-icon file-editor-icon-popout-preview" aria-hidden="true"></span></button>
         </div>
         <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="mode" aria-hidden="true" hidden></span>
         <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}" hidden>
@@ -19523,10 +19461,10 @@ function createFileEditorPanel(item) {
     const path = controls?.dataset?.diffRefPath || '';
     setRepoDiffRefs(repo, 'HEAD', 'current', {path});
   });
-  panel.querySelector('.file-editor-cross-split-panel')?.addEventListener('click', event => {
+  panel.querySelector('.file-editor-popout-preview-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    openFileCrossPaneSplit(path);
+    openFilePreviewPopout(path, panel);
   });
   panel.querySelector('.file-editor-theme-panel')?.addEventListener('click', event => {
     event.preventDefault();
@@ -20767,16 +20705,15 @@ function renderFileEditorPanel(panel, item) {
   const diffButton = panel.querySelector('.file-editor-diff-panel');
   const diffRefPanel = panel.querySelector('.file-editor-diff-ref-panel');
   const diffExpandButton = panel.querySelector('.file-editor-diff-expand-panel');
-  const crossSplitButton = panel.querySelector('.file-editor-cross-split-panel');
+  const popoutPreviewButton = panel.querySelector('.file-editor-popout-preview-panel');
   const reloadButton = panel.querySelector('.file-editor-reload-panel');
   const themeButton = panel.querySelector('.file-editor-theme-panel');
   const blameButton = panel.querySelector('.file-editor-blame-panel');
   const saveButton = panel.querySelector('.file-editor-save-panel');
   const content = panel.querySelector('.file-editor-content');
-  const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, crossSplitButton, reloadButton];
+  const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, popoutPreviewButton, reloadButton];
   updateEditorThemeButton(themeButton);
   if (!state) {
-    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -20786,7 +20723,6 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.loading) {
-    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -20797,7 +20733,6 @@ function renderFileEditorPanel(panel, item) {
     return;
   }
   if (state.kind === 'error' || state.kind === 'too-large') {
-    panel.classList.remove('file-editor-pure-preview');
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
     panel.classList.remove('syntax-highlighted');
@@ -20826,36 +20761,31 @@ function renderFileEditorPanel(panel, item) {
     setFileEditorViewMode(path, 'edit', item);
   }
   const mode = editorViewModeFor(path, item);
-  const purePreviewMode = mode === 'preview';
-  panel.classList.toggle('file-editor-pure-preview', purePreviewMode);
   updateEditorModeControl(modeControl, path, state, item);
-  if (modeControl && purePreviewMode) modeControl.hidden = true;
   if (previewFontPanel) {
     previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path) || (mode !== 'preview' && mode !== 'split');
     updateEditorPreviewFontControls(previewFontPanel);
   }
   if (gutterButton) {
-    gutterButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
+    gutterButton.hidden = state.kind !== 'text' || mode === 'preview';
     updateEditorGutterButton(gutterButton);
   }
   if (wrapButton) {
-    wrapButton.hidden = isFilePreviewItem(item) || state.kind !== 'text' || mode === 'preview';
+    wrapButton.hidden = state.kind !== 'text' || mode === 'preview';
     updateEditorWrapButton(wrapButton);
   }
   updateEditorFindButton(findButton, state, panel);
-  if (findButton && (isFilePreviewItem(item) || mode === 'preview')) findButton.hidden = true;
+  if (findButton && mode === 'preview') findButton.hidden = true;
   // Git-backed controls share file-history gating, but Diff also depends on the loaded diff state while
   // Blame stays available in normal edit mode for clean files with useful history.
   updateFileEditorBlameButton(blameButton, path, state, item);
   updateFileEditorDiffButton(diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
-  if (purePreviewMode) setElementsHidden([blameButton, diffButton, diffExpandButton], true);
-  if (crossSplitButton) {
-    crossSplitButton.hidden = purePreviewMode || isFilePreviewItem(item) || state.kind !== 'text' || !editorPreviewModeAvailable(path);
+  if (popoutPreviewButton) {
+    popoutPreviewButton.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path);
   }
-  setElementsHidden([reloadButton, saveButton], purePreviewMode);
   if (diffRefPanel) {
-    diffRefPanel.hidden = purePreviewMode || mode !== 'diff' || state.kind !== 'text';
+    diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
     // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
     // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
     const diffRepo = fileRepoForPath(path);
@@ -20990,7 +20920,7 @@ function loadFileEditorState(path, panel, item) {
 function updateFileEditorPanelChrome(panel, path) {
   const state = openFiles.get(path);
   const item = panel?.dataset?.layoutItem || '';
-  const previewOnly = isFilePreviewItem(item);
+  const previewOnly = false;
   panel.classList.toggle('dirty', !!state?.dirty);
   const dirtyDot = panel.querySelector('.file-editor-title .file-tab-dirty');
   if (dirtyDot) dirtyDot.hidden = !state?.dirty;
@@ -21056,10 +20986,10 @@ async function activateNavItem(item) {
     activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
     return true;
   }
-  if (isFileEditorItem(item) || isFilePreviewItem(item)) {
+  if (isFileEditorItem(item)) {
     const path = fileItemPath(item);
     if (path) {
-      await openFileInEditor(path, basenameOf(path), {item, viewMode: isFilePreviewItem(item) ? 'preview' : undefined});
+      await openFileInEditor(path, basenameOf(path), {item});
       return true;
     }
   }
@@ -21561,6 +21491,320 @@ function renderEditorPreviewPane(container, path, text) {
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }
 
+const filePreviewPopouts = new Map();
+
+function currentStylesheetHref(match) {
+  const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+    .find(item => String(item.getAttribute('href') || '').includes(match));
+  return link ? link.href : '';
+}
+
+function previewPopoutBodyClassName() {
+  const keep = ['theme-light', 'theme-dark', 'editor-theme-light', 'editor-theme-dark', 'editor-preview-vanilla'];
+  const classes = keep.filter(name => document.body?.classList?.contains(name));
+  classes.push('file-preview-popout-window');
+  return classes.join(' ');
+}
+
+function previewPopoutVariableStyle() {
+  const root = getComputedStyle(document.documentElement);
+  const names = [
+    '--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text',
+    '--active-control-bg', '--active-control-border', '--active-control-text',
+    '--editor-preview-font-size', '--editor-line-height',
+    '--lt-editor-bg', '--lt-editor-preview-bg', '--lt-text', '--lt-muted', '--lt-line',
+    '--lt-panel', '--lt-panel2', '--lt-markdown-heading', '--lt-markdown-heading-bg',
+    '--lt-markdown-link', '--lt-markdown-strong', '--lt-markdown-emphasis',
+    '--lt-code-inline', '--lt-code-inline-bg', '--lt-code-inline-border',
+    '--markdown-heading', '--markdown-heading-bg', '--markdown-link', '--markdown-strong',
+    '--markdown-emphasis', '--code-inline', '--code-inline-bg', '--code-inline-border',
+  ];
+  const aliases = [
+    ['--editor-scheme-bg', '--popout-editor-scheme-bg'],
+    ['--editor-scheme-fg', '--popout-editor-scheme-fg'],
+    ['--editor-scheme-muted', '--popout-editor-scheme-muted'],
+    ['--editor-scheme-line', '--popout-editor-scheme-line'],
+    ['--editor-scheme-panel', '--popout-editor-scheme-panel'],
+    ['--editor-scheme-panel2', '--popout-editor-scheme-panel2'],
+    ['--editor-scheme-preview-bg', '--popout-editor-scheme-preview-bg'],
+  ];
+  const copied = names
+    .map(name => {
+      const value = root.getPropertyValue(name).trim();
+      return value ? `${name}: ${value}` : '';
+    });
+  const aliased = aliases.map(([source, target]) => {
+    const value = root.getPropertyValue(source).trim();
+    return value ? `${target}: ${value}` : '';
+  });
+  return [...copied, ...aliased].filter(Boolean)
+    .join('; ');
+}
+
+function previewPopoutToolbarHtml() {
+  return `
+      <div class="file-preview-popout-controls" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}">
+        <button type="button" data-preview-popout-theme title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
+        <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}">
+          <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
+          <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
+          <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
+        </span>
+      </div>`;
+}
+
+function renderedPreviewSnapshot(path, text) {
+  const scratch = document.createElement('div');
+  scratch.className = 'file-editor-preview-pane-panel';
+  renderEditorPreviewPane(scratch, path, text);
+  scratch.hidden = false;
+  return {
+    className: scratch.className,
+    html: scratch.innerHTML,
+  };
+}
+
+function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
+  const doc = previewWindow?.document;
+  if (!doc) return false;
+  const title = `${basenameOf(path)} preview`;
+  const cssHref = currentStylesheetHref('yolomux.css') || '/static/yolomux.css';
+  doc.open();
+  doc.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(title)}</title>
+  <link rel="stylesheet" href="${esc(cssHref)}">
+  <style>
+    html, body { min-height: 100%; margin: 0; }
+    body.file-preview-popout-window {
+      background: var(--editor-preview-bg, var(--bg, #ffffff));
+      color: var(--text, #111827);
+      overflow: auto;
+    }
+    .file-preview-popout-shell {
+      box-sizing: border-box;
+      width: min(100%, 1040px);
+      margin: 0 auto;
+      padding: 20px 24px 36px;
+    }
+    .file-preview-popout-title {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 8px 0 12px;
+      margin-bottom: 12px;
+      border-bottom: 1px solid var(--border, #d1d5db);
+      background: var(--editor-preview-bg, var(--bg, #ffffff));
+      color: var(--text, #111827);
+      font: 600 13px/1.3 var(--font, system-ui, sans-serif);
+    }
+    .file-preview-popout-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }
+    .file-preview-popout-controls > button {
+      min-width: 24px;
+      width: 24px;
+      height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid var(--active-control-border, #76b900);
+      border-radius: 4px;
+      color: var(--active-control-bg, #76b900);
+      background: transparent;
+      cursor: pointer;
+    }
+    .file-preview-popout-controls .file-editor-preview-font-panel {
+      display: inline-flex;
+    }
+    .file-preview-popout-title span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-preview-popout-title small {
+      color: var(--muted, #6b7280);
+      font: 500 11px/1.2 var(--font, system-ui, sans-serif);
+      white-space: nowrap;
+    }
+    .file-preview-popout-window .file-editor-preview-pane-panel {
+      position: static !important;
+      inset: auto !important;
+      display: block !important;
+      min-height: auto;
+      max-height: none;
+      height: auto;
+      overflow: visible;
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+    .file-preview-popout-window {
+      --editor-scheme-bg: var(--popout-editor-scheme-bg);
+      --editor-scheme-fg: var(--popout-editor-scheme-fg);
+      --editor-scheme-muted: var(--popout-editor-scheme-muted);
+      --editor-scheme-line: var(--popout-editor-scheme-line);
+      --editor-scheme-panel: var(--popout-editor-scheme-panel);
+      --editor-scheme-panel2: var(--popout-editor-scheme-panel2);
+      --editor-scheme-preview-bg: var(--popout-editor-scheme-preview-bg);
+      --bg: var(--editor-scheme-bg, #0f131a);
+      --panel: var(--editor-scheme-panel, #151b24);
+      --panel2: var(--editor-scheme-panel2, #1b2432);
+      --text: var(--editor-scheme-fg, #e4e8ee);
+      --muted: var(--editor-scheme-muted, #8b95a5);
+      --line: var(--editor-scheme-line, #2a3444);
+      --editor-preview-bg: var(--editor-scheme-preview-bg, var(--bg));
+    }
+    .file-preview-popout-window .markdown-body {
+      color: var(--text, #111827);
+      background: transparent;
+    }
+    .file-preview-popout-window.editor-theme-light {
+      --editor-scheme-bg: var(--lt-editor-bg);
+      --editor-scheme-fg: var(--lt-text);
+      --editor-scheme-muted: var(--lt-muted);
+      --editor-scheme-line: var(--lt-line);
+      --editor-scheme-panel: var(--lt-panel);
+      --editor-scheme-panel2: var(--lt-panel2);
+      --editor-scheme-preview-bg: var(--lt-editor-preview-bg);
+    }
+    .file-preview-popout-window.editor-theme-light .markdown-body {
+      --markdown-heading: var(--lt-markdown-heading);
+      --markdown-heading-bg: var(--lt-markdown-heading-bg);
+      --markdown-link: var(--lt-markdown-link);
+      --markdown-strong: var(--lt-markdown-strong);
+      --markdown-emphasis: var(--lt-markdown-emphasis);
+      --code-inline: var(--lt-code-inline);
+      --code-inline-bg: var(--lt-code-inline-bg);
+      --code-inline-border: var(--lt-code-inline-border);
+    }
+    .file-preview-popout-window.editor-theme-light .markdown-body pre {
+      color: var(--lt-text);
+      background: var(--lt-panel);
+      border-color: var(--lt-line);
+    }
+    .file-preview-popout-window.editor-theme-light .markdown-body pre code {
+      color: inherit;
+      background: transparent;
+      border: 0;
+    }
+    @media (max-width: 640px) {
+      .file-preview-popout-shell { padding: 12px 14px 28px; }
+    }
+  </style>
+</head>
+<body class="${esc(previewPopoutBodyClassName())}" style="${esc(previewPopoutVariableStyle())}">
+  <main class="file-preview-popout-shell">
+    <header class="file-preview-popout-title"><span>${esc(compactHomePath(path))}</span>${previewPopoutToolbarHtml()}</header>
+    <article data-preview-root class="${esc(snapshot.className)}">${snapshot.html}</article>
+  </main>
+</body>
+</html>`);
+  doc.close();
+  bindFilePreviewPopoutControls(path, previewWindow);
+  return true;
+}
+
+function updateFilePreviewPopoutControls(path, previewWindow) {
+  const doc = previewWindow?.document;
+  if (!doc) return;
+  doc.body?.setAttribute('style', previewPopoutVariableStyle());
+  const themeButton = doc.querySelector('[data-preview-popout-theme]');
+  if (themeButton) updateEditorThemeButton(themeButton);
+  updateEditorPreviewFontControls(doc);
+}
+
+function bindFilePreviewPopoutControls(path, previewWindow) {
+  const doc = previewWindow?.document;
+  if (!doc || doc._yolomuxPreviewControlsBound) return;
+  doc._yolomuxPreviewControlsBound = true;
+  doc.querySelector('[data-preview-popout-theme]')?.addEventListener('click', event => {
+    event.preventDefault();
+    cycleEditorThemeMode();
+    refreshFilePreviewPopouts();
+  });
+  doc.querySelector('.file-editor-preview-font-panel')?.addEventListener('click', event => {
+    const button = event.target?.closest?.('[data-editor-preview-font-step]');
+    if (!button) return;
+    event.preventDefault();
+    setEditorPreviewFontSize(editorPreviewFontSize + Number(button.dataset.editorPreviewFontStep || 0));
+    refreshFilePreviewPopouts();
+  });
+  updateFilePreviewPopoutControls(path, previewWindow);
+}
+
+function updateFilePreviewPopout(path, text) {
+  const record = filePreviewPopouts.get(path);
+  if (!record) return false;
+  const previewWindow = record.window;
+  if (!previewWindow || previewWindow.closed) {
+    filePreviewPopouts.delete(path);
+    return false;
+  }
+  const snapshot = renderedPreviewSnapshot(path, text);
+  try {
+    const doc = previewWindow.document;
+    const root = doc?.querySelector?.('[data-preview-root]');
+    if (!root) return writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
+    root.className = snapshot.className;
+    root.innerHTML = snapshot.html;
+    doc.body.className = previewPopoutBodyClassName();
+    updateFilePreviewPopoutControls(path, previewWindow);
+    doc.title = `${basenameOf(path)} preview`;
+    return true;
+  } catch (_) {
+    filePreviewPopouts.delete(path);
+    return false;
+  }
+}
+
+function refreshFilePreviewPopouts() {
+  for (const path of Array.from(filePreviewPopouts.keys())) {
+    const state = openFiles.get(path);
+    if (state?.kind === 'text') updateFilePreviewPopout(path, state.content);
+    else filePreviewPopouts.delete(path);
+  }
+}
+
+function openFilePreviewPopout(path, panel = null) {
+  if (!path || !editorPreviewModeAvailable(path)) return;
+  syncOpenFileContentFromPanels(path, panel);
+  const state = openFiles.get(path);
+  if (!state || state.kind !== 'text') return;
+  const existing = filePreviewPopouts.get(path)?.window;
+  if (existing && !existing.closed) {
+    updateFilePreviewPopout(path, state.content);
+    existing.focus?.();
+    return;
+  }
+  const previewWindow = window.open('', `yolomux-preview-${encodeURIComponent(path)}`, 'popup,width=980,height=900');
+  if (!previewWindow) {
+    statusErr('preview pop-out was blocked by the browser');
+    return;
+  }
+  try {
+    filePreviewPopouts.set(path, {window: previewWindow});
+    writeFilePreviewPopoutDocument(path, previewWindow, renderedPreviewSnapshot(path, state.content));
+    previewWindow.focus?.();
+  } catch (error) {
+    filePreviewPopouts.delete(path);
+    try { previewWindow.close(); } catch (_) {}
+    statusErr(`preview pop-out failed: ${esc(error)}`);
+  }
+}
+
 function markdownInlineHighlightHtml(escaped) {
   return escaped
     .replace(/(`[^`]+`)/g, '<span class="md-code">$1</span>')
@@ -21851,38 +22095,6 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
   }
 }
 
-function updateLinkedFilePreviewRings() {
-  for (const panel of panelNodes.values()) panel.classList.remove('preview-linked');
-  if (!focusedPanelItem) return;
-  const path = (isFileEditorItem(focusedPanelItem) || isFilePreviewItem(focusedPanelItem)) ? fileItemPath(focusedPanelItem) : '';
-  if (!path) return;
-  if (isFilePreviewItem(focusedPanelItem)) {
-    const editorItem = fileEditorItemFor(path);
-    if (!itemIsActivePaneTab(editorItem)) return;
-    const editorPanel = panelNodes.get(editorItem);
-    if (editorPanel) editorPanel.classList.add('preview-linked');
-    return;
-  }
-  const previewItem = filePreviewItemFor(path);
-  if (!itemIsActivePaneTab(previewItem)) return;
-  const previewPanel = panelNodes.get(previewItem);
-  if (previewPanel) previewPanel.classList.add('preview-linked');
-}
-
-function syncCrossPaneFileEditorScroll(host, source) {
-  const path = fileEditorPanelPath(host);
-  if (!path || !fileEditorSourceCanDrive(host, source)) return;
-  const line = fileEditorSourceLineForScroll(host, source);
-  if (!line) return;
-  const preferredTarget = source === 'preview' ? 'editor' : 'preview';
-  const fallbackTarget = preferredTarget === 'editor' ? 'preview' : 'editor';
-  for (const panel of fileEditorPanelsForPath(path)) {
-    if (panel === host || fileEditorScrollSyncBlocked(panel)) continue;
-    if (scrollFileEditorPanelToSourceLine(panel, preferredTarget, line)) continue;
-    scrollFileEditorPanelToSourceLine(panel, fallbackTarget, line);
-  }
-}
-
 function syncFileEditorInPaneSplitScroll(host, source) {
   const content = host.querySelector?.('.file-editor-content');
   if (!content?.classList?.contains('split-preview')) return false;
@@ -21930,7 +22142,6 @@ function syncFileEditorSplitScroll(host, source) {
   const canDrive = fileEditorSourceCanDrive(host, source);
   if (!canDrive) return;
   syncFileEditorInPaneSplitScroll(host, source);
-  syncCrossPaneFileEditorScroll(host, source);
 }
 
 function refreshEditorPreviews() {
@@ -21940,6 +22151,7 @@ function refreshEditorPreviews() {
     const state = openFiles.get(path);
     if (state?.kind === 'text') {
       renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      updateFilePreviewPopout(path, state.content);
     }
   }
 }
@@ -23181,7 +23393,7 @@ function updatePanelSlot(panel, session, slot) {
   panel.dataset.layoutItem = session;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session) || isFilePreviewItem(session)) renderFileEditorPanel(panel, session);
+  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session);
   updatePaneExpandButton(panel, session);
   updatePaneTabStrip(panel, slot);
   updatePanelInactiveOverlays();
@@ -24107,7 +24319,7 @@ function globalShortcutTargetAllowsPlatformAction(target) {
 }
 
 function itemCanCloseWithAppShortcut(item) {
-  return isFileEditorItem(item) || isFilePreviewItem(item) || isImageViewerItem(item);
+  return isFileEditorItem(item) || isImageViewerItem(item);
 }
 
 function toggleFileExplorerShortcut() {

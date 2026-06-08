@@ -1178,7 +1178,7 @@ function updatePanelSlot(panel, session, slot) {
   panel.dataset.layoutItem = session;
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
-  if (isFileEditorItem(session) || isFilePreviewItem(session)) renderFileEditorPanel(panel, session);
+  if (isFileEditorItem(session)) renderFileEditorPanel(panel, session);
   updatePaneExpandButton(panel, session);
   updatePaneTabStrip(panel, slot);
   updatePanelInactiveOverlays();
@@ -2104,7 +2104,7 @@ function globalShortcutTargetAllowsPlatformAction(target) {
 }
 
 function itemCanCloseWithAppShortcut(item) {
-  return isFileEditorItem(item) || isFilePreviewItem(item) || isImageViewerItem(item);
+  return isFileEditorItem(item) || isImageViewerItem(item);
 }
 
 function toggleFileExplorerShortcut() {
