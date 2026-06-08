@@ -111,9 +111,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "yoagent": {
         "backend": "auto",
         "invocation": "cli",
-        "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Help users operate YOLOmux using the supplied concepts and report only from the supplied agent activity context. Write like a normal human status update, not a metadata list. Answer the user's question directly and helpfully. Prioritize the most recent and important work, blockers, PRs, CI, dirty repos, and likely next actions. Do not mention session ids, per-session details, or a session-by-session inventory unless the user explicitly asks about a session, asks to list/enumerate sessions, or asks for all sessions. Do not run tools or inspect ~/.claude, ~/.codex, transcript directories, or any filesystem path. Do not say Sup. Do not invent missing facts.",
-        "intro": "Use the live AI agent activity only as much as the user asked for. If the user is unsure what to do, recommend what to work on next based on freshness, importance, blockers, PR/CI state, dirty repos, and changed files. Keep stale or old work out of the default answer unless it changes the recommendation or the user explicitly asks for sessions.",
-        "format": "Reply in Markdown. Default shape: a short direct answer, then optional bullets for the top relevant topics or next actions. Do not include session ids, per-session headings, or one item per session unless the user asks about a specific session or asks to list/enumerate/show all sessions. When the user explicitly asks for sessions, use one numbered item per session/topic, with a bold title and one or two short factual sub-bullets. End with `**Open / pending:**` only when there are concrete next actions or blockers. Name repos, tickets, PRs, and important files when they matter; omit unsupported details.",
+        "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Use the supplied YOLOmux concepts and activity context as the starting point. Answer the user's question directly in a normal status-update style. Prioritize fresh work, blockers, PR/CI state, dirty repos, changed files, and likely next actions. You may run tools such as ls, git status, or transcript inspection when that helps answer the user's question. Keep tool use scoped to the relevant tmux session, repo, and transcript paths. Whenever you discuss session-specific work, refer to it as tmux session `<session-name>` and pair that name with its full directory or repo path enclosed in backticks. If the agent/model matters, say tmux session `<session-name>` with <agent/model> about ... . Avoid session inventories unless the user asks about a session, asks for a summary, asks to list/enumerate sessions, or asks for all sessions. Do not invent missing facts.",
+        "intro": "Use the live AI agent activity only as much as the user asked for. When useful, run scoped tools such as ls, git status, or transcript inspection to verify details before answering. If the user is unsure what to do, recommend what to work on next based on freshness, importance, blockers, PR/CI state, dirty repos, changed files, and stale work.",
+        "format": "Reply in Markdown. Default shape: a short direct answer, then optional bullets for the top relevant topics or next actions. Include repo/directory and important files when they matter. Include session names only when the user asks about a specific session, asks for a summary, or asks to list/enumerate/show all sessions. For summary/list answers, use one Markdown table with columns: tmux session, full path, last worked, details. In the tmux session column, show only the session name as a Markdown link with code-formatted text, like [`2`](?yoagent-session=2). Do not repeat the words tmux session inside table cells. In the full path column, use absolute full directory/repo paths enclosed in backticks, e.g. `/home/<user>/repo`. In the last worked column, use compact recency such as `9 hrs ago` or `5 min ago`. In the details column, write 1-2 factual sentences about what that session is doing. If there are 6 sessions, emit 6 table rows. End with `**Open / pending:**` only for concrete next actions or blockers.",
     },
     "yolo": {
         "rule_file_path": "~/.config/yolomux/yolo-rules.yaml",
@@ -123,9 +123,26 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 LEGACY_YOAGENT_DEFAULTS = {
-    "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Help users operate YOLOmux using the supplied concepts and report only from the supplied agent activity context. Write like a normal human status update, not a metadata list. Answer the user's question directly. Prioritize the most recent and important work; do not list every session by default. Only enumerate sessions one by one when the user asks to list, enumerate, or show all sessions. Do not run tools or inspect ~/.claude, ~/.codex, transcript directories, or any filesystem path. Do not say Sup. Do not invent missing facts.",
+    "system_prompt": DEFAULT_SETTINGS["yoagent"]["system_prompt"],
     "intro": "Summarize the live AI agent activity only as much as the user asked for. Lead with the freshest or most important task, especially active sessions, recent edits, blocked work, PRs, CI, or dirty repos. Stale or old sessions should be mentioned only in a short follow-up paragraph unless the user explicitly asks for a full list.",
     "format": "Reply in Markdown. Default shape: a short direct answer, then optional bullets only for the top relevant <topic> items. Do not create one item per session unless the user asks to list, enumerate, or show all sessions. When the user does ask for a list, use one numbered item per session/topic, with a bold title and one or two short factual sub-bullets. End with `**Open / pending:**` only when there are concrete next actions, blockers, or stale sessions worth calling out. Name repos, tickets, PRs, and session ids when they matter; omit unsupported details.",
+}
+LEGACY_YOAGENT_PROMPT_MARKERS = {
+    "system_prompt": [
+        "Do not mention session ids, per-session details",
+        "report only from the supplied agent activity context",
+        "Do not run tools or inspect ~/.claude",
+        "transcript directories, or any filesystem path",
+    ],
+    "intro": [
+        "Keep stale or old work out of the default answer",
+        "Stale or old sessions should be mentioned only",
+    ],
+    "format": [
+        "Do not include session ids, per-session headings",
+        "Do not create one item per session unless",
+        "When the user explicitly asks for sessions",
+    ],
 }
 
 SESSION_STATE_KEYS = {
@@ -152,11 +169,11 @@ PR_TRANSITION_KEYS = {
 NOTIFY_TRANSITION_KEYS = SESSION_STATE_KEYS | PR_TRANSITION_KEYS
 
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
-    ("appearance", "ui_font_size"): (8, 20),
-    ("appearance", "terminal_font_size"): (8, 28),
-    ("appearance", "editor_font_size"): (8, 28),
-    ("appearance", "preview_font_size"): (8, 32),
-    ("appearance", "file_explorer_font_size"): (8, 24),
+    ("appearance", "ui_font_size"): (6, 20),
+    ("appearance", "terminal_font_size"): (6, 28),
+    ("appearance", "editor_font_size"): (6, 28),
+    ("appearance", "preview_font_size"): (6, 32),
+    ("appearance", "file_explorer_font_size"): (6, 24),
     ("appearance", "tab_width"): (120, 420),
     ("appearance", "pane_spacing"): (0, 20),
     ("appearance", "pane_ring_opacity"): (5, 100),
@@ -249,15 +266,15 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "active_color"): "green | blue | orange | yellow | purple | white. Accent color for ACTIVE/FOCUSED UI (active tab, focused-pane ring/glow, chrome strip, file selection, Markdown headings, and YO markers). Green is the default.",
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
     ("appearance", "date_time_hour_cycle"): "24 | 12. Controls date/time displays in Finder/File Explorer and Differ. Default 24.",
-    ("appearance", "ui_font_size"): "Pixels, 8-20. Drives tab and compact UI text.",
-    ("appearance", "terminal_font_size"): "Pixels, 8-28. Applied live to xterm.js terminals.",
-    ("appearance", "editor_font_size"): "Pixels, 8-28. Applied live to editor and preview panes.",
+    ("appearance", "ui_font_size"): "Pixels, 6-20. Drives tab and compact UI text.",
+    ("appearance", "terminal_font_size"): "Pixels, 6-28. Applied live to xterm.js terminals.",
+    ("appearance", "editor_font_size"): "Pixels, 6-28. Applied live to editor and preview panes.",
     ("appearance", "editor_color_scheme"): "Legacy active editor color scheme. Kept for compatibility; new UI uses separate dark/light scheme defaults.",
     ("appearance", "editor_dark_color_scheme"): "Dark editor scheme used by the editor dark/light toggle.",
     ("appearance", "editor_light_color_scheme"): "Light editor scheme used by the editor dark/light toggle. Default is VS Code Light+.",
     ("appearance", "editor_cursor_style"): "line | block. CodeMirror caret shape.",
     ("appearance", "editor_cursor_color"): "yellow | theme. yellow matches the active terminal cursor (#ffd000) for a consistent caret across terminal + editor; theme uses the editor scheme's caret color. Applies to both the line and block cursor.",
-    ("appearance", "file_explorer_font_size"): "Pixels, 8-24. Applied live to File Explorer/Finder.",
+    ("appearance", "file_explorer_font_size"): "Pixels, 6-24. Applied live to File Explorer/Finder.",
     ("appearance", "tab_width"): "Pixels, 120-420. Drives the pane tab width CSS variable.",
     ("appearance", "pane_spacing"): "Pixels, 0-20. Gap between panes; at 0 they touch and the green active outline covers the divider. The active outline thickens as spacing grows.",
     ("appearance", "pane_ring_opacity"): "Percent, 5-100. Opacity of the green/red pane ring drawn over the content edge.",
@@ -365,6 +382,9 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
             present = key in incoming
             value = incoming.get(key, default)
             if section == "yoagent" and key in LEGACY_YOAGENT_DEFAULTS and value == LEGACY_YOAGENT_DEFAULTS[key]:
+                value = default
+            legacy_markers = LEGACY_YOAGENT_PROMPT_MARKERS.get(key, []) if section == "yoagent" else []
+            if isinstance(value, str) and any(marker in value for marker in legacy_markers):
                 value = default
             if isinstance(default, bool):
                 sanitized[section][key] = coerce_bool(value, default)

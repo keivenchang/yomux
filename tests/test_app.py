@@ -334,7 +334,7 @@ def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):
     assert payload["backend_used"] == "deterministic"
     assert payload["fallback"] is False
     assert "editor fixes" in payload["answer"]
-    assert "session 5" in payload["context_lines"][1]
+    assert "tmux session `5`" in payload["context_lines"][1]
 
 
 def test_yoagent_cli_auth_failure_is_actionable(monkeypatch):
@@ -393,9 +393,9 @@ def test_resolve_yoagent_backend_auto_prefers_codex_then_claude(monkeypatch):
 
 def test_yoagent_language_directive_only_for_non_english_locales():
     # DOIT.8 Phase 1: a non-English UI locale asks the LLM to answer in that language.
-    assert app_module.yoagent_language_directive("zh-Hant") == "\n\nRespond in Traditional Chinese."
-    assert app_module.yoagent_language_directive("zh-Hans") == "\n\nRespond in Simplified Chinese."
-    assert app_module.yoagent_language_directive("es") == "\n\nRespond in Spanish."
+    assert app_module.yoagent_language_directive("zh-Hant") == "\n\n請用繁體中文回答。"
+    assert app_module.yoagent_language_directive("zh-Hans") == "\n\n请用简体中文回答。"
+    assert app_module.yoagent_language_directive("es") == "\n\nResponde en español."
     assert app_module.yoagent_language_directive("en") == ""
     assert app_module.yoagent_language_directive("en-XA") == ""
     assert app_module.yoagent_language_directive("system") == ""
@@ -420,7 +420,8 @@ def test_yoagent_chat_appends_language_directive_to_the_llm_prompt(monkeypatch):
     finally:
         webapp.control_server.stop()
     assert status == HTTPStatus.OK
-    assert "Respond in Traditional Chinese." in captured["prompt"]
+    assert "You are YO!agent" in captured["prompt"]
+    assert "請用繁體中文回答。" in captured["prompt"]
 
 
 def test_yoagent_chat_auto_runs_logged_in_agent(monkeypatch):
@@ -440,7 +441,7 @@ def test_yoagent_chat_auto_runs_logged_in_agent(monkeypatch):
     assert payload["answer"] == "codex answer"
 
 
-def test_yoagent_permission_block_answer_falls_back(monkeypatch):
+def test_yoagent_permission_block_answer_is_preserved(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(webapp, "run_yoagent_claude_cli", lambda prompt, session_id="", resume=False: ("I'm blocked — the harness denied access to ~/.claude/projects/**/*.jsonl.", ""))
     activity = {
@@ -455,8 +456,8 @@ def test_yoagent_permission_block_answer_falls_back(monkeypatch):
     finally:
         webapp.control_server.stop()
 
-    assert answer == ""
-    assert "outside the supplied YOLOmux context" in reason
+    assert answer == "I'm blocked — the harness denied access to ~/.claude/projects/**/*.jsonl."
+    assert reason == ""
     assert status["backend"] == "claude"
 
 

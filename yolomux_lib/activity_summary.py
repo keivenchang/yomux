@@ -9,6 +9,7 @@ from datetime import timezone
 from pathlib import Path
 import re
 from typing import Any
+from urllib.parse import quote
 
 from .common import AgentInfo
 from .common import SessionInfo
@@ -18,13 +19,15 @@ from .transcripts import compact_transcript_items
 from .transcripts import newest_transcript_timestamp
 from .transcripts import session_transcript_activity_state
 from .web import server_string
+from .settings import DEFAULT_SETTINGS
+from .settings import LEGACY_YOAGENT_DEFAULTS
 
 
 ACTIVITY_SUMMARY_FORMAT_VERSION = 4
 YOAGENT_CONTEXT_GUARD = (
-    "Use only the supplied YOLOmux concepts and activity context. Do not run tools, inspect files, "
-    "or enumerate ~/.claude, ~/.codex, transcript directories, or any other filesystem path. "
-    "If a timestamp or path is not present in the context, say that it is not available."
+    "Use the supplied YOLOmux concepts and activity context as the starting point. You may run tools "
+    "such as ls, git status, or transcript inspection when that helps answer the user's question. "
+    "Keep tool use scoped to the relevant tmux session, repo, and transcript paths, and do not invent missing facts."
 )
 YOAGENT_README_PATH = Path(__file__).resolve().parents[1] / "README.md"
 YOAGENT_HELP_PRIMER_MAX_CHARS = 8_000
@@ -36,6 +39,11 @@ YOAGENT_CONTEXT_CHAIN_PRIMER = (
     "combines that with git metadata and changed-file summaries, and turns that into YO!agent insights. "
     "If a session has no detected agent or no transcript, YO!agent may know the tmux session exists but will have little or no activity insight for it."
 )
+YOAGENT_DEFAULT_TEXT_KEYS = {
+    "system_prompt": "yoagent.prompt.system",
+    "intro": "yoagent.prompt.intro",
+    "format": "yoagent.prompt.format",
+}
 
 
 def markdown_section(markdown: str, heading: str) -> str:
@@ -374,6 +382,10 @@ def stale_summary(session_summaries: list[dict[str, Any]], stale_after_seconds: 
     return min(candidates, key=summary_last_activity_ts)
 
 
+def tmux_session_label(session: Any) -> str:
+    return f"tmux session `{session}`"
+
+
 def global_recommendation_sentence(session_summaries: list[dict[str, Any]]) -> str:
     if not session_summaries:
         return ""
@@ -386,8 +398,8 @@ def global_recommendation_sentence(session_summaries: list[dict[str, Any]]) -> s
     last = str(target.get("last_activity_text") or "").strip()
     recency = f", last worked {last}" if last else ""
     if active:
-        return f"Recommendation: keep session {session} focused on {work} until it reaches a clean stopping point{recency}."
-    return f"Recommendation: resume session {session} first because it has the freshest context for {work}{recency}."
+        return f"Recommendation: keep {tmux_session_label(session)} focused on {work} until it reaches a clean stopping point{recency}."
+    return f"Recommendation: resume {tmux_session_label(session)} first because it has the freshest context for {work}{recency}."
 
 
 def stale_work_sentence(session_summaries: list[dict[str, Any]]) -> str:
@@ -397,7 +409,7 @@ def stale_work_sentence(session_summaries: list[dict[str, Any]]) -> str:
     session = stale.get("session")
     work = summary_work_label(stale)
     last = str(stale.get("last_activity_text") or "").strip()
-    return f"You have not touched session {session} ({work}) for {last}; ask it to summarize before resuming, or close it if the work is no longer useful."
+    return f"You have not touched {tmux_session_label(session)} ({work}) for {last}; ask it to summarize before resuming, or close it if the work is no longer useful."
 
 
 def project_status_sentence(project: dict[str, Any], files: dict[str, Any], active: bool) -> str:
@@ -561,7 +573,7 @@ def build_global_activity_summary(session_summaries: list[dict[str, Any]], error
         work = item.get("work") or item.get("goal") or item.get("ci") or ""
         agent_text = str(item.get("agent_label") or agent_label(str(item.get("agent") or "")))
         status_text = str(item.get("status_text") or status)
-        lines.append(f"Session {item.get('session')}: {agent_text} is {status} in {repo}; {files_sentence(files)}; {status_text}; {truncate_text(str(work), 150)}")
+        lines.append(f"{tmux_session_label(item.get('session'))}: {agent_text} is {status} in {repo}; {files_sentence(files)}; {status_text}; {truncate_text(str(work), 150)}")
     for error in errors or []:
         lines.append(f"Activity summary error: {error}")
     return {
@@ -595,7 +607,7 @@ def yoagent_context_lines(activity_payload: dict[str, Any]) -> list[str]:
             work = str(summary.get("work") or summary.get("goal") or "").strip()
             status = str(summary.get("status_text") or "").strip()
             state = str(summary.get("activity_label") or ("active" if summary.get("active") else "idle"))
-            parts = [f"session {session}: {agent} is {state}", f"repos: {repos}", f"changes: {files}"]
+            parts = [f"{tmux_session_label(session)} directory: {repos}", f"{agent} is {state}", f"changes: {files}"]
             last_activity = str(summary.get("last_activity_text") or "").strip()
             if last_activity:
                 parts.append(f"last worked: {last_activity}")
@@ -616,59 +628,70 @@ def yoagent_context_lines(activity_payload: dict[str, Any]) -> list[str]:
 YOAGENT_HISTORY_TURN_LIMIT = 4
 
 
-def yoagent_system_prompt(settings: dict[str, Any]) -> str:
-    return str(settings.get("system_prompt") or "You are YO!agent. Help users operate YOLOmux using the concepts below and report on the supplied activity context.")
+def yoagent_localized_setting(settings: dict[str, Any], key: str, locale: str) -> str:
+    value = str(settings.get(key) or "").strip()
+    default = str(DEFAULT_SETTINGS["yoagent"].get(key) or "")
+    legacy = str(LEGACY_YOAGENT_DEFAULTS.get(key) or "")
+    if not value or value == default or value == legacy:
+        catalog_key = YOAGENT_DEFAULT_TEXT_KEYS.get(key)
+        if catalog_key:
+            return server_string(locale, catalog_key)
+    return value
 
 
-def yoagent_intro(settings: dict[str, Any]) -> str:
-    return str(settings.get("intro") or "Summarize the running AI agents and changed files.")
+def yoagent_system_prompt(settings: dict[str, Any], locale: str = "en") -> str:
+    return yoagent_localized_setting(settings, "system_prompt", locale)
 
 
-def yoagent_output_format(settings: dict[str, Any]) -> str:
-    return str(settings.get("format") or "Keep answers short and factual.")
+def yoagent_intro(settings: dict[str, Any], locale: str = "en") -> str:
+    return yoagent_localized_setting(settings, "intro", locale)
 
 
-def yoagent_concepts_prompt_block() -> list[str]:
+def yoagent_output_format(settings: dict[str, Any], locale: str = "en") -> str:
+    return yoagent_localized_setting(settings, "format", locale)
+
+
+def yoagent_concepts_prompt_block(locale: str = "en") -> list[str]:
     return [
-        YOAGENT_CONTEXT_GUARD,
-        "YOLOmux concepts:",
+        server_string(locale, "yoagent.prompt.contextGuard"),
+        server_string(locale, "yoagent.prompt.concepts"),
         yolomux_help_primer(),
     ]
 
 
-def build_yoagent_chat_prompt(question: str, activity_payload: dict[str, Any], settings: dict[str, Any], history: list[dict[str, str]] | None = None) -> str:
+def build_yoagent_chat_prompt(question: str, activity_payload: dict[str, Any], settings: dict[str, Any], history: list[dict[str, str]] | None = None, locale: str = "en") -> str:
     history_lines = []
     for item in (history or [])[-YOAGENT_HISTORY_TURN_LIMIT:]:
         role = "user" if item.get("role") == "user" else "assistant"
         content = truncate_text(" ".join(str(item.get("content") or "").split()), 600)
         if content:
             history_lines.append(f"{role}: {content}")
-    context = "\n".join(yoagent_context_lines(activity_payload)) or "No AI agent activity is available."
+    context = "\n".join(yoagent_context_lines(activity_payload)) or server_string(locale, "yoagent.prompt.noActivityContext")
     return "\n\n".join([
-        yoagent_system_prompt(settings),
-        yoagent_intro(settings),
-        yoagent_output_format(settings),
-        *yoagent_concepts_prompt_block(),
-        "Activity context:",
+        yoagent_system_prompt(settings, locale),
+        yoagent_intro(settings, locale),
+        yoagent_output_format(settings, locale),
+        *yoagent_concepts_prompt_block(locale),
+        server_string(locale, "yoagent.prompt.activityContext"),
         context,
-        "Recent chat:",
-        "\n".join(history_lines) if history_lines else "(none)",
-        f"User question: {question}",
+        server_string(locale, "yoagent.prompt.recentChat"),
+        "\n".join(history_lines) if history_lines else server_string(locale, "yoagent.prompt.none"),
+        f'{server_string(locale, "yoagent.prompt.userQuestion")} {question}',
     ])
 
 
-def build_yoagent_resume_prompt(question: str, activity_payload: dict[str, Any], settings: dict[str, Any], context_changed: bool) -> str:
+def build_yoagent_resume_prompt(question: str, activity_payload: dict[str, Any], settings: dict[str, Any], context_changed: bool, locale: str = "en") -> str:
     if context_changed:
-        context = "\n".join(yoagent_context_lines(activity_payload)) or "No AI agent activity is available."
-        context_block = "Activity summary changed since the previous YO!agent turn. Use this current summarized state:\n" + context
+        context = "\n".join(yoagent_context_lines(activity_payload)) or server_string(locale, "yoagent.prompt.noActivityContext")
+        context_block = server_string(locale, "yoagent.prompt.activityChanged") + "\n" + context
     else:
-        context_block = "Activity summary is unchanged since the previous YO!agent turn. Reuse the prior context in this resumed conversation."
+        context_block = server_string(locale, "yoagent.prompt.activityUnchanged")
     return "\n\n".join([
-        "Continue the existing YO!agent conversation.",
-        yoagent_output_format(settings),
-        *yoagent_concepts_prompt_block(),
+        server_string(locale, "yoagent.prompt.continueConversation"),
+        yoagent_output_format(settings, locale),
+        *yoagent_concepts_prompt_block(locale),
         context_block,
-        f"User question: {question}",
+        f'{server_string(locale, "yoagent.prompt.userQuestion")} {question}',
     ])
 
 
@@ -710,29 +733,87 @@ def yoagent_topic_title(summary: dict[str, Any]) -> str:
     return f"{topic}{suffix}"
 
 
-def yoagent_session_section(index: int, summary: dict[str, Any]) -> list[str]:
-    """One numbered Markdown section for a session: a bold title line + indented sub-bullets."""
+def yoagent_session_topic_title(summary: dict[str, Any]) -> str:
     session = summary.get("session")
-    lines = [f"**{index}. {yoagent_topic_title(summary)} (session {session})**"]
+    agent = str(summary.get("agent_label") or agent_label(str(summary.get("agent") or ""))).strip()
+    topic = yoagent_topic_title(summary)
+    if agent and agent.lower() not in {"no agent", "agent"}:
+        return f"{tmux_session_label(session)} with {agent} about {topic}"
+    return f"{tmux_session_label(session)} about {topic}"
+
+
+def markdown_table_cell(value: Any) -> str:
+    return str(value or "").replace("\n", " ").replace("|", "\\|").strip()
+
+
+def markdown_code(value: Any) -> str:
+    text = str(value or "").strip().replace("`", "\\`")
+    return f"`{text}`" if text else ""
+
+
+def markdown_session_link(session: Any) -> str:
+    text = str(session or "").strip()
+    if not text:
+        return ""
+    return f"[{markdown_code(text)}](?yoagent-session={quote(text, safe='')})"
+
+
+def yoagent_session_paths(summary: dict[str, Any]) -> str:
+    repos = [str(repo) for repo in summary.get("repos") or [] if repo]
+    if not repos:
+        return "not available"
+    return ", ".join(markdown_code(repo) for repo in repos)
+
+
+def yoagent_session_details(summary: dict[str, Any]) -> str:
     agent = str(summary.get("agent_label") or agent_label(str(summary.get("agent") or "")))
     state = str(summary.get("activity_label") or ("active" if summary.get("active") else "idle"))
-    last = str(summary.get("last_activity_text") or "").strip()
-    state_line = f"- {agent} is {state}"
-    if last:
-        state_line += f"; last worked {last}"
-    lines.append(state_line)
     files = summary.get("files") or {}
-    if int(files.get("count") or 0):
-        lines.append(f"- {files_sentence(files)}")
+    details = f"{agent} is {state}; {files_sentence(files)}"
     goal = str(summary.get("goal") or "").strip()
+    extras: list[str] = []
     if goal and goal != str(summary.get("work") or ""):
-        lines.append(f"- goal: {truncate_text(goal, 160)}")
+        extras.append(f"goal: {truncate_text(goal, 120)}")
     ci = str(summary.get("ci") or "").strip()
     if ci:
-        lines.append(f"- CI: {ci}")
+        extras.append(f"CI: {ci}")
     status = str(summary.get("status_text") or "").strip()
     if status and status != ci:
-        lines.append(f"- status: {truncate_text(status, 160)}")
+        extras.append(f"status: {truncate_text(status, 120)}")
+    file_lines = [str(item) for item in summary.get("file_lines") or [] if item]
+    if file_lines:
+        extras.append(f"files: {', '.join(file_lines[:3])}")
+    if extras:
+        return f"{details}. {'; '.join(extras)}."
+    return f"{details}."
+
+
+def compact_last_worked_text(text: Any) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return "not available"
+    replacements = [
+        (r"\b(\d+)\s+minutes?\s+ago\b", r"\1 min ago"),
+        (r"\b1\s+hour\s+ago\b", "1 hr ago"),
+        (r"\b(\d+)\s+hours\s+ago\b", r"\1 hrs ago"),
+    ]
+    for pattern, replacement in replacements:
+        value = re.sub(pattern, replacement, value, flags=re.IGNORECASE)
+    return value
+
+
+def yoagent_session_table(summaries: list[dict[str, Any]]) -> list[str]:
+    """One Markdown table for session summary/list answers."""
+    lines = [
+        "| tmux session | full path | last worked | details |",
+        "|---|---|---|---|",
+    ]
+    for summary in summaries:
+        session = markdown_table_cell(markdown_session_link(summary.get("session")))
+        paths = yoagent_session_paths(summary)
+        last = markdown_table_cell(compact_last_worked_text(summary.get("last_activity_text")))
+        details = markdown_table_cell(yoagent_session_details(summary))
+        lines.append(f"| {session} | {paths} | {last} | {details} |")
     return lines
 
 
@@ -744,6 +825,16 @@ def yoagent_question_requests_session_list(question: str) -> bool:
         "list every session",
         "enumerate sessions",
         "enumerate all sessions",
+        "summary",
+        "summarize",
+        "summarise",
+        "summarize sessions",
+        "summarise sessions",
+        "session summary",
+        "summaries",
+        "what did we work on",
+        "what we worked on",
+        "worked on today",
         "show sessions",
         "show all sessions",
         "one by one",
@@ -847,14 +938,14 @@ def deterministic_yoagent_reply(question: str, activity_payload: dict[str, Any],
     out.append("")
     include_session_details = bool(selected) or yoagent_question_requests_session_list(question)
     if include_session_details:
-        for index, summary in enumerate(chosen, start=1):
-            out.extend(yoagent_session_section(index, summary))
-            out.append("")
+        out.extend(yoagent_session_table(chosen))
+        out.append("")
+        pending_scope = chosen if selected else all_summaries
         pending: list[str] = []
-        recommendation = global_recommendation_sentence(all_summaries)
+        recommendation = global_recommendation_sentence(pending_scope)
         if recommendation:
             pending.append(f"- {recommendation}")
-        stale = stale_work_sentence(all_summaries)
+        stale = stale_work_sentence(pending_scope)
         if stale:
             pending.append(f"- {stale}")
     else:

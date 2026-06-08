@@ -135,8 +135,8 @@ def test_global_activity_summary_rolls_up_sessions():
     assert "currently making changes to a and b in order to finish fix A" in global_summary["headline"]
     assert "Other work includes debug B" in global_summary["headline"]
     assert "So far: 3 files changed (+5/-4)" in global_summary["lines"][0]
-    assert "Recommendation: keep session 1 focused on fix A" in global_summary["lines"][1]
-    assert "You have not touched session 2" in global_summary["lines"][2]
+    assert "Recommendation: keep tmux session `1` focused on fix A" in global_summary["lines"][1]
+    assert "You have not touched tmux session `2`" in global_summary["lines"][2]
     assert "ask it to summarize before resuming" in global_summary["lines"][2]
 
 
@@ -167,7 +167,7 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
             "headline": "Your most recent work is about editor fixes, and you are currently making changes to yolomux in order to finish editor fixes. So far: 2 files changed (+7/-1); 1 of 1 AI agent is active.",
             "lines": [
                 "Your most recent work is about editor fixes, and you are currently making changes to yolomux in order to finish editor fixes. So far: 2 files changed (+7/-1); 1 of 1 AI agent is active.",
-                "Recommendation: keep session 5 focused on editor fixes until it reaches a clean stopping point, last worked 2 hours ago.",
+                "Recommendation: keep tmux session `5` focused on editor fixes until it reaches a clean stopping point, last worked 2 hours ago.",
             ],
         },
         "sessions": {
@@ -207,11 +207,11 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     activity["sessions"]["5"]["last_activity_text"] = "2 hours ago"
     lines = yoagent_context_lines(activity)
 
-    assert any("session 5: Codex gpt-5.5 is active" in line for line in lines)
+    assert any("tmux session `5` directory: yolomux" in line and "Codex gpt-5.5 is active" in line for line in lines)
     assert any("last worked: 2 hours ago" in line for line in lines)
     assert "Use facts only." in prompt
-    assert "Do not run tools" in prompt
-    assert "transcript directories" in prompt
+    assert "You may run tools" in prompt
+    assert "transcript inspection" in prompt
     assert "YOLOmux concepts:" in prompt
     assert "Pane" in prompt
     assert "Context sourcing chain" in prompt
@@ -220,7 +220,7 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert "status?" in prompt
     assert "Activity summary changed" in changed_resume
     assert "YOLOmux concepts:" in changed_resume
-    assert "Do not run tools" in changed_resume
+    assert "You may run tools" in changed_resume
     assert "M static/yolomux.js" in changed_resume
     assert "Activity summary is unchanged" in unchanged_resume
     assert "M static/yolomux.js" not in unchanged_resume
@@ -228,9 +228,9 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     assert "Set or log in a Claude/Codex backend" in reply
     assert "Your most recent work is about editor fixes" in reply
     # Direct status shape: focus on the asked-about session plus an Open / pending tail.
-    assert "**1. editor fixes" in reply
-    assert "(session 5)**" in reply
-    assert "- Codex gpt-5.5 is active" in reply
+    assert "| tmux session | full path | last worked | details |" in reply
+    assert "| [`5`](?yoagent-session=5) | `/repo/yolomux` | not available | Codex gpt-5.5 is active; 2 files changed (+7/-1). status: CI pending; files: M static/yolomux.js (+5/-1). |" in reply
+    assert "Codex gpt-5.5 is active" in reply
     assert "**Open / pending:**" in reply
     assert "Recommendation" in reply
     assert "Be terse" not in reply
@@ -307,12 +307,16 @@ def test_deterministic_yoagent_reply_prioritizes_active_work_without_listing_eve
     assert "Keep the active work" in reply
     assert "Stale work: stale refactor" in reply.split("**Open / pending:**", 1)[1]
     list_reply = deterministic_yoagent_reply("list all sessions", activity, {})
-    assert "**1. tab approval badge — yolomux · PR #12345 (session 5)**" in list_reply
-    assert "**2. stale refactor — dynamo (session 9)**" in list_reply
-    assert list_reply.index("(session 5)") < list_reply.index("(session 9)")
+    assert "| [`5`](?yoagent-session=5) | `/repo/yolomux` | 2 min ago | Codex gpt-5.5 is active; 3 files changed (+12/-4). CI: CI passing; status: PR #12345. |" in list_reply
+    assert "| [`9`](?yoagent-session=9) | `/repo/dynamo` | 8 days ago | Claude opus is idle; no Differ results attributed yet. status: waiting for more activity. |" in list_reply
+    assert list_reply.index("[`5`](?yoagent-session=5)") < list_reply.index("[`9`](?yoagent-session=9)")
     named_reply = deterministic_yoagent_reply("what is session 5 doing?", activity, {})
-    assert "**1. tab approval badge — yolomux · PR #12345 (session 5)**" in named_reply
-    assert "(session 9)" not in named_reply
+    assert "| [`5`](?yoagent-session=5) | `/repo/yolomux` | 2 min ago | Codex gpt-5.5 is active; 3 files changed (+12/-4). CI: CI passing; status: PR #12345. |" in named_reply
+    assert "[`9`](?yoagent-session=9)" not in named_reply
+    summary_reply = deterministic_yoagent_reply("summary", activity, {})
+    assert summary_reply.count("](?yoagent-session=") == 2
+    assert "[`5`](?yoagent-session=5)" in summary_reply
+    assert "[`9`](?yoagent-session=9)" in summary_reply
 
 
 def test_changed_file_totals_coerces_numeric_strings_and_ignores_bools():

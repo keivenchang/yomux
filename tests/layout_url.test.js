@@ -1623,18 +1623,25 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function reloadIsSafe\(\)[\s\S]*file\?\.dirty[\s\S]*isContentEditable/.test(source), 'reloadIsSafe refuses when an editor buffer is dirty or the user is typing');
   // #40: YO!info and YO!agent are merged into ONE panel with a segmented sub-tab toggle; both sub-views
   // (the metadata table + the AI chat/summary) live in the single info panel and the active one is shown.
+  const createInfoPanelSource = source.slice(source.indexOf('function createInfoPanel()'), source.indexOf('// The merged YO!info pane keeps its outer chrome'));
   assert.ok(/function createInfoPanel\(\)[\s\S]*?class="info-subtabs"[\s\S]*?data-info-subtab="info"[\s\S]*?data-info-subtab="yoagent"/.test(source), '#40: the merged info panel renders a YO!info/YO!agent sub-tab toggle');
   assert.ok(/function createInfoPanel\(\)[\s\S]*?data-info-subview="info"[\s\S]*?id="info-content"[\s\S]*?data-info-subview="yoagent"[\s\S]*?id="yoagent-content"/.test(source), '#40: the merged info panel hosts both the metadata and the YO!agent sub-views');
   assert.ok(/function createInfoPanel\(\)[\s\S]*?class="info-subtab-actions"[\s\S]*?data-info-subtab-action="info"[\s\S]*?data-info-subtab-action="yoagent"/.test(source), '#40: refresh actions live in the YO!info/YO!agent sub-tab bar');
+  assert.equal(createInfoPanelSource.includes('class="panel-detail-row"'), false, '#40: the merged YO!info panel no longer renders a redundant title/info bar');
+  assert.equal(createInfoPanelSource.includes('id="meta-'), false, '#40: the merged YO!info panel no longer renders a subtitle meta bar');
   assert.equal(/class="transcript-head info-head"/.test(source), false, '#40: the duplicate sub-view title bar is gone');
   assert.ok(/function createInfoPanel\(\)[\s\S]*?renderInfoPanel\(\);\s*renderYoagentPanel\(\);/.test(source), '#40: the merged panel renders both sub-views on creation');
+  assert.ok(/function renderAttachedPanelContent\(item\)[\s\S]*?item !== infoItemId[\s\S]*?applyInfoSubTab\(\)[\s\S]*?renderInfoPanel\(\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, scrollBottom: false\}\)/.test(source), '#40/#YO!info: attaching the pooled info panel immediately renders both sub-views');
+  assert.ok(/function renderDropSlot\(slot, session\)[\s\S]*?node\.appendChild\(panel\);\s*renderAttachedPanelContent\(session\);/.test(source), '#40/#YO!info: initial drop-slot attach renders YO!info before metadata polling');
+  assert.ok(/function syncActivePanelsInPlace\(\)[\s\S]*?dropSlot\.replaceChildren\(desired\);[\s\S]*?updatePanelSlot\(desired, item, slot\);[\s\S]*?renderAttachedPanelContent\(item\);/.test(source), '#40/#YO!info: in-place panel swaps also render YO!info after attachment');
   assert.equal(source.includes('function createYoagentPanel('), false, '#40: the standalone YO!agent panel builder is gone');
   assert.ok(source.includes('function setInfoSubTab(') && source.includes('function applyInfoSubTab(') && source.includes('function relocalizeInfoPanelChrome(') && source.includes('async function openInfoSubTab('), '#40: sub-tab switch + locale + open helpers exist');
   assert.ok(/function setInfoSubTab[\s\S]*?writeStoredInfoSubTab\(next\)/.test(source), '#40: switching the sub-tab persists it (remembered across reloads)');
   assert.ok(/function openInfoSubTab[\s\S]*?selectSession\(infoItemId\)/.test(source), '#40: opening YO!agent activates the merged info pane');
   assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)[\s\S]*?renderInfoPanel\(\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, allowBusyRebuild: options\.localeChange === true\}\)[\s\S]*?relocalizeInfoPanelChrome\(\)/.test(source), '#40/#50: a language switch relabels persistent YO!info chrome and forces busy YO!agent UI to rebuild in the new locale');
   assert.equal(/function virtualPanelControlsHtml\(session\)[\s\S]*terminal-tab/.test(source), false, '#40: Preferences and YO!info virtual pane controls do not render a redundant active-tab pill');
-  assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?info\.subtitle[\s\S]*?querySelectorAll\('\[data-info-subtab\]'\)[\s\S]*?button\.dataset\.infoSubtab === 'yoagent'[\s\S]*?data-info-refresh[\s\S]*?data-yoagent-refresh/.test(source), '#40/#50: the persistent YO!info/YO!agent sub-tab chrome and actions are localized in place by data attribute');
+  assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?querySelectorAll\('\[data-info-subtab\]'\)[\s\S]*?button\.dataset\.infoSubtab === 'yoagent'[\s\S]*?data-info-refresh[\s\S]*?data-yoagent-refresh/.test(source), '#40/#50: the persistent YO!info/YO!agent sub-tab chrome and actions are localized in place by data attribute');
+  assert.equal(/function relocalizeInfoPanelChrome[\s\S]*?info\.subtitle/.test(source), false, '#40/#50: no removed YO!info subtitle bar remains to relocalize');
   assert.ok(/let i18nApplyLocaleRequestId = 0/.test(source) && /async function applyLocale[\s\S]*?\+\+i18nApplyLocaleRequestId[\s\S]*?if \(requestId !== i18nApplyLocaleRequestId\) return/.test(source), '#50: overlapping language transitions cannot let an older catalog load repaint after the newer language choice');
   // DOIT.8 Phase 1: the YO marker glyph is i18n-keyed (renders 優/优 under Chinese), not a hardcoded "YO".
   assert.ok(source.includes("esc(t('brand.marker'))"), 'the YO marker glyph renders via t(brand.marker)');
@@ -1664,9 +1671,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.info-subtab \.session-button-dir\s*\{[\s\S]*?color:\s*inherit/.test(mergedInfoCss), '#40: YO!info/YO!agent sub-tab labels inherit button contrast instead of forcing white text');
   assert.ok(/\.info-subtab\s*\{[\s\S]*?display:\s*inline-flex[\s\S]*?align-items:\s*center[\s\S]*?line-height:\s*1/.test(mergedInfoCss), '#40: YO!info/YO!agent sub-tab labels are vertically centered, including CJK labels');
   assert.ok(/body\.theme-light \.info-list,[\s\S]*?body\.theme-light \.info-watched\s*\{[\s\S]*?background:\s*#ffffff/.test(mergedInfoCss), '#40: the light-mode YO!info table uses a white surface');
-  // #48: the merged info panel gets its own 4-row grid so the YO!info|YO!agent sub-tab row is always
-  // visible (a real track), including when the detail header is collapsed.
-  assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the info panel reserves a row for the sub-tab toggle');
+  // #48: the merged info panel gets its own 3-row grid so the YO!info|YO!agent sub-tab row is always
+  // visible (a real track) without a redundant detail/header bar.
+  assert.ok(/\.info-panel\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the info panel reserves a row for the sub-tab toggle');
   assert.ok(/\.info-panel\.details-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(mergedInfoCss), '#48: the sub-tab row survives a collapsed detail header');
   // #50: a language switch force-re-renders every localized surface and fires applyLocale optimistically.
   assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?renderPreferencesPanels\(\{force: true\}\)[\s\S]*?renderBrandWordmark\(\)/.test(source), '#50: rerenderForLocale force-re-renders Preferences + the wordmark');
@@ -2006,10 +2013,17 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(source.includes("panel?._cmPlainFallback ? [codeMirrorThemeExtension(api)]"), false, 'plain CodeMirror fallback theme toggles keep Markdown fallback syntax decorations');
   assert.equal(source.includes('scheme: activeEditorScheme().id'), false, 'CodeMirror config signatures do not force panel rebuilds on theme-only changes');
   assert.ok(source.includes('function yoagentChatNetworkError'), 'YO!agent chat distinguishes network failures from normal HTTP errors');
-  assert.ok(source.includes('focusInput: true'), 'YO!agent chat refocuses the input after responses and retryable failures');
+  assert.ok(source.includes('let yoagentFocusSerial = 0'), 'YO!agent chat tracks whether focus was abandoned while a request is pending');
+  assert.ok(/focusInput:\s*shouldRestoreFocus && focusSerial === yoagentFocusSerial && yoagentDocumentHasFocus\(\)/.test(source), 'YO!agent responses only refocus when the user did not move away');
+  assert.ok(/if \(options\.summaryOnly && refreshYoagentSummaryRegions\(node\)\) \{[\s\S]*?restoreYoagentChatInputFocus/.test(source), 'YO!agent summary refresh restores an already-focused composer input');
   assert.ok(source.includes('function refreshYoagentSummaryRegions'), 'YO!agent metadata refresh can update summaries without rebuilding the chat input');
   assert.ok(source.includes('summaryOnly: true'), 'YO!agent metadata refresh requests summary-only panel updates');
   assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent activity-summary requests carry the active UI locale');
+  assert.ok(source.includes('function yoagentSessionFromHref'), 'YO!agent Markdown session links parse the target session from the query string');
+  assert.ok(/function handleYoagentSessionLinkClick[\s\S]*?selectSession\(session, \{userInitiated: true\}\)/.test(source), 'YO!agent Markdown session links select the matching tab');
+  assert.ok(source.includes('function installYoagentSessionLinks'), 'YO!agent Markdown session links install a scoped click handler');
+  assert.ok(/function linkYoagentSessionCodeReferences[\s\S]*?sessions\.includes\(session\)[\s\S]*?\(tmux\\s\+\)\?session\\s\*\$[\s\S]*?link\.href = `\?yoagent-session=\$\{encodeURIComponent\(session\)\}`/.test(source), 'YO!agent inline `tmux session `code`` references are converted to clickable session links');
+  assert.ok(/function renderYoagentMessageMarkdown[\s\S]*?renderMarkdownPreviewInto\(body, yoagentTightMarkdown[\s\S]*?installYoagentSessionLinks\(body\)/.test(source), 'YO!agent Markdown rendering makes session links clickable after sanitization');
   assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?allowBusyRebuild: options\.localeChange === true[\s\S]*?refreshActivitySummary\(\{force: true, silent: true, localeChange: true\}\)/.test(source), 'language switches force the busy YO!agent UI and activity summary through the new locale');
   // #45: assistant replies are structured Markdown — flag the body and render it through marked.js.
   assert.ok(source.includes('function renderYoagentMessageMarkdown'), '#45: YO!agent assistant replies render their multi-section Markdown body');
@@ -3521,7 +3535,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(yoloSectionHtml.includes('YOLO rules'), 'YOLO rules label is inside the YOLO section');
   assert.ok(/YOLO rules[\s\S]*data-copy-path=/.test(yoloSectionHtml), 'YOLO rules copy button is inside the YOLO section');
   assert.ok(yoloSectionHtml.includes('data-yolo-rule-open'), 'YOLO rule file open action remains inside the YOLO section');
-  assert.equal(preferencesHtml.includes('preferences-global-reset'), false, 'preferences hide Global reset when every setting is already default');
+  assert.ok(preferencesHtml.includes('preferences-global-reset'), 'preferences always expose Global reset so stale persisted settings can be rewritten');
+  assert.ok(preferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action even when values look default');
   api.setClientSettingsPatchForTest({general: {auto_focus: true}});
   const modifiedPreferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(modifiedPreferencesHtml.indexOf('preferences-global-reset') > modifiedPreferencesHtml.indexOf('preferences-sections'), 'preferences global reset is below the setting sections');
@@ -3575,6 +3590,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.system_prompt"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent system prompt renders as an autosizing full-width row');
   assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.intro"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent intro renders as an autosizing full-width row');
   assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.format"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent format renders as an autosizing full-width row');
+  assert.ok(/yoagent\.system_prompt[\s\S]*?alwaysEnableReset:\s*true/.test(diffBundle), 'YO!agent system prompt keeps its row Reset button enabled to rewrite stale saved prompts');
+  assert.ok(/yoagent\.intro[\s\S]*?alwaysEnableReset:\s*true/.test(diffBundle), 'YO!agent intro keeps its row Reset button enabled to rewrite stale saved prompts');
+  assert.ok(/yoagent\.format[\s\S]*?alwaysEnableReset:\s*true/.test(diffBundle), 'YO!agent answer format keeps its row Reset button enabled to rewrite stale saved prompts');
+  assert.ok(/const resetDisabled = readOnlyMode \|\| \(!item\.alwaysEnableReset && JSON\.stringify\(value\) === JSON\.stringify\(defaultValue\)\)/.test(diffBundle), 'alwaysEnableReset bypasses only the same-as-default disable rule');
+  assert.ok(/data-setting-reset="yoagent\.system_prompt"(?! disabled)/.test(preferencesHtml), 'YO!agent system prompt row Reset is visible and enabled at defaults');
+  assert.ok(/data-setting-reset="yoagent\.intro"(?! disabled)/.test(preferencesHtml), 'YO!agent intro row Reset is visible and enabled at defaults');
+  assert.ok(/data-setting-reset="yoagent\.format"(?! disabled)/.test(preferencesHtml), 'YO!agent answer format row Reset is visible and enabled at defaults');
   assert.ok(/data-setting-path="file_explorer\.quick_access_paths"[\s\S]*data-setting-type="list"[\s\S]*rows="3"/.test(preferencesHtml), 'list settings keep compact textarea rows');
   assert.ok(/\.preferences-setting-row--wide\s*\{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\)/.test(preferencesCss), 'wide preference rows stack to one column');
   assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control textarea\s*\{[\s\S]*grid-column:\s*1 \/ -1[\s\S]*min-height:\s*5lh/.test(preferencesCss), 'wide textarea controls span the row with a compact autosize floor');
@@ -5813,8 +5835,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.setClientSettingsPatchForTest({yoagent: {backend: 'claude'}});
   const enabledChatHtml = api.yoagentChatHtml();
   assert.ok(enabledChatHtml.includes('data-yoagent-chat-form'), 'Claude-backed YO!agent panel includes a chat form');
-  assert.ok(enabledChatHtml.includes('Ask YO!agent'), 'Claude-backed YO!agent chat starts with an empty prompt');
-  assert.ok(enabledChatHtml.includes('yoagent-chat empty'), 'empty YO!agent chat uses the compact empty layout');
+  assert.ok(enabledChatHtml.includes('Your most recent work is about editor fixes'), 'Claude-backed YO!agent chat starts with the regular intro message');
+  assert.ok(enabledChatHtml.includes('Ask anything'), 'Claude-backed YO!agent composer uses the localized ask-anything placeholder');
+  assert.equal(enabledChatHtml.includes('yoagent-chat empty'), false, 'YO!agent intro is a regular message, not a special empty layout');
   assert.equal(enabledChatHtml.includes('yoagent-chat-toolbar'), false, 'YO!agent chat does not put Clear in a detached toolbar');
   assert.ok(enabledChatHtml.includes('yoagent-chat-controls'), 'YO!agent composer has a control row');
   assert.ok(enabledChatHtml.includes('data-yoagent-backend'), 'YO!agent composer shows the backend (Auto) pill mapped to yoagent.backend');
@@ -5828,10 +5851,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(enabledChatHtml.indexOf('yoagent-chat-clear') < enabledChatHtml.indexOf('yoagent-chat-send'), 'YO!agent send arrow is the last (far-right) control, after Clear');
   api.setYoagentBusyForTest(true);
   assert.ok(api.yoagentChatHtml().includes('yoagent-chat-spinner'), 'YO!agent busy state includes an animated spinner');
-  // The "thinking" label keeps its word but the trailing dots are three animated <i> dots, so it reads
-  // as a live agent rather than static "thinking..." text.
+  // The "thinking" label keeps its word but the trailing dots are CSS-animated, so the text updates
+  // without rebuilding the busy-state DOM.
   assert.ok(api.yoagentChatHtml().includes('thinking'), 'YO!agent busy state keeps the concise thinking label');
-  assert.ok(/yoagent-thinking-dots[\s\S]*?<i>\.<\/i><i>\.<\/i><i>\.<\/i>/.test(api.yoagentChatHtml()), 'YO!agent thinking dots are three animated dots, not static text');
+  assert.ok(api.yoagentChatHtml().includes('yoagent-thinking-dots'), 'YO!agent thinking dots are CSS animated, not hardcoded static text');
   assert.ok(api.yoagentChatHtml().includes('session-yolo-marker active working'), 'YO!agent busy spinner reuses the YO tab working marker');
   api.setYoagentBusyForTest(false);
   api.setYoagentDraftForTest('half typed question');
@@ -6166,9 +6189,15 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // Rendered-markdown chat bodies drop pre-wrap so bullet lists are tightly spaced (the preserved
   // newlines between/inside the generated <ul><li> HTML were widening them).
   assert.ok(/\.yoagent-message-body\.markdown-body\s*\{[^}]*white-space:\s*normal/.test(css), 'rendered markdown chat bodies use white-space:normal so bullets are not widely spaced');
-  // The "thinking" busy indicator animates three dots (live agent), not static "thinking..." text.
-  assert.ok(/\.yoagent-thinking-dots i\s*\{[^}]*animation:\s*yoagent-thinking-bounce/.test(css), 'thinking dots animate via the bounce keyframes');
-  assert.ok(/@keyframes yoagent-thinking-bounce/.test(css), 'the thinking-dots bounce keyframes exist');
+  // The "thinking" busy indicator uses real staggered dot spans, not static localized "..." text or
+  // pseudo-element content animation that may not visibly update in all browsers.
+  assert.ok(/const thinkingDots = '<span class="yoagent-thinking-dots"[^']*<span>\.<\/span><span>\.<\/span><span>\.<\/span><\/span>';/.test(src), 'thinking dots render as three real animated spans');
+  assert.ok(/\.yoagent-thinking-dots span\s*\{[^}]*animation:\s*yoagent-thinking-dot/.test(css), 'thinking dot spans animate directly');
+  assert.ok(/\.yoagent-thinking-dots span\s*\{[^}]*opacity:\s*0/.test(css), 'thinking dots start hidden so the ellipsis visibly cycles');
+  assert.ok(/\.yoagent-thinking-dots span:nth-child\(2\)\s*\{[^}]*animation-delay:\s*0\.2s/.test(css), 'thinking dot 2 is staggered');
+  assert.ok(/\.yoagent-thinking-dots span:nth-child\(3\)\s*\{[^}]*animation-delay:\s*0\.4s/.test(css), 'thinking dot 3 is staggered');
+  assert.ok(/@keyframes yoagent-thinking-dot/.test(css), 'the thinking-dot keyframes exist');
+  assert.equal(/prefers-reduced-motion[^{]*\{[^}]*yoagent-thinking-dots/.test(css), false, 'thinking dots keep blinking even when reduced-motion CSS is active');
   // #YO!info scroll: the body pane (a grid item of the .panel grid) must keep min-width:0 so wide
   // content scrolls inside .info-list (overflow:auto) instead of blowing the column out past the
   // overflow:hidden panel (which silently clipped the right side — the user could not scroll right).
@@ -6277,7 +6306,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-editor-raw-panel\s*\{[^}]*font-size:\s*var\(--editor-font-size\)/.test(css), 'raw editor pane keeps the editor font variable');
   const settingsSource = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
   assert.ok(settingsSource.includes('"preview_font_size": 14'), 'preview font size default is 14');
-  assert.ok(settingsSource.includes('("appearance", "preview_font_size"): (8, 32)'), 'preview font size has server-side limits');
+  assert.ok(settingsSource.includes('("appearance", "preview_font_size"): (6, 32)'), 'preview font size has server-side limits');
 }
 
 {
@@ -6525,8 +6554,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.ok(zhHtml.includes(catalog['pref.appearance.theme.label']), `${locale} renders the localized global-theme label`);
     assert.ok(zhHtml.includes(catalog['pref.appearance.date_time_hour_cycle.label']), `${locale} renders the localized date/time clock label`);
     assert.ok(zhHtml.includes(catalog['pref.section.yoagent']), `${locale} renders the localized YO!agent section title`);
-    // Brand glyph: YO!agent localizes to 優agent / 优agent (no plain "YO!agent" section title leak).
-    assert.ok(catalog['pref.section.yoagent'].includes(locale === 'zh-Hant' ? '優agent' : '优agent'), `${locale} applies the YO!agent brand glyph`);
+    // Brand glyph: YO!agent localizes to 優!助手 / 优!助手 (no plain "YO!agent" section title leak).
+    assert.ok(catalog['pref.section.yoagent'].includes(locale === 'zh-Hant' ? '優!助手' : '优!助手'), `${locale} applies the YO!agent brand glyph`);
     // The YO marker glyph localizes to 優 / 优 (the catalog value the marker renders via t('brand.marker')).
     assert.equal(catalog['brand.marker'], locale === 'zh-Hant' ? '優' : '优', `${locale} marker glyph`);
     // #52: the wordmark glyphs localize to 優樂 / 优乐.

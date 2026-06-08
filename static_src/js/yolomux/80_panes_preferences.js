@@ -78,7 +78,15 @@ function syncActivePanelsInPlace() {
     poolDisplacedPanel(mounted);
     dropSlot.replaceChildren(desired);
     updatePanelSlot(desired, item, slot);
+    renderAttachedPanelContent(item);
   }
+}
+
+function renderAttachedPanelContent(item) {
+  if (item !== infoItemId) return;
+  applyInfoSubTab();
+  renderInfoPanel();
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
 }
 
 function bindDropTargets() {
@@ -319,6 +327,7 @@ function renderDropSlot(slot, session) {
   const panel = getOrCreatePanel(session);
   updatePanelSlot(panel, session, slot);
   node.appendChild(panel);
+  renderAttachedPanelContent(session);
   return node;
 }
 
@@ -1236,7 +1245,7 @@ function updatePanelControlLabels(session, info) {
 }
 
 // DOIT.6 #40: ONE merged panel hosting both YO!info (repo metadata) and YO!agent (chat + activity
-// summary), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
+// context), switched by a segmented sub-tab row under the pane tabs. Both sub-views render into their
 // own containers (#info-content / #yoagent-content) and the active one is shown via CSS; the chosen
 // sub-tab is remembered across reloads (infoPanelSubTab).
 function createInfoPanel() {
@@ -1248,13 +1257,6 @@ function createInfoPanel() {
       <div class="panel-head">
         ${virtualPanelControlsHtml(infoItemId)}
         <div class="pane-tabs" role="tablist" aria-label="${esc(t('pane.tabs.aria'))}"></div>
-      </div>
-      <div class="panel-detail-row">
-        <div class="panel-copy">
-          <div id="panel-tab-${infoItemId}" class="panel-session-label"><span class="session-button-dir">${esc(infoTabLabel())}</span></div>
-          <div id="meta-${infoItemId}" class="meta">${esc(t('info.subtitle'))}</div>
-        </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(infoItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>
       <div class="info-subtabs" role="tablist" aria-label="${esc(infoTabLabel())} / ${esc(yoagentTabLabel())}">
         <div class="info-subtab-group" role="presentation">
@@ -1332,6 +1334,7 @@ function createInfoPanel() {
   applyInfoSubTab(panel);
   renderInfoPanel();
   renderYoagentPanel();
+  if (infoPanelSubTab === 'yoagent') prewarmYoagent();
   return panel;
 }
 
@@ -1357,16 +1360,6 @@ function relocalizeInfoPanelChrome(panel = document.getElementById(`panel-${info
     button.title = expandLabel;
     button.setAttribute('aria-label', expandLabel);
   });
-  const detailLabel = document.getElementById(`panel-tab-${infoItemId}`)?.querySelector('.session-button-dir');
-  if (detailLabel) detailLabel.textContent = infoLabel;
-  const meta = document.getElementById(`meta-${infoItemId}`);
-  if (meta) meta.textContent = t('info.subtitle');
-  const detailClose = panel.querySelector('.panel-detail-close[data-detail-toggle]');
-  if (detailClose) {
-    const label = t('pane.details.hide');
-    detailClose.title = label;
-    detailClose.setAttribute('aria-label', label);
-  }
   panel.querySelector('.info-subtabs')?.setAttribute('aria-label', `${infoLabel} / ${agentLabel}`);
   panel.querySelectorAll('[data-info-subtab]').forEach(button => {
     const label = button.dataset.infoSubtab === 'yoagent' ? agentLabel : infoLabel;
@@ -1419,7 +1412,10 @@ function setInfoSubTab(tab, options = {}) {
     writeStoredInfoSubTab(next);
   }
   applyInfoSubTab();
-  if (next === 'yoagent') renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
+  if (next === 'yoagent') {
+    renderYoagentPanel({preserveDraft: true, focusInput: options.focusChat === true});
+    prewarmYoagent();
+  }
 }
 
 // Open the merged YO!info pane on a given sub-tab — used by the File menu, command palette, the topbar
@@ -1429,7 +1425,10 @@ async function openInfoSubTab(tab) {
   writeStoredInfoSubTab(infoPanelSubTab);
   await selectSession(infoItemId);
   applyInfoSubTab();
-  if (infoPanelSubTab === 'yoagent') renderYoagentPanel({preserveDraft: true, focusInput: true});
+  if (infoPanelSubTab === 'yoagent') {
+    renderYoagentPanel({preserveDraft: true, focusInput: true});
+    prewarmYoagent();
+  }
 }
 
 function sessionActivitySummary(session) {
@@ -1444,6 +1443,28 @@ function activitySummaryLinesHtml(lines, options = {}) {
   const items = Array.isArray(lines) ? lines.filter(Boolean) : [];
   if (!items.length) return options.empty ? `<div class="yoagent-empty">${esc(options.empty)}</div>` : '';
   return items.map(line => activitySummaryMarkdownBlockHtml(String(line), 'yoagent-line')).join('');
+}
+
+function yoagentTimestampText(value) {
+  const date = value ? new Date(value) : new Date();
+  if (!Number.isFinite(date.getTime())) return '';
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      timeZone: 'America/Los_Angeles',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    }).format(date);
+  } catch (_) {
+    return date.toLocaleString();
+  }
+}
+
+function yoagentMessageTimestampHtml(value) {
+  const text = yoagentTimestampText(value);
+  return text ? `<span class="yoagent-message-time">${esc(text)}</span>` : '';
 }
 
 function relativeActivityGeneratedText(payload = activitySummaryPayload) {
@@ -1487,13 +1508,15 @@ function globalActivitySummaryHtml() {
 
 function yoagentChatMessagesHtml() {
   const messages = Array.isArray(yoagentMessages) ? yoagentMessages : [];
+  const intro = yoagentIntroMessageHtml();
   if (!messages.length) {
+    if (intro) return intro;
     if (!yoagentChatEnabled()) {
       return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatDisabled'))}</div>`;
     }
     return `<div class="yoagent-chat-empty">${esc(t('yoagent.chatEmpty', {name: yoagentTabLabel()}))}</div>`;
   }
-  return messages.map(message => {
+  const messageHtml = messages.map(message => {
     const role = message.role === 'user' ? t('yoagent.you') : yoagentTabLabel();
     const roleClass = message.role === 'user' ? 'user' : 'assistant';
     // Assistant replies are Markdown (numbered sections, bold titles, sub-bullets); flag the body so
@@ -1501,10 +1524,32 @@ function yoagentChatMessagesHtml() {
     const bodyClass = roleClass === 'assistant' ? 'yoagent-message-body markdown-body' : 'yoagent-message-body';
     const markdownAttr = roleClass === 'assistant' ? ' data-yoagent-markdown' : '';
     return `<div class="yoagent-message ${roleClass}">
-      <div class="yoagent-message-role">${esc(role)}</div>
+      <div class="yoagent-message-role"><span>${esc(role)}</span>${yoagentMessageTimestampHtml(message.createdAt)}</div>
       <div class="${bodyClass}"${markdownAttr}>${esc(message.content || '')}</div>
     </div>`;
   }).join('');
+  return `${intro}${messageHtml}`;
+}
+
+function yoagentIntroMessageText() {
+  const summary = activitySummaryPayload?.global || {};
+  const lines = Array.isArray(summary.lines) ? summary.lines : [];
+  const headline = String(summary.headline || lines[0] || '').trim();
+  if (!headline) return '';
+  const details = lines
+    .filter(line => line && line !== headline && !/^Session\s+\S+:/i.test(String(line)))
+    .slice(0, 2)
+    .map(line => `- ${String(line).trim()}`);
+  return ["Here's what I see right now:", "", headline, ...details].filter(Boolean).join('\n');
+}
+
+function yoagentIntroMessageHtml() {
+  const text = yoagentIntroMessageText();
+  if (!text || !yoagentChatEnabled()) return '';
+  return `<div class="yoagent-message assistant yoagent-intro-message">
+    <div class="yoagent-message-role"><span>${esc(yoagentTabLabel())}</span>${yoagentMessageTimestampHtml(activitySummaryPayload?.generated_at)}</div>
+    <div class="yoagent-message-body markdown-body" data-yoagent-markdown>${esc(text)}</div>
+  </div>`;
 }
 
 function yoagentNoticeHtml() {
@@ -1560,11 +1605,13 @@ function yoagentBackendPillHtml(disabled) {
 function yoagentChatHtml() {
   const disabled = yoagentBusy || readOnlyMode ? ' disabled' : '';
   const placeholder = readOnlyMode ? t('yoagent.chatAdminPlaceholder', {name: yoagentTabLabel()}) : t('yoagent.chatPlaceholder');
-  const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || yoagentBusy || yoagentError);
+  const isThinking = yoagentBusy || yoagentPrewarming;
+  const hasConversation = Boolean(yoagentMessages.length || yoagentNotice || isThinking || yoagentError || yoagentIntroMessageText());
   // Strip any trailing dots/ellipsis from the localized label so the three animated dots carry the motion.
   const thinkingLabel = esc(t('yoagent.thinking').replace(/[.…\s]+$/, ''));
-  const busy = yoagentBusy
-    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingLabel}<span class="yoagent-thinking-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></span></div>`
+  const thinkingDots = '<span class="yoagent-thinking-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>';
+  const busy = isThinking
+    ? `<div class="yoagent-chat-status"><span class="session-yolo-marker active working yoagent-chat-spinner" style="--yolo-rotate-delay: ${esc(yoloRotationDelay())}" aria-hidden="true">${esc(t('brand.marker'))}</span><span class="yoagent-thinking">${thinkingLabel}${thinkingDots}</span></div>`
     : '';
   const retry = yoagentError && yoagentDraft && yoagentChatEnabled() && !yoagentBusy && !readOnlyMode
     ? `<button type="button" class="yoagent-chat-retry" data-yoagent-retry>${esc(t('yoagent.retry'))}</button>`
@@ -1602,6 +1649,33 @@ function yoagentChatErrorMessage(error) {
   return t('yoagent.chatFailed', {error: error?.message || error});
 }
 
+let yoagentFocusSerial = 0;
+let yoagentFocusTrackerInstalled = false;
+
+function yoagentDocumentHasFocus() {
+  if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return false;
+  if (typeof document !== 'undefined' && typeof document.hasFocus === 'function') return document.hasFocus();
+  return true;
+}
+
+function yoagentEventIsInsideComposer(event) {
+  return Boolean(event?.target?.closest?.('[data-yoagent-chat-form]'));
+}
+
+function installYoagentFocusTracker() {
+  if (yoagentFocusTrackerInstalled || typeof document === 'undefined') return;
+  yoagentFocusTrackerInstalled = true;
+  document.addEventListener('pointerdown', event => {
+    if (!yoagentEventIsInsideComposer(event)) yoagentFocusSerial += 1;
+  }, true);
+  document.addEventListener('focusin', event => {
+    if (!yoagentEventIsInsideComposer(event)) yoagentFocusSerial += 1;
+  }, true);
+  if (typeof window !== 'undefined') {
+    window.addEventListener('blur', () => { yoagentFocusSerial += 1; });
+  }
+}
+
 async function clearYoagentConversation() {
   yoagentMessages = [];
   yoagentBusy = false;
@@ -1620,9 +1694,13 @@ async function clearYoagentConversation() {
 async function sendYoagentChatMessage(rawText) {
   const text = String(rawText || '').trim();
   if (!text || yoagentBusy || readOnlyMode || !yoagentChatEnabled()) return;
-  yoagentMessages.push({role: 'user', content: text});
+  installYoagentFocusTracker();
+  const focusSerial = yoagentFocusSerial;
+  const shouldRestoreFocus = yoagentChatInputIsFocused() && yoagentDocumentHasFocus();
+  yoagentMessages.push({role: 'user', content: text, createdAt: new Date().toISOString()});
   yoagentDraft = '';
   yoagentBusy = true;
+  yoagentPrewarming = false;
   yoagentError = '';
   yoagentNotice = null;
   renderYoagentPanel({preserveDraft: false, scrollBottom: true});
@@ -1636,14 +1714,37 @@ async function sendYoagentChatMessage(rawText) {
     if (payload.fallback && payload.fallback_reason) {
       yoagentNotice = {backend: yoagentBackendLabel(payload.backend_used || payload.backend), reason: payload.fallback_reason};
     }
-    yoagentMessages.push({role: 'assistant', content: payload.answer || t('yoagent.noAnswer')});
+    yoagentMessages.push({role: 'assistant', content: payload.answer || t('yoagent.noAnswer'), createdAt: payload.answered_at || new Date().toISOString()});
     statusEl.textContent = t('yoagent.statusAnswered', {backend: yoagentBackendLabel(payload.backend_used || payload.backend)});
   } catch (error) {
     if (yoagentChatNetworkError(error)) yoagentDraft = text;
     yoagentError = yoagentChatErrorMessage(error);
   } finally {
     yoagentBusy = false;
-    renderYoagentPanel({preserveDraft: true, scrollBottom: true, focusInput: true});
+    renderYoagentPanel({
+      preserveDraft: true,
+      scrollBottom: true,
+      focusInput: shouldRestoreFocus && focusSerial === yoagentFocusSerial && yoagentDocumentHasFocus(),
+    });
+  }
+}
+
+async function prewarmYoagent(options = {}) {
+  if (yoagentPrewarmStarted || readOnlyMode || !yoagentChatEnabled()) return;
+  yoagentPrewarmStarted = true;
+  yoagentPrewarming = true;
+  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  try {
+    await apiFetchJson('/api/yoagent/prewarm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({locale: i18nActiveLocaleId()}),
+    });
+  } catch (_) {
+    // Prewarm is opportunistic; visible chat requests handle real errors.
+  } finally {
+    yoagentPrewarming = false;
+    renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
   }
 }
 
@@ -1673,6 +1774,7 @@ async function refreshActivitySummary(options = {}) {
       activitySummaryRefreshing = false;
       renderInfoPanel();
       renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
+      if (infoPanelSubTab === 'yoagent') prewarmYoagent();
     }
   }
 }
@@ -1754,8 +1856,8 @@ function preferenceSections() {
     {title: t('pref.section.appearance'), items: [
       {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
       {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
-      {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 8, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
-      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 8, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
+      {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 6, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
+      {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 6, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {type: 'note', text: t('pref.appearance.font_sizes.note')},
       {path: 'appearance.tab_width', label: t('pref.appearance.tab_width.label'), type: 'number', min: 120, max: 420, step: 5, suffix: 'px', help: t('pref.appearance.tab_width.help')},
       {path: 'appearance.max_tabs_per_pane', label: t('pref.appearance.max_tabs_per_pane.label'), type: 'number', min: 2, max: 30, step: 1, help: t('pref.appearance.max_tabs_per_pane.help')},
@@ -1775,9 +1877,9 @@ function preferenceSections() {
         {value: 'dark', label: t('pref.appearance.terminal_theme.dark')},
         {value: 'light', label: t('pref.appearance.terminal_theme.light')},
       ], help: t('pref.appearance.terminal_theme.help')},
-      {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
-      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 8, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
-      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 8, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
+      {path: 'appearance.terminal_font_size', label: t('pref.appearance.terminal_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.terminal_font_size.help')},
+      {path: 'appearance.editor_font_size', label: t('pref.appearance.editor_font_size.label'), type: 'number', min: 6, max: 28, step: 1, suffix: 'px', help: t('pref.appearance.editor_font_size.help')},
+      {path: 'appearance.preview_font_size', label: t('pref.appearance.preview_font_size.label'), type: 'number', min: 6, max: 32, step: 1, suffix: 'px', help: t('pref.appearance.preview_font_size.help')},
       {path: 'terminal_editor.scrollback', label: t('pref.terminal_editor.scrollback.label'), type: 'number', min: 1000, max: 50000, step: 500, suffix: 'lines', help: t('pref.terminal_editor.scrollback.help')},
       {path: 'appearance.editor_dark_color_scheme', label: t('pref.appearance.editor_dark_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: true}), help: t('pref.appearance.editor_dark_color_scheme.help')},
       {path: 'appearance.editor_light_color_scheme', label: t('pref.appearance.editor_light_color_scheme.label'), type: 'select', choices: editorSchemePreferenceChoices({dark: false}), help: t('pref.appearance.editor_light_color_scheme.help')},
@@ -1854,9 +1956,9 @@ function preferenceSections() {
         {value: 'cli', label: t('pref.yoagent.invocation.cli')},
         {value: 'api-key', label: t('pref.yoagent.invocation.api-key')},
       ], help: t('pref.yoagent.invocation.help')},
-      {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help')},
-      {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help')},
-      {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help')},
+      {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help'), alwaysEnableReset: true},
+      {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},
+      {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help'), alwaysEnableReset: true},
     ]},
   ];
 }
@@ -2110,7 +2212,7 @@ function preferenceControlHtml(item, query = '') {
   } else {
     control = `<input type="text" ${baseAttrs} value="${esc(value)}">`;
   }
-  const resetDisabled = readOnlyMode || JSON.stringify(value) === JSON.stringify(defaultValue) ? ' disabled' : '';
+  const resetDisabled = readOnlyMode || (!item.alwaysEnableReset && JSON.stringify(value) === JSON.stringify(defaultValue)) ? ' disabled' : '';
   const extraControl = item.action === 'open-yolo-rule'
     ? `<button type="button" class="preferences-inline-action" data-yolo-rule-open${readOnlyMode ? ' disabled' : ''}>${esc(t('pref.openAction'))}</button>`
     : '';
@@ -2135,12 +2237,6 @@ function preferenceAdvisoryHtml(item, value) {
     <code>${esc(command)}</code>
     <button type="button" class="preferences-inline-action" data-copy-text="${esc(command)}">${esc(t('pref.advisory.copyRsync'))}</button>
   </div>`;
-}
-
-function preferencesAllDefault() {
-  return preferenceSections().every(section => section.items.filter(item => item.path).every(item => (
-    JSON.stringify(preferenceValue(item.path)) === JSON.stringify(preferenceDefault(item.path))
-  )));
 }
 
 function preferencesPanelHtml() {
@@ -2177,7 +2273,7 @@ function preferencesPanelHtml() {
         <button type="button" class="preferences-reset-continue" data-preferences-reset-confirm${resetDisabled}>${esc(t('pref.reset.continue'))}</button>
         <button type="button" class="preferences-reset-cancel" data-preferences-reset-cancel>${esc(t('pref.reset.cancel'))}</button>
       </div>` : `<button type="button" class="preferences-reset-all" data-preferences-reset-all${resetDisabled}>${esc(t('pref.reset.all'))}</button>`;
-  const resetBlock = preferencesAllDefault() && !preferencesResetConfirmVisible ? '' : `
+  const resetBlock = `
     <div class="preferences-global-reset${preferencesResetConfirmVisible ? ' confirming' : ''}" role="group" aria-label="${esc(t('pref.reset.aria'))}">
       <div>
         <div class="preferences-global-reset-title">${resetTitle}</div>

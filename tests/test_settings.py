@@ -33,6 +33,15 @@ def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text(
     assert custom["yoagent"]["intro"] == "Custom intro"
     assert custom["yoagent"]["format"] == defaults["format"]
 
+    stale_reset = sanitize_settings({"yoagent": {
+        "system_prompt": "You are YO!agent, a concise assistant for YOLOmux. Help users operate YOLOmux using the supplied concepts and report only from the supplied agent activity context. Write like a normal human status update, not a metadata list. Answer the user's question directly and helpfully. Prioritize the most recent and important work, blockers, PRs, CI, dirty repos, and likely next actions. Do not mention session ids, per-session details, or a session-by-session inventory unless the user explicitly asks about a session, asks to list/enumerate sessions, or asks for all sessions. Do not run tools or inspect ~/.claude, ~/.codex, transcript directories, or any filesystem path. Do not invent missing facts.",
+        "intro": "Use the live AI agent activity only as much as the user asked for. If the user is unsure what to do, recommend what to work on next based on freshness, importance, blockers, PR/CI state, dirty repos, and changed files. Keep stale or old work out of the default answer unless it changes the recommendation or the user explicitly asks for sessions.",
+        "format": "Reply in Markdown. Default shape: a short direct answer, then optional bullets for the top relevant topics or next actions. Do not include session ids, per-session headings, or one item per session unless the user asks about a specific session or asks to list/enumerate/show all sessions. When the user explicitly asks for sessions, use one numbered item per session/topic, with a bold title and one or two short factual sub-bullets.",
+    }})
+    assert stale_reset["yoagent"]["system_prompt"] == defaults["system_prompt"]
+    assert stale_reset["yoagent"]["intro"] == defaults["intro"]
+    assert stale_reset["yoagent"]["format"] == defaults["format"]
+
 
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
@@ -52,7 +61,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["theme"] == "dark"
     assert settings["appearance"]["terminal_theme"] == "follow-app"
     assert settings["appearance"]["date_time_hour_cycle"] == "24"
-    assert settings["appearance"]["ui_font_size"] == 8
+    assert settings["appearance"]["ui_font_size"] == 6
     assert settings["appearance"]["terminal_font_size"] == 28
     assert settings["appearance"]["editor_font_size"] == 28
     assert settings["appearance"]["editor_color_scheme"] == "dark"
@@ -60,7 +69,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["appearance"]["editor_light_color_scheme"] == "yolomux-light"
     assert settings["appearance"]["editor_cursor_style"] == "block"  # C3: invalid choice clamps to the new block default
     assert settings["appearance"]["editor_cursor_color"] == "yellow"  # invalid choice clamps to the default
-    assert settings["appearance"]["file_explorer_font_size"] == 8
+    assert settings["appearance"]["file_explorer_font_size"] == 6
     assert settings["appearance"]["tab_width"] == 120
     assert settings["appearance"]["pane_spacing"] == 20
     assert settings["appearance"]["pane_ring_opacity"] == 5
@@ -97,10 +106,16 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["appearance"]["tab_width"] == 180
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "auto"
-    assert "normal human status update" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "normal status-update style" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "You may run tools" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "run scoped tools" in payload["settings"]["yoagent"]["intro"]
     assert "recommend what to work on next" in payload["settings"]["yoagent"]["intro"]
-    assert "Do not mention session ids" in payload["settings"]["yoagent"]["system_prompt"]
-    assert "Do not include session ids" in payload["settings"]["yoagent"]["format"]
+    assert "refer to it as tmux session `<session-name>`" in payload["settings"]["yoagent"]["system_prompt"]
+    assert "use one Markdown table with columns" in payload["settings"]["yoagent"]["format"]
+    assert "show only the session name as a Markdown link" in payload["settings"]["yoagent"]["format"]
+    assert "[`2`](?yoagent-session=2)" in payload["settings"]["yoagent"]["format"]
+    assert "9 hrs ago" in payload["settings"]["yoagent"]["format"]
+    assert "If there are 6 sessions, emit 6 table rows." in payload["settings"]["yoagent"]["format"]
     assert "Open / pending:" in payload["settings"]["yoagent"]["format"]
     assert path.exists()
     assert "YOLOmux user preferences" in path.read_text()

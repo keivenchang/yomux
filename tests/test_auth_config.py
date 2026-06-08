@@ -271,7 +271,8 @@ def test_bootstrap_json_escapes_breakout_chars_without_html_entities():
     assert "</script>" not in raw
     parsed = json.loads(raw)
     fmt = parsed["settingsPayload"]["settings"]["yoagent"]["format"]
-    assert "Do not include session ids" in fmt
+    assert "columns: tmux session, full path, last worked, details" in fmt
+    assert "[`2`](?yoagent-session=2)" in fmt
     assert "&lt;" not in fmt
 
 

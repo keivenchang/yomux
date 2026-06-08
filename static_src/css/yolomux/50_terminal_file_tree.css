@@ -537,11 +537,10 @@
 .info-subview .info-list {
   flex: 1;
 }
-/* #48: the merged info panel has FOUR rows — window-tab strip, detail row, the YO!info|YO!agent sub-tab
-   toggle, then the body. `.panel` only declares three tracks, so give the info panel its own template so
-   the sub-tab row gets a real track (and stays visible when the detail header is collapsed away). */
+/* #48: the merged info panel has three rows: window-tab strip, the YO!info|YO!agent sub-tab toggle,
+   then the body. Give the sub-tab row a real track so it stays visible. */
 .info-panel {
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 .info-panel.details-collapsed {
   grid-template-rows: auto auto minmax(0, 1fr);
@@ -735,27 +734,30 @@
   height: 18px;
   flex: 0 0 auto;
 }
-/* "thinking" with three dots that bounce in sequence, so it reads as a live agent, not static text. */
+/* "thinking" with a blinking, moving ellipsis so it reads as live agent work, not static text. */
 .yoagent-thinking {
   display: inline-flex;
   align-items: baseline;
 }
 .yoagent-thinking-dots {
   display: inline-flex;
+  width: 1.6em;
+  justify-content: flex-start;
 }
-.yoagent-thinking-dots i {
+.yoagent-thinking-dots span {
   display: inline-block;
-  font-style: normal;
-  animation: yoagent-thinking-bounce 1.25s infinite ease-in-out both;
+  opacity: 0;
+  animation: yoagent-thinking-dot 1.2s steps(1, end) infinite;
 }
-.yoagent-thinking-dots i:nth-child(2) { animation-delay: 0.16s; }
-.yoagent-thinking-dots i:nth-child(3) { animation-delay: 0.32s; }
-@keyframes yoagent-thinking-bounce {
-  0%, 70%, 100% { transform: translateY(0); opacity: 0.3; }
-  35% { transform: translateY(-3px); opacity: 1; }
+.yoagent-thinking-dots span:nth-child(2) {
+  animation-delay: 0.2s;
 }
-@media (prefers-reduced-motion: reduce) {
-  .yoagent-thinking-dots i { animation: none; opacity: 1; }
+.yoagent-thinking-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes yoagent-thinking-dot {
+  0%, 20%, 100% { opacity: 0; transform: translateY(0); }
+  25%, 75% { opacity: 1; transform: translateY(-1px); }
 }
 .yoagent-chat-error {
   display: flex;
@@ -796,9 +798,17 @@
   border-color: var(--active-control-soft-border);
 }
 .yoagent-message-role {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--muted);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
   text-transform: uppercase;
+}
+.yoagent-message-time {
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: none;
 }
 .yoagent-message-body {
   white-space: pre-wrap;

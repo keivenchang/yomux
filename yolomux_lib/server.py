@@ -595,6 +595,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             response, status = self.server.app.yoagent_chat(payload)
             self.write_json(response, status=status)
             return
+        if parsed.path == "/api/yoagent/prewarm":
+            payload = self.read_json_body(64 * 1024)
+            if payload is None:
+                return
+            response, status = self.server.app.yoagent_prewarm(payload)
+            self.write_json(response, status=status)
+            return
         if parsed.path == "/api/yoagent/reset":
             self.write_json(self.server.app.reset_yoagent_chat())
             return

@@ -85,6 +85,7 @@ from .types import RunHistoryEntry
 from .types import RunHistoryPayload
 from .uploads import sanitize_upload_filename
 from .uploads import unique_upload_path
+from .web import server_string
 from .workdir import agent_command
 from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
@@ -103,20 +104,12 @@ YOAGENT_AUTH_FAILURE_RE = re.compile(
     r"(not\s+logged\s+in|log\s*in|login|required\s+auth|authentication|unauthorized|permission\s+denied|401)",
     re.IGNORECASE,
 )
-YOAGENT_PERMISSION_BLOCK_RE = re.compile(
-    r"(?:i'?m\s+blocked|harness\s+denied|grant\s+.*permission|approve\s+the\s+next\s+bash|need\s+read(?:/bash)?\s+permission)",
-    re.IGNORECASE,
-)
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
 
 
 def yoagent_cli_auth_failure(text: str) -> bool:
     return bool(YOAGENT_AUTH_FAILURE_RE.search(text or ""))
-
-
-def yoagent_cli_answer_is_permission_blocked(text: str) -> bool:
-    return bool(YOAGENT_PERMISSION_BLOCK_RE.search(text or ""))
 
 
 def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
@@ -131,27 +124,12 @@ def yoagent_cli_fallback_reason(backend: str, error: str) -> str:
     return f"{label} is not logged in. Run `{login_command}`; showing the No agent YO!agent summary."
 
 
-# DOIT.8 Phase 1: when the UI is in a non-English locale, ask the LLM backend to answer in that
-# language. The directive itself is English (models follow it reliably) and names the target language.
-_YOAGENT_LANGUAGE_NAMES = {
-    "zh-Hant": "Traditional Chinese",
-    "zh-Hans": "Simplified Chinese",
-    "es": "Spanish",
-    "ja": "Japanese",
-    "de": "German",
-    "fr": "French",
-    "pt-BR": "Brazilian Portuguese",
-    "ru": "Russian",
-    "ko": "Korean",
-    "hi": "Hindi",
-    "ar": "Arabic",
-    "he": "Hebrew",
-}
-
-
 def yoagent_language_directive(locale: str) -> str:
-    name = _YOAGENT_LANGUAGE_NAMES.get(str(locale or "").strip())
-    return f"\n\nRespond in {name}." if name else ""
+    locale_id = str(locale or "").strip()
+    if locale_id in {"", "en", "en-XA", "system"}:
+        return ""
+    directive = server_string(locale_id, "yoagent.prompt.answerLanguage").strip()
+    return f"\n\n{directive}" if directive else ""
 
 
 def resolve_yoagent_backend(backend: str) -> str:
@@ -220,6 +198,9 @@ class TmuxWebtermApp:
         self.activity_summary_cache: dict[str, dict[str, Any]] = {}
         self.yoagent_cli_lock = threading.RLock()
         self.yoagent_cli_sessions: dict[str, dict[str, Any]] = {}
+        self.yoagent_prewarm_lock = threading.Lock()
+        self.yoagent_prewarm_running = False
+        self.yoagent_prewarm_status: dict[str, Any] = {}
         self.load_metadata_badge_state()
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
@@ -341,7 +322,46 @@ class TmuxWebtermApp:
     def reset_yoagent_chat(self) -> dict[str, Any]:
         with self.yoagent_cli_lock:
             self.yoagent_cli_sessions.clear()
+        with self.yoagent_prewarm_lock:
+            self.yoagent_prewarm_status = {}
         return {"ok": True}
+
+    def yoagent_prewarm(self, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any], HTTPStatus]:
+        settings = self.yoagent_settings()
+        requested_backend = str(settings.get("backend") or "deterministic").strip().lower()
+        backend = resolve_yoagent_backend(requested_backend)
+        invocation = str(settings.get("invocation") or "cli").strip().lower()
+        if backend not in {"codex", "claude"} or invocation != "cli":
+            return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "no CLI backend available"}, HTTPStatus.OK
+        with self.yoagent_prewarm_lock:
+            if self.yoagent_prewarm_running:
+                return {"ok": True, "started": False, "backend": requested_backend, "backend_used": backend, "reason": "already running"}, HTTPStatus.ACCEPTED
+            self.yoagent_prewarm_running = True
+            self.yoagent_prewarm_status = {"backend": backend, "started_at": time.time()}
+        locale = str((payload or {}).get("locale") or "en").strip() or "en"
+
+        def worker() -> None:
+            status: dict[str, Any] = {"backend": backend}
+            try:
+                activity_payload = self.activity_summary_payload()
+                answer, reason, cli_status = self.run_yoagent_cli_backend(
+                    backend,
+                    server_string(locale, "yoagent.prompt.prewarmQuestion"),
+                    activity_payload,
+                    settings,
+                    [],
+                    locale,
+                )
+                status = {"backend": backend, "warmed": bool(answer and not reason), "fallback_reason": reason, "cli": cli_status}
+            except Exception as exc:
+                status = {"backend": backend, "warmed": False, "error": str(exc)}
+            finally:
+                with self.yoagent_prewarm_lock:
+                    self.yoagent_prewarm_status = status
+                    self.yoagent_prewarm_running = False
+
+        threading.Thread(target=worker, name="yoagent-prewarm", daemon=True).start()
+        return {"ok": True, "started": True, "backend": requested_backend, "backend_used": backend}, HTTPStatus.ACCEPTED
 
     def yoagent_chat(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         question = truncate_text(" ".join(str(payload.get("message") or payload.get("question") or "").split()), 4000)
@@ -378,6 +398,7 @@ class TmuxWebtermApp:
             answer = deterministic_yoagent_reply(question, activity_payload, settings, locale)
         return {
             "answer": answer,
+            "answered_at": datetime.now(timezone.utc).isoformat(),
             "backend": requested_backend,
             "backend_used": backend_used,
             "fallback": bool(fallback_reason),
@@ -411,7 +432,7 @@ class TmuxWebtermApp:
             context_changed = context_signature != state.get("activity_signature")
             seed = not session_id
             next_session_id = session_id or (str(uuid.uuid4()) if backend == "claude" else "")
-            prompt = build_yoagent_chat_prompt(question, activity_payload, settings, history) if seed else build_yoagent_resume_prompt(question, activity_payload, settings, context_changed)
+            prompt = build_yoagent_chat_prompt(question, activity_payload, settings, history, locale) if seed else build_yoagent_resume_prompt(question, activity_payload, settings, context_changed, locale)
             prompt += yoagent_language_directive(locale)
 
         started = time.monotonic()
@@ -420,9 +441,6 @@ class TmuxWebtermApp:
             next_session_id = captured_session_id or session_id
         else:
             answer, error = self.run_yoagent_claude_cli(prompt, session_id=next_session_id, resume=not seed)
-        if answer and yoagent_cli_answer_is_permission_blocked(answer):
-            answer = ""
-            error = "YO!agent backend tried to inspect files outside the supplied YOLOmux context; showing the No agent summary instead."
         elapsed_ms = round((time.monotonic() - started) * 1000)
         fallback_reason = yoagent_cli_fallback_reason(backend, error)
         status = {

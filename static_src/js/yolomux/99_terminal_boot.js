@@ -411,11 +411,22 @@ function yoagentChatInputIsFocused(node = document.getElementById('yoagent-conte
   return Boolean(input && document.activeElement === input);
 }
 
+function restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd) {
+  if (!inputFocused) return false;
+  const nextInput = node?.querySelector?.('[data-yoagent-chat-input]');
+  if (!nextInput || nextInput.disabled) return false;
+  nextInput.focus({preventScroll: true});
+  if (selectionStart !== null && selectionEnd !== null) {
+    try { nextInput.setSelectionRange(selectionStart, selectionEnd); } catch (_) {}
+  }
+  return true;
+}
+
 function refreshYoagentSummaryRegions(node = document.getElementById('yoagent-content')) {
   if (!node) return false;
-  const globalRegion = node.querySelector('.yoagent-global');
-  if (!globalRegion) return false;
-  globalRegion.outerHTML = globalActivitySummaryHtml();
+  const chat = node.querySelector('.yoagent-chat');
+  if (!chat) return false;
+  chat.outerHTML = yoagentChatHtml();
   renderYoagentMessageMarkdown(node);
   return true;
 }
@@ -442,16 +453,62 @@ function yoagentInlineMarkdown(text) {
   return yoagentTightMarkdown(downgraded);
 }
 
+function yoagentSessionFromHref(href) {
+  try {
+    const url = new URL(String(href || ''), window.location.href);
+    return url.searchParams.get('yoagent-session') || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function handleYoagentSessionLinkClick(event) {
+  const anchor = event.target?.closest?.('a[href]');
+  if (!anchor) return;
+  const session = yoagentSessionFromHref(anchor.getAttribute('href') || '');
+  if (!session) return;
+  event.preventDefault();
+  selectSession(session, {userInitiated: true});
+}
+
+function linkYoagentSessionCodeReferences(container) {
+  if (!container) return;
+  (container.querySelectorAll?.('code') || []).forEach(code => {
+    if (code.closest('a')) return;
+    const session = (code.textContent || '').trim();
+    if (!session || !sessions.includes(session)) return;
+    const previousText = code.previousSibling?.nodeType === Node.TEXT_NODE ? code.previousSibling.textContent || '' : '';
+    if (!/(^|\b)(tmux\s+)?session\s*$/i.test(previousText)) return;
+    const link = document.createElement('a');
+    link.href = `?yoagent-session=${encodeURIComponent(session)}`;
+    link.className = 'yoagent-session-link';
+    link.title = `Open tmux session ${session}`;
+    code.replaceWith(link);
+    link.appendChild(code);
+  });
+}
+
+function installYoagentSessionLinks(container) {
+  if (!container) return;
+  linkYoagentSessionCodeReferences(container);
+  if (container.dataset.yoagentSessionLinksBound !== 'true') {
+    container.dataset.yoagentSessionLinksBound = 'true';
+    container.addEventListener('click', handleYoagentSessionLinkClick);
+  }
+}
+
 function renderYoagentMessageMarkdown(node = document.getElementById('yoagent-content')) {
   // Render assistant chat replies through the Markdown pipeline so bold titles, code, lists, and links
   // display formatted. Without marked.js the escaped-text fallback stays.
   if (!node || typeof window.marked === 'undefined') return;
   (node.querySelectorAll?.('.yoagent-global [data-yoagent-global-markdown]') || []).forEach(body => {
     renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
+    installYoagentSessionLinks(body);
     body.removeAttribute('data-yoagent-global-markdown');
   });
   (node.querySelectorAll?.('.yoagent-message.assistant .yoagent-message-body[data-yoagent-markdown]') || []).forEach(body => {
     renderMarkdownPreviewInto(body, yoagentTightMarkdown(body.textContent || ''));
+    installYoagentSessionLinks(body);
     body.removeAttribute('data-yoagent-markdown');
   });
 }
@@ -465,11 +522,16 @@ function renderYoagentPanel(options = {}) {
   const selectionEnd = inputFocused ? input.selectionEnd : null;
   if (input && options.preserveDraft !== false) yoagentDraft = input.value || '';
   if (yoagentBusyUiIsMounted(node) && options.allowBusyRebuild !== true) {
-    refreshYoagentSummaryRegions(node);
+    if (refreshYoagentSummaryRegions(node)) {
+      restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
+    }
     return;
   }
-  if (options.summaryOnly && refreshYoagentSummaryRegions(node)) return;
-  node.innerHTML = `${globalActivitySummaryHtml()}${yoagentChatHtml()}`;
+  if (options.summaryOnly && refreshYoagentSummaryRegions(node)) {
+    restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
+    return;
+  }
+  node.innerHTML = yoagentChatHtml();
   renderYoagentMessageMarkdown(node);
   if (options.scrollBottom !== false) {
     requestAnimationFrame(() => scrollYoagentChatToBottom(node));
@@ -480,11 +542,7 @@ function renderYoagentPanel(options = {}) {
     return;
   }
   if (!inputFocused) return;
-  const nextInput = node.querySelector('[data-yoagent-chat-input]');
-  nextInput?.focus?.({preventScroll: true});
-  if (nextInput && selectionStart !== null && selectionEnd !== null) {
-    try { nextInput.setSelectionRange(selectionStart, selectionEnd); } catch (_) {}
-  }
+  restoreYoagentChatInputFocus(node, inputFocused, selectionStart, selectionEnd);
 }
 
 function infoBranchRows() {
