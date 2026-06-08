@@ -32,7 +32,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "language": "system",
         "reload_on_update": False,
         "reload_on_update_auto": False,
-        "startup_helpers": True,
+        "startup_tips": True,
     },
     "appearance": {
         "theme": "dark",
@@ -263,7 +263,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
     ("general", "reload_on_update"): "true/false. Default false. When true, an open client shows a 'New version available' banner once the server ships a newer YOLOMUX_VERSION.",
     ("general", "reload_on_update_auto"): "true/false. Default false. When reload_on_update is on, reload immediately instead of showing a banner — but only when it is safe (no unsaved editor changes and not mid-typing).",
-    ("general", "startup_helpers"): "true/false. Default true. When true, a small startup tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn helpers off forever.",
+    ("general", "startup_tips"): "true/false. Default true. When true, a small startup Tip teaches one YOLOmux feature after the app loads; users can dismiss it or turn Tips off forever.",
     ("file_explorer", "indexed_dirs"): "Directories with a pre-built quick-open index, one path per line. Adding a path indexes it (also via the Finder right-click); removing a line un-indexes it.",
     ("file_explorer", "index_refresh_seconds"): "Seconds, 0-3600. How often the quick-open index is proactively refreshed in the background. 0 = only rebuild when you search.",
     ("file_explorer", "companion_dirs"): "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Useful for companion repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates.",
@@ -386,6 +386,9 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
                 legacy_ms = 3000
             if round(legacy_ms) != 3000:
                 incoming["refresh_seconds"] = legacy_ms / 1000
+        if section == "general" and "startup_tips" not in incoming and "startup_helpers" in incoming:
+            incoming = dict(incoming)
+            incoming["startup_tips"] = incoming["startup_helpers"]
         for key, default in values.items():
             present = key in incoming
             value = incoming.get(key, default)
@@ -422,6 +425,8 @@ def merge_settings(base: dict[str, Any], patch: Any, coerced: list[str] | None =
         if section not in merged or not isinstance(values, dict):
             continue
         for key, value in values.items():
+            if section == "general" and key == "startup_helpers":
+                key = "startup_tips"
             if key in merged[section]:
                 merged[section][key] = value
     return sanitize_settings(merged, coerced)

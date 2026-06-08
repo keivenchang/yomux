@@ -1527,7 +1527,7 @@ body.editor-theme-light .file-editor-content {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 2px;
   float: right;
   max-width: calc(100% - 4px);
@@ -1557,7 +1557,7 @@ body.editor-theme-light .file-editor-content {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 2px;
   min-height: 26px;
   padding: 2px 6px;
@@ -1693,6 +1693,12 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-diff-expand-panel {
   order: -2;
+}
+.file-editor-toolbar:has(.file-editor-diff-ref-panel[hidden]) .file-editor-diff-expand-panel:not([hidden]) {
+  margin-inline-end: auto;
+}
+.file-editor-toolbar:has(.file-editor-diff-ref-panel[hidden]):has(.file-editor-diff-expand-panel[hidden]) .file-editor-diff-panel:not([hidden]) {
+  margin-inline-end: auto;
 }
 .file-editor-toolbar:has(.file-editor-diff-panel[hidden]) .file-editor-gutter-panel:not([hidden]) {
   margin-inline-end: auto;

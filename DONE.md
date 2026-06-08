@@ -6,8 +6,8 @@ dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 
 ## 2026-06-07
 
-### DOIT.48 startup helper tips
-- Added a lightweight startup helper that shows one delayed feature tip after app load for admin users with helpers enabled. The tip catalog covers drag/drop, image prompts, YO!agent, YO auto-approval, YOLO rules, `Differ`, Finder Sync/Reload, editor ref diffs, notifications, watched PRs, quick search, Markdown Preview, and rsync for large uploads. The helper uses the existing toast renderer, rotates serially through localStorage, never focuses controls, offers `Next tip`, `Hide this`, and `Turn off helpers forever`, and persists the forever-off choice through `general.startup_helpers`. Preferences can re-enable it from General. Added source/runtime guards plus settings coverage.
+### DOIT.48 Startup Tips
+- Added lightweight Startup Tips that show one delayed feature tip after app load for admin users with Tips enabled. The tip catalog covers drag/drop, image prompts, YO!agent, YO auto-approval, YOLO rules, `Differ`, Finder Sync/Reload, editor ref diffs, notifications, watched PRs, quick search, Markdown Preview, and rsync for large uploads. The tip uses the existing toast renderer, rotates serially through localStorage, never focuses controls, offers `Next tip`, `Hide this`, and `Turn off Tips forever`, and persists the forever-off choice through `general.startup_tips`. Preferences can re-enable it from General. Added source/runtime guards plus settings coverage.
 
 ### DOIT.47 YO!agent capability boundary
 - Grounded YO!agent capability answers in a backend capability inventory. Activity payloads and prompt context now state that YOLOmux can read tmux panes, poll sessions, monitor prompts/PRs/files, notify on configured transitions, and send tmux input only through explicit admin UI paths; YO!agent chat itself must not claim autonomous command-sending tools. Updated default/reset prompt text and locale prompt catalogs, preserved legacy prompt migration, and added regressions for prompt context plus deterministic capability answers.

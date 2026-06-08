@@ -2118,7 +2118,7 @@ function showStartupHelperTip(options = {}) {
   const offAction = startupHelperAction(t('startupHelper.action.offForever'), () => {
     startupHelpersEnabled = false;
     closeStartupHelperToast(node);
-    saveSettingsPatch(settingPatch('general.startup_helpers', false))
+    saveSettingsPatch(settingPatch('general.startup_tips', false))
       .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
       .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
   });
@@ -2126,7 +2126,7 @@ function showStartupHelperTip(options = {}) {
     className: 'attention-alert toast startup-helper-toast',
     container: displayToastContainer(focusedPanelItem),
     actions: [navAction, hideAction, offAction],
-    countdownMs: 30000,
+    countdownMs: 45000,
   });
   if (node) node.dataset.toastKind = 'startup-helper';
   return node;

@@ -1858,7 +1858,7 @@ function preferenceSections() {
         {value: 'en-XA', label: t('pref.general.language.pseudo')},
       ], help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
-      {path: 'general.startup_helpers', label: t('pref.general.startup_helpers.label'), type: 'boolean', help: t('pref.general.startup_helpers.help')},
+      {path: 'general.startup_tips', label: t('pref.general.startup_tips.label'), type: 'boolean', help: t('pref.general.startup_tips.help')},
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
     ]},
     {title: t('pref.section.appearance'), items: [

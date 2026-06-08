@@ -2069,7 +2069,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-editor-gutter-panel\s*\{[^}]*order:\s*-4/.test(css), 'editor toolbar puts # at the far-left edge');
   assert.ok(/\.file-editor-diff-panel\s*\{[^}]*order:\s*-3[\s\S]*min-width:\s*44px/.test(css), 'editor toolbar puts Differ after # and gives it text-button width');
   assert.ok(/\.file-editor-diff-expand-panel\s*\{[^}]*order:\s*-2/.test(css), 'editor toolbar puts diff expand immediately after Differ');
-  assert.equal(/\.file-editor-toolbar:has\(\.file-editor-diff-ref-panel\[hidden\]\) \.file-editor-diff-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), false, 'editor toolbar keeps Differ immediately beside # when FROM/TO is hidden');
+  assert.ok(/\.file-editor-toolbar\s*\{[^}]*justify-content:\s*flex-start/.test(css), 'editor toolbar left-aligns # and Differ by default, including after browser refresh');
+  assert.ok(/\.file-editor-toolbar:has\(\.file-editor-diff-ref-panel\[hidden\]\) \.file-editor-diff-expand-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), 'editor toolbar uses diff-expand as the spacer when FROM/TO is hidden');
+  assert.ok(/\.file-editor-toolbar:has\(\.file-editor-diff-ref-panel\[hidden\]\):has\(\.file-editor-diff-expand-panel\[hidden\]\) \.file-editor-diff-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), 'editor toolbar uses Differ as the spacer when FROM/TO and expand are hidden');
   assert.ok(/\.file-editor-toolbar:has\(\.file-editor-diff-panel\[hidden\]\) \.file-editor-gutter-panel:not\(\[hidden\]\)\s*\{[^}]*margin-inline-end:\s*auto/.test(css), 'editor toolbar keeps # on the left even when Diff is hidden');
   assert.ok(/\.file-editor-preview-font-panel\s*\{[^}]*position:\s*absolute[\s\S]*left:\s*50%[\s\S]*transform:\s*translateX\(-50%\)/.test(css), 'preview font-size control is centered in the editor toolbar');
   assert.ok(/\.file-editor-toolbar\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(css), '#3: editor toolbar background matches the pane chrome bar (--pane-bar-bg: bright focused / gray unfocused)');
@@ -6733,18 +6735,19 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.writeStartupHelperIndex(15);
   assert.equal(api.readStartupHelperIndex(tips.length), 1, 'startup helper index wraps by catalog length');
   const generalHtml = api.preferencesPanelHtmlForTest('');
-  assert.ok(generalHtml.includes('data-setting-path="general.startup_helpers"'), 'Startup helper tips setting renders in General');
-  assert.ok(generalHtml.indexOf('data-setting-path="general.auto_focus"') < generalHtml.indexOf('data-setting-path="general.startup_helpers"'), 'Startup helper setting follows Auto-focus');
+  assert.ok(generalHtml.includes('data-setting-path="general.startup_tips"'), 'Startup Tips setting renders in General');
+  assert.ok(generalHtml.includes('Startup Tips'), 'Startup Tips setting uses Tips wording');
+  assert.ok(generalHtml.indexOf('data-setting-path="general.auto_focus"') < generalHtml.indexOf('data-setting-path="general.startup_tips"'), 'Startup Tips setting follows Auto-focus');
   const src = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
   assert.ok(src.includes("if (readOnlyMode || !startupHelpersEnabled) return null;"), 'startup helper does not render in readonly or disabled mode');
   assert.ok(src.includes("writeStartupHelperIndex((index + 1) % tips.length)"), 'startup helper advances the localStorage index when shown');
   assert.ok(src.includes("showStartupHelperTip({manual: true})"), 'Next tip action shows the next helper');
-  assert.ok(src.includes("saveSettingsPatch(settingPatch('general.startup_helpers', false))"), 'Turn off forever persists the General setting');
+  assert.ok(src.includes("saveSettingsPatch(settingPatch('general.startup_tips', false))"), 'Turn off forever persists the General setting');
   assert.ok(src.includes('startupHelperPromptTitle(index, tips.length, tip)'), 'startup helper title includes tip number, total, and action prompt');
   assert.ok(src.includes('container: displayToastContainer(focusedPanelItem)'), 'startup helper renders in the focused pane toast stack, below pane tabs');
   assert.ok(src.includes("startupHelperAction('<', () => showRelativeTip(-1)"), 'startup helper has a previous-tip arrow control');
   assert.ok(src.includes("startupHelperAction('>', () => showRelativeTip(1)"), 'startup helper has a next-tip arrow control');
-  assert.ok(src.includes('countdownMs: 30000'), 'startup helper stays visible for 30 seconds');
+  assert.ok(src.includes('countdownMs: 45000'), 'Startup Tips stay visible for 45 seconds');
   const helperStart = src.indexOf('function showStartupHelperTip');
   const helperEnd = src.indexOf('function scheduleStartupHelperTip');
   assert.ok(helperStart >= 0 && helperEnd > helperStart, 'startup helper function block is present');
@@ -6756,7 +6759,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/installRuntimeIntervals\(\);\s*scheduleStartupHelperTip\(\);/.test(bootSrc), 'startup helper is scheduled after initial boot intervals');
   assert.ok(src.includes("if (location.protocol === 'file:') return;"), 'startup helper is skipped in file:// browser fixtures');
   const settingsSrc = fs.readFileSync('yolomux_lib/settings.py', 'utf8');
-  assert.ok(settingsSrc.includes('"startup_helpers": True'), 'startup helper setting defaults on server-side');
+  assert.ok(settingsSrc.includes('"startup_tips": True'), 'Startup Tips setting defaults on server-side');
+  assert.ok(settingsSrc.includes('"startup_helpers" in incoming'), 'legacy startup_helpers configs migrate to startup_tips');
 }
 
 {

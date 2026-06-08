@@ -409,7 +409,7 @@ let editorPreviewFontSize = initialSetting('appearance.preview_font_size', edito
 let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
 let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
 let autoFocusEnabled = initialSetting('general.auto_focus', false);
-let startupHelpersEnabled = initialSetting('general.startup_helpers', true) !== false;
+let startupHelpersEnabled = initialSetting('general.startup_tips', true) !== false;
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;
@@ -4502,7 +4502,7 @@ function showStartupHelperTip(options = {}) {
   const offAction = startupHelperAction(t('startupHelper.action.offForever'), () => {
     startupHelpersEnabled = false;
     closeStartupHelperToast(node);
-    saveSettingsPatch(settingPatch('general.startup_helpers', false))
+    saveSettingsPatch(settingPatch('general.startup_tips', false))
       .then(() => { statusEl.textContent = t('startupHelper.status.disabled'); })
       .catch(error => { statusErr(`settings save failed: ${esc(error)}`); refreshSettings({force: true}); });
   });
@@ -4510,7 +4510,7 @@ function showStartupHelperTip(options = {}) {
     className: 'attention-alert toast startup-helper-toast',
     container: displayToastContainer(focusedPanelItem),
     actions: [navAction, hideAction, offAction],
-    countdownMs: 30000,
+    countdownMs: 45000,
   });
   if (node) node.dataset.toastKind = 'startup-helper';
   return node;
@@ -11432,7 +11432,7 @@ function applySettingsPayload(payload, options = {}) {
   const previousBlameAllLines = fileEditorBlameAllLines;
   fileEditorBlameAllLines = boolSetting('editor.blame_all_lines', false);
   autoFocusEnabled = boolSetting('general.auto_focus', false);
-  startupHelpersEnabled = boolSetting('general.startup_helpers', true);
+  startupHelpersEnabled = boolSetting('general.startup_tips', true);
   const previousEditorSchemeId = activeEditorScheme().id;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
@@ -16354,7 +16354,7 @@ function preferenceSections() {
         {value: 'en-XA', label: t('pref.general.language.pseudo')},
       ], help: t('pref.general.language.help')},
       {path: 'general.auto_focus', label: t('pref.general.auto_focus.label'), type: 'boolean', help: t('pref.general.auto_focus.help')},
-      {path: 'general.startup_helpers', label: t('pref.general.startup_helpers.label'), type: 'boolean', help: t('pref.general.startup_helpers.help')},
+      {path: 'general.startup_tips', label: t('pref.general.startup_tips.label'), type: 'boolean', help: t('pref.general.startup_tips.help')},
       {path: 'general.default_sessions', label: t('pref.general.default_sessions.label'), type: 'list', help: t('pref.general.default_sessions.help')},
     ]},
     {title: t('pref.section.appearance'), items: [

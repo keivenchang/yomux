@@ -106,7 +106,7 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["appearance"]["terminal_theme"] == "follow-app"
     assert payload["settings"]["appearance"]["date_time_hour_cycle"] == "24"
     assert payload["settings"]["appearance"]["tab_width"] == 180
-    assert payload["settings"]["general"]["startup_helpers"] is True
+    assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "auto"
     assert payload["settings"]["yoagent"]["auto_refresh"] is False
@@ -134,6 +134,11 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     loaded, error = read_settings_file(path)
     assert error == ""
     assert loaded == updated["settings"]
+
+
+def test_startup_helpers_setting_migrates_to_startup_tips():
+    migrated = sanitize_settings({"general": {"startup_helpers": False}})
+    assert migrated["general"]["startup_tips"] is False
 
 
 def test_save_settings_can_reset_all_values_to_defaults(tmp_path):

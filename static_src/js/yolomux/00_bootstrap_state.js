@@ -408,7 +408,7 @@ let editorPreviewFontSize = initialSetting('appearance.preview_font_size', edito
 let fileExplorerFontSize = initialSetting('appearance.file_explorer_font_size', 13);
 let terminalScrollback = initialSetting('terminal_editor.scrollback', 5000);
 let autoFocusEnabled = initialSetting('general.auto_focus', false);
-let startupHelpersEnabled = initialSetting('general.startup_helpers', true) !== false;
+let startupHelpersEnabled = initialSetting('general.startup_tips', true) !== false;
 const menuClickCloseGraceMs = 2000;
 const terminalFitBottomReservePx = 2;
 const terminalWheelPageFraction = 0.85;
