@@ -179,6 +179,8 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
                 "files": {"count": 2, "added": 7, "removed": 1},
                 "work": "editor fixes",
                 "status_text": "CI pending",
+                "rolling_summary": "The transcript says this session is wiring clickable session links and fixing the thinking indicator.",
+                "rolling_state": "working",
                 "file_lines": ["M static/yolomux.js (+5/-1)"],
                 "local": "Codex session 5 is active in yolomux.",
             }
@@ -208,6 +210,7 @@ def test_yoagent_prompt_and_deterministic_reply_use_activity_context():
     lines = yoagent_context_lines(activity)
 
     assert any("tmux session `5` directory: yolomux" in line and "Codex gpt-5.5 is active" in line for line in lines)
+    assert any("transcript summary (working): The transcript says this session is wiring clickable session links" in line for line in lines)
     assert any("last worked: 2 hours ago" in line for line in lines)
     assert "Use facts only." in prompt
     assert "You may run tools" in prompt

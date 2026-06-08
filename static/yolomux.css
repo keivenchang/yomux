@@ -2084,7 +2084,7 @@ body.theme-light .branch-link {
 .file-explorer-changes-panel {
   --changes-row-hover-bg: var(--active-control-soft-bg);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
-  --changes-indent-line: var(--tree-indent-line);
+  --changes-indent-line: rgba(148, 163, 184, 0.50);
   --changes-repo-head-bg: color-mix(in srgb, var(--panel2) 88%, var(--text) 12%);
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);

@@ -615,6 +615,10 @@ def yoagent_context_lines(activity_payload: dict[str, Any]) -> list[str]:
                 parts.append(f"work: {truncate_text(work, 180)}")
             if status:
                 parts.append(f"status: {truncate_text(status, 160)}")
+            rolling_summary = str(summary.get("rolling_summary") or "").strip()
+            if rolling_summary:
+                rolling_state = str(summary.get("rolling_state") or "idle").strip()
+                parts.append(f"transcript summary ({rolling_state}): {truncate_text(rolling_summary, 260)}")
             file_lines = [str(item) for item in summary.get("file_lines") or [] if item]
             if file_lines:
                 parts.append(f"files: {', '.join(file_lines[:6])}")

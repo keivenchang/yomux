@@ -43,6 +43,7 @@ from .common import SUMMARY_CODEX_EFFORT
 from .common import YOLOMUX_VERSION
 from .common import SUMMARY_CODEX_MODEL
 from .common import SUMMARY_CODEX_SERVICE_TIER
+from .common import YOAGENT_CLAUDE_SUMMARY_MODEL
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
 from .common import next_numbered_session_name
@@ -73,6 +74,8 @@ from .transcripts import compact_transcript_items
 from .transcripts import compact_transcript_items_since
 from .transcripts import compact_transcript_lines
 from .transcripts import format_transcript_item
+from .transcripts import newest_transcript_timestamp
+from .transcripts import transcript_activity_is_recent
 from .transcripts import session_transcript_activity_state
 from .transcripts import trim_prompt_text
 from .tmux_utils import list_tmux_session_names
@@ -100,6 +103,10 @@ METADATA_BADGE_SIGNATURES_STATE_KEY = "metadata_badge_signatures"
 METADATA_BADGE_PULSE_UNTIL_STATE_KEY = "metadata_badge_pulse_until"
 YOAGENT_CLI_TIMEOUT_SECONDS = 45
 YOAGENT_CLI_SESSION_IDLE_SECONDS = 300
+YOAGENT_SESSION_SUMMARIES_STATE_KEY = "yoagent_session_summaries"
+YOAGENT_SESSION_SUMMARY_STATES = {"working", "waiting", "blocked", "done", "idle"}
+YOAGENT_SESSION_SUMMARY_QUIET_SECONDS = 15.0
+YOAGENT_SESSION_SUMMARY_MAX_ITEMS = 120
 YOAGENT_AUTH_FAILURE_RE = re.compile(
     r"(not\s+logged\s+in|log\s*in|login|required\s+auth|authentication|unauthorized|permission\s+denied|401)",
     re.IGNORECASE,
@@ -201,15 +208,22 @@ class TmuxWebtermApp:
         self.yoagent_prewarm_lock = threading.Lock()
         self.yoagent_prewarm_running = False
         self.yoagent_prewarm_status: dict[str, Any] = {}
+        self.yoagent_session_summary_lock = threading.RLock()
+        self.yoagent_session_summaries: dict[str, dict[str, Any]] = {}
+        self.yoagent_summary_worker_lock = threading.Lock()
+        self.yoagent_summary_worker_running = False
         self.load_metadata_badge_state()
+        self.load_yoagent_session_summaries()
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
         self.control_server.start()
+        self.maybe_start_yoagent_summary_worker()
 
     def refresh_sessions(self) -> list[str]:
         sessions, error = list_tmux_session_names()
         if error is None:
             self.sessions = sessions
+            self.prune_yoagent_session_summaries(set(sessions))
             return []
         return [error]
 
@@ -281,6 +295,7 @@ class TmuxWebtermApp:
         locale = str(locale or "en").strip() or "en"
         sessions, errors = discover_sessions(self.sessions)
         self.warm_metadata_cache_async(sessions)
+        self.prune_yoagent_session_summaries(set(sessions))
         summaries: dict[str, Any] = {}
         ordered_summaries: list[dict[str, Any]] = []
         with self.activity_summary_lock:
@@ -295,16 +310,20 @@ class TmuxWebtermApp:
                 signature = activity_signature(info, project, files_payload)
                 cached = self.activity_summary_cache.get(session)
                 if cached and cached.get("signature") == signature:
-                    summary = cached["summary"]
+                    summary = dict(cached["summary"])
                 else:
                     summary = build_session_activity_summary(info, project, files_payload)
                     self.activity_summary_cache[session] = {"signature": signature, "summary": summary}
+                    summary = dict(summary)
+                self.attach_yoagent_session_summary(session, summary)
                 summaries[session] = summary
                 ordered_summaries.append(summary)
             for session in list(self.activity_summary_cache):
                 if session not in sessions:
                     self.activity_summary_cache.pop(session, None)
         generated = datetime.now(timezone.utc)
+        rolling_updated = self.latest_yoagent_session_summary_updated_ts()
+        settings = self.yoagent_settings()
         return {
             "generated_at": generated.isoformat(),
             "generated_ts": generated.timestamp(),
@@ -313,7 +332,237 @@ class TmuxWebtermApp:
             "global": build_global_activity_summary(ordered_summaries, errors),
             "errors": errors,
             "locale": locale,
+            "yoagent_summaries": {
+                "auto_refresh": bool(settings.get("auto_refresh", False)),
+                "updated_ts": rolling_updated,
+                "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
+            },
         }
+
+    def sanitized_yoagent_session_summaries(self, value: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(value, dict):
+            return {}
+        clean: dict[str, dict[str, Any]] = {}
+        for session, item in value.items():
+            if not isinstance(session, str) or not isinstance(item, dict):
+                continue
+            summary = truncate_text(str(item.get("rolling_summary") or "").strip(), 1200)
+            if not summary:
+                continue
+            state = str(item.get("state") or "idle").strip().lower()
+            if state not in YOAGENT_SESSION_SUMMARY_STATES:
+                state = "idle"
+            clean[session] = {
+                "rolling_summary": summary,
+                "last_processed_ts": max(0.0, self.float_value(item.get("last_processed_ts"), 0.0)),
+                "updated_ts": max(0.0, self.float_value(item.get("updated_ts"), 0.0)),
+                "state": state,
+            }
+        return clean
+
+    def load_yoagent_session_summaries(self) -> None:
+        state = read_yolomux_state()
+        with self.yoagent_session_summary_lock:
+            self.yoagent_session_summaries = self.sanitized_yoagent_session_summaries(
+                state.get(YOAGENT_SESSION_SUMMARIES_STATE_KEY)
+            )
+
+    def persist_yoagent_session_summaries_locked(self) -> None:
+        update_yolomux_state({YOAGENT_SESSION_SUMMARIES_STATE_KEY: self.yoagent_session_summaries})
+
+    def prune_yoagent_session_summaries(self, live_sessions: set[str]) -> None:
+        with self.yoagent_session_summary_lock:
+            stale = [session for session in self.yoagent_session_summaries if session not in live_sessions]
+            if not stale:
+                return
+            for session in stale:
+                self.yoagent_session_summaries.pop(session, None)
+            self.persist_yoagent_session_summaries_locked()
+
+    def attach_yoagent_session_summary(self, session: str, summary: dict[str, Any]) -> None:
+        with self.yoagent_session_summary_lock:
+            rolling = dict(self.yoagent_session_summaries.get(session) or {})
+        if not rolling.get("rolling_summary"):
+            return
+        summary["rolling_summary"] = rolling["rolling_summary"]
+        summary["rolling_state"] = rolling.get("state") or "idle"
+        summary["rolling_updated_ts"] = rolling.get("updated_ts") or 0
+
+    def latest_yoagent_session_summary_updated_ts(self) -> float:
+        with self.yoagent_session_summary_lock:
+            return max((float(item.get("updated_ts") or 0) for item in self.yoagent_session_summaries.values()), default=0.0)
+
+    def float_value(self, value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def yoagent_refresh_interval_seconds(self, settings: dict[str, Any] | None = None) -> float:
+        value = (settings or self.yoagent_settings()).get("refresh_interval_seconds", 120)
+        return max(30.0, min(3600.0, self.float_value(value, 120.0)))
+
+    def yoagent_session_summary_due(self, session: str, interval: float, now: float | None = None) -> bool:
+        current = time.time() if now is None else now
+        with self.yoagent_session_summary_lock:
+            updated = self.float_value((self.yoagent_session_summaries.get(session) or {}).get("updated_ts"), 0.0)
+        return updated <= 0 or current - updated >= interval
+
+    def build_yoagent_session_summary_update_prompt(
+        self,
+        session: str,
+        transcript_path: str,
+        prior_summary: str,
+        transcript_text: str,
+    ) -> str:
+        return "\n\n".join([
+            "Update one YO!agent rolling summary for a single tmux session.",
+            f"tmux session: `{session}`",
+            f"transcript: `{transcript_path}`",
+            "Use the prior summary plus only the new transcript lines below. Do not invent facts.",
+            "Return exactly two fields:\nstate: working|waiting|blocked|done|idle\nsummary: 1-3 short factual lines about what this session is doing now.",
+            "Prior summary:\n" + (prior_summary or "(none)"),
+            "New transcript lines:\n" + transcript_text,
+        ])
+
+    def parse_yoagent_session_summary_response(self, text: str, default_state: str = "idle") -> dict[str, str]:
+        raw = str(text or "").strip()
+        state = default_state if default_state in YOAGENT_SESSION_SUMMARY_STATES else "idle"
+        match = re.search(r"(?im)^\s*state\s*:\s*([a-z-]+)\s*$", raw)
+        if match and match.group(1).lower() in YOAGENT_SESSION_SUMMARY_STATES:
+            state = match.group(1).lower()
+        summary_match = re.search(r"(?ims)^\s*summary\s*:\s*(.+)$", raw)
+        summary = summary_match.group(1).strip() if summary_match else raw
+        summary = re.sub(r"(?im)^\s*state\s*:\s*[a-z-]+\s*$", "", summary).strip()
+        return {"state": state, "rolling_summary": truncate_text(summary, 1200)}
+
+    def run_yoagent_direct_prompt_backend(self, backend: str, prompt: str) -> tuple[str, str, dict[str, Any]]:
+        if backend not in {"codex", "claude"}:
+            return "", f"unknown backend: {backend}", {}
+        started = time.monotonic()
+        if backend == "codex":
+            answer, error, _session_id = self.run_yoagent_codex_cli(prompt, session_id="", resume=False)
+        else:
+            answer, error = self.run_yoagent_claude_cli(prompt, session_id="", resume=False, model=YOAGENT_CLAUDE_SUMMARY_MODEL)
+        return answer, yoagent_cli_fallback_reason(backend, error), {
+            "backend": backend,
+            "prompt_chars": len(prompt),
+            "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "direct": True,
+        }
+
+    def update_yoagent_session_summary(
+        self,
+        session: str,
+        info: SessionInfo,
+        settings: dict[str, Any] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        agent = next((item for item in info.agents if item.transcript), None)
+        if agent is None or not agent.transcript:
+            return {"session": session, "updated": False, "reason": "no transcript"}
+        transcript_path = Path(agent.transcript)
+        try:
+            text = tail_file_lines(transcript_path, MAX_TRANSCRIPT_TAIL_LINES)
+        except OSError as exc:
+            return {"session": session, "updated": False, "reason": str(exc)}
+        if not force and transcript_activity_is_recent(transcript_path, text, recency_seconds=YOAGENT_SESSION_SUMMARY_QUIET_SECONDS):
+            return {"session": session, "updated": False, "reason": "transcript still active"}
+        with self.yoagent_session_summary_lock:
+            previous = dict(self.yoagent_session_summaries.get(session) or {})
+        last_processed_ts = self.float_value(previous.get("last_processed_ts"), 0.0)
+        since = datetime.fromtimestamp(last_processed_ts + 0.000001, timezone.utc) if last_processed_ts > 0 else datetime.fromtimestamp(0, timezone.utc)
+        items, stats = compact_transcript_items_since(text, since)
+        items = items[-YOAGENT_SESSION_SUMMARY_MAX_ITEMS:]
+        newest = newest_transcript_timestamp(text)
+        if not items or newest is None:
+            return {"session": session, "updated": False, "reason": "no new transcript lines", "stats": stats}
+        transcript_text = "\n\n".join(format_transcript_item(item) for item in items)
+        transcript_text, truncated = trim_prompt_text(transcript_text, SUMMARY_MAX_PROMPT_CHARS)
+        prompt = self.build_yoagent_session_summary_update_prompt(
+            session,
+            str(transcript_path),
+            str(previous.get("rolling_summary") or ""),
+            transcript_text,
+        )
+        current_settings = settings or self.yoagent_settings()
+        requested_backend = str(current_settings.get("backend") or "deterministic").strip().lower()
+        backend = resolve_yoagent_backend(requested_backend)
+        invocation = str(current_settings.get("invocation") or "cli").strip().lower()
+        if backend not in {"codex", "claude"} or invocation != "cli":
+            return {"session": session, "updated": False, "reason": "no CLI backend available", "backend": backend}
+        answer, fallback_reason, cli_status = self.run_yoagent_direct_prompt_backend(backend, prompt)
+        if not answer:
+            return {"session": session, "updated": False, "reason": fallback_reason or "empty summary response", "backend": backend, "cli": cli_status}
+        parsed = self.parse_yoagent_session_summary_response(answer, default_state="working" if agent.status == "running" else "idle")
+        if not parsed["rolling_summary"]:
+            return {"session": session, "updated": False, "reason": "empty parsed summary", "backend": backend, "cli": cli_status}
+        now = time.time()
+        record = {
+            "rolling_summary": parsed["rolling_summary"],
+            "last_processed_ts": newest.timestamp(),
+            "updated_ts": now,
+            "state": parsed["state"],
+        }
+        with self.yoagent_session_summary_lock:
+            self.yoagent_session_summaries[session] = record
+            self.persist_yoagent_session_summaries_locked()
+        return {
+            "session": session,
+            "updated": True,
+            "backend": backend,
+            "state": parsed["state"],
+            "items": len(items),
+            "truncated": truncated,
+            "stats": stats,
+            "cli": cli_status,
+        }
+
+    def tick_yoagent_session_summaries(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        current_settings = settings or self.yoagent_settings()
+        if not current_settings.get("auto_refresh", False):
+            return {"enabled": False, "updated": [], "skipped": []}
+        interval = self.yoagent_refresh_interval_seconds(current_settings)
+        sessions, errors = discover_sessions(self.sessions)
+        self.prune_yoagent_session_summaries(set(sessions))
+        updated: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        now = time.time()
+        for session in self.sessions:
+            info = sessions.get(session)
+            if info is None:
+                continue
+            if not self.yoagent_session_summary_due(session, interval, now):
+                skipped.append({"session": session, "reason": "interval"})
+                continue
+            result = self.update_yoagent_session_summary(session, info, current_settings)
+            if result.get("updated"):
+                updated.append(result)
+            else:
+                skipped.append(result)
+        return {"enabled": True, "updated": updated, "skipped": skipped, "errors": errors}
+
+    def maybe_start_yoagent_summary_worker(self) -> None:
+        settings = self.yoagent_settings()
+        if not settings.get("auto_refresh", False):
+            return
+        with self.yoagent_summary_worker_lock:
+            if self.yoagent_summary_worker_running:
+                return
+            self.yoagent_summary_worker_running = True
+        threading.Thread(target=self.yoagent_summary_worker_loop, name="yoagent-summary-refresh", daemon=True).start()
+
+    def yoagent_summary_worker_loop(self) -> None:
+        try:
+            while True:
+                settings = self.yoagent_settings()
+                if not settings.get("auto_refresh", False):
+                    return
+                self.tick_yoagent_session_summaries(settings)
+                time.sleep(min(self.yoagent_refresh_interval_seconds(settings), 60.0))
+        finally:
+            with self.yoagent_summary_worker_lock:
+                self.yoagent_summary_worker_running = False
 
     def yoagent_settings(self) -> dict[str, Any]:
         settings = settings_payload().get("settings", {}).get("yoagent", {})
@@ -512,10 +761,12 @@ class TmuxWebtermApp:
         error = completed.stderr.strip() or f"codex exited {completed.returncode}"
         return "", error, captured_session_id
 
-    def run_yoagent_claude_cli(self, prompt: str, session_id: str = "", resume: bool = False) -> tuple[str, str]:
+    def run_yoagent_claude_cli(self, prompt: str, session_id: str = "", resume: bool = False, model: str = "") -> tuple[str, str]:
         if not shutil.which("claude"):
             return "", "claude CLI not found"
         args = ["claude", "-p"]
+        if model:
+            args.extend(["--model", model])
         if resume and session_id:
             args.extend(["--resume", session_id])
         elif session_id:
@@ -538,7 +789,10 @@ class TmuxWebtermApp:
         return "", completed.stderr.strip() or f"claude exited {completed.returncode}"
 
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
-        return save_settings(patch)
+        payload = save_settings(patch)
+        if payload.get("settings", {}).get("yoagent", {}).get("auto_refresh", False):
+            self.maybe_start_yoagent_summary_worker()
+        return payload
 
     def yolo_rules_payload(self) -> dict[str, Any]:
         return yolo_rules.rules_status()

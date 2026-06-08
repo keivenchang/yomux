@@ -303,6 +303,80 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     assert localized["locale"] == "zh-Hant"
 
 
+def test_yoagent_session_summary_updates_from_transcript_delta(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(
+        "\n".join([
+            json.dumps({"timestamp": "2026-06-07T10:00:00Z", "payload": {"type": "user_message", "message": "Fix the YO!agent summary table"}}),
+            json.dumps({"timestamp": "2026-06-07T10:00:01Z", "payload": {"type": "agent_message", "message": "Added clickable session links."}}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    info = SessionInfo(
+        session="5",
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session="5",
+                kind="codex",
+                pid=123,
+                pane_target="5:0.0",
+                command="codex",
+                cwd=str(tmp_path),
+                status="running",
+                session_id="session-5",
+                transcript=str(transcript),
+                error=None,
+            )
+        ],
+    )
+    prompts = []
+
+    def fake_direct_backend(backend, prompt):
+        prompts.append(prompt)
+        summary = "state: working\nsummary: Updating YO!agent session summaries from transcript deltas." if len(prompts) == 1 else "state: done\nsummary: Verified the rolling summary update path."
+        return summary, "", {"backend": backend, "prompt_chars": len(prompt)}
+
+    monkeypatch.setattr(app_module, "transcript_activity_is_recent", lambda *_args, **_kwargs: False)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.warm_metadata_cache_async = lambda sessions: None
+    monkeypatch.setattr(webapp, "run_yoagent_direct_prompt_backend", fake_direct_backend)
+    settings = {"backend": "codex", "invocation": "cli", "auto_refresh": True, "refresh_interval_seconds": 120}
+    try:
+        first = webapp.update_yoagent_session_summary("5", info, settings)
+        unchanged = webapp.update_yoagent_session_summary("5", info, settings)
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"timestamp": "2026-06-07T10:05:00Z", "payload": {"type": "agent_message", "message": "Tests now pass."}}) + "\n")
+        second = webapp.update_yoagent_session_summary("5", info, settings)
+        state = app_module.read_yolomux_state().get(app_module.YOAGENT_SESSION_SUMMARIES_STATE_KEY, {})
+    finally:
+        webapp.control_server.stop()
+
+    assert first["updated"] is True
+    assert unchanged["updated"] is False
+    assert unchanged["reason"] == "no new transcript lines"
+    assert second["updated"] is True
+    assert second["state"] == "done"
+    assert "Fix the YO!agent summary table" in prompts[0]
+    assert "Tests now pass." not in prompts[0]
+    assert "Prior summary:\nUpdating YO!agent session summaries from transcript deltas." in prompts[1]
+    assert "Tests now pass." in prompts[1]
+    assert "Fix the YO!agent summary table" not in prompts[1]
+    assert state["5"]["rolling_summary"] == "Verified the rolling summary update path."
+
+
+def test_yoagent_session_summary_auto_refresh_is_disabled_by_default(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "update_yoagent_session_summary", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("auto-refresh off must not call the model")))
+    try:
+        result = webapp.tick_yoagent_session_summaries({"auto_refresh": False, "refresh_interval_seconds": 120})
+    finally:
+        webapp.control_server.stop()
+
+    assert result == {"enabled": False, "updated": [], "skipped": []}
+
+
 def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None

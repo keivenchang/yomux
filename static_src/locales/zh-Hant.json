@@ -715,5 +715,10 @@
   "yolo.state.onHere": "在此開啟",
   "yolo.title": "優樂 {state}",
   "yolo.titleForSession": "優樂 {session} {state}",
-  "yolo.titleReadonly": "優樂 {session} {state}；唯讀存取"
+  "yolo.titleReadonly": "優樂 {session} {state}；唯讀存取",
+  "pref.yoagent.auto_refresh.help": "When enabled, YO!agent updates per-session transcript summaries in the background after quiet intervals. Off by default to avoid background model cost.",
+  "pref.yoagent.auto_refresh.label": "Background transcript summaries",
+  "pref.yoagent.refresh_interval_seconds.help": "Minimum seconds between background transcript-summary updates for each tmux session.",
+  "pref.yoagent.refresh_interval_seconds.label": "Summary refresh interval",
+  "yoagent.autoRefreshStatus": "Background transcript summaries on; {updated}."
 }

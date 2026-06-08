@@ -2017,6 +2017,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/focusInput:\s*shouldRestoreFocus && focusSerial === yoagentFocusSerial && yoagentDocumentHasFocus\(\)/.test(source), 'YO!agent responses only refocus when the user did not move away');
   assert.ok(/if \(options\.summaryOnly && refreshYoagentSummaryRegions\(node\)\) \{[\s\S]*?restoreYoagentChatInputFocus/.test(source), 'YO!agent summary refresh restores an already-focused composer input');
   assert.ok(source.includes('function refreshYoagentSummaryRegions'), 'YO!agent metadata refresh can update summaries without rebuilding the chat input');
+  assert.ok(source.includes('function yoagentAutoRefreshStatusHtml'), 'YO!agent renders cached background-summary status when auto-refresh is enabled');
   assert.ok(source.includes('summaryOnly: true'), 'YO!agent metadata refresh requests summary-only panel updates');
   assert.ok(source.includes("params.set('locale', i18nActiveLocaleId())"), 'YO!agent activity-summary requests carry the active UI locale');
   assert.ok(source.includes('function yoagentSessionFromHref'), 'YO!agent Markdown session links parse the target session from the query string');
@@ -2579,6 +2580,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // #46: Modified-files rows match the Finder file tree — the row uses the file-explorer font size and
   // the filename carries no semibold/bold weight (regular, not big bold white).
   assert.ok(/\.changes-file-row\s*\{[\s\S]*font-size:\s*var\(--file-explorer-font-size\)/.test(changedFilesCss), '#46: modified-file rows use the Finder file-tree font size');
+  assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-indent-line:\s*rgba\(148,\s*163,\s*184,\s*0\.50\)/.test(changedFilesCss), 'Differ/Finder changes trees use a brighter dark-mode guide line');
+  assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*color-mix\(in srgb,\s*var\(--panel2\) 88%,\s*var\(--text\) 12%\)/.test(changedFilesCss), 'Differ/Finder changes repo headers use a brighter dark-mode scoped background token');
+  assert.ok(/body\.theme-light \.file-explorer-changes-panel,[\s\S]*--changes-indent-line:\s*var\(--tree-indent-line\);[\s\S]*--changes-repo-head-bg:\s*var\(--panel2\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide and repo header tokens stay unchanged');
   assert.equal(/(?:^|\n)\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
   assert.ok(/\.changes-tree-folder-row\s*\{[\s\S]*grid-template-columns:\s*12px 16px minmax\(0, 1fr\) auto/.test(changedFilesCss), 'modified-file folders use a compact GitLens-style tree row');
   assert.ok(/\.changes-repo-title\s*\{[\s\S]*color:\s*var\(--accent-gold\)[\s\S]*font-weight:\s*800/.test(changedFilesCss), 'Modified-files repo names are gold and bold');
@@ -3586,6 +3590,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave"'), 'preferences expose editor autosave');
   assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave_delay_seconds"'), 'preferences expose editor autosave delay');
   assert.ok(preferencesHtml.includes('data-setting-path="yoagent.backend"'), 'preferences expose YO!agent backend');
+  assert.ok(preferencesHtml.includes('data-setting-path="yoagent.auto_refresh"'), 'preferences expose YO!agent background transcript-summary refresh');
+  assert.ok(/data-setting-path="yoagent\.refresh_interval_seconds"[\s\S]*min="30"[\s\S]*max="3600"/.test(preferencesHtml), 'YO!agent background summary interval is bounded in Preferences');
   assert.ok(preferencesHtml.includes('data-setting-path="yoagent.system_prompt"'), 'preferences expose YO!agent prompt');
   assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.system_prompt"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent system prompt renders as an autosizing full-width row');
   assert.ok(/preferences-setting-row preferences-setting-row--wide[\s\S]*data-setting-path="yoagent\.intro"[\s\S]*data-setting-autosize="true"/.test(preferencesHtml), 'YO!agent intro renders as an autosizing full-width row');
@@ -5815,7 +5821,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 
 {
   const api = loadYolomux('', ['alpha', 'beta']);
-  api.setActivitySummaryPayloadForTest({
+  const baseActivitySummaryPayload = {
     generated_at: '2026-05-31T12:00:00+00:00',
     global: {
       headline: "Your most recent work is about editor fixes, and you are currently making changes to yolomux.dev in order to finish editor fixes. So far: 3 files changed (+9/-2); 1 of 2 AI agents is active.",
@@ -5827,7 +5833,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     sessions: {
       alpha: {local: "Codex session alpha is active in yolomux.dev. It has been working on editor fixes. It currently has 2 files changed (+8/-1)."},
     },
-  });
+  };
+  api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
   assert.ok(api.globalActivitySummaryHtml().includes('YO!agent'), 'global activity summary uses the YO agent label');
   assert.equal(api.globalActivitySummaryHtml().includes('Session alpha'), false, 'YO!agent default panel does not expose the per-session SESSION detail list');
   assert.equal(api.yoagentChatHtml().includes('data-yoagent-chat-form'), false, 'No-agent YO!agent hides the chat form');
@@ -5837,6 +5844,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(enabledChatHtml.includes('data-yoagent-chat-form'), 'Claude-backed YO!agent panel includes a chat form');
   assert.ok(enabledChatHtml.includes('Your most recent work is about editor fixes'), 'Claude-backed YO!agent chat starts with the regular intro message');
   assert.ok(enabledChatHtml.includes('Ask anything'), 'Claude-backed YO!agent composer uses the localized ask-anything placeholder');
+  api.setActivitySummaryPayloadForTest({yoagent_summaries: {auto_refresh: true, updated_ts: 1760000000, updated_at: '2025-10-09T08:53:20+00:00'}, global: {headline: 'Cached rolling context'}, sessions: {}, session_order: []});
+  assert.ok(api.yoagentChatHtml().includes('Background transcript summaries on'), 'YO!agent chat shows when background transcript summaries are enabled');
+  api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
   assert.equal(enabledChatHtml.includes('yoagent-chat empty'), false, 'YO!agent intro is a regular message, not a special empty layout');
   assert.equal(enabledChatHtml.includes('yoagent-chat-toolbar'), false, 'YO!agent chat does not put Clear in a detached toolbar');
   assert.ok(enabledChatHtml.includes('yoagent-chat-controls'), 'YO!agent composer has a control row');

@@ -15939,6 +15939,15 @@ function yoagentNoticeHtml() {
   return `<div class="yoagent-chat-notice">${backend}${esc(yoagentNotice.reason)}</div>`;
 }
 
+function yoagentAutoRefreshStatusHtml() {
+  const summary = activitySummaryPayload?.yoagent_summaries || {};
+  if (!summary.auto_refresh) return '';
+  const generated = summary.updated_ts
+    ? relativeActivityGeneratedText({generated_ts: summary.updated_ts, generated_at: summary.updated_at})
+    : {text: t('yoagent.notLoaded'), title: ''};
+  return `<div class="yoagent-chat-notice yoagent-auto-refresh-status" title="${esc(generated.title)}">${esc(t('yoagent.autoRefreshStatus', {updated: generated.text}))}</div>`;
+}
+
 function yoagentBackendLabel(value) {
   const key = String(value || '').toLowerCase();
   if (key === 'auto') return t('yoagent.backend.auto');
@@ -16013,7 +16022,7 @@ function yoagentChatHtml() {
     </form>`
     : '';
   return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
-    <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
+    <div class="yoagent-chat-history">${yoagentAutoRefreshStatusHtml()}${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${busy}${error}</div>
     ${form}
   </section>`;
 }
@@ -16337,6 +16346,8 @@ function preferenceSections() {
         {value: 'cli', label: t('pref.yoagent.invocation.cli')},
         {value: 'api-key', label: t('pref.yoagent.invocation.api-key')},
       ], help: t('pref.yoagent.invocation.help')},
+      {path: 'yoagent.auto_refresh', label: t('pref.yoagent.auto_refresh.label'), type: 'boolean', help: t('pref.yoagent.auto_refresh.help')},
+      {path: 'yoagent.refresh_interval_seconds', label: t('pref.yoagent.refresh_interval_seconds.label'), type: 'number', min: 30, max: 3600, step: 30, suffix: 's', help: t('pref.yoagent.refresh_interval_seconds.help')},
       {path: 'yoagent.system_prompt', label: t('pref.yoagent.system_prompt.label'), type: 'textarea', help: t('pref.yoagent.system_prompt.help'), alwaysEnableReset: true},
       {path: 'yoagent.intro', label: t('pref.yoagent.intro.label'), type: 'textarea', help: t('pref.yoagent.intro.help'), alwaysEnableReset: true},
       {path: 'yoagent.format', label: t('pref.yoagent.format.label'), type: 'textarea', help: t('pref.yoagent.format.help'), alwaysEnableReset: true},

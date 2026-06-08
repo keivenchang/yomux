@@ -89,6 +89,8 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["terminal_editor"]["line_numbers"] is False
     assert settings["yoagent"]["backend"] == "auto"
     assert settings["yoagent"]["invocation"] == "cli"
+    assert settings["yoagent"]["auto_refresh"] is False
+    assert settings["yoagent"]["refresh_interval_seconds"] == 120
     assert settings["yoagent"]["system_prompt"] == "Use facts"
     assert settings["yoagent"]["intro"] == "Be terse"
     assert settings["yoagent"]["format"] == "One line"
@@ -106,6 +108,8 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["appearance"]["tab_width"] == 180
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
     assert payload["settings"]["yoagent"]["backend"] == "auto"
+    assert payload["settings"]["yoagent"]["auto_refresh"] is False
+    assert payload["settings"]["yoagent"]["refresh_interval_seconds"] == 120
     assert "normal status-update style" in payload["settings"]["yoagent"]["system_prompt"]
     assert "You may run tools" in payload["settings"]["yoagent"]["system_prompt"]
     assert "run scoped tools" in payload["settings"]["yoagent"]["intro"]
@@ -188,6 +192,9 @@ def test_save_settings_reports_coerced_keys(tmp_path):
     ring = save_settings({"appearance": {"pane_ring_opacity": 20}}, path)
     assert ring["coerced"] == []
     assert ring["settings"]["appearance"]["pane_ring_opacity"] == 20
+    interval = save_settings({"yoagent": {"refresh_interval_seconds": 1}}, path)
+    assert "yoagent.refresh_interval_seconds" in interval["coerced"]
+    assert interval["settings"]["yoagent"]["refresh_interval_seconds"] == 30
     clamped_ring = save_settings({"appearance": {"pane_ring_opacity": 1}}, path)
     assert "appearance.pane_ring_opacity" in clamped_ring["coerced"]
     assert clamped_ring["settings"]["appearance"]["pane_ring_opacity"] == 5
