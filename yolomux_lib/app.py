@@ -40,13 +40,11 @@ from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import PROJECT_ROOT
 from .common import SERVER_HOSTNAME
 from .common import SUMMARY_MAX_PROMPT_CHARS
-from .common import SUMMARY_CODEX_EFFORT
 from .common import YOLOMUX_VERSION
-from .common import SUMMARY_CODEX_MODEL
-from .common import SUMMARY_CODEX_SERVICE_TIER
 from .common import YOAGENT_CLAUDE_SUMMARY_MODEL
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
+from .common import codex_exec_argv
 from .common import next_numbered_session_name
 from .common import tail_file_lines
 from .common import truncate_text
@@ -186,6 +184,13 @@ def tmux_session_name_error(name: str) -> str | None:
     if not TMUX_SESSION_NAME_RE.fullmatch(name):
         return "session name may contain only letters, numbers, spaces, dot, dash, and underscore"
     return None
+
+
+def normalized_prompt_state(prompt: dict[str, Any] | None = None) -> dict[str, Any]:
+    state = auto_approve_tmux.blank_prompt_state()
+    if prompt:
+        state.update(prompt)
+    return state
 
 
 class TmuxWebtermApp:
@@ -718,22 +723,7 @@ class TmuxWebtermApp:
     def run_yoagent_codex_cli(self, prompt: str, session_id: str = "", resume: bool = False) -> tuple[str, str, str]:
         if not shutil.which("codex"):
             return "", "codex CLI not found", ""
-        common = [
-            "--json",
-            "-m",
-            SUMMARY_CODEX_MODEL,
-            "-c",
-            f'model_reasoning_effort="{SUMMARY_CODEX_EFFORT}"',
-            "-c",
-            f'service_tier="{SUMMARY_CODEX_SERVICE_TIER}"',
-            "--ignore-rules",
-        ]
-        if resume and session_id:
-            # `codex exec resume` rejects --sandbox/--cd (it restores the original session's cwd + sandbox);
-            # the subprocess already runs with cwd=PROJECT_ROOT. Only the first-turn `exec` takes them.
-            args = ["codex", "exec", "resume", *common, session_id, "-"]
-        else:
-            args = ["codex", "exec", *common, "--sandbox", "read-only", "--cd", str(PROJECT_ROOT), "-"]
+        args = codex_exec_argv(resume_session_id=session_id if resume and session_id else None)
         try:
             completed = subprocess.run(
                 args,
@@ -836,6 +826,7 @@ class TmuxWebtermApp:
         self.log_event(session, event_type, message, details)
 
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
+        self.refresh_sessions()
         if session and session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         bounded_limit = max(1, min(limit, MAX_EVENT_TAIL_LINES))
@@ -846,6 +837,7 @@ class TmuxWebtermApp:
         }, HTTPStatus.OK
 
     def search_payload(self, query: str, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
+        self.refresh_sessions()
         if session and session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         text = str(query or "").strip()
@@ -916,7 +908,8 @@ class TmuxWebtermApp:
         if session and session not in self.sessions:
             return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
         scope = [session] if session else self.sessions
-        infos, errors = discover_sessions(scope)
+        discover_scope = self.sessions if session else scope
+        infos, errors = discover_sessions(discover_scope)
         payload, status = session_files.session_files_payload(session, infos, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
         payload["errors"] = [*refresh_errors, *errors, *payload.get("errors", [])]
         return payload, status
@@ -1716,7 +1709,7 @@ class TmuxWebtermApp:
         discovered_sessions: dict[str, SessionInfo] | None = None,
         capture_pane: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        hidden_prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": ""}
+        hidden_prompt = normalized_prompt_state()
         target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
         if not capture_pane:
             # Roster path: derive working/idle from the LIVE pane via a cheap visible-only capture
@@ -1729,12 +1722,13 @@ class TmuxWebtermApp:
                 visible_text = None
             if visible_text is None:
                 return hidden_prompt, {"key": "idle", "text": ""}
-            return dict(module.approval_prompt_state(visible_text)), dict(module.agent_screen_state(visible_text))
+            return normalized_prompt_state(module.approval_prompt_state(visible_text)), dict(module.agent_screen_state(visible_text))
         try:
             module = auto_approve_tmux
             visible_text = module.tmux_capture_pane(target, visible_only=True)
             if visible_text is None:
-                prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": "", "error": "failed to capture pane"}
+                prompt = normalized_prompt_state()
+                prompt["error"] = "failed to capture pane"
                 screen = {"key": "disconnected", "text": "failed to capture pane"}
                 return prompt, screen
             prompt_state = module.hybrid_approval_prompt_state(session, visible_text, prompt_source=self.auto_approve_prompt_source())
@@ -1749,9 +1743,10 @@ class TmuxWebtermApp:
                 transcript_state = session_transcript_activity_state(infos.get(session))
                 if transcript_state.get("key") != "idle":
                     screen_state = transcript_state
-            return dict(prompt_state), dict(screen_state)
+            return normalized_prompt_state(prompt_state), dict(screen_state)
         except (OSError, subprocess.SubprocessError) as exc:
-            prompt = {"visible": False, "type": "", "text": "", "yes_selected": False, "action": "", "error": str(exc)}
+            prompt = normalized_prompt_state()
+            prompt["error"] = str(exc)
             screen = {"key": "error", "text": str(exc)}
             return prompt, screen
 
@@ -1792,6 +1787,7 @@ class TmuxWebtermApp:
         return payload
 
     def auto_approve_status(self, session: str | None = None) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
+        refresh_errors = self.refresh_sessions()
         if session is not None and session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
         removed = False
@@ -1805,7 +1801,6 @@ class TmuxWebtermApp:
             self.persist_auto_sessions()
         if session is not None:
             return self.auto_approve_session_status(session), HTTPStatus.OK
-        refresh_errors = self.refresh_sessions()
         discovered_sessions, discovery_errors = discover_sessions(self.sessions)
         return {
             "session_order": self.sessions,

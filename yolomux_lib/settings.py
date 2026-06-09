@@ -59,10 +59,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "metadata_badge_pulse_seconds": 20,
     },
     "performance": {
-        "metadata_refresh_ms": 15000,
-        "pane_state_refresh_ms": 1250,
-        "latency_refresh_ms": 3000,
-        "event_log_refresh_ms": 5000,
+        # Backend polling defaults use odd rounded-up values so clients do not align on the same tick.
+        "metadata_refresh_ms": 15001,
+        "pane_state_refresh_ms": 1253,
+        "latency_refresh_ms": 3001,
+        "event_log_refresh_ms": 5003,
         "popover_show_delay_ms": 1000,
         "popover_hide_delay_ms": 300,
         "menu_hover_open_delay_ms": 800,
@@ -72,7 +73,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "auto_approve_interval_seconds": 0.5,
         # DOIT.29: watched PRs poll on their OWN, longer interval so a big watchlist doesn't burn the
         # GitHub rate limit at the (15s) session-metadata cadence.
-        "watched_pr_refresh_ms": 60000,
+        "watched_pr_refresh_ms": 60001,
     },
     "notifications": {
         "toast_duration_ms": 10000,

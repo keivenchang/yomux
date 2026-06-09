@@ -841,13 +841,9 @@ function pastedImageFile(event) {
 function beginPasteUpload(session) {
   const now = Date.now();
   if (pasteUploadInFlight) return false;
-  try {
-    const existing = JSON.parse(localStorage.getItem(pasteLockStorageKey) || 'null');
-    if (existing?.expiresAt && existing.expiresAt > now) return false;
-    localStorage.setItem(pasteLockStorageKey, JSON.stringify({session, expiresAt: now + 1500}));
-  } catch (_) {
-    // Clipboard events can arrive as a burst; the in-memory flag is the fallback.
-  }
+  const existing = readStoredJson(pasteLockStorageKey, null);
+  if (existing?.expiresAt && existing.expiresAt > now) return false;
+  storageSet(pasteLockStorageKey, JSON.stringify({session, expiresAt: now + 1500}));
   pasteUploadInFlight = true;
   return true;
 }
@@ -891,18 +887,12 @@ function nextPasteCounter(key) {
 }
 
 function readPasteCounters() {
-  try {
-    const counters = JSON.parse(localStorage.getItem(pasteCountersStorageKey) || '{}');
-    return counters && typeof counters === 'object' ? counters : {};
-  } catch (_) {
-    return {};
-  }
+  const counters = readStoredJson(pasteCountersStorageKey, {});
+  return counters && typeof counters === 'object' ? counters : {};
 }
 
 function writePasteCounters(counters) {
-  try {
-    localStorage.setItem(pasteCountersStorageKey, JSON.stringify(counters));
-  } catch (_) {}
+  storageSet(pasteCountersStorageKey, JSON.stringify(counters));
 }
 
 function pasteCounterValue(counters, key) {

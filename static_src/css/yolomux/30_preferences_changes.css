@@ -497,21 +497,21 @@
 }
 /* Row tinting: match Finder git-* name colors */
 .changes-file-row.git-modified:not(.selected) .changes-file-name {
-  color: #f5c542;
+  color: var(--git-modified);
 }
 .changes-file-row.git-untracked:not(.selected) .changes-file-name {
-  color: #7ee787;
+  color: var(--git-untracked-name);
 }
 .changes-file-row.git-deleted:not(.selected) .changes-file-name {
-  color: #ff8585;
+  color: var(--git-deleted);
   text-decoration: line-through;
 }
 .changes-file-row.git-staged:not(.selected) .changes-file-name {
-  color: #c4f970;
+  color: var(--git-staged);
   font-weight: 700;
 }
 .changes-file-row.git-transcript:not(.selected) .changes-file-name {
-  color: var(--muted);
+  color: var(--git-transcript);
 }
 .changes-file-row:hover {
   background: var(--changes-row-hover-bg);
@@ -541,30 +541,30 @@
   letter-spacing: 0;
 }
 .changes-status-a {
-  background: #76b900;
+  background: var(--git-staged-badge);
 }
 .changes-status-m {
   /* Clarity (image 046): use the BRIGHT amber as a fixed badge fill (like the other vibrant status
      badges) so the near-black "M" pops. The theme-aware --accent-gold flips to a dark brown (#b7791f)
      in light mode → near-black-on-dark = muddy/illegible. */
-  background: #f5c542;
+  background: var(--git-modified-badge);
 }
 .changes-status-d {
-  background: #ff5d5d;
+  background: var(--git-deleted-badge);
 }
 .changes-status-r,
 .changes-status-c {
   background: #38bdf8;
 }
 .changes-status-t {
-  background: #94a3b8;
+  background: var(--git-transcript-badge);
 }
 .changes-status-u,
 .changes-status-unknown {
   /* Untracked/unknown = teal (a vibrant "new content" color). Purple is RESERVED for MERGED PR status
      (pr-status-merged) across the app, so this badge must not be purple — it used to be violet, which
      read as a merged indicator next to the PR badges. */
-  background: #2dd4bf;
+  background: var(--git-untracked-badge);
 }
 .changes-status-unknown {
   border: 1px solid rgba(226, 232, 240, 0.16);
@@ -652,7 +652,7 @@
   font-weight: 800;
 }
 .changes-diff-remove {
-  color: #ff6673;
+  color: var(--bad);
   font-weight: 800;
 }
 .changes-count-badge {
@@ -1119,7 +1119,7 @@ body.theme-light .command-palette-view-chip {
   box-decoration-break: clone;
 }
 .command-palette-detail {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .command-palette-keybinding {
@@ -1453,7 +1453,7 @@ body.theme-light .preferences-inline-action {
 .summary-context a.pr-status-merged:hover,
 .branch-meta a.pr-status-merged:hover,
 .info-cell a.pr-status-merged:hover {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .branch-list {
   margin-top: 8px;
@@ -1567,7 +1567,7 @@ body.theme-light .keyboard-shortcut-row kbd {
   border-color: rgba(15, 23, 42, 0.18);
 }
 body.theme-light .preferences-global-reset {
-  color: #7f1d1d;
+  color: var(--danger-light-text);
   background: #fff5f5;
   border-color: rgba(220, 38, 38, 0.46);
 }
@@ -1576,20 +1576,20 @@ body.theme-light .preferences-global-reset.confirming {
   border-color: #d9534f;
 }
 body.theme-light .preferences-global-reset-title {
-  color: #991b1b;
+  color: var(--danger-strong-border);
 }
 body.theme-light .preferences-global-reset-warning {
-  color: #7f1d1d;
+  color: var(--danger-light-text);
 }
 body.theme-light .preferences-global-reset .preferences-reset-all {
   color: #ffffff;
-  background: #dc2626;
+  background: var(--danger-strong);
   border-color: #ef4444;
 }
 body.theme-light .preferences-global-reset .preferences-reset-all:hover,
 body.theme-light .preferences-global-reset .preferences-reset-all:focus-visible {
-  background: #b91c1c;
-  border-color: #dc2626;
+  background: var(--danger-strong-hover);
+  border-color: var(--danger-strong);
 }
 body.theme-light .preferences-reset-cancel {
   background: rgba(15, 23, 42, 0.05);

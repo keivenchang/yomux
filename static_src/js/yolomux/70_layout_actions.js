@@ -682,7 +682,7 @@ function sessionAgentKind(session) {
 }
 
 function agentIcon(kind, options = {}) {
-  const name = kind === 'codex' ? 'Codex' : (kind === 'claude' ? 'Claude' : '');
+  const name = agentLabel(kind);
   const label = options.label || name;
   const labelAttr = label ? ` aria-label="${esc(label)}" title="${esc(label)}"` : '';
   if (kind === 'codex') {

@@ -10,6 +10,9 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import SessionInfo
 
 
+PROMPT_STATE_KEYS = set(app_module.auto_approve_tmux.blank_prompt_state())
+
+
 @pytest.fixture(autouse=True)
 def no_control_socket(monkeypatch):
     monkeypatch.setattr(app_module.YolomuxControlServer, "start", lambda self: None)
@@ -29,6 +32,24 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
     assert status == HTTPStatus.OK
     assert payload["session_order"] == ["new"]
     assert payload["sessions"] == {"new": {"target": "new"}}
+
+
+@pytest.mark.parametrize("method_name", ["events_payload", "search_payload", "auto_approve_status"])
+def test_session_scoped_endpoints_refresh_before_unknown_session_guard(monkeypatch, method_name):
+    webapp = app_module.TmuxWebtermApp(["old"])
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["new"], None))
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    monkeypatch.setattr(webapp, "auto_approve_session_status", lambda session, **_kwargs: {"target": session})
+    try:
+        if method_name == "search_payload":
+            payload, status = webapp.search_payload("", session="new")
+        else:
+            payload, status = getattr(webapp, method_name)("new")
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["session" if method_name != "auto_approve_status" else "target"] == "new"
 
 
 def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
@@ -224,6 +245,7 @@ def test_prompt_and_screen_status_captures_discovered_agent_pane(monkeypatch):
         webapp.control_server.stop()
 
     assert prompt["visible"] is True
+    assert set(prompt) == PROMPT_STATE_KEYS
     assert screen["key"] == "approval"
     assert capture_calls == [("6:1.0", True), ("6:1.0", False)]
     assert hybrid_targets == [("6", False), ("6", True)]
@@ -238,6 +260,7 @@ def test_prompt_and_screen_status_reports_os_errors(monkeypatch):
         webapp.control_server.stop()
 
     assert prompt["error"] == "tmux failed"
+    assert set(prompt) == PROMPT_STATE_KEYS | {"error"}
     assert screen == {"key": "error", "text": "tmux failed"}
 
 

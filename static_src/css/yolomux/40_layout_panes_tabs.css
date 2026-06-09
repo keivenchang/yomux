@@ -729,20 +729,20 @@ body.theme-light .drop-slot.drag-over {
   color: var(--pane-meta-desc);
 }
 .meta-pr-status.pr-status-failing {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .meta-pr-status.pr-status-pending,
 .meta-pr-status.pr-status-draft {
   color: var(--accent-gold);
 }
 .meta-pr-status.pr-status-passing {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .meta-pr-status.pr-status-merged {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .meta-pr-status.pr-status-closed {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
 .meta-muted {
   color: #8b95a5;
@@ -1440,7 +1440,7 @@ body.theme-light .summary-context a:hover {
   color: #1e3a8a;
 }
 /* DOIT.19: a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
-   not the generic link blue above. The dark `.meta a.pr-status-merged{#c084fc}` (20_*.css) is out-won in
+   not the generic link blue above. The dark `.meta a.pr-status-merged{var(--pr-status-merged)}` (20_*.css) is out-won in
    light mode by `body.theme-light .meta a` (same 0,2,1, later in source), so re-assert at 0,3,1 here. */
 body.theme-light .popover-value a.pr-status-merged,
 body.theme-light .meta a.pr-status-merged,

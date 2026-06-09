@@ -13,9 +13,9 @@ from typing import Any
 
 from .common import AgentInfo
 from .common import SessionInfo
+from .common import git
 from .common import is_generated_upload_name
 from .filesystem import git_root_for_path
-from .tmux_utils import run_cmd
 
 
 CLAUDE_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -126,14 +126,14 @@ def bounded_session_files_hours(value: Any) -> float:
 
 
 def git_default_branch_ref(repo: Path) -> str | None:
-    result = run_cmd(["git", "-C", str(repo), "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], timeout=5.0)
+    result = git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], cwd=str(repo), timeout=5.0)
     if result.returncode == 0:
         ref = result.stdout.strip()
         if ref:
             return ref
     for ref in ("origin/main", "origin/master", "main", "master"):
         verify_ref = f"refs/remotes/{ref}" if ref.startswith("origin/") else f"refs/heads/{ref}"
-        verify = run_cmd(["git", "-C", str(repo), "show-ref", "--verify", "--quiet", verify_ref], timeout=5.0)
+        verify = git(["show-ref", "--verify", "--quiet", verify_ref], cwd=str(repo), timeout=5.0)
         if verify.returncode == 0:
             return ref
     return None
@@ -142,7 +142,7 @@ def git_default_branch_ref(repo: Path) -> str | None:
 def git_diff_base(repo: Path) -> str:
     default_ref = git_default_branch_ref(repo)
     if default_ref:
-        result = run_cmd(["git", "-C", str(repo), "merge-base", default_ref, "HEAD"], timeout=5.0)
+        result = git(["merge-base", default_ref, "HEAD"], cwd=str(repo), timeout=5.0)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     return "HEAD"
@@ -162,7 +162,7 @@ def diff_refs(from_ref: str | None = None, to_ref: str | None = None) -> tuple[s
 
 
 def git_ref_exists(repo: Path, ref: str) -> bool:
-    result = run_cmd(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], timeout=3.0)
+    result = git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=str(repo), timeout=3.0)
     return result.returncode == 0
 
 
@@ -177,7 +177,7 @@ def validate_diff_refs(repo: Path, from_ref: str, to_ref: str) -> str:
         return f"unknown FROM ref: {from_ref}"
     if not git_ref_exists(repo, to_ref):
         return f"unknown TO ref: {to_ref}"
-    order = run_cmd(["git", "-C", str(repo), "merge-base", "--is-ancestor", from_ref, to_ref], timeout=5.0)
+    order = git(["merge-base", "--is-ancestor", from_ref, to_ref], cwd=str(repo), timeout=5.0)
     if order.returncode != 0:
         return f"FROM ref must be older than TO ref ({from_ref} is not an ancestor of {to_ref})"
     return ""
@@ -196,7 +196,7 @@ def git_diff_args(repo: Path, base: str | None = None, from_ref: str | None = No
 
 
 def git_recent_refs(repo: Path, limit: int = 100) -> list[dict[str, str]]:
-    result = run_cmd(["git", "-C", str(repo), "log", f"--max-count={max(1, min(limit, 200))}", "--pretty=format:%H%x1f%h%x1f%s%x1f%at%x1f%an"], timeout=5.0)
+    result = git(["log", f"--max-count={max(1, min(limit, 200))}", "--pretty=format:%H%x1f%h%x1f%s%x1f%at%x1f%an"], cwd=str(repo), timeout=5.0)
     refs = [{"ref": "HEAD", "short": "HEAD", "subject": "base commit"}, {"ref": "current", "short": "current", "subject": "working tree"}]
     if result.returncode != 0:
         return refs
@@ -227,7 +227,7 @@ def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = 
     diff_args, include_untracked, error = git_diff_args(repo, base, from_ref, to_ref)
     if error:
         return statuses, error
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--name-status", "-z", "--find-renames", *diff_args], timeout=5.0)
+    diff = git(["diff", "--name-status", "-z", "--find-renames", *diff_args], cwd=str(repo), timeout=5.0)
     if diff.returncode == 0:
         parts = diff.stdout.split("\0")
         index = 0
@@ -248,7 +248,7 @@ def git_name_status(repo: Path, base: str | None = None, from_ref: str | None = 
             if rel_path:
                 statuses[rel_path] = "A" if status == "A" else "D" if status == "D" else "M"
     if include_untracked:
-        untracked = run_cmd(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"], timeout=5.0)
+        untracked = git(["ls-files", "--others", "--exclude-standard", "-z"], cwd=str(repo), timeout=5.0)
     else:
         untracked = None
     if untracked and untracked.returncode == 0:
@@ -276,7 +276,7 @@ def git_numstat(repo: Path, base: str | None = None, from_ref: str | None = None
     diff_args, _, error = git_diff_args(repo, base, from_ref, to_ref)
     if error:
         return counts
-    diff = run_cmd(["git", "-C", str(repo), "diff", "--numstat", "-z", "--find-renames", *diff_args], timeout=5.0)
+    diff = git(["diff", "--numstat", "-z", "--find-renames", *diff_args], cwd=str(repo), timeout=5.0)
     if diff.returncode != 0:
         return counts
     parts = diff.stdout.split("\0")
@@ -311,14 +311,14 @@ def git_ahead_behind(repo: Path, from_ref: str | None = None, to_ref: str | None
         left_ref = older
         right_ref = "HEAD" if newer == "current" else newer
     else:
-        upstream = run_cmd(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], timeout=3.0)
+        upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd=str(repo), timeout=3.0)
         if upstream.returncode != 0 or not upstream.stdout.strip():
             return {}
         left_ref = upstream.stdout.strip()
         right_ref = "HEAD"
     if not git_ref_exists(repo, left_ref) or not git_ref_exists(repo, right_ref):
         return {}
-    result = run_cmd(["git", "-C", str(repo), "rev-list", "--left-right", "--count", f"{left_ref}...{right_ref}"], timeout=5.0)
+    result = git(["rev-list", "--left-right", "--count", f"{left_ref}...{right_ref}"], cwd=str(repo), timeout=5.0)
     if result.returncode != 0:
         return {}
     parts = result.stdout.strip().split()
@@ -406,25 +406,20 @@ def line_total(entries: list[dict[str, Any]], key: str) -> int:
     return total
 
 
-def session_files_payload_for_info(
-    info: SessionInfo,
-    hours: float = 24.0,
-    now: float | None = None,
-    from_ref: str | None = None,
-    to_ref: str | None = None,
-    repo_refs: dict[str, dict[str, str]] | None = None,
-) -> dict[str, Any]:
-    # C6: `repo_refs` carries per-repo FROM/TO overrides ({repo_path: {"from","to"}}); a SHA chosen for
-    # one repo no longer leaks into another. The scalar from_ref/to_ref stay as the global default applied
-    # to any repo without an override (and drive the top-level payload refs for legacy single-repo callers).
-    cutoff = (now if now is not None else time.time()) - bounded_session_files_hours(hours) * 3600
-    refs_active = refs_requested(from_ref, to_ref)
-    selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
+def merge_agent_lists(*agent_lists: list[str]) -> list[str]:
+    merged: list[str] = []
+    for agent_list in agent_lists:
+        for agent_name in agent_list:
+            if agent_name and agent_name not in merged:
+                merged.append(agent_name)
+    return merged
+
+
+def touched_files_for_info(info: SessionInfo, cutoff: float, errors: list[str] | None = None) -> dict[str, dict[str, Any]]:
     touched: dict[str, dict[str, Any]] = {}
-    errors: list[str] = []
     for agent in info.agents:
         if not agent.transcript:
-            if agent.error:
+            if agent.error and errors is not None:
                 errors.append(agent.error)
             continue
         transcript = Path(agent.transcript).expanduser()
@@ -439,6 +434,34 @@ def session_files_payload_for_info(
                 entry["agents"].append(agent.kind)
             entry["status"] = classify_change(markers)
             entry["mtime"] = max(float(entry.get("mtime") or 0.0), transcript_mtime)
+    return touched
+
+
+def agent_attribution_by_path(infos: dict[str, SessionInfo], cutoff: float) -> dict[str, list[str]]:
+    attribution: dict[str, list[str]] = {}
+    for info in infos.values():
+        for path_text, metadata in touched_files_for_info(info, cutoff).items():
+            attribution[path_text] = merge_agent_lists(attribution.get(path_text, []), metadata.get("agents", []))
+    return attribution
+
+
+def session_files_payload_for_info(
+    info: SessionInfo,
+    hours: float = 24.0,
+    now: float | None = None,
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+    repo_refs: dict[str, dict[str, str]] | None = None,
+    agent_attribution: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    # C6: `repo_refs` carries per-repo FROM/TO overrides ({repo_path: {"from","to"}}); a SHA chosen for
+    # one repo no longer leaks into another. The scalar from_ref/to_ref stay as the global default applied
+    # to any repo without an override (and drive the top-level payload refs for legacy single-repo callers).
+    cutoff = (now if now is not None else time.time()) - bounded_session_files_hours(hours) * 3600
+    refs_active = refs_requested(from_ref, to_ref)
+    selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
+    errors: list[str] = []
+    touched = touched_files_for_info(info, cutoff, errors)
 
     repos: dict[str, set[str]] = {}
     for path_text, metadata in touched.items():
@@ -495,7 +518,7 @@ def session_files_payload_for_info(
                 removed = 0
             # C5: attribute the file to exactly the agents the transcripts say touched it — no fallback.
             # A repo-only change with no transcript attribution gets an empty list (zero agent icons).
-            agents = touched_by_rel.get(rel_path, {}).get("agents", [])
+            agents = merge_agent_lists(touched_by_rel.get(rel_path, {}).get("agents", []), (agent_attribution or {}).get(str(path), []))
             repo_entries.append(session_file_entry(info.session, agents, status, path, repo, "git", added, removed))
         for rel_path, metadata in touched_by_rel.items():
             if rel_path in statuses:
@@ -505,7 +528,7 @@ def session_files_payload_for_info(
             path = repo / rel_path
             repo_entries.append(session_file_entry(
                 info.session,
-                metadata.get("agents", []),
+                merge_agent_lists(metadata.get("agents", []), (agent_attribution or {}).get(str(path), [])),
                 "T",
                 path,
                 repo,
@@ -552,11 +575,14 @@ def session_files_payload(
     to_ref: str | None = None,
     repo_refs: dict[str, dict[str, str]] | None = None,
 ) -> tuple[dict[str, Any], HTTPStatus]:
+    now = time.time()
+    cutoff = now - bounded_session_files_hours(hours) * 3600
+    attribution = agent_attribution_by_path(infos, cutoff)
     if session:
         info = infos.get(session)
         if info is None:
             return {"error": f"unknown session: {session}", "session": session}, HTTPStatus.NOT_FOUND
-        payload = session_files_payload_for_info(info, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+        payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
         return payload, HTTPStatus.OK
 
     files: list[dict[str, Any]] = []
@@ -564,7 +590,7 @@ def session_files_payload(
     refs_by_repo: dict[str, list[dict[str, str]]] = {}
     errors: list[str] = []
     for info in infos.values():
-        payload = session_files_payload_for_info(info, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+        payload = session_files_payload_for_info(info, hours, now=now, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, agent_attribution=attribution)
         files.extend(payload["files"])
         errors.extend(payload["errors"])
         refs_by_repo.update(payload.get("refs_by_repo", {}))

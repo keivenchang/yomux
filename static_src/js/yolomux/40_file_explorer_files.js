@@ -1400,14 +1400,19 @@ function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortMode, opt
   });
 }
 
-function fileTreeGitStatusClass(status) {
+function gitStatusRowClass(status) {
   const key = String(status || '').toUpperCase();
   if (key === 'A' || key === 'U' || key === '?') return 'git-untracked';
   if (key === 'D') return 'git-deleted';
   if (key === 'S') return 'git-staged';
   if (key === 'M') return 'git-modified';
   if (key === 'T') return 'git-transcript';
-  return '';
+  const fallback = String(status || '').toLowerCase();
+  return /^[a-z0-9_-]+$/.test(fallback) ? `git-${fallback}` : '';
+}
+
+function fileTreeGitStatusClass(status) {
+  return gitStatusRowClass(status);
 }
 
 function fileTreeGitStatusBadgeClass(status) {

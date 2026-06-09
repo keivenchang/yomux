@@ -74,7 +74,7 @@
   padding: 8px 10px;
   color: #ffd8dc;
   background: rgba(42, 14, 18, 0.98);
-  border: 1px solid #ff8a95;
+  border: 1px solid var(--pr-status-failing);
   border-radius: 7px;
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.42);
   white-space: normal;
@@ -201,7 +201,7 @@
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--input-bg, #11151c);
+  background: var(--input-bg);
   color: var(--text);
   font: inherit;
   font-size: var(--ui-font-size-sm);
@@ -231,7 +231,7 @@ body.theme-light .topbar-nav-button {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--input-bg, #11151c);
+  background: var(--input-bg);
   color: var(--muted, #8b95a5);
   cursor: text;
   font: inherit;
@@ -253,7 +253,7 @@ body.theme-light .topbar-search {
   max-width: 140px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--input-bg, #11151c);
+  background: var(--input-bg);
   color: var(--text);
   font: inherit;
   font-size: var(--ui-font-size-sm);
@@ -469,7 +469,7 @@ body.theme-light .topbar-language {
 }
 .app-menu-section {
   padding: 4px 7px 5px;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   letter-spacing: 0;
@@ -630,7 +630,7 @@ body.theme-light .topbar-language {
   white-space: nowrap;
   text-overflow: ellipsis;
   max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .app-menu-rich {
@@ -726,7 +726,7 @@ body.theme-light .topbar-language {
   }
 }
 .app-menu-submenu-arrow {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font-weight: 700;
 }
 .app-menu-submenu-wrap:hover > .app-menu-command .app-menu-submenu-arrow,

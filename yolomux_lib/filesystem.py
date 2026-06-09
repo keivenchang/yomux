@@ -12,7 +12,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -21,8 +20,8 @@ from .common import AUTH_CONFIG_PATH
 from .common import AUTH_COOKIE_SECRET_PATH
 from .common import CONFIG_DIR
 from .common import git
+from .common import git_bytes
 from .common import is_generated_upload_name
-from .common import run_cmd
 from . import file_index
 
 MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
@@ -893,12 +892,7 @@ def path_info(raw_path: str) -> dict[str, Any]:
 
 
 def _git_blob_text(repo: Path, ref: str, rel_path: str, label: str) -> tuple[str, str]:
-    result = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{ref}:{rel_path}"],
-        capture_output=True,
-        timeout=5.0,
-        check=False,
-    )
+    result = git_bytes(["show", f"{ref}:{rel_path}"], cwd=str(repo), timeout=5.0)
     if result.returncode != 0:
         return "", ""
     if len(result.stdout) > MAX_READ_BYTES:
@@ -978,7 +972,7 @@ def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = N
     working = ""
     working_error = ""
     if diff_to == "current" and tracked.returncode != 0:
-        result = run_cmd(["git", "-C", str(repo), "diff", "--no-index", "--", "/dev/null", str(path)], timeout=5.0)
+        result = git(["diff", "--no-index", "--", "/dev/null", str(path)], cwd=str(repo), timeout=5.0)
         untracked = True
     else:
         if diff_to == "current":

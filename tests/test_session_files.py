@@ -11,9 +11,9 @@ from yolomux_lib import session_files
 from _git_helpers import git
 
 
-def agent(kind, transcript, cwd):
+def agent(kind, transcript, cwd, session="s1"):
     return AgentInfo(
-        session="s1",
+        session=session,
         kind=kind,
         pid=1,
         pane_target="%1",
@@ -178,6 +178,38 @@ def test_session_files_payload_collects_multiple_agents_for_one_file(tmp_path):
 
     assert sorted(by_path["tracked.txt"]["agents"]) == ["claude", "codex"]
     assert by_path["tracked.txt"]["agent"] in {"claude", "codex"}  # scalar alias is just the first
+
+
+def test_selected_session_rows_include_cross_session_agent_attribution(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "base")
+    tracked.write_text("two\n", encoding="utf-8")
+
+    codex_path = tmp_path / "rollout.jsonl"
+    codex_path.write_text('{"msg":"*** Begin Patch\\n*** Update File: tracked.txt\\n"}\n', encoding="utf-8")
+    claude_path = tmp_path / "claude.jsonl"
+    claude_path.write_text(
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": str(tracked)}},
+        ]}}) + "\n",
+        encoding="utf-8",
+    )
+    info1 = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("codex", codex_path, repo, session="s1")])
+    info2 = SessionInfo(session="s2", panes=[], selected_pane=None, agents=[agent("claude", claude_path, repo, session="s2")])
+
+    payload, status = session_files.session_files_payload("s1", {"s1": info1, "s2": info2}, hours=24)
+
+    assert status == 200
+    by_path = {item["path"]: item for item in payload["files"]}
+    assert by_path["tracked.txt"]["session"] == "s1"
+    assert sorted(by_path["tracked.txt"]["agents"]) == ["claude", "codex"]
 
 
 def test_session_files_payload_excludes_non_repo_transcript_artifacts(tmp_path):

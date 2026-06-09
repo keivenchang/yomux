@@ -6,6 +6,7 @@
   --panel-inactive: #202633;
   --panel2: #1e2430;
   --panel2-inactive: #252c3a;
+  --input-bg: var(--panel2);
   --text: #e4e8ee;
   --muted: #9aa5b1;
   --line: #303948;
@@ -34,6 +35,14 @@
   --auto-border-disabled: #4b7518;
   --auto-glow: rgba(118, 185, 0, 0.24);
   --bad: #ff6673;
+  --danger-text: #fff3f4;
+  --danger-bg: #c61f38;
+  --danger-border: #ff7a86;
+  --danger-muted-bg: #5b1e28;
+  --danger-strong: #dc2626;
+  --danger-strong-hover: #b91c1c;
+  --danger-strong-border: #991b1b;
+  --danger-light-text: #7f1d1d;
   --transport-warning-text: #fff4f5;
   --transport-warning-bg: #b42332;
   --transport-warning-border: #ff8a95;
@@ -41,6 +50,16 @@
   --pr-status-passing: #52d273;
   --pr-status-merged: #c084fc;
   --pr-status-closed: #aeb8c7;
+  --git-modified: var(--accent-gold);
+  --git-modified-badge: var(--accent-gold);
+  --git-untracked-name: #7ee787;
+  --git-untracked-badge: #2dd4bf;
+  --git-deleted: #ff8585;
+  --git-deleted-badge: #ff5d5d;
+  --git-staged: #c4f970;
+  --git-staged-badge: var(--brand-green);
+  --git-transcript: var(--muted);
+  --git-transcript-badge: #94a3b8;
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
   --inactive-pane-opacity-scale: 1;
@@ -159,6 +178,8 @@
   --z-menu-dropdown: 92;
   --z-ref-suggestion: 260;
   --z-file-conflict-dialog: 270;
+  --z-file-editor-actions: 220;
+  --z-file-editor-dialog: 275;
   --z-rename-input: 9000;
   --file-pane-min-inline-size: min(260px, 46vw);
   --file-editor-pane-min-inline-size: min(340px, 52vw);
@@ -378,6 +399,7 @@ body.theme-light {
   --panel-inactive: #eef2f7;
   --panel2: #edf2f8;
   --panel2-inactive: #e4eaf2;
+  --input-bg: var(--panel2);
   --text: #17202c;
   --muted: #5b6573;
   --line: #c9d2df;
@@ -388,6 +410,16 @@ body.theme-light {
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
   --accent: #2563eb;
+  --git-modified: var(--accent-gold);
+  --git-modified-badge: #f5c542;
+  --git-untracked-name: #116329;
+  --git-untracked-badge: #0f766e;
+  --git-deleted: #b42332;
+  --git-deleted-badge: #dc2626;
+  --git-staged: #3f6f00;
+  --git-staged-badge: var(--brand-green);
+  --git-transcript: var(--muted);
+  --git-transcript-badge: #64748b;
   --drop-outline: #1d4ed8;
   --drop-outline-text: #071327;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
@@ -404,6 +436,14 @@ body.theme-light {
   --auto-border-disabled: #b3c99b;
   --auto-glow: rgba(95, 152, 0, 0.22);
   --bad: #b91c1c;
+  --danger-text: #fff3f4;
+  --danger-bg: #c61f38;
+  --danger-border: #ff7a86;
+  --danger-muted-bg: #5b1e28;
+  --danger-strong: #dc2626;
+  --danger-strong-hover: #b91c1c;
+  --danger-strong-border: #991b1b;
+  --danger-light-text: #7f1d1d;
   --inactive-gray: rgba(91, 101, 115, 0.42);
   --inactive-gray-hover: rgba(91, 101, 115, 0.54);
   /* #254/#259 follow-up: keep the neutral gray dim, but back off the light-mode alpha so inactive panes
@@ -558,7 +598,7 @@ body {
   padding: 8px 10px;
   color: #ffd8dc;
   background: rgba(42, 14, 18, 0.98);
-  border: 1px solid #ff8a95;
+  border: 1px solid var(--pr-status-failing);
   border-radius: 7px;
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.42);
   white-space: normal;
@@ -685,7 +725,7 @@ body {
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--input-bg, #11151c);
+  background: var(--input-bg);
   color: var(--text);
   font: inherit;
   font-size: var(--ui-font-size-sm);
@@ -715,7 +755,7 @@ body.theme-light .topbar-nav-button {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--input-bg, #11151c);
+  background: var(--input-bg);
   color: var(--muted, #8b95a5);
   cursor: text;
   font: inherit;
@@ -737,7 +777,7 @@ body.theme-light .topbar-search {
   max-width: 140px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--input-bg, #11151c);
+  background: var(--input-bg);
   color: var(--text);
   font: inherit;
   font-size: var(--ui-font-size-sm);
@@ -953,7 +993,7 @@ body.theme-light .topbar-language {
 }
 .app-menu-section {
   padding: 4px 7px 5px;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font-size: var(--ui-font-size-xs);
   font-weight: 700;
   letter-spacing: 0;
@@ -1114,7 +1154,7 @@ body.theme-light .topbar-language {
   white-space: nowrap;
   text-overflow: ellipsis;
   max-width: min(58ch, calc(var(--app-menu-max-inline-size) - 74px));
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .app-menu-rich {
@@ -1210,7 +1250,7 @@ body.theme-light .topbar-language {
   }
 }
 .app-menu-submenu-arrow {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font-weight: 700;
 }
 .app-menu-submenu-wrap:hover > .app-menu-command .app-menu-submenu-arrow,
@@ -1434,20 +1474,16 @@ body.theme-light .latency-meter {
   padding: 1px 3px;
   border: 1px solid #384356;
   border-radius: 5px;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   background: #161d29;
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
   text-transform: uppercase;
 }
-.session-state-needs-approval {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
-}
+.session-state-needs-approval,
 .session-state-needs-input {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 .session-state-yolo-approval {
   color: var(--active-control-text);
@@ -1456,9 +1492,9 @@ body.theme-light .latency-meter {
 }
 .session-state-blocked,
 .session-state-disconnected {
-  color: #fff3f4;
-  background: #5b1e28;
-  border-color: #ff6673;
+  color: var(--danger-text);
+  background: var(--danger-muted-bg);
+  border-color: var(--bad);
 }
 .session-state-tests-running {
   color: #10151f;
@@ -1467,7 +1503,7 @@ body.theme-light .latency-meter {
 }
 .session-state-ready-review {
   color: #082014;
-  background: #52d273;
+  background: var(--pr-status-passing);
   border-color: #9befad;
 }
 .session-state-working {
@@ -1615,7 +1651,7 @@ body.theme-light .session-yolo-marker.inactive {
   padding: 0 2px;
   border-radius: 0;
   border: 1px solid #384356;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   background: #161d29;
   font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
   overflow: hidden;
@@ -1642,9 +1678,9 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   text-decoration: none;
 }
 .ci-indicator.pr-status-failing {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
   box-shadow: none;
 }
 .ci-indicator.pr-status-pending,
@@ -1655,12 +1691,12 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 }
 .ci-indicator.pr-status-passing {
   color: #051408;
-  background: #52d273;
+  background: var(--pr-status-passing);
   border-color: #8ff2a7;
 }
 .ci-indicator.pr-status-merged {
   color: #170326;
-  background: #c084fc;
+  background: var(--pr-status-merged);
   border-color: #e9d5ff;
 }
 /* #38: PR reviewDecision badge — green Approved, red Changes, crossed-out neutral Review. */
@@ -1670,13 +1706,13 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 }
 .ci-indicator.pr-review-approved {
   color: #051408;
-  background: #52d273;
+  background: var(--pr-status-passing);
   border-color: #8ff2a7;
 }
 .ci-indicator.pr-review-changes {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 .ci-indicator.pr-review-required {
   color: #172033;
@@ -2521,21 +2557,21 @@ body.theme-light .branch-link {
 }
 /* Row tinting: match Finder git-* name colors */
 .changes-file-row.git-modified:not(.selected) .changes-file-name {
-  color: #f5c542;
+  color: var(--git-modified);
 }
 .changes-file-row.git-untracked:not(.selected) .changes-file-name {
-  color: #7ee787;
+  color: var(--git-untracked-name);
 }
 .changes-file-row.git-deleted:not(.selected) .changes-file-name {
-  color: #ff8585;
+  color: var(--git-deleted);
   text-decoration: line-through;
 }
 .changes-file-row.git-staged:not(.selected) .changes-file-name {
-  color: #c4f970;
+  color: var(--git-staged);
   font-weight: 700;
 }
 .changes-file-row.git-transcript:not(.selected) .changes-file-name {
-  color: var(--muted);
+  color: var(--git-transcript);
 }
 .changes-file-row:hover {
   background: var(--changes-row-hover-bg);
@@ -2565,30 +2601,30 @@ body.theme-light .branch-link {
   letter-spacing: 0;
 }
 .changes-status-a {
-  background: #76b900;
+  background: var(--git-staged-badge);
 }
 .changes-status-m {
   /* Clarity (image 046): use the BRIGHT amber as a fixed badge fill (like the other vibrant status
      badges) so the near-black "M" pops. The theme-aware --accent-gold flips to a dark brown (#b7791f)
      in light mode → near-black-on-dark = muddy/illegible. */
-  background: #f5c542;
+  background: var(--git-modified-badge);
 }
 .changes-status-d {
-  background: #ff5d5d;
+  background: var(--git-deleted-badge);
 }
 .changes-status-r,
 .changes-status-c {
   background: #38bdf8;
 }
 .changes-status-t {
-  background: #94a3b8;
+  background: var(--git-transcript-badge);
 }
 .changes-status-u,
 .changes-status-unknown {
   /* Untracked/unknown = teal (a vibrant "new content" color). Purple is RESERVED for MERGED PR status
      (pr-status-merged) across the app, so this badge must not be purple — it used to be violet, which
      read as a merged indicator next to the PR badges. */
-  background: #2dd4bf;
+  background: var(--git-untracked-badge);
 }
 .changes-status-unknown {
   border: 1px solid rgba(226, 232, 240, 0.16);
@@ -2676,7 +2712,7 @@ body.theme-light .branch-link {
   font-weight: 800;
 }
 .changes-diff-remove {
-  color: #ff6673;
+  color: var(--bad);
   font-weight: 800;
 }
 .changes-count-badge {
@@ -3143,7 +3179,7 @@ body.theme-light .command-palette-view-chip {
   box-decoration-break: clone;
 }
 .command-palette-detail {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font: var(--ui-font-size-xs)/1.2 var(--mono-font);
 }
 .command-palette-keybinding {
@@ -3477,7 +3513,7 @@ body.theme-light .preferences-inline-action {
 .summary-context a.pr-status-merged:hover,
 .branch-meta a.pr-status-merged:hover,
 .info-cell a.pr-status-merged:hover {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .branch-list {
   margin-top: 8px;
@@ -3591,7 +3627,7 @@ body.theme-light .keyboard-shortcut-row kbd {
   border-color: rgba(15, 23, 42, 0.18);
 }
 body.theme-light .preferences-global-reset {
-  color: #7f1d1d;
+  color: var(--danger-light-text);
   background: #fff5f5;
   border-color: rgba(220, 38, 38, 0.46);
 }
@@ -3600,20 +3636,20 @@ body.theme-light .preferences-global-reset.confirming {
   border-color: #d9534f;
 }
 body.theme-light .preferences-global-reset-title {
-  color: #991b1b;
+  color: var(--danger-strong-border);
 }
 body.theme-light .preferences-global-reset-warning {
-  color: #7f1d1d;
+  color: var(--danger-light-text);
 }
 body.theme-light .preferences-global-reset .preferences-reset-all {
   color: #ffffff;
-  background: #dc2626;
+  background: var(--danger-strong);
   border-color: #ef4444;
 }
 body.theme-light .preferences-global-reset .preferences-reset-all:hover,
 body.theme-light .preferences-global-reset .preferences-reset-all:focus-visible {
-  background: #b91c1c;
-  border-color: #dc2626;
+  background: var(--danger-strong-hover);
+  border-color: var(--danger-strong);
 }
 body.theme-light .preferences-reset-cancel {
   background: rgba(15, 23, 42, 0.05);
@@ -4371,20 +4407,20 @@ body.theme-light .drop-slot.drag-over {
   color: var(--pane-meta-desc);
 }
 .meta-pr-status.pr-status-failing {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .meta-pr-status.pr-status-pending,
 .meta-pr-status.pr-status-draft {
   color: var(--accent-gold);
 }
 .meta-pr-status.pr-status-passing {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .meta-pr-status.pr-status-merged {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .meta-pr-status.pr-status-closed {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
 .meta-muted {
   color: #8b95a5;
@@ -5082,7 +5118,7 @@ body.theme-light .summary-context a:hover {
   color: #1e3a8a;
 }
 /* DOIT.19: a merged PR link must read purple (GitHub convention + matches the purple #number tab chip),
-   not the generic link blue above. The dark `.meta a.pr-status-merged{#c084fc}` (20_*.css) is out-won in
+   not the generic link blue above. The dark `.meta a.pr-status-merged{var(--pr-status-merged)}` (20_*.css) is out-won in
    light mode by `body.theme-light .meta a` (same 0,2,1, later in source), so re-assert at 0,3,1 here. */
 body.theme-light .popover-value a.pr-status-merged,
 body.theme-light .meta a.pr-status-merged,
@@ -5557,7 +5593,7 @@ body.theme-light .tabs .panel-tab-overflow:focus-visible {
 .transcript-item.user { border-color: #60a5fa; background: color-mix(in srgb, #60a5fa 12%, var(--panel)); }
 .transcript-item.assistant { border-color: #4ade80; background: color-mix(in srgb, #4ade80 12%, var(--panel)); }
 .transcript-item.tool_use { border-color: #f59e0b; background: color-mix(in srgb, #f59e0b 12%, var(--panel)); }
-.transcript-item.tool_result { border-color: #c084fc; background: color-mix(in srgb, #c084fc 12%, var(--panel)); }
+.transcript-item.tool_result { border-color: var(--pr-status-merged); background: color-mix(in srgb, var(--pr-status-merged) 12%, var(--panel)); }
 .transcript-item.summary { border-color: #f472b6; background: color-mix(in srgb, #f472b6 12%, var(--panel)); }
 .transcript-item.system { border-color: #94a3b8; background: color-mix(in srgb, #94a3b8 12%, var(--panel)); }
 .transcript-role {
@@ -6174,41 +6210,41 @@ body.theme-light .yoagent-global .markdown-body pre code {
   text-decoration: none;
 }
 .info-cell a.pr-status-failing {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .info-cell a.pr-status-pending,
 .info-cell a.pr-status-draft {
   color: var(--accent-gold);
 }
 .info-cell a.pr-status-passing {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .info-cell a.pr-status-merged {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .info-cell a.pr-status-closed {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
 .info-cell a:hover {
   color: #bfdbfe;
   text-decoration: underline;
 }
 .info-cell a.pr-status-failing:hover {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .info-cell a.pr-status-pending:hover,
 .info-cell a.pr-status-draft:hover {
   color: var(--accent-gold);
 }
 .info-cell a.pr-status-passing:hover {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .branch-meta a.pr-status-merged:hover,
 .info-cell a.pr-status-merged:hover {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .info-cell a.pr-status-closed:hover {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
 /* Light mode (DOIT.18 C1): the whole YO!info table hardcoded dark-mode colors with NO light
    override — near-white row text vanished on the white pane, header/current rows were dark bars,
@@ -6361,9 +6397,9 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .server-update-banner-reload {
   cursor: pointer;
-  border: 1px solid #b91c1c;
+  border: 1px solid var(--danger-strong-hover);
   border-radius: 4px;
-  background: #dc2626;
+  background: var(--danger-strong);
   color: #ffffff;
   font: inherit;
   font-weight: 800;
@@ -6371,15 +6407,15 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .server-update-banner-reload:hover,
 .server-update-banner-reload:focus-visible {
-  border-color: #991b1b;
-  background: #b91c1c;
+  border-color: var(--danger-strong-border);
+  background: var(--danger-strong-hover);
   color: #ffffff;
 }
 .server-update-banner-dismiss {
   cursor: pointer;
   border: none;
   background: transparent;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font-size: 16px;
   line-height: 1;
   padding: 0 4px;
@@ -6804,36 +6840,36 @@ body.theme-light .modal.about-open {
   box-shadow: inset 3px 0 0 var(--accent-gold);
 }
 .file-tree-row.git-modified:not(.selected) .file-tree-name {
-  color: #f5c542;
+  color: var(--git-modified);
 }
 .file-tree-row.git-modified:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #f5c542;
+  background: var(--git-modified-badge);
 }
 .file-tree-row.git-untracked:not(.selected) .file-tree-name {
-  color: #7ee787;
+  color: var(--git-untracked-name);
 }
 .file-tree-row.git-untracked:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #2dd4bf;
+  background: var(--git-untracked-badge);
 }
 .file-tree-row.git-deleted:not(.selected) .file-tree-name {
-  color: #ff8585;
+  color: var(--git-deleted);
   text-decoration: line-through;
 }
 .file-tree-row.git-deleted:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #ff5d5d;
+  background: var(--git-deleted-badge);
 }
 .file-tree-row.git-staged:not(.selected) .file-tree-name {
-  color: #c4f970;
+  color: var(--git-staged);
   font-weight: 700;
 }
 .file-tree-row.git-staged:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #76b900;
+  background: var(--git-staged-badge);
 }
 .file-tree-row.git-transcript:not(.selected) .file-tree-name {
-  color: var(--muted);
+  color: var(--git-transcript);
 }
 .file-tree-row.git-transcript:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #94a3b8;
+  background: var(--git-transcript-badge);
 }
 .file-tree-row.kind-dir {
   color: var(--text);
@@ -6975,7 +7011,7 @@ body.theme-light .modal.about-open {
   color: #facc15;
 }
 .file-tree-icon.file-icon-config {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .file-tree-icon.file-icon-image {
   color: #86efac;
@@ -7044,14 +7080,14 @@ body.theme-light .server-update-banner-dismiss {
   color: #586072;
 }
 body.theme-light .server-update-banner-reload {
-  border-color: #b91c1c;
-  background: #dc2626;
+  border-color: var(--danger-strong-hover);
+  background: var(--danger-strong);
   color: #ffffff;
 }
 body.theme-light .server-update-banner-reload:hover,
 body.theme-light .server-update-banner-reload:focus-visible {
-  border-color: #991b1b;
-  background: #b91c1c;
+  border-color: var(--danger-strong-border);
+  background: var(--danger-strong-hover);
   color: #ffffff;
 }
 body.theme-light .file-tree-row.selected {
@@ -7710,7 +7746,7 @@ body.theme-light .file-tree-children::before {
 .file-editor-dialog-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 260;
+  z-index: var(--z-file-editor-dialog);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -7904,7 +7940,7 @@ body.editor-theme-light .file-editor-image {
   border-top: 1px solid var(--line);
   min-height: 16px;
 }
-.file-editor-status[data-level="error"] { color: #ff8a95; }
+.file-editor-status[data-level="error"] { color: var(--pr-status-failing); }
 .file-editor-status[data-level="ok"]    { color: var(--good); }
 .file-editor-status[data-level="warn"]  { color: var(--accent-gold); }
 
@@ -9072,9 +9108,9 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine * {
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedText,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk .cm-deletedText {
-  color: #7f1d1d;
+  color: var(--danger-light-text);
   background: #f4b7b7;
-  text-decoration-color: #7f1d1d;
+  text-decoration-color: var(--danger-light-text);
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText {
   color: #064e3b;
@@ -9121,7 +9157,7 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-panel-actions {
   position: relative;
-  z-index: 220;
+  z-index: var(--z-file-editor-actions);
   min-width: 0;
   display: flex;
   flex-wrap: nowrap;
@@ -10336,7 +10372,7 @@ body.editor-theme-light .file-editor-image-panel {
   white-space: nowrap;
 }
 .file-editor-status-panel[data-level="error"] {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .file-editor-status-panel[data-level="ok"] {
   color: var(--good);

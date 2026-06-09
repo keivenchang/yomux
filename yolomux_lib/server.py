@@ -40,6 +40,8 @@ from .common import SUMMARY_CODEX_TIMEOUT_SECONDS
 from .common import SUMMARY_LOOKBACK_SECONDS
 from .common import WEBSOCKET_GUID
 from .common import auth_setup_required
+from .common import codex_event_kind
+from .common import codex_exec_argv
 from .common import parse_bool
 from .common import terminate_process_group
 from .filesystem import FilesystemError
@@ -863,24 +865,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def run_codex_summary(self, prompt: str) -> None:
         repo_root = PROJECT_ROOT
-        args = [
-            "codex",
-            "exec",
-            "--json",
-            "-m",
-            SUMMARY_CODEX_MODEL,
-            "-c",
-            f'model_reasoning_effort="{SUMMARY_CODEX_EFFORT}"',
-            "-c",
-            f'service_tier="{SUMMARY_CODEX_SERVICE_TIER}"',
-            "--sandbox",
-            "read-only",
-            "--ephemeral",
-            "--ignore-rules",
-            "--cd",
-            str(repo_root),
-            "-",
-        ]
+        args = codex_exec_argv(ephemeral=True)
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
         env["NO_COLOR"] = "1"
@@ -955,16 +940,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.write_sse_json("log", {"text": stripped})
             return
-        event_type = str(event.get("type") or "")
-        if event_type == "thread.started":
-            self.write_sse_json("log", {"text": "thread started"})
+        event_kind = codex_event_kind(event)
+        if event_kind == "log":
+            self.write_sse_json("log", {"text": str(event.get("type") or "").replace(".", " ")})
             return
-        if event_type == "turn.started":
-            self.write_sse_json("log", {"text": "turn started"})
+        if event_kind == "completed":
             return
-        if event_type == "turn.completed":
-            return
-        if event_type in {"error", "turn.failed"}:
+        if event_kind == "error":
             self.write_sse_json("summary_error", {"error": json.dumps(event, ensure_ascii=False)})
             return
 

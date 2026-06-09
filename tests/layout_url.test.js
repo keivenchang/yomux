@@ -348,6 +348,7 @@ globalThis.__layoutTestApi = {
   fileQuickOpenScopeLabel,
   fileExplorerDirectoryIsIndexed,
   fileExplorerIndexBadgeText,
+  gitStatusRowClass,
   fileEditorGitActionControlsVisible,
   diffModeShouldFallBackToEdit,
   setFileExplorerIndexedDirsForTest(paths) { setFileExplorerIndexedDirs(paths); },
@@ -1411,6 +1412,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 }
 
 {
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  const withoutStorageHelpers = source
+    .replace(/function storageGet\([\s\S]*?\n}\n\nfunction storageSet/, 'function storageSet')
+    .replace(/function storageSet\([\s\S]*?\n}\n\nfunction safeJsonParse/, 'function safeJsonParse');
+  assert.equal(withoutStorageHelpers.includes('localStorage.'), false, 'browser storage access goes through storageGet/storageSet helpers');
+}
+
+{
   const api = loadYolomux('', ['1']);
   assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
   assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
@@ -2410,6 +2419,18 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
     {compact: true},
   );
+  const gitStatusClassCases = {
+    A: 'git-untracked',
+    U: 'git-untracked',
+    '?': 'git-untracked',
+    D: 'git-deleted',
+    S: 'git-staged',
+    M: 'git-modified',
+    T: 'git-transcript',
+  };
+  for (const [status, expectedClass] of Object.entries(gitStatusClassCases)) {
+    assert.equal(api.gitStatusRowClass(status), expectedClass, `shared git status row class for ${status}`);
+  }
   assert.ok(/changes-file-name[^>]*>README\.md<\/span>[\s\S]*changes-file-agent[\s\S]*changes-file-meta[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-status[^>]*>M<\/span>[\s\S]*changes-file-date/.test(compactChangeHtml), 'compact changed-file row order is file, AI icon, counts, status, date');
   assert.ok(/changes-status[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(compactChangeHtml), 'compact changed-file M badge explains itself on hover');
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
@@ -2441,6 +2462,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // C5: image rows carry size + relative path and DROP the native title (the rich hover preview replaces it);
   // non-image rows keep the full-path title.
   const imageRow = api.changeFileRowHtml({session: '1', agents: [], status: 'A', repo: '/repo/app', path: 'pic.png', abs_path: '/repo/app/pic.png', mtime: 1, size: 4096}, {});
+  assert.ok(imageRow.includes('changes-file-row detailed git-untracked'), 'C5: added uploaded rows use the same git-untracked class as Finder rows');
   assert.ok(/changes-status[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(imageRow), 'C5: added status badge explains itself on hover');
   assert.ok(imageRow.includes('data-change-size="4096"'), 'C5: image rows carry the file size for preview gating');
   assert.ok(imageRow.includes('data-change-rel="pic.png"'), 'C5: rows carry the relative path for Copy path');
@@ -2693,10 +2715,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/body\.theme-light\b[\s\S]*?--tree-indent-line:\s*rgba\(100,\s*116,\s*139,\s*0\.12\)/.test(changedFilesCss), 'light-mode tree connector lines are subdued (shared --tree-indent-line token)');
   assert.ok(/body\.theme-light \.changes-file-row\s*\{[\s\S]*border-top-color:\s*rgba\(100,\s*116,\s*139,\s*0\.13\)/.test(changedFilesCss), 'light-mode Modified-files row dividers are subdued');
   assert.ok(changedFilesCss.includes('.changes-status-r,'), 'modified-file rename/copy statuses get distinct colors');
-  assert.ok(/\.changes-status-t\s*\{[^}]*background:\s*#94a3b8/.test(changedFilesCss), 'touched-only transcript rows get a neutral status color');
+  assert.ok(/\.changes-status-t\s*\{[^}]*background:\s*var\(--git-transcript-badge\)/.test(changedFilesCss), 'touched-only transcript rows get the shared neutral git status color');
   // Purple is RESERVED for MERGED PR status: the untracked/unknown change badge must NOT be purple
   // (it was #a78bfa, reading as a merged indicator next to the PR badges); the merged PR status keeps it.
-  assert.ok(/\.changes-status-u,\s*\.changes-status-unknown\s*\{[^}]*background:\s*#2dd4bf/.test(changedFilesCss), 'untracked/unknown badge is teal, not purple (purple is reserved for MERGED PR status)');
+  assert.ok(/\.changes-status-u,\s*\.changes-status-unknown\s*\{[^}]*background:\s*var\(--git-untracked-badge\)/.test(changedFilesCss), 'untracked/unknown badge uses the shared git status token, not the merged PR token');
+  assert.ok(/--input-bg\s*:/.test(changedFilesCss), 'input background token is defined instead of relying on a dark fallback');
+  assert.equal(/var\(--input-bg,\s*#[0-9a-fA-F]{3,8}\)/.test(changedFilesCss), false, 'input controls do not hide dark literals inside token fallbacks');
+  assert.equal(/z-index:\s*(?:260|220)\b/.test(changedFilesCss), false, 'file editor z-index collision literals are routed through named tokens');
   assert.equal(changedFilesCss.includes('#a78bfa'), false, 'the old untracked purple is gone — no non-merged status uses purple');
   assert.ok(changedFilesCss.includes('body.theme-light .changes-comparison-head'), 'light theme explicitly restyles the Changes comparison header');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*overflow-y:\s*scroll/.test(changedFilesCss), 'Finder modified-files scrollbar stays visible');
@@ -3460,8 +3485,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.diff-ref-suggestion-option\s*\{[\s\S]*height:\s*24px/.test(preferencesCss), 'diff-ref popup rows are compact one-line options');
   assert.ok(/const minWidth = Math\.min\(compact \? 880 : 960, viewportWidth - 16\)/.test(changedFilesSource), 'diff-ref popup reserves enough width for normal 80-character commit subjects');
   assert.ok(/const maxWidth = compact \? 1040 : 1120/.test(changedFilesSource), 'diff-ref popup width is capped for the viewport without truncating normal subjects');
-  assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*#dc2626[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button is red in dark mode');
-  assert.ok(/body\.theme-light \.server-update-banner-reload\s*\{[\s\S]*background:\s*#dc2626[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button is red in light mode');
+  assert.ok(/\.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in dark mode');
+  assert.ok(/body\.theme-light \.server-update-banner-reload\s*\{[\s\S]*background:\s*var\(--danger-strong\)[\s\S]*color:\s*#ffffff/.test(preferencesCss), 'server update Reload button uses the danger token in light mode');
   assert.equal(/\.panel\.active-pane \.panel-head\s*\{[\s\S]*background:\s*var\(--pane-tab-panel-head-bg\)/.test(preferencesCss), false, 'focused panes do not recolor the tab strip green');
   assert.ok(preferencesCss.includes('.panel:not(.active-pane):not(.file-explorer-panel) .pane-tab.active'), 'non-focused panes dim their active tab without touching Finder panes');
   assert.ok(preferencesCss.includes('--pane-split-gap: 0px'), 'pane split layout collapses gap through a shared token');
@@ -3632,7 +3657,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(preferencesCss), 'light diff added lines use a more visible green fill');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(preferencesCss), 'light diff removed lines use a more visible red fill');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine,[\s\S]*?\.cm-deletedLine\s*\{[\s\S]*color:\s*#3b0a0a/.test(preferencesCss), 'light diff removed lines force dark red text on the stronger red fill');
-  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*#7f1d1d[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses dark red on a distinct red fill (image 055)');
+  assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*var\(--danger-light-text\)[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses the danger text token on a distinct red fill (image 055)');
   assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedText\s*\{[\s\S]*color:\s*#064e3b[\s\S]*background:\s*#b9e7c2/.test(preferencesCss), 'light diff added inline text uses dark green on a distinct green fill');
   assert.ok(/--diff-remove-line-bg:\s*#540c06/.test(preferencesCss), '#250: diff removed lines use the sampled opaque red fill over the dark bg');
   // DOIT.16 C3: a .panel-overlay-root must NOT be the scroll container (else the inactive-pane dim
@@ -3678,7 +3703,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(modifiedPreferencesHtml.includes('resets every Preferences value'), 'preferences reset carries a broad warning');
   assert.ok(modifiedPreferencesHtml.includes('data-preferences-reset-all'), 'preferences expose a global reset action after a setting changes');
   assert.ok(/\.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?background:\s*#d92d20[\s\S]*?font:\s*600 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'preferences global reset button is red and uses normal UI text');
-  assert.ok(/body\.theme-light \.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?background:\s*#dc2626/.test(preferencesCss), 'preferences global reset button remains red in light mode');
+  assert.ok(/body\.theme-light \.preferences-global-reset \.preferences-reset-all\s*\{[\s\S]*?background:\s*var\(--danger-strong\)/.test(preferencesCss), 'preferences global reset button uses the shared danger token in light mode');
   assert.equal(preferencesHtml.includes('data-preferences-reset-confirm'), false, 'preferences do not show the destructive confirmation until requested');
   const resetConfirmHtml = api.preferencesResetConfirmHtmlForTest();
   assert.ok(resetConfirmHtml.includes('data-preferences-reset-confirm'), 'reset-all requires a second continue action');

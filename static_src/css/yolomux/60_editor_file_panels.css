@@ -285,7 +285,7 @@
 .file-editor-dialog-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 260;
+  z-index: var(--z-file-editor-dialog);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -479,7 +479,7 @@ body.editor-theme-light .file-editor-image {
   border-top: 1px solid var(--line);
   min-height: 16px;
 }
-.file-editor-status[data-level="error"] { color: #ff8a95; }
+.file-editor-status[data-level="error"] { color: var(--pr-status-failing); }
 .file-editor-status[data-level="ok"]    { color: var(--good); }
 .file-editor-status[data-level="warn"]  { color: var(--accent-gold); }
 
@@ -1647,9 +1647,9 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-deletedLine * {
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedText,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk .cm-deletedText {
-  color: #7f1d1d;
+  color: var(--danger-light-text);
   background: #f4b7b7;
-  text-decoration-color: #7f1d1d;
+  text-decoration-color: var(--danger-light-text);
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText {
   color: #064e3b;
@@ -1696,7 +1696,7 @@ body.editor-theme-light .file-editor-content {
 }
 .file-editor-panel-actions {
   position: relative;
-  z-index: 220;
+  z-index: var(--z-file-editor-actions);
   min-width: 0;
   display: flex;
   flex-wrap: nowrap;
@@ -2911,7 +2911,7 @@ body.editor-theme-light .file-editor-image-panel {
   white-space: nowrap;
 }
 .file-editor-status-panel[data-level="error"] {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .file-editor-status-panel[data-level="ok"] {
   color: var(--good);

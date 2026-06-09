@@ -33,7 +33,7 @@ DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
-YOLOMUX_VERSION = "0.2.59"
+YOLOMUX_VERSION = "0.2.60"
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -65,6 +65,37 @@ _CACHE_MISS = object()
 SERVER_HOSTNAME = socket.gethostname()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
 _YOLOMUX_COMMIT_TIME_PT: str | None = None
+
+
+def codex_exec_argv(*, resume_session_id: str | None = None, ephemeral: bool = False) -> list[str]:
+    common = [
+        "--json",
+        "-m",
+        SUMMARY_CODEX_MODEL,
+        "-c",
+        f'model_reasoning_effort="{SUMMARY_CODEX_EFFORT}"',
+        "-c",
+        f'service_tier="{SUMMARY_CODEX_SERVICE_TIER}"',
+        "--ignore-rules",
+    ]
+    if resume_session_id:
+        # `codex exec resume` restores the original cwd/sandbox and rejects --sandbox/--cd.
+        return ["codex", "exec", "resume", *common, resume_session_id, "-"]
+    args = ["codex", "exec", *common, "--sandbox", "read-only"]
+    if ephemeral:
+        args.append("--ephemeral")
+    return [*args, "--cd", str(PROJECT_ROOT), "-"]
+
+
+def codex_event_kind(event: dict[str, Any]) -> str:
+    event_type = str(event.get("type") or "")
+    if event_type in {"thread.started", "turn.started"}:
+        return "log"
+    if event_type == "turn.completed":
+        return "completed"
+    if event_type in {"error", "turn.failed"}:
+        return "error"
+    return "content"
 
 
 AuthUser = _auth.AuthUser
@@ -264,6 +295,10 @@ def next_numbered_session_name(existing_sessions: list[str]) -> str | None:
 
 def git(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[str]:
     return run_cmd(["git", "-C", cwd, *args], timeout=timeout)
+
+
+def git_bytes(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(["git", "-C", cwd, *args], capture_output=True, timeout=timeout, check=False)
 
 
 def xterm_asset_path(asset: str) -> Path | None:

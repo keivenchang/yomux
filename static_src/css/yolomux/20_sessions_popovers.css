@@ -86,20 +86,16 @@
   padding: 1px 3px;
   border: 1px solid #384356;
   border-radius: 5px;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   background: #161d29;
   font: var(--ui-font-size-3xs)/1.15 var(--mono-font);
   text-transform: uppercase;
 }
-.session-state-needs-approval {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
-}
+.session-state-needs-approval,
 .session-state-needs-input {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 .session-state-yolo-approval {
   color: var(--active-control-text);
@@ -108,9 +104,9 @@
 }
 .session-state-blocked,
 .session-state-disconnected {
-  color: #fff3f4;
-  background: #5b1e28;
-  border-color: #ff6673;
+  color: var(--danger-text);
+  background: var(--danger-muted-bg);
+  border-color: var(--bad);
 }
 .session-state-tests-running {
   color: #10151f;
@@ -119,7 +115,7 @@
 }
 .session-state-ready-review {
   color: #082014;
-  background: #52d273;
+  background: var(--pr-status-passing);
   border-color: #9befad;
 }
 .session-state-working {
@@ -267,7 +263,7 @@ body.theme-light .session-yolo-marker.inactive {
   padding: 0 2px;
   border-radius: 0;
   border: 1px solid #384356;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   background: #161d29;
   font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
   overflow: hidden;
@@ -294,9 +290,9 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
   text-decoration: none;
 }
 .ci-indicator.pr-status-failing {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
   box-shadow: none;
 }
 .ci-indicator.pr-status-pending,
@@ -307,12 +303,12 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 }
 .ci-indicator.pr-status-passing {
   color: #051408;
-  background: #52d273;
+  background: var(--pr-status-passing);
   border-color: #8ff2a7;
 }
 .ci-indicator.pr-status-merged {
   color: #170326;
-  background: #c084fc;
+  background: var(--pr-status-merged);
   border-color: #e9d5ff;
 }
 /* #38: PR reviewDecision badge — green Approved, red Changes, crossed-out neutral Review. */
@@ -322,13 +318,13 @@ body.tab-meta-hidden .pane-tab .tab-symbol {
 }
 .ci-indicator.pr-review-approved {
   color: #051408;
-  background: #52d273;
+  background: var(--pr-status-passing);
   border-color: #8ff2a7;
 }
 .ci-indicator.pr-review-changes {
-  color: #fff3f4;
-  background: #c61f38;
-  border-color: #ff7a86;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
 }
 .ci-indicator.pr-review-required {
   color: #172033;

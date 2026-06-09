@@ -5,6 +5,7 @@
   --panel-inactive: #202633;
   --panel2: #1e2430;
   --panel2-inactive: #252c3a;
+  --input-bg: var(--panel2);
   --text: #e4e8ee;
   --muted: #9aa5b1;
   --line: #303948;
@@ -33,6 +34,14 @@
   --auto-border-disabled: #4b7518;
   --auto-glow: rgba(118, 185, 0, 0.24);
   --bad: #ff6673;
+  --danger-text: #fff3f4;
+  --danger-bg: #c61f38;
+  --danger-border: #ff7a86;
+  --danger-muted-bg: #5b1e28;
+  --danger-strong: #dc2626;
+  --danger-strong-hover: #b91c1c;
+  --danger-strong-border: #991b1b;
+  --danger-light-text: #7f1d1d;
   --transport-warning-text: #fff4f5;
   --transport-warning-bg: #b42332;
   --transport-warning-border: #ff8a95;
@@ -40,6 +49,16 @@
   --pr-status-passing: #52d273;
   --pr-status-merged: #c084fc;
   --pr-status-closed: #aeb8c7;
+  --git-modified: var(--accent-gold);
+  --git-modified-badge: var(--accent-gold);
+  --git-untracked-name: #7ee787;
+  --git-untracked-badge: #2dd4bf;
+  --git-deleted: #ff8585;
+  --git-deleted-badge: #ff5d5d;
+  --git-staged: #c4f970;
+  --git-staged-badge: var(--brand-green);
+  --git-transcript: var(--muted);
+  --git-transcript-badge: #94a3b8;
   --inactive-gray: rgba(178, 190, 210, 0.38);
   --inactive-gray-hover: rgba(190, 202, 220, 0.44);
   --inactive-pane-opacity-scale: 1;
@@ -158,6 +177,8 @@
   --z-menu-dropdown: 92;
   --z-ref-suggestion: 260;
   --z-file-conflict-dialog: 270;
+  --z-file-editor-actions: 220;
+  --z-file-editor-dialog: 275;
   --z-rename-input: 9000;
   --file-pane-min-inline-size: min(260px, 46vw);
   --file-editor-pane-min-inline-size: min(340px, 52vw);
@@ -377,6 +398,7 @@ body.theme-light {
   --panel-inactive: #eef2f7;
   --panel2: #edf2f8;
   --panel2-inactive: #e4eaf2;
+  --input-bg: var(--panel2);
   --text: #17202c;
   --muted: #5b6573;
   --line: #c9d2df;
@@ -387,6 +409,16 @@ body.theme-light {
   --brand-green-dark: #3d6900;
   --accent-gold: #b7791f;
   --accent: #2563eb;
+  --git-modified: var(--accent-gold);
+  --git-modified-badge: #f5c542;
+  --git-untracked-name: #116329;
+  --git-untracked-badge: #0f766e;
+  --git-deleted: #b42332;
+  --git-deleted-badge: #dc2626;
+  --git-staged: #3f6f00;
+  --git-staged-badge: var(--brand-green);
+  --git-transcript: var(--muted);
+  --git-transcript-badge: #64748b;
   --drop-outline: #1d4ed8;
   --drop-outline-text: #071327;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
@@ -403,6 +435,14 @@ body.theme-light {
   --auto-border-disabled: #b3c99b;
   --auto-glow: rgba(95, 152, 0, 0.22);
   --bad: #b91c1c;
+  --danger-text: #fff3f4;
+  --danger-bg: #c61f38;
+  --danger-border: #ff7a86;
+  --danger-muted-bg: #5b1e28;
+  --danger-strong: #dc2626;
+  --danger-strong-hover: #b91c1c;
+  --danger-strong-border: #991b1b;
+  --danger-light-text: #7f1d1d;
   --inactive-gray: rgba(91, 101, 115, 0.42);
   --inactive-gray-hover: rgba(91, 101, 115, 0.54);
   /* #254/#259 follow-up: keep the neutral gray dim, but back off the light-mode alpha so inactive panes

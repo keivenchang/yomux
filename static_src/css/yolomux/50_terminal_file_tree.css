@@ -449,7 +449,7 @@
 .transcript-item.user { border-color: #60a5fa; background: color-mix(in srgb, #60a5fa 12%, var(--panel)); }
 .transcript-item.assistant { border-color: #4ade80; background: color-mix(in srgb, #4ade80 12%, var(--panel)); }
 .transcript-item.tool_use { border-color: #f59e0b; background: color-mix(in srgb, #f59e0b 12%, var(--panel)); }
-.transcript-item.tool_result { border-color: #c084fc; background: color-mix(in srgb, #c084fc 12%, var(--panel)); }
+.transcript-item.tool_result { border-color: var(--pr-status-merged); background: color-mix(in srgb, var(--pr-status-merged) 12%, var(--panel)); }
 .transcript-item.summary { border-color: #f472b6; background: color-mix(in srgb, #f472b6 12%, var(--panel)); }
 .transcript-item.system { border-color: #94a3b8; background: color-mix(in srgb, #94a3b8 12%, var(--panel)); }
 .transcript-role {
@@ -1066,41 +1066,41 @@ body.theme-light .yoagent-global .markdown-body pre code {
   text-decoration: none;
 }
 .info-cell a.pr-status-failing {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .info-cell a.pr-status-pending,
 .info-cell a.pr-status-draft {
   color: var(--accent-gold);
 }
 .info-cell a.pr-status-passing {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .info-cell a.pr-status-merged {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .info-cell a.pr-status-closed {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
 .info-cell a:hover {
   color: #bfdbfe;
   text-decoration: underline;
 }
 .info-cell a.pr-status-failing:hover {
-  color: #ff8a95;
+  color: var(--pr-status-failing);
 }
 .info-cell a.pr-status-pending:hover,
 .info-cell a.pr-status-draft:hover {
   color: var(--accent-gold);
 }
 .info-cell a.pr-status-passing:hover {
-  color: #52d273;
+  color: var(--pr-status-passing);
 }
 .branch-meta a.pr-status-merged:hover,
 .info-cell a.pr-status-merged:hover {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .info-cell a.pr-status-closed:hover {
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
 }
 /* Light mode (DOIT.18 C1): the whole YO!info table hardcoded dark-mode colors with NO light
    override — near-white row text vanished on the white pane, header/current rows were dark bars,
@@ -1253,9 +1253,9 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .server-update-banner-reload {
   cursor: pointer;
-  border: 1px solid #b91c1c;
+  border: 1px solid var(--danger-strong-hover);
   border-radius: 4px;
-  background: #dc2626;
+  background: var(--danger-strong);
   color: #ffffff;
   font: inherit;
   font-weight: 800;
@@ -1263,15 +1263,15 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 }
 .server-update-banner-reload:hover,
 .server-update-banner-reload:focus-visible {
-  border-color: #991b1b;
-  background: #b91c1c;
+  border-color: var(--danger-strong-border);
+  background: var(--danger-strong-hover);
   color: #ffffff;
 }
 .server-update-banner-dismiss {
   cursor: pointer;
   border: none;
   background: transparent;
-  color: #aeb8c7;
+  color: var(--pr-status-closed);
   font-size: 16px;
   line-height: 1;
   padding: 0 4px;
@@ -1696,36 +1696,36 @@ body.theme-light .modal.about-open {
   box-shadow: inset 3px 0 0 var(--accent-gold);
 }
 .file-tree-row.git-modified:not(.selected) .file-tree-name {
-  color: #f5c542;
+  color: var(--git-modified);
 }
 .file-tree-row.git-modified:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #f5c542;
+  background: var(--git-modified-badge);
 }
 .file-tree-row.git-untracked:not(.selected) .file-tree-name {
-  color: #7ee787;
+  color: var(--git-untracked-name);
 }
 .file-tree-row.git-untracked:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #2dd4bf;
+  background: var(--git-untracked-badge);
 }
 .file-tree-row.git-deleted:not(.selected) .file-tree-name {
-  color: #ff8585;
+  color: var(--git-deleted);
   text-decoration: line-through;
 }
 .file-tree-row.git-deleted:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #ff5d5d;
+  background: var(--git-deleted-badge);
 }
 .file-tree-row.git-staged:not(.selected) .file-tree-name {
-  color: #c4f970;
+  color: var(--git-staged);
   font-weight: 700;
 }
 .file-tree-row.git-staged:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #76b900;
+  background: var(--git-staged-badge);
 }
 .file-tree-row.git-transcript:not(.selected) .file-tree-name {
-  color: var(--muted);
+  color: var(--git-transcript);
 }
 .file-tree-row.git-transcript:not(.selected) .file-tree-git-status:not([hidden]) {
-  background: #94a3b8;
+  background: var(--git-transcript-badge);
 }
 .file-tree-row.kind-dir {
   color: var(--text);
@@ -1867,7 +1867,7 @@ body.theme-light .modal.about-open {
   color: #facc15;
 }
 .file-tree-icon.file-icon-config {
-  color: #c084fc;
+  color: var(--pr-status-merged);
 }
 .file-tree-icon.file-icon-image {
   color: #86efac;
@@ -1936,14 +1936,14 @@ body.theme-light .server-update-banner-dismiss {
   color: #586072;
 }
 body.theme-light .server-update-banner-reload {
-  border-color: #b91c1c;
-  background: #dc2626;
+  border-color: var(--danger-strong-hover);
+  background: var(--danger-strong);
   color: #ffffff;
 }
 body.theme-light .server-update-banner-reload:hover,
 body.theme-light .server-update-banner-reload:focus-visible {
-  border-color: #991b1b;
-  background: #b91c1c;
+  border-color: var(--danger-strong-border);
+  background: var(--danger-strong-hover);
   color: #ffffff;
 }
 body.theme-light .file-tree-row.selected {

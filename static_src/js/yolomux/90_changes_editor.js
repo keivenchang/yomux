@@ -903,8 +903,8 @@ function fileExplorerDifferFiles(payload = fileExplorerSessionFilesPayload) {
 }
 
 function changeStatusClassKey(statusKey) {
-  const key = String(statusKey || 'M').toLowerCase();
-  return /^[a-z0-9_-]+$/.test(key) ? key : 'unknown';
+  const rowClass = gitStatusRowClass(statusKey || 'M');
+  return rowClass ? rowClass.replace(/^git-/, '') : 'unknown';
 }
 
 function changeFileParentLabel(relPath) {
@@ -1175,12 +1175,8 @@ function renderUploadedFileList(container, uploadedFiles, options = {}) {
 // C5: a changed file can be touched by 0, 1, or several agents. Render an icon per agent from item.agents
 // (Claude, then Codex, then any others alphabetically), falling back to the legacy scalar item.agent. When
 // more than one agent appears, label the slot so screen readers announce all of them.
-function agentDisplayName(kind) {
-  return String(kind || '').toLowerCase() === 'codex' ? 'Codex' : (String(kind || '').toLowerCase() === 'claude' ? 'Claude' : String(kind || ''));
-}
-
 function changedFileAgentTitle(kind, item) {
-  const name = agentDisplayName(kind);
+  const name = agentLabel(kind);
   if (!name) return '';
   const timeText = sessionFileRelativeTimeText(item?.mtime);
   return timeText ? `modified by ${name} ${timeText}` : `modified by ${name}`;
@@ -1214,7 +1210,7 @@ function changeFileRowHtml(item, options = {}) {
   const statusBadgeHtml = `<span class="changes-status changes-status-${esc(statusClass)}"${statusTitleAttr}>${esc(statusKey)}</span>`;
   const metaHtml = [diffHtml, statusBadgeHtml, dateHtml].filter(Boolean).join('');
   // Row gets a git-* class for tinting (shared with Finder CSS rules)
-  const gitRowClass = {m:'git-modified',t:'git-transcript',a:'git-staged',d:'git-deleted',u:'git-untracked',unknown:'git-untracked'}[statusClass] || 'git-transcript';
+  const gitRowClass = gitStatusRowClass(statusKey) || (statusClass === 'unknown' ? 'git-untracked' : 'git-transcript');
   const compactClass = options.compact ? ' compact' : ' detailed';
   const depth = Math.max(0, Number(options.depth) || 0);
   const icon = fileIconFor(name);

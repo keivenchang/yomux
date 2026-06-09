@@ -35,6 +35,13 @@ async function redirectToLogin(response) {
   window.location.assign(loginUrl);
 }
 
+function agentLabel(kind) {
+  const key = String(kind || '').toLowerCase();
+  if (key === 'codex') return 'Codex';
+  if (key === 'claude') return 'Claude';
+  return String(kind || '');
+}
+
 // localStorage can throw (privacy mode, blocked, quota) — these swallow failures so a blocked store
 // never breaks the page. storageGet returns the raw string (or `fallback` when absent/blocked);
 // storageSet coerces to string and no-ops on failure. Every readStored*/writeStored* builds on these.
@@ -53,19 +60,21 @@ function storageSet(key, value) {
   } catch (_) {}
 }
 
-function readStoredSet(key) {
+function safeJsonParse(raw, fallback = null) {
   try {
-    const raw = window.localStorage?.getItem(key);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
-  } catch (_) { return new Set(); }
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function readStoredSet(key) {
+  const parsed = safeJsonParse(storageGet(key), []);
+  return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
 }
 
 function readStoredJson(key, fallback = null) {
-  try {
-    const raw = window.localStorage?.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch (_) { return fallback; }
+  return safeJsonParse(storageGet(key), fallback);
 }
 
 function normalizeFileStateRecord(state) {

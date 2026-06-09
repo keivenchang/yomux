@@ -270,7 +270,7 @@ def test_watched_prs_and_watched_pr_refresh_defaults():
     # DOIT.29: the watched-PR settings ship with safe empty/longer-interval defaults.
     d = default_settings()
     assert d["github"]["watched_prs"] == []
-    assert d["performance"]["watched_pr_refresh_ms"] == 60000
+    assert d["performance"]["watched_pr_refresh_ms"] == 60001
 
 
 def test_file_explorer_refresh_uses_seconds_and_migrates_legacy_ms():
