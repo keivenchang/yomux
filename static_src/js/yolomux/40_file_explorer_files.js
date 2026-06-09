@@ -4217,70 +4217,20 @@ function blameAnnotationText(info) {
   return `${author}, ${rel} • ${info.summary || ''}${pr}`.trim();
 }
 
-// S1 (DOIT.51): styled hover popover for inline blame, replacing the native `title` tooltip (which
-// flickers and can't show a commit body). The CodeMirror bundle exposes no hoverTooltip/WidgetType,
-// so a single body-mounted `.session-popover` is positioned under the hovered `.cm-line[data-blame]`
-// via a delegated mouseover on the editor scroller (see codeMirrorBlameExtension).
-let blamePopoverEl = null;
-
-function ensureBlamePopoverEl() {
-  if (blamePopoverEl) return blamePopoverEl;
-  const el = document.createElement('div');
-  el.className = 'session-popover blame-popover';
-  el.setAttribute('role', 'tooltip');
-  el.hidden = true;
-  document.body.appendChild(el);
-  blamePopoverEl = el;
-  return el;
-}
-
-function blamePopoverHtml(info, body) {
-  const author = esc(info.author || '');
-  const abs = info.time ? esc(new Date(info.time * 1000).toLocaleString()) : '';
-  const committed = info.sha && !/^0+$/.test(info.sha);
-  const sha = committed ? esc(info.sha.slice(0, 8)) : '';
-  const summary = esc(info.summary || '');
-  const pr = info.pr ? ` <span class="meta-muted">(#${esc(String(info.pr))})</span>` : '';
-  const datePart = abs ? `<span class="meta-sep">•</span><span class="meta-muted">${abs}</span>` : '';
-  const shaPart = sha ? `<span class="meta-sep">•</span><span class="meta-muted">${sha}</span>` : '';
-  const bodyPart = body ? `<div class="blame-popover-body">${esc(body)}</div>` : '';
-  return `<div class="blame-popover-head"><strong>${author}</strong>${datePart}${shaPart}</div>`
-    + `<div class="blame-popover-summary">${summary}${pr}</div>${bodyPart}`;
-}
-
-function showBlamePopoverForLine(lineEl, view, path) {
-  const blame = editorBlameForPath(path);
-  if (!blame || !blame.lines) { hideBlamePopover(); return; }
-  let lineNumber;
-  try { lineNumber = view.state.doc.lineAt(view.posAtDOM(lineEl)).number; }
-  catch (_error) { hideBlamePopover(); return; }
-  const info = blame.lines[String(lineNumber)];
-  if (!info) { hideBlamePopover(); return; }
-  const body = (blame.commits && info.sha) ? (blame.commits[info.sha] || '') : '';
-  const el = ensureBlamePopoverEl();
-  el.innerHTML = blamePopoverHtml(info, body);
-  el.hidden = false;
-  // Free-floating (position:fixed) so it escapes the editor's overflow; clamp into the viewport.
-  const rect = lineEl.getBoundingClientRect();
-  const left = Math.max(6, Math.min(rect.left, window.innerWidth - el.offsetWidth - 6));
-  let top = rect.bottom + 4;
-  if (top + el.offsetHeight > window.innerHeight - 6) top = Math.max(6, rect.top - el.offsetHeight - 4);
-  el.style.left = `${Math.round(left)}px`;
-  el.style.top = `${Math.round(top)}px`;
-}
-
-function hideBlamePopover() {
-  if (blamePopoverEl) blamePopoverEl.hidden = true;
+function blameHoverText(info) {
+  const author = info.author || '';
+  const abs = info.time ? new Date(info.time * 1000).toLocaleString() : '';
+  const sha = info.sha && !/^0+$/.test(info.sha) ? ` [${info.sha.slice(0, 8)}]` : '';
+  return `${author} • ${abs}${sha}\n${info.summary || ''}`.trim();
 }
 
 // Decorate the CURSOR's current line with the dim blame annotation (rendered via a CSS ::after that
 // flows after the line text — the bundle exposes no WidgetType). The dim color comes from the editor
-// scheme's --code-comment token (theme-aware), and the full commit detail (author, absolute date,
-// sha, summary, body) shows in a hover popover via showBlamePopoverForLine — no native title tooltip.
+// scheme's --code-comment token (theme-aware), and the full commit is the line's native title tooltip.
 function codeMirrorBlameExtension(api, path) {
   if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
   if (!fileStateHasUsefulGitHistory(fileStateFor(path))) return [];
-  const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info)}});
+  const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
   const build = view => {
     const blame = editorBlameForPath(path);
     if (!blame || !blame.lines) return api.Decoration.none;
@@ -4307,29 +4257,9 @@ function codeMirrorBlameExtension(api, path) {
     return api.Decoration.set([lineDeco(info).range(line.from)]);
   };
   return api.ViewPlugin.fromClass(class {
-    constructor(view) {
-      this.view = view;
-      this.decorations = build(view);
-      // Delegated hover: any blame-annotated line under the pointer shows the commit popover; moving
-      // onto a non-blame line or leaving/scrolling the editor hides it. Cheap (closest + map lookup).
-      this.onOver = event => {
-        const lineEl = event.target?.closest?.('.cm-line[data-blame]');
-        if (lineEl && view.scrollDOM.contains(lineEl)) showBlamePopoverForLine(lineEl, view, path);
-        else hideBlamePopover();
-      };
-      this.onLeave = () => hideBlamePopover();
-      view.scrollDOM.addEventListener('mouseover', this.onOver);
-      view.scrollDOM.addEventListener('mouseleave', this.onLeave);
-      view.scrollDOM.addEventListener('scroll', this.onLeave, {passive: true});
-    }
+    constructor(view) { this.decorations = build(view); }
     update(update) {
       if (update.docChanged || update.selectionSet || update.viewportChanged) this.decorations = build(update.view);
-    }
-    destroy() {
-      hideBlamePopover();
-      this.view.scrollDOM.removeEventListener('mouseover', this.onOver);
-      this.view.scrollDOM.removeEventListener('mouseleave', this.onLeave);
-      this.view.scrollDOM.removeEventListener('scroll', this.onLeave);
     }
   }, {decorations: plugin => plugin.decorations});
 }

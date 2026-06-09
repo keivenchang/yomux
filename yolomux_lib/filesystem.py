@@ -1054,28 +1054,6 @@ def _parse_blame_porcelain(text: str) -> dict[str, dict[str, Any]]:
     return lines
 
 
-def _blame_commit_bodies(repo: str, shas: set[str]) -> dict[str, str]:
-    """Commit-message bodies (`git show -s --format=%b`) for the blame hover popover, fetched in
-    ONE git call. Keyed by full sha; commits with an empty body are omitted, and uncommitted
-    (all-zero) shas are skipped. Unit/record separators (\\x1f/\\x1e) won't appear in a body."""
-    real = sorted(sha for sha in shas if sha and sha != "0" * 40)
-    if not real:
-        return {}
-    result = git(["show", "-s", "--format=%H%x1f%b%x1e", *real], cwd=repo, timeout=3.0)
-    if result.returncode != 0:
-        return {}
-    bodies: dict[str, str] = {}
-    for record in (result.stdout or "").split("\x1e"):
-        record = record.lstrip("\n")
-        if "\x1f" not in record:
-            continue
-        sha, body = record.split("\x1f", 1)
-        body = body.strip()
-        if sha and body:
-            bodies[sha] = body
-    return bodies
-
-
 def blame_file(raw_path: str, ref: str | None = None) -> dict[str, Any]:
     path = _validated_path(raw_path)
     repo_root = git_root_for_path(path)
@@ -1106,10 +1084,8 @@ def blame_file(raw_path: str, ref: str | None = None) -> dict[str, Any]:
         # File not committed yet (or blame failed) → no annotation; surface a hint, don't error the page.
         return {"path": str(path), "repo": str(repo), "relative_path": rel_path, "in_repo": True,
                 "lines": {}, "error": (result.stderr or "not committed yet").strip()}
-    blame_lines = _parse_blame_porcelain(result.stdout or "")
-    commit_bodies = _blame_commit_bodies(str(repo), {info["sha"] for info in blame_lines.values() if info.get("sha")})
     payload = {"path": str(path), "repo": str(repo), "relative_path": rel_path, "head": head_sha,
-               "in_repo": True, "lines": blame_lines, "commits": commit_bodies}
+               "in_repo": True, "lines": _parse_blame_porcelain(result.stdout or "")}
     if len(_blame_cache) > 64:
         _blame_cache.clear()
     _blame_cache[cache_key] = payload

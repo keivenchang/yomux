@@ -7593,19 +7593,6 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/scrollIntoView\(head,\s*\{x:\s*'center'/.test(source), 'the fix re-centers the match horizontally');
 }
 
-// S1 (DOIT.51): inline git blame shows a styled hover popover (author / absolute date / sha / summary
-// / optional commit body), replacing the native `title` tooltip that flickered and couldn't show a body.
-{
-  const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.ok(source.includes('function showBlamePopoverForLine('), 'blame hover popover builder exists');
-  assert.ok(source.includes("const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info)}})"), 'blame line decoration carries data-blame only — no native title tooltip');
-  assert.ok(!/'data-blame': blameAnnotationText\(info\), title:/.test(source), 'blame line decoration sets no native title');
-  assert.ok(/scrollDOM\.addEventListener\('mouseover', this\.onOver\)/.test(source), 'blame ViewPlugin attaches a delegated mouseover for the popover');
-  assert.ok(source.includes("closest?.('.cm-line[data-blame]')"), 'popover triggers only on blame-annotated lines');
-  assert.ok(source.includes("el.className = 'session-popover blame-popover'"), 'blame popover reuses the shared .session-popover card');
-  assert.ok(/blame\.commits/.test(source), 'popover reads optional commit bodies from the blame payload commits map');
-}
-
 // S2 (DOIT.51): a file open as a tab shows ONCE in the merged palette — its deduped Tabs row (carrying
 // both edit + preview chips) wins; the Recent/Files duplicate is dropped. Files-only / empty-box keep Recent.
 {
