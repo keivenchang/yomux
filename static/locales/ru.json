@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "Жёлтый совпадает с курсором активного терминала; Тема использует цвет курсора схемы редактора.",
   "pref.appearance.editor_cursor_color.label": "Цвет курсора редактора",
   "pref.appearance.editor_cursor_color.theme": "Тема",
-  "pref.appearance.editor_cursor_color.yellow": "Жёлтый (как в терминале)",
   "pref.appearance.editor_cursor_style.block": "Блок",
   "pref.appearance.editor_cursor_style.help": "Форма курсора в редакторах CodeMirror. Оба стиля используют цвет курсора активного редактора.",
   "pref.appearance.editor_cursor_style.label": "Стиль курсора редактора",

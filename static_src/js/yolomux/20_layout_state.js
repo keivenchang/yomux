@@ -1329,7 +1329,7 @@ function commandPaletteCommandItems() {
       });
     },
   })));
-  return [...tabItems, ...menuItems, ...settingItems];
+  return [...tabItems, ...menuItems, ...settingItems].map(item => ({...item, category: 'action'}));
 }
 
 function fileQuickOpenRootForSearch() {
@@ -1523,19 +1523,22 @@ function fileQuickOpenItems() {
       run: null,
     });
   }
-  return items;
+  return items.map(item => ({...item, category: 'file'}));
 }
 
 function commandPaletteItems() {
-  if (commandPaletteEffectiveMode() !== 'files') return commandPaletteCommandItems();
-  const fileItems = fileQuickOpenItems();
-  // DOIT.6: in files mode, BLEND matching commands/settings/tabs into the results when there is a
-  // plain (non-`>`, non-`@`, non-path) query, so typing a command/setting/tab name surfaces it without
-  // the `>` prefix. The shared score sort interleaves them; `>` stays commands-only, `@` for symbols.
+  // Unified palette. commandPaletteMode is now a PRIORITY flag ('files' = Cmd-P, 'command' = Cmd-Shift-P):
+  // it picks the home category shown on an EMPTY box, and which category ranks first once you type.
+  // Labels are identical for both entry points; only the ordering (commandPaletteItemPriorityRank) differs.
   const parts = fileQuickOpenQueryParts();
-  if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileItems;
-  if (!commandPaletteSearchQuery()) return fileItems;
-  return [...fileItems, ...commandPaletteCommandItems()];
+  if (parts.commandMode) return commandPaletteCommandItems();                          // `>` = actions only
+  if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileQuickOpenItems(); // `@` / path = files only
+  // Lean on open: an empty box shows only the priority's home category (no command dump — DOIT.6 #7).
+  if (!commandPaletteSearchQuery()) {
+    return commandPaletteMode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
+  }
+  // On type: BOTH entry points search the full corpus; the priority sort floats the home category up.
+  return [...fileQuickOpenItems(), ...commandPaletteCommandItems()];
 }
 
 function commandPaletteMatches(item, query) {
@@ -1567,6 +1570,14 @@ function commandPaletteRecentBonus(item) {
   return sequence ? 1000 + sequence : 0;
 }
 
+// Priority sort tier: Cmd-P (commandPaletteMode 'files') floats file results above actions;
+// Cmd-Shift-P ('command') floats panes/tabs/commands/settings above files. pinTop rows stay first.
+function commandPaletteItemPriorityRank(item) {
+  if (item.pinTop) return -1;
+  const isFile = item.category === 'file';
+  return commandPaletteMode === 'files' ? (isFile ? 0 : 1) : (isFile ? 1 : 0);
+}
+
 function rememberCommandPaletteItem(item) {
   if (!item || item.disabled) return;
   const key = item.key || `${item.group}:${item.label}`;
@@ -1588,21 +1599,22 @@ function commandPaletteSearchQuery(query = commandPaletteQuery) {
 }
 
 function commandPalettePlaceholder() {
-  if (commandPaletteMode === 'files' && commandPaletteQuery.trim().startsWith('>')) return 'Run command';
-  if (commandPaletteMode === 'files' && commandPaletteQuery.trim().startsWith('@')) return 'Symbol search is not available yet';
-  return commandPaletteMode === 'files'
-    ? `Open file in ${fileQuickOpenScopeLabel(fileQuickOpenRoot || fileQuickOpenRootForSearch())}`
-    : 'Find tabs, commands, settings';
+  // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
+  const q = commandPaletteQuery.trim();
+  if (q.startsWith('>')) return 'Run command';
+  if (q.startsWith('@')) return 'Symbol search is not available yet';
+  return 'Find files, tabs, commands, settings';
 }
 
 function commandPaletteLabel() {
-  return commandPaletteMode === 'files' ? 'File quick-open' : 'Command palette';
+  // Identical aria label for both entry points.
+  return 'Quick open';
 }
 
 function commandPaletteEmptyText() {
-  if (commandPaletteMode === 'files' && fileQuickOpenLoading) return 'Searching...';
-  if (commandPaletteMode === 'files' && commandPaletteQuery.trim().startsWith('@')) return 'Symbol search is not available yet';
-  return commandPaletteMode === 'files' ? 'No files found' : 'No matches';
+  if (fileQuickOpenLoading) return 'Searching...';
+  if (commandPaletteQuery.trim().startsWith('@')) return 'Symbol search is not available yet';
+  return 'No matches';
 }
 
 function ensureCommandPalette() {
@@ -1623,7 +1635,8 @@ function ensureCommandPalette() {
     commandPaletteQuery = input.value || '';
     commandPaletteIndex = 0;
     renderCommandPaletteResults();
-    if (commandPaletteMode === 'files') scheduleFileQuickOpenSearch();
+    // Both entry points fetch files on type so a typed query can blend files into either ordering.
+    scheduleFileQuickOpenSearch();
   });
   input.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
@@ -1676,9 +1689,11 @@ function renderCommandPaletteResults() {
   commandPaletteItemsCache = commandPaletteItems()
     .map((item, sortIndex) => ({...item, score: commandPaletteItemScore(item, query), sortIndex}))
     .filter(item => Number.isFinite(item.score))
-    .sort((left, right) => query
-      ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
-      : right.score - left.score || left.sortIndex - right.sortIndex)
+    .sort((left, right) =>
+      commandPaletteItemPriorityRank(left) - commandPaletteItemPriorityRank(right)
+      || (query
+        ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
+        : right.score - left.score || left.sortIndex - right.sortIndex))
     .slice(0, 60);
   commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteItemsCache.length - 1));
   if (!commandPaletteItemsCache.length) {
@@ -1704,13 +1719,14 @@ function openCommandPalette(options = {}) {
   node.classList.add('open');
   const input = node.querySelector('.command-palette-input');
   input.value = '';
-  if (commandPaletteMode === 'files') {
-    fileQuickOpenRoot = fileQuickOpenRootForSearch();
-    fileQuickOpenCandidates = [];
-    fileQuickOpenLoading = false;
-    fileQuickOpenError = '';
-    scheduleFileQuickOpenSearch({immediate: true});
-  }
+  // Reset file-search state for BOTH entry points so a typed query can blend files in either mode.
+  fileQuickOpenRoot = fileQuickOpenRootForSearch();
+  fileQuickOpenCandidates = [];
+  fileQuickOpenLoading = false;
+  fileQuickOpenError = '';
+  // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
+  // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
+  if (commandPaletteMode === 'files') scheduleFileQuickOpenSearch({immediate: true});
   renderCommandPaletteResults();
   input.focus({preventScroll: true});
 }

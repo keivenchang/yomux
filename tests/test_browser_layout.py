@@ -2742,7 +2742,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         const activeSwatch = document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="blue"]').closest('.preferences-radio').querySelector('.preferences-radio-swatch');
         const activeSwatchLabel = activeSwatch.closest('.preferences-radio');
         const scrollProbe = document.createElement('div');
-        scrollProbe.style.background = 'var(--active-control-scrollbar-thumb)';
+        scrollProbe.style.background = 'var(--pane-scrollbar-thumb-active)';
         document.body.appendChild(scrollProbe);
         const expectedScrollThumb = getComputedStyle(scrollProbe).backgroundColor;
         scrollProbe.style.background = 'var(--pane-scrollbar-thumb)';
@@ -2804,7 +2804,7 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     assert metrics["prefsRangeAccent"] == "rgb(59, 130, 246)", metrics
     assert metrics["ringRangeAccent"] == "rgb(59, 130, 246)", metrics
     assert metrics["radioAccent"] == "rgb(59, 130, 246)", metrics
-    assert metrics["expectedScrollThumb"] == "rgba(59, 130, 246, 0.72)", metrics
+    assert metrics["expectedScrollThumb"] == "rgba(255, 208, 0, 0.88)", metrics
     assert metrics["prefsScrollColor"].startswith(metrics["expectedNeutralScrollThumb"]), metrics
     assert metrics["prefsScrollThumb"] == metrics["expectedNeutralScrollThumb"], metrics
     assert metrics["finderModeBg"] == "rgb(59, 130, 246)", metrics
@@ -2820,11 +2820,19 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
     assert metrics["swatchDisplay"] == "grid", metrics
     assert metrics["swatchRadius"] == "2px 0px 0px 2px", metrics
     assert metrics["settingsPosts"] >= 1, metrics
+    browser.execute_script("document.querySelector('#panel-__prefs__')?.classList.add('active-pane', 'focused-pane')")
     ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
     WebDriverWait(browser, 2).until(
         lambda driver: driver.execute_script(
             "return getComputedStyle(document.querySelector('.preferences-scroll'), '::-webkit-scrollbar-thumb').backgroundColor"
         ) == metrics["expectedScrollThumb"]
+    )
+    browser.execute_script("document.querySelector('#panel-__prefs__')?.classList.remove('active-pane', 'focused-pane')")
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
+    WebDriverWait(browser, 2).until(
+        lambda driver: driver.execute_script(
+            "return getComputedStyle(document.querySelector('.preferences-scroll'), '::-webkit-scrollbar-thumb').backgroundColor"
+        ) == metrics["expectedNeutralScrollThumb"]
     )
     ActionChains(browser).move_to_element(browser.find_element("css selector", "#panel-1")).perform()
     WebDriverWait(browser, 2).until(
@@ -2855,7 +2863,7 @@ def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp
         probe.style.background = 'var(--pane-scrollbar-thumb)';
         document.body.appendChild(probe);
         const neutral = getComputedStyle(probe).backgroundColor;
-        probe.style.background = 'var(--active-control-scrollbar-thumb)';
+        probe.style.background = 'var(--pane-scrollbar-thumb-active)';
         const accent = getComputedStyle(probe).backgroundColor;
         probe.remove();
         return {
@@ -2882,13 +2890,24 @@ def test_info_and_preferences_scrollbars_inherit_shared_hover_state(browser, tmp
     def wait_thumb(selector, expected):
         WebDriverWait(browser, 2).until(lambda _driver: thumb(selector) == expected)
 
+    browser.execute_script("document.querySelector('.info-list')?.closest('.panel')?.classList.add('active-pane', 'focused-pane')")
     ActionChains(browser).move_to_element(browser.find_element("css selector", ".info-list")).perform()
     wait_thumb(".info-list", metrics["accent"])
     wait_thumb(".preferences-scroll", metrics["neutral"])
 
+    browser.execute_script(
+        """
+        document.querySelector('.info-list')?.closest('.panel')?.classList.remove('active-pane', 'focused-pane');
+        document.querySelector('.preferences-scroll')?.closest('.panel')?.classList.add('active-pane', 'focused-pane');
+        """
+    )
     ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
     wait_thumb(".preferences-scroll", metrics["accent"])
     wait_thumb(".info-list", metrics["neutral"])
+
+    browser.execute_script("document.querySelector('.preferences-scroll')?.closest('.panel')?.classList.remove('active-pane', 'focused-pane')")
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".preferences-scroll")).perform()
+    wait_thumb(".preferences-scroll", metrics["neutral"])
 
     ActionChains(browser).move_to_element(browser.find_element("css selector", ".topbar")).perform()
     wait_thumb(".info-list", metrics["neutral"])
@@ -4914,11 +4933,11 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     def wait_thumb(selector, expected):
         WebDriverWait(browser, 2).until(lambda _driver: thumb(selector) == expected)
 
-    neutral = "rgba(190, 205, 218, 0.62)"
+    neutral = "rgba(190, 205, 218, 0.56)"
     accent = browser.execute_script(
         """
         const probe = document.createElement('div');
-        probe.style.background = 'var(--active-control-scrollbar-thumb)';
+        probe.style.background = 'var(--pane-scrollbar-thumb-active)';
         document.body.appendChild(probe);
         const color = getComputedStyle(probe).backgroundColor;
         probe.remove();
@@ -4938,6 +4957,9 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     wait_thumb(".file-explorer-tree-panel", neutral)
     ActionChains(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", accent)
+    browser.execute_script("document.getElementById('finder-panel')?.classList.remove('active-pane', 'focused-pane')")
+    ActionChains(browser).move_to_element(browser.find_element("css selector", ".file-explorer-tree-panel")).perform()
+    wait_thumb(".file-explorer-tree-panel", neutral)
     ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb(".file-explorer-tree-panel", neutral)
 
@@ -4956,8 +4978,12 @@ def test_finder_and_embedded_differ_scrollbars_hover_independently(browser, tmp_
     )
     assert overflow["differ"]
     wait_thumb("#modified-files-panel", neutral)
+    browser.execute_script("document.getElementById('finder-panel')?.classList.add('active-pane', 'focused-pane')")
     ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
     wait_thumb("#modified-files-panel", accent)
+    browser.execute_script("document.getElementById('finder-panel')?.classList.remove('active-pane', 'focused-pane')")
+    ActionChains(browser).move_to_element(browser.find_element("id", "modified-files-panel")).perform()
+    wait_thumb("#modified-files-panel", neutral)
     ActionChains(browser).move_to_element(browser.find_element("id", "terminal-panel")).perform()
     wait_thumb("#modified-files-panel", neutral)
 

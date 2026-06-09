@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "黄色与活动终端的光标一致；主题使用编辑器配色方案的光标颜色。",
   "pref.appearance.editor_cursor_color.label": "编辑器光标颜色",
   "pref.appearance.editor_cursor_color.theme": "主题",
-  "pref.appearance.editor_cursor_color.yellow": "黄色（与终端一致）",
   "pref.appearance.editor_cursor_style.block": "方块",
   "pref.appearance.editor_cursor_style.help": "CodeMirror 编辑器的光标形状。两种样式都使用活动编辑器光标颜色。",
   "pref.appearance.editor_cursor_style.label": "编辑器光标样式",

@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "黃色與使用中終端機的游標一致；主題使用編輯器配色方案的游標顏色。",
   "pref.appearance.editor_cursor_color.label": "編輯器游標顏色",
   "pref.appearance.editor_cursor_color.theme": "主題",
-  "pref.appearance.editor_cursor_color.yellow": "黃色（與終端機一致）",
   "pref.appearance.editor_cursor_style.block": "方塊",
   "pref.appearance.editor_cursor_style.help": "CodeMirror 編輯器的游標形狀。兩種樣式都使用使用中的編輯器游標顏色。",
   "pref.appearance.editor_cursor_style.label": "編輯器游標樣式",

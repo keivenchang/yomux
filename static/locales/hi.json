@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "पीला सक्रिय terminal कर्सर से मेल खाता है; थीम editor स्कीम के कर्सर रंग का उपयोग करती है।",
   "pref.appearance.editor_cursor_color.label": "Editor कर्सर रंग",
   "pref.appearance.editor_cursor_color.theme": "थीम",
-  "pref.appearance.editor_cursor_color.yellow": "पीला (terminal जैसा)",
   "pref.appearance.editor_cursor_style.block": "ब्लॉक",
   "pref.appearance.editor_cursor_style.help": "CodeMirror editors के लिए कैरेट का आकार। दोनों स्टाइल सक्रिय editor cursor कलर का उपयोग करते हैं।",
   "pref.appearance.editor_cursor_style.label": "Editor कर्सर स्टाइल",

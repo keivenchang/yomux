@@ -3656,7 +3656,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-editor-diff-codemirror \.cm-changedLineGutter,\s*\n\.file-editor-diff-codemirror \.cm-deletedLineGutter\s*\{[^}]*color:\s*inherit[\s\S]*background:\s*transparent/.test(preferencesCss), 'diff left gutter stays neutral; only changed content rows and the right overview rail carry red/green diff color');
   assert.equal(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-(?:changed|deleted)LineGutter\s*\{[^}]*background:\s*#[0-9a-fA-F]+/.test(preferencesCss), false, 'light theme must not reintroduce red/green left-gutter diff indicators');
   assert.ok(/\.file-editor-codemirror \.cm-scroller,\s*\n\.file-editor-codemirror-panel \.cm-scroller\s*\{[^}]*scrollbar-gutter:\s*stable[\s\S]*--pane-scrollbar-size:\s*12px/.test(preferencesCss), 'CodeMirror keeps a stable, draggable native scrollbar gutter while using the shared pane scrollbar behavior');
-  assert.ok(/\.panel:hover\s*\{[^}]*--pane-scrollbar-current-thumb:\s*var\(--pane-scrollbar-thumb-active\)[\s\S]*--pane-scrollbar-current-track:\s*var\(--pane-scrollbar-track-active\)/.test(preferencesCss), 'pane hover flips the inherited shared scrollbar variables to the active accent');
+  assert.ok(/\.panel:is\(\.focused-pane,\s*\.active-pane\):hover\s*\{[^}]*--pane-scrollbar-current-thumb:\s*var\(--pane-scrollbar-thumb-active\)[\s\S]*--pane-scrollbar-current-track:\s*var\(--pane-scrollbar-track-active\)/.test(preferencesCss), 'only focused/active pane hover flips the inherited shared scrollbar variables to the configured cursor-color hover token');
   assert.ok(preferencesCss.includes('Pane scrollbars must always inherit a shared pane scrollbar contract'), 'pane CSS documents that scrollbars must inherit the shared rule');
   for (const selector of [
     '.preferences-scroll',
@@ -3680,7 +3680,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   ]) {
     assert.ok(preferencesCss.includes(selector), `shared pane scrollbar selector includes ${selector}`);
   }
-  assert.ok(preferencesCss.includes('scrollbar-color: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb)) var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));'), 'shared scrollbar rule defaults to neutral gray and inherits active color only from pane hover variables');
+  assert.ok(preferencesCss.includes('scrollbar-color: var(--pane-scrollbar-current-thumb, var(--pane-scrollbar-thumb)) var(--pane-scrollbar-current-track, var(--pane-scrollbar-track));'), 'shared scrollbar rule defaults to neutral gray and inherits configured cursor hover colors only from focused/active pane hover variables');
   assert.ok(/:where\([\s\S]*\)::\-webkit-scrollbar-thumb\s*\{[^}]*background:\s*var\(--pane-scrollbar-current-thumb,\s*var\(--pane-scrollbar-thumb\)\)/.test(preferencesCss), 'shared WebKit thumb uses the inherited current pane thumb token');
   assert.equal(/\.file-editor-panel:hover \.file-editor-codemirror-panel \.cm-scroller[\s\S]*?\{[\s\S]*?scrollbar-color:/.test(preferencesCss), false, 'editor pane no longer has local hover scrollbar coloring');
   assert.equal(/\.file-explorer-tree-panel:hover,[\s\S]*?\.file-explorer-tree-panel:focus-within\s*\{[\s\S]*?scrollbar-color:/.test(preferencesCss), false, 'Finder tree no longer has local hover scrollbar coloring');
@@ -3770,12 +3770,15 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_dark_color_scheme"'), 'preferences expose the dark editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_light_color_scheme"'), 'preferences expose the light editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_cursor_style"'), 'preferences expose the editor cursor style setting');
-  // The editor cursor COLOR is a preference (yellow matches the active terminal caret, or the theme caret).
+  // Cursor color is a preference shared by the active terminal caret, editor caret, and pane scrollbar thumb.
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_cursor_color"'), 'preferences expose the editor cursor color setting');
   {
     const cursorSrc = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(/fileEditorCursorColor === 'theme' \? scheme\.cursor : activeTerminalCursorColor/.test(cursorSrc), 'editor cursor color: yellow reuses the active terminal cursor color (#ffd000), theme uses the scheme caret');
-    assert.ok(cursorSrc.includes("initialSetting('appearance.editor_cursor_color', 'yellow')"), 'editor cursor color defaults to yellow (consistent with the terminal cursor)');
+    assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(cursorSrc), 'cursor color: yellow remains the named default');
+    assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursor:\s*'#ffd000'/.test(cursorSrc), 'cursor color: the shared UI color parent owns the yellow cursor value');
+    assert.ok(/function editorCursorColorForScheme[\s\S]*value === 'theme' \? scheme\.cursor : UI_COLOR_PRESETS\[value\]\.cursor/.test(cursorSrc), 'cursor color: theme uses the scheme caret, color choices use the shared UI color parent');
+    assert.ok(/function activeTerminalCursorColorForTheme[\s\S]*value === 'theme' \? baseTheme\.cursor : UI_COLOR_PRESETS\[value\]\.cursor/.test(cursorSrc), 'cursor color: active terminal uses the same shared UI color parent');
+    assert.ok(cursorSrc.includes("initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR)"), 'editor cursor color defaults through the shared cursor default');
   }
   assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave"'), 'preferences expose editor autosave');
   assert.ok(preferencesHtml.includes('data-setting-path="editor.autosave_delay_seconds"'), 'preferences expose editor autosave delay');
@@ -3810,7 +3813,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     ['appearance.terminal_theme', ['follow-app', 'dark', 'light']],
     ['appearance.date_time_hour_cycle', ['24', '12']],
     ['appearance.editor_cursor_style', ['line', 'block']],
-    ['appearance.editor_cursor_color', ['yellow', 'theme']],
+    ['appearance.editor_cursor_color', ['yellow', 'green', 'blue', 'orange', 'purple', 'white', 'theme']],
     ['yolo.prompt_source', ['hybrid', 'pane']],
     ['file_explorer.root_mode', ['fixed', 'sync']],
     ['file_explorer.image_open_mode', ['same-tab', 'new-tab']],
@@ -6421,11 +6424,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // #261: the View menu no longer PINS the terminal palette — it just follows the app (follow-app stays).
   assert.equal(/function setGlobalThemeMode[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: setGlobalThemeMode no longer pins appearance.terminal_theme');
   assert.equal(/function cycleGlobalThemeSetting[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: cycleGlobalThemeSetting no longer pins appearance.terminal_theme');
-  // Active-terminal cursor: the focused pane's terminal shows a blinking yellow cursor.
-  assert.ok(/const activeTerminalCursorColor = '#ffd000'/.test(source), 'active-terminal cursor: yellow cursor color is defined');
-  assert.ok(/function terminalThemeForSession[\s\S]*?session === focusedPanelItem \? \{\.\.\.theme, cursor: activeTerminalCursorColor\}/.test(source), 'active-terminal cursor: the focused session gets the yellow cursor, others keep theme default');
-  assert.ok(/item\.term\.options\.theme = terminalThemeForSession\(session, theme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings themes the active terminal with the yellow cursor');
-  assert.ok(/theme: terminalThemeForSession\(session\)/.test(source), 'active-terminal cursor: a newly-created terminal uses terminalThemeForSession (yellow when focused)');
+  // Active-terminal cursor: the focused pane's terminal shows the configured cursor color.
+  assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(source), 'active-terminal cursor: yellow remains the default cursor color');
+  assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursor:\s*'#ffd000'/.test(source), 'active-terminal cursor: yellow cursor color lives in the shared UI color parent');
+  assert.ok(/function terminalThemeForSession[\s\S]*?session === focusedPanelItem \? \{\.\.\.theme, cursor: activeTerminalCursorColorForTheme\(theme\)\}/.test(source), 'active-terminal cursor: the focused session gets the configured cursor color, others keep theme default');
+  assert.ok(/item\.term\.options\.theme = terminalThemeForSession\(session, theme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings themes the active terminal with the configured cursor color');
+  assert.ok(/theme: terminalThemeForSession\(session\)/.test(source), 'active-terminal cursor: a newly-created terminal uses terminalThemeForSession');
   assert.ok(/function updatePanelInactiveOverlays[\s\S]*?refreshActiveTerminalCursor\(\)/.test(source), 'active-terminal cursor: focus changes refresh the cursor color (refreshActiveTerminalCursor)');
 }
 
@@ -7006,6 +7010,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(appearanceHtml.includes('Royal violet'), 'Active color Purple is labeled Royal violet');
   assert.ok(appearanceHtml.includes('Moon white'), 'Active color White is labeled Moon white');
   assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.active_color"/.test(appearanceHtml), 'Active color Blue renders as a radio');
+  assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.yolo_rotate_ms"/.test(appearanceHtml), 'Cursor color sits immediately after Active color in Appearance');
+  assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.editor_cursor_color"/.test(appearanceHtml), 'Cursor color Blue renders as a radio');
+  const preferencesSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/function activeColorPreferenceChoices\(\)\s*\{[\s\S]*UI_COLOR_CHOICES\.map\(value => activeColorPreferenceChoice\(value, t\(UI_COLOR_PRESETS\[value\]\.labelKey\)\)\)/.test(preferencesSource), 'Active color choices derive labels from the shared UI color parent');
+  assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*\[DEFAULT_CURSOR_COLOR, \.\.\.UI_COLOR_CHOICES\.filter\(value => value !== DEFAULT_CURSOR_COLOR\), 'theme'\][\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices derive order from the shared UI color parent and default');
+  assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*value === 'theme' \? t\('pref\.appearance\.editor_cursor_color\.theme'\) : t\(preset\.labelKey\)/.test(preferencesSource), 'Cursor color labels reuse the Active color label keys from the shared parent');
   assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#3b82f6[\s\S]*--preferences-radio-swatch:#2563eb/.test(appearanceHtml), 'Active color Blue radio shows connected actual dark/light accent swatches');
   assert.ok(appearanceHtml.includes('preferences-setting-note') && appearanceHtml.includes('Editor/Terminal font sizes are in Terminal / Editor.'), 'Appearance shows a note after Finder font size pointing editor/terminal font sizes to Terminal / Editor');
   assert.ok(/data-setting-path="appearance\.file_explorer_font_size"[\s\S]*preferences-setting-note[\s\S]*data-setting-path="appearance\.tab_width"/.test(appearanceHtml), 'Appearance font-size note sits directly after Finder font size');
@@ -7016,6 +7026,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(appearancePaths.at(-1), 'appearance.date_time_hour_cycle', '12-hour / 24-hour Date/time clock is the last Appearance item');
   const terminalEditorHtml = sectionHtml(api.t('pref.section.terminal_editor'));
   assert.ok(terminalEditorHtml.includes('data-setting-path="appearance.terminal_theme"'), 'Terminal / Editor follows Appearance and owns terminal/editor-specific controls');
+  assert.equal(terminalEditorHtml.includes('data-setting-path="appearance.editor_cursor_color"'), false, 'Cursor color moved out of Terminal / Editor into Appearance');
   assert.ok(/data-setting-path="appearance\.terminal_font_size"[\s\S]*data-setting-path="appearance\.editor_font_size"[\s\S]*data-setting-path="appearance\.preview_font_size"[\s\S]*data-setting-path="terminal_editor\.scrollback"/.test(terminalEditorHtml), 'Terminal / Editor groups Terminal, Editor, and Preview font sizes together before scrollback');
   assert.equal(sectionHtml(api.t('pref.section.general')).includes('data-setting-path="general.default_layout"'), false, 'Default layout no longer lives in General');
   assert.equal(sectionHtml(api.t('pref.section.general')).includes('data-setting-path="general.reload_on_update"'), false, 'Notify on server update no longer lives in General');
@@ -7142,7 +7153,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.terminalThemeSettingForGlobalMode('light'), 'light', 'light maps to light');
   assert.equal(source.includes('patch.appearance.terminal_theme = terminalThemeSettingForGlobalMode(next)'), false, '#261: the View theme toggle no longer pins the terminal palette (terminal follows the app)');
   // #10: a global-theme change re-themes live editors via the compartment swap.
-  assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme change re-themes open editors');
+  assert.ok(/previousEditorSchemeId !== activeEditorScheme\(\)\.id \|\| previousCursorColor !== fileEditorCursorColor\)\s*\{[^}]*refreshOpenEditorThemePanels\(\)/.test(source), '#10: theme or cursor-color change re-themes open editors');
   // #12: Preferences field renamed. (DOIT.8 Phase 0: the label is now i18n-keyed; en.json holds the text.)
   assert.ok(source.includes("label: t('pref.appearance.theme.label')"), '#12: the global theme field is i18n-keyed');
   assert.ok(source.includes("initialSetting('appearance.date_time_hour_cycle', '24')"), 'date/time clock defaults to 24-hour in the client');

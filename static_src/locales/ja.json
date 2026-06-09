@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "黄色はアクティブなターミナルのカーソルに合わせます。テーマはエディタースキームのカーソル色を使います。",
   "pref.appearance.editor_cursor_color.label": "エディターのカーソル色",
   "pref.appearance.editor_cursor_color.theme": "テーマ",
-  "pref.appearance.editor_cursor_color.yellow": "黄色（ターミナルに合わせる）",
   "pref.appearance.editor_cursor_style.block": "ブロック",
   "pref.appearance.editor_cursor_style.help": "CodeMirror エディターのカーソル形状。どちらのスタイルもアクティブなエディターのカーソル色を使います。",
   "pref.appearance.editor_cursor_style.label": "エディターのカーソルスタイル",

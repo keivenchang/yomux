@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "Gelb entspricht dem aktiven Terminal-Cursor; Thema nutzt die Cursorfarbe des Editor-Schemas.",
   "pref.appearance.editor_cursor_color.label": "Cursorfarbe des Editors",
   "pref.appearance.editor_cursor_color.theme": "Thema",
-  "pref.appearance.editor_cursor_color.yellow": "Gelb (wie Terminal)",
   "pref.appearance.editor_cursor_style.block": "Block",
   "pref.appearance.editor_cursor_style.help": "Cursorform in CodeMirror-Editoren. Beide Stile verwenden die Cursorfarbe des aktiven Editors.",
   "pref.appearance.editor_cursor_style.label": "Cursorstil des Editors",

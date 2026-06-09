@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "الأصفر يطابق مؤشر الطرفية النشطة؛ السمة تستخدم لون المؤشر في نظام ألوان المحرر.",
   "pref.appearance.editor_cursor_color.label": "لون مؤشر المحرر",
   "pref.appearance.editor_cursor_color.theme": "السمة",
-  "pref.appearance.editor_cursor_color.yellow": "أصفر (مطابق للطرفية)",
   "pref.appearance.editor_cursor_style.block": "كتلة",
   "pref.appearance.editor_cursor_style.help": "شكل المؤشر في محررات CodeMirror. يستخدم كلا الأسلوبين لون مؤشر المحرر النشط.",
   "pref.appearance.editor_cursor_style.label": "نمط مؤشر المحرر",

@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "Jaune correspond au curseur du terminal actif ; Thème utilise la couleur de curseur du thème de l'éditeur.",
   "pref.appearance.editor_cursor_color.label": "Couleur du curseur de l'éditeur",
   "pref.appearance.editor_cursor_color.theme": "Thème",
-  "pref.appearance.editor_cursor_color.yellow": "Jaune (comme le terminal)",
   "pref.appearance.editor_cursor_style.block": "Bloc",
   "pref.appearance.editor_cursor_style.help": "Forme du curseur dans les éditeurs CodeMirror. Les deux styles utilisent la couleur de curseur de l'éditeur actif.",
   "pref.appearance.editor_cursor_style.label": "Style du curseur de l'éditeur",

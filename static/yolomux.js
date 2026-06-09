@@ -3801,7 +3801,7 @@ function commandPaletteCommandItems() {
       });
     },
   })));
-  return [...tabItems, ...menuItems, ...settingItems];
+  return [...tabItems, ...menuItems, ...settingItems].map(item => ({...item, category: 'action'}));
 }
 
 function fileQuickOpenRootForSearch() {
@@ -3995,19 +3995,22 @@ function fileQuickOpenItems() {
       run: null,
     });
   }
-  return items;
+  return items.map(item => ({...item, category: 'file'}));
 }
 
 function commandPaletteItems() {
-  if (commandPaletteEffectiveMode() !== 'files') return commandPaletteCommandItems();
-  const fileItems = fileQuickOpenItems();
-  // DOIT.6: in files mode, BLEND matching commands/settings/tabs into the results when there is a
-  // plain (non-`>`, non-`@`, non-path) query, so typing a command/setting/tab name surfaces it without
-  // the `>` prefix. The shared score sort interleaves them; `>` stays commands-only, `@` for symbols.
+  // Unified palette. commandPaletteMode is now a PRIORITY flag ('files' = Cmd-P, 'command' = Cmd-Shift-P):
+  // it picks the home category shown on an EMPTY box, and which category ranks first once you type.
+  // Labels are identical for both entry points; only the ordering (commandPaletteItemPriorityRank) differs.
   const parts = fileQuickOpenQueryParts();
-  if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileItems;
-  if (!commandPaletteSearchQuery()) return fileItems;
-  return [...fileItems, ...commandPaletteCommandItems()];
+  if (parts.commandMode) return commandPaletteCommandItems();                          // `>` = actions only
+  if (parts.symbolMode || fileQuickOpenPathQuery().active) return fileQuickOpenItems(); // `@` / path = files only
+  // Lean on open: an empty box shows only the priority's home category (no command dump — DOIT.6 #7).
+  if (!commandPaletteSearchQuery()) {
+    return commandPaletteMode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
+  }
+  // On type: BOTH entry points search the full corpus; the priority sort floats the home category up.
+  return [...fileQuickOpenItems(), ...commandPaletteCommandItems()];
 }
 
 function commandPaletteMatches(item, query) {
@@ -4039,6 +4042,14 @@ function commandPaletteRecentBonus(item) {
   return sequence ? 1000 + sequence : 0;
 }
 
+// Priority sort tier: Cmd-P (commandPaletteMode 'files') floats file results above actions;
+// Cmd-Shift-P ('command') floats panes/tabs/commands/settings above files. pinTop rows stay first.
+function commandPaletteItemPriorityRank(item) {
+  if (item.pinTop) return -1;
+  const isFile = item.category === 'file';
+  return commandPaletteMode === 'files' ? (isFile ? 0 : 1) : (isFile ? 1 : 0);
+}
+
 function rememberCommandPaletteItem(item) {
   if (!item || item.disabled) return;
   const key = item.key || `${item.group}:${item.label}`;
@@ -4060,21 +4071,22 @@ function commandPaletteSearchQuery(query = commandPaletteQuery) {
 }
 
 function commandPalettePlaceholder() {
-  if (commandPaletteMode === 'files' && commandPaletteQuery.trim().startsWith('>')) return 'Run command';
-  if (commandPaletteMode === 'files' && commandPaletteQuery.trim().startsWith('@')) return 'Symbol search is not available yet';
-  return commandPaletteMode === 'files'
-    ? `Open file in ${fileQuickOpenScopeLabel(fileQuickOpenRoot || fileQuickOpenRootForSearch())}`
-    : 'Find tabs, commands, settings';
+  // Identical for Cmd-P and Cmd-Shift-P — they differ only in result ordering, not in labels.
+  const q = commandPaletteQuery.trim();
+  if (q.startsWith('>')) return 'Run command';
+  if (q.startsWith('@')) return 'Symbol search is not available yet';
+  return 'Find files, tabs, commands, settings';
 }
 
 function commandPaletteLabel() {
-  return commandPaletteMode === 'files' ? 'File quick-open' : 'Command palette';
+  // Identical aria label for both entry points.
+  return 'Quick open';
 }
 
 function commandPaletteEmptyText() {
-  if (commandPaletteMode === 'files' && fileQuickOpenLoading) return 'Searching...';
-  if (commandPaletteMode === 'files' && commandPaletteQuery.trim().startsWith('@')) return 'Symbol search is not available yet';
-  return commandPaletteMode === 'files' ? 'No files found' : 'No matches';
+  if (fileQuickOpenLoading) return 'Searching...';
+  if (commandPaletteQuery.trim().startsWith('@')) return 'Symbol search is not available yet';
+  return 'No matches';
 }
 
 function ensureCommandPalette() {
@@ -4095,7 +4107,8 @@ function ensureCommandPalette() {
     commandPaletteQuery = input.value || '';
     commandPaletteIndex = 0;
     renderCommandPaletteResults();
-    if (commandPaletteMode === 'files') scheduleFileQuickOpenSearch();
+    // Both entry points fetch files on type so a typed query can blend files into either ordering.
+    scheduleFileQuickOpenSearch();
   });
   input.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
@@ -4148,9 +4161,11 @@ function renderCommandPaletteResults() {
   commandPaletteItemsCache = commandPaletteItems()
     .map((item, sortIndex) => ({...item, score: commandPaletteItemScore(item, query), sortIndex}))
     .filter(item => Number.isFinite(item.score))
-    .sort((left, right) => query
-      ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
-      : right.score - left.score || left.sortIndex - right.sortIndex)
+    .sort((left, right) =>
+      commandPaletteItemPriorityRank(left) - commandPaletteItemPriorityRank(right)
+      || (query
+        ? right.score - left.score || left.group.localeCompare(right.group) || left.label.localeCompare(right.label)
+        : right.score - left.score || left.sortIndex - right.sortIndex))
     .slice(0, 60);
   commandPaletteIndex = Math.min(commandPaletteIndex, Math.max(0, commandPaletteItemsCache.length - 1));
   if (!commandPaletteItemsCache.length) {
@@ -4176,13 +4191,14 @@ function openCommandPalette(options = {}) {
   node.classList.add('open');
   const input = node.querySelector('.command-palette-input');
   input.value = '';
-  if (commandPaletteMode === 'files') {
-    fileQuickOpenRoot = fileQuickOpenRootForSearch();
-    fileQuickOpenCandidates = [];
-    fileQuickOpenLoading = false;
-    fileQuickOpenError = '';
-    scheduleFileQuickOpenSearch({immediate: true});
-  }
+  // Reset file-search state for BOTH entry points so a typed query can blend files in either mode.
+  fileQuickOpenRoot = fileQuickOpenRootForSearch();
+  fileQuickOpenCandidates = [];
+  fileQuickOpenLoading = false;
+  fileQuickOpenError = '';
+  // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
+  // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
+  if (commandPaletteMode === 'files') scheduleFileQuickOpenSearch({immediate: true});
   renderCommandPaletteResults();
   input.focus({preventScroll: true});
 }
@@ -10161,6 +10177,7 @@ function codeMirrorHighlightExtension(api) {
 
 function codeMirrorThemeExtension(api) {
   const scheme = activeEditorScheme();
+  const cursorColor = editorCursorColorForScheme(scheme);
   return api.EditorView.theme({
     '&': {
       height: '100%',
@@ -10173,11 +10190,11 @@ function codeMirrorThemeExtension(api) {
       lineHeight: 'var(--editor-line-height)',
     },
     '.cm-content': {
-      caretColor: scheme.cursor,
+      caretColor: cursorColor,
       padding: '8px 10px',
     },
     '.cm-cursor': {
-      borderLeftColor: scheme.cursor,
+      borderLeftColor: cursorColor,
       borderLeftWidth: '2px',
     },
     '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, &.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
@@ -11045,9 +11062,7 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--editor-scheme-panel2': scheme.panel2,
     '--editor-scheme-gutter-bg': scheme.gutterBg,
     '--editor-scheme-preview-bg': scheme.previewBg,
-    // 'yellow' matches the active terminal's caret (#ffd000) for a consistent typing cursor across
-    // terminal + editor; 'theme' keeps the per-scheme caret. Drives both the line and block cursor CSS.
-    '--editor-cursor': fileEditorCursorColor === 'theme' ? scheme.cursor : activeTerminalCursorColor,
+    '--editor-cursor': editorCursorColorForScheme(scheme),
     '--editor-selection': scheme.selection,
     '--editor-active-line': scheme.activeLine,
     '--editor-line-number': scheme.lineNo,
@@ -11423,8 +11438,43 @@ function normalizeEditorCursorStyle(value) {
   return value === 'block' ? 'block' : 'line';
 }
 
+const UI_COLOR_CHOICES = ['green', 'blue', 'orange', 'yellow', 'purple', 'white'];
+const DEFAULT_CURSOR_COLOR = 'yellow';
+// One parent for the named UI colors. Active color and Cursor color must both derive from this map so
+// labels, swatches, and palette membership cannot drift.
+const UI_COLOR_PRESETS = {
+  green:  {labelKey: 'pref.appearance.active_color.green', cursor: '#76b900', active: null},
+  blue:   {labelKey: 'pref.appearance.active_color.blue', cursor: '#3b82f6', active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
+  orange: {labelKey: 'pref.appearance.active_color.orange', cursor: '#f97316', active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#c2570a', bright: '#c2570a', text: '#ffffff'}}},
+  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursor: '#ffd000', active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#a16207', bright: '#a16207', text: '#ffffff'}}},
+  purple: {labelKey: 'pref.appearance.active_color.purple', cursor: '#a855f7', active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
+  white:  {labelKey: 'pref.appearance.active_color.white', cursor: '#f8fafc', active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
+};
+
+const ACTIVE_COLOR_PRESETS = Object.fromEntries(
+  UI_COLOR_CHOICES
+    .map(value => [value, UI_COLOR_PRESETS[value]?.active])
+    .filter(([, active]) => active)
+);
+
 function normalizeEditorCursorColor(value) {
-  return value === 'theme' ? 'theme' : 'yellow';
+  return value === 'theme' || UI_COLOR_PRESETS[value]?.cursor ? value : DEFAULT_CURSOR_COLOR;
+}
+
+function editorCursorColorForScheme(scheme = activeEditorScheme()) {
+  const value = normalizeEditorCursorColor(fileEditorCursorColor);
+  return value === 'theme' ? scheme.cursor : UI_COLOR_PRESETS[value].cursor;
+}
+
+function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalTheme()) {
+  const value = normalizeEditorCursorColor(fileEditorCursorColor);
+  return value === 'theme' ? baseTheme.cursor : UI_COLOR_PRESETS[value].cursor;
+}
+
+function applyCursorColorSetting() {
+  const style = document.documentElement?.style;
+  if (!style) return;
+  style.setProperty('--active-terminal-cursor-rgb', hexToRgbTriple(activeTerminalCursorColorForTheme()));
 }
 
 function applyEditorCursorStyle() {
@@ -11447,18 +11497,6 @@ function applyPaneRingOpacity(value) {
   root.setProperty('--pane-ring-opacity', `${percent}%`);
   root.setProperty('--pane-active-ring-opacity', `${percent}%`);
 }
-
-// DOIT.41: the appearance.active_color presets. Green is NOT listed — it is the default and maps to the
-// CSS token defaults (so picking Green clears the inline overrides = a no-op). Each preset supplies, per
-// theme, the solid accent (ring/glow/strip/tints), the tab fill (bright), and the on-accent text. White
-// in light mode uses a light-neutral fill with a darker-neutral ring so the active pane still reads.
-const ACTIVE_COLOR_PRESETS = {
-  blue:   {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}},
-  orange: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#c2570a', bright: '#c2570a', text: '#ffffff'}},
-  yellow: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#a16207', bright: '#a16207', text: '#ffffff'}},
-  purple: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}},
-  white:  {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}},
-};
 
 function hexToRgbTriple(hex) {
   const h = String(hex || '').replace('#', '');
@@ -11514,6 +11552,7 @@ function applyCssSettings() {
   applyPaneRingOpacity(paneRingOpacity);
   applyInactivePaneOpacity(numberSetting('appearance.inactive_pane_opacity', 60));
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
+  applyCursorColorSetting();
   root.setProperty('--red-reminder-duration', `${Math.max(0, redReminderMs) / 1000}s`);
   root.setProperty('--yolo-rotation-duration', `${Math.max(0, yoloRotateMs) / 1000}s`);
   root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);
@@ -11550,13 +11589,12 @@ function installGlobalThemeMediaListener() {
   globalThemeMediaListenerInstalled = true;
 }
 
-// The ACTIVE pane's terminal gets a blinking yellow cursor so it's obvious which terminal you're
+// The ACTIVE pane's terminal gets the configured cursor color so it's obvious which terminal you're
 // typing into; every other terminal keeps its theme's default cursor color.
-const activeTerminalCursorColor = '#ffd000';
 
 function terminalThemeForSession(session, baseTheme) {
   const theme = baseTheme || terminalThemeForGlobalTheme();
-  return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColor} : theme;
+  return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColorForTheme(theme)} : theme;
 }
 
 function applyTerminalRuntimeSettings(options = {}) {
@@ -11582,7 +11620,7 @@ function refreshActiveTerminalCursor() {
   const base = terminalThemeForGlobalTheme();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term?.options) continue;
-    const cursor = session === focusedPanelItem ? activeTerminalCursorColor : base.cursor;
+    const cursor = session === focusedPanelItem ? activeTerminalCursorColorForTheme(base) : base.cursor;
     const current = item.term.options.theme || base;
     if (current.cursor !== cursor) item.term.options.theme = {...current, cursor};
   }
@@ -11647,11 +11685,12 @@ function applySettingsPayload(payload, options = {}) {
   autoFocusEnabled = boolSetting('general.auto_focus', false);
   startupHelpersEnabled = boolSetting('general.startup_tips', true);
   const previousEditorSchemeId = activeEditorScheme().id;
+  const previousCursorColor = fileEditorCursorColor;
   globalThemeMode = normalizeGlobalThemeMode(initialSetting('appearance.theme', defaultGlobalTheme));
   terminalThemeMode = normalizeTerminalThemeMode(initialSetting('appearance.terminal_theme', defaultTerminalTheme));
   dateTimeHourCycle = normalizeDateTimeHourCycle(initialSetting('appearance.date_time_hour_cycle', '24'));
   fileEditorCursorStyle = normalizeEditorCursorStyle(initialSetting('appearance.editor_cursor_style', 'block'));
-  fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', 'yellow'));
+  fileEditorCursorColor = normalizeEditorCursorColor(initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR));
   fileEditorThemeMode = readConfiguredEditorScheme();
   if (options.initial || options.applyEditorDefaults) {
     fileEditorWrapEnabled = boolSetting('terminal_editor.word_wrap', fileEditorWrapEnabled);
@@ -11676,7 +11715,7 @@ function applySettingsPayload(payload, options = {}) {
     if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
     if (typeof relocalizeFileExplorerPanels === 'function') relocalizeFileExplorerPanels();
   }
-  if (previousEditorSchemeId !== activeEditorScheme().id) {
+  if (previousEditorSchemeId !== activeEditorScheme().id || previousCursorColor !== fileEditorCursorColor) {
     // DOIT.6: re-theme LIVE editors via the compartment swap (preserves scroll/selection). A plain
     // renderFileEditorPanel short-circuits because codeMirrorConfigSignature omits the scheme, so the
     // CM view would keep its old theme; refreshOpenEditorThemePanels reconfigures the theme directly.
@@ -16547,14 +16586,19 @@ function activeColorPreferenceChoice(value, label) {
 }
 
 function activeColorPreferenceChoices() {
-  return [
-    activeColorPreferenceChoice('green', t('pref.appearance.active_color.green')),
-    activeColorPreferenceChoice('blue', t('pref.appearance.active_color.blue')),
-    activeColorPreferenceChoice('orange', t('pref.appearance.active_color.orange')),
-    activeColorPreferenceChoice('yellow', t('pref.appearance.active_color.yellow')),
-    activeColorPreferenceChoice('purple', t('pref.appearance.active_color.purple')),
-    activeColorPreferenceChoice('white', t('pref.appearance.active_color.white')),
-  ];
+  return UI_COLOR_CHOICES.map(value => activeColorPreferenceChoice(value, t(UI_COLOR_PRESETS[value].labelKey)));
+}
+
+function cursorColorPreferenceChoice(value) {
+  const preset = UI_COLOR_PRESETS[value];
+  const color = value === 'theme' ? activeEditorScheme().cursor : preset?.cursor;
+  const label = value === 'theme' ? t('pref.appearance.editor_cursor_color.theme') : t(preset.labelKey);
+  return color ? {value, label, swatches: [color]} : {value, label};
+}
+
+function cursorColorPreferenceChoices() {
+  return [DEFAULT_CURSOR_COLOR, ...UI_COLOR_CHOICES.filter(value => value !== DEFAULT_CURSOR_COLOR), 'theme']
+    .map(cursorColorPreferenceChoice);
 }
 
 function preferenceSections() {
@@ -16594,6 +16638,7 @@ function preferenceSections() {
       {path: 'appearance.pane_ring_opacity', label: t('pref.appearance.pane_ring_opacity.label'), type: 'range', min: 5, max: 100, step: 5, suffix: '%', help: t('pref.appearance.pane_ring_opacity.help')},
       {path: 'appearance.inactive_pane_opacity', label: t('pref.appearance.inactive_pane_opacity.label'), type: 'range', min: 0, max: 100, step: 5, suffix: '%', help: t('pref.appearance.inactive_pane_opacity.help')},
       {path: 'appearance.active_color', label: t('pref.appearance.active_color.label'), type: 'radio', choices: activeColorPreferenceChoices(), help: t('pref.appearance.active_color.help')},
+      {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'radio', choices: cursorColorPreferenceChoices(), help: t('pref.appearance.editor_cursor_color.help')},
       {path: 'appearance.yolo_rotate_ms', label: t('pref.appearance.yolo_rotate_ms.label'), type: 'number', min: 0, max: 60000, step: 250, suffix: 'ms', help: t('pref.appearance.yolo_rotate_ms.help')},
       {path: 'appearance.date_time_hour_cycle', label: t('pref.appearance.date_time_hour_cycle.label'), type: 'radio', choices: [
         {value: '24', label: t('pref.appearance.date_time_hour_cycle.24')},
@@ -16616,10 +16661,6 @@ function preferenceSections() {
         {value: 'line', label: t('pref.appearance.editor_cursor_style.line')},
         {value: 'block', label: t('pref.appearance.editor_cursor_style.block')},
       ], help: t('pref.appearance.editor_cursor_style.help')},
-      {path: 'appearance.editor_cursor_color', label: t('pref.appearance.editor_cursor_color.label'), type: 'radio', choices: [
-        {value: 'yellow', label: t('pref.appearance.editor_cursor_color.yellow')},
-        {value: 'theme', label: t('pref.appearance.editor_cursor_color.theme')},
-      ], help: t('pref.appearance.editor_cursor_color.help')},
       {path: 'terminal_editor.word_wrap', label: t('pref.terminal_editor.word_wrap.label'), type: 'boolean', help: t('pref.terminal_editor.word_wrap.help')},
       {path: 'terminal_editor.line_numbers', label: t('pref.terminal_editor.line_numbers.label'), type: 'boolean', help: t('pref.terminal_editor.line_numbers.help')},
       {path: 'editor.autosave', label: t('pref.editor.autosave.label'), type: 'boolean', help: t('pref.editor.autosave.help')},

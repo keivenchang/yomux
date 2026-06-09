@@ -23,6 +23,9 @@ from .common import UPLOAD_MAX_BYTES
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
 SETTINGS_DISPLAY_PATH = "~/.config/yolomux/settings.yaml"
 _SETTINGS_LOCK = threading.RLock()
+UI_COLOR_CHOICES: tuple[str, ...] = ("green", "blue", "orange", "yellow", "purple", "white")
+DEFAULT_CURSOR_COLOR = "yellow"
+CURSOR_COLOR_CHOICES: tuple[str, ...] = (DEFAULT_CURSOR_COLOR, "green", "blue", "orange", "purple", "white", "theme")
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "general": {
@@ -46,7 +49,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "editor_dark_color_scheme": "dark",
         "editor_light_color_scheme": "yolomux-light",
         "editor_cursor_style": "block",
-        "editor_cursor_color": "yellow",
+        "editor_cursor_color": DEFAULT_CURSOR_COLOR,
         "file_explorer_font_size": 13,
         "tab_width": 180,
         "pane_spacing": 4,
@@ -217,7 +220,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     # browser/OS. Phase 1 will widen this as real locale catalogs are added.
     ("general", "language"): {"system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr", "pt-BR", "ru", "ko", "hi", "ar", "he", "en-XA"},
     ("appearance", "theme"): {"system", "dark", "light"},
-    ("appearance", "active_color"): {"green", "blue", "orange", "yellow", "purple", "white"},
+    ("appearance", "active_color"): set(UI_COLOR_CHOICES),
     ("appearance", "terminal_theme"): {"dark", "light", "follow-app"},
     ("appearance", "date_time_hour_cycle"): {"24", "12"},
     ("appearance", "editor_color_scheme"): {
@@ -249,7 +252,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
         "solarized-light",
     },
     ("appearance", "editor_cursor_style"): {"line", "block"},
-    ("appearance", "editor_cursor_color"): {"yellow", "theme"},
+    ("appearance", "editor_cursor_color"): set(CURSOR_COLOR_CHOICES),
     ("file_explorer", "root_mode"): {"fixed", "sync"},
     ("file_explorer", "image_open_mode"): {"same-tab", "new-tab"},
     ("yoagent", "backend"): {"auto", "deterministic", "claude", "codex"},
@@ -280,7 +283,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "editor_dark_color_scheme"): "Dark editor scheme used by the editor dark/light toggle.",
     ("appearance", "editor_light_color_scheme"): "Light editor scheme used by the editor dark/light toggle. Default is VS Code Light+.",
     ("appearance", "editor_cursor_style"): "line | block. CodeMirror caret shape.",
-    ("appearance", "editor_cursor_color"): "yellow | theme. yellow matches the active terminal cursor (#ffd000) for a consistent caret across terminal + editor; theme uses the editor scheme's caret color. Applies to both the line and block cursor.",
+    ("appearance", "editor_cursor_color"): "yellow | green | blue | orange | purple | white | theme. Default yellow. Applies to the active terminal cursor, editor caret, and pane scrollbar thumb; theme uses each surface's scheme cursor.",
     ("appearance", "file_explorer_font_size"): "Pixels, 6-24. Applied live to File Explorer/Finder.",
     ("appearance", "tab_width"): "Pixels, 120-420. Drives the pane tab width CSS variable.",
     ("appearance", "pane_spacing"): "Pixels, 0-20. Gap between panes; at 0 they touch and the green active outline covers the divider. The active outline thickens as spacing grows.",
@@ -526,6 +529,10 @@ def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
     return {
         "settings": settings,
         "defaults": default_settings(),
+        "choices": {
+            "appearance.active_color": list(UI_COLOR_CHOICES),
+            "appearance.editor_cursor_color": list(CURSOR_COLOR_CHOICES),
+        },
         "path": str(path),
         "display_path": SETTINGS_DISPLAY_PATH,
         "mtime_ns": stat.st_mtime_ns if stat else 0,

@@ -97,11 +97,13 @@
   --active-control-soft-bg: var(--active-accent-soft);
   --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
-  --active-control-scrollbar-thumb: rgb(var(--active-accent-rgb) / 0.72);
-  --pane-scrollbar-thumb: rgba(190, 205, 218, 0.62);
-  --pane-scrollbar-track: rgba(255, 255, 255, 0.06);
-  --pane-scrollbar-thumb-active: var(--active-control-scrollbar-thumb);
-  --pane-scrollbar-track-active: rgba(255, 255, 255, 0.08);
+  --active-terminal-cursor-rgb: var(--active-accent-rgb);
+  --active-control-scrollbar-thumb: rgb(var(--active-terminal-cursor-rgb) / 0.88);
+  --pane-scrollbar-thumb: rgba(190, 205, 218, 0.56);
+  --pane-scrollbar-thumb-hover: var(--active-control-scrollbar-thumb);
+  --pane-scrollbar-track: rgba(255, 255, 255, 0.035);
+  --pane-scrollbar-thumb-active: var(--pane-scrollbar-thumb-hover);
+  --pane-scrollbar-track-active: rgba(255, 255, 255, 0.055);
   --pane-scrollbar-corner: var(--pane-scrollbar-track);
   --pane-scrollbar-size: 10px;
   --pane-scrollbar-radius: var(--radius-pill);
@@ -353,11 +355,12 @@ body.theme-light {
   --active-control-soft-bg: var(--active-accent-soft);
   --active-control-soft-border: rgb(var(--active-accent-rgb) / 0.45);
   --active-control-focus-ring: rgb(var(--active-accent-rgb) / 0.14);
-  --active-control-scrollbar-thumb: rgb(var(--active-accent-rgb) / 0.68);
-  --pane-scrollbar-thumb: rgba(82, 98, 116, 0.64);
-  --pane-scrollbar-track: rgba(15, 23, 42, 0.08);
-  --pane-scrollbar-thumb-active: var(--active-control-scrollbar-thumb);
-  --pane-scrollbar-track-active: rgba(15, 23, 42, 0.08);
+  --active-control-scrollbar-thumb: rgb(var(--active-terminal-cursor-rgb) / 0.88);
+  --pane-scrollbar-thumb: rgba(82, 98, 116, 0.52);
+  --pane-scrollbar-thumb-hover: var(--active-control-scrollbar-thumb);
+  --pane-scrollbar-track: rgba(15, 23, 42, 0.045);
+  --pane-scrollbar-thumb-active: var(--pane-scrollbar-thumb-hover);
+  --pane-scrollbar-track-active: rgba(15, 23, 42, 0.065);
   --pane-scrollbar-corner: var(--pane-scrollbar-track);
   --active-tab-muted-bg: color-mix(in srgb, var(--active-accent-bright) 20%, var(--panel));
   --active-tab-muted-hover-bg: color-mix(in srgb, var(--active-accent-bright) 28%, var(--panel));
@@ -3727,7 +3730,7 @@ body.theme-light .drop-slot.drag-over {
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
-.panel:hover {
+.panel:is(.focused-pane, .active-pane):hover {
   --pane-scrollbar-current-thumb: var(--pane-scrollbar-thumb-active);
   --pane-scrollbar-current-track: var(--pane-scrollbar-track-active);
 }

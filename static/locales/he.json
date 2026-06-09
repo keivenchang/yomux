@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "צהוב תואם לסמן הטרמינל הפעיל; ערכת נושא משתמשת בצבע הסמן של ערכת העורך.",
   "pref.appearance.editor_cursor_color.label": "צבע סמן העורך",
   "pref.appearance.editor_cursor_color.theme": "ערכת נושא",
-  "pref.appearance.editor_cursor_color.yellow": "צהוב (תואם לטרמינל)",
   "pref.appearance.editor_cursor_style.block": "בלוק",
   "pref.appearance.editor_cursor_style.help": "צורת הסמן בעורכי CodeMirror. שני הסגנונות משתמשים בצבע סמן העורך הפעיל.",
   "pref.appearance.editor_cursor_style.label": "סגנון סמן העורך",

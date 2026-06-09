@@ -265,7 +265,7 @@ body.theme-light .drop-slot.drag-over {
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }
-.panel:hover {
+.panel:is(.focused-pane, .active-pane):hover {
   --pane-scrollbar-current-thumb: var(--pane-scrollbar-thumb-active);
   --pane-scrollbar-current-track: var(--pane-scrollbar-track-active);
 }

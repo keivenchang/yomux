@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "노랑은 활성 터미널 커서와 일치합니다. 테마는 에디터 구성표의 커서 색상을 사용합니다.",
   "pref.appearance.editor_cursor_color.label": "에디터 커서 색상",
   "pref.appearance.editor_cursor_color.theme": "테마",
-  "pref.appearance.editor_cursor_color.yellow": "노랑 (터미널과 동일)",
   "pref.appearance.editor_cursor_style.block": "블록",
   "pref.appearance.editor_cursor_style.help": "CodeMirror 에디터의 커서 모양입니다. 두 스타일 모두 활성 에디터 커서 색상을 사용합니다.",
   "pref.appearance.editor_cursor_style.label": "에디터 커서 스타일",

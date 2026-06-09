@@ -345,7 +345,6 @@
   "pref.appearance.editor_cursor_color.help": "Amarillo coincide con el cursor de la terminal activa; Tema usa el color de cursor del esquema del editor.",
   "pref.appearance.editor_cursor_color.label": "Color del cursor del editor",
   "pref.appearance.editor_cursor_color.theme": "Tema",
-  "pref.appearance.editor_cursor_color.yellow": "Amarillo (igual que la terminal)",
   "pref.appearance.editor_cursor_style.block": "Bloque",
   "pref.appearance.editor_cursor_style.help": "Forma del cursor en los editores CodeMirror. Ambos estilos usan el color de cursor del editor activo.",
   "pref.appearance.editor_cursor_style.label": "Estilo del cursor del editor",

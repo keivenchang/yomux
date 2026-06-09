@@ -3995,6 +3995,7 @@ function codeMirrorHighlightExtension(api) {
 
 function codeMirrorThemeExtension(api) {
   const scheme = activeEditorScheme();
+  const cursorColor = editorCursorColorForScheme(scheme);
   return api.EditorView.theme({
     '&': {
       height: '100%',
@@ -4007,11 +4008,11 @@ function codeMirrorThemeExtension(api) {
       lineHeight: 'var(--editor-line-height)',
     },
     '.cm-content': {
-      caretColor: scheme.cursor,
+      caretColor: cursorColor,
       padding: '8px 10px',
     },
     '.cm-cursor': {
-      borderLeftColor: scheme.cursor,
+      borderLeftColor: cursorColor,
       borderLeftWidth: '2px',
     },
     '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, &.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {

@@ -4,6 +4,11 @@ Archive of completed YOLOmux work, newest first. Concise by design — the full 
 detail (file/symbol, fix, tests) lives in the git commit history on `main`. Each item shipped to
 dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 
+## 2026-06-08
+
+### DOIT.50 Cursor/active color parent cleanup
+- Collapsed Active color and Cursor color onto one shared UI color parent with one default cursor constant, removed the dead cursor-color per-color locale keys, exposed backend setting choice metadata for both color settings, and made Preferences/tests derive cursor ordering and labels from the shared parent. The CSS boot default now routes through the active accent token until JS applies the configured cursor color, avoiding a second hardcoded Solar gold literal. Verified with `python3 tools/static_build.py --check`, `node --check static/yolomux.js`, `node tests/layout_url.test.js`, `python3 -m py_compile yolomux_lib/settings.py`, `python3 -m pytest tests/test_settings.py -q`, `python3 -m pytest tests/test_browser_layout.py -q -k "scrollbar or active_color_radios_recolor_live_pane_chrome"`, and `git diff --check`.
+
 ## 2026-06-07
 
 ### DOIT.48 Startup Tips
