@@ -1508,6 +1508,10 @@ function fileQuickOpenQueryParts(query = commandPaletteQuery) {
   };
 }
 
+function fileQuickOpenSearchText(query = commandPaletteQuery) {
+  return fileQuickOpenQueryParts(query).query.replace(/[:.]+$/g, '').trim();
+}
+
 function fileQuickOpenPathQuery(query = commandPaletteQuery) {
   const text = fileQuickOpenQueryParts(query).query;
   if (!text.startsWith('/') && !text.startsWith('~')) return {active: false, directory: '', filter: ''};
@@ -1567,18 +1571,29 @@ function focusQuickOpenedFile(item) {
   requestAnimationFrame(() => focusPanel(item, {userInitiated: true}));
 }
 
+function cursorStyleFileReference(path, options = {}) {
+  const fullPath = String(path || '');
+  if (!fullPath || options.kind === 'dir') return null;
+  if (IMAGE_EXTENSIONS.has(fileExtensionOf(fullPath))) {
+    const index = Math.max(1, Math.floor(Number(options.imageIndex || 1)));
+    return {label: `[Image #${index}]`, detail: `'${fullPath}'`};
+  }
+  return null;
+}
+
 function fileQuickOpenItem(path, options = {}) {
   const label = basenameOf(path);
   const isDir = options.kind === 'dir';
-  const detail = compactHomePath(path);
+  const cursorReference = cursorStyleFileReference(path, options);
+  const detail = cursorReference?.detail || compactHomePath(path);
   return {
     group: options.group || 'Files',
-    label: isDir ? `${label}/` : label,
+    label: cursorReference?.label || (isDir ? `${label}/` : label),
     detail,
     key: `file:${path}`,
     iconText: isDir ? '▸' : fileIconFor(label),
     keybinding: isDir ? 'Enter' : `${appShortcutText('Enter')} split`,
-    searchFields: [label, path, detail, options.relativePath || ''],
+    searchFields: [label, path, detail, options.relativePath || '', cursorReference?.label || ''],
     sortBonus: Number(options.sortBonus || 0),
     run: () => isDir ? descendFileQuickOpenDirectory(path) : openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line}),
     splitRun: isDir ? null : () => openFileQuickOpenPath(path, {line: fileQuickOpenQueryParts().line, split: true}),
@@ -1622,6 +1637,7 @@ function fileQuickOpenOpenFolderItem() {
 function fileQuickOpenItems() {
   const seen = new Set();
   const items = [];
+  let imageIndex = 0;
   const add = item => {
     const path = item.searchFields?.[1] || item.detail || item.label;
     if (!path || seen.has(path)) return;
@@ -1640,10 +1656,13 @@ function fileQuickOpenItems() {
     const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
     const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
     const externalIndexed = Boolean(indexedRoot && indexedRoot !== baseRoot);
+    const isImage = (file.kind || 'file') !== 'dir' && IMAGE_EXTENSIONS.has(fileExtensionOf(path));
+    if (isImage) imageIndex += 1;
     add(fileQuickOpenItem(path, {
       group: externalIndexed ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
+      imageIndex,
       sortBonus: (externalIndexed ? -250 : 250) + (file.uploaded === true ? -500 : 0),
     }));
   }
@@ -1700,10 +1719,28 @@ function commandPaletteItemScore(item, query) {
   // C15 follow-up: the path-mode "Open this folder in Finder" row always sorts to the top (and survives
   // any filter text) so it is the default Enter action while a directory path is typed.
   if (item.pinTop) return 1e9;
-  const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item) + commandPaletteFinderAliasBonus(item, query);
+  const bonus = Number(item.sortBonus || 0) + commandPaletteRecentBonus(item) + commandPaletteFinderAliasBonus(item, query) + commandPaletteFileNameBonus(item, query);
   if (!String(query || '').trim()) return bonus;
   const base = fuzzySearchScore(query, item.searchFields || [item.label, item.detail, item.group]);
   return Number.isFinite(base) ? base + bonus : base;
+}
+
+function commandPaletteFileNameBonus(item, query) {
+  if (item?.category !== 'file') return 0;
+  const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return 0;
+  const filename = String(item.searchFields?.[0] || item.label || '');
+  const canonicalName = fuzzyCanonicalPrefixText(filename);
+  if (!canonicalName) return 0;
+  let bonus = 0;
+  for (const token of tokens) {
+    const canonicalToken = fuzzyCanonicalPrefixText(token);
+    if (!canonicalToken) continue;
+    if (canonicalName.startsWith(canonicalToken)) bonus += 100000;
+    else if (canonicalName.includes(canonicalToken)) bonus += 60000;
+    else if (Number.isFinite(fuzzySubsequenceScore(token, filename))) bonus += 20000;
+  }
+  return bonus;
 }
 
 function commandPaletteFinderAliasBonus(item, query) {
@@ -1745,7 +1782,7 @@ function commandPaletteSearchQuery(query = commandPaletteQuery) {
   if (parts.symbolMode) return String(query || '').replace(/^@\s*/, '').trim();
   const pathQuery = fileQuickOpenPathQuery(query);
   if (pathQuery.active) return pathQuery.filter;
-  return parts.query;
+  return fileQuickOpenSearchText(query);
 }
 
 function commandPalettePlaceholder() {

@@ -368,6 +368,7 @@ globalThis.__layoutTestApi = {
   emptyLayoutSlots,
   editorNav,
   recordEditorNav,
+  cursorStyleFileReference,
   fileEditorPaneTabHtml,
   fileQuickOpenItem,
   fileQuickOpenItems,
@@ -376,6 +377,7 @@ globalThis.__layoutTestApi = {
   fileQuickOpenRootForFile,
   fileQuickOpenRootForSearch,
   fileQuickOpenRootsForSearch,
+  fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
   fileExplorerDirectoryIsIndexed,
   fileExplorerIndexBadgeText,
@@ -529,6 +531,7 @@ globalThis.__layoutTestApi = {
   bindClipboardPasteForTest: bindClipboardPaste,
   documentListenersForTest(type) { return [...(document.__listeners.get(type) || [])]; },
   commandPaletteItemScore,
+  commandPaletteSearchQuery,
   commandPaletteCommandItems,
   commandPaletteItems,
   dedupeFileSearchResults,
@@ -780,6 +783,9 @@ globalThis.__layoutTestApi = {
   windowStepVisibility,
   markdownSyntaxHtml,
   markdownTextWithSourceAnchors,
+  markdownTaskLineEntries,
+  markdownTextWithTaskLineToggled,
+  markdownPreviewBlockedTagsForTest() { return Array.from(MARKDOWN_PREVIEW_BLOCKED_TAGS); },
   moveSessionToSlot,
   openFileEditorPane,
   onFileTreeRowClick,
@@ -1312,9 +1318,20 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(anchoredMarkdown.includes('markdown-source-anchor'), false, 'Markdown source is not mutated before marked parses GFM tables and rules');
   assert.ok(anchoredMarkdown.includes('|---|---|'), 'GFM table delimiter rows stay intact before parsing');
   assert.ok(anchoredMarkdown.includes('\n---'), 'thematic breaks stay intact before parsing');
+  assert.deepStrictEqual(canonical(api.markdownTaskLineEntries('- [ ] Open\n- [x] Done\ntext')), [
+    {line: 1, checked: false},
+    {line: 2, checked: true},
+  ], 'Markdown task lines are detected in source order for Preview checkbox binding');
+  assert.equal(api.markdownTextWithTaskLineToggled('- [ ] Open\n- [x] Done', 1, true), '- [x] Open\n- [x] Done', 'Preview can toggle an unchecked task line to checked source');
+  assert.equal(api.markdownTextWithTaskLineToggled('- [ ] Open\n- [x] Done', 2, false), '- [ ] Open\n- [ ] Done', 'Preview can toggle a checked task line to unchecked source');
+  assert.equal(api.markdownTextWithTaskLineToggled('plain text', 1, true), null, 'Preview task toggles reject non-task source lines');
+  assert.equal(api.markdownPreviewBlockedTagsForTest().includes('input'), false, 'Markdown sanitizer preserves checkbox inputs for task-list Preview controls');
+  assert.ok(/bindMarkdownTaskCheckboxes\(container, text, markdownPath\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown Preview wires rendered task checkboxes after parsing');
+  assert.ok(/tagName === 'input'[\s\S]*getAttribute\('type'\)[\s\S]*checkbox/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown sanitizer removes non-checkbox inputs while allowing task checkboxes');
   const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); }'), 'Markdown table headers get a readable preview background');
   assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }'), 'Markdown thematic breaks render as preview rules');
+  assert.ok(/\.markdown-body input\.markdown-task-checkbox/.test(editorCss), 'Markdown Preview task checkboxes have visible interactive styling');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*#ffffff[\s\S]*color:\s*#111827/.test(editorCss), 'vanilla preview uses a neutral white email-friendly surface');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*#111827[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*#0645ad/.test(editorCss), 'vanilla preview links use a conventional blue instead of scheme colors');
@@ -4605,6 +4622,36 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const quickItem = api.fileQuickOpenItems().find(item => item.label === 'helloXandYyy.py');
   assert.ok(quickItem, 'file quick-open uses the same command-palette item shell');
   assert.equal(api.commandPaletteMatches(quickItem, 'xy'), true, 'file quick-open uses fuzzy matching');
+  const doitApi = loadYolomux('', ['1']);
+  doitApi.setFileQuickOpenCandidatesForTest('/repo/yolomux', [
+    {name: 'websocket.py', path: '/repo/yolomux/yolomux_lib/websocket.py', relative_path: 'yolomux_lib/websocket.py', kind: 'file'},
+    {name: 'DOIT.53.md', path: '/repo/yolomux/DOIT.53.md', relative_path: 'DOIT.53.md', kind: 'file'},
+    {name: 'DOIT.parser-performance-v2-audit.md', path: '/repo/yolomux/frontend-crates/DOIT.parser-performance-v2-audit.md', relative_path: 'frontend-crates/DOIT.parser-performance-v2-audit.md', kind: 'file'},
+    {name: 'DOIT.51.md', path: '/repo/yolomux/DOIT.51.md', relative_path: 'DOIT.51.md', kind: 'file'},
+    {name: 'events.py', path: '/repo/yolomux/yolomux_lib/events.py', relative_path: 'yolomux_lib/events.py', kind: 'file'},
+  ]);
+  doitApi.setCommandPaletteStateForTest('files', 'DOIT:');
+  assert.equal(doitApi.fileQuickOpenSearchText('DOIT:'), 'DOIT', 'file quick-open ignores a trailing colon with no line number');
+  assert.equal(doitApi.commandPaletteSearchQuery(), 'DOIT', 'command palette scores the normalized file query');
+  const doitRows = doitApi.commandPaletteItems()
+    .filter(item => item.category === 'file')
+    .map((item, index) => ({...item, index, score: doitApi.commandPaletteItemScore(item, 'DOIT')}))
+    .filter(item => Number.isFinite(item.score))
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label) || left.index - right.index)
+    .map(item => item.label);
+  assert.deepStrictEqual(canonical(doitRows.slice(0, 2)), ['DOIT.51.md', 'DOIT.53.md'], 'DOIT-numbered files stay contiguous for a DOIT: query');
+  assert.deepStrictEqual(
+    canonical(api.cursorStyleFileReference('/home/keivenc/yolomux.dev1/20260609-001.png', {imageIndex: 1})),
+    {label: '[Image #1]', detail: "'/home/keivenc/yolomux.dev1/20260609-001.png'"},
+    'file quick-open can render image hits in Cursor-style reference form'
+  );
+  api.setFileQuickOpenCandidatesForTest('/home/keivenc/yolomux.dev1', [
+    {name: '20260609-001.png', path: '/home/keivenc/yolomux.dev1/20260609-001.png', relative_path: '20260609-001.png', kind: 'file'},
+    {name: '20260609-002.png', path: '/home/keivenc/yolomux.dev1/20260609-002.png', relative_path: '20260609-002.png', kind: 'file'},
+  ]);
+  const imageItems = api.fileQuickOpenItems().filter(item => item.key.includes('20260609-00'));
+  assert.deepStrictEqual(canonical(imageItems.map(item => item.label)), ['[Image #1]', '[Image #2]'], 'Search image results use Cursor-style image numbering');
+  assert.equal(imageItems[0].detail, "'/home/keivenc/yolomux.dev1/20260609-001.png'", 'Search image result details show the quoted absolute path');
   // C15 follow-up: cmd-P path mode offers a pinned "Open folder in Finder" row (Enter opens the typed
   // directory), while a subfolder entry descends and a file entry opens.
   api.setFileQuickOpenCandidatesForTest('/repo/app', [

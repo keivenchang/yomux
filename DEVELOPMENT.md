@@ -82,60 +82,62 @@ Full pytest may need local socket/browser access. If a sandboxed run fails with 
 
 ## Dev And Production Servers
 
-Two instances run side-by-side:
+Production and development instances run side-by-side:
 
 | Instance | Directory | Port | Purpose |
 |---|---|---|---|
-| dev | `~/yolomux.dev/` | `7778` | Active development |
-| prod | `~/yolomux/` | `7777` | Stable copy, synced from dev after verification |
+| prod | `~/yolomux/` | HTTPS `7777` | Stable copy, synced from dev after verification |
+| dev1 | `~/yolomux.dev1/` | HTTPS `8001` | Active development worktree 1 |
+| dev2 | `~/yolomux.dev2/` | HTTPS `8002` | Active development worktree 2 |
+| dev3 | `~/yolomux.dev3/` | HTTPS `8003` | Active development worktree 3 |
+| dev4 | `~/yolomux.dev4/` | HTTPS `8004` | Active development worktree 4 |
+
+The dev worktree ports are HTTPS-only in normal use. Launch them with `--self-signed`; do not use plain HTTP for `8001`-`8004`.
 
 For an ad hoc dev run:
 
 ```bash
-python3 yolomux.py --port 7778 --self-signed
+python3 yolomux.py --host 0.0.0.0 --port 8001 --self-signed
 ```
 
 ### Restart workflow
 
-Restarts of the YOLOmux dev server on port `7778` must delegate the kill/relaunch chain to `systemd-run` as a transient user unit. Running the chain directly inside an AI harness shell can leave the child process reaped when that shell exits.
+Restarts of YOLOmux dev servers must delegate the kill/relaunch chain to `systemd-run` as a transient user unit. Running the chain directly inside an AI harness shell can leave the child process reaped when that shell exits.
 
-Local-only restart scripts live at `~/.local/bin/yolomux-restart-{dev,prod}.sh`. They are not committed because they hardcode local paths and port choices. Both must be executable. Reference dev script:
-
-```bash
-#!/bin/bash
-set -u
-cd /home/keivenc/yolomux.dev
-pkill -f "python3 -u yolomux\.py.*--port 7778" 2>/dev/null
-sleep 2
-exec python3 -u yolomux.py --host 0.0.0.0 --port 7778 --dangerously-yolo --self-signed \
-  >> /tmp/yolomux-dev-7778.log 2>&1 < /dev/null
-```
-
-The prod script is the same shape with port `7777`, cwd `~/yolomux`, and log `/tmp/yolomux-prod-7777.log`. The `exec` matters because it makes python the unit's main process.
-
-Restart dev:
+Local-only restart scripts live under `~/.local/bin/`. They are not committed because they hardcode local paths and port choices. Reference dev1 launch:
 
 ```bash
-systemctl --user stop yolomux-dev-7778 2>/dev/null
-systemd-run --user --quiet --collect --unit=yolomux-dev-7778 ~/.local/bin/yolomux-restart-dev.sh
+systemctl --user stop yolomux-dev1-8001 2>/dev/null
+systemd-run --user --quiet --collect --unit=yolomux-dev1-8001 \
+  --working-directory=/home/keivenc/yolomux.dev1 \
+  /usr/bin/python3 /home/keivenc/yolomux.dev1/yolomux.py \
+  --host 0.0.0.0 --port 8001 --dangerously-yolo --self-signed
 ```
 
-Restart prod by swapping `dev`/`7778` for `prod`/`7777`.
+The prod script is the same shape with port `7777`, cwd `~/yolomux`, and `--self-signed`.
+
+Restart dev1:
+
+```bash
+systemctl --user stop yolomux-dev1-8001 2>/dev/null
+systemd-run --user --quiet --collect --unit=yolomux-dev1-8001 --working-directory=/home/keivenc/yolomux.dev1 /usr/bin/python3 /home/keivenc/yolomux.dev1/yolomux.py --host 0.0.0.0 --port 8001 --dangerously-yolo --self-signed
+```
+
+Restart prod by swapping `dev1`/`8001`/`~/yolomux.dev1` for `prod`/`7777`/`~/yolomux`.
 
 Verify after restart:
 
 ```bash
-ps -ef | grep "python3 -u yolomux\.py.*7778" | grep -v grep
-ss -tlnp 2>/dev/null | grep ":7778 "
-curl -sk -o /dev/null -w "ping: %{http_code} %{time_total}s\n" https://localhost:7778/api/ping
-curl -skL -u <user>:<pass> https://localhost:7778/ | grep -oE 'YOLOmux [0-9.]+' | head -1
+ps -ef | grep "yolomux\.py.*8001" | grep -v grep
+ss -tlnp 2>/dev/null | grep ":8001 "
+curl -sk -o /dev/null -w "ping: %{http_code} %{time_total}s\n" https://localhost:8001/api/ping
+curl -skL -u <user>:<pass> https://localhost:8001/ | grep -oE 'YOLOmux [0-9.]+' | head -1
 ```
 
-Expected: one `python3 -u yolomux.py` process, `LISTEN` on `:7778`, `ping: 401` in under roughly 100ms, and the rendered version matches `YOLOMUX_VERSION`. If verification fails, inspect the unit and log:
+Expected: one `yolomux.py` process, `LISTEN` on `:8001`, `ping: 401` in under roughly 100ms, and the rendered version matches `YOLOMUX_VERSION`. If verification fails, inspect the unit:
 
 ```bash
-systemctl --user status yolomux-dev-7778 --no-pager
-tail -30 /tmp/yolomux-dev-7778.log
+systemctl --user status yolomux-dev1-8001 --no-pager
 ```
 
 ## Production Sync (`cps`)

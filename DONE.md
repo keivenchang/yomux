@@ -6,6 +6,11 @@ dev with a test (node `tests/layout_url.test.js` and/or `pytest`) green.
 
 ## 2026-06-09
 
+### DOIT Search formatting and editable Markdown tasks
+- Quick Search now normalizes a trailing punctuation query such as `DOIT:` to `DOIT` for file search, ranks basename matches ahead of path-only fuzzy hits, and renders image hits in Cursor-style form such as `[Image #1] '/home/keivenc/yolomux.dev1/20260609-001.png'`.
+- Markdown Preview now wires rendered task-list checkboxes back to the open file model: clicking a `- [ ]` / `- [x]` checkbox toggles the Markdown source, refreshes linked preview panes/popouts, updates CodeMirror documents, and uses the existing dirty/autosave path.
+- Verification: `python3 tools/static_build.py`, `node --check static/yolomux.js`, and `node tests/layout_url.test.js` passed.
+
 ### DOIT.53 Differ selection/delete and non-git diff counts
 - Unified Differ file-row selection and file context menus onto the Finder shared parent: single-click, shift-click, and cmd/ctrl-click now use `updateFileTreeSelectionFromClick`, right-click file rows use `showFileTreeContextMenu`, and the shared delete path refreshes session-files so deleted Differ rows disappear immediately. Removed the Differ-only single selected-path state and safe-only file context menu.
 - Added `diff_tracked` to session-files payloads. Counts from real `git numstat` stay green and contribute to repo totals; raw full-file counts for untracked/no-repo files stay visible per row but render neutral and are excluded from added/removed totals. Transcript-touched files outside any git repo now appear under the `Outside repo` section instead of being silently dropped.
