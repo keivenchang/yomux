@@ -1538,7 +1538,13 @@ function commandPaletteItems() {
     return commandPaletteMode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
   }
   // On type: BOTH entry points search the full corpus; the priority sort floats the home category up.
-  return [...fileQuickOpenItems(), ...commandPaletteCommandItems()];
+  // S2 (DOIT.51): a file that is already an open tab shows ONCE — as the deduped Tabs row (which carries
+  // both edit + preview chips). Drop its Recent/Files duplicate so it isn't listed twice. Only here, in
+  // the merged view; the files-only and empty-box modes above have no Tabs rows, so Recent stays intact.
+  const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean));
+  const filePathOf = item => item.searchFields?.[1] || item.detail || item.label;
+  const dedupedFileItems = fileQuickOpenItems().filter(item => !openTabPaths.has(filePathOf(item)));
+  return [...dedupedFileItems, ...commandPaletteCommandItems()];
 }
 
 function commandPaletteMatches(item, query) {

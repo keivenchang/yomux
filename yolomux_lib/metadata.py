@@ -97,6 +97,23 @@ def path_within(path_text: str, root_text: str) -> bool:
         return False
     return path == root or path.is_relative_to(root)
 
+def git_worktree_identity(cwd: str, toplevel: str) -> dict[str, str] | None:
+    """S7 (DOIT.51): name a LINKED git worktree vs its parent repo, cheaply (one local git call).
+    A linked worktree's per-worktree git dir (`.../.git/worktrees/<name>`) differs from the shared
+    common dir (`.../.git`); the main worktree's two are identical. Returns the worktree path, its
+    name, and the parent (main) repo root — or None when `cwd` is the main worktree / not a worktree."""
+    res = git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd)
+    if res.returncode != 0:
+        return None
+    parts = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+    if len(parts) < 2:
+        return None
+    git_dir, common_dir = parts[0], parts[1]
+    if not git_dir or not common_dir or git_dir == common_dir:
+        return None
+    return {"path": toplevel, "parent_root": str(Path(common_dir).parent), "name": Path(git_dir).name}
+
+
 def git_inventory(cwd: str | None) -> dict[str, Any] | None:
     if not cwd:
         return None
@@ -125,6 +142,7 @@ def git_inventory(cwd: str | None) -> dict[str, Any] | None:
         "status": status_lines[:30],
         "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
         "other_branches": local_branch_inventory(cwd, branch_name),
+        "worktree": git_worktree_identity(cwd, root.stdout.strip()),
     }
 
 def git_ahead_behind(cwd: str, upstream: str | None) -> tuple[int | None, int | None]:
@@ -438,6 +456,7 @@ def repo_summary(cwd: str | None) -> dict[str, Any] | None:
         "ahead": ahead,
         "behind": behind,
         "dirty_count": len(status_lines),
+        "worktree": git_worktree_identity(cwd, root.stdout.strip()),
     }
 
 

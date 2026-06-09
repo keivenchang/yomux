@@ -1008,7 +1008,41 @@ function fileDragPreviewMedia(path, entry) {
   return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
 }
 
+// S14 (DOIT.51): OPT-IN tab-drag timing to diagnose the ~500ms first-drag delay without guessing. Off by
+// default (no permanent user-visible perf log). Enable by setting storage key 'yolomux.debugDragTiming' to
+// '1' (via storageSet in the console), drag a tab, then read the per-bucket console.table at drop. Marks
+// the buckets the DOIT calls out: pointerdown -> dragstart/startSessionDrag (begin/end) -> first dragover
+// -> first dragMeasureStrip / paneTabDropPlacement. dragTimingMarkOnce dedups the repeating measure calls.
+let dragTimingMarks = null;
+const dragTimingSeen = new Set();
+function dragTimingEnabled() {
+  return storageGet('yolomux.debugDragTiming') === '1';
+}
+function dragTimingReset() {
+  dragTimingSeen.clear();
+  dragTimingMarks = dragTimingEnabled() ? [] : null;
+}
+function dragTimingMark(label) {
+  if (dragTimingMarks) dragTimingMarks.push({label, t: performance.now()});
+}
+function dragTimingMarkOnce(label) {
+  if (dragTimingMarks && !dragTimingSeen.has(label)) { dragTimingSeen.add(label); dragTimingMark(label); }
+}
+function dragTimingReport() {
+  if (dragTimingMarks && dragTimingMarks.length >= 2) {
+    const first = dragTimingMarks[0].t;
+    console.table(dragTimingMarks.map((mark, i) => ({
+      mark: mark.label,
+      deltaMs: i ? Number((mark.t - dragTimingMarks[i - 1].t).toFixed(1)) : 0,
+      sinceStartMs: Number((mark.t - first).toFixed(1)),
+    })));
+  }
+  dragTimingMarks = null;
+  dragTimingSeen.clear();
+}
+
 function startSessionDrag(event, session, sourceSlot = null) {
+  dragTimingMark('startSessionDrag:begin');
   dragSession = session;
   dragSourceSlot = sourceSlot;
   const payload = JSON.stringify({session, sourceSlot});
@@ -1028,6 +1062,7 @@ function startSessionDrag(event, session, sourceSlot = null) {
     event.dataTransfer.setDragImage(source, offsetX, offsetY);
   }
   resetDragTabRectCache();
+  dragTimingMark('startSessionDrag:end');
 }
 
 function endSessionDrag(event) {
@@ -1042,4 +1077,5 @@ function endSessionDrag(event) {
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
   // DOIT.52: flush through the shared layout render scheduler so same-shape drops keep the cheap path.
   flushPendingLayoutRender();
+  dragTimingReport();
 }

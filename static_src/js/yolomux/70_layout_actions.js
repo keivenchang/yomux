@@ -1061,6 +1061,8 @@ function summaryContextHtml(session, info, agent) {
   if (git) {
     lines.push(summaryContextLine('branch', `${git.branch || 'unknown'}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine('repo', git.root));
+    // S7 (DOIT.51): name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
+    if (git.worktree) lines.push(summaryContextLine('worktree', `${git.worktree.name || git.worktree.path} — worktree of ${git.worktree.parent_root}`));
     if (git.head) lines.push(summaryContextLine('head', git.head));
   } else {
     lines.push(summaryContextLine('repo', 'no git checkout detected'));

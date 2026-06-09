@@ -160,18 +160,21 @@ rules:
 
 The `tmux` menu has `Open rule file` and `Reload rules`. Set `yolo.dry_run: true` in Preferences to log what the rule engine would do without pressing a key.
 
+The optional `risk:` field is a label shown in the YOLO event log. Keep it to the boring concrete set so the audit display stays consistent: `read`, `edit`, `network`, `process`, `delete`, `credential`, `unknown`. Any other string is accepted (the engine never rejects a rule for its risk label), it just won't be standardized.
+
 ## Remote access
 
-Keep YOLOmux on localhost and tunnel from your client:
-
-```bash
-autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0.0.1:9998 user@server
-```
-
-If you bind with `--host 0.0.0.0`, restrict the port to trusted IPs:
+YOLOmux binds `--host 0.0.0.0` (all interfaces) by default, on purpose: the product is built for reaching your sessions from a phone or another machine on a trusted LAN, and every request is gated by the login layer. If that's your setup, restrict the port to trusted IPs at the firewall:
 
 ```bash
 sudo ufw allow from <client-ip> to any port 9998 proto tcp
+```
+
+To keep YOLOmux local-only instead, bind loopback and tunnel from your client:
+
+```bash
+python3 yolomux.py --host 127.0.0.1 --port 9998
+autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0.0.1:9998 user@server
 ```
 
 ## Companion: `auto_approve_tmux.py`

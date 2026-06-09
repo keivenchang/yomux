@@ -434,3 +434,29 @@ def test_candidate_session_cwds_falls_back_to_default_without_live_cwd(monkeypat
     monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
     assert metadata.candidate_session_cwds(info) == [str(default_dir.resolve())]
+
+
+def test_git_worktree_identity_names_linked_worktree_vs_parent(tmp_path):
+    # S7 (DOIT.51): a linked worktree resolves to its parent repo; the main checkout returns None.
+    import subprocess
+
+    def run(*args, cwd):
+        subprocess.run(args, cwd=str(cwd), check=True, capture_output=True)
+
+    main = tmp_path / "main"
+    main.mkdir()
+    run("git", "init", "-q", cwd=main)
+    run("git", "config", "user.email", "t@example.com", cwd=main)
+    run("git", "config", "user.name", "T", cwd=main)
+    (main / "f.txt").write_text("hi\n", encoding="utf-8")
+    run("git", "add", "f.txt", cwd=main)
+    run("git", "commit", "-qm", "init", cwd=main)
+    wt = tmp_path / "wt"
+    run("git", "worktree", "add", "-q", str(wt), "-b", "feature", cwd=main)
+
+    assert metadata.git_worktree_identity(str(main), str(main)) is None
+    ident = metadata.git_worktree_identity(str(wt), str(wt))
+    assert ident is not None
+    assert Path(ident["parent_root"]).name == "main"
+    assert ident["name"] == "wt"
+    assert ident["path"] == str(wt)

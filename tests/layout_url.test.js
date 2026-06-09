@@ -7469,6 +7469,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.recordEditorNav('B');
   assert.deepEqual(api.editorNav.stack, ['A', 'B'], 'A->B->A->B collapses to the useful two-pane history');
   assert.equal(api.editorNav.index, 1, 'the collapsed ping-pong stack still points at the current pane');
+  // S3 (DOIT.51): the stack trims to NAV_STACK_LIMIT (50) oldest-first so long sessions stay bounded.
+  api.editorNav.stack = [];
+  api.editorNav.index = -1;
+  for (let i = 0; i < 55; i++) api.recordEditorNav(`/repo/f${i}.txt`);
+  assert.equal(api.editorNav.stack.length, 50, 'S3: nav stack is capped at NAV_STACK_LIMIT (50)');
+  assert.equal(api.editorNav.stack[0], '/repo/f5.txt', 'S3: the oldest entries are dropped when the cap is exceeded');
+  assert.equal(api.editorNav.index, 49, 'S3: index points at the latest after trimming');
 }
 
 // A user click/type focus transition records the pane being left and the pane being entered, so Back
@@ -7584,4 +7591,37 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('codeMirrorSearchScrollFix(api)'), 'search-scroll fix is wired into the editable editor extensions');
   assert.ok(/isUserEvent\?\.\('select\.search'\)/.test(source), 'the fix triggers only on search-driven selection changes');
   assert.ok(/scrollIntoView\(head,\s*\{x:\s*'center'/.test(source), 'the fix re-centers the match horizontally');
+}
+
+// S1 (DOIT.51): inline git blame shows a styled hover popover (author / absolute date / sha / summary
+// / optional commit body), replacing the native `title` tooltip that flickered and couldn't show a body.
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('function showBlamePopoverForLine('), 'blame hover popover builder exists');
+  assert.ok(source.includes("const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info)}})"), 'blame line decoration carries data-blame only — no native title tooltip');
+  assert.ok(!/'data-blame': blameAnnotationText\(info\), title:/.test(source), 'blame line decoration sets no native title');
+  assert.ok(/scrollDOM\.addEventListener\('mouseover', this\.onOver\)/.test(source), 'blame ViewPlugin attaches a delegated mouseover for the popover');
+  assert.ok(source.includes("closest?.('.cm-line[data-blame]')"), 'popover triggers only on blame-annotated lines');
+  assert.ok(source.includes("el.className = 'session-popover blame-popover'"), 'blame popover reuses the shared .session-popover card');
+  assert.ok(/blame\.commits/.test(source), 'popover reads optional commit bodies from the blame payload commits map');
+}
+
+// S2 (DOIT.51): a file open as a tab shows ONCE in the merged palette — its deduped Tabs row (carrying
+// both edit + preview chips) wins; the Recent/Files duplicate is dropped. Files-only / empty-box keep Recent.
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes('const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean))'), 'S2: merged palette collects open-tab file paths');
+  assert.ok(/dedupedFileItems = fileQuickOpenItems\(\)\.filter\(item => !openTabPaths\.has\(filePathOf\(item\)\)\)/.test(source), 'S2: open-tab files are dropped from the file list so a file appears once total');
+  assert.ok(/return \[\.\.\.dedupedFileItems, \.\.\.commandPaletteCommandItems\(\)\]/.test(source), 'S2: merged palette returns deduped files then commands');
+}
+
+// S14 (DOIT.51): opt-in tab-drag timing instrumentation (OFF by default) to diagnose the ~500ms first-drag
+// delay by measuring the real bucket, instead of guessing setDragImage is the cause.
+{
+  const source = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(source.includes("storageGet('yolomux.debugDragTiming') === '1'"), 'S14: drag timing is gated behind an opt-in storage flag (no permanent user-visible perf log)');
+  assert.ok(source.includes("dragTimingMark('pointerdown')"), 'S14: pointerdown is marked (pointerdown->dragstart bucket)');
+  assert.ok(source.includes("dragTimingMark('startSessionDrag:begin')") && source.includes("dragTimingMark('startSessionDrag:end')"), 'S14: startSessionDrag is bracketed by timing marks');
+  assert.ok(source.includes("dragTimingMarkOnce('dragMeasureStrip:first')") && source.includes("dragTimingMarkOnce('paneTabDropPlacement:first')"), 'S14: first strip-measure and drop-placement are marked');
+  assert.ok(source.includes('dragTimingReport()'), 'S14: the per-bucket report fires at drag end');
 }

@@ -29,6 +29,23 @@ ACTIVE_RULE_ACTIONS = {"approve", "decline"}
 PASSIVE_RULE_ACTIONS = {"block", "ask", "notify", "off"}
 RULE_MATCH_TYPES = {"command", "regex", "glob", "contains"}
 
+# S5 (DOIT.51): the canonical, boring risk vocabulary surfaced in the event log / audit display, rule
+# templates, and docs. The engine still ACCEPTS any custom risk string (no validation/rejection) — this
+# is just the recommended set so what users see stays consistent instead of ad-hoc per rule.
+YOLO_RISK_LABELS = ("read", "edit", "network", "process", "delete", "credential", "unknown")
+# Internal hard-floor synonyms for storage destruction collapse to the canonical "delete".
+_RISK_SYNONYMS = {"device": "delete", "format": "delete", "wipe": "delete"}
+
+
+def normalize_risk(value: Any) -> str:
+    """Normalize a risk label for display: strip + lowercase, blank -> "unknown", and map the
+    internal storage-destruction synonyms to "delete". Non-canonical custom labels pass through
+    unchanged — the engine does not reject them (see YOLO_RISK_LABELS)."""
+    text = value.strip().lower() if isinstance(value, str) else ""
+    if not text:
+        return "unknown"
+    return _RISK_SYNONYMS.get(text, text)
+
 DEFAULT_DANGEROUS_COMMANDS = (
     "dd",
     "fdisk",

@@ -4009,7 +4009,13 @@ function commandPaletteItems() {
     return commandPaletteMode === 'files' ? fileQuickOpenItems() : commandPaletteCommandItems();
   }
   // On type: BOTH entry points search the full corpus; the priority sort floats the home category up.
-  return [...fileQuickOpenItems(), ...commandPaletteCommandItems()];
+  // S2 (DOIT.51): a file that is already an open tab shows ONCE — as the deduped Tabs row (which carries
+  // both edit + preview chips). Drop its Recent/Files duplicate so it isn't listed twice. Only here, in
+  // the merged view; the files-only and empty-box modes above have no Tabs rows, so Recent stays intact.
+  const openTabPaths = new Set(commandPaletteAllTabItems().map(fileItemPath).filter(Boolean));
+  const filePathOf = item => item.searchFields?.[1] || item.detail || item.label;
+  const dedupedFileItems = fileQuickOpenItems().filter(item => !openTabPaths.has(filePathOf(item)));
+  return [...dedupedFileItems, ...commandPaletteCommandItems()];
 }
 
 function commandPaletteMatches(item, query) {
@@ -10454,20 +10460,70 @@ function blameAnnotationText(info) {
   return `${author}, ${rel} • ${info.summary || ''}${pr}`.trim();
 }
 
-function blameHoverText(info) {
-  const author = info.author || '';
-  const abs = info.time ? new Date(info.time * 1000).toLocaleString() : '';
-  const sha = info.sha && !/^0+$/.test(info.sha) ? ` [${info.sha.slice(0, 8)}]` : '';
-  return `${author} • ${abs}${sha}\n${info.summary || ''}`.trim();
+// S1 (DOIT.51): styled hover popover for inline blame, replacing the native `title` tooltip (which
+// flickers and can't show a commit body). The CodeMirror bundle exposes no hoverTooltip/WidgetType,
+// so a single body-mounted `.session-popover` is positioned under the hovered `.cm-line[data-blame]`
+// via a delegated mouseover on the editor scroller (see codeMirrorBlameExtension).
+let blamePopoverEl = null;
+
+function ensureBlamePopoverEl() {
+  if (blamePopoverEl) return blamePopoverEl;
+  const el = document.createElement('div');
+  el.className = 'session-popover blame-popover';
+  el.setAttribute('role', 'tooltip');
+  el.hidden = true;
+  document.body.appendChild(el);
+  blamePopoverEl = el;
+  return el;
+}
+
+function blamePopoverHtml(info, body) {
+  const author = esc(info.author || '');
+  const abs = info.time ? esc(new Date(info.time * 1000).toLocaleString()) : '';
+  const committed = info.sha && !/^0+$/.test(info.sha);
+  const sha = committed ? esc(info.sha.slice(0, 8)) : '';
+  const summary = esc(info.summary || '');
+  const pr = info.pr ? ` <span class="meta-muted">(#${esc(String(info.pr))})</span>` : '';
+  const datePart = abs ? `<span class="meta-sep">•</span><span class="meta-muted">${abs}</span>` : '';
+  const shaPart = sha ? `<span class="meta-sep">•</span><span class="meta-muted">${sha}</span>` : '';
+  const bodyPart = body ? `<div class="blame-popover-body">${esc(body)}</div>` : '';
+  return `<div class="blame-popover-head"><strong>${author}</strong>${datePart}${shaPart}</div>`
+    + `<div class="blame-popover-summary">${summary}${pr}</div>${bodyPart}`;
+}
+
+function showBlamePopoverForLine(lineEl, view, path) {
+  const blame = editorBlameForPath(path);
+  if (!blame || !blame.lines) { hideBlamePopover(); return; }
+  let lineNumber;
+  try { lineNumber = view.state.doc.lineAt(view.posAtDOM(lineEl)).number; }
+  catch (_error) { hideBlamePopover(); return; }
+  const info = blame.lines[String(lineNumber)];
+  if (!info) { hideBlamePopover(); return; }
+  const body = (blame.commits && info.sha) ? (blame.commits[info.sha] || '') : '';
+  const el = ensureBlamePopoverEl();
+  el.innerHTML = blamePopoverHtml(info, body);
+  el.hidden = false;
+  // Free-floating (position:fixed) so it escapes the editor's overflow; clamp into the viewport.
+  const rect = lineEl.getBoundingClientRect();
+  const left = Math.max(6, Math.min(rect.left, window.innerWidth - el.offsetWidth - 6));
+  let top = rect.bottom + 4;
+  if (top + el.offsetHeight > window.innerHeight - 6) top = Math.max(6, rect.top - el.offsetHeight - 4);
+  el.style.left = `${Math.round(left)}px`;
+  el.style.top = `${Math.round(top)}px`;
+}
+
+function hideBlamePopover() {
+  if (blamePopoverEl) blamePopoverEl.hidden = true;
 }
 
 // Decorate the CURSOR's current line with the dim blame annotation (rendered via a CSS ::after that
 // flows after the line text — the bundle exposes no WidgetType). The dim color comes from the editor
-// scheme's --code-comment token (theme-aware), and the full commit is the line's native title tooltip.
+// scheme's --code-comment token (theme-aware), and the full commit detail (author, absolute date,
+// sha, summary, body) shows in a hover popover via showBlamePopoverForLine — no native title tooltip.
 function codeMirrorBlameExtension(api, path) {
   if (!fileEditorBlameEnabled || !api.ViewPlugin || !api.Decoration) return [];
   if (!fileStateHasUsefulGitHistory(fileStateFor(path))) return [];
-  const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info), title: blameHoverText(info)}});
+  const lineDeco = info => api.Decoration.line({attributes: {'data-blame': blameAnnotationText(info)}});
   const build = view => {
     const blame = editorBlameForPath(path);
     if (!blame || !blame.lines) return api.Decoration.none;
@@ -10494,9 +10550,29 @@ function codeMirrorBlameExtension(api, path) {
     return api.Decoration.set([lineDeco(info).range(line.from)]);
   };
   return api.ViewPlugin.fromClass(class {
-    constructor(view) { this.decorations = build(view); }
+    constructor(view) {
+      this.view = view;
+      this.decorations = build(view);
+      // Delegated hover: any blame-annotated line under the pointer shows the commit popover; moving
+      // onto a non-blame line or leaving/scrolling the editor hides it. Cheap (closest + map lookup).
+      this.onOver = event => {
+        const lineEl = event.target?.closest?.('.cm-line[data-blame]');
+        if (lineEl && view.scrollDOM.contains(lineEl)) showBlamePopoverForLine(lineEl, view, path);
+        else hideBlamePopover();
+      };
+      this.onLeave = () => hideBlamePopover();
+      view.scrollDOM.addEventListener('mouseover', this.onOver);
+      view.scrollDOM.addEventListener('mouseleave', this.onLeave);
+      view.scrollDOM.addEventListener('scroll', this.onLeave, {passive: true});
+    }
     update(update) {
       if (update.docChanged || update.selectionSet || update.viewportChanged) this.decorations = build(update.view);
+    }
+    destroy() {
+      hideBlamePopover();
+      this.view.scrollDOM.removeEventListener('mouseover', this.onOver);
+      this.view.scrollDOM.removeEventListener('mouseleave', this.onLeave);
+      this.view.scrollDOM.removeEventListener('scroll', this.onLeave);
     }
   }, {decorations: plugin => plugin.decorations});
 }
@@ -12920,7 +12996,41 @@ function fileDragPreviewMedia(path, entry) {
   return `<span class="file-drag-thumb file-drag-icon" aria-hidden="true">${icon}</span>`;
 }
 
+// S14 (DOIT.51): OPT-IN tab-drag timing to diagnose the ~500ms first-drag delay without guessing. Off by
+// default (no permanent user-visible perf log). Enable by setting storage key 'yolomux.debugDragTiming' to
+// '1' (via storageSet in the console), drag a tab, then read the per-bucket console.table at drop. Marks
+// the buckets the DOIT calls out: pointerdown -> dragstart/startSessionDrag (begin/end) -> first dragover
+// -> first dragMeasureStrip / paneTabDropPlacement. dragTimingMarkOnce dedups the repeating measure calls.
+let dragTimingMarks = null;
+const dragTimingSeen = new Set();
+function dragTimingEnabled() {
+  return storageGet('yolomux.debugDragTiming') === '1';
+}
+function dragTimingReset() {
+  dragTimingSeen.clear();
+  dragTimingMarks = dragTimingEnabled() ? [] : null;
+}
+function dragTimingMark(label) {
+  if (dragTimingMarks) dragTimingMarks.push({label, t: performance.now()});
+}
+function dragTimingMarkOnce(label) {
+  if (dragTimingMarks && !dragTimingSeen.has(label)) { dragTimingSeen.add(label); dragTimingMark(label); }
+}
+function dragTimingReport() {
+  if (dragTimingMarks && dragTimingMarks.length >= 2) {
+    const first = dragTimingMarks[0].t;
+    console.table(dragTimingMarks.map((mark, i) => ({
+      mark: mark.label,
+      deltaMs: i ? Number((mark.t - dragTimingMarks[i - 1].t).toFixed(1)) : 0,
+      sinceStartMs: Number((mark.t - first).toFixed(1)),
+    })));
+  }
+  dragTimingMarks = null;
+  dragTimingSeen.clear();
+}
+
 function startSessionDrag(event, session, sourceSlot = null) {
+  dragTimingMark('startSessionDrag:begin');
   dragSession = session;
   dragSourceSlot = sourceSlot;
   const payload = JSON.stringify({session, sourceSlot});
@@ -12940,6 +13050,7 @@ function startSessionDrag(event, session, sourceSlot = null) {
     event.dataTransfer.setDragImage(source, offsetX, offsetY);
   }
   resetDragTabRectCache();
+  dragTimingMark('startSessionDrag:end');
 }
 
 function endSessionDrag(event) {
@@ -12954,6 +13065,7 @@ function endSessionDrag(event) {
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
   // DOIT.52: flush through the shared layout render scheduler so same-shape drops keep the cheap path.
   flushPendingLayoutRender();
+  dragTimingReport();
 }
 function layoutWithoutItemFromSlots(item, slots = layoutSlots, options = {}) {
   const next = emptyLayoutSlots();
@@ -14018,6 +14130,8 @@ function summaryContextHtml(session, info, agent) {
   if (git) {
     lines.push(summaryContextLine('branch', `${git.branch || 'unknown'}${git.upstream ? ` -> ${git.upstream}` : ''}`));
     if (git.root) lines.push(summaryContextLine('repo', git.root));
+    // S7 (DOIT.51): name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
+    if (git.worktree) lines.push(summaryContextLine('worktree', `${git.worktree.name || git.worktree.path} — worktree of ${git.worktree.parent_root}`));
     if (git.head) lines.push(summaryContextLine('head', git.head));
   } else {
     lines.push(summaryContextLine('repo', 'no git checkout detected'));
@@ -15417,6 +15531,8 @@ function createPaneTab(side, item, displayContext = {}) {
     ? `${itemLabel(item)} ${fileItemPath(item)}${missingFileClass ? ' missing on disk' : ''}`
     : type ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
+    dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
+    dragTimingMark('pointerdown');
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
       return;
@@ -15719,6 +15835,7 @@ function resetDragTabRectCache() {
 // its tab rects ONCE and reuse them for every dragover instead of forcing sync layout on every move.
 // Outside a drag (e.g. unit tests calling paneTabDropPlacement directly), measure fresh each time.
 function dragMeasureStrip(strip) {
+  dragTimingMarkOnce('dragMeasureStrip:first');   // S14: first strip getBoundingClientRect of the drag
   if (dragSession != null) {
     if (!dragTabRectCache || dragTabRectCache.strip !== strip) {
       dragTabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
@@ -15738,6 +15855,7 @@ function dragMeasureTab(cache, tab) {
 }
 
 function paneTabDropPlacement(strip, event, movingSession) {
+  dragTimingMarkOnce('paneTabDropPlacement:first');   // S14: first drop-placement pass (first real dragover)
   const allTabs = Array.from(strip.querySelectorAll('.pane-tab'));
   // The source's position in the FULL strip (before filtering) drives a directional insert threshold
   // for same-strip reorder; -1 means a cross-pane move (keep the centered threshold).

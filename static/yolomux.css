@@ -1847,6 +1847,45 @@ body.theme-light .ci-indicator.branch-indicator {
   border-inline-start: 1px solid var(--active-control-soft-border);
   border-top: 1px solid var(--active-control-soft-border);
 }
+/* S1 (DOIT.51): inline-blame hover popover. Reuses the .session-popover card but is body-mounted and
+   positioned with position:fixed (escapes the editor's overflow), so it drops the parent-hover-driven
+   show/hide transition and the arrow; visibility is controlled by the [hidden] attribute from JS. */
+.blame-popover {
+  position: fixed;
+  top: auto;
+  left: 0;
+  width: max-content;
+  max-width: min(480px, var(--popover-max-inline-size));
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+  transition: none;
+  pointer-events: none;
+  white-space: normal;
+}
+.blame-popover[hidden] {
+  display: none;
+}
+.blame-popover::before {
+  display: none;
+}
+.blame-popover .blame-popover-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: baseline;
+}
+.blame-popover .blame-popover-summary {
+  margin-top: 4px;
+}
+.blame-popover .blame-popover-body {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--active-control-soft-border);
+  white-space: pre-wrap;
+  color: var(--muted);
+  font-size: calc(var(--ui-font-size) - 1px);
+}
 /* Light mode: use a neutral card with the active accent only as border/labels. */
 body.theme-light .session-popover {
   color: var(--pc-control-fg);

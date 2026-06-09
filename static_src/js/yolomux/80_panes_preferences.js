@@ -538,6 +538,8 @@ function createPaneTab(side, item, displayContext = {}) {
     ? `${itemLabel(item)} ${fileItemPath(item)}${missingFileClass ? ' missing on disk' : ''}`
     : type ? itemLabel(item) : `${sessionLabel(item)} ${sessionWorkDescription(item, info, 140)}`.trim());
   tab.addEventListener('pointerdown', event => {
+    dragTimingReset();           // S14: starts the opt-in drag-timing window (no-op unless the flag is on)
+    dragTimingMark('pointerdown');
     if (event.target.closest('[data-pane-tab-close]')) {
       event.stopPropagation();
       return;
@@ -840,6 +842,7 @@ function resetDragTabRectCache() {
 // its tab rects ONCE and reuse them for every dragover instead of forcing sync layout on every move.
 // Outside a drag (e.g. unit tests calling paneTabDropPlacement directly), measure fresh each time.
 function dragMeasureStrip(strip) {
+  dragTimingMarkOnce('dragMeasureStrip:first');   // S14: first strip getBoundingClientRect of the drag
   if (dragSession != null) {
     if (!dragTabRectCache || dragTabRectCache.strip !== strip) {
       dragTabRectCache = {strip, stripRect: strip.getBoundingClientRect(), rects: new Map()};
@@ -859,6 +862,7 @@ function dragMeasureTab(cache, tab) {
 }
 
 function paneTabDropPlacement(strip, event, movingSession) {
+  dragTimingMarkOnce('paneTabDropPlacement:first');   // S14: first drop-placement pass (first real dragover)
   const allTabs = Array.from(strip.querySelectorAll('.pane-tab'));
   // The source's position in the FULL strip (before filtering) drives a directional insert threshold
   // for same-strip reorder; -1 means a cross-pane move (keep the centered threshold).

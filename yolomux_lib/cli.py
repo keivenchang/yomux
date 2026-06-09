@@ -22,7 +22,13 @@ from .server import TmuxWebtermHTTPServer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Attach local tmux sessions in a browser.")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="interface to bind. Default 0.0.0.0 (all interfaces), on purpose: the product is built for "
+             "reaching sessions from a phone or another machine on a trusted LAN, and every request is "
+             "gated by the login layer. Pass --host 127.0.0.1 to restrict to localhost and tunnel in.",
+    )
     parser.add_argument("--port", type=int, default=9998)
     parser.add_argument(
         "--sessions",

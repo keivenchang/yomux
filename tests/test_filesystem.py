@@ -770,6 +770,22 @@ def test_blame_file_on_a_tracked_repo_file():
     assert first["author"]
 
 
+def test_blame_commit_bodies_skips_uncommitted_and_empty():
+    # S1 (DOIT.51): empty input and the all-zero uncommitted sentinel yield no bodies (no git call).
+    assert filesystem._blame_commit_bodies(".", set()) == {}
+    assert filesystem._blame_commit_bodies(".", {"0" * 40}) == {}
+
+
+def test_blame_file_includes_commit_bodies_map():
+    # S1 (DOIT.51): the hover popover reads commit bodies from a deduped full-sha -> body map.
+    repo_file = str(Path(__file__).resolve().parents[1] / "AGENTS.md")
+    result = filesystem.blame_file(repo_file)
+    assert isinstance(result.get("commits"), dict)
+    for sha, body in result["commits"].items():
+        assert len(sha) == 40
+        assert isinstance(body, str) and body.strip(), "commit bodies are non-empty strings"
+
+
 def test_list_directory_flags_symlinks_with_target(tmp_path):
     # DOIT.31: symlink entries carry is_symlink + symlink_target; a symlink to a dir resolves kind=dir,
     # to a file kind=file, and a dangling link is kind=symlink-broken. Plain entries are not flagged.

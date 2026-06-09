@@ -287,3 +287,24 @@ def test_rule_file_text_validation_reports_yaml_errors():
         assert "regex error" in str(exc)
     else:
         raise AssertionError("invalid YOLO rules should fail validation")
+
+
+def test_normalize_risk_canonicalizes_for_display():
+    # S5 (DOIT.51): blank -> "unknown", storage-destruction synonyms -> "delete", case/space
+    # insensitive, and custom labels pass through (the engine never rejects a risk label).
+    assert yolo_rules.normalize_risk("") == "unknown"
+    assert yolo_rules.normalize_risk(None) == "unknown"
+    assert yolo_rules.normalize_risk("  DELETE ") == "delete"
+    assert yolo_rules.normalize_risk("device") == "delete"
+    assert yolo_rules.normalize_risk("format") == "delete"
+    assert yolo_rules.normalize_risk("custom-label") == "custom-label"
+    for label in yolo_rules.YOLO_RISK_LABELS:
+        assert yolo_rules.normalize_risk(label) == label
+
+
+def test_hard_floor_risks_normalize_to_canonical_labels():
+    # S5: the internal mkfs / block-device "format"/"device" hard floors display as canonical "delete".
+    mkfs = yolo_rules.hard_floor_decision("mkfs.ext4 /dev/sda1")
+    assert mkfs and yolo_rules.normalize_risk(mkfs["risk"]) == "delete"
+    forkbomb = yolo_rules.hard_floor_decision(":(){ :|:& };:")
+    assert forkbomb and yolo_rules.normalize_risk(forkbomb["risk"]) == "process"
