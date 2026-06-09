@@ -83,7 +83,7 @@
   padding: 4px;
   color: #e7ecf3;
   background: rgba(17, 24, 32, 0.98);
-  border: 1px solid #5e6878;
+  border: 1px solid var(--sep-muted);
   border-radius: 7px;
   box-shadow: var(--shadow-elevated);
 }
@@ -124,7 +124,7 @@
   color: #f4ffe8;
   background: #07110d;
   border: 1px solid #9be33d;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: 600 var(--ui-font-size)/1.2 var(--mono-font);
   outline: 0;
 }
@@ -141,7 +141,7 @@
   padding: 4px 9px;
   color: #e7ecf3;
   background: #222b3a;
-  border: 1px solid #5e6878;
+  border: 1px solid var(--sep-muted);
   border-radius: 5px;
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
@@ -451,7 +451,7 @@
 .transcript-item.tool_use { border-color: #f59e0b; background: color-mix(in srgb, #f59e0b 12%, var(--panel)); }
 .transcript-item.tool_result { border-color: var(--pr-status-merged); background: color-mix(in srgb, var(--pr-status-merged) 12%, var(--panel)); }
 .transcript-item.summary { border-color: #f472b6; background: color-mix(in srgb, #f472b6 12%, var(--panel)); }
-.transcript-item.system { border-color: #94a3b8; background: color-mix(in srgb, #94a3b8 12%, var(--panel)); }
+.transcript-item.system { border-color: var(--git-transcript-badge); background: color-mix(in srgb, var(--git-transcript-badge) 12%, var(--panel)); }
 .transcript-role {
   color: var(--text);
   font-weight: 700;
@@ -646,7 +646,7 @@
   background: #151d24;
   border: 1px solid #314154;
   border-inline-start: 3px solid var(--active-accent-bright);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: var(--ui-font-size-sm)/1.35 var(--mono-font);
 }
 .yoagent-global-head {
@@ -664,7 +664,7 @@
   margin: 2px 0 7px;
   overflow: hidden;
   background: color-mix(in srgb, var(--active-control-bg) 12%, var(--panel2));
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 .yoagent-refresh-progress::before {
   content: "";
@@ -709,7 +709,7 @@
   color: var(--text);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
 }
 .yoagent-chat.empty {
   grid-template-rows: auto auto;
@@ -724,7 +724,7 @@
   color: var(--muted);
   background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: 700 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .yoagent-chat-clear:hover:not(:disabled),
@@ -795,7 +795,7 @@
   color: #071000;
   background: var(--pane-tab-badge-gold);
   border: 1px solid #ffe27a;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .yoagent-chat-notice {
@@ -803,7 +803,7 @@
   color: #2a1e00;
   background: #ffe7a3;
   border: 1px solid #c8941e;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: var(--ui-font-size-sm)/1.35 var(--ui-font);
 }
 .yoagent-chat-notice-backend {
@@ -884,7 +884,7 @@
   color: var(--text);
   background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
 }
 .yoagent-backend-pill-dot {
@@ -910,7 +910,7 @@
   color: var(--muted);
   background: transparent;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font: 600 var(--ui-font-size-xs)/1 var(--ui-font);
   cursor: pointer;
 }
@@ -1194,7 +1194,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   place-items: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
   font-size: var(--ui-font-size-md);
@@ -1254,7 +1254,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
 .server-update-banner-reload {
   cursor: pointer;
   border: 1px solid var(--danger-strong-hover);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: var(--danger-strong);
   color: #ffffff;
   font: inherit;
@@ -1349,7 +1349,7 @@ body.theme-light .info-cell a.pr-status-closed:hover {
   padding: 3px 6px 5px;
   color: var(--pane-tab-yolo-text);
   background: var(--pane-tab-yolo-bg);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   transform-origin: center;
   animation: yolo-marker-rotate var(--yolo-rotation-duration, 20s) linear infinite;
   animation-delay: var(--yolo-rotate-delay, 0s);
@@ -1532,7 +1532,7 @@ body.theme-light .modal.about-open {
   color: var(--text);
   background: color-mix(in srgb, var(--panel) 72%, transparent);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1625,7 +1625,7 @@ body.theme-light .modal.about-open {
   left: 50%;
   width: var(--panel-close-glyph-width);
   height: var(--panel-close-glyph-height);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: currentColor;
 }
 .file-explorer-close::before,
@@ -1876,7 +1876,7 @@ body.theme-light .modal.about-open {
   color: #fb923c;
 }
 .file-tree-icon.file-icon-generic {
-  color: #94a3b8;
+  color: var(--git-transcript-badge);
 }
 .file-tree-row.kind-dir > .file-tree-icon {
   font-size: 1.18em;
@@ -1889,7 +1889,7 @@ body.theme-light .modal.about-open {
   color: var(--brand-green);
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-name {
-  color: #c4f970;
+  color: var(--accent-lime);
   font-weight: 700;
 }
 .file-tree-row.indexed-directory:not(.selected) .file-tree-git-status {
@@ -1906,7 +1906,7 @@ body.theme-light .modal.about-open {
 }
 .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed {
   position: relative;
-  color: #c4f970;
+  color: var(--accent-lime);
   text-shadow: 0 0 8px rgba(196, 249, 112, 0.35);
 }
 .file-tree-row.kind-dir > .file-tree-icon.file-icon-dir-indexed::after {
@@ -1928,9 +1928,9 @@ body.theme-light .modal.about-open {
    ============================================================================ */
 body.theme-light .server-update-banner {
   background: #ffffff;
-  color: #1f2937;
+  color: var(--pc-control-fg);
   border-color: #d68c1e;
-  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.18);
+  box-shadow: 0 6px 20px rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .server-update-banner-dismiss {
   color: #586072;
@@ -1950,7 +1950,7 @@ body.theme-light .file-tree-row.selected {
   box-shadow: inset 4px 0 0 var(--file-selection-border), inset 0 0 0 1px rgba(63, 143, 45, 0.5);
 }
 body.theme-light .file-tree-row.current-directory:not(.selected) {
-  color: #1f2937;
+  color: var(--pc-control-fg);
 }
 body.theme-light .file-tree-row.current-file:not(.selected) {
   color: var(--file-selection-text);
@@ -2149,9 +2149,9 @@ body.theme-light .file-tree-row.git-staged:not(.selected) .file-tree-name {
   color: #2f7d20;
 }
 body.theme-light .file-tree-git-status.file-tree-git-status-unknown {
-  border-color: rgba(15, 23, 42, 0.12);
-  background: rgba(15, 23, 42, 0.06) !important;
-  color: rgba(15, 23, 42, 0.36);
+  border-color: rgb(var(--overlay-slate-rgb) / 0.12);
+  background: rgb(var(--overlay-slate-rgb) / 0.06) !important;
+  color: rgb(var(--overlay-slate-rgb) / 0.36);
 }
 body.theme-light .file-tree-row.kind-dir > .file-tree-icon {
   color: #64748b;
@@ -2201,7 +2201,7 @@ body.theme-light .file-tree-children::before {
   flex: 0 0 30px;
   padding: 0 4px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
   font-family: var(--mono-font);
@@ -2236,7 +2236,7 @@ body.theme-light .file-tree-children::before {
   color: var(--muted);
   background: transparent;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: 700 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
 .file-explorer-sort-select:hover,
@@ -2283,7 +2283,7 @@ body.theme-light .file-tree-children::before {
   height: 20px;
   padding: 0 7px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   color: var(--muted);
   background: transparent;
   font: 700 var(--ui-font-size-2xs) var(--mono-font);

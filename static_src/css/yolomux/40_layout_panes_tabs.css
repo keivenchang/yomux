@@ -159,7 +159,7 @@ body.layout-resizing {
 /* Light mode: the dark drop-target fill is a black box on the white grid; the dashed
    border already uses the theme-aware --drop-outline token (DOIT.12 B5). */
 body.theme-light .drop-slot.drag-over {
-  background: rgba(15, 23, 42, 0.06);
+  background: rgb(var(--overlay-slate-rgb) / 0.06);
 }
 .drop-slot.drop-preview::before,
 .grid.drop-preview::before {
@@ -520,7 +520,7 @@ body.theme-light .drop-slot.drag-over {
   position: relative;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -538,7 +538,7 @@ body.theme-light .drop-slot.drag-over {
   left: 50%;
   width: 8px;
   height: 1.4px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: currentColor;
 }
 .panel-detail-close::before {
@@ -748,14 +748,14 @@ body.theme-light .drop-slot.drag-over {
   color: #8b95a5;
 }
 .meta-sep {
-  color: #5e6878;
+  color: var(--sep-muted);
 }
 /* C9: the "+N repos" chip on the detail bar and its multi-repo popover rows. Tokens only (light/dark). */
 .meta-repo-chip {
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 0 6px;
   font: inherit;
   font-weight: 600;
@@ -910,7 +910,7 @@ body.theme-light .drop-slot.drag-over {
 body.theme-light .pane-tab:not(.active) .session-button-name,
 body.theme-light .pane-tab:not(.active) .session-button-dir,
 body.theme-light .pane-tab:not(.active) .session-button-detail {
-  color: #1f2937;
+  color: var(--pc-control-fg);
 }
 .panel.active-pane .pane-tab.active .session-button-name,
 .panel.active-pane .pane-tab.active .session-button-dir,
@@ -922,7 +922,7 @@ body.theme-light .pane-tab:not(.active) .session-button-detail {
 }
 .pane-tab.active .session-yolo-marker.inactive {
   color: #d7dde5;
-  background: #384356;
+  background: var(--divider);
   border-color: #5d6878;
 }
 .pane-tab.file-missing {
@@ -1001,7 +1001,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   left: 50%;
   width: 8px;
   height: 1.6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: currentColor;
 }
 .pane-tab-close::before {
@@ -1036,7 +1036,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
 }
 .pane-tab-close.pc-window-control {
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: currentColor;
   opacity: 0.68;
@@ -1323,7 +1323,7 @@ body.theme-light .pane-tab.active .session-yolo-marker.inactive {
   left: 50%;
   width: 8px;
   height: 1.4px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: currentColor;
 }
 .tabs .pane-close::before {
@@ -1403,13 +1403,13 @@ body.theme-light .tab.active {
 }
 body.theme-light .panel.empty-pane-panel {
   background: #edf2f8;
-  border-color: #9aa6b6;
+  border-color: var(--pc-control-border);
 }
 body.theme-light .empty-pane-fill {
-  border-color: #9aa6b6;
+  border-color: var(--pc-control-border);
   background:
-    linear-gradient(135deg, rgba(15, 23, 42, 0.045), rgba(15, 23, 42, 0) 46%),
-    rgba(15, 23, 42, 0.018);
+    linear-gradient(135deg, rgb(var(--overlay-slate-rgb) / 0.045), rgb(var(--overlay-slate-rgb) / 0) 46%),
+    rgb(var(--overlay-slate-rgb) / 0.018);
 }
 body.theme-light .panel-detail-row {
   /* bg comes from the shared --pane-bar-bg (bright when focused, gray when not) — no light override. */
@@ -1425,8 +1425,8 @@ body.theme-light .panel.active-pane .panel-detail-row .session-button-name {
 }
 body.theme-light .panel-detail-close:hover,
 body.theme-light .panel-detail-close:focus-visible {
-  color: #0f172a;
-  background: rgba(15, 23, 42, 0.08);
+  color: var(--pc-control-hover-fg);
+  background: rgb(var(--overlay-slate-rgb) / 0.08);
 }
 /* DOIT.6 #28: light-mode contrast fixes for genuine light-text-on-neutral / near-white-affordance
    cases (links on the light detail row, the near-white tab-hover border, white hover-glyph text on
@@ -1453,14 +1453,14 @@ body.theme-light .summary-context a.pr-status-merged:hover {
   color: #6639ba;
 }
 body.theme-light .pane-tab:hover {
-  border-color: rgba(15, 23, 42, 0.5);
+  border-color: rgb(var(--overlay-slate-rgb) / 0.5);
 }
 body.theme-light .tabs .pane-actions:hover,
 body.theme-light .tabs .pane-actions:focus-visible,
 body.theme-light .tabs .panel-tab-overflow:hover,
 body.theme-light .tabs .panel-tab-overflow:focus-visible {
-  color: #0f172a;
+  color: var(--pc-control-hover-fg);
 }
-/* (removed) a light-mode gray #9aa6b6 border on focused terminals — the light twin of the dark #465267
+/* (removed) a light-mode gray var(--pc-control-border) border on focused terminals — the light twin of the dark #465267
    gray focus bug. Focused terminals now fall through to the shared green focus border (var(--pane-tab-
    panel-ring)) like every other focused pane, in both light and dark. */

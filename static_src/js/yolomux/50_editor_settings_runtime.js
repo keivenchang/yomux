@@ -800,6 +800,14 @@ function resetRuntimeInterval(name, callback, delay) {
   runtimeIntervals.set(name, state);
 }
 
+function clearRuntimeInterval(name) {
+  const existing = runtimeIntervals.get(name);
+  if (!existing) return;
+  existing.active = false;
+  clearTimeout(existing.timer);
+  runtimeIntervals.delete(name);
+}
+
 function installRuntimeIntervals() {
   resetRuntimeInterval('auto', refreshAutoStatuses, paneStateRefreshMs);
   resetRuntimeInterval('metadata', refreshTranscripts, metadataRefreshMs);
@@ -811,11 +819,6 @@ function installRuntimeIntervals() {
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
   } else {
-    const existing = runtimeIntervals.get('file-index-refresh');
-    if (existing) {
-      existing.active = false;
-      clearTimeout(existing.timer);
-      runtimeIntervals.delete('file-index-refresh');
-    }
+    clearRuntimeInterval('file-index-refresh');
   }
 }

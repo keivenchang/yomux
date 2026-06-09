@@ -693,20 +693,20 @@ function renderSessionButtons(options = {}) {
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
     clearDropPreview();
-    sessionButtons.classList.add('drag-over');
+    sessionButtons.classList.add(CLS.dragOver);
   };
   sessionButtons.ondragleave = event => {
-    if (!sessionButtons.contains(event.relatedTarget)) sessionButtons.classList.remove('drag-over');
+    if (!sessionButtons.contains(event.relatedTarget)) sessionButtons.classList.remove(CLS.dragOver);
   };
   sessionButtons.ondrop = event => {
     const payload = dragPayload(event);
-    sessionButtons.classList.remove('drag-over');
+    sessionButtons.classList.remove(CLS.dragOver);
     if (!payload?.session) return;
     event.preventDefault();
     event.stopPropagation();
     removeSessionFromLayout(payload.session);
   };
-  sessionButtons.classList.remove('drag-over');
+  sessionButtons.classList.remove(CLS.dragOver);
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarNav());
   sessionButtons.appendChild(createTopbarSearch());
@@ -744,24 +744,24 @@ function createTopbarNav() {
   group.className = 'topbar-nav';
   group.setAttribute('role', 'group');
   group.setAttribute('aria-label', t('editor.nav.aria'));
-  const back = document.createElement('button');
-  back.type = 'button';
-  back.id = 'topbarNavBack';
-  back.className = 'topbar-nav-button';
-  back.title = t('editor.nav.back');
-  back.setAttribute('aria-label', t('editor.nav.back'));
-  back.disabled = true;
-  back.textContent = '←';
-  back.addEventListener('click', event => { event.preventDefault(); editorNavBack(); });
-  const forward = document.createElement('button');
-  forward.type = 'button';
-  forward.id = 'topbarNavForward';
-  forward.className = 'topbar-nav-button';
-  forward.title = t('editor.nav.forward');
-  forward.setAttribute('aria-label', t('editor.nav.forward'));
-  forward.disabled = true;
-  forward.textContent = '→';
-  forward.addEventListener('click', event => { event.preventDefault(); editorNavForward(); });
+  const back = makeButton({
+    id: 'topbarNavBack',
+    className: 'topbar-nav-button',
+    title: t('editor.nav.back'),
+    ariaLabel: t('editor.nav.back'),
+    disabled: true,
+    label: '←',
+    onClick: event => { event.preventDefault(); editorNavBack(); },
+  });
+  const forward = makeButton({
+    id: 'topbarNavForward',
+    className: 'topbar-nav-button',
+    title: t('editor.nav.forward'),
+    ariaLabel: t('editor.nav.forward'),
+    disabled: true,
+    label: '→',
+    onClick: event => { event.preventDefault(); editorNavForward(); },
+  });
   group.append(back, forward);
   return group;
 }
@@ -772,12 +772,12 @@ function createTopbarNav() {
 function createTopbarSearch() {
   const isMac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || '');
   const mod = isMac ? 'Cmd' : 'Ctrl';
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.id = 'topbarSearch';
-  button.className = 'topbar-search';
-  button.setAttribute('aria-label', t('topbar.search.aria'));
-  button.title = t('topbar.search.title', {mod});
+  const button = makeButton({
+    id: 'topbarSearch',
+    className: 'topbar-search',
+    ariaLabel: t('topbar.search.aria'),
+    title: t('topbar.search.title', {mod}),
+  });
   const icon = document.createElement('span');
   icon.className = 'topbar-search-icon';
   icon.setAttribute('aria-hidden', 'true');

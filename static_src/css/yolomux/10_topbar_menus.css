@@ -54,7 +54,7 @@
   color: var(--transport-warning-text);
   background: var(--transport-warning-bg);
   border: 1px solid var(--transport-warning-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font: 900 var(--ui-font-size-sm)/1 var(--ui-font);
   cursor: help;
 }
@@ -209,7 +209,7 @@
   cursor: pointer;
 }
 body.theme-light .topbar-nav-button {
-  background: rgba(15, 23, 42, 0.05);
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-nav-button:hover:not(:disabled) {
   border-color: var(--accent, #6ea8fe);
@@ -243,7 +243,7 @@ body.theme-light .topbar-nav-button {
 /* DOIT.6 #33: --input-bg is undefined, so the fallback #11151c made this a DARK pill in both themes.
    In light mode blend it into the topbar as a subtle bordered box (keep the border + muted text). */
 body.theme-light .topbar-search {
-  background: rgba(15, 23, 42, 0.05);
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 /* DOIT.8 Phase 1: the top-right language switcher. A compact pill matching the topbar search. */
 .topbar-language {
@@ -261,7 +261,7 @@ body.theme-light .topbar-search {
   cursor: pointer;
 }
 body.theme-light .topbar-language {
-  background: rgba(15, 23, 42, 0.05);
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
 }
 .topbar-language:hover {
   border-color: var(--accent, #6ea8fe);
@@ -384,7 +384,7 @@ body.theme-light .topbar-language {
   color: var(--active-control-text);
   background: var(--active-control-bg);
   border: 1px solid var(--active-control-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
 }
 .app-menu-button::after {
@@ -401,7 +401,7 @@ body.theme-light .topbar-language {
 .app-menu.open > .app-menu-button {
   color: #f4ffe8;
   background: #1d2531;
-  border-color: #5e6878;
+  border-color: var(--sep-muted);
   outline: 0;
 }
 .app-menu.open > .app-menu-button {
@@ -421,7 +421,7 @@ body.theme-light .topbar-language {
   padding: 7px;
   color: #e7ecf3;
   background: #111820;
-  border: 1px solid #5e6878;
+  border: 1px solid var(--sep-muted);
   border-radius: 8px;
   box-shadow:
     0 -3px 12px rgba(0, 0, 0, 0.30),
@@ -478,7 +478,7 @@ body.theme-light .topbar-language {
 .app-menu-separator {
   height: 1px;
   margin: 6px 2px;
-  background: #384356;
+  background: var(--divider);
 }
 .app-menu-submenu-wrap {
   position: relative;
@@ -503,7 +503,7 @@ body.theme-light .topbar-language {
   display: block;
   width: 4px;
   align-self: stretch;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   opacity: 0;
 }
 .app-menu-command[data-checked="true"] {
@@ -650,7 +650,7 @@ body.theme-light .topbar-language {
   grid-template-columns: 4px minmax(0, 1fr);
   gap: 4px;
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font-size: var(--ui-font-size-sm);
   line-height: 1;
 }
@@ -764,16 +764,16 @@ body.theme-light .app-menu-button {
 body.theme-light .app-menu-button:hover,
 body.theme-light .app-menu-button:focus-visible,
 body.theme-light .app-menu.open > .app-menu-button {
-  color: #0f172a;
+  color: var(--pc-control-hover-fg);
   background: #dfe7f2;
-  border-color: #9aa6b6;
+  border-color: var(--pc-control-border);
 }
 body.theme-light .app-menu-popover {
   color: var(--text);
   background: #ffffff;
-  border-color: #9aa6b6;
+  border-color: var(--pc-control-border);
   box-shadow:
-    0 -3px 12px rgba(15, 23, 42, 0.10),
+    0 -3px 12px rgb(var(--overlay-slate-rgb) / 0.10),
     var(--shadow-popover);
 }
 body.theme-light .app-submenu-popover {
@@ -781,8 +781,8 @@ body.theme-light .app-submenu-popover {
   background: #f8fafc;
   border-color: #c9d2df;
   box-shadow:
-    0 -2px 10px rgba(15, 23, 42, 0.10),
-    0 12px 32px rgba(15, 23, 42, 0.18);
+    0 -2px 10px rgb(var(--overlay-slate-rgb) / 0.10),
+    0 12px 32px rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .app-menu-section,
 body.theme-light .app-menu-detail {
@@ -802,7 +802,7 @@ body.theme-light .app-menu-command:hover:not(:disabled),
 body.theme-light .app-menu-command:focus-visible,
 body.theme-light .app-menu-submenu-wrap:hover > .app-menu-command:not(:disabled),
 body.theme-light .app-menu-submenu-wrap.open > .app-menu-command:not(:disabled) {
-  color: #0f172a;
+  color: var(--pc-control-hover-fg);
   background: #e8f0fb;
   border-color: #1d4ed8;
 }
@@ -819,9 +819,9 @@ body.theme-light .app-menu-ui-icon {
    still kept dark-mode fills. Active stays green (the on-state cue) but tuned for a white topbar. */
 body.theme-light .app-menu-ui-icon:hover,
 body.theme-light .app-menu-ui-icon:focus-visible {
-  color: #0f172a;
+  color: var(--pc-control-hover-fg);
   background: #dfe7f2;
-  border-color: #9aa6b6;
+  border-color: var(--pc-control-border);
 }
 body.theme-light .app-menu-ui-icon.active {
   color: var(--active-control-text);
@@ -846,7 +846,7 @@ body.theme-light .app-menu-tab-command .session-button-dir {
 }
 body.theme-light .app-menu-tab-command:hover:not(:disabled),
 body.theme-light .app-menu-tab-command:focus-visible {
-  color: #0f172a;
+  color: var(--pc-control-hover-fg);
   background: #e8f0fb;
   border-color: #1d4ed8;
 }

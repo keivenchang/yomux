@@ -285,7 +285,7 @@ let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayloadSignature = '';
 let fileExplorerSessionFilesLoading = false;
-let fileExplorerSessionFilesRequestId = 0;
+const fileExplorerSessionFilesGuard = makeGenerationGuard();
 let fileExplorerExplicitSyncSession = '';
 const fileExplorerExpandedBySyncTarget = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
@@ -301,7 +301,7 @@ let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready'
-const fileIndexStatusTimers = new Map();  // normalized indexed root -> poll timer while building
+const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
 let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
@@ -442,8 +442,64 @@ const prefsItemId = '__prefs__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
 const imageViewerItemPrefix = 'image:';
+const CLS = Object.freeze({
+  active: 'active',
+  collapsed: 'collapsed',
+  dragOver: 'drag-over',
+  dropPreview: 'drop-preview',
+  fileDragOver: 'file-drag-over',
+  open: 'open',
+  pathDragOver: 'path-drag-over',
+  selected: 'selected',
+  tabDragOver: 'tab-drag-over',
+  tabDropPreview: 'tab-drop-preview',
+});
+const DROP_PREVIEW_CLASSES = Object.freeze([
+  CLS.dragOver,
+  CLS.tabDragOver,
+  CLS.tabDropPreview,
+  CLS.dropPreview,
+  'drop-preview-top',
+  'drop-preview-bottom',
+  'drop-preview-left',
+  'drop-preview-right',
+  'drop-preview-middle',
+  'drop-preview-root',
+  'drop-preview-gutter',
+]);
+function makeGenerationGuard() {
+  let generation = 0;
+  return Object.freeze({
+    begin() {
+      const current = ++generation;
+      return () => current === generation;
+    },
+    invalidate() {
+      generation += 1;
+    },
+  });
+}
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
+function filePanelTabType({key, prefix, shortLabel, terminalTitle, className, sortRank}) {
+  return {
+    key,
+    prefix,
+    match: item => typeof item === 'string' && item.startsWith(prefix),
+    label: item => basenameOf(fileItemPath(item)),
+    shortLabel,
+    terminalTitle,
+    sortRank,
+    param: item => item,
+    detail: item => compactHomePath(fileItemPath(item)),
+    rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
+    createPanel: item => createFileEditorPanel(item),
+    className,
+    icon: 'document',
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
+    prunePriority: () => 1,
+  };
+}
 const TAB_TYPES = [
   {
     // DOIT.6 #40: YO!info and YO!agent are ONE item now — the panel hosts both via an in-pane sub-tab
@@ -461,6 +517,11 @@ const TAB_TYPES = [
     detail: () => t('info.subtitle'),
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
+    renderAttached: () => {
+      applyInfoSubTab();
+      renderInfoPanel();
+      renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+    },
     className: () => 'info',
     icon: 'branch-info',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
@@ -502,40 +563,22 @@ const TAB_TYPES = [
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
-  {
+  filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
-    match: item => typeof item === 'string' && item.startsWith(imageViewerItemPrefix),
-    label: item => basenameOf(fileItemPath(item)),
     shortLabel: () => t('popover.kind.image'),
     terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.image')}),
     sortRank: 0.74,
-    param: item => item,
-    detail: item => compactHomePath(fileItemPath(item)),
-    rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
-    createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item image-viewer-item',
-    icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
-    prunePriority: () => 1,
-  },
-  {
+  }),
+  filePanelTabType({
     key: 'file-editor',
     prefix: fileEditorItemPrefix,
-    match: item => typeof item === 'string' && item.startsWith(fileEditorItemPrefix),
-    label: item => basenameOf(fileItemPath(item)),
     shortLabel: () => 'Edit',
     terminalTitle: () => 'unavailable for file editor',
     sortRank: 0.75,
-    param: item => item,
-    detail: item => compactHomePath(fileItemPath(item)),
-    rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
-    createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item',
-    icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
-    prunePriority: () => 1,
-  },
+  }),
 ];
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }
 function tabTypeForParam(value) {
@@ -657,7 +700,7 @@ let transcriptMetaRefreshPromise = null;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
-let activitySummaryRequestId = 0;
+const activitySummaryGuard = makeGenerationGuard();
 let yoagentMessages = [];
 let yoagentBusy = false;
 let yoagentPrewarming = false;

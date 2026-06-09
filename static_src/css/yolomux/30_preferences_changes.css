@@ -28,7 +28,7 @@
   gap: 5px;
   padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: var(--panel2);
   color: var(--text);
   font-size: var(--ui-font-size-xs);
@@ -98,7 +98,7 @@
 .diff-ref-control input {
   height: 24px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: var(--panel2);
   color: var(--text);
   font: inherit;
@@ -141,7 +141,7 @@
   height: 24px;
   padding: 0 7px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: var(--panel2);
   color: var(--muted);
   font-size: var(--ui-font-size-xs);
@@ -186,7 +186,7 @@
   gap: 8px;
   padding: 0 6px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: inherit;
   text-align: start;
@@ -416,208 +416,10 @@
 .changes-tree {
   padding: 2px 0;
 }
-.changes-tree-folder {
-  position: relative;
-}
-.changes-tree-folder::before {
-  content: "";
-  position: absolute;
-  top: 22px;
-  bottom: 0;
-  left: calc(10px + (var(--changes-tree-depth, 0) * 16px));
-  border-inline-start: 1px solid var(--changes-indent-line);
-  pointer-events: none;
-}
-.changes-tree-folder.collapsed::before {
-  display: none;
-}
-.changes-tree-folder-row {
-  display: grid;
-  grid-template-columns: 12px 16px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 5px;
-  width: 100%;
-  padding: 3px 7px 3px calc(7px + (var(--changes-tree-depth, 0) * 16px));
-  border: 0;
-  border-top: 1px solid var(--changes-indent-line);
-  background: var(--changes-folder-bg);
-  color: var(--changes-folder-text);
-  font: 400 var(--ui-font-size-sm)/1.15 var(--ui-font);
-  text-align: start;
-  cursor: pointer;
-}
-.changes-tree-folder-row:hover,
-.changes-tree-folder-row:focus-visible {
-  background: var(--changes-row-hover-bg);
-}
-.changes-tree-caret,
-.changes-tree-folder-icon,
-.changes-tree-folder-count {
+.changes-tree-caret {
   color: var(--muted);
   font-family: var(--mono-font);
   font-size: var(--ui-font-size-2xs);
-}
-.changes-tree-folder-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--changes-folder-text);
-  font-weight: 400;
-}
-.changes-file-row {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) max-content;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 4px 7px 4px calc(7px + (var(--changes-tree-depth, 0) * 16px));
-  border: 0;
-  border-top: 1px solid var(--changes-indent-line);
-  background: transparent;
-  color: var(--muted);
-  text-align: start;
-  font-family: var(--ui-font);
-  /* DOIT.6 #46: Modified-files rows read like the Finder file tree (same font size + line-height). */
-  font-size: var(--file-explorer-font-size);
-  line-height: 1.4;
-  cursor: pointer;
-}
-.changes-file-row.compact {
-  grid-template-columns: 16px minmax(0, 1fr) max-content;
-  gap: 5px;
-  padding: 2px 4px 2px calc(4px + (var(--changes-tree-depth, 0) * 14px));
-  line-height: 1.05;
-}
-.changes-file-row.compact .changes-file-meta {
-  grid-column: 3;
-}
-.changes-file-row.compact .changes-file-path {
-  display: none;
-}
-/* Row tinting: match Finder git-* name colors */
-.changes-file-row.git-modified:not(.selected) .changes-file-name {
-  color: var(--git-modified);
-}
-.changes-file-row.git-untracked:not(.selected) .changes-file-name {
-  color: var(--git-untracked-name);
-}
-.changes-file-row.git-deleted:not(.selected) .changes-file-name {
-  color: var(--git-deleted);
-  text-decoration: line-through;
-}
-.changes-file-row.git-staged:not(.selected) .changes-file-name {
-  color: var(--git-staged);
-  font-weight: 700;
-}
-.changes-file-row.git-transcript:not(.selected) .changes-file-name {
-  color: var(--git-transcript);
-}
-.changes-file-row:hover {
-  background: var(--changes-row-hover-bg);
-}
-/* C5: Finder-like single-click selection highlight — the hover tint plus a gold left bar (the same
-   --accent-gold marker the file tree uses for the current row). Both tokens flip with the theme. */
-.changes-file-row.selected {
-  background: var(--changes-row-hover-bg);
-  box-shadow: inset 3px 0 0 var(--accent-gold);
-}
-.changes-file-row:disabled {
-  cursor: default;
-  opacity: 0.65;
-}
-.changes-status {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 13px;
-  height: 18px;
-  border-radius: 3px;
-  color: #061207;
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-xs);
-  font-stretch: condensed;
-  font-weight: 700;
-  letter-spacing: 0;
-}
-.changes-status-a {
-  background: var(--git-staged-badge);
-}
-.changes-status-m {
-  /* Clarity (image 046): use the BRIGHT amber as a fixed badge fill (like the other vibrant status
-     badges) so the near-black "M" pops. The theme-aware --accent-gold flips to a dark brown (#b7791f)
-     in light mode → near-black-on-dark = muddy/illegible. */
-  background: var(--git-modified-badge);
-}
-.changes-status-d {
-  background: var(--git-deleted-badge);
-}
-.changes-status-r,
-.changes-status-c {
-  background: #38bdf8;
-}
-.changes-status-t {
-  background: var(--git-transcript-badge);
-}
-.changes-status-u,
-.changes-status-unknown {
-  /* Untracked/unknown = teal (a vibrant "new content" color). Purple is RESERVED for MERGED PR status
-     (pr-status-merged) across the app, so this badge must not be purple — it used to be violet, which
-     read as a merged indicator next to the PR badges. */
-  background: var(--git-untracked-badge);
-}
-.changes-status-unknown {
-  border: 1px solid rgba(226, 232, 240, 0.16);
-  background: rgba(226, 232, 240, 0.10);
-  color: rgba(226, 232, 240, 0.46);
-}
-.changes-file-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  color: var(--changes-icon-text);
-  font-size: var(--ui-font-size-sm);
-  line-height: 1;
-}
-.changes-file-main {
-  min-width: 0;
-  overflow: hidden;
-  display: grid;
-  gap: 2px;
-}
-.changes-file-title {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.changes-file-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* DOIT.6 #46: match the Finder file tree — regular weight + the file-explorer font size (inherited
-     from the row), not a larger semibold bright filename. */
-}
-.changes-file-path,
-.changes-file-meta {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--changes-path-text);
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-2xs);
-}
-.changes-file-meta {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  min-width: max-content;
-  overflow: visible;
-  text-overflow: clip;
 }
 .changes-file-agent {
   display: inline-flex;
@@ -637,12 +439,6 @@
   flex-basis: 14px;
   width: 14px;
   height: 14px;
-}
-.changes-file-date {
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-3xs);
-  font-stretch: condensed;
-  letter-spacing: 0;
 }
 .changes-meta-separator {
   color: rgba(174, 184, 199, 0.62);
@@ -858,7 +654,7 @@
   color: #2a1e00;
   background: #ffe7a3;
   border: 1px solid #c8941e;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: var(--ui-font-size-xs)/1.3 var(--ui-font);
 }
 .preferences-setting-advisory code {
@@ -1094,7 +890,7 @@
 .command-palette-view-chip {
   padding: 0 5px;
   border: 1px solid var(--active-control-soft-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--text);
   background: var(--active-control-soft-bg);
   font: 700 var(--ui-font-size-3xs)/1.5 var(--mono-font);
@@ -1177,7 +973,7 @@ body.theme-light .command-palette-view-chip {
   color: var(--text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   cursor: pointer;
 }
 .keyboard-shortcuts-close:hover,
@@ -1217,7 +1013,7 @@ body.theme-light .command-palette-view-chip {
   color: #dfe6ef;
   background: #0b1017;
   border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font: 800 var(--ui-font-size-2xs)/1 var(--mono-font);
   white-space: nowrap;
 }
@@ -1241,7 +1037,7 @@ body.theme-light .command-palette-view-chip {
   min-width: 0;
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   background: #10151d;
   color: var(--text);
   font: var(--ui-font-size-sm) var(--mono-font);
@@ -1270,7 +1066,7 @@ body.theme-light .file-explorer-changes-panel,
 body.theme-light .changes-toolbar,
 body.theme-light .changes-repo-group {
   --changes-row-hover-bg: rgba(31, 111, 235, 0.08);
-  --changes-folder-bg: #f6f8fa;
+  --changes-folder-bg: var(--lt-panel);
   --changes-indent-line: var(--tree-indent-line);
   --changes-repo-head-bg: var(--panel2);
   --changes-folder-text: var(--accent-gold);
@@ -1299,30 +1095,6 @@ body.theme-light .changes-repo-head {
 }
 body.theme-light .changes-repo-title {
   color: var(--accent-gold);
-}
-body.theme-light .changes-file-row {
-  color: var(--muted);
-  border-top-color: rgba(100, 116, 139, 0.13);
-}
-body.theme-light .changes-file-row.git-modified:not(.selected) .changes-file-name {
-  color: #8a5a00;
-}
-body.theme-light .changes-file-row.git-untracked:not(.selected) .changes-file-name {
-  color: #166534;
-}
-body.theme-light .changes-file-row.git-deleted:not(.selected) .changes-file-name {
-  color: #b91c1c;
-}
-body.theme-light .changes-file-row.git-staged:not(.selected) .changes-file-name {
-  color: #2f7d20;
-}
-body.theme-light .changes-status-unknown {
-  border-color: rgba(15, 23, 42, 0.12);
-  background: rgba(15, 23, 42, 0.06);
-  color: rgba(15, 23, 42, 0.36);
-}
-body.theme-light .changes-file-row:hover {
-  background: var(--active-control-soft-bg);
 }
 body.theme-light .changes-diff-add {
   color: #166534;
@@ -1433,7 +1205,7 @@ body.theme-light .keyboard-shortcut-row kbd {
   min-width: 0;
   height: 24px;
   padding: 0 7px;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   font-size: var(--ui-font-size-xs);
 }
 .preferences-inline-action {
@@ -1532,17 +1304,17 @@ body.theme-light .command-palette-dialog,
 body.theme-light .keyboard-shortcuts-dialog {
   background: #ffffff;
   border-color: #cdd5e0;
-  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+  box-shadow: 0 24px 70px rgb(var(--overlay-slate-rgb) / 0.22);
 }
 body.theme-light .command-palette-input {
   background: #f3f6fa;
 }
 body.theme-light .command-palette-row {
-  color: #1f2937;
+  color: var(--pc-control-fg);
 }
 body.theme-light .command-palette-row.active,
 body.theme-light .command-palette-row:hover {
-  color: #1f2937;
+  color: var(--pc-control-fg);
   background: var(--active-control-soft-bg);
   border-color: var(--active-control-soft-border);
 }
@@ -1556,15 +1328,15 @@ body.theme-light .keyboard-shortcuts-section h3 {
 }
 body.theme-light .keyboard-shortcuts-close:hover,
 body.theme-light .keyboard-shortcuts-close:focus-visible {
-  background: rgba(15, 23, 42, 0.06);
+  background: rgb(var(--overlay-slate-rgb) / 0.06);
 }
 body.theme-light .keyboard-shortcut-row {
-  border-bottom-color: rgba(15, 23, 42, 0.08);
+  border-bottom-color: rgb(var(--overlay-slate-rgb) / 0.08);
 }
 body.theme-light .keyboard-shortcut-row kbd {
-  color: #1f2937;
+  color: var(--pc-control-fg);
   background: #eef1f5;
-  border-color: rgba(15, 23, 42, 0.18);
+  border-color: rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .preferences-global-reset {
   color: var(--danger-light-text);
@@ -1592,12 +1364,12 @@ body.theme-light .preferences-global-reset .preferences-reset-all:focus-visible 
   border-color: var(--danger-strong);
 }
 body.theme-light .preferences-reset-cancel {
-  background: rgba(15, 23, 42, 0.05);
-  border-color: rgba(15, 23, 42, 0.18);
+  background: rgb(var(--overlay-slate-rgb) / 0.05);
+  border-color: rgb(var(--overlay-slate-rgb) / 0.18);
 }
 body.theme-light .agent-icon.codex,
 body.theme-light .agent-icon.claude {
-  color: #1f2937;
+  color: var(--pc-control-fg);
 }
 button {
   min-width: 34px;

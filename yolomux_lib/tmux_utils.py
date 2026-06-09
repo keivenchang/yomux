@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import re
 import subprocess
-import time
+
+from .cache import TtlCache
 
 
 def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -83,17 +84,16 @@ def tmux_exact_target_from_sessions(target: str, sessions: list[str]) -> str:
 # DOIT.6 #80: tmux_exact_target ran `tmux list-sessions` on EVERY capture, so the inline N×2-3 captures
 # in prompt_and_screen_status each paid a list-sessions subprocess (a +3s hang point if tmux wedged).
 # Cache the session-name resolution for a short window so a poll's captures reuse one resolution.
-_SESSION_NAMES_CACHE: dict[str, object] = {"at": 0.0, "names": []}
 _SESSION_NAMES_TTL = 1.0
+_session_names_cache = TtlCache(_SESSION_NAMES_TTL, max_entries=1)
 
 
 def cached_session_names() -> list[str]:
-    now = time.monotonic()
-    if now - float(_SESSION_NAMES_CACHE["at"]) < _SESSION_NAMES_TTL:
-        return list(_SESSION_NAMES_CACHE["names"])  # type: ignore[arg-type]
+    cached = _session_names_cache.get("names")
+    if cached is not None:
+        return list(cached)
     names = tmux_session_names()
-    _SESSION_NAMES_CACHE["at"] = now
-    _SESSION_NAMES_CACHE["names"] = names
+    _session_names_cache.set("names", names)
     return names
 
 

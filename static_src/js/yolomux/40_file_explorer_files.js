@@ -2096,12 +2096,30 @@ async function refreshFileIndexStatus(root) {
   const status = payload && payload.ready ? 'ready' : 'building';
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
-  clearTimeout(fileIndexStatusTimers.get(normalized));
-  fileIndexStatusTimers.delete(normalized);
-  if (status === 'building') {
-    fileIndexStatusTimers.set(normalized, setTimeout(() => refreshFileIndexStatus(normalized), 1500));
-  }
+  if (status === 'building') fileIndexStatusPollRoots.add(normalized);
+  else fileIndexStatusPollRoots.delete(normalized);
+  syncFileIndexStatusPollInterval();
   if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+}
+
+function refreshBuildingFileIndexStatuses() {
+  for (const root of Array.from(fileIndexStatusPollRoots)) {
+    if (!fileExplorerIndexedDirs.has(root)) {
+      fileIndexStatusPollRoots.delete(root);
+      continue;
+    }
+    refreshFileIndexStatus(root);
+  }
+  syncFileIndexStatusPollInterval();
+}
+
+function syncFileIndexStatusPollInterval() {
+  if (!fileIndexStatusPollRoots.size) {
+    clearRuntimeInterval('file-index-building');
+    return;
+  }
+  const proactiveMs = Math.max(1, fileExplorerIndexRefreshSeconds * 1000);
+  resetRuntimeInterval('file-index-building', refreshBuildingFileIndexStatuses, Math.min(1500, proactiveMs));
 }
 
 // Lazily warm/poll an indexed root's status, without re-fetching once it is known ready or while a
@@ -2109,7 +2127,7 @@ async function refreshFileIndexStatus(root) {
 function ensureFileIndexStatus(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
-  if (fileExplorerIndexStatus.get(normalized) === 'ready' || fileIndexStatusTimers.has(normalized)) return;
+  if (fileExplorerIndexStatus.get(normalized) === 'ready' || fileIndexStatusPollRoots.has(normalized)) return;
   refreshFileIndexStatus(normalized);
 }
 
@@ -2117,8 +2135,8 @@ function clearFileIndexStatus(root) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized) return;
   fileExplorerIndexStatus.delete(normalized);
-  clearTimeout(fileIndexStatusTimers.get(normalized));
-  fileIndexStatusTimers.delete(normalized);
+  fileIndexStatusPollRoots.delete(normalized);
+  syncFileIndexStatusPollInterval();
 }
 
 // Proactive periodic re-check: re-fetches index-status for every indexed root even if already

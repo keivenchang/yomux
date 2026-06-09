@@ -1228,19 +1228,48 @@ function createContextMenuController() {
   };
 }
 
-function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
+function makeButton(options = {}) {
   const button = document.createElement('button');
-  button.type = 'button';
+  button.type = options.type || 'button';
+  if (options.id) button.id = options.id;
   if (options.className) button.className = options.className;
-  button.setAttribute('role', 'menuitem');
-  button.textContent = label;
+  if (options.role) button.setAttribute('role', options.role);
+  if (options.html !== undefined) button.innerHTML = options.html;
+  else if (options.label !== undefined) button.textContent = options.label;
   button.disabled = options.disabled === true;
   if (options.title) button.title = options.title;
+  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
+  if (options.pressed !== undefined) button.setAttribute('aria-pressed', options.pressed ? 'true' : 'false');
   if (options.checked !== undefined) {
-    button.setAttribute('role', 'menuitemcheckbox');
     button.setAttribute('aria-checked', options.checked ? 'true' : 'false');
     if (options.checked === true) button.dataset.checked = 'true';
   }
+  if (options.dataset) {
+    for (const [key, value] of Object.entries(options.dataset)) {
+      if (value !== undefined && value !== null) button.dataset[key] = String(value);
+    }
+  }
+  if (typeof options.onClick === 'function') button.addEventListener('click', options.onClick);
+  return button;
+}
+
+function delegate(parent, type, selector, handler, options = {}) {
+  if (!parent || typeof handler !== 'function') return null;
+  const listener = event => {
+    const target = event.target?.closest?.(selector);
+    if (!target || !parent.contains(target)) return;
+    handler(event, target);
+  };
+  parent.addEventListener(type, listener, options);
+  return listener;
+}
+
+function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
+  const button = makeButton({
+    ...options,
+    label,
+    role: options.checked !== undefined ? 'menuitemcheckbox' : 'menuitem',
+  });
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();

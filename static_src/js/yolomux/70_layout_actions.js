@@ -1144,12 +1144,22 @@ function rekeyMap(map, oldKey, newKey) {
   map.delete(oldKey);
 }
 
+function clearSessionUiState(session) {
+  stopTranscriptStream(session);
+  stopSummaryStream(session);
+  autoApproveStates.delete(session);
+  uploadResultsBySession.delete(session);
+  if (uploadCleanupTimers.has(session)) {
+    clearTimeout(uploadCleanupTimers.get(session));
+    uploadCleanupTimers.delete(session);
+  }
+}
+
 function stopSessionUi(session) {
   const item = terminals.get(session);
   if (item) closeTerminalItem(session, item);
   terminals.delete(session);
-  stopTranscriptStream(session);
-  stopSummaryStream(session);
+  clearSessionUiState(session);
   const panel = panelNodes.get(session);
   if (panel) panel.remove();
   panelNodes.delete(session);
@@ -1756,13 +1766,12 @@ function dropIntentAllowsSession(session, intent) {
 }
 
 function clearDropPreview() {
-  const classes = ['drag-over', 'tab-drag-over', 'tab-drop-preview', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle', 'drop-preview-root', 'drop-preview-gutter'];
   const nodes = new Set([grid]);
-  for (const className of classes) {
+  for (const className of DROP_PREVIEW_CLASSES) {
     grid.querySelectorAll(`.${className}`).forEach(node => nodes.add(node));
   }
   nodes.forEach(node => {
-    node.classList.remove(...classes);
+    node.classList.remove(...DROP_PREVIEW_CLASSES);
     node.style?.removeProperty('--tab-drop-x');
     node.style?.removeProperty('--tab-drop-y');
     node.style?.removeProperty('--tab-drop-height');
@@ -1828,7 +1837,7 @@ function showDropPreview(intent) {
   const node = intent?.boundary ? grid : intent?.previewNode;
   if (!node) return;
   const zone = intent.zone || 'middle';
-  node.classList.add('drag-over', 'drop-preview', `drop-preview-${zone}`);
+  node.classList.add(CLS.dragOver, CLS.dropPreview, `drop-preview-${zone}`);
   if (intent.boundary) node.classList.add(`drop-preview-${intent.boundary}`);
   node.dataset.dropLabel = intent.boundary === 'root'
     ? `full ${zone}`

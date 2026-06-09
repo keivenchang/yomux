@@ -10,6 +10,15 @@
   --muted: #9aa5b1;
   --line: #303948;
   --tree-indent-line: rgba(148, 163, 184, 0.45);
+  --sep-muted: #5e6878;
+  --divider: #384356;
+  --overlay-slate-rgb: 15 23 42;
+  --accent-lime: #c4f970;
+  --radius-pill: 999px;
+  --radius-control: 4px;
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
   --good: #52d273;
   --active-ring: rgba(255, 255, 255, 0.96);
   --brand-green: #76b900;
@@ -55,7 +64,7 @@
   --git-untracked-badge: #2dd4bf;
   --git-deleted: #ff8585;
   --git-deleted-badge: #ff5d5d;
-  --git-staged: #c4f970;
+  --git-staged: var(--accent-lime);
   --git-staged-badge: var(--brand-green);
   --git-transcript: var(--muted);
   --git-transcript-badge: #94a3b8;
@@ -94,7 +103,7 @@
   --pane-scrollbar-track-active: rgba(255, 255, 255, 0.08);
   --pane-scrollbar-corner: var(--pane-scrollbar-track);
   --pane-scrollbar-size: 10px;
-  --pane-scrollbar-radius: 999px;
+  --pane-scrollbar-radius: var(--radius-pill);
   --pane-scrollbar-border: 2px solid transparent;
   --active-tab-muted-bg: color-mix(in srgb, var(--active-accent) 28%, var(--panel2));
   --active-tab-muted-hover-bg: color-mix(in srgb, var(--active-accent) 36%, var(--panel2));
@@ -326,6 +335,9 @@ body.theme-dark {
 }
 body.theme-light {
   color-scheme: light;
+  --sep-muted: #8c96a3;
+  --divider: var(--lt-line);
+  --accent-lime: #2f7d20;
   /* DOIT.41: light-theme defaults for the active accent (Green). The picker (applyActiveColor) overrides
      these per preset; supplied (not derived) so Green stays the exact current light values. */
   --active-accent: #5f9800;

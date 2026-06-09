@@ -681,8 +681,7 @@ async function fetchSessionFiles(options = {}) {
   const destination = 'finder';
   const forceRefresh = options.force === true;
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const requestId = ++fileExplorerSessionFilesRequestId;
-  const requestIsCurrent = () => requestId === fileExplorerSessionFilesRequestId;
+  const requestIsCurrent = fileExplorerSessionFilesGuard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
   let shouldRender = options.silent !== true;
   if (!session) {
@@ -900,17 +899,6 @@ function sessionFileIsDifferVisible(item) {
 
 function fileExplorerDifferFiles(payload = fileExplorerSessionFilesPayload) {
   return (Array.isArray(payload?.files) ? payload.files : []).filter(sessionFileIsDifferVisible);
-}
-
-function changeStatusClassKey(statusKey) {
-  const rowClass = gitStatusRowClass(statusKey || 'M');
-  return rowClass ? rowClass.replace(/^git-/, '') : 'unknown';
-}
-
-function changeFileParentLabel(relPath) {
-  const rel = String(relPath || '');
-  const index = rel.lastIndexOf('/');
-  return index > 0 ? rel.slice(0, index) : '';
 }
 
 function changeFileTotals(files) {
@@ -1191,44 +1179,6 @@ function changeFileAgentsHtml(item) {
   const label = ordered.map(kind => changedFileAgentTitle(kind, item)).filter(Boolean).join(', ');
   const labelAttr = icons.length > 1 && label ? ` aria-label="${esc(label)}"` : '';
   return `<span class="changes-file-agent"${labelAttr}>${icons.join('')}</span>`;
-}
-
-function changeFileRowHtml(item, options = {}) {
-  const statusKey = String(item.status || 'M').toUpperCase();
-  const statusClass = changeStatusClassKey(statusKey);
-  const absPath = item.abs_path || item.path || '';
-  const name = item.__displayName || basenameOf(absPath || item.path || '');
-  const rel = item.path || absPath;
-  const parentLabel = changeFileParentLabel(rel);
-  const detail = item.uploaded === true ? '' : (parentLabel || rel);
-  const timeText = sessionFileDisplayTimeText(item.mtime);
-  const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
-  const agentSlotHtml = changeFileAgentsHtml(item);
-  const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
-  const statusTitle = gitStatusBadgeTitle(statusKey);
-  const statusTitleAttr = statusTitle ? ` title="${esc(statusTitle)}" aria-label="${esc(statusTitle)}"` : '';
-  const statusBadgeHtml = `<span class="changes-status changes-status-${esc(statusClass)}"${statusTitleAttr}>${esc(statusKey)}</span>`;
-  const metaHtml = [diffHtml, statusBadgeHtml, dateHtml].filter(Boolean).join('');
-  // Row gets a git-* class for tinting (shared with Finder CSS rules)
-  const gitRowClass = gitStatusRowClass(statusKey) || (statusClass === 'unknown' ? 'git-untracked' : 'git-transcript');
-  const compactClass = options.compact ? ' compact' : ' detailed';
-  const depth = Math.max(0, Number(options.depth) || 0);
-  const icon = fileIconFor(name);
-  const iconClass = fileIconClassFor(name, 'file');
-  // C5: image rows get a rich Finder-style hover preview (bound in bindChangedFileRowBehaviors), so drop
-  // the native title there to avoid a duplicate tooltip; non-image rows keep the full-path title.
-  const isImage = IMAGE_EXTENSIONS.has(fileExtensionOf(name));
-  const titleAttr = isImage ? '' : ` title="${esc(absPath)}"`;
-  const sizeAttr = item.size === null || item.size === undefined ? '' : ` data-change-size="${esc(String(item.size))}"`;
-  const repoAttr = item.repo ? ` data-open-change-repo="${esc(item.repo)}"` : '';
-  const actionAttr = absPath
-    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" data-change-rel="${esc(rel || '')}"${repoAttr}${sizeAttr}${titleAttr}`
-    : ' disabled';
-  return `<button type="button" class="changes-file-row${compactClass} ${gitRowClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
-    <span class="changes-file-icon ${esc(iconClass)}" aria-hidden="true">${esc(icon)}</span>
-    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span>${detail ? `<span class="changes-file-path">${esc(detail)}</span>` : ''}</span>
-    <span class="changes-file-meta">${metaHtml}</span>
-  </button>`;
 }
 
 // DOM-mutation renderer for all repo sections in a Changes/Differ panel scroll area.

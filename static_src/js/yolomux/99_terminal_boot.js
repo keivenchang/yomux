@@ -647,35 +647,32 @@ function sortedInfoBranchRows(rows, sortState = infoBranchSort) {
 }
 
 function bindPanelControls(panel, session) {
-  panel.querySelectorAll('[data-tab]').forEach(button => {
-    button.addEventListener('click', () => {
-      const currentName = button.dataset.tabName;
-      const nextName = currentName !== 'terminal' && button.classList.contains('active') ? 'terminal' : currentName;
-      activateTab(button.dataset.tab, nextName, {userInitiated: true});
-    });
+  delegate(panel, 'click', '[data-tab]', (_event, button) => {
+    const currentName = button.dataset.tabName;
+    const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
+    activateTab(button.dataset.tab, nextName, {userInitiated: true});
   });
-  panel.querySelectorAll('[data-window-dir]').forEach(button => {
-    button.addEventListener('click', handleWindowStepButtonClick);
+  delegate(panel, 'click', '[data-window-dir]', event => {
+    handleWindowStepButtonClick(event);
   });
-  panel.querySelector('[data-pane-close]')?.addEventListener('click', event => {
+  delegate(panel, 'click', '[data-pane-close]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    removePaneFromLayout(event.currentTarget.dataset.paneClose);
+    removePaneFromLayout(button.dataset.paneClose);
   });
-  panel.querySelector('[data-pane-minimize]')?.addEventListener('click', event => {
+  delegate(panel, 'click', '[data-pane-minimize]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    minimizePaneFromLayout(event.currentTarget.dataset.paneMinimize);
+    minimizePaneFromLayout(button.dataset.paneMinimize);
   });
-  panel.querySelector('[data-pane-expand]')?.addEventListener('click', event => {
+  delegate(panel, 'click', '[data-pane-expand]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    expandPaneFromLayout(event.currentTarget.dataset.paneExpand);
+    expandPaneFromLayout(button.dataset.paneExpand);
   });
-  panel.querySelector('[data-pane-actions]')?.addEventListener('click', event => {
+  delegate(panel, 'click', '[data-pane-actions]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    const button = event.currentTarget;
     const rect = button.getBoundingClientRect();
     showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
   });
@@ -687,7 +684,7 @@ function bindPanelControls(panel, session) {
       showSessionContextMenu(session, event.clientX, event.clientY);
     });
   }
-  panel.querySelector('[data-context]')?.addEventListener('click', () => showContext(session));
+  delegate(panel, 'click', '[data-context]', () => showContext(session));
   panel.addEventListener('click', event => {
     const target = event.target.closest('[data-auto-session]');
     if (!target || !panel.contains(target)) return;
@@ -730,25 +727,25 @@ function bindFileUpload(panel, session) {
     if (!hasFileDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
-    panel.classList.add('file-drag-over');
+    panel.classList.add(CLS.fileDragOver);
   });
   panel.addEventListener('dragover', event => {
     if (!hasFileDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
-    panel.classList.add('file-drag-over');
+    panel.classList.add(CLS.fileDragOver);
   });
   panel.addEventListener('dragleave', event => {
     if (!hasFileDrag(event)) return;
     if (panel.contains(event.relatedTarget)) return;
-    panel.classList.remove('file-drag-over');
+    panel.classList.remove(CLS.fileDragOver);
   });
   panel.addEventListener('drop', event => {
     if (!hasFileDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
-    panel.classList.remove('file-drag-over');
+    panel.classList.remove(CLS.fileDragOver);
     uploadFiles(session, event.dataTransfer?.files || []);
   });
 }
@@ -779,11 +776,11 @@ function installFilePathDropTarget(session, target) {
     event.dataTransfer.dropEffect = 'copy';
     const intent = dropIntentForEvent(event);
     if (intent?.targetSlot) showDropPreview(intent);
-    target.classList.add('path-drag-over');
+    target.classList.add(CLS.pathDragOver);
   });
   target.addEventListener('dragleave', event => {
     if (target.contains(event.relatedTarget)) return;
-    target.classList.remove('path-drag-over');
+    target.classList.remove(CLS.pathDragOver);
     clearDropPreview();
   });
   target.addEventListener('drop', event => {
@@ -791,7 +788,7 @@ function installFilePathDropTarget(session, target) {
     if (!payload?.path) return;
     event.preventDefault();
     event.stopPropagation();
-    target.classList.remove('path-drag-over');
+    target.classList.remove(CLS.pathDragOver);
     const intent = dropIntentForEvent(event);
     clearDropPreview();
     if (intent?.targetSlot && intent.zone !== 'middle') {

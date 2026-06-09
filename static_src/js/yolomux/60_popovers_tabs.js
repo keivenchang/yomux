@@ -1029,7 +1029,7 @@ function endSessionDrag(event) {
   dragSourceSlot = null;
   resetDragTabRectCache();
   stopCustomDragPreview();
-  sessionButtons.classList.remove('drag-over');
+  sessionButtons.classList.remove(CLS.dragOver);
   clearDropPreview();
   // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }

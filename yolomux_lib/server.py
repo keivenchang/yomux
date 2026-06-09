@@ -65,6 +65,16 @@ PTY_DIMENSION_MAX = 1000
 WEBSOCKET_FRAME_READ_TIMEOUT_SECONDS = 5.0
 
 
+def query_one(qs: dict[str, list[str]], name: str, default: str | None = "") -> str | None:
+    values = qs.get(name)
+    return values[0] if values else default
+
+
+def query_bool(qs: dict[str, list[str]], name: str, default: bool = False) -> bool:
+    raw_default = "1" if default else "0"
+    return parse_bool(str(query_one(qs, name, raw_default) or ""))
+
+
 def content_disposition_attachment(raw_path: str) -> str:
     name = Path(str(raw_path or "")).name or "download"
     safe = "".join(char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";", "/"} else "_" for char in name).strip()
@@ -207,13 +217,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/api/activity-summary":
             qs = parse_qs(parsed.query)
             self.write_json(self.server.app.activity_summary_payload(
-                force=parse_bool(qs.get("force", ["0"])[0]),
-                locale=qs.get("locale", ["en"])[0],
+                force=query_bool(qs, "force"),
+                locale=str(query_one(qs, "locale", "en") or "en"),
             ))
             return
         if parsed.path == "/api/tmux":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
+            session = str(query_one(qs, "session", "") or "")
             lines, error = parse_query_int(qs, "lines", 90, max_value=MAX_TRANSCRIPT_TAIL_LINES)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
@@ -223,7 +233,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/transcript":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
+            session = str(query_one(qs, "session", "") or "")
             lines, error = parse_query_int(qs, "lines", 120, max_value=MAX_TRANSCRIPT_TAIL_LINES)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
@@ -233,7 +243,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/context":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
+            session = str(query_one(qs, "session", "") or "")
             messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
@@ -243,7 +253,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/context-items":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
+            session = str(query_one(qs, "session", "") or "")
             messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
@@ -259,7 +269,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/auto-approve":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [None])[0]
+            session = query_one(qs, "session", None)
             payload, status = self.server.app.auto_approve_status(session)
             self.write_json(payload, status=status)
             return
@@ -277,7 +287,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/events":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [None])[0]
+            session = query_one(qs, "session", None)
             limit, error = parse_query_int(qs, "limit", 100, max_value=MAX_EVENT_TAIL_LINES)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
@@ -287,8 +297,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/search":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [None])[0]
-            query = qs.get("q", [""])[0]
+            session = query_one(qs, "session", None)
+            query = str(query_one(qs, "q", "") or "")
             limit, error = parse_query_int(qs, "limit", 100, max_value=MAX_EVENT_TAIL_LINES)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
@@ -298,28 +308,28 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/run-history":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [None])[0]
+            session = query_one(qs, "session", None)
             payload, status = self.server.app.run_history_payload(session)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/session-files":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [None])[0]
+            session = query_one(qs, "session", None)
             hours, error = parse_query_float(qs, "hours", 24.0, max_value=24.0 * 365.0)
             if error:
                 self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
                 return
-            from_ref = qs.get("from", [None])[0]
-            to_ref = qs.get("to", [None])[0]
+            from_ref = query_one(qs, "from", None)
+            to_ref = query_one(qs, "to", None)
             # C6: optional per-repo override map ({repo_path: {"from","to"}}) as URL-encoded JSON, so each
             # repo can compare its own commit graph. Malformed JSON falls back to the scalar from/to.
-            repo_refs = parse_repo_refs_param(qs.get("refs", [None])[0])
+            repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
             payload, status = self.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/summary":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
+            session = str(query_one(qs, "session", "") or "")
             payload, status = self.server.app.summary(session)
             self.write_json(payload, status=status)
             return
@@ -357,43 +367,43 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def handle_fs_list(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        raw_path = qs.get("path", ["/"])[0]
+        raw_path = str(query_one(qs, "path", "/") or "/")
         self.write_filesystem_json(raw_path, lambda: filesystem.list_directory(raw_path))
 
     def handle_fs_search(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        raw_root = qs.get("root", qs.get("path", ["/"]))[0]
-        query = qs.get("query", [""])[0]
-        limit = qs.get("limit", ["400"])[0]
-        recursive = qs.get("recursive", [""])[0] in {"1", "true", "yes"}
+        raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
+        query = str(query_one(qs, "query", "") or "")
+        limit = str(query_one(qs, "limit", "400") or "400")
+        recursive = query_bool(qs, "recursive")
         self.write_filesystem_json(raw_root, lambda: filesystem.search_files(raw_root, query, limit, recursive=recursive))
 
     def handle_fs_index_status(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        raw_root = qs.get("root", qs.get("path", ["/"]))[0]
+        raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
         self.write_filesystem_json(raw_root, lambda: filesystem.index_status(raw_root))
 
     def handle_fs_read(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        raw_path = qs.get("path", [""])[0]
+        raw_path = str(query_one(qs, "path", "") or "")
         self.write_filesystem_json(raw_path, lambda: filesystem.read_file(raw_path))
 
     def handle_fs_info(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        raw_path = qs.get("path", [""])[0]
+        raw_path = str(query_one(qs, "path", "") or "")
         self.write_filesystem_json(raw_path, lambda: filesystem.path_info(raw_path))
 
     def handle_fs_diff(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        raw_path = qs.get("path", [""])[0]
-        from_ref = qs.get("from", [None])[0]
-        to_ref = qs.get("to", [None])[0]
+        raw_path = str(query_one(qs, "path", "") or "")
+        from_ref = query_one(qs, "from", None)
+        to_ref = query_one(qs, "to", None)
         self.write_filesystem_json(raw_path, lambda: filesystem.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref))
 
     def handle_blame(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        raw_path = qs.get("path", [""])[0]
-        ref = qs.get("ref", [None])[0]
+        raw_path = str(query_one(qs, "path", "") or "")
+        ref = query_one(qs, "ref", None)
         self.write_filesystem_json(raw_path, lambda: filesystem.blame_file(raw_path, ref=ref))
 
     def write_filesystem_json(self, raw_path: str, build_payload: Any) -> None:
@@ -406,8 +416,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def handle_fs_raw(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        raw_path = qs.get("path", [""])[0]
-        download = qs.get("download", [""])[0] in {"1", "true", "yes"}
+        raw_path = str(query_one(qs, "path", "") or "")
+        download = query_bool(qs, "download")
         try:
             data, mime = filesystem.read_raw(raw_path)
         except FilesystemError as exc:
@@ -561,45 +571,45 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/ensure-session":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
+            session = str(query_one(qs, "session", "") or "")
             payload, status = self.server.app.ensure_session(session)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/create-session":
             qs = parse_qs(parsed.query)
-            agent = qs.get("agent", ["claude"])[0]
+            agent = str(query_one(qs, "agent", "claude") or "claude")
             payload, status = self.server.app.create_next_session(agent)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/rename-session":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
-            new_name = qs.get("new_name", [""])[0]
+            session = str(query_one(qs, "session", "") or "")
+            new_name = str(query_one(qs, "new_name", "") or "")
             payload, status = self.server.app.rename_session(session, new_name)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/kill-session":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
+            session = str(query_one(qs, "session", "") or "")
             payload, status = self.server.app.kill_session(session)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/upload":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
+            session = str(query_one(qs, "session", "") or "")
             payload, status = self.handle_upload(session)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/auto-approve":
             qs = parse_qs(parsed.query)
-            session = qs.get("session", [""])[0]
-            enabled = parse_bool(qs.get("enabled", ["0"])[0])
+            session = str(query_one(qs, "session", "") or "")
+            enabled = query_bool(qs, "enabled")
             payload, status = self.server.app.set_auto_approve(session, enabled)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/notify":
             qs = parse_qs(parsed.query)
-            enabled = parse_bool(qs.get("enabled", ["0"])[0])
+            enabled = query_bool(qs, "enabled")
             self.write_json(self.server.app.set_notify(enabled))
             return
         if parsed.path == "/api/settings":
@@ -780,7 +790,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def stream_context_items(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        session = qs.get("session", [""])[0]
+        session = str(query_one(qs, "session", "") or "")
         messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
         if error:
             self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)
@@ -822,7 +832,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def stream_codex_summary(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
-        session = qs.get("session", [""])[0]
+        session = str(query_one(qs, "session", "") or "")
         lookback_seconds, error = parse_query_int(qs, "lookback", SUMMARY_LOOKBACK_SECONDS, max_value=SUMMARY_LOOKBACK_SECONDS * 24)
         if error:
             self.write_json({"error": error}, status=HTTPStatus.BAD_REQUEST)

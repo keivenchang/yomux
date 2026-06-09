@@ -375,7 +375,7 @@ globalThis.__layoutTestApi = {
   sessionFilesCacheKeyForTest: sessionFilesCacheKey,
   noteFileExplorerChangesSessionInteractionForTest: noteFileExplorerChangesSessionInteraction,
   setFileExplorerChangesSelectedSessionForTest(value) { fileExplorerChangesSelectedSession = String(value || ''); },
-  changeFileRowHtml,
+  changesGroupsSnapshotHtmlForTest: changesGroupsSnapshotHtml,
   fileExplorerChangesCollapseToggleHtml,
   fileExplorerChangesAllReposCollapsedForTest: fileExplorerChangesAllReposCollapsed,
   toggleAllFileExplorerChangesForTest: toggleAllFileExplorerChanges,
@@ -490,6 +490,26 @@ globalThis.__layoutTestApi = {
   testElementForId(id) { return document.getElementById(id); },
   registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN}) {
     terminals.set(session, {term, socket, container: document.getElementById('terminal-pane-' + session)});
+  },
+  seedSessionTeardownStateForTest(session) {
+    const closed = {transcript: 0, summary: 0};
+    transcriptStreams.set(session, {close() { closed.transcript += 1; }});
+    summaryStreams.set(session, {close() { closed.summary += 1; }});
+    autoApproveStates.set(session, {enabled: true});
+    uploadResultsBySession.set(session, [{text: 'uploaded'}]);
+    uploadCleanupTimers.set(session, 123);
+    return closed;
+  },
+  stopSessionUiForTest: stopSessionUi,
+  sessionTeardownStateForTest(session) {
+    return {
+      terminal: terminals.has(session),
+      transcript: transcriptStreams.has(session),
+      summary: summaryStreams.has(session),
+      autoApprove: autoApproveStates.has(session),
+      uploads: uploadResultsBySession.has(session),
+      uploadTimer: uploadCleanupTimers.has(session),
+    };
   },
   tmuxSessionActionCommands,
   tmuxSessionViewCommands,
@@ -1640,14 +1660,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(activePreferenceBody.includes('[data-preferences-reset-all]'), 'global reset button is preserved through search focusout');
   assert.ok(activePreferenceBody.includes('[data-preferences-reset-confirm]'), 'global reset confirmation button is preserved through focusout');
   assert.equal(source.includes('let sessionFilesRequestId = 0;'), false, 'standalone Changes request id is removed');
-  assert.ok(source.includes('let fileExplorerSessionFilesRequestId = 0;'), 'Finder diff fetches have their own stale-response request id');
-  assert.ok(source.includes('requestId === fileExplorerSessionFilesRequestId'), 'Finder diff fetches reject stale responses');
+  assert.ok(source.includes('const fileExplorerSessionFilesGuard = makeGenerationGuard();'), 'Finder diff fetches have their own stale-response generation guard');
+  assert.ok(source.includes('const requestIsCurrent = fileExplorerSessionFilesGuard.begin();'), 'Finder diff fetches reject stale responses through the shared guard');
   assert.ok(source.includes('function activeChangesControl'), 'Finder diff renders can detect active controls');
   assert.ok(source.includes('!activeChangesControl(panel)'), 'background Changes renders preserve active selects and ref controls');
   assert.ok(source.includes('function sessionFilesRenderOptions'), 'modified-file fetch rendering distinguishes silent polls from explicit user refreshes');
   assert.ok(source.includes('const loadingPromise = (async () => {'), 'editor file loading keeps a promise handle for guarded cleanup');
   assert.ok(source.includes('if (current?.loadingPromise === loadingPromise) delete current.loadingPromise;'), 'editor file loading clears stale loading promises after failure or success');
-  assert.ok(source.includes('let activitySummaryRequestId = 0;'), 'activity summary refreshes carry a stale-response request id');
+  assert.ok(source.includes('const activitySummaryGuard = makeGenerationGuard();'), 'activity summary refreshes carry a stale-response generation guard');
   assert.ok(source.includes('if (activitySummaryRefreshing && options.force !== true) return;'), 'activity summary polling skips overlapping non-forced refreshes');
   assert.ok(source.includes('let transcriptMetaRefreshPromise = null;'), 'metadata refreshes keep one in-flight promise');
   assert.ok(source.includes('if (transcriptMetaRefreshPromise) return transcriptMetaRefreshPromise;'), 'metadata refreshes dedupe overlapping loads');
@@ -1689,7 +1709,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(createInfoPanelSource.includes('id="meta-'), false, '#40: the merged YO!info panel no longer renders a subtitle meta bar');
   assert.equal(/class="transcript-head info-head"/.test(source), false, '#40: the duplicate sub-view title bar is gone');
   assert.ok(/function createInfoPanel\(\)[\s\S]*?renderInfoPanel\(\);\s*renderYoagentPanel\(\);/.test(source), '#40: the merged panel renders both sub-views on creation');
-  assert.ok(/function renderAttachedPanelContent\(item\)[\s\S]*?item !== infoItemId[\s\S]*?applyInfoSubTab\(\)[\s\S]*?renderInfoPanel\(\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, scrollBottom: false\}\)/.test(source), '#40/#YO!info: attaching the pooled info panel immediately renders both sub-views');
+  assert.ok(/renderAttached:\s*\(\) => \{[\s\S]*?applyInfoSubTab\(\);[\s\S]*?renderInfoPanel\(\);[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, scrollBottom: false\}\);[\s\S]*?\}/.test(source), '#40/#YO!info: info tab registry hook renders both sub-views on attach');
+  assert.ok(/function renderAttachedPanelContent\(item\)[\s\S]*?tabTypeForItem\(item\)\?\.renderAttached[\s\S]*?renderAttached\(item\)/.test(source), '#40/#YO!info: pooled panel attach dispatches through TAB_TYPES');
   assert.ok(/function renderDropSlot\(slot, session\)[\s\S]*?node\.appendChild\(panel\);\s*renderAttachedPanelContent\(session\);/.test(source), '#40/#YO!info: initial drop-slot attach renders YO!info before metadata polling');
   assert.ok(/function syncActivePanelsInPlace\(\)[\s\S]*?dropSlot\.replaceChildren\(desired\);[\s\S]*?updatePanelSlot\(desired, item, slot\);[\s\S]*?renderAttachedPanelContent\(item\);/.test(source), '#40/#YO!info: in-place panel swaps also render YO!info after attachment');
   assert.equal(source.includes('function createYoagentPanel('), false, '#40: the standalone YO!agent panel builder is gone');
@@ -1877,6 +1898,23 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 }
 
 {
+  // T5: stopping a session clears every session-keyed UI map and closes live streams.
+  const api = loadYolomux('', ['1']);
+  api.registerTerminalForTest('1', {dispose() {}}, {readyState: 1, close() {}});
+  const closed = api.seedSessionTeardownStateForTest('1');
+  api.stopSessionUiForTest('1');
+  assert.deepEqual(api.sessionTeardownStateForTest('1'), {
+    terminal: false,
+    transcript: false,
+    summary: false,
+    autoApprove: false,
+    uploads: false,
+    uploadTimer: false,
+  }, 'stopSessionUi clears all session-keyed UI state');
+  assert.deepEqual(closed, {transcript: 1, summary: 1}, 'stopSessionUi closes both EventSource streams');
+}
+
+{
   // Git-aware Finder: repo-dir inline annotation (branch + ahead/behind/dirty) + hover popover.
   const api = loadYolomux('', ['1']);
   const css = fs.readFileSync('static/yolomux.css', 'utf8');
@@ -2047,7 +2085,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("apiFetchJson('/api/yoagent/reset'"), 'YO!agent clear conversation resets the server-side CLI session');
   assert.ok(source.includes("renderYoagentPanel({preserveDraft: false, scrollBottom: true})"), 'YO!agent send/clear clears the draft and scrolls chat to the bottom');
   assert.equal(source.includes('yoagentSessionSummariesHtml'), false, 'YO!agent default panel does not render the per-session SESSION detail card list');
-  assert.ok(source.includes('draggable="true" data-open-change-file='), 'Modified-files rows are draggable as file payloads');
+  assert.ok(source.includes("row.draggable = entry.kind === 'file' || entry.kind === 'dir';") && source.includes('row.dataset.openChangeFile = changedFile.abs_path;'), 'Modified-files rows use the shared tree renderer and remain draggable as file payloads');
   assert.ok(source.includes("event.dataTransfer.setData('application/x-yolomux-file'"), 'Modified-files drag carries the same file payload as Finder drag');
   assert.ok(source.includes("'Allow index'"), 'Finder directory context menu exposes Allow index');
   assert.ok(source.includes("'Disallow index'"), 'Finder directory context menu exposes Disallow index');
@@ -2415,10 +2453,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(emptyExplicitRepoHtml.includes('No Differ results for this session.'), 'empty explicit repo section explains that the selected refs have no visible file rows');
   assert.equal(emptyExplicitRepoHtml.includes('data-open-change-file='), false, 'empty explicit repo section does not invent transcript-only file rows');
   assert.ok(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), 'modified-file rows open from a double-click handler');
-  const compactChangeHtml = api.changeFileRowHtml(
+  const compactChangeHtml = api.changesGroupsSnapshotHtmlForTest([
     {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
-    {compact: true},
-  );
+  ], {compact: true});
   const gitStatusClassCases = {
     A: 'git-untracked',
     U: 'git-untracked',
@@ -2431,8 +2468,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   for (const [status, expectedClass] of Object.entries(gitStatusClassCases)) {
     assert.equal(api.gitStatusRowClass(status), expectedClass, `shared git status row class for ${status}`);
   }
-  assert.ok(/changes-file-name[^>]*>README\.md<\/span>[\s\S]*changes-file-agent[\s\S]*changes-file-meta[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-status[^>]*>M<\/span>[\s\S]*changes-file-date/.test(compactChangeHtml), 'compact changed-file row order is file, AI icon, counts, status, date');
-  assert.ok(/changes-status[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(compactChangeHtml), 'compact changed-file M badge explains itself on hover');
+  assert.ok(/file-tree-name[^>]*>README\.md<\/span>[\s\S]*file-tree-agent[\s\S]*changes-file-agent[\s\S]*file-tree-diff[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*file-tree-git-status[^>]*>M<\/span>[\s\S]*file-tree-date/.test(compactChangeHtml), 'compact changed-file row order is file, AI icon, counts, status, date');
+  assert.ok(/file-tree-git-status[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(compactChangeHtml), 'compact changed-file M badge explains itself on hover');
   assert.equal(changesHtml.includes('>codex<'), false, 'changed-file rows do not spell out the agent kind');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'));
   assert.ok(changesHtml.includes('data-open-change-status="A"'), 'changed-file clicks carry status for deleted-file diff opens');
@@ -2441,34 +2478,34 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(changedFilesSource.includes("const initialMode = isAddedChange || isTouchedOnly ? 'edit' : 'diff';"), 'added/untracked/touched rows open through editable mode first');
   assert.ok(changedFilesSource.includes("viewMode: initialMode"), 'non-diff rows fall back to normal editor mode instead of forcing diff');
   assert.ok(/async function openChangedFileInDiff\([^]*?const payloadRepoRefs = \(\(\) => \{[^]*?\}\)\(\);[\s\S]*?noteFileExplorerChangesSessionInteraction\(ownerSession\)[\s\S]*?openFileInEditor/.test(changedFilesSource), 'opening a changed-file row commits its owner session to the Differ panel after preserving row FROM/TO refs');
-  const touchedOnlyHtml = api.changeFileRowHtml({session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/merged.py', abs_path: '/repo/app/src/merged.py', mtime: 100, source: 'transcript'}, {compact: true});
-  assert.ok(touchedOnlyHtml.includes('changes-status-t') && touchedOnlyHtml.includes('>T</span>'), 'touched-only transcript rows carry a neutral T status badge');
-  assert.ok(/changes-status[^>]*title="T: touched by AI transcript"[^>]*aria-label="T: touched by AI transcript"[^>]*>T<\/span>/.test(touchedOnlyHtml), 'touched-only T badge explains itself on hover');
+  const touchedOnlyHtml = api.changesGroupsSnapshotHtmlForTest([
+    {session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/merged.py', abs_path: '/repo/app/src/merged.py', mtime: 100, source: 'transcript'},
+  ], {compact: true});
+  assert.ok(touchedOnlyHtml.includes('git-transcript') && touchedOnlyHtml.includes('>T</span>'), 'touched-only transcript rows carry a neutral T status badge');
+  assert.ok(/file-tree-git-status[^>]*title="T: touched by AI transcript"[^>]*aria-label="T: touched by AI transcript"[^>]*>T<\/span>/.test(touchedOnlyHtml), 'touched-only T badge explains itself on hover');
   // C5: agent attribution renders 0-to-N icons from item.agents (Claude before Codex), with a screen-
   // reader label when more than one appears.
-  const zeroAgentRow = api.changeFileRowHtml({session: '1', agents: [], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
+  const zeroAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agents: [], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
   assert.equal(zeroAgentRow.includes('changes-file-agent'), false, 'C5: a file with no transcript attribution renders zero agent icons');
-  const oneAgentRow = api.changeFileRowHtml({session: '1', agents: ['codex'], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
+  const oneAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agents: ['codex'], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
   assert.ok(oneAgentRow.includes('agent-icon codex') && !oneAgentRow.includes('agent-icon claude'), 'C5: one agent renders exactly one icon');
   assert.ok(/agent-icon codex"[^>]*aria-label="modified by Codex [^"]* ago"[^>]*title="modified by Codex [^"]* ago"/.test(oneAgentRow), 'C5: Codex icon hover names who modified the file and when');
-  const twoAgentRow = api.changeFileRowHtml({session: '1', agents: ['codex', 'claude'], status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
+  const twoAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agents: ['codex', 'claude'], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
   assert.ok(twoAgentRow.includes('agent-icon claude') && twoAgentRow.includes('agent-icon codex'), 'C5: a file touched by both agents renders both icons');
   assert.ok(twoAgentRow.indexOf('agent-icon claude') < twoAgentRow.indexOf('agent-icon codex'), 'C5: agent icons order Claude before Codex');
   assert.ok(/changes-file-agent(?![^>]*title=)[^>]*aria-label="modified by Claude [^"]* ago, modified by Codex [^"]* ago"/.test(twoAgentRow), 'C5: the multi-agent slot is labeled for screen readers without a generic native tooltip');
   assert.ok(/agent-icon claude"[^>]*title="modified by Claude [^"]* ago"/.test(twoAgentRow), 'C5: Claude icon hover names who modified the file and when');
   assert.ok(/agent-icon codex"[^>]*title="modified by Codex [^"]* ago"/.test(twoAgentRow), 'C5: Codex icon hover stays contextual in multi-agent rows');
-  const legacyAgentRow = api.changeFileRowHtml({session: '1', agent: 'codex', status: 'M', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}, {});
+  const legacyAgentRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1}], {});
   assert.ok(legacyAgentRow.includes('agent-icon codex'), 'C5: legacy scalar agent payloads still render their icon');
   // C5: image rows carry size + relative path and DROP the native title (the rich hover preview replaces it);
   // non-image rows keep the full-path title.
-  const imageRow = api.changeFileRowHtml({session: '1', agents: [], status: 'A', repo: '/repo/app', path: 'pic.png', abs_path: '/repo/app/pic.png', mtime: 1, size: 4096}, {});
-  assert.ok(imageRow.includes('changes-file-row detailed git-untracked'), 'C5: added uploaded rows use the same git-untracked class as Finder rows');
-  assert.ok(/changes-status[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(imageRow), 'C5: added status badge explains itself on hover');
+  const imageRow = api.changesGroupsSnapshotHtmlForTest([{session: '1', agents: [], status: 'A', repo: '/repo/app', path: 'pic.png', abs_path: '/repo/app/pic.png', mtime: 1, size: 4096}], {});
+  assert.ok(imageRow.includes('file-tree-row kind-file git-untracked'), 'C5: added uploaded rows use the same git-untracked class as Finder rows');
+  assert.ok(/file-tree-git-status[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(imageRow), 'C5: added status badge explains itself on hover');
   assert.ok(imageRow.includes('data-change-size="4096"'), 'C5: image rows carry the file size for preview gating');
   assert.ok(imageRow.includes('data-change-rel="pic.png"'), 'C5: rows carry the relative path for Copy path');
   assert.equal(/title="[^"]*pic\.png"/.test(imageRow), false, 'C5: image rows drop the native title so it does not duplicate the hover preview');
-  const textRow = api.changeFileRowHtml({session: '1', agents: [], status: 'M', repo: '/repo/app', path: 'a.txt', abs_path: '/repo/app/a.txt', mtime: 1, size: 10}, {});
-  assert.ok(textRow.includes('title="/repo/app/a.txt"'), 'C5: non-image rows keep the full-path title');
   // C5: per-render row binder + safe Finder-style context menu (no destructive Rename/Delete on Modified files).
   assert.ok(changedFilesSource.includes('function bindChangedFileRowBehaviors('), 'C5: a per-render binder hooks Modified-files rows');
   assert.ok(/function bindChangedFileRowBehaviors\([\s\S]*?bindFileImagePreview\(row, path/.test(changedFilesSource), 'C5: image rows get the Finder hover preview');
@@ -2699,26 +2736,24 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(c10Body.includes('fileExplorerSelectedPaths') && c10Body.includes('deleteFileTreePath('), 'C10: it deletes the selected paths via the existing delete flow');
   assert.ok(c10Body.includes('readOnlyMode'), 'C10: readonly is blocked through the existing delete guard');
   const changedFilesCss = fs.readFileSync('static/yolomux.css', 'utf8');
-  assert.ok(/\.changes-status\s*\{[\s\S]*width:\s*13px/.test(changedFilesCss), 'modified-file status chips are skinny');
+  assert.ok(/\.file-tree-git-status\s*\{[\s\S]*width:\s*13px/.test(changedFilesCss), 'modified-file status chips use the shared skinny Finder badge');
   // #46: Modified-files rows match the Finder file tree — the row uses the file-explorer font size and
   // the filename carries no semibold/bold weight (regular, not big bold white).
-  assert.ok(/\.changes-file-row\s*\{[\s\S]*font-size:\s*var\(--file-explorer-font-size\)/.test(changedFilesCss), '#46: modified-file rows use the Finder file-tree font size');
+  assert.equal(changedFilesCss.includes('.changes-file-row'), false, '#46: modified-file rows use shared Finder file-tree rows, not standalone changes-file-row CSS');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-indent-line:\s*rgba\(148,\s*163,\s*184,\s*0\.50\)/.test(changedFilesCss), 'Differ/Finder changes trees use a brighter dark-mode guide line');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*color-mix\(in srgb,\s*var\(--panel2\) 88%,\s*var\(--text\) 12%\)/.test(changedFilesCss), 'Differ/Finder changes repo headers use a brighter dark-mode scoped background token');
   assert.ok(/body\.theme-light \.file-explorer-changes-panel,[\s\S]*--changes-indent-line:\s*var\(--tree-indent-line\);[\s\S]*--changes-repo-head-bg:\s*var\(--panel2\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide and repo header tokens stay unchanged');
   assert.equal(/(?:^|\n)\.changes-file-name\s*\{[^}]*font-weight/.test(changedFilesCss), false, '#46: modified-file names carry no bold/semibold weight override');
-  assert.ok(/\.changes-tree-folder-row\s*\{[\s\S]*grid-template-columns:\s*12px 16px minmax\(0, 1fr\) auto/.test(changedFilesCss), 'modified-file folders use a compact GitLens-style tree row');
+  assert.equal(changedFilesCss.includes('.changes-tree-folder'), false, 'Differ folders use the shared Finder tree renderer, not a stale changes-tree-folder CSS path');
+  assert.equal(changedFilesSource.includes('function changeFileRowHtml('), false, 'Differ rows are not rendered through the legacy standalone row builder');
   assert.ok(/\.changes-repo-title\s*\{[\s\S]*color:\s*var\(--accent-gold\)[\s\S]*font-weight:\s*800/.test(changedFilesCss), 'Modified-files repo names are gold and bold');
   assert.ok(/\.changes-repo-totals\s*\{[\s\S]*margin-inline-start:\s*auto/.test(changedFilesCss), 'Modified-files repo totals are pinned to the right side of the disclosure header');
-  assert.ok(/\.changes-tree-folder-name\s*\{[\s\S]*color:\s*var\(--changes-folder-text\)[\s\S]*font-weight:\s*400/.test(changedFilesCss), 'Modified-files subdirectory names are gold but not bold');
   assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-folder-text:\s*var\(--accent-gold\)/.test(changedFilesCss), 'Finder diff inherits the same gold subdirectory token');
   assert.ok(/body\.theme-light\b[\s\S]*?--tree-indent-line:\s*rgba\(100,\s*116,\s*139,\s*0\.12\)/.test(changedFilesCss), 'light-mode tree connector lines are subdued (shared --tree-indent-line token)');
-  assert.ok(/body\.theme-light \.changes-file-row\s*\{[\s\S]*border-top-color:\s*rgba\(100,\s*116,\s*139,\s*0\.13\)/.test(changedFilesCss), 'light-mode Modified-files row dividers are subdued');
-  assert.ok(changedFilesCss.includes('.changes-status-r,'), 'modified-file rename/copy statuses get distinct colors');
-  assert.ok(/\.changes-status-t\s*\{[^}]*background:\s*var\(--git-transcript-badge\)/.test(changedFilesCss), 'touched-only transcript rows get the shared neutral git status color');
+  assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgba\(226,\s*232,\s*240,\s*0\.10\)/.test(changedFilesCss), 'shared Finder/Differ unknown status chips are faint-neutral in dark mode');
   // Purple is RESERVED for MERGED PR status: the untracked/unknown change badge must NOT be purple
   // (it was #a78bfa, reading as a merged indicator next to the PR badges); the merged PR status keeps it.
-  assert.ok(/\.changes-status-u,\s*\.changes-status-unknown\s*\{[^}]*background:\s*var\(--git-untracked-badge\)/.test(changedFilesCss), 'untracked/unknown badge uses the shared git status token, not the merged PR token');
+  assert.ok(/\.file-tree-row\.git-untracked:not\(\.selected\) \.file-tree-git-status:not\(\[hidden\]\)\s*\{[\s\S]*background:\s*var\(--git-untracked-badge\)/.test(changedFilesCss), 'untracked badge uses the shared git status token, not the merged PR token');
   assert.ok(/--input-bg\s*:/.test(changedFilesCss), 'input background token is defined instead of relying on a dark fallback');
   assert.equal(/var\(--input-bg,\s*#[0-9a-fA-F]{3,8}\)/.test(changedFilesCss), false, 'input controls do not hide dark literals inside token fallbacks');
   assert.equal(/z-index:\s*(?:260|220)\b/.test(changedFilesCss), false, 'file editor z-index collision literals are routed through named tokens');
@@ -3532,7 +3567,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-text:\s*#1f2937/.test(preferencesCss), 'light-mode tab text is dark (no white-on-white inactive tabs)');
   // The name/dir/detail spans hardcode near-white (for dark tabs); light mode overrides them dark too,
   // or the branch/path text stays white-on-white even with a dark base tab color.
-  assert.ok(/body\.theme-light \.pane-tab:not\(\.active\) \.session-button-name,[\s\S]*?\.session-button-detail\s*\{[^}]*color:\s*#1f2937/.test(preferencesCss), 'light-mode inactive-tab name/dir/detail text is dark (fixes white-on-white branch/path text)');
+  assert.ok(/body\.theme-light \.pane-tab:not\(\.active\) \.session-button-name,[\s\S]*?\.session-button-detail\s*\{[^}]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'light-mode inactive-tab name/dir/detail text is dark via the shared control foreground token');
   // An inactive pane's inactive tabs follow the gray bar (--pane-bar-bg, which is --panel2 when unfocused);
   // the bars themselves go gray via --pane-bar-bg (asserted above), so only the tabs need this rule.
   assert.ok(/\.panel:not\(\.active-pane\):not\(\.typing-ready-pane\) \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'an inactive pane\'s inactive tabs follow the gray bar (--pane-bar-bg)');
@@ -4662,9 +4697,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(syncCss.includes('--finder-sync-expanded-bg'), false, 'Finder auto-expanded Sync marker no longer uses a background token');
   assert.ok(/\.file-tree-row\.file-tree-row--sync-expanded > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-repo > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--session-touched > \.file-tree-name,[\s\S]*?\.file-tree-row\.file-tree-row--changed-ancestor > \.file-tree-name\s*\{[\s\S]*?font-weight:\s*800/.test(syncCss), 'Finder Sync and changed-ancestor markers bold the row name instead of painting a background');
   assert.ok(/\.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgba\(226,\s*232,\s*240,\s*0\.10\) !important[\s\S]*?color:\s*rgba\(226,\s*232,\s*240,\s*0\.46\)/.test(syncCss), 'dark Finder ? status badge is faint against a dark background');
-  assert.ok(/body\.theme-light \.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgba\(15,\s*23,\s*42,\s*0\.06\) !important[\s\S]*?color:\s*rgba\(15,\s*23,\s*42,\s*0\.36\)/.test(syncCss), 'light Finder ? status badge is faint against a light background');
-  assert.ok(/\.changes-status-unknown\s*\{[\s\S]*?background:\s*rgba\(226,\s*232,\s*240,\s*0\.10\)[\s\S]*?color:\s*rgba\(226,\s*232,\s*240,\s*0\.46\)/.test(syncCss), 'Differ ? status badge is faint-neutral in dark mode');
-  assert.ok(/body\.theme-light \.changes-status-unknown\s*\{[\s\S]*?background:\s*rgba\(15,\s*23,\s*42,\s*0\.06\)[\s\S]*?color:\s*rgba\(15,\s*23,\s*42,\s*0\.36\)/.test(syncCss), 'Differ ? status badge is faint-neutral in light mode');
+  assert.ok(/body\.theme-light \.file-tree-git-status\.file-tree-git-status-unknown\s*\{[\s\S]*?background:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.06\) !important[\s\S]*?color:\s*rgb\(var\(--overlay-slate-rgb\) \/ 0\.36\)/.test(syncCss), 'light Finder ? status badge is faint against a light background through the shared slate overlay token');
+  assert.equal(syncCss.includes('.changes-status-unknown'), false, 'Differ no longer has a separate unknown-status CSS path');
   const scrollContainer = {
     clientHeight: 100,
     isConnected: true,
@@ -7466,7 +7500,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes("createTopbarNav())"), 'the topbar assembles the nav group');
   assert.ok(source.indexOf('createTopbarNav())') < source.indexOf('createTopbarSearch())'), 'the nav (back/forward) group is appended before the topbar search box');
-  assert.ok(source.includes("back.id = 'topbarNavBack'") && source.includes("forward.id = 'topbarNavForward'"), 'the topbar nav builds #topbarNavBack / #topbarNavForward');
+  assert.ok(/const back = makeButton\(\{[\s\S]*id: 'topbarNavBack'/.test(source) && /const forward = makeButton\(\{[\s\S]*id: 'topbarNavForward'/.test(source), 'the topbar nav builds #topbarNavBack / #topbarNavForward through the shared button builder');
   assert.ok(/topbarNavBack[\s\S]{0,400}?editorNavBack\(\)/.test(source), 'the back button is wired to editorNavBack()');
   assert.ok(/topbarNavForward[\s\S]{0,400}?editorNavForward\(\)/.test(source), 'the forward button is wired to editorNavForward()');
   assert.ok(/getElementById\('topbarNavBack'\)[\s\S]{0,200}?editorNav\.index <= 0/.test(source), 'updateEditorNavButtons disables Back at the start of the stack');

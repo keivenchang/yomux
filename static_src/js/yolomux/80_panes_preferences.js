@@ -83,10 +83,8 @@ function syncActivePanelsInPlace() {
 }
 
 function renderAttachedPanelContent(item) {
-  if (item !== infoItemId) return;
-  applyInfoSubTab();
-  renderInfoPanel();
-  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  const renderAttached = tabTypeForItem(item)?.renderAttached;
+  if (typeof renderAttached === 'function') renderAttached(item);
 }
 
 function bindDropTargets() {
@@ -815,11 +813,11 @@ function showPaneTabDropPreview(strip, event, movingSession) {
   strip.style.setProperty('--tab-drop-x', `${Math.round(placement.x)}px`);
   strip.style.setProperty('--tab-drop-y', `${Math.round(placement.y)}px`);
   strip.style.setProperty('--tab-drop-height', `${Math.round(placement.height)}px`);
-  strip.classList.add('drag-over', 'tab-drop-preview');
+  strip.classList.add(CLS.dragOver, CLS.tabDropPreview);
 }
 
 function clearPaneTabDropPreview(strip) {
-  strip.classList.remove('drag-over', 'tab-drop-preview');
+  strip.classList.remove(CLS.dragOver, CLS.tabDropPreview);
   strip.style.removeProperty('--tab-drop-x');
   strip.style.removeProperty('--tab-drop-y');
   strip.style.removeProperty('--tab-drop-height');
@@ -972,7 +970,7 @@ function bindPanelShell(panel, session) {
           return;
         }
         event.dataTransfer.dropEffect = 'copy';
-        head.classList.add('tab-drag-over');
+        head.classList.add(CLS.tabDragOver);
         return;
       }
       const payload = dragPayload(event);
@@ -987,15 +985,15 @@ function bindPanelShell(panel, session) {
         return;
       }
       event.dataTransfer.dropEffect = 'move';
-      head.classList.add('tab-drag-over');
+      head.classList.add(CLS.tabDragOver);
     });
     head.addEventListener('dragleave', event => {
-      if (!head.contains(event.relatedTarget)) head.classList.remove('tab-drag-over');
+      if (!head.contains(event.relatedTarget)) head.classList.remove(CLS.tabDragOver);
     });
     head.addEventListener('drop', event => {
       const filePayload = fileDragPayload(event);
       if (filePayload?.path && !event.target.closest('.pane-tabs')) {
-        head.classList.remove('tab-drag-over');
+        head.classList.remove(CLS.tabDragOver);
         event.preventDefault();
         event.stopPropagation();
         const targetSlot = head.dataset.dragSlot || slotForSession(session);
@@ -1004,7 +1002,7 @@ function bindPanelShell(panel, session) {
         return;
       }
       const payload = dragPayload(event);
-      head.classList.remove('tab-drag-over');
+      head.classList.remove(CLS.tabDragOver);
       if (!payload?.session || event.target.closest('.pane-tabs')) return;
       event.preventDefault();
       event.stopPropagation();
@@ -1757,8 +1755,7 @@ async function prewarmYoagent(options = {}) {
 
 async function refreshActivitySummary(options = {}) {
   if (activitySummaryRefreshing && options.force !== true) return;
-  const requestId = ++activitySummaryRequestId;
-  const requestIsCurrent = () => requestId === activitySummaryRequestId;
+  const requestIsCurrent = activitySummaryGuard.begin();
   activitySummaryRefreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   try {

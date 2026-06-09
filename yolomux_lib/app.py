@@ -44,6 +44,7 @@ from .common import YOLOMUX_VERSION
 from .common import YOAGENT_CLAUDE_SUMMARY_MODEL
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
+from .common import as_dict
 from .common import codex_exec_argv
 from .common import next_numbered_session_name
 from .common import tail_file_lines
@@ -1074,10 +1075,10 @@ class TmuxWebtermApp:
         return clean
 
     def metadata_badge_signatures_for_session(self, payload: dict[str, Any]) -> dict[str, str]:
-        project = payload.get("project") if isinstance(payload.get("project"), dict) else {}
-        git_data = project.get("git") if isinstance(project.get("git"), dict) else {}
+        project = as_dict(payload.get("project"))
+        git_data = as_dict(project.get("git"))
         pr = self.metadata_badge_pull_request(project)
-        checks = pr.get("checks") if isinstance(pr.get("checks"), dict) else {}
+        checks = as_dict(pr.get("checks"))
         status = "" if not pr or pr.get("source_only") else self.metadata_badge_status_state(pr)
         check_state = self.metadata_badge_ci_state(checks)
         return {
@@ -1150,7 +1151,7 @@ class TmuxWebtermApp:
         pr = project.get("pull_request")
         if isinstance(pr, dict) and pr.get("number"):
             return pr
-        git_data = project.get("git") if isinstance(project.get("git"), dict) else {}
+        git_data = as_dict(project.get("git"))
         if str(git_data.get("branch") or "") not in {"main", "master"}:
             return {}
         number = pull_request_number_from_subject(str(git_data.get("head") or ""))

@@ -286,7 +286,7 @@ let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 let fileExplorerSessionFilesPayload = {session: '', files: [], repos: [], errors: []};
 let fileExplorerSessionFilesPayloadSignature = '';
 let fileExplorerSessionFilesLoading = false;
-let fileExplorerSessionFilesRequestId = 0;
+const fileExplorerSessionFilesGuard = makeGenerationGuard();
 let fileExplorerExplicitSyncSession = '';
 const fileExplorerExpandedBySyncTarget = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
@@ -302,7 +302,7 @@ let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready'
-const fileIndexStatusTimers = new Map();  // normalized indexed root -> poll timer while building
+const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
 const tabLastActivatedAt = new Map();  // layout item -> last-activated timestamp (ms) for per-pane LRU tab eviction
 let fileTreeRepoPopoverPath = null;  // normalized path of the repo dir whose hover popover is showing
@@ -443,8 +443,64 @@ const prefsItemId = '__prefs__';
 const emptyPaneParam = '__empty_pane__';
 const fileEditorItemPrefix = 'file:';
 const imageViewerItemPrefix = 'image:';
+const CLS = Object.freeze({
+  active: 'active',
+  collapsed: 'collapsed',
+  dragOver: 'drag-over',
+  dropPreview: 'drop-preview',
+  fileDragOver: 'file-drag-over',
+  open: 'open',
+  pathDragOver: 'path-drag-over',
+  selected: 'selected',
+  tabDragOver: 'tab-drag-over',
+  tabDropPreview: 'tab-drop-preview',
+});
+const DROP_PREVIEW_CLASSES = Object.freeze([
+  CLS.dragOver,
+  CLS.tabDragOver,
+  CLS.tabDropPreview,
+  CLS.dropPreview,
+  'drop-preview-top',
+  'drop-preview-bottom',
+  'drop-preview-left',
+  'drop-preview-right',
+  'drop-preview-middle',
+  'drop-preview-root',
+  'drop-preview-gutter',
+]);
+function makeGenerationGuard() {
+  let generation = 0;
+  return Object.freeze({
+    begin() {
+      const current = ++generation;
+      return () => current === generation;
+    },
+    invalidate() {
+      generation += 1;
+    },
+  });
+}
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
 function imageViewerItemFor(path) { return imageViewerItemPrefix + path; }
+function filePanelTabType({key, prefix, shortLabel, terminalTitle, className, sortRank}) {
+  return {
+    key,
+    prefix,
+    match: item => typeof item === 'string' && item.startsWith(prefix),
+    label: item => basenameOf(fileItemPath(item)),
+    shortLabel,
+    terminalTitle,
+    sortRank,
+    param: item => item,
+    detail: item => compactHomePath(fileItemPath(item)),
+    rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
+    createPanel: item => createFileEditorPanel(item),
+    className,
+    icon: 'document',
+    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
+    prunePriority: () => 1,
+  };
+}
 const TAB_TYPES = [
   {
     // DOIT.6 #40: YO!info and YO!agent are ONE item now — the panel hosts both via an in-pane sub-tab
@@ -462,6 +518,11 @@ const TAB_TYPES = [
     detail: () => t('info.subtitle'),
     rowHtml: (item, options) => paneInfoTabHtml(item, options),
     createPanel: () => createInfoPanel(),
+    renderAttached: () => {
+      applyInfoSubTab();
+      renderInfoPanel();
+      renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+    },
     className: () => 'info',
     icon: 'branch-info',
     minWidth: () => rootCssLengthPx('--info-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
@@ -503,40 +564,22 @@ const TAB_TYPES = [
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
     prunePriority: () => 0,
   },
-  {
+  filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
-    match: item => typeof item === 'string' && item.startsWith(imageViewerItemPrefix),
-    label: item => basenameOf(fileItemPath(item)),
     shortLabel: () => t('popover.kind.image'),
     terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.image')}),
     sortRank: 0.74,
-    param: item => item,
-    detail: item => compactHomePath(fileItemPath(item)),
-    rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
-    createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item image-viewer-item',
-    icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
-    prunePriority: () => 1,
-  },
-  {
+  }),
+  filePanelTabType({
     key: 'file-editor',
     prefix: fileEditorItemPrefix,
-    match: item => typeof item === 'string' && item.startsWith(fileEditorItemPrefix),
-    label: item => basenameOf(fileItemPath(item)),
     shortLabel: () => 'Edit',
     terminalTitle: () => 'unavailable for file editor',
     sortRank: 0.75,
-    param: item => item,
-    detail: item => compactHomePath(fileItemPath(item)),
-    rowHtml: (item, options) => fileEditorPaneTabHtml(item, options),
-    createPanel: item => createFileEditorPanel(item),
     className: () => 'file-editor-item',
-    icon: 'document',
-    minWidth: () => rootCssLengthPx('--file-editor-pane-min-inline-size') || rootCssLengthPx('--min-split-pane-width') || 320,
-    prunePriority: () => 1,
-  },
+  }),
 ];
 function tabTypeForItem(item) { return TAB_TYPES.find(type => type.match(item)) || null; }
 function tabTypeForParam(value) {
@@ -658,7 +701,7 @@ let transcriptMetaRefreshPromise = null;
 let serverVersionReloadHandled = '';
 let activitySummaryPayload = {sessions: {}, global: {lines: []}, session_order: []};
 let activitySummaryRefreshing = false;
-let activitySummaryRequestId = 0;
+const activitySummaryGuard = makeGenerationGuard();
 let yoagentMessages = [];
 let yoagentBusy = false;
 let yoagentPrewarming = false;
@@ -2182,19 +2225,48 @@ function createContextMenuController() {
   };
 }
 
-function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
+function makeButton(options = {}) {
   const button = document.createElement('button');
-  button.type = 'button';
+  button.type = options.type || 'button';
+  if (options.id) button.id = options.id;
   if (options.className) button.className = options.className;
-  button.setAttribute('role', 'menuitem');
-  button.textContent = label;
+  if (options.role) button.setAttribute('role', options.role);
+  if (options.html !== undefined) button.innerHTML = options.html;
+  else if (options.label !== undefined) button.textContent = options.label;
   button.disabled = options.disabled === true;
   if (options.title) button.title = options.title;
+  if (options.ariaLabel) button.setAttribute('aria-label', options.ariaLabel);
+  if (options.pressed !== undefined) button.setAttribute('aria-pressed', options.pressed ? 'true' : 'false');
   if (options.checked !== undefined) {
-    button.setAttribute('role', 'menuitemcheckbox');
     button.setAttribute('aria-checked', options.checked ? 'true' : 'false');
     if (options.checked === true) button.dataset.checked = 'true';
   }
+  if (options.dataset) {
+    for (const [key, value] of Object.entries(options.dataset)) {
+      if (value !== undefined && value !== null) button.dataset[key] = String(value);
+    }
+  }
+  if (typeof options.onClick === 'function') button.addEventListener('click', options.onClick);
+  return button;
+}
+
+function delegate(parent, type, selector, handler, options = {}) {
+  if (!parent || typeof handler !== 'function') return null;
+  const listener = event => {
+    const target = event.target?.closest?.(selector);
+    if (!target || !parent.contains(target)) return;
+    handler(event, target);
+  };
+  parent.addEventListener(type, listener, options);
+  return listener;
+}
+
+function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) {
+  const button = makeButton({
+    ...options,
+    label,
+    role: options.checked !== undefined ? 'menuitemcheckbox' : 'menuitem',
+  });
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
@@ -5588,20 +5660,20 @@ function renderSessionButtons(options = {}) {
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
     clearDropPreview();
-    sessionButtons.classList.add('drag-over');
+    sessionButtons.classList.add(CLS.dragOver);
   };
   sessionButtons.ondragleave = event => {
-    if (!sessionButtons.contains(event.relatedTarget)) sessionButtons.classList.remove('drag-over');
+    if (!sessionButtons.contains(event.relatedTarget)) sessionButtons.classList.remove(CLS.dragOver);
   };
   sessionButtons.ondrop = event => {
     const payload = dragPayload(event);
-    sessionButtons.classList.remove('drag-over');
+    sessionButtons.classList.remove(CLS.dragOver);
     if (!payload?.session) return;
     event.preventDefault();
     event.stopPropagation();
     removeSessionFromLayout(payload.session);
   };
-  sessionButtons.classList.remove('drag-over');
+  sessionButtons.classList.remove(CLS.dragOver);
   sessionButtons.appendChild(createAppMenuBar());
   sessionButtons.appendChild(createTopbarNav());
   sessionButtons.appendChild(createTopbarSearch());
@@ -5639,24 +5711,24 @@ function createTopbarNav() {
   group.className = 'topbar-nav';
   group.setAttribute('role', 'group');
   group.setAttribute('aria-label', t('editor.nav.aria'));
-  const back = document.createElement('button');
-  back.type = 'button';
-  back.id = 'topbarNavBack';
-  back.className = 'topbar-nav-button';
-  back.title = t('editor.nav.back');
-  back.setAttribute('aria-label', t('editor.nav.back'));
-  back.disabled = true;
-  back.textContent = '←';
-  back.addEventListener('click', event => { event.preventDefault(); editorNavBack(); });
-  const forward = document.createElement('button');
-  forward.type = 'button';
-  forward.id = 'topbarNavForward';
-  forward.className = 'topbar-nav-button';
-  forward.title = t('editor.nav.forward');
-  forward.setAttribute('aria-label', t('editor.nav.forward'));
-  forward.disabled = true;
-  forward.textContent = '→';
-  forward.addEventListener('click', event => { event.preventDefault(); editorNavForward(); });
+  const back = makeButton({
+    id: 'topbarNavBack',
+    className: 'topbar-nav-button',
+    title: t('editor.nav.back'),
+    ariaLabel: t('editor.nav.back'),
+    disabled: true,
+    label: '←',
+    onClick: event => { event.preventDefault(); editorNavBack(); },
+  });
+  const forward = makeButton({
+    id: 'topbarNavForward',
+    className: 'topbar-nav-button',
+    title: t('editor.nav.forward'),
+    ariaLabel: t('editor.nav.forward'),
+    disabled: true,
+    label: '→',
+    onClick: event => { event.preventDefault(); editorNavForward(); },
+  });
   group.append(back, forward);
   return group;
 }
@@ -5667,12 +5739,12 @@ function createTopbarNav() {
 function createTopbarSearch() {
   const isMac = /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || '');
   const mod = isMac ? 'Cmd' : 'Ctrl';
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.id = 'topbarSearch';
-  button.className = 'topbar-search';
-  button.setAttribute('aria-label', t('topbar.search.aria'));
-  button.title = t('topbar.search.title', {mod});
+  const button = makeButton({
+    id: 'topbarSearch',
+    className: 'topbar-search',
+    ariaLabel: t('topbar.search.aria'),
+    title: t('topbar.search.title', {mod}),
+  });
   const icon = document.createElement('span');
   icon.className = 'topbar-search-icon';
   icon.setAttribute('aria-hidden', 'true');
@@ -8190,12 +8262,30 @@ async function refreshFileIndexStatus(root) {
   const status = payload && payload.ready ? 'ready' : 'building';
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
-  clearTimeout(fileIndexStatusTimers.get(normalized));
-  fileIndexStatusTimers.delete(normalized);
-  if (status === 'building') {
-    fileIndexStatusTimers.set(normalized, setTimeout(() => refreshFileIndexStatus(normalized), 1500));
-  }
+  if (status === 'building') fileIndexStatusPollRoots.add(normalized);
+  else fileIndexStatusPollRoots.delete(normalized);
+  syncFileIndexStatusPollInterval();
   if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+}
+
+function refreshBuildingFileIndexStatuses() {
+  for (const root of Array.from(fileIndexStatusPollRoots)) {
+    if (!fileExplorerIndexedDirs.has(root)) {
+      fileIndexStatusPollRoots.delete(root);
+      continue;
+    }
+    refreshFileIndexStatus(root);
+  }
+  syncFileIndexStatusPollInterval();
+}
+
+function syncFileIndexStatusPollInterval() {
+  if (!fileIndexStatusPollRoots.size) {
+    clearRuntimeInterval('file-index-building');
+    return;
+  }
+  const proactiveMs = Math.max(1, fileExplorerIndexRefreshSeconds * 1000);
+  resetRuntimeInterval('file-index-building', refreshBuildingFileIndexStatuses, Math.min(1500, proactiveMs));
 }
 
 // Lazily warm/poll an indexed root's status, without re-fetching once it is known ready or while a
@@ -8203,7 +8293,7 @@ async function refreshFileIndexStatus(root) {
 function ensureFileIndexStatus(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
-  if (fileExplorerIndexStatus.get(normalized) === 'ready' || fileIndexStatusTimers.has(normalized)) return;
+  if (fileExplorerIndexStatus.get(normalized) === 'ready' || fileIndexStatusPollRoots.has(normalized)) return;
   refreshFileIndexStatus(normalized);
 }
 
@@ -8211,8 +8301,8 @@ function clearFileIndexStatus(root) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized) return;
   fileExplorerIndexStatus.delete(normalized);
-  clearTimeout(fileIndexStatusTimers.get(normalized));
-  fileIndexStatusTimers.delete(normalized);
+  fileIndexStatusPollRoots.delete(normalized);
+  syncFileIndexStatusPollInterval();
 }
 
 // Proactive periodic re-check: re-fetches index-status for every indexed root even if already
@@ -11649,6 +11739,14 @@ function resetRuntimeInterval(name, callback, delay) {
   runtimeIntervals.set(name, state);
 }
 
+function clearRuntimeInterval(name) {
+  const existing = runtimeIntervals.get(name);
+  if (!existing) return;
+  existing.active = false;
+  clearTimeout(existing.timer);
+  runtimeIntervals.delete(name);
+}
+
 function installRuntimeIntervals() {
   resetRuntimeInterval('auto', refreshAutoStatuses, paneStateRefreshMs);
   resetRuntimeInterval('metadata', refreshTranscripts, metadataRefreshMs);
@@ -11660,12 +11758,7 @@ function installRuntimeIntervals() {
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
   } else {
-    const existing = runtimeIntervals.get('file-index-refresh');
-    if (existing) {
-      existing.active = false;
-      clearTimeout(existing.timer);
-      runtimeIntervals.delete('file-index-refresh');
-    }
+    clearRuntimeInterval('file-index-refresh');
   }
 }
 function toggleHiddenFiles() {
@@ -12699,7 +12792,7 @@ function endSessionDrag(event) {
   dragSourceSlot = null;
   resetDragTabRectCache();
   stopCustomDragPreview();
-  sessionButtons.classList.remove('drag-over');
+  sessionButtons.classList.remove(CLS.dragOver);
   clearDropPreview();
   // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
@@ -13853,12 +13946,22 @@ function rekeyMap(map, oldKey, newKey) {
   map.delete(oldKey);
 }
 
+function clearSessionUiState(session) {
+  stopTranscriptStream(session);
+  stopSummaryStream(session);
+  autoApproveStates.delete(session);
+  uploadResultsBySession.delete(session);
+  if (uploadCleanupTimers.has(session)) {
+    clearTimeout(uploadCleanupTimers.get(session));
+    uploadCleanupTimers.delete(session);
+  }
+}
+
 function stopSessionUi(session) {
   const item = terminals.get(session);
   if (item) closeTerminalItem(session, item);
   terminals.delete(session);
-  stopTranscriptStream(session);
-  stopSummaryStream(session);
+  clearSessionUiState(session);
   const panel = panelNodes.get(session);
   if (panel) panel.remove();
   panelNodes.delete(session);
@@ -14465,13 +14568,12 @@ function dropIntentAllowsSession(session, intent) {
 }
 
 function clearDropPreview() {
-  const classes = ['drag-over', 'tab-drag-over', 'tab-drop-preview', 'drop-preview', 'drop-preview-top', 'drop-preview-bottom', 'drop-preview-left', 'drop-preview-right', 'drop-preview-middle', 'drop-preview-root', 'drop-preview-gutter'];
   const nodes = new Set([grid]);
-  for (const className of classes) {
+  for (const className of DROP_PREVIEW_CLASSES) {
     grid.querySelectorAll(`.${className}`).forEach(node => nodes.add(node));
   }
   nodes.forEach(node => {
-    node.classList.remove(...classes);
+    node.classList.remove(...DROP_PREVIEW_CLASSES);
     node.style?.removeProperty('--tab-drop-x');
     node.style?.removeProperty('--tab-drop-y');
     node.style?.removeProperty('--tab-drop-height');
@@ -14537,7 +14639,7 @@ function showDropPreview(intent) {
   const node = intent?.boundary ? grid : intent?.previewNode;
   if (!node) return;
   const zone = intent.zone || 'middle';
-  node.classList.add('drag-over', 'drop-preview', `drop-preview-${zone}`);
+  node.classList.add(CLS.dragOver, CLS.dropPreview, `drop-preview-${zone}`);
   if (intent.boundary) node.classList.add(`drop-preview-${intent.boundary}`);
   node.dataset.dropLabel = intent.boundary === 'root'
     ? `full ${zone}`
@@ -14705,10 +14807,8 @@ function syncActivePanelsInPlace() {
 }
 
 function renderAttachedPanelContent(item) {
-  if (item !== infoItemId) return;
-  applyInfoSubTab();
-  renderInfoPanel();
-  renderYoagentPanel({preserveDraft: true, scrollBottom: false});
+  const renderAttached = tabTypeForItem(item)?.renderAttached;
+  if (typeof renderAttached === 'function') renderAttached(item);
 }
 
 function bindDropTargets() {
@@ -15437,11 +15537,11 @@ function showPaneTabDropPreview(strip, event, movingSession) {
   strip.style.setProperty('--tab-drop-x', `${Math.round(placement.x)}px`);
   strip.style.setProperty('--tab-drop-y', `${Math.round(placement.y)}px`);
   strip.style.setProperty('--tab-drop-height', `${Math.round(placement.height)}px`);
-  strip.classList.add('drag-over', 'tab-drop-preview');
+  strip.classList.add(CLS.dragOver, CLS.tabDropPreview);
 }
 
 function clearPaneTabDropPreview(strip) {
-  strip.classList.remove('drag-over', 'tab-drop-preview');
+  strip.classList.remove(CLS.dragOver, CLS.tabDropPreview);
   strip.style.removeProperty('--tab-drop-x');
   strip.style.removeProperty('--tab-drop-y');
   strip.style.removeProperty('--tab-drop-height');
@@ -15594,7 +15694,7 @@ function bindPanelShell(panel, session) {
           return;
         }
         event.dataTransfer.dropEffect = 'copy';
-        head.classList.add('tab-drag-over');
+        head.classList.add(CLS.tabDragOver);
         return;
       }
       const payload = dragPayload(event);
@@ -15609,15 +15709,15 @@ function bindPanelShell(panel, session) {
         return;
       }
       event.dataTransfer.dropEffect = 'move';
-      head.classList.add('tab-drag-over');
+      head.classList.add(CLS.tabDragOver);
     });
     head.addEventListener('dragleave', event => {
-      if (!head.contains(event.relatedTarget)) head.classList.remove('tab-drag-over');
+      if (!head.contains(event.relatedTarget)) head.classList.remove(CLS.tabDragOver);
     });
     head.addEventListener('drop', event => {
       const filePayload = fileDragPayload(event);
       if (filePayload?.path && !event.target.closest('.pane-tabs')) {
-        head.classList.remove('tab-drag-over');
+        head.classList.remove(CLS.tabDragOver);
         event.preventDefault();
         event.stopPropagation();
         const targetSlot = head.dataset.dragSlot || slotForSession(session);
@@ -15626,7 +15726,7 @@ function bindPanelShell(panel, session) {
         return;
       }
       const payload = dragPayload(event);
-      head.classList.remove('tab-drag-over');
+      head.classList.remove(CLS.tabDragOver);
       if (!payload?.session || event.target.closest('.pane-tabs')) return;
       event.preventDefault();
       event.stopPropagation();
@@ -16379,8 +16479,7 @@ async function prewarmYoagent(options = {}) {
 
 async function refreshActivitySummary(options = {}) {
   if (activitySummaryRefreshing && options.force !== true) return;
-  const requestId = ++activitySummaryRequestId;
-  const requestIsCurrent = () => requestId === activitySummaryRequestId;
+  const requestIsCurrent = activitySummaryGuard.begin();
   activitySummaryRefreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
   try {
@@ -17849,8 +17948,7 @@ async function fetchSessionFiles(options = {}) {
   const destination = 'finder';
   const forceRefresh = options.force === true;
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const requestId = ++fileExplorerSessionFilesRequestId;
-  const requestIsCurrent = () => requestId === fileExplorerSessionFilesRequestId;
+  const requestIsCurrent = fileExplorerSessionFilesGuard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
   let shouldRender = options.silent !== true;
   if (!session) {
@@ -18068,17 +18166,6 @@ function sessionFileIsDifferVisible(item) {
 
 function fileExplorerDifferFiles(payload = fileExplorerSessionFilesPayload) {
   return (Array.isArray(payload?.files) ? payload.files : []).filter(sessionFileIsDifferVisible);
-}
-
-function changeStatusClassKey(statusKey) {
-  const rowClass = gitStatusRowClass(statusKey || 'M');
-  return rowClass ? rowClass.replace(/^git-/, '') : 'unknown';
-}
-
-function changeFileParentLabel(relPath) {
-  const rel = String(relPath || '');
-  const index = rel.lastIndexOf('/');
-  return index > 0 ? rel.slice(0, index) : '';
 }
 
 function changeFileTotals(files) {
@@ -18359,44 +18446,6 @@ function changeFileAgentsHtml(item) {
   const label = ordered.map(kind => changedFileAgentTitle(kind, item)).filter(Boolean).join(', ');
   const labelAttr = icons.length > 1 && label ? ` aria-label="${esc(label)}"` : '';
   return `<span class="changes-file-agent"${labelAttr}>${icons.join('')}</span>`;
-}
-
-function changeFileRowHtml(item, options = {}) {
-  const statusKey = String(item.status || 'M').toUpperCase();
-  const statusClass = changeStatusClassKey(statusKey);
-  const absPath = item.abs_path || item.path || '';
-  const name = item.__displayName || basenameOf(absPath || item.path || '');
-  const rel = item.path || absPath;
-  const parentLabel = changeFileParentLabel(rel);
-  const detail = item.uploaded === true ? '' : (parentLabel || rel);
-  const timeText = sessionFileDisplayTimeText(item.mtime);
-  const diffHtml = sessionFileDiffText(item).map(part => `<span class="changes-diff-${part.kind}">${esc(part.text)}</span>`).join(' ');
-  const agentSlotHtml = changeFileAgentsHtml(item);
-  const dateHtml = timeText ? `<span class="changes-file-date">${esc(timeText)}</span>` : '';
-  const statusTitle = gitStatusBadgeTitle(statusKey);
-  const statusTitleAttr = statusTitle ? ` title="${esc(statusTitle)}" aria-label="${esc(statusTitle)}"` : '';
-  const statusBadgeHtml = `<span class="changes-status changes-status-${esc(statusClass)}"${statusTitleAttr}>${esc(statusKey)}</span>`;
-  const metaHtml = [diffHtml, statusBadgeHtml, dateHtml].filter(Boolean).join('');
-  // Row gets a git-* class for tinting (shared with Finder CSS rules)
-  const gitRowClass = gitStatusRowClass(statusKey) || (statusClass === 'unknown' ? 'git-untracked' : 'git-transcript');
-  const compactClass = options.compact ? ' compact' : ' detailed';
-  const depth = Math.max(0, Number(options.depth) || 0);
-  const icon = fileIconFor(name);
-  const iconClass = fileIconClassFor(name, 'file');
-  // C5: image rows get a rich Finder-style hover preview (bound in bindChangedFileRowBehaviors), so drop
-  // the native title there to avoid a duplicate tooltip; non-image rows keep the full-path title.
-  const isImage = IMAGE_EXTENSIONS.has(fileExtensionOf(name));
-  const titleAttr = isImage ? '' : ` title="${esc(absPath)}"`;
-  const sizeAttr = item.size === null || item.size === undefined ? '' : ` data-change-size="${esc(String(item.size))}"`;
-  const repoAttr = item.repo ? ` data-open-change-repo="${esc(item.repo)}"` : '';
-  const actionAttr = absPath
-    ? ` draggable="true" data-open-change-file="${esc(absPath)}" data-open-change-session="${esc(item.session || '')}" data-open-change-status="${esc(statusKey)}" data-change-rel="${esc(rel || '')}"${repoAttr}${sizeAttr}${titleAttr}`
-    : ' disabled';
-  return `<button type="button" class="changes-file-row${compactClass} ${gitRowClass}" style="--changes-tree-depth:${depth}"${actionAttr}>
-    <span class="changes-file-icon ${esc(iconClass)}" aria-hidden="true">${esc(icon)}</span>
-    <span class="changes-file-main"><span class="changes-file-title"><span class="changes-file-name">${esc(name)}</span>${agentSlotHtml}</span>${detail ? `<span class="changes-file-path">${esc(detail)}</span>` : ''}</span>
-    <span class="changes-file-meta">${metaHtml}</span>
-  </button>`;
 }
 
 // DOM-mutation renderer for all repo sections in a Changes/Differ panel scroll area.
@@ -23526,35 +23575,32 @@ function sortedInfoBranchRows(rows, sortState = infoBranchSort) {
 }
 
 function bindPanelControls(panel, session) {
-  panel.querySelectorAll('[data-tab]').forEach(button => {
-    button.addEventListener('click', () => {
-      const currentName = button.dataset.tabName;
-      const nextName = currentName !== 'terminal' && button.classList.contains('active') ? 'terminal' : currentName;
-      activateTab(button.dataset.tab, nextName, {userInitiated: true});
-    });
+  delegate(panel, 'click', '[data-tab]', (_event, button) => {
+    const currentName = button.dataset.tabName;
+    const nextName = currentName !== 'terminal' && button.classList.contains(CLS.active) ? 'terminal' : currentName;
+    activateTab(button.dataset.tab, nextName, {userInitiated: true});
   });
-  panel.querySelectorAll('[data-window-dir]').forEach(button => {
-    button.addEventListener('click', handleWindowStepButtonClick);
+  delegate(panel, 'click', '[data-window-dir]', event => {
+    handleWindowStepButtonClick(event);
   });
-  panel.querySelector('[data-pane-close]')?.addEventListener('click', event => {
+  delegate(panel, 'click', '[data-pane-close]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    removePaneFromLayout(event.currentTarget.dataset.paneClose);
+    removePaneFromLayout(button.dataset.paneClose);
   });
-  panel.querySelector('[data-pane-minimize]')?.addEventListener('click', event => {
+  delegate(panel, 'click', '[data-pane-minimize]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    minimizePaneFromLayout(event.currentTarget.dataset.paneMinimize);
+    minimizePaneFromLayout(button.dataset.paneMinimize);
   });
-  panel.querySelector('[data-pane-expand]')?.addEventListener('click', event => {
+  delegate(panel, 'click', '[data-pane-expand]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    expandPaneFromLayout(event.currentTarget.dataset.paneExpand);
+    expandPaneFromLayout(button.dataset.paneExpand);
   });
-  panel.querySelector('[data-pane-actions]')?.addEventListener('click', event => {
+  delegate(panel, 'click', '[data-pane-actions]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    const button = event.currentTarget;
     const rect = button.getBoundingClientRect();
     showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
   });
@@ -23566,7 +23612,7 @@ function bindPanelControls(panel, session) {
       showSessionContextMenu(session, event.clientX, event.clientY);
     });
   }
-  panel.querySelector('[data-context]')?.addEventListener('click', () => showContext(session));
+  delegate(panel, 'click', '[data-context]', () => showContext(session));
   panel.addEventListener('click', event => {
     const target = event.target.closest('[data-auto-session]');
     if (!target || !panel.contains(target)) return;
@@ -23609,25 +23655,25 @@ function bindFileUpload(panel, session) {
     if (!hasFileDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
-    panel.classList.add('file-drag-over');
+    panel.classList.add(CLS.fileDragOver);
   });
   panel.addEventListener('dragover', event => {
     if (!hasFileDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
-    panel.classList.add('file-drag-over');
+    panel.classList.add(CLS.fileDragOver);
   });
   panel.addEventListener('dragleave', event => {
     if (!hasFileDrag(event)) return;
     if (panel.contains(event.relatedTarget)) return;
-    panel.classList.remove('file-drag-over');
+    panel.classList.remove(CLS.fileDragOver);
   });
   panel.addEventListener('drop', event => {
     if (!hasFileDrag(event)) return;
     event.preventDefault();
     event.stopPropagation();
-    panel.classList.remove('file-drag-over');
+    panel.classList.remove(CLS.fileDragOver);
     uploadFiles(session, event.dataTransfer?.files || []);
   });
 }
@@ -23658,11 +23704,11 @@ function installFilePathDropTarget(session, target) {
     event.dataTransfer.dropEffect = 'copy';
     const intent = dropIntentForEvent(event);
     if (intent?.targetSlot) showDropPreview(intent);
-    target.classList.add('path-drag-over');
+    target.classList.add(CLS.pathDragOver);
   });
   target.addEventListener('dragleave', event => {
     if (target.contains(event.relatedTarget)) return;
-    target.classList.remove('path-drag-over');
+    target.classList.remove(CLS.pathDragOver);
     clearDropPreview();
   });
   target.addEventListener('drop', event => {
@@ -23670,7 +23716,7 @@ function installFilePathDropTarget(session, target) {
     if (!payload?.path) return;
     event.preventDefault();
     event.stopPropagation();
-    target.classList.remove('path-drag-over');
+    target.classList.remove(CLS.pathDragOver);
     const intent = dropIntentForEvent(event);
     clearDropPreview();
     if (intent?.targetSlot && intent.zone !== 'middle') {

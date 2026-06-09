@@ -42,7 +42,7 @@ def test_cached_session_names_memoizes_within_ttl(monkeypatch):
         return ["1", "2"]
 
     monkeypatch.setattr(tmux_utils, "tmux_session_names", fake_names)
-    tmux_utils._SESSION_NAMES_CACHE["at"] = 0.0  # force one fresh resolution
+    tmux_utils._session_names_cache.values.clear()  # force one fresh resolution
     for _ in range(5):
         assert tmux_utils.cached_session_names() == ["1", "2"]
     assert calls["n"] == 1

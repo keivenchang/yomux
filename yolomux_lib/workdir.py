@@ -5,10 +5,10 @@ import os
 import re
 import shutil
 import subprocess
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .cache import TtlCache
 from .common import PROJECT_ROOT
 
 
@@ -82,7 +82,7 @@ _AGENT_LOGGED_OUT_MARKERS = (
 )
 _AGENT_AUTH_PROBE_TIMEOUT = 4.0
 _AGENT_AUTH_CACHE_TTL = 45.0
-_agent_auth_cache: dict[str, tuple[float, dict[str, dict[str, bool]]]] = {}
+_agent_auth_cache = TtlCache(_AGENT_AUTH_CACHE_TTL, max_entries=4)
 
 
 def _logged_in_flag_from_json(stdout: str) -> bool | None:
@@ -117,10 +117,9 @@ def _probe_agent_logged_in(agent: str) -> bool:
 
 
 def agent_auth_status(force: bool = False) -> dict[str, dict[str, bool]]:
-    now = time.monotonic()
     cached = _agent_auth_cache.get("status")
-    if not force and cached is not None and now - cached[0] < _AGENT_AUTH_CACHE_TTL:
-        return cached[1]
+    if not force and cached is not None:
+        return cached
     agents = ("claude", "codex")
     installed = {agent: shutil.which(agent) is not None for agent in agents}
     to_probe = [agent for agent in agents if installed[agent]]
@@ -131,5 +130,5 @@ def agent_auth_status(force: bool = False) -> dict[str, dict[str, bool]]:
             for agent, result in zip(to_probe, pool.map(_probe_agent_logged_in, to_probe)):
                 logged_in[agent] = result
     status = {agent: {"installed": installed[agent], "logged_in": logged_in[agent]} for agent in agents}
-    _agent_auth_cache["status"] = (now, status)
+    _agent_auth_cache.set("status", status)
     return status
