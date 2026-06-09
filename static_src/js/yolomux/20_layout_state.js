@@ -1495,11 +1495,12 @@ function fileQuickOpenItems() {
     // '/' (empty -> root), which used to mislabel every path-mode directory row as "Indexed /".
     const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
     const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
+    const externalIndexed = Boolean(indexedRoot && indexedRoot !== baseRoot);
     add(fileQuickOpenItem(path, {
-      group: indexedRoot && indexedRoot !== baseRoot ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
+      group: externalIndexed ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
-      sortBonus: file.uploaded === true ? -500 : 0,
+      sortBonus: (externalIndexed ? -250 : 250) + (file.uploaded === true ? -500 : 0),
     }));
   }
   if (fileQuickOpenError) {
@@ -1818,7 +1819,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
           const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
           const payload = await response.json().catch(() => ({}));
           if (!response.ok) throw new Error(payload.error || response.status);
-          return {ok: true, root: payload.root || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
+          return {ok: true, root: normalizeStoredFileExplorerIndexedDir(payload.root || payload.root_realpath || searchRoot) || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
         } catch (error) {
           return {ok: false, root: searchRoot, error};
         }

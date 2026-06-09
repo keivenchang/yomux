@@ -394,7 +394,7 @@ function fileExplorerRefreshMsFromValues(secondsValue, legacyMsValue = 15001) {
   return Math.max(1000, Math.min(60000, Number.isFinite(legacyMs) ? legacyMs : 15001));
 }
 let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
-  initialSetting('file_explorer.refresh_seconds', 15),
+  initialSetting('file_explorer.refresh_seconds', 1),
   initialSetting('file_explorer.refresh_ms', 15001),
 );
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
@@ -3886,11 +3886,12 @@ function fileQuickOpenItems() {
     // '/' (empty -> root), which used to mislabel every path-mode directory row as "Indexed /".
     const indexedRoot = file.indexed_root ? normalizeStoredFileExplorerIndexedDir(file.indexed_root) : '';
     const baseRoot = normalizeStoredFileExplorerIndexedDir(fileQuickOpenRoot || '');
+    const externalIndexed = Boolean(indexedRoot && indexedRoot !== baseRoot);
     add(fileQuickOpenItem(path, {
-      group: indexedRoot && indexedRoot !== baseRoot ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
+      group: externalIndexed ? `Indexed ${compactHomePath(indexedRoot)}` : 'Files',
       relativePath: file.relative_path || file.name || '',
       kind: file.kind || 'file',
-      sortBonus: file.uploaded === true ? -500 : 0,
+      sortBonus: (externalIndexed ? -250 : 250) + (file.uploaded === true ? -500 : 0),
     }));
   }
   if (fileQuickOpenError) {
@@ -4209,7 +4210,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
           const response = await apiFetch(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
           const payload = await response.json().catch(() => ({}));
           if (!response.ok) throw new Error(payload.error || response.status);
-          return {ok: true, root: payload.root || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
+          return {ok: true, root: normalizeStoredFileExplorerIndexedDir(payload.root || payload.root_realpath || searchRoot) || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
         } catch (error) {
           return {ok: false, root: searchRoot, error};
         }
@@ -9668,6 +9669,9 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
   clearFileAutosaveTimer(path);
   setFileState(path, clearOpenFileExternalState(loaded.state));
   renderOpenFilePath(path);
+  if (loaded.state?.kind === 'text' && typeof updateFilePreviewPopout === 'function') {
+    updateFilePreviewPopout(path, loaded.state.content || '');
+  }
   if (previous?.diff !== undefined) refreshOpenFileDiff(path);
   return true;
 }
@@ -21879,7 +21883,7 @@ function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
     const mode = fileEditorPanelMode(panel);
     const previewPane = fileEditorPanelPreviewPane(panel);
     const editorScroller = fileEditorPanelScroller(panel);
-    if (editorScroller && elementCanScroll(editorScroller)) synced = syncScrollPositionByRatio(scroller, editorScroller) || synced;
+    if (mode !== 'diff' && editorScroller && elementCanScroll(editorScroller)) synced = syncScrollPositionByRatio(scroller, editorScroller) || synced;
     if ((mode === 'preview' || mode === 'split') && previewPane && elementCanScroll(previewPane)) synced = syncScrollPositionByRatio(scroller, previewPane) || synced;
   }
   return synced;
@@ -22004,21 +22008,25 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     }
     .file-preview-popout-shell {
       box-sizing: border-box;
-      width: min(100%, 1040px);
+      width: 100%;
       margin: 0 auto;
-      padding: 0 24px 36px;
+      padding: 64px 24px 36px;
     }
     .file-preview-popout-title {
-      position: sticky;
+      position: fixed;
       top: 0;
-      z-index: 20;
+      left: 50%;
+      z-index: 1000;
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
       gap: 12px;
+      box-sizing: border-box;
+      width: calc(100% - 48px);
       min-height: 32px;
       padding: 8px 0 12px;
       margin-bottom: 12px;
+      transform: translateX(-50%);
       border-bottom: 1px solid var(--border, #d1d5db);
       background: var(--editor-preview-bg, var(--bg, #ffffff));
       color: var(--text, #111827);
@@ -22213,7 +22221,8 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       border: 0;
     }
     @media (max-width: 640px) {
-      .file-preview-popout-shell { padding: 0 14px 28px; }
+      .file-preview-popout-shell { padding: 64px 14px 28px; }
+      .file-preview-popout-title { width: calc(100% - 28px); }
     }
   </style>
 </head>
@@ -22695,6 +22704,7 @@ function fileEditorPanelPreviewPane(panel) {
 }
 
 function fileEditorSourceElement(panel, source) {
+  if (fileEditorPanelMode(panel) === 'diff') return null;
   return source === 'preview' ? fileEditorPanelPreviewPane(panel) : fileEditorPanelScroller(panel);
 }
 

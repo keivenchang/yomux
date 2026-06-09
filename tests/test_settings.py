@@ -275,11 +275,11 @@ def test_watched_prs_and_watched_pr_refresh_defaults():
 
 def test_file_explorer_refresh_uses_seconds_and_migrates_legacy_ms():
     d = default_settings()
-    assert d["file_explorer"]["refresh_seconds"] == 15
+    assert d["file_explorer"]["refresh_seconds"] == 1
     migrated = sanitize_settings({"file_explorer": {"refresh_ms": 42000}})
     assert migrated["file_explorer"]["refresh_seconds"] == 42
     default_legacy = sanitize_settings({"file_explorer": {"refresh_ms": 3000}})
-    assert default_legacy["file_explorer"]["refresh_seconds"] == 15
+    assert default_legacy["file_explorer"]["refresh_seconds"] == 1
 
 
 def test_notify_transitions_accepts_pr_keys_and_drops_unknown():

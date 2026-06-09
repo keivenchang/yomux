@@ -393,7 +393,7 @@ function fileExplorerRefreshMsFromValues(secondsValue, legacyMsValue = 15001) {
   return Math.max(1000, Math.min(60000, Number.isFinite(legacyMs) ? legacyMs : 15001));
 }
 let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
-  initialSetting('file_explorer.refresh_seconds', 15),
+  initialSetting('file_explorer.refresh_seconds', 1),
   initialSetting('file_explorer.refresh_ms', 15001),
 );
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);

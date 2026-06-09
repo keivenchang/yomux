@@ -102,7 +102,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "indexed_dirs": [],
         "index_refresh_seconds": 120,
         "companion_dirs": [],
-        "refresh_seconds": 15,
+        "refresh_seconds": 1,
         "new_entry_highlight_ms": 60000,
     },
     "uploads": {

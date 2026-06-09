@@ -3584,6 +3584,9 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
   clearFileAutosaveTimer(path);
   setFileState(path, clearOpenFileExternalState(loaded.state));
   renderOpenFilePath(path);
+  if (loaded.state?.kind === 'text' && typeof updateFilePreviewPopout === 'function') {
+    updateFilePreviewPopout(path, loaded.state.content || '');
+  }
   if (previous?.diff !== undefined) refreshOpenFileDiff(path);
   return true;
 }

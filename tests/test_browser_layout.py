@@ -3185,7 +3185,8 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
           <div id="host" class="file-editor-codemirror-panel file-editor-diff-codemirror">
             <div class="cm-editor"><div class="cm-content">
               <div id="added-a" class="cm-line cm-insertedLine">added one</div>
-              <div id="added-active" class="cm-line cm-insertedLine cm-activeLine">added active</div>
+              <div id="added-active" class="cm-line cm-insertedLine cm-activeLine">added <span id="added-match" class="cm-searchMatch">active</span></div>
+              <div id="added-selected" class="cm-line cm-insertedLine">added <span id="selected-match" class="cm-searchMatch cm-searchMatch-selected">selected</span></div>
               <div id="plain-active" class="cm-line cm-activeLine">plain active</div>
             </div></div>
           </div>
@@ -3202,6 +3203,11 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
           added: bg('#added-a'),
           activeAdded: bg('#added-active'),
           plainActive: bg('#plain-active'),
+          matchBg: bg('#added-match'),
+          matchColor: getComputedStyle(document.querySelector('#added-match')).color,
+          matchShadow: getComputedStyle(document.querySelector('#added-match')).boxShadow,
+          selectedBg: bg('#selected-match'),
+          selectedShadow: getComputedStyle(document.querySelector('#selected-match')).boxShadow,
           addToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-add-line-bg').trim(),
           removeToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-remove-line-bg').trim(),
         };
@@ -3210,6 +3216,10 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
         const light = {
           added: bg('#added-a'),
           activeAdded: bg('#added-active'),
+          matchBg: bg('#added-match'),
+          matchColor: getComputedStyle(document.querySelector('#added-match')).color,
+          matchShadow: getComputedStyle(document.querySelector('#added-match')).boxShadow,
+          selectedBg: bg('#selected-match'),
           addToken: getComputedStyle(document.querySelector('#host')).getPropertyValue('--diff-add-line-bg').trim(),
         };
         return {dark, light};
@@ -3217,9 +3227,18 @@ def test_diff_added_active_line_uses_same_fill_as_neighbor(browser, tmp_path):
     )
     assert metrics["dark"]["added"] == metrics["dark"]["activeAdded"], metrics
     assert metrics["dark"]["plainActive"] in ("rgba(0, 0, 0, 0)", "transparent"), metrics
+    assert metrics["dark"]["matchBg"] != metrics["dark"]["added"], metrics
+    assert metrics["dark"]["matchColor"] == "rgb(11, 16, 32)", metrics
+    assert metrics["dark"]["matchShadow"] != "none", metrics
+    assert metrics["dark"]["selectedBg"] != metrics["dark"]["added"], metrics
+    assert metrics["dark"]["selectedShadow"] != "none", metrics
     assert "transparent" not in metrics["dark"]["addToken"], metrics
     assert "transparent" not in metrics["dark"]["removeToken"], metrics
     assert metrics["light"]["added"] == metrics["light"]["activeAdded"], metrics
+    assert metrics["light"]["matchBg"] != metrics["light"]["added"], metrics
+    assert metrics["light"]["matchColor"] == "rgb(17, 24, 39)", metrics
+    assert metrics["light"]["matchShadow"] != "none", metrics
+    assert metrics["light"]["selectedBg"] != metrics["light"]["added"], metrics
     assert metrics["light"]["addToken"] == "#bfeac8", metrics
 
 
@@ -3962,6 +3981,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               previewRatio: scrollRatio(previewPane),
               popupCenterRatio: visibleCenterRatio(popupScroller()),
               previewCenterRatio: visibleCenterRatio(previewPane),
+              headerTop: snapshotGeometry().headerTop,
             };
             await delay(220);
             popupScroller().scrollTop = 0;
@@ -4221,6 +4241,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     assert metrics["afterPopupScroll"]["popupTop"] < metrics["afterPopupScroll"]["popupBefore"], metrics
     assert metrics["afterPopupScroll"]["previewTop"] < metrics["afterEditorBottomScroll"]["previewTop"], metrics
     assert abs(metrics["afterPopupScroll"]["popupCenterRatio"] - metrics["afterPopupScroll"]["previewCenterRatio"]) <= 0.05, metrics
+    assert abs(metrics["afterPopupScroll"]["headerTop"]) <= 1, metrics
     assert metrics["afterPopupTopScroll"]["popupTop"] == 0, metrics
     assert metrics["afterPopupTopScroll"]["previewTop"] == 0, metrics
     assert abs(metrics["afterPopupBottomScroll"]["popupTop"] - metrics["afterPopupBottomScroll"]["popupMax"]) <= 1, metrics

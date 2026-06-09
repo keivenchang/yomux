@@ -8931,6 +8931,11 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
   position: relative;
   --diff-add-line-bg: #2b5d16;
   --diff-remove-line-bg: #540c06;
+  --diff-search-match-bg: #ffd54a;
+  --diff-search-match-fg: #0b1020;
+  --diff-search-match-ring: #fff2a8;
+  --diff-search-selected-bg: #ff9f1c;
+  --diff-search-selected-ring: #fff7c2;
 }
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;
@@ -8977,6 +8982,22 @@ body.theme-light .file-explorer-date-reload-cluster .changes-refresh:focus-visib
 .file-editor-diff-codemirror .cm-insertedLine {
   box-shadow: -100vw 0 0 var(--diff-full-line-bg), 100vw 0 0 var(--diff-full-line-bg);
   clip-path: inset(0 -100vw);
+}
+.file-editor-diff-codemirror .cm-searchMatch {
+  position: relative;
+  z-index: 1;
+  color: var(--diff-search-match-fg) !important;
+  background: var(--diff-search-match-bg) !important;
+  box-shadow: inset 0 0 0 1px var(--diff-search-match-ring), 0 0 0 1px rgba(0, 0, 0, 0.54) !important;
+  border-radius: 2px;
+  font-weight: 800;
+}
+.file-editor-diff-codemirror .cm-searchMatch-selected {
+  color: var(--diff-search-match-fg) !important;
+  background: var(--diff-search-selected-bg) !important;
+  box-shadow: inset 0 0 0 2px var(--diff-search-selected-ring), 0 0 0 1px rgba(0, 0, 0, 0.66) !important;
+  border-radius: 2px;
+  font-weight: 900;
 }
 /* DOIT.6 #44: diffs render as full red/green lines only (highlightChanges:false), so the per-token
    intra-line change-highlight background rules and their --diff-*-text-bg tokens are gone. */
@@ -9033,6 +9054,11 @@ body.editor-theme-light .file-editor-diff-codemirror {
   --code-diff-remove: #d81f32;
   --diff-add-line-bg: #bfeac8;
   --diff-remove-line-bg: #f3b7b7;
+  --diff-search-match-bg: #ffcc00;
+  --diff-search-match-fg: #111827;
+  --diff-search-match-ring: #7c2d12;
+  --diff-search-selected-bg: #ff9f1c;
+  --diff-search-selected-ring: #7c2d12;
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk,

@@ -331,6 +331,21 @@ def test_search_files_recursive_walks_indexed_non_repo_root_but_skips_heavy_dirs
     assert "node_modules/target_file.js" not in paths
 
 
+def test_search_files_canonicalizes_symlink_root(tmp_path):
+    real_root = tmp_path / "dynamo" / "notes"
+    real_root.mkdir(parents=True)
+    (real_root / "DIS-2218.md").write_text("# notes\n", encoding="utf-8")
+    link_root = tmp_path / "notes"
+    link_root.symlink_to(real_root, target_is_directory=True)
+
+    payload = filesystem.search_files(str(link_root), "DIS-2218", 20, recursive=True)
+
+    assert payload["root"] == str(real_root)
+    assert payload["root_realpath"] == os.path.realpath(real_root)
+    assert [item["path"] for item in payload["files"]] == [str(real_root / "DIS-2218.md")]
+    assert payload["files"][0]["realpath"] == os.path.realpath(real_root / "DIS-2218.md")
+
+
 def test_search_files_ranks_exact_filename_above_large_generated_sibling(tmp_path):
     root = tmp_path / "dynamo"
     logs = root / "commits" / "logs"

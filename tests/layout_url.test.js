@@ -3858,6 +3858,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(editorSelectionSource.includes("boxShadow: scheme.dark ? 'inset 0 0 0 1px rgba(191, 219, 254, 0.42)' : 'inset 0 0 0 1px rgba(29, 78, 216, 0.24)'"), 'editor selections get a visible edge without an opaque fill');
   assert.equal(editorSelectionSource.includes("'.cm-searchMatch-selected': {\n      backgroundColor: scheme.dark ? 'rgba(118, 185, 0, 0.84)'"), false, 'selected editor search matches are not green, so they remain visible on green active/highlighted rows');
   assert.ok(/'\.cm-searchMatch-selected': \{[\s\S]*backgroundColor: scheme\.dark \? '#ffd166' : '#ff9f1c'[\s\S]*fontWeight: '800'/.test(editorSelectionSource), 'selected editor search matches use high-contrast yellow/orange fill and bold text');
+  assert.ok(/\.file-editor-diff-codemirror \.cm-searchMatch\s*\{[\s\S]*z-index:\s*1[\s\S]*background:\s*var\(--diff-search-match-bg\) !important/.test(editorSelectionCss), 'Differ search matches sit above green/red diff row fills');
+  assert.ok(/\.file-editor-diff-codemirror \.cm-searchMatch-selected\s*\{[\s\S]*background:\s*var\(--diff-search-selected-bg\) !important[\s\S]*font-weight:\s*900/.test(editorSelectionCss), 'selected Differ search matches use a stronger non-green fill');
   assert.ok(editorSelectionSource.includes("}, {dark: scheme.dark});"), 'CodeMirror receives the active light/dark theme flag');
   assert.ok(editorSelectionSource.includes("backgroundColor: 'transparent !important'"), 'CodeMirror native editor selection background is suppressed so drawSelection owns the fill');
   assert.ok(/\.file-editor-codemirror \.cm-content ::selection,[\s\S]*?background:\s*transparent !important[\s\S]*?color:\s*inherit !important/.test(editorSelectionCss), 'static CSS keeps global browser selection colors out of CodeMirror');
@@ -4395,6 +4397,15 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.fileExplorerDirectoryIsIndexed('/repo/tools/src'), false, 'Finder compacts redundant child index marks under an indexed ancestor');
   assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/repo/workspace')), ['/repo/workspace', '/repo/other', '/repo/tools'], 'file quick-open adds indexed Finder directories and compacts nested search roots');
   assert.equal(api.fileQuickOpenScopeLabel('/repo/workspace'), '/repo/workspace + 2 indexed', 'file quick-open placeholder summarizes indexed search scope');
+  api.setFileQuickOpenCandidatesForTest('/repo/workspace', [
+    {name: 'target.md', path: '/home/test/dynamo/notes/target.md', relative_path: 'target.md', indexed_root: '/home/test/dynamo/notes'},
+    {name: 'target.md', path: '/repo/workspace/docs/target.md', relative_path: 'docs/target.md', indexed_root: '/repo/workspace'},
+  ]);
+  const priorityItems = api.fileQuickOpenItems().filter(item => item.label === 'target.md');
+  const contextItem = priorityItems.find(item => item.key === 'file:/repo/workspace/docs/target.md');
+  const indexedItem = priorityItems.find(item => item.key === 'file:/home/test/dynamo/notes/target.md');
+  assert.ok(contextItem && indexedItem, 'file quick-open renders both context and external indexed matches');
+  assert.ok(api.commandPaletteItemScore(contextItem, 'target') > api.commandPaletteItemScore(indexedItem, 'target'), 'file quick-open prioritizes the active context over external indexed roots');
   api.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
   assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test')), ['/home/test/dynamo'], 'an indexed child under the default root replaces the broad live parent search');
   // #31: the Finder indexed badge reflects the cached build status without writing a long label into
@@ -6860,7 +6871,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('.file-preview-popout-window.editor-theme-light .markdown-body pre'), 'preview pop-out has light-theme code block rules outside .file-editor-content');
   assert.ok(source.includes('.file-preview-popout-window .markdown-body'), 'preview pop-out sets readable body text in its standalone document');
   assert.ok(/\.file-preview-popout-title\s*\{[\s\S]*display:\s*grid[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto minmax\(0,\s*1fr\)/.test(source), 'preview pop-out top bar uses left/title, centered font, and right theme zones');
-  assert.ok(/\.file-preview-popout-title\s*\{[\s\S]*position:\s*sticky[\s\S]*z-index:\s*20/.test(source), 'preview pop-out top bar stays above the preview body while scrolling');
+  assert.ok(/\.file-preview-popout-title\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*1000/.test(source), 'preview pop-out top bar stays fixed above the preview body while scrolling');
+  assert.ok(/\.file-preview-popout-shell\s*\{[\s\S]*width:\s*100%[\s\S]*padding:\s*64px 24px 36px/.test(source), 'preview pop-out shell uses the full window width and reserves space below the fixed top bar');
+  assert.equal(/\.file-preview-popout-shell\s*\{[\s\S]*width:\s*min\(/.test(source), false, 'preview pop-out content is not capped at a fixed desktop width');
   assert.ok(/<span class="file-preview-popout-title-path">[\s\S]*\$\{previewPopoutToolbarHtml\(\)\}/.test(source), 'preview pop-out header renders the path before the shared pop-out toolbar controls');
   assert.ok(/function previewPopoutToolbarHtml\(\)[\s\S]*file-editor-preview-font-panel[\s\S]*class="file-editor-theme-panel" data-preview-popout-theme/.test(source), 'preview pop-out toolbar renders font selector before the theme selector');
   assert.ok(/updateEditorThemeButton\(themeButton, \{includeVanilla: true\}\)/.test(source), 'preview pop-out theme selector includes vanilla mode');
@@ -6875,6 +6888,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function scrollSyncTargetPosition\(from, to, axis = 'top'\)[\s\S]*const edgeSnap = Math\.max\(2, Math\.ceil\(sourceClient \* 0\.01\)\);[\s\S]*if \(maxTo <= 0 \|\| current <= edgeSnap\) return 0;[\s\S]*if \(maxFrom <= edgeSnap \|\| current >= maxFrom - edgeSnap\) return maxTo;[\s\S]*const sourceCenter = Math\.min\(maxFrom, current\) \+ \(sourceClient \/ 2\);[\s\S]*return Math\.min\(maxTo, Math\.max\(0, target\)\);/.test(source), 'pop-out scroll sync aligns viewport centers with fractional precision and explicit edge snaps');
   assert.ok(/function syncFilePreviewPopoutFromPanel[\s\S]*syncScrollPositionByRatio\(from, scroller\)/.test(source), 'editor-to-popout scroll sync uses the shared proportional mapper');
   assert.ok(/function syncFilePreviewPopoutScroll[\s\S]*syncScrollPositionByRatio\(scroller, editorScroller\)[\s\S]*syncScrollPositionByRatio\(scroller, previewPane\)/.test(source), 'popout-to-editor scroll sync uses the shared proportional mapper');
+  assert.ok(/function fileEditorSourceElement\(panel, source\)\s*\{[\s\S]*fileEditorPanelMode\(panel\) === 'diff'[\s\S]*return null/.test(source), 'Differ views are not preview-scroll sources');
+  assert.ok(/function syncFilePreviewPopoutScroll[\s\S]*mode !== 'diff' && editorScroller[\s\S]*syncScrollPositionByRatio\(scroller, editorScroller\)/.test(source), 'preview pop-out scrolling does not drive Differ editors');
   assert.ok(/function scheduleFilePreviewPopoutScrollSync\(path, previewWindow, options = \{\}\)[\s\S]*requestAnimationFrame\(run\)/.test(source), 'pop-out wheel/scroll sync is coalesced through requestAnimationFrame for smooth trackpad deltas');
   assert.ok(/function syncFileEditorInPaneSplitScroll\(host, source\)[\s\S]*return syncScrollPositionByRatio\(from, to\);/.test(source), 'split Preview scroll sync uses the same fractional center/edge mapper as pop-out preview');
   const splitSyncStart = source.indexOf('function syncFileEditorInPaneSplitScroll');
@@ -6889,6 +6904,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/function closeFilePreviewPopout\(path\)[\s\S]*filePreviewPopouts\.delete\(path\)[\s\S]*previewWindow\.close\?\.\(\)/.test(source), 'preview pop-out close removes the registry entry and closes the window');
   assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*mode === 'preview' \|\| mode === 'split'[\s\S]*closeFilePreviewPopout\(path\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'switching to in-editor Preview or Split closes any open pop-out preview for that file');
   assert.ok(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8').includes("if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();"), 'settings refresh syncs open preview pop-outs');
+  assert.ok(/function replaceOpenFileStateFromDisk[\s\S]*renderOpenFilePath\(path\);[\s\S]*updateFilePreviewPopout\(path, loaded\.state\.content \|\| ''\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'external disk reload syncs open preview pop-outs');
   assert.ok(source.includes('position: static !important;'), 'preview pop-out resets the in-pane absolute preview positioning');
   assert.ok(source.includes('display: block !important;') && source.includes('grid-template-rows: none !important;'), 'preview pop-out resets the app body grid layout');
   assert.ok(source.includes('width: 100% !important;') && source.includes('left: auto !important;'), 'preview pop-out resets split-preview geometry that would clip content to the right half');

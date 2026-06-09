@@ -4729,7 +4729,7 @@ function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
     const mode = fileEditorPanelMode(panel);
     const previewPane = fileEditorPanelPreviewPane(panel);
     const editorScroller = fileEditorPanelScroller(panel);
-    if (editorScroller && elementCanScroll(editorScroller)) synced = syncScrollPositionByRatio(scroller, editorScroller) || synced;
+    if (mode !== 'diff' && editorScroller && elementCanScroll(editorScroller)) synced = syncScrollPositionByRatio(scroller, editorScroller) || synced;
     if ((mode === 'preview' || mode === 'split') && previewPane && elementCanScroll(previewPane)) synced = syncScrollPositionByRatio(scroller, previewPane) || synced;
   }
   return synced;
@@ -4854,21 +4854,25 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     }
     .file-preview-popout-shell {
       box-sizing: border-box;
-      width: min(100%, 1040px);
+      width: 100%;
       margin: 0 auto;
-      padding: 0 24px 36px;
+      padding: 64px 24px 36px;
     }
     .file-preview-popout-title {
-      position: sticky;
+      position: fixed;
       top: 0;
-      z-index: 20;
+      left: 50%;
+      z-index: 1000;
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
       gap: 12px;
+      box-sizing: border-box;
+      width: calc(100% - 48px);
       min-height: 32px;
       padding: 8px 0 12px;
       margin-bottom: 12px;
+      transform: translateX(-50%);
       border-bottom: 1px solid var(--border, #d1d5db);
       background: var(--editor-preview-bg, var(--bg, #ffffff));
       color: var(--text, #111827);
@@ -5063,7 +5067,8 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       border: 0;
     }
     @media (max-width: 640px) {
-      .file-preview-popout-shell { padding: 0 14px 28px; }
+      .file-preview-popout-shell { padding: 64px 14px 28px; }
+      .file-preview-popout-title { width: calc(100% - 28px); }
     }
   </style>
 </head>
@@ -5545,6 +5550,7 @@ function fileEditorPanelPreviewPane(panel) {
 }
 
 function fileEditorSourceElement(panel, source) {
+  if (fileEditorPanelMode(panel) === 'diff') return null;
   return source === 'preview' ? fileEditorPanelPreviewPane(panel) : fileEditorPanelScroller(panel);
 }
 

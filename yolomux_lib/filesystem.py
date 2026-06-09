@@ -131,6 +131,11 @@ def _validated_path(raw: str) -> Path:
     return path
 
 
+def _canonical_root(path: Path) -> Path:
+    """Use the real directory as a search/index root so symlink aliases don't duplicate results."""
+    return _normalized_scope_path(path)
+
+
 def _normalized_scope_path(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
@@ -505,7 +510,7 @@ def _search_full_tree(root: Path, search_root: Path, tokens: list[str], results:
 
 
 def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
-    root = _validated_path(raw_root)
+    root = _canonical_root(_validated_path(raw_root))
     if not root.exists():
         raise FilesystemError(f"path not found: {root}", status=404)
     if not root.is_dir():
@@ -545,6 +550,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                 _annotate_search_dedupe_fields(entry)
             return {
                 "root": str(root),
+                "root_realpath": os.path.realpath(root),
                 "query": str(query or ""),
                 "limit": max_results,
                 "truncated": indexed_truncated,
@@ -569,6 +575,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                     _annotate_search_dedupe_fields(entry)
                 return {
                     "root": str(root),
+                    "root_realpath": os.path.realpath(root),
                     "query": "",
                     "limit": max_results,
                     "truncated": recent_truncated,
@@ -577,6 +584,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                 }
             return {
                 "root": str(root),
+                "root_realpath": os.path.realpath(root),
                 "query": "",
                 "limit": max_results,
                 "truncated": False,
@@ -626,6 +634,7 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
         entry.pop("_sort_key", None)
     return {
         "root": str(root),
+        "root_realpath": os.path.realpath(root),
         "query": str(query or ""),
         "limit": max_results,
         "truncated": truncated,
@@ -637,7 +646,7 @@ def index_status(raw_root: str) -> dict[str, Any]:
     """Warm the persistent quick-open index for a root (kick the background build if missing/stale)
     and report its build state, so the client can eagerly index and show a stable indexing/indexed
     badge instead of paying a cold live walk on the first query."""
-    root = _validated_path(raw_root)
+    root = _canonical_root(_validated_path(raw_root))
     if not root.is_dir():
         raise FilesystemError(f"not a directory: {root}", status=400)
     index = file_index.ensure_index(
@@ -657,6 +666,7 @@ def index_status(raw_root: str) -> dict[str, Any]:
     state = "ready" if ready else ("building" if building else "missing")
     return {
         "root": str(root),
+        "root_realpath": os.path.realpath(root),
         "building": building,
         "ready": ready,
         "count": count,
@@ -669,7 +679,7 @@ def index_status(raw_root: str) -> dict[str, Any]:
 
 def unindex_root(raw_root: str) -> dict[str, Any]:
     """Drop the persistent quick-open index for a root (cancel any build, free memory + on-disk)."""
-    root = _validated_path(raw_root)
+    root = _canonical_root(_validated_path(raw_root))
     file_index.unindex(root)
     return {"root": str(root), "ok": True}
 
