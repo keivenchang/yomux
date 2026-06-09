@@ -222,6 +222,22 @@ def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_p
     assert written["json"]["error"] == "path must be an HTML file"
 
 
+def test_preview_popout_placeholder_route_returns_same_origin_shell():
+    written = {}
+    handler = SimpleNamespace(
+        write_html=lambda body, status=HTTPStatus.OK: written.update({"html_status": status, "html": body}),
+    )
+
+    Handler.handle_preview_popout_placeholder(
+        handler,
+        urlparse(f"/preview-popout?{urlencode({'path': '/home/test/README.md'})}"),
+    )
+
+    assert written["html_status"] == HTTPStatus.OK
+    assert "<title>README.md preview</title>" in written["html"]
+    assert "<body></body>" in written["html"]
+
+
 def test_html_preview_route_accepts_logged_in_cookie(monkeypatch, tmp_path):
     target = tmp_path / "preview.html"
     target.write_text("<h1>ok</h1><script>window.answer = 42;</script>\n", encoding="utf-8")

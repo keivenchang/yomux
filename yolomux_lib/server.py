@@ -196,6 +196,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if parsed.path == "/":
             self.write_html(html_page(self.server.app.sessions, self.auth_identity().role, dev=getattr(self.server, 'dev', False), dangerously_yolo=self.server.app.dangerously_yolo))
             return
+        if parsed.path == "/preview-popout":
+            self.handle_preview_popout_placeholder(parsed)
+            return
         if parsed.path == "/api/transcripts":
             self.write_json(self.server.app.transcripts_payload())
             return
@@ -446,6 +449,21 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 <body>
   <iframe title="{title}" sandbox="allow-scripts allow-forms allow-popups" srcdoc="{source}"></iframe>
 </body>
+</html>"""
+        self.write_html(body)
+
+    def handle_preview_popout_placeholder(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", [""])[0]
+        title = html.escape(f"{Path(raw_path).name or 'Preview'} preview")
+        body = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+</head>
+<body></body>
 </html>"""
         self.write_html(body)
 

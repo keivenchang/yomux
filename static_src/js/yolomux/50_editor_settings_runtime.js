@@ -14,6 +14,7 @@ function editorViewModeFor(path, item = null) {
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
+  if ((mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
 }
 
@@ -85,7 +86,12 @@ function editorPreviewThemeState() {
 
 function editorPreviewThemeStateLabel(state = editorPreviewThemeState()) {
   if (state === 'vanilla') return 'Vanilla preview';
-  return state === 'light' ? 'Light preview' : 'Dark preview';
+  return state === 'light' ? 'Bright preview' : 'Dark preview';
+}
+
+function editorPreviewThemeShortLabel(state = editorPreviewThemeState()) {
+  if (state === 'vanilla') return 'Vanilla';
+  return state === 'light' ? 'Bright' : 'Dark';
 }
 
 function editorSchemeCssVariables(scheme = activeEditorScheme()) {
@@ -112,6 +118,7 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--markdown-strong': syntax.strong,
     '--markdown-emphasis': syntax.emphasis,
     '--code-keyword': syntax.keyword,
+    '--code-control': syntax.control || syntax.keyword,
     '--code-atom': syntax.atom,
     '--code-string': syntax.string,
     '--code-number': syntax.number,
@@ -142,6 +149,7 @@ function editorSchemeCssVariables(scheme = activeEditorScheme()) {
     '--lt-markdown-strong': syntax.strong,
     '--lt-markdown-emphasis': syntax.emphasis,
     '--lt-code-keyword': syntax.keyword,
+    '--lt-code-control': syntax.control || syntax.keyword,
     '--lt-code-atom': syntax.atom,
     '--lt-code-string': syntax.string,
     '--lt-code-number': syntax.number,
@@ -175,7 +183,10 @@ function updateEditorThemeButton(button, options = {}) {
   button.classList.toggle('theme-dark', previewState === 'dark');
   button.classList.toggle('theme-light', previewState === 'light');
   button.classList.toggle('theme-vanilla', previewState === 'vanilla');
+  button.classList.toggle('theme-with-label', includeVanilla);
   button.dataset.editorTheme = previewState === 'vanilla' ? 'vanilla' : scheme.id;
+  button.dataset.editorThemeShort = includeVanilla ? editorPreviewThemeShortLabel(previewState) : '';
+  button.dataset.editorThemeNext = includeVanilla ? editorPreviewThemeShortLabel(nextState) : '';
   button.setAttribute('aria-pressed', previewState === 'dark' ? 'false' : 'true');
   button.title = `${editorThemeLabel()}; next: ${editorPreviewThemeStateLabel(nextState)}`;
   button.setAttribute('aria-label', editorThemeLabel());
@@ -710,6 +721,7 @@ function applySettingsPayload(payload, options = {}) {
   fileExplorerRootMode = initialSetting('file_explorer.root_mode', fileExplorerRootMode) === 'sync' ? 'sync' : 'fixed';
   applyCssSettings();
   if (typeof updateEditorPreviewFontControls === 'function') updateEditorPreviewFontControls();
+  if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();
   applyGlobalThemeMode({updateEditor: false, updateTerminals: false});
   applyEditorThemeMode({refreshEditors: false});
   applyEditorCursorStyle();

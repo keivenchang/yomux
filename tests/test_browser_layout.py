@@ -3708,6 +3708,796 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
     assert metrics["edit"]["saveHidden"] is False, metrics
 
 
+def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
+    page = tmp_path / "preview-popout-sync.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"appearance": {"preview_font_size": 16}},
+            sessions=["1"],
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+            window.marked = {
+              parse(markdown) {
+                const lines = String(markdown || '').split('\\n');
+                const parts = [];
+                for (let index = 0; index < lines.length; index += 1) {
+                  const line = lines[index];
+                  if (!line.trim()) continue;
+                  if (line.startsWith('# ')) {
+                    parts.push(`<h1>${escapeHtml(line.slice(2))}</h1>`);
+                    continue;
+                  }
+                  if (line.startsWith('```')) {
+                    const lang = escapeHtml(line.slice(3).trim() || 'text');
+                    const code = [];
+                    index += 1;
+                    while (index < lines.length && !lines[index].startsWith('```')) {
+                      code.push(lines[index]);
+                      index += 1;
+                    }
+                    parts.push(`<pre><code class="language-${lang}">${escapeHtml(code.join('\\n'))}</code></pre>`);
+                    continue;
+                  }
+                  parts.push(`<p>${escapeHtml(line)}</p>`);
+                }
+                return parts.join('');
+              },
+            };
+            window.hljs = {
+              highlightElement(block) {
+                if (block.classList.contains('language-rust')) {
+                  block.classList.add('hljs');
+                  return;
+                }
+                block.classList.add('hljs');
+                block.innerHTML = '<span class="hljs-keyword">function</span> <span class="hljs-title function_">paint</span>() { <span class="hljs-keyword">return</span> <span class="hljs-string">"blue"</span>; }';
+              },
+            };
+            const path = '/home/test/repo/README.md';
+            const longTail = Array.from({length: 42}, (_, index) => `Paragraph ${index + 1} pop-out scroll sync text`).join('\\n\\n');
+            const original = `# Preview\\n\\nOriginal pop-out text\\n\\n\\`\\`\\`javascript\\nfunction paint() { return "blue"; }\\n\\`\\`\\`\\n\\n\\`\\`\\`rust\\npub fn main() { let value: Option<u32> = Some(1); }\\n\\`\\`\\`\\n\\n${longTail}\\n`;
+            const updated = original.replace('Original pop-out text', 'Updated pop-out text');
+            const item = fileEditorItemFor(path);
+            setFileEditorThemeMode('yolomux-light');
+            setFileState(path, {
+              kind: 'text',
+              gitRoot: '/home/test/repo',
+              gitTracked: true,
+              gitHasHistory: true,
+              gitHistory: [{ref: 'HEAD'}, {ref: 'abc123def'}],
+              content: original,
+              original,
+              dirty: false,
+              language: 'markdown',
+            });
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '900px';
+            panel.style.height = '520px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            const iframe = document.createElement('iframe');
+            iframe.style.width = '900px';
+            iframe.style.height = '520px';
+            iframe.style.position = 'absolute';
+            iframe.style.left = '0';
+            iframe.style.top = '0';
+            document.body.append(iframe);
+            const realOpen = window.open;
+            let openedUrl = '';
+            window.open = (url) => {
+              openedUrl = String(url || '');
+              return iframe.contentWindow;
+            };
+            panel.querySelector('.file-editor-popout-preview-panel').click();
+            await frame();
+            await frame();
+            window.open = realOpen;
+            const afterPopoutButtonClick = {
+              mode: editorViewModeFor(path, item),
+              openedUrl,
+              hasRecord: filePreviewPopouts.has(path),
+              editMode: panel.querySelector('.file-editor-content')?.classList.contains('edit-mode') === true,
+              editorThemeText: panel.querySelector('.file-editor-theme-panel')?.dataset?.editorThemeShort || '',
+              editorThemeClass: panel.querySelector('.file-editor-theme-panel')?.className || '',
+            };
+            filePreviewPopouts.delete(path);
+            setFileEditorViewMode(path, 'preview', item);
+            renderFileEditorPanel(panel, item);
+            filePreviewPopouts.set(path, {window: iframe.contentWindow});
+            writeFilePreviewPopoutDocument(path, iframe.contentWindow, renderedPreviewSnapshot(path, original));
+            await frame();
+            await frame();
+            const popupDoc = iframe.contentDocument;
+            const popupValue = () => popupDoc.querySelector('.file-editor-preview-font-value')?.textContent?.trim() || '';
+            const editorValue = () => panel.querySelector('.file-editor-preview-font-value')?.textContent?.trim() || '';
+            const popupThemeButton = () => popupDoc.querySelector('[data-preview-popout-theme]');
+            const popupThemeText = () => popupThemeButton()?.dataset?.editorThemeShort || '';
+            const popupScroller = () => popupDoc.scrollingElement || popupDoc.documentElement;
+            const maxScrollTop = element => Math.max(0, Number(element?.scrollHeight || 0) - Number(element?.clientHeight || 0));
+            const scrollRatio = element => {
+              const max = maxScrollTop(element);
+              return max > 0 ? Number(element.scrollTop || 0) / max : 0;
+            };
+            const visibleCenterRatio = element => {
+              const size = Math.max(0, Number(element?.scrollHeight || 0));
+              if (size <= 0) return 0;
+              return (Number(element.scrollTop || 0) + Number(element.clientHeight || 0) / 2) / size;
+            };
+            const editorKeyword = () => getComputedStyle(panel.querySelector('code.language-javascript .code-keyword')).color;
+            const popupKeyword = () => getComputedStyle(popupDoc.querySelector('code.language-javascript .code-keyword')).color;
+            const editorRustControl = () => panel.querySelector('code.language-rust .code-control')?.textContent || '';
+            const popupRustControl = () => popupDoc.querySelector('code.language-rust .code-control')?.textContent || '';
+            const popupRustControlColor = () => getComputedStyle(popupDoc.querySelector('code.language-rust .code-control')).color;
+            const popupRustType = () => popupDoc.querySelector('code.language-rust .code-type')?.textContent || '';
+            const popupRustTypeColor = () => getComputedStyle(popupDoc.querySelector('code.language-rust .code-type')).color;
+            const snapshotGeometry = () => {
+              const header = popupDoc.querySelector('.file-preview-popout-title').getBoundingClientRect();
+              const pathNode = popupDoc.querySelector('.file-preview-popout-title-path').getBoundingClientRect();
+              const font = popupDoc.querySelector('.file-editor-preview-font-panel').getBoundingClientRect();
+              const theme = popupThemeButton().getBoundingClientRect();
+              return {
+                headerLeft: header.left,
+                headerRight: header.right,
+                headerCenter: header.left + header.width / 2,
+                pathLeft: pathNode.left,
+                pathRight: pathNode.right,
+                fontLeft: font.left,
+                fontCenter: font.left + font.width / 2,
+                themeRight: theme.right,
+                themeLeft: theme.left,
+                headerTop: header.top,
+              };
+            };
+            const initialGeometry = snapshotGeometry();
+            const initial = {
+              popupValue: popupValue(),
+              editorValue: editorValue(),
+              popupText: popupDoc.querySelector('[data-preview-root]')?.textContent || '',
+              popupBodyClass: popupDoc.body.className,
+              popupThemeClass: popupThemeButton().className,
+              popupThemeText: popupThemeText(),
+              editorKeywordColor: editorKeyword(),
+              popupKeywordColor: popupKeyword(),
+              editorRustControl: editorRustControl(),
+              popupRustControl: popupRustControl(),
+              popupRustControlColor: popupRustControlColor(),
+              popupRustType: popupRustType(),
+              popupRustTypeColor: popupRustTypeColor(),
+              editorCodeClass: panel.querySelector('pre code')?.className || '',
+              popupCodeClass: popupDoc.querySelector('pre code')?.className || '',
+            };
+            setEditorPreviewFontSize(19);
+            await frame();
+            await frame();
+            const afterEditorFont = {
+              popupValue: popupValue(),
+              editorValue: editorValue(),
+              popupStyle: popupDoc.body.getAttribute('style') || '',
+            };
+            handleFileEditorContentChanged(panel, path, updated, {syntax: false});
+            await frame();
+            await frame();
+            const afterEditorContent = popupDoc.querySelector('[data-preview-root]')?.textContent || '';
+            setFileEditorThemeMode(configuredEditorSchemeForMode(false));
+            await frame();
+            await frame();
+            const afterEditorTheme = {
+              popupBodyClass: popupDoc.body.className,
+              editorThemeClass: panel.querySelector('.file-editor-theme-panel')?.className || '',
+              popupThemeClass: popupThemeButton().className,
+              popupThemeText: popupThemeText(),
+            };
+            popupDoc.querySelector('[data-editor-preview-font-step="1"]').click();
+            await frame();
+            await frame();
+            const afterPopupFont = {
+              popupValue: popupValue(),
+              editorValue: editorValue(),
+            };
+            popupThemeButton().click();
+            await frame();
+            await frame();
+            const previewPane = panel.querySelector('.file-editor-preview-pane-panel');
+            previewPane.scrollTop = Math.round(maxScrollTop(previewPane) * 0.38);
+            previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await frame();
+            await frame();
+            const afterEditorScroll = {
+              previewTop: previewPane.scrollTop,
+              popupTop: popupScroller().scrollTop,
+              previewRatio: scrollRatio(previewPane),
+              popupRatio: scrollRatio(popupScroller()),
+              previewCenterRatio: visibleCenterRatio(previewPane),
+              popupCenterRatio: visibleCenterRatio(popupScroller()),
+            };
+            await delay(220);
+            previewPane.scrollTop = 0;
+            previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await frame();
+            await frame();
+            const afterEditorTopScroll = {
+              previewTop: previewPane.scrollTop,
+              popupTop: popupScroller().scrollTop,
+            };
+            await delay(220);
+            previewPane.scrollTop = maxScrollTop(previewPane);
+            previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await frame();
+            await frame();
+            const afterEditorBottomScroll = {
+              previewTop: previewPane.scrollTop,
+              previewMax: maxScrollTop(previewPane),
+              popupTop: popupScroller().scrollTop,
+              popupMax: maxScrollTop(popupScroller()),
+            };
+            await delay(220);
+            const popupBefore = popupScroller().scrollTop;
+            popupScroller().scrollTop = Math.round(maxScrollTop(popupScroller()) * 0.61);
+            popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
+            popupDoc.defaultView.dispatchEvent(new Event('scroll'));
+            await frame();
+            await frame();
+            const afterPopupScroll = {
+              popupBefore,
+              popupTop: popupScroller().scrollTop,
+              previewTop: previewPane.scrollTop,
+              popupRatio: scrollRatio(popupScroller()),
+              previewRatio: scrollRatio(previewPane),
+              popupCenterRatio: visibleCenterRatio(popupScroller()),
+              previewCenterRatio: visibleCenterRatio(previewPane),
+            };
+            await delay(220);
+            popupScroller().scrollTop = 0;
+            popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
+            popupDoc.defaultView.dispatchEvent(new Event('scroll'));
+            await frame();
+            await frame();
+            const afterPopupTopScroll = {
+              popupTop: popupScroller().scrollTop,
+              previewTop: previewPane.scrollTop,
+            };
+            await delay(220);
+            popupScroller().scrollTop = maxScrollTop(popupScroller());
+            popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
+            popupDoc.defaultView.dispatchEvent(new Event('scroll'));
+            await frame();
+            await frame();
+            const afterPopupBottomScroll = {
+              popupTop: popupScroller().scrollTop,
+              popupMax: maxScrollTop(popupScroller()),
+              previewTop: previewPane.scrollTop,
+              previewMax: maxScrollTop(previewPane),
+            };
+            const afterPopupTheme = {
+              bodyClass: document.body.className,
+              popupBodyClass: popupDoc.body.className,
+              editorThemeClass: panel.querySelector('.file-editor-theme-panel')?.className || '',
+              popupThemeClass: popupThemeButton().className,
+              editorThemeText: panel.querySelector('.file-editor-theme-panel')?.dataset?.editorThemeShort || '',
+              popupThemeText: popupThemeText(),
+            };
+            popupThemeButton().click();
+            await frame();
+            await frame();
+            const afterPopupThemeDark = {
+              bodyClass: document.body.className,
+              popupBodyClass: popupDoc.body.className,
+              editorThemeClass: panel.querySelector('.file-editor-theme-panel')?.className || '',
+              popupThemeClass: popupThemeButton().className,
+              editorThemeText: panel.querySelector('.file-editor-theme-panel')?.dataset?.editorThemeShort || '',
+              popupThemeText: popupThemeText(),
+            };
+            setFileEditorViewMode(path, 'edit', item);
+            renderFileEditorPanel(panel, item);
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+              if (panel._cmView?.scrollDOM) break;
+              await frame();
+            }
+            const editorScroller = panel._cmView?.scrollDOM;
+            popupScroller().scrollTop = maxScrollTop(popupScroller());
+            popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
+            popupDoc.defaultView.dispatchEvent(new WheelEvent('wheel', {deltaY: 0, bubbles: true}));
+            popupDoc.defaultView.dispatchEvent(new Event('scroll'));
+            await frame();
+            await frame();
+            const afterPopupBottomScrollEditMode = {
+              mode: editorViewModeFor(path, item),
+              popupTop: popupScroller().scrollTop,
+              popupMax: maxScrollTop(popupScroller()),
+              editorTop: editorScroller?.scrollTop || 0,
+              editorMax: maxScrollTop(editorScroller),
+            };
+            await delay(220);
+            const splitPath = '/home/test/repo/SPLIT_SCROLL.md';
+            const splitTail = Array.from({length: 120}, (_, index) => `Split paragraph ${index + 1} smooth scroll text`).join('\\n\\n');
+            const splitOriginal = `# Split Scroll\n\n${splitTail}\n`;
+            const splitItem = fileEditorItemFor(splitPath);
+            setFileState(splitPath, {
+              kind: 'text',
+              gitRoot: '/home/test/repo',
+              gitTracked: true,
+              gitHasHistory: true,
+              gitHistory: [{ref: 'HEAD'}, {ref: 'abc123def'}],
+              content: splitOriginal,
+              original: splitOriginal,
+              dirty: false,
+              language: 'markdown',
+            });
+            setFileEditorViewMode(splitPath, 'split', splitItem);
+            addFileEditorTabItem(splitPath, splitItem);
+            const splitPanel = createFileEditorPanel(splitItem);
+            splitPanel.classList.add('active-pane');
+            splitPanel.style.width = '900px';
+            splitPanel.style.height = '520px';
+            panelNodes.set(splitItem, splitPanel);
+            document.getElementById('grid').append(splitPanel);
+            renderFileEditorPanel(splitPanel, splitItem);
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+              const candidateScroller = splitPanel._cmView?.scrollDOM;
+              const candidatePreview = splitPanel.querySelector('.file-editor-preview-pane-panel');
+              if (candidateScroller?.isConnected && maxScrollTop(candidateScroller) > 0 && candidatePreview && !candidatePreview.hidden && maxScrollTop(candidatePreview) > 0) break;
+              await frame();
+            }
+            await frame();
+            await frame();
+            const splitEditorScroller = splitPanel._cmView?.scrollDOM;
+            const splitPreviewPane = splitPanel.querySelector('.file-editor-preview-pane-panel');
+            splitEditorScroller.scrollTop = Math.round(maxScrollTop(splitEditorScroller) * 0.37);
+            splitEditorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await frame();
+            await frame();
+            const afterSplitEditorScroll = {
+              editorTop: splitEditorScroller.scrollTop,
+              previewTop: splitPreviewPane.scrollTop,
+              editorCenterRatio: visibleCenterRatio(splitEditorScroller),
+              previewCenterRatio: visibleCenterRatio(splitPreviewPane),
+            };
+            await delay(220);
+            splitEditorScroller.scrollTop = 0;
+            splitEditorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await frame();
+            await frame();
+            const afterSplitEditorTopScroll = {
+              editorTop: splitEditorScroller.scrollTop,
+              previewTop: splitPreviewPane.scrollTop,
+            };
+            await delay(220);
+            splitEditorScroller.scrollTop = maxScrollTop(splitEditorScroller);
+            splitEditorScroller.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await frame();
+            await frame();
+            const afterSplitEditorBottomScroll = {
+              editorTop: splitEditorScroller.scrollTop,
+              editorMax: maxScrollTop(splitEditorScroller),
+              previewTop: splitPreviewPane.scrollTop,
+              previewMax: maxScrollTop(splitPreviewPane),
+            };
+            await delay(220);
+            splitPreviewPane.scrollTop = Math.round(maxScrollTop(splitPreviewPane) * 0.63);
+            splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await frame();
+            await frame();
+            const afterSplitPreviewScroll = {
+              previewTop: splitPreviewPane.scrollTop,
+              editorTop: splitEditorScroller.scrollTop,
+              previewCenterRatio: visibleCenterRatio(splitPreviewPane),
+              editorCenterRatio: visibleCenterRatio(splitEditorScroller),
+            };
+            await delay(220);
+            splitPreviewPane.scrollTop = 0;
+            splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await frame();
+            await frame();
+            const afterSplitPreviewTopScroll = {
+              previewTop: splitPreviewPane.scrollTop,
+              editorTop: splitEditorScroller.scrollTop,
+            };
+            await delay(220);
+            splitPreviewPane.scrollTop = maxScrollTop(splitPreviewPane);
+            splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
+            await frame();
+            await frame();
+            const afterSplitPreviewBottomScroll = {
+              previewTop: splitPreviewPane.scrollTop,
+              previewMax: maxScrollTop(splitPreviewPane),
+              editorTop: splitEditorScroller.scrollTop,
+              editorMax: maxScrollTop(splitEditorScroller),
+            };
+            let splitCloseCount = 0;
+            const splitWindow = {closed: false, close() { splitCloseCount += 1; this.closed = true; }};
+            filePreviewPopouts.set(path, {window: splitWindow});
+            setFileEditorViewMode(path, 'split', item);
+            const afterSplitModeClose = {
+              mode: editorViewModeFor(path, item),
+              closed: splitWindow.closed,
+              closeCount: splitCloseCount,
+              hasRecord: filePreviewPopouts.has(path),
+            };
+            let previewCloseCount = 0;
+            const previewWindow = {closed: false, close() { previewCloseCount += 1; this.closed = true; }};
+            filePreviewPopouts.set(path, {window: previewWindow});
+            setFileEditorViewMode(path, 'preview', item);
+            const afterPreviewModeClose = {
+              mode: editorViewModeFor(path, item),
+              closed: previewWindow.closed,
+              closeCount: previewCloseCount,
+              hasRecord: filePreviewPopouts.has(path),
+            };
+            done({
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+              initialGeometry,
+              afterPopoutButtonClick,
+              initial,
+              afterEditorFont,
+              afterEditorContent,
+              afterEditorTheme,
+              afterPopupFont,
+              afterEditorScroll,
+              afterEditorTopScroll,
+              afterEditorBottomScroll,
+              afterPopupScroll,
+              afterPopupTopScroll,
+              afterPopupBottomScroll,
+              afterPopupTheme,
+              afterPopupThemeDark,
+              afterPopupBottomScrollEditMode,
+              afterSplitEditorScroll,
+              afterSplitEditorTopScroll,
+              afterSplitEditorBottomScroll,
+              afterSplitPreviewScroll,
+              afterSplitPreviewTopScroll,
+              afterSplitPreviewBottomScroll,
+              afterSplitModeClose,
+              afterPreviewModeClose,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    geometry = metrics["initialGeometry"]
+    assert geometry["pathLeft"] <= geometry["headerLeft"] + 2, metrics
+    assert geometry["pathRight"] <= geometry["fontLeft"] - 8, metrics
+    assert abs(geometry["fontCenter"] - geometry["headerCenter"]) <= 3, metrics
+    assert geometry["themeRight"] >= geometry["headerRight"] - 2, metrics
+    assert geometry["themeLeft"] > geometry["fontCenter"], metrics
+    assert abs(geometry["headerTop"]) <= 1, metrics
+    assert metrics["afterPopoutButtonClick"]["mode"] == "edit", metrics
+    assert metrics["afterPopoutButtonClick"]["editMode"] is True, metrics
+    assert metrics["afterPopoutButtonClick"]["hasRecord"] is True, metrics
+    assert metrics["afterPopoutButtonClick"]["openedUrl"].startswith("/preview-popout?path="), metrics
+    assert metrics["afterPopoutButtonClick"]["editorThemeText"] == "Bright", metrics
+    assert "theme-with-label" in metrics["afterPopoutButtonClick"]["editorThemeClass"], metrics
+    assert metrics["initial"]["popupValue"] == "16", metrics
+    assert metrics["initial"]["editorValue"] == "16", metrics
+    assert "Original pop-out text" in metrics["initial"]["popupText"], metrics
+    assert metrics["initial"]["popupThemeText"] == "Bright", metrics
+    assert "hljs" in metrics["initial"]["popupCodeClass"], metrics
+    assert metrics["initial"]["editorKeywordColor"] == metrics["initial"]["popupKeywordColor"], metrics
+    assert metrics["initial"]["editorKeywordColor"] == "rgb(0, 0, 255)", metrics
+    assert metrics["initial"]["editorRustControl"] == "pub", metrics
+    assert metrics["initial"]["popupRustControl"] == "pub", metrics
+    assert metrics["initial"]["popupRustControlColor"] == "rgb(175, 0, 219)", metrics
+    assert metrics["initial"]["popupRustType"] == "Option", metrics
+    assert metrics["initial"]["popupRustTypeColor"] == "rgb(0, 128, 128)", metrics
+    assert metrics["afterEditorFont"]["popupValue"] == "19", metrics
+    assert metrics["afterEditorFont"]["editorValue"] == "19", metrics
+    assert "--editor-preview-font-size: 19px" in metrics["afterEditorFont"]["popupStyle"], metrics
+    assert "Updated pop-out text" in metrics["afterEditorContent"], metrics
+    assert "editor-theme-light" in metrics["afterEditorTheme"]["popupBodyClass"], metrics
+    assert "theme-light" in metrics["afterEditorTheme"]["popupThemeClass"], metrics
+    assert metrics["afterEditorTheme"]["popupThemeText"] == "Bright", metrics
+    assert metrics["afterPopupFont"]["popupValue"] == "20", metrics
+    assert metrics["afterPopupFont"]["editorValue"] == "20", metrics
+    assert metrics["afterEditorScroll"]["previewTop"] > 0, metrics
+    assert metrics["afterEditorScroll"]["popupTop"] > 0, metrics
+    assert abs(metrics["afterEditorScroll"]["previewCenterRatio"] - metrics["afterEditorScroll"]["popupCenterRatio"]) <= 0.05, metrics
+    assert metrics["afterEditorTopScroll"]["previewTop"] == 0, metrics
+    assert metrics["afterEditorTopScroll"]["popupTop"] == 0, metrics
+    assert abs(metrics["afterEditorBottomScroll"]["previewTop"] - metrics["afterEditorBottomScroll"]["previewMax"]) <= 1, metrics
+    assert abs(metrics["afterEditorBottomScroll"]["popupTop"] - metrics["afterEditorBottomScroll"]["popupMax"]) <= 1, metrics
+    assert metrics["afterPopupScroll"]["popupTop"] < metrics["afterPopupScroll"]["popupBefore"], metrics
+    assert metrics["afterPopupScroll"]["previewTop"] < metrics["afterEditorBottomScroll"]["previewTop"], metrics
+    assert abs(metrics["afterPopupScroll"]["popupCenterRatio"] - metrics["afterPopupScroll"]["previewCenterRatio"]) <= 0.05, metrics
+    assert metrics["afterPopupTopScroll"]["popupTop"] == 0, metrics
+    assert metrics["afterPopupTopScroll"]["previewTop"] == 0, metrics
+    assert abs(metrics["afterPopupBottomScroll"]["popupTop"] - metrics["afterPopupBottomScroll"]["popupMax"]) <= 1, metrics
+    assert abs(metrics["afterPopupBottomScroll"]["previewTop"] - metrics["afterPopupBottomScroll"]["previewMax"]) <= 1, metrics
+    assert metrics["afterPopupBottomScrollEditMode"]["mode"] == "edit", metrics
+    assert abs(metrics["afterPopupBottomScrollEditMode"]["popupTop"] - metrics["afterPopupBottomScrollEditMode"]["popupMax"]) <= 1, metrics
+    assert abs(metrics["afterPopupBottomScrollEditMode"]["editorTop"] - metrics["afterPopupBottomScrollEditMode"]["editorMax"]) <= 1, metrics
+    assert metrics["afterSplitEditorScroll"]["editorTop"] > 0, metrics
+    assert metrics["afterSplitEditorScroll"]["previewTop"] > 0, metrics
+    assert abs(metrics["afterSplitEditorScroll"]["editorCenterRatio"] - metrics["afterSplitEditorScroll"]["previewCenterRatio"]) <= 0.05, metrics
+    assert metrics["afterSplitEditorTopScroll"]["editorTop"] == 0, metrics
+    assert metrics["afterSplitEditorTopScroll"]["previewTop"] == 0, metrics
+    assert abs(metrics["afterSplitEditorBottomScroll"]["editorTop"] - metrics["afterSplitEditorBottomScroll"]["editorMax"]) <= 1, metrics
+    assert abs(metrics["afterSplitEditorBottomScroll"]["previewTop"] - metrics["afterSplitEditorBottomScroll"]["previewMax"]) <= 1, metrics
+    assert metrics["afterSplitPreviewScroll"]["previewTop"] < metrics["afterSplitEditorBottomScroll"]["previewTop"], metrics
+    assert metrics["afterSplitPreviewScroll"]["editorTop"] < metrics["afterSplitEditorBottomScroll"]["editorTop"], metrics
+    assert abs(metrics["afterSplitPreviewScroll"]["previewCenterRatio"] - metrics["afterSplitPreviewScroll"]["editorCenterRatio"]) <= 0.05, metrics
+    assert metrics["afterSplitPreviewTopScroll"]["previewTop"] == 0, metrics
+    assert metrics["afterSplitPreviewTopScroll"]["editorTop"] == 0, metrics
+    assert abs(metrics["afterSplitPreviewBottomScroll"]["previewTop"] - metrics["afterSplitPreviewBottomScroll"]["previewMax"]) <= 1, metrics
+    assert abs(metrics["afterSplitPreviewBottomScroll"]["editorTop"] - metrics["afterSplitPreviewBottomScroll"]["editorMax"]) <= 1, metrics
+    assert "editor-preview-vanilla" in metrics["afterPopupTheme"]["popupBodyClass"], metrics
+    assert "editor-preview-vanilla" in metrics["afterPopupTheme"]["bodyClass"], metrics
+    assert "theme-vanilla" in metrics["afterPopupTheme"]["editorThemeClass"], metrics
+    assert "theme-vanilla" in metrics["afterPopupTheme"]["popupThemeClass"], metrics
+    assert metrics["afterPopupTheme"]["editorThemeText"] == "Vanilla", metrics
+    assert metrics["afterPopupTheme"]["popupThemeText"] == "Vanilla", metrics
+    assert "editor-theme-dark" in metrics["afterPopupThemeDark"]["popupBodyClass"], metrics
+    assert "editor-theme-dark" in metrics["afterPopupThemeDark"]["bodyClass"], metrics
+    assert "theme-dark" in metrics["afterPopupThemeDark"]["editorThemeClass"], metrics
+    assert "theme-dark" in metrics["afterPopupThemeDark"]["popupThemeClass"], metrics
+    assert metrics["afterPopupThemeDark"]["editorThemeText"] == "Dark", metrics
+    assert metrics["afterPopupThemeDark"]["popupThemeText"] == "Dark", metrics
+    assert metrics["afterSplitModeClose"] == {"mode": "split", "closed": True, "closeCount": 1, "hasRecord": False}, metrics
+    assert metrics["afterPreviewModeClose"] == {"mode": "preview", "closed": True, "closeCount": 1, "hasRecord": False}, metrics
+
+
+def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_path):
+    page = tmp_path / "editor-preview-shared-light-syntax.html"
+    page.write_text(
+        live_runtime_boot_fixture_html(
+            settings={"appearance": {"preview_font_size": 16}},
+            sessions=["1"],
+        ),
+        encoding="utf-8",
+    )
+    browser.get(page.as_uri() + "?sessions=1")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return typeof createFileEditorPanel === 'function' && document.querySelector('#grid');")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+            const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+            window.marked = {
+              parse(markdown) {
+                const lines = String(markdown || '').split('\\n');
+                const parts = [];
+                for (let index = 0; index < lines.length; index += 1) {
+                  const line = lines[index];
+                  if (line.startsWith('```')) {
+                    const lang = escapeHtml(line.slice(3).trim() || 'text');
+                    const code = [];
+                    index += 1;
+                    while (index < lines.length && !lines[index].startsWith('```')) {
+                      code.push(lines[index]);
+                      index += 1;
+                    }
+                    parts.push(`<pre><code class="language-${lang}">${escapeHtml(code.join('\\n'))}</code></pre>`);
+                  }
+                }
+                return parts.join('');
+              },
+            };
+            window.hljs = {
+              highlightElement(block) {
+                block.classList.add('hljs');
+                block.innerHTML = escapeHtml(block.textContent || '')
+                  .replace(/\\bclass\\b/g, '<span class="hljs-keyword">class</span>')
+                  .replace(/\\bdef\\b/g, '<span class="hljs-keyword">def</span>')
+                  .replace(/\\breturn\\b/g, '<span class="hljs-keyword">return</span>')
+                  .replace(/\\bextract_tool_calls\\b/g, '<span class="hljs-title function_">extract_tool_calls</span>');
+              },
+            };
+            setFileEditorThemeMode('yolomux-light');
+            const path = '/home/test/repo/README.md';
+            const content = [
+              '```python',
+              'class ToolParser:',
+              '    def extract_tool_calls(self, model_output: str) -> DeltaMessage | None:',
+              '        return None',
+              '    def extract_tool_calls_streaming(',
+              '        self,',
+              '        previous_text: str, current_text: str, delta_text: str,',
+              '        previous_token_ids, current_token_ids, delta_token_ids,',
+              '        request,',
+              '    ) -> DeltaMessage | None:',
+              '        return None',
+              '',
+              'class DeltaFunctionCall(BaseModel):',
+              '    name: str | None = None',
+              '    arguments: str | None = None',
+              '',
+              'class DeltaToolCall(OpenAIBaseModel):',
+              '    id: str | None = None',
+              '    type: Literal["function"] | None = None',
+              '    index: int',
+              '    function: DeltaFunctionCall | None = None',
+              '',
+              'class DeltaMessage(OpenAIBaseModel):',
+              '    role: str | None = None',
+              '    content: str | None = None',
+              '    reasoning: str | None = None',
+              '    tool_calls: list[DeltaToolCall] = []',
+              '```',
+              '',
+            ].join('\\n');
+            const item = fileEditorItemFor(path);
+            setFileState(path, {
+              kind: 'text',
+              gitRoot: '/home/test/repo',
+              gitTracked: true,
+              gitHasHistory: true,
+              gitHistory: [{ref: 'HEAD'}, {ref: 'abc123def'}],
+              content,
+              original: content,
+              dirty: false,
+              language: 'markdown',
+            });
+            setFileEditorViewMode(path, 'split', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '1160px';
+            panel.style.height = '520px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').append(panel);
+            renderFileEditorPanel(panel, item);
+            for (let attempt = 0; attempt < 160; attempt += 1) {
+              if (panel._cmView && panel.querySelector('code.language-python .code-type')) break;
+              await frame();
+            }
+            const rootStyle = getComputedStyle(document.documentElement);
+            const visibleSpans = selector => Array.from(panel.querySelectorAll(selector))
+              .filter(node => node.textContent && node.getClientRects().length);
+            const editorByClassText = (className, text, occurrence = 0) => {
+              const nodes = visibleSpans(`.cm-content .${className}`).filter(candidate => candidate.textContent === text);
+              const node = nodes[occurrence] || nodes[0] || null;
+              if (!node) return {text: '', color: '', leafColor: ''};
+              const descendants = Array.from(node.querySelectorAll('span')).filter(candidate => candidate.textContent === text);
+              const leaf = descendants[descendants.length - 1] || node;
+              return {text: node.textContent, color: getComputedStyle(node).color, leafColor: getComputedStyle(leaf).color};
+            };
+            const previewByClassText = (className, text, occurrence = 0) => {
+              const nodes = Array.from(panel.querySelectorAll(`code.language-python .${className}`)).filter(candidate => candidate.textContent === text);
+              const node = nodes[occurrence] || nodes[0] || null;
+              return node ? {text: node.textContent, color: getComputedStyle(node).color} : {text: '', color: ''};
+            };
+            done({
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+              editor: {
+                keyword: editorByClassText('code-keyword', 'class'),
+                type: editorByClassText('code-type', 'ToolParser'),
+                functionName: editorByClassText('code-function', 'extract_tool_calls'),
+                streamingFunctionName: editorByClassText('code-function', 'extract_tool_calls_streaming'),
+                property: editorByClassText('code-property', 'model_output'),
+                request: editorByClassText('code-variable', 'request'),
+                previousText: editorByClassText('code-property', 'previous_text'),
+                currentText: editorByClassText('code-property', 'current_text'),
+                deltaText: editorByClassText('code-property', 'delta_text'),
+                previousTokenIds: editorByClassText('code-variable', 'previous_token_ids'),
+                currentTokenIds: editorByClassText('code-variable', 'current_token_ids'),
+                deltaTokenIds: editorByClassText('code-variable', 'delta_token_ids'),
+                functionField: editorByClassText('code-property', 'function'),
+                annotation: editorByClassText('code-type', 'str'),
+                deltaMessage: editorByClassText('code-type', 'DeltaMessage'),
+                deltaFunctionCall: editorByClassText('code-type', 'DeltaFunctionCall'),
+                literalType: editorByClassText('code-type', 'Literal'),
+                atom: editorByClassText('code-constant', 'None'),
+              },
+              preview: {
+                keyword: previewByClassText('code-keyword', 'class'),
+                type: previewByClassText('code-type', 'ToolParser'),
+                functionName: previewByClassText('code-function', 'extract_tool_calls'),
+                streamingFunctionName: previewByClassText('code-function', 'extract_tool_calls_streaming'),
+                property: previewByClassText('code-property', 'model_output'),
+                request: previewByClassText('code-variable', 'request'),
+                previousText: previewByClassText('code-property', 'previous_text'),
+                currentText: previewByClassText('code-property', 'current_text'),
+                deltaText: previewByClassText('code-property', 'delta_text'),
+                previousTokenIds: previewByClassText('code-variable', 'previous_token_ids'),
+                currentTokenIds: previewByClassText('code-variable', 'current_token_ids'),
+                deltaTokenIds: previewByClassText('code-variable', 'delta_token_ids'),
+                functionField: previewByClassText('code-property', 'function'),
+                annotation: previewByClassText('code-type', 'str'),
+                deltaMessage: previewByClassText('code-type', 'DeltaMessage'),
+                deltaFunctionCall: previewByClassText('code-type', 'DeltaFunctionCall'),
+                literalType: previewByClassText('code-type', 'Literal'),
+                atom: previewByClassText('code-constant', 'None'),
+              },
+              vars: {
+                keyword: rootStyle.getPropertyValue('--code-keyword').trim(),
+                type: rootStyle.getPropertyValue('--code-type').trim(),
+                functionName: rootStyle.getPropertyValue('--code-function').trim(),
+                property: rootStyle.getPropertyValue('--code-property').trim(),
+                atom: rootStyle.getPropertyValue('--code-atom').trim(),
+              },
+              editorHtml: panel.querySelector('.cm-content')?.innerHTML || '',
+              previewHtml: panel.querySelector('code.language-python')?.innerHTML || '',
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert metrics["editor"]["keyword"]["color"] == metrics["preview"]["keyword"]["color"], metrics
+    assert metrics["editor"]["type"]["color"] == metrics["preview"]["type"]["color"], metrics
+    assert metrics["editor"]["functionName"]["color"] == metrics["preview"]["functionName"]["color"], metrics
+    assert metrics["editor"]["streamingFunctionName"]["color"] == metrics["preview"]["streamingFunctionName"]["color"], metrics
+    assert metrics["editor"]["property"]["color"] == metrics["preview"]["property"]["color"], metrics
+    assert metrics["editor"]["request"]["color"] == metrics["preview"]["request"]["color"], metrics
+    assert metrics["editor"]["previousText"]["color"] == metrics["preview"]["previousText"]["color"], metrics
+    assert metrics["editor"]["currentText"]["color"] == metrics["preview"]["currentText"]["color"], metrics
+    assert metrics["editor"]["deltaText"]["color"] == metrics["preview"]["deltaText"]["color"], metrics
+    assert metrics["editor"]["previousTokenIds"]["color"] == metrics["preview"]["previousTokenIds"]["color"], metrics
+    assert metrics["editor"]["currentTokenIds"]["color"] == metrics["preview"]["currentTokenIds"]["color"], metrics
+    assert metrics["editor"]["deltaTokenIds"]["color"] == metrics["preview"]["deltaTokenIds"]["color"], metrics
+    assert metrics["editor"]["functionField"]["color"] == metrics["preview"]["functionField"]["color"], metrics
+    assert metrics["editor"]["atom"]["color"] == metrics["preview"]["atom"]["color"], metrics
+    assert metrics["editor"]["annotation"]["color"] == metrics["preview"]["type"]["color"], metrics
+    assert metrics["editor"]["deltaMessage"]["color"] == metrics["preview"]["deltaMessage"]["color"], metrics
+    assert metrics["editor"]["deltaFunctionCall"]["color"] == metrics["preview"]["deltaFunctionCall"]["color"], metrics
+    assert metrics["editor"]["literalType"]["color"] == metrics["preview"]["literalType"]["color"], metrics
+    assert metrics["editor"]["keyword"]["leafColor"] == metrics["preview"]["keyword"]["color"], metrics
+    assert metrics["editor"]["type"]["leafColor"] == metrics["preview"]["type"]["color"], metrics
+    assert metrics["editor"]["functionName"]["leafColor"] == metrics["preview"]["functionName"]["color"], metrics
+    assert metrics["editor"]["streamingFunctionName"]["leafColor"] == metrics["preview"]["streamingFunctionName"]["color"], metrics
+    assert metrics["editor"]["property"]["leafColor"] == metrics["preview"]["property"]["color"], metrics
+    assert metrics["editor"]["request"]["leafColor"] == metrics["preview"]["request"]["color"], metrics
+    assert metrics["editor"]["previousText"]["leafColor"] == metrics["preview"]["previousText"]["color"], metrics
+    assert metrics["editor"]["currentText"]["leafColor"] == metrics["preview"]["currentText"]["color"], metrics
+    assert metrics["editor"]["deltaText"]["leafColor"] == metrics["preview"]["deltaText"]["color"], metrics
+    assert metrics["editor"]["previousTokenIds"]["leafColor"] == metrics["preview"]["previousTokenIds"]["color"], metrics
+    assert metrics["editor"]["currentTokenIds"]["leafColor"] == metrics["preview"]["currentTokenIds"]["color"], metrics
+    assert metrics["editor"]["deltaTokenIds"]["leafColor"] == metrics["preview"]["deltaTokenIds"]["color"], metrics
+    assert metrics["editor"]["functionField"]["leafColor"] == metrics["preview"]["functionField"]["color"], metrics
+    assert metrics["editor"]["atom"]["leafColor"] == metrics["preview"]["atom"]["color"], metrics
+    assert metrics["editor"]["annotation"]["leafColor"] == metrics["preview"]["type"]["color"], metrics
+    assert metrics["editor"]["deltaMessage"]["leafColor"] == metrics["preview"]["deltaMessage"]["color"], metrics
+    assert metrics["editor"]["deltaFunctionCall"]["leafColor"] == metrics["preview"]["deltaFunctionCall"]["color"], metrics
+    assert metrics["editor"]["literalType"]["leafColor"] == metrics["preview"]["literalType"]["color"], metrics
+    assert metrics["editor"]["keyword"]["text"] == "class", metrics
+    assert metrics["editor"]["type"]["text"] == "ToolParser", metrics
+    assert metrics["editor"]["functionName"]["text"] == "extract_tool_calls", metrics
+    assert metrics["editor"]["streamingFunctionName"]["text"] == "extract_tool_calls_streaming", metrics
+    assert metrics["editor"]["property"]["text"] == "model_output", metrics
+    assert metrics["editor"]["request"]["text"] == "request", metrics
+    assert metrics["editor"]["previousTokenIds"]["text"] == "previous_token_ids", metrics
+    assert metrics["editor"]["atom"]["text"] == "None", metrics
+    assert metrics["preview"]["keyword"]["text"] == "class", metrics
+    assert metrics["preview"]["type"]["text"] == "ToolParser", metrics
+    assert metrics["preview"]["functionName"]["text"] == "extract_tool_calls", metrics
+    assert metrics["preview"]["streamingFunctionName"]["text"] == "extract_tool_calls_streaming", metrics
+    assert metrics["preview"]["property"]["text"] == "model_output", metrics
+    assert metrics["preview"]["request"]["text"] == "request", metrics
+    assert metrics["preview"]["previousTokenIds"]["text"] == "previous_token_ids", metrics
+    assert metrics["preview"]["atom"]["text"] == "None", metrics
+
+
 def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser, tmp_path):
     css = (REPO_ROOT / "static" / "yolomux.css").read_text(encoding="utf-8")
     strings = json.loads((REPO_ROOT / "static" / "locales" / "en.json").read_text(encoding="utf-8"))
@@ -3795,7 +4585,7 @@ def test_editor_preview_vanilla_mode_uses_neutral_email_friendly_styles(browser,
     metrics = browser.execute_script("return window.__previewVanillaReady")
     assert metrics["normal"]["vanillaClass"] is False, metrics
     assert metrics["normal"]["headingColor"] != "rgb(17, 24, 39)", metrics
-    assert metrics["normal"]["codeSpanColor"] == "rgb(255, 0, 0)", metrics
+    assert metrics["normal"]["codeSpanColor"] == "rgb(0, 0, 255)", metrics
     assert metrics["vanilla"]["vanillaClass"] is True, metrics
     assert metrics["vanilla"]["previewBg"] == "rgb(255, 255, 255)", metrics
     assert metrics["vanilla"]["previewColor"] == "rgb(17, 24, 39)", metrics

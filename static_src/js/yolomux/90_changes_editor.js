@@ -1122,6 +1122,56 @@ function renderChangedFileList(container, repoPath, sessionFiles, options = {}) 
   });
 }
 
+function uploadedFileRepoRoot(item) {
+  const repo = item?.repo || '';
+  if (repo && repo !== 'Outside repo') return repo;
+  const absPath = item?.abs_path || item?.path || '';
+  return dirnameOf(absPath);
+}
+
+function uploadedFileForRepoRoot(item, repoPath) {
+  const absPath = item?.abs_path || (repoPath && item?.path ? `${repoPath}/${item.path}` : item?.path || '');
+  const relPath = item?.path || (absPath && repoPath && absPath.startsWith(repoPath + '/') ? absPath.slice(repoPath.length + 1) : basenameOf(absPath));
+  return {
+    ...item,
+    repo: repoPath,
+    path: relPath,
+    abs_path: absPath,
+  };
+}
+
+function renderUploadedFileList(container, uploadedFiles, options = {}) {
+  const groups = new Map();
+  for (const item of uploadedFiles || []) {
+    const repoPath = uploadedFileRepoRoot(item);
+    if (!groups.has(repoPath)) groups.set(repoPath, []);
+    groups.get(repoPath).push(uploadedFileForRepoRoot(item, repoPath));
+  }
+  const groupedFiles = Array.from(groups.entries());
+  if (groupedFiles.length <= 1) {
+    const [repoPath, files] = groupedFiles[0] || ['', []];
+    renderChangedFileList(container, repoPath, files, options);
+    return;
+  }
+  const existing = new Map();
+  for (const child of container.children || []) {
+    const key = child.dataset?.uploadedRepo;
+    if (key) existing.set(key, child);
+  }
+  const nextNodes = [];
+  for (const [repoPath, files] of groupedFiles) {
+    let repoList = existing.get(repoPath);
+    if (!repoList) {
+      repoList = document.createElement('div');
+      repoList.className = 'changes-uploaded-repo-list';
+      repoList.dataset.uploadedRepo = repoPath;
+    }
+    renderChangedFileList(repoList, repoPath, files, options);
+    nextNodes.push(repoList);
+  }
+  reconcileChildNodes(container, nextNodes);
+}
+
 // C5: a changed file can be touched by 0, 1, or several agents. Render an icon per agent from item.agents
 // (Claude, then Codex, then any others alphabetically), falling back to the legacy scalar item.agent. When
 // more than one agent appears, label the slot so screen readers announce all of them.
@@ -1264,7 +1314,6 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     }
     nextNodes.push(section);
   }
-  // Uploaded files section (keep HTML approach — uploaded rows have no git status)
   if (uploaded.length) {
     let uploadedSection = existing.get('__uploaded__');
     if (!uploadedSection) {
@@ -1272,12 +1321,28 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       uploadedSection.className = 'changes-repo-group changes-uploaded-group';
       uploadedSection.dataset.changesRepo = '__uploaded__';
     }
-    const uploadedRowsHtml = uploadedFilesCollapsed ? '' : uploaded.map(item => changeFileRowHtml(item, options)).join('');
-    uploadedSection.innerHTML = `
-      <button type="button" class="changes-repo-head changes-uploaded-toggle" data-uploaded-files-toggle aria-expanded="${uploadedFilesCollapsed ? 'false' : 'true'}">
-        <span><span class="changes-uploaded-caret">${uploadedFilesCollapsed ? '▸' : '▾'}</span> ${esc(t('changes.uploaded', {count: uploaded.length}))}</span><span>${uploadedFilesCollapsed ? esc(t('changes.collapsed')) : uploaded.length}</span>
-      </button>
-      ${uploadedFilesCollapsed ? '' : `<div class="changes-file-list">${uploadedRowsHtml}</div>`}`;
+    let head = uploadedSection.querySelector(':scope > .changes-uploaded-toggle');
+    if (!head) {
+      head = document.createElement('button');
+      head.type = 'button';
+      head.className = 'changes-repo-head changes-uploaded-toggle';
+      head.dataset.uploadedFilesToggle = '';
+      uploadedSection.prepend(head);
+    }
+    head.setAttribute('aria-expanded', uploadedFilesCollapsed ? 'false' : 'true');
+    head.innerHTML = `<span><span class="changes-uploaded-caret">${uploadedFilesCollapsed ? '▸' : '▾'}</span> ${esc(t('changes.uploaded', {count: uploaded.length}))}</span><span>${uploadedFilesCollapsed ? esc(t('changes.collapsed')) : uploaded.length}</span>`;
+    let fileList = uploadedSection.querySelector(':scope > .changes-file-list');
+    if (!uploadedFilesCollapsed) {
+      if (!fileList) {
+        fileList = document.createElement('div');
+        fileList.className = 'changes-file-list';
+        uploadedSection.append(fileList);
+      }
+      fileList.hidden = false;
+      renderUploadedFileList(fileList, uploaded, {compact});
+    } else if (fileList) {
+      fileList.hidden = true;
+    }
     uploadedSection.classList.toggle('collapsed', uploadedFilesCollapsed);
     nextNodes.push(uploadedSection);
   }
@@ -2265,7 +2330,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
   renderLinkedFilePreviewPanels(panel, path, state.content);
   updateFilePreviewPopout(path, state.content);
-  syncFileEditorSplitScroll(panel, 'editor');
+  scheduleFileEditorSplitScrollSync(panel, 'editor');
   const item = fileEditorPanelItem(panel);
   if (item && panel?.contains?.(document.activeElement)) {
     scheduleFileExplorerActiveTabSync(item, {explicit: true});
@@ -2344,6 +2409,7 @@ function createFileEditorPanel(item) {
           </span>
         </div>
         <div class="file-editor-toolbar-zone file-editor-toolbar-right">
+          <button type="button" class="file-editor-theme-panel" title="${esc(t('editor.theme'))}" aria-label="${esc(t('editor.theme'))}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
           <div class="file-editor-mode-control file-editor-mode-control-panel" role="group" aria-label="${esc(t('editor.mode.aria'))}" hidden>
             <button type="button" data-editor-mode="edit" title="${esc(t('editor.mode.edit'))}" aria-label="${esc(t('editor.mode.edit'))}"><span class="file-editor-icon file-editor-icon-edit" aria-hidden="true"></span></button>
             <button type="button" data-editor-mode="preview" title="${esc(t('editor.mode.preview'))}" aria-label="${esc(t('editor.mode.preview'))}"><span class="file-editor-icon file-editor-icon-eye" aria-hidden="true"></span></button>
@@ -2355,7 +2421,6 @@ function createFileEditorPanel(item) {
           <button type="button" class="file-editor-find-panel" title="${esc(t('editor.findInFile', {shortcut: appShortcutText('F')}))}" aria-label="${esc(t('editor.findInFileAria'))}" aria-pressed="false" hidden><span class="file-editor-icon file-editor-icon-find" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-blame-panel" title="${esc(t('editor.blame.toggle'))}" aria-label="${esc(t('editor.blame.toggle'))}" aria-pressed="${fileEditorBlameEnabled ? 'true' : 'false'}" hidden><span class="file-editor-icon file-editor-icon-blame" aria-hidden="true"></span></button>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="tools" aria-hidden="true" hidden></span>
-          <button type="button" class="file-editor-theme-panel" title="${esc(t('editor.theme'))}" aria-label="${esc(t('editor.theme'))}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
           <button type="button" class="file-editor-reload-panel" title="${esc(t('editor.reloadFromDisk'))}" aria-label="${esc(t('editor.reloadFromDisk'))}" hidden>${esc(t('editor.reload'))}</button>
           <span class="file-editor-toolbar-separator" data-editor-toolbar-separator="theme" aria-hidden="true" hidden></span>
           <button type="button" class="file-editor-save-panel" title="${esc(t('editor.save'))}" aria-label="${esc(t('editor.saveFile'))}" ${readOnlyMode ? 'hidden' : ''}><span class="file-editor-icon file-editor-icon-save" aria-hidden="true"></span></button>
@@ -2509,15 +2574,17 @@ function createFileEditorPanel(item) {
   panel.querySelector('.file-editor-popout-preview-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    openFilePreviewPopout(path, panel);
+    if (openFilePreviewPopout(path, panel)) {
+      setFileEditorViewMode(path, 'edit', item);
+      renderFileEditorPanel(panel, item);
+    }
   });
   panel.querySelector('.file-editor-theme-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    const mode = editorViewModeFor(path, item);
-    cycleEditorThemeMode({includeVanilla: mode === 'preview' || mode === 'split'});
+    cycleEditorThemeMode({includeVanilla: true});
   });
-  panel.querySelector('.file-editor-preview-pane-panel')?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'preview'));
+  panel.querySelector('.file-editor-preview-pane-panel')?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'preview'));
   renderFileEditorPanel(panel, item);
   return panel;
 }
@@ -3571,7 +3638,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
       });
       panel._cmView = panel._cmMergeView.b;
       trackCodeMirrorThemeViews(panel, api, [panel._cmMergeView.a, panel._cmMergeView.b]);
-      panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+      panel._cmMergeView.b.scrollDOM?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'));
     } else {
       const unifiedMergeOptions = {
         original,
@@ -3615,7 +3682,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
           }
         },
       });
-      panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+      panel._cmView.scrollDOM?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'));
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
     }
     panel._cmPath = path;
@@ -3673,7 +3740,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       panel._cmSignature = signature;
       panel._cmMode = 'edit';
       panel._cmPlainFallback = Boolean(createdState.plain);
-      panel._cmView.scrollDOM?.addEventListener('scroll', () => syncFileEditorSplitScroll(panel, 'editor'));
+      panel._cmView.scrollDOM?.addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'));
       trackCodeMirrorThemeViews(panel, api, [panel._cmView]);
       updateCodeMirrorCursorStatus(panel);
       if (createdState.plain) {
@@ -3760,7 +3827,7 @@ function renderFileEditorPanel(panel, item) {
   const content = panel.querySelector('.file-editor-content');
   const textControls = [modeControl, previewFontPanel, gutterButton, wrapButton, findButton, blameButton, diffButton, diffExpandButton, diffRefPanel, popoutPreviewButton, reloadButton];
   let mode = editorViewModeFor(path, item);
-  updateEditorThemeButton(themeButton, {includeVanilla: mode === 'preview' || mode === 'split'});
+  updateEditorThemeButton(themeButton, {includeVanilla: true});
   if (!state) {
     setElementsHidden(textControls, true);
     updateFileEditorToolbarSeparators(panel);
@@ -3809,7 +3876,7 @@ function renderFileEditorPanel(panel, item) {
     setFileEditorViewMode(path, 'edit', item);
   }
   mode = editorViewModeFor(path, item);
-  updateEditorThemeButton(themeButton, {includeVanilla: mode === 'preview' || mode === 'split'});
+  updateEditorThemeButton(themeButton, {includeVanilla: true});
   updateEditorModeControl(modeControl, path, state, item);
   if (previewFontPanel) {
     previewFontPanel.hidden = state.kind !== 'text' || !editorPreviewModeAvailable(path) || (mode !== 'preview' && mode !== 'split');
@@ -4082,6 +4149,7 @@ function updateEditorNavButtons() {
 
 function updateFileEditorToolbarSeparators(panel) {
   const mode = fileEditorToolbarControlVisible(panel, '.file-editor-mode-control-panel');
+  const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel');
   const tools = [
     '.file-editor-preview-font-panel',
     '.file-editor-gutter-panel',
@@ -4092,16 +4160,15 @@ function updateFileEditorToolbarSeparators(panel) {
     '.file-editor-diff-expand-panel',
     '.file-editor-diff-ref-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
-  const theme = fileEditorToolbarControlVisible(panel, '.file-editor-theme-panel')
-    || fileEditorToolbarControlVisible(panel, '.file-editor-reload-panel');
+  const reload = fileEditorToolbarControlVisible(panel, '.file-editor-reload-panel');
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
   // #42: the editor controls now live on their own toolbar row below the tab strip (no frame
   // controls sit beside them), so separators only sit between adjacent visible control groups.
-  setFileEditorToolbarSeparator(panel, 'mode', mode && (tools || theme || save));
-  setFileEditorToolbarSeparator(panel, 'tools', tools && (theme || save));
-  setFileEditorToolbarSeparator(panel, 'theme', theme && save);
+  setFileEditorToolbarSeparator(panel, 'mode', (theme || mode) && (tools || reload || save));
+  setFileEditorToolbarSeparator(panel, 'tools', tools && (reload || save));
+  setFileEditorToolbarSeparator(panel, 'theme', reload && save);
   const toolbar = panel?.querySelector?.('.file-editor-toolbar');
-  if (toolbar) toolbar.hidden = !(mode || tools || theme || save);
+  if (toolbar) toolbar.hidden = !(theme || mode || tools || reload || save);
 }
 
 function setFileEditorPanelStatus(panel, message, level) {
@@ -4322,11 +4389,32 @@ function renderMarkdownPreviewInto(container, text, markdownPath) {
       container.addEventListener('click', handleMarkdownPreviewLinkClick);
     }
   }
-  if (fileEditorPreviewDisplayMode !== 'vanilla' && typeof window.hljs !== 'undefined') {
+  if (fileEditorPreviewDisplayMode !== 'vanilla') {
     container.querySelectorAll('pre code').forEach(block => {
-      try { window.hljs.highlightElement(block); } catch (_) {}
+      if (typeof window.hljs !== 'undefined') {
+        try { window.hljs.highlightElement(block); } catch (_) {}
+      }
+      applyMarkdownFenceFallbackHighlight(block);
     });
   }
+}
+
+function markdownFenceLanguage(block) {
+  const classes = Array.from(block?.classList || []);
+  for (const className of classes) {
+    const match = String(className || '').match(/^(?:language|lang)-(.+)$/);
+    if (match) return match[1].toLowerCase();
+  }
+  return '';
+}
+
+function applyMarkdownFenceFallbackHighlight(block) {
+  const language = markdownFenceLanguage(block);
+  if (!language) return;
+  const html = simpleCodeSyntaxHtml(language, block.textContent || '');
+  if (html === null) return;
+  block.innerHTML = html;
+  block.classList.add('editor-highlight-code');
 }
 
 function safeDecodePathComponent(value) {
@@ -4542,6 +4630,125 @@ function renderEditorPreviewPane(container, path, text) {
 
 const filePreviewPopouts = new Map();
 
+function filePreviewPopoutsForPath(path) {
+  const record = filePreviewPopouts.get(path);
+  return record ? [record] : [];
+}
+
+function closeFilePreviewPopout(path) {
+  const record = filePreviewPopouts.get(path);
+  filePreviewPopouts.delete(path);
+  const previewWindow = record?.window;
+  if (!previewWindow || previewWindow.closed) return false;
+  try { previewWindow.close?.(); } catch (_) {}
+  return true;
+}
+
+function filePreviewPopoutDocument(previewWindow) {
+  try { return previewWindow?.document || null; } catch (_) { return null; }
+}
+
+function filePreviewPopoutScrollElement(previewWindow) {
+  const doc = filePreviewPopoutDocument(previewWindow);
+  return doc?.scrollingElement || doc?.documentElement || doc?.body || null;
+}
+
+function filePreviewPopoutPreviewRoot(previewWindow) {
+  return filePreviewPopoutDocument(previewWindow)?.querySelector?.('[data-preview-root]') || null;
+}
+
+function filePreviewPopoutCanDrive(previewWindow) {
+  const scroller = filePreviewPopoutScrollElement(previewWindow);
+  return elementCanScroll(scroller);
+}
+
+function scrollSyncTargetPosition(from, to, axis = 'top') {
+  const scrollKey = axis === 'left' ? 'scrollLeft' : 'scrollTop';
+  const sizeKey = axis === 'left' ? 'scrollWidth' : 'scrollHeight';
+  const clientKey = axis === 'left' ? 'clientWidth' : 'clientHeight';
+  const sourceSize = Math.max(0, Number(from?.[sizeKey] || 0));
+  const targetSize = Math.max(0, Number(to?.[sizeKey] || 0));
+  const sourceClient = Math.max(0, Number(from?.[clientKey] || 0));
+  const targetClient = Math.max(0, Number(to?.[clientKey] || 0));
+  const maxFrom = Math.max(0, sourceSize - sourceClient);
+  const maxTo = Math.max(0, targetSize - targetClient);
+  const current = Math.max(0, Number(from?.[scrollKey] || 0));
+  const edgeSnap = Math.max(2, Math.ceil(sourceClient * 0.01));
+  if (maxTo <= 0 || current <= edgeSnap) return 0;
+  if (maxFrom <= edgeSnap || current >= maxFrom - edgeSnap) return maxTo;
+  const sourceCenter = Math.min(maxFrom, current) + (sourceClient / 2);
+  const centerRatio = sourceSize > 0 ? sourceCenter / sourceSize : 0;
+  const target = (centerRatio * targetSize) - (targetClient / 2);
+  return Math.min(maxTo, Math.max(0, target));
+}
+
+function syncScrollPositionByRatio(from, to) {
+  if (!from || !to) return false;
+  to.scrollTop = scrollSyncTargetPosition(from, to, 'top');
+  to.scrollLeft = scrollSyncTargetPosition(from, to, 'left');
+  return true;
+}
+
+function scrollElementAtVerticalEdge(element) {
+  const maxTop = Math.max(0, Number(element?.scrollHeight || 0) - Number(element?.clientHeight || 0));
+  const current = Math.max(0, Number(element?.scrollTop || 0));
+  const edgeSnap = Math.max(2, Math.ceil(Number(element?.clientHeight || 0) * 0.01));
+  return current <= edgeSnap || current >= maxTop - edgeSnap;
+}
+
+function syncFilePreviewPopoutFromPanel(path, record, panel, source) {
+  if (!record) return false;
+  const previewWindow = record.window;
+  const scroller = filePreviewPopoutScrollElement(previewWindow);
+  const root = filePreviewPopoutPreviewRoot(previewWindow);
+  const from = fileEditorSourceElement(panel, source);
+  if (!scroller || !root || !from || !elementCanScroll(scroller)) return false;
+  setFileEditorScrollSyncGuard(record);
+  return syncScrollPositionByRatio(from, scroller);
+}
+
+function syncFilePreviewPopoutsFromPanel(panel, source) {
+  const path = fileEditorPanelPath(panel);
+  if (!path || !fileEditorSourceCanDrive(panel, source)) return false;
+  let synced = false;
+  for (const record of filePreviewPopoutsForPath(path)) {
+    synced = syncFilePreviewPopoutFromPanel(path, record, panel, source) || synced;
+  }
+  return synced;
+}
+
+function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
+  const record = filePreviewPopouts.get(path);
+  if (!record || !filePreviewPopoutCanDrive(previewWindow)) return false;
+  const scroller = filePreviewPopoutScrollElement(previewWindow);
+  const forceEdge = options.forceEdges === true && scrollElementAtVerticalEdge(scroller);
+  if (!forceEdge && fileEditorScrollSyncBlocked(record)) return false;
+  let synced = false;
+  for (const panel of fileEditorPanelsForPath(path)) {
+    setFileEditorScrollSyncGuard(panel);
+    const mode = fileEditorPanelMode(panel);
+    const previewPane = fileEditorPanelPreviewPane(panel);
+    const editorScroller = fileEditorPanelScroller(panel);
+    if (editorScroller && elementCanScroll(editorScroller)) synced = syncScrollPositionByRatio(scroller, editorScroller) || synced;
+    if ((mode === 'preview' || mode === 'split') && previewPane && elementCanScroll(previewPane)) synced = syncScrollPositionByRatio(scroller, previewPane) || synced;
+  }
+  return synced;
+}
+
+function scheduleFilePreviewPopoutScrollSync(path, previewWindow, options = {}) {
+  const record = filePreviewPopouts.get(path);
+  if (!record) return false;
+  if (record.scrollSyncFrame) return true;
+  const run = () => {
+    record.scrollSyncFrame = 0;
+    syncFilePreviewPopoutScroll(path, previewWindow, options);
+  };
+  if (typeof previewWindow?.requestAnimationFrame === 'function') record.scrollSyncFrame = previewWindow.requestAnimationFrame(run);
+  else if (typeof requestAnimationFrame === 'function') record.scrollSyncFrame = requestAnimationFrame(run);
+  else record.scrollSyncFrame = setTimeout(run, 0);
+  return true;
+}
+
 function currentStylesheetHref(match) {
   const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
     .find(item => String(item.getAttribute('href') || '').includes(match));
@@ -4567,6 +4774,9 @@ function previewPopoutVariableStyle() {
     '--lt-code-inline', '--lt-code-inline-bg', '--lt-code-inline-border',
     '--markdown-heading', '--markdown-heading-bg', '--markdown-link', '--markdown-strong',
     '--markdown-emphasis', '--code-inline', '--code-inline-bg', '--code-inline-border',
+    '--code-keyword', '--code-control', '--code-atom', '--code-string', '--code-number', '--code-variable',
+    '--code-function', '--code-type', '--code-property', '--code-tag', '--code-comment',
+    '--code-invalid',
   ];
   const aliases = [
     ['--editor-scheme-bg', '--popout-editor-scheme-bg'],
@@ -4592,14 +4802,12 @@ function previewPopoutVariableStyle() {
 
 function previewPopoutToolbarHtml() {
   return `
-      <div class="file-preview-popout-controls" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}">
-        <button type="button" data-preview-popout-theme title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>
-        <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}">
-          <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
-          <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
-          <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
-        </span>
-      </div>`;
+      <span class="file-editor-preview-font-panel" role="group" aria-label="${esc(t('editor.previewFont.aria'))}">
+        <button type="button" data-editor-preview-font-step="-1" title="${esc(t('editor.previewFont.decrease'))}" aria-label="${esc(t('editor.previewFont.decrease'))}">A-</button>
+        <span class="file-editor-preview-font-value" aria-live="polite">${esc(String(editorPreviewFontSize))}</span>
+        <button type="button" data-editor-preview-font-step="1" title="${esc(t('editor.previewFont.increase'))}" aria-label="${esc(t('editor.previewFont.increase'))}">A+</button>
+      </span>
+      <button type="button" class="file-editor-theme-panel" data-preview-popout-theme title="${esc(editorThemeLabel())}" aria-label="${esc(editorThemeLabel())}"><span class="file-editor-icon file-editor-icon-theme" aria-hidden="true"></span></button>`;
 }
 
 function renderedPreviewSnapshot(path, text) {
@@ -4648,56 +4856,50 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       box-sizing: border-box;
       width: min(100%, 1040px);
       margin: 0 auto;
-      padding: 20px 24px 36px;
+      padding: 0 24px 36px;
     }
     .file-preview-popout-title {
       position: sticky;
       top: 0;
-      z-index: 1;
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 16px;
+      z-index: 20;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+      align-items: center;
+      gap: 12px;
+      min-height: 32px;
       padding: 8px 0 12px;
       margin-bottom: 12px;
       border-bottom: 1px solid var(--border, #d1d5db);
       background: var(--editor-preview-bg, var(--bg, #ffffff));
       color: var(--text, #111827);
       font: 600 13px/1.3 var(--font, system-ui, sans-serif);
+      box-shadow: 0 1px 0 var(--editor-preview-bg, var(--bg, #ffffff));
     }
-    .file-preview-popout-controls {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      flex: 0 0 auto;
-    }
-    .file-preview-popout-controls > button {
-      min-width: 24px;
-      width: 24px;
-      height: 22px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0;
-      border: 1px solid var(--active-control-border, #76b900);
-      border-radius: 4px;
-      color: var(--active-control-bg, #76b900);
-      background: transparent;
-      cursor: pointer;
-    }
-    .file-preview-popout-controls .file-editor-preview-font-panel {
-      display: inline-flex;
-    }
-    .file-preview-popout-title span {
+    .file-preview-popout-title-path {
+      grid-column: 1;
       min-width: 0;
+      max-width: 100%;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      justify-self: start;
     }
-    .file-preview-popout-title small {
-      color: var(--muted, #6b7280);
-      font: 500 11px/1.2 var(--font, system-ui, sans-serif);
-      white-space: nowrap;
+    .file-preview-popout-title .file-editor-preview-font-panel {
+      grid-column: 2;
+      display: inline-flex;
+      align-items: center;
+      justify-self: center;
+    }
+    .file-preview-popout-title .file-editor-theme-panel {
+      grid-column: 3;
+      justify-self: end;
+      min-width: 66px;
+      width: auto;
+      height: 20px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 0 7px 0 4px;
     }
     .file-preview-popout-window .file-editor-preview-pane-panel {
       position: static !important;
@@ -4738,6 +4940,99 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       color: var(--text, #111827);
       background: transparent;
     }
+    .file-preview-popout-window .markdown-body pre code.hljs {
+      color: var(--editor-scheme-fg, inherit) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-comment,
+    .file-preview-popout-window .markdown-body pre code .hljs-quote {
+      color: var(--code-comment) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-keyword,
+    .file-preview-popout-window .markdown-body pre code .hljs-selector-tag,
+    .file-preview-popout-window .markdown-body pre code .hljs-literal,
+    .file-preview-popout-window .markdown-body pre code .hljs-section,
+    .file-preview-popout-window .markdown-body pre code .hljs-doctag {
+      color: var(--code-keyword) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-string,
+    .file-preview-popout-window .markdown-body pre code .hljs-regexp,
+    .file-preview-popout-window .markdown-body pre code .hljs-addition,
+    .file-preview-popout-window .markdown-body pre code .hljs-template-variable {
+      color: var(--code-string) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-number,
+    .file-preview-popout-window .markdown-body pre code .hljs-symbol,
+    .file-preview-popout-window .markdown-body pre code .hljs-bullet,
+    .file-preview-popout-window .markdown-body pre code .hljs-attr {
+      color: var(--code-number) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-title,
+    .file-preview-popout-window .markdown-body pre code .hljs-title.function_,
+    .file-preview-popout-window .markdown-body pre code .hljs-function .hljs-title {
+      color: var(--code-function) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-built_in,
+    .file-preview-popout-window .markdown-body pre code .hljs-type,
+    .file-preview-popout-window .markdown-body pre code .hljs-class .hljs-title {
+      color: var(--code-type) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-variable,
+    .file-preview-popout-window .markdown-body pre code .hljs-params,
+    .file-preview-popout-window .markdown-body pre code .hljs-name {
+      color: var(--code-variable) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-property,
+    .file-preview-popout-window .markdown-body pre code .hljs-attribute {
+      color: var(--code-property) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-tag {
+      color: var(--code-tag) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-deletion {
+      color: var(--code-invalid) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .hljs-meta {
+      color: var(--code-atom) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-keyword {
+      color: var(--code-keyword) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-control {
+      color: var(--code-control) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-string {
+      color: var(--code-string) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-comment {
+      color: var(--code-comment) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-number {
+      color: var(--code-number) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-constant {
+      color: var(--code-atom) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-builtin,
+    .file-preview-popout-window .markdown-body pre code .code-function {
+      color: var(--code-function) !important;
+      font-weight: 700;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-type,
+    .file-preview-popout-window .markdown-body pre code .code-attr {
+      color: var(--code-type) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-variable {
+      color: var(--code-variable) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-property {
+      color: var(--code-property) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-tag {
+      color: var(--code-tag) !important;
+    }
+    .file-preview-popout-window .markdown-body pre code .code-invalid {
+      color: var(--code-invalid) !important;
+    }
     .file-preview-popout-window.editor-theme-light {
       --editor-scheme-bg: var(--lt-editor-bg);
       --editor-scheme-fg: var(--lt-text);
@@ -4768,18 +5063,22 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
       border: 0;
     }
     @media (max-width: 640px) {
-      .file-preview-popout-shell { padding: 12px 14px 28px; }
+      .file-preview-popout-shell { padding: 0 14px 28px; }
     }
   </style>
 </head>
 <body class="${esc(previewPopoutBodyClassName())}" style="${esc(previewPopoutVariableStyle())}">
   <main class="file-preview-popout-shell">
-    <header class="file-preview-popout-title"><span>${esc(compactHomePath(path))}</span>${previewPopoutToolbarHtml()}</header>
+    <header class="file-preview-popout-title" role="toolbar" aria-label="${esc(t('editor.toolbar.aria'))}">
+      <span class="file-preview-popout-title-path">${esc(compactHomePath(path))}</span>
+      ${previewPopoutToolbarHtml()}
+    </header>
     <article data-preview-root class="${esc(snapshot.className)}">${snapshot.html}</article>
   </main>
 </body>
 </html>`);
   doc.close();
+  doc._yolomuxPreviewControlsBound = false;
   bindFilePreviewPopoutControls(path, previewWindow);
   return true;
 }
@@ -4789,7 +5088,7 @@ function updateFilePreviewPopoutControls(path, previewWindow) {
   if (!doc) return;
   doc.body?.setAttribute('style', previewPopoutVariableStyle());
   const themeButton = doc.querySelector('[data-preview-popout-theme]');
-  if (themeButton) updateEditorThemeButton(themeButton);
+  if (themeButton) updateEditorThemeButton(themeButton, {includeVanilla: true});
   updateEditorPreviewFontControls(doc);
 }
 
@@ -4797,18 +5096,42 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   const doc = previewWindow?.document;
   if (!doc || doc._yolomuxPreviewControlsBound) return;
   doc._yolomuxPreviewControlsBound = true;
+  if (typeof previewWindow._yolomuxPreviewControlsCleanup === 'function') {
+    previewWindow._yolomuxPreviewControlsCleanup();
+  }
+  const cleanup = [];
+  const bind = (target, type, handler) => {
+    if (!target?.addEventListener) return;
+    target.addEventListener(type, handler, {passive: true});
+    cleanup.push(() => target.removeEventListener?.(type, handler));
+  };
+  previewWindow._yolomuxPreviewControlsCleanup = () => {
+    while (cleanup.length) {
+      try { cleanup.pop()(); } catch (_) {}
+    }
+  };
   doc.querySelector('[data-preview-popout-theme]')?.addEventListener('click', event => {
     event.preventDefault();
-    cycleEditorThemeMode();
-    refreshFilePreviewPopouts();
+    cycleEditorThemeMode({includeVanilla: true});
   });
   doc.querySelector('.file-editor-preview-font-panel')?.addEventListener('click', event => {
     const button = event.target?.closest?.('[data-editor-preview-font-step]');
     if (!button) return;
     event.preventDefault();
     setEditorPreviewFontSize(editorPreviewFontSize + Number(button.dataset.editorPreviewFontStep || 0));
-    refreshFilePreviewPopouts();
   });
+  const syncScroll = () => {
+    syncFilePreviewPopoutScroll(path, previewWindow, {forceEdges: true});
+    scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true});
+  };
+  const scheduleScrollSync = () => scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true});
+  const scroller = filePreviewPopoutScrollElement(previewWindow);
+  bind(previewWindow, 'scroll', syncScroll);
+  bind(previewWindow, 'wheel', scheduleScrollSync);
+  bind(doc, 'scroll', syncScroll);
+  bind(doc, 'wheel', scheduleScrollSync);
+  bind(scroller, 'scroll', syncScroll);
+  bind(scroller, 'wheel', scheduleScrollSync);
   updateFilePreviewPopoutControls(path, previewWindow);
 }
 
@@ -4823,6 +5146,9 @@ function updateFilePreviewPopout(path, text) {
   const snapshot = renderedPreviewSnapshot(path, text);
   try {
     const doc = previewWindow.document;
+    const scroller = filePreviewPopoutScrollElement(previewWindow);
+    const scrollTop = scroller?.scrollTop || 0;
+    const scrollLeft = scroller?.scrollLeft || 0;
     const root = doc?.querySelector?.('[data-preview-root]');
     if (!root) return writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
     root.className = snapshot.className;
@@ -4830,6 +5156,7 @@ function updateFilePreviewPopout(path, text) {
     doc.body.className = previewPopoutBodyClassName();
     updateFilePreviewPopoutControls(path, previewWindow);
     doc.title = `${basenameOf(path)} preview`;
+    restoreElementScrollPosition(scroller, scrollTop, scrollLeft);
     return true;
   } catch (_) {
     filePreviewPopouts.delete(path);
@@ -4845,30 +5172,51 @@ function refreshFilePreviewPopouts() {
   }
 }
 
+function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot) {
+  let written = false;
+  const write = () => {
+    if (written || !previewWindow || previewWindow.closed) return;
+    written = true;
+    writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
+    previewWindow.focus?.();
+  };
+  try {
+    if (previewWindow.location?.pathname === '/preview-popout' && previewWindow.document?.readyState === 'complete') {
+      write();
+      return;
+    }
+    previewWindow.addEventListener?.('load', write, {once: true});
+    window.setTimeout(write, 1000);
+  } catch (_) {
+    write();
+  }
+}
+
 function openFilePreviewPopout(path, panel = null) {
-  if (!path || !editorPreviewModeAvailable(path)) return;
+  if (!path || !editorPreviewModeAvailable(path)) return false;
   syncOpenFileContentFromPanels(path, panel);
   const state = openFiles.get(path);
-  if (!state || state.kind !== 'text') return;
+  if (!state || state.kind !== 'text') return false;
   const existing = filePreviewPopouts.get(path)?.window;
   if (existing && !existing.closed) {
     updateFilePreviewPopout(path, state.content);
     existing.focus?.();
-    return;
+    return true;
   }
-  const previewWindow = window.open('', `yolomux-preview-${encodeURIComponent(path)}`, 'popup,width=980,height=900');
+  const previewWindow = window.open(`/preview-popout?path=${encodeURIComponent(path)}`, `yolomux-preview-${encodeURIComponent(path)}`, 'popup,width=980,height=900');
   if (!previewWindow) {
     statusErr('preview pop-out was blocked by the browser');
-    return;
+    return false;
   }
   try {
     filePreviewPopouts.set(path, {window: previewWindow});
-    writeFilePreviewPopoutDocument(path, previewWindow, renderedPreviewSnapshot(path, state.content));
-    previewWindow.focus?.();
+    writeFilePreviewPopoutAfterNavigation(path, previewWindow, renderedPreviewSnapshot(path, state.content));
+    return true;
   } catch (error) {
     filePreviewPopouts.delete(path);
     try { previewWindow.close(); } catch (_) {}
     statusErr(`preview pop-out failed: ${esc(error)}`);
+    return false;
   }
 }
 
@@ -4901,10 +5249,10 @@ function markdownSyntaxHtml(text) {
   }).join('\n');
 }
 
-function simpleTokenHighlightHtml(raw, rules) {
+function simpleTokenHighlightTokens(raw, rules) {
   const text = String(raw || '');
-  let html = '';
   let index = 0;
+  const tokens = [];
   while (index < text.length) {
     let best = null;
     for (let ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
@@ -4920,18 +5268,47 @@ function simpleTokenHighlightHtml(raw, rules) {
       }
     }
     if (!best) {
-      html += esc(text.slice(index));
       break;
     }
-    html += esc(text.slice(index, best.index));
-    html += `<span class="${best.rule.className}">${esc(best.text)}</span>`;
+    if (best.index > index) index = best.index;
+    tokens.push({
+      from: best.index,
+      to: best.index + best.text.length,
+      text: best.text,
+      className: best.rule.className,
+    });
     index = best.index + best.text.length;
   }
+  return tokens;
+}
+
+function simpleTokenHighlightHtml(raw, rules) {
+  const text = String(raw || '');
+  const tokens = simpleTokenHighlightTokens(text, rules);
+  let html = '';
+  let index = 0;
+  for (const token of tokens) {
+    html += esc(text.slice(index, token.from));
+    html += `<span class="${token.className}">${esc(token.text)}</span>`;
+    index = token.to;
+  }
+  html += esc(text.slice(index));
   return html;
 }
 
-function simpleCodeSyntaxHtml(language, text) {
-  if (language === 'markdown') return markdownSyntaxHtml(text);
+function normalizeSimpleCodeSyntaxLanguage(language) {
+  const normalized = String(language || '').trim().toLowerCase();
+  if (normalized === 'py') return 'python';
+  if (normalized === 'rs') return 'rust';
+  if (normalized === 'sh' || normalized === 'shell' || normalized === 'zsh') return 'bash';
+  if (normalized === 'js' || normalized === 'jsx') return 'javascript';
+  if (normalized === 'ts' || normalized === 'tsx') return 'typescript';
+  if (normalized === 'yml') return 'yaml';
+  return normalized;
+}
+
+function simpleCodeSyntaxRules(language) {
+  const normalized = normalizeSimpleCodeSyntaxLanguage(language);
   const stringRule = {regex: /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, className: 'code-string'};
   const numberRule = {regex: /\b\d+(?:\.\d+)?\b/g, className: 'code-number'};
   const shellRules = [
@@ -4946,8 +5323,14 @@ function simpleCodeSyntaxHtml(language, text) {
     stringRule,
     {regex: /#[^\n]*/g, className: 'code-comment'},
     {regex: /@\w+/g, className: 'code-function'},
+    {regex: /\b(?:Any|BaseModel|Callable|DeltaFunctionCall|DeltaMessage|DeltaToolCall|Dict|ExtractedToolCallInformation|Iterable|Iterator|List|Literal|Mapping|NoneType|OpenAIBaseModel|Optional|Sequence|Set|Self|ToolParser|Tuple|Type|Union|bool|bytes|dict|float|int|list|set|str|tuple)\b/g, className: 'code-type'},
+    {regex: /\b(?:False|None|True)\b/g, className: 'code-constant'},
+    {regex: /\b[A-Z][A-Za-z0-9_]*(?=[\[\]|,):]|\s*$)/g, className: 'code-type'},
+    {regex: /\b[a-z_][A-Za-z0-9_]*(?=\s*\()/g, className: 'code-function'},
+    {regex: /\b[a-z_][A-Za-z0-9_]*(?=\s*:)/g, className: 'code-property'},
     {regex: /\b(?:and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b/g, className: 'code-keyword'},
-    {regex: /\b(?:False|None|True|self|cls)\b/g, className: 'code-constant'},
+    {regex: /\b(?:cls|self)\b/g, className: 'code-variable'},
+    {regex: /\b[a-z_][A-Za-z0-9_]*\b/g, className: 'code-variable'},
     numberRule,
   ];
   const jsRules = [
@@ -4960,8 +5343,13 @@ function simpleCodeSyntaxHtml(language, text) {
   const rustRules = [
     stringRule,
     {regex: /\/\/[^\n]*|\/\*.*?\*\//g, className: 'code-comment'},
-    {regex: /\b(?:as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|fn|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|where|while)\b/g, className: 'code-keyword'},
-    {regex: /\b(?:bool|char|f32|f64|i8|i16|i32|i64|i128|isize|str|u8|u16|u32|u64|u128|usize|String|Vec|Option|Result)\b/g, className: 'code-type'},
+    {regex: /\b(?:fn|pub|where)\b/g, className: 'code-control'},
+    {regex: /\b[A-Za-z_][A-Za-z0-9_]*(?=\s*:)/g, className: 'code-property'},
+    {regex: /\b[a-z_][A-Za-z0-9_]*(?=\s*\()/g, className: 'code-function'},
+    {regex: /\b(?:Box|Option|Result|Send|String|Tool|ToolCallDelta|ToolParser|ToolParserOutput|Value|Vec|bool|char|dyn|f32|f64|i8|i16|i32|i64|i128|isize|str|u8|u16|u32|u64|u128|usize)\b/g, className: 'code-type'},
+    {regex: /\b[A-Z][A-Za-z0-9_]*\b/g, className: 'code-type'},
+    {regex: /'[A-Za-z_][A-Za-z0-9_]*/g, className: 'code-type'},
+    {regex: /\b(?:as|async|await|break|const|continue|crate|else|enum|extern|false|for|if|impl|in|let|loop|match|mod|move|mut|ref|return|self|Self|static|struct|super|trait|true|type|unsafe|use|while)\b/g, className: 'code-keyword'},
     {regex: /\b[A-Za-z_][A-Za-z0-9_]*!/g, className: 'code-function'},
     numberRule,
   ];
@@ -5003,7 +5391,19 @@ function simpleCodeSyntaxHtml(language, text) {
     ['xml', xmlRules],
     ['yaml', yamlRules],
   ]);
-  const rules = rulesByLanguage.get(language);
+  return rulesByLanguage.get(normalized) || null;
+}
+
+function simpleCodeSyntaxTokens(language, text) {
+  const rules = simpleCodeSyntaxRules(language);
+  if (!rules) return [];
+  return simpleTokenHighlightTokens(text, rules);
+}
+
+function simpleCodeSyntaxHtml(language, text) {
+  const normalized = normalizeSimpleCodeSyntaxLanguage(language);
+  if (normalized === 'markdown') return markdownSyntaxHtml(text);
+  const rules = simpleCodeSyntaxRules(normalized);
   if (!rules) return null;
   return String(text || '').split('\n').map(line => simpleTokenHighlightHtml(line, rules)).join('\n');
 }
@@ -5042,6 +5442,37 @@ function scrollPreviewToSourceLine(previewPane, sourceLine) {
   return true;
 }
 
+function scrollViewportTopForElement(scroller) {
+  if (!scroller?.getBoundingClientRect) return 0;
+  const doc = scroller.ownerDocument || null;
+  if (doc && (doc.scrollingElement === scroller || doc.documentElement === scroller || doc.body === scroller)) return 0;
+  return scroller.getBoundingClientRect().top || 0;
+}
+
+function scrollTopForPreviewElement(scroller, element) {
+  if (!scroller || !element?.getBoundingClientRect) return Number(element?.offsetTop || 0);
+  return Math.max(0, Number(scroller.scrollTop || 0) + element.getBoundingClientRect().top - scrollViewportTopForElement(scroller));
+}
+
+function previewSourceLineForScroller(previewRoot, scroller) {
+  const anchors = previewSourceLineAnchors(previewRoot);
+  if (!anchors.length || !scroller) return null;
+  const top = Number(scroller.scrollTop || 0) + 6;
+  let best = anchors[0];
+  for (const item of anchors) {
+    if (scrollTopForPreviewElement(scroller, item.element) > top) break;
+    best = item;
+  }
+  return best.line;
+}
+
+function scrollPreviewScrollerToSourceLine(previewRoot, scroller, sourceLine) {
+  const anchor = previewAnchorForSourceLine(previewRoot, sourceLine);
+  if (!anchor || !scroller) return false;
+  scroller.scrollTop = Math.max(0, scrollTopForPreviewElement(scroller, anchor.element) - 4);
+  return true;
+}
+
 function previewSourceLineForScroll(previewPane) {
   const anchors = previewSourceLineAnchors(previewPane);
   if (!anchors.length) return null;
@@ -5060,22 +5491,30 @@ function nowMs() {
     : Date.now();
 }
 
-function fileEditorScrollSyncBlocked(panel) {
-  return Boolean(panel?._splitScrollSyncing || Number(panel?._splitScrollSuppressUntil || 0) > nowMs());
+function fileEditorScrollSyncBlocked(panel, source = '') {
+  const suppressed = panel?._splitScrollSyncing || Number(panel?._splitScrollSuppressUntil || 0) > nowMs();
+  if (!suppressed) return false;
+  return !source || panel?._splitScrollSource !== source;
 }
 
-function setFileEditorScrollSyncGuard(...panels) {
+function setFileEditorScrollSyncGuardForSource(source, ...panels) {
   const until = nowMs() + fileEditorScrollSyncSuppressMs;
   for (const panel of panels) {
     if (!panel) continue;
     panel._splitScrollSyncing = true;
+    panel._splitScrollSource = source || '';
     panel._splitScrollSuppressUntil = Math.max(Number(panel._splitScrollSuppressUntil || 0), until);
     const release = () => {
       panel._splitScrollSyncing = false;
+      if (Number(panel._splitScrollSuppressUntil || 0) <= nowMs()) panel._splitScrollSource = '';
     };
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => setTimeout(release, 0));
     else setTimeout(release, 0);
   }
+}
+
+function setFileEditorScrollSyncGuard(...panels) {
+  setFileEditorScrollSyncGuardForSource('', ...panels);
 }
 
 function elementCanScroll(element) {
@@ -5169,46 +5608,34 @@ function syncFileEditorInPaneSplitScroll(host, source) {
   const editorScroller = cmView?.scrollDOM || null;
   const previewPane = host.querySelector?.('.file-editor-preview-pane-panel');
   if (!editorScroller || !previewPane || previewPane.hidden) return false;
-  if (!cmView) return false;
   if (!fileEditorSourceCanDrive(host, source)) return false;
   const from = source === 'preview' ? previewPane : editorScroller;
   const to = source === 'preview' ? editorScroller : previewPane;
-  const maxFromTop = Math.max(1, from.scrollHeight - from.clientHeight);
-  const maxToTop = Math.max(0, to.scrollHeight - to.clientHeight);
-  const maxFromLeft = Math.max(1, from.scrollWidth - from.clientWidth);
-  const maxToLeft = Math.max(0, to.scrollWidth - to.clientWidth);
-  setFileEditorScrollSyncGuard(host);
-  try {
-    if (source === 'preview') {
-      const line = previewSourceLineForScroll(previewPane);
-      if (line && cmView) {
-        const docLine = cmView.state.doc.line(Math.min(line, cmView.state.doc.lines));
-        const scrollEffect = cmView.constructor?.scrollIntoView?.(docLine.from, {y: 'start'});
-        if (scrollEffect) cmView.dispatch({effects: scrollEffect});
-        else to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
-      } else {
-        to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
-      }
-    } else if (cmView) {
-      let line = null;
-      try {
-        const block = cmView.lineBlockAtHeight(cmView.scrollDOM.scrollTop);
-        line = cmView.state.doc.lineAt(block.from).number;
-      } catch (_) {}
-      if (!line || !scrollPreviewToSourceLine(previewPane, line)) {
-        to.scrollTop = Math.round((from.scrollTop / maxFromTop) * maxToTop);
-      }
-    }
-    to.scrollLeft = Math.round((from.scrollLeft / maxFromLeft) * maxToLeft);
-  } finally {}
-  return true;
+  setFileEditorScrollSyncGuardForSource(source, host);
+  return syncScrollPositionByRatio(from, to);
 }
 
 function syncFileEditorSplitScroll(host, source) {
-  if (!host || fileEditorScrollSyncBlocked(host)) return;
+  if (!host || fileEditorScrollSyncBlocked(host, source)) return;
   const canDrive = fileEditorSourceCanDrive(host, source);
   if (!canDrive) return;
   syncFileEditorInPaneSplitScroll(host, source);
+  syncFilePreviewPopoutsFromPanel(host, source);
+}
+
+function scheduleFileEditorSplitScrollSync(host, source) {
+  if (!host) return false;
+  host._splitScrollPendingSource = source;
+  if (host._splitScrollFrame) return true;
+  const run = () => {
+    host._splitScrollFrame = 0;
+    const pendingSource = host._splitScrollPendingSource || source;
+    host._splitScrollPendingSource = '';
+    syncFileEditorSplitScroll(host, pendingSource);
+  };
+  if (typeof requestAnimationFrame === 'function') host._splitScrollFrame = requestAnimationFrame(run);
+  else host._splitScrollFrame = setTimeout(run, 0);
+  return true;
 }
 
 function refreshEditorPreviews() {

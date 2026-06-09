@@ -221,6 +221,7 @@
   --code-inline-bg: rgba(245, 197, 66, 0.14);
   --code-inline-border: rgba(245, 197, 66, 0.24);
   --code-invalid: #ff6673;
+  --code-control: var(--code-keyword);
   --code-diff-add: #56d364;
   --code-diff-remove: #ff7b72;
   --file-hover-bg: rgba(245, 197, 66, 0.26);
@@ -263,6 +264,7 @@
   --lt-code-inline-bg: #fff1d6;
   --lt-code-inline-border: #d8a657;
   --lt-code-invalid: #82071e;
+  --lt-code-control: var(--lt-code-keyword);
   --tab-line-height: 1;
   --pane-tab-width: 180px;
   --pc-control-bg: #1b2432;
@@ -8032,6 +8034,154 @@ body.theme-light .summary-preview pre {
   border: 0;
   padding: 0;
 }
+.markdown-body pre code.hljs {
+  color: var(--editor-scheme-fg, inherit) !important;
+}
+.markdown-body pre code .hljs-comment,
+.markdown-body pre code .hljs-quote {
+  color: var(--code-comment) !important;
+}
+.markdown-body pre code .hljs-keyword,
+.markdown-body pre code .hljs-selector-tag,
+.markdown-body pre code .hljs-literal,
+.markdown-body pre code .hljs-section,
+.markdown-body pre code .hljs-doctag {
+  color: var(--code-keyword) !important;
+}
+.markdown-body pre code .hljs-string,
+.markdown-body pre code .hljs-regexp,
+.markdown-body pre code .hljs-addition,
+.markdown-body pre code .hljs-template-variable {
+  color: var(--code-string) !important;
+}
+.markdown-body pre code .hljs-number,
+.markdown-body pre code .hljs-symbol,
+.markdown-body pre code .hljs-bullet,
+.markdown-body pre code .hljs-attr {
+  color: var(--code-number) !important;
+}
+.markdown-body pre code .hljs-title,
+.markdown-body pre code .hljs-title.function_,
+.markdown-body pre code .hljs-function .hljs-title {
+  color: var(--code-function) !important;
+}
+.markdown-body pre code .hljs-built_in,
+.markdown-body pre code .hljs-type,
+.markdown-body pre code .hljs-class .hljs-title {
+  color: var(--code-type) !important;
+}
+.markdown-body pre code .hljs-variable,
+.markdown-body pre code .hljs-params,
+.markdown-body pre code .hljs-name {
+  color: var(--code-variable) !important;
+}
+.markdown-body pre code .hljs-property,
+.markdown-body pre code .hljs-attribute {
+  color: var(--code-property) !important;
+}
+.markdown-body pre code .hljs-tag {
+  color: var(--code-tag) !important;
+}
+.markdown-body pre code .hljs-deletion {
+  color: var(--code-invalid) !important;
+}
+.markdown-body pre code .hljs-meta {
+  color: var(--code-atom) !important;
+}
+.markdown-body pre code .code-keyword {
+  color: var(--code-keyword) !important;
+}
+.markdown-body pre code .code-control {
+  color: var(--code-control) !important;
+}
+.markdown-body pre code .code-string {
+  color: var(--code-string) !important;
+}
+.markdown-body pre code .code-comment {
+  color: var(--code-comment) !important;
+}
+.markdown-body pre code .code-number {
+  color: var(--code-number) !important;
+}
+.markdown-body pre code .code-constant {
+  color: var(--code-atom) !important;
+}
+.markdown-body pre code .code-builtin,
+.markdown-body pre code .code-function {
+  color: var(--code-function) !important;
+  font-weight: 700;
+}
+.markdown-body pre code .code-type,
+.markdown-body pre code .code-attr {
+  color: var(--code-type) !important;
+}
+.markdown-body pre code .code-variable {
+  color: var(--code-variable) !important;
+}
+.markdown-body pre code .code-property {
+  color: var(--code-property) !important;
+}
+.markdown-body pre code .code-tag {
+  color: var(--code-tag) !important;
+}
+.markdown-body pre code .code-invalid {
+  color: var(--code-invalid) !important;
+}
+.cm-content .code-keyword,
+.cm-content .code-keyword * {
+  color: var(--code-keyword) !important;
+  font-weight: 700;
+}
+.cm-content .code-control,
+.cm-content .code-control * {
+  color: var(--code-control) !important;
+  font-weight: 700;
+}
+.cm-content .code-string,
+.cm-content .code-string * {
+  color: var(--code-string) !important;
+}
+.cm-content .code-comment,
+.cm-content .code-comment * {
+  color: var(--code-comment) !important;
+}
+.cm-content .code-number,
+.cm-content .code-number * {
+  color: var(--code-number) !important;
+}
+.cm-content .code-constant,
+.cm-content .code-constant * {
+  color: var(--code-atom) !important;
+}
+.cm-content .code-builtin,
+.cm-content .code-builtin *,
+.cm-content .code-function,
+.cm-content .code-function * {
+  color: var(--code-function) !important;
+  font-weight: 700;
+}
+.cm-content .code-type,
+.cm-content .code-type *,
+.cm-content .code-attr,
+.cm-content .code-attr * {
+  color: var(--code-type) !important;
+}
+.cm-content .code-variable,
+.cm-content .code-variable * {
+  color: var(--code-variable) !important;
+}
+.cm-content .code-property,
+.cm-content .code-property * {
+  color: var(--code-property) !important;
+}
+.cm-content .code-tag,
+.cm-content .code-tag * {
+  color: var(--code-tag) !important;
+}
+.cm-content .code-invalid,
+.cm-content .code-invalid * {
+  color: var(--code-invalid) !important;
+}
 body.editor-theme-light .file-editor-content .markdown-body code {
   color: var(--lt-code-inline);
   background: var(--lt-code-inline-bg);
@@ -9120,6 +9270,19 @@ body.editor-theme-light .file-editor-content {
   padding: 0;
   line-height: 1;
 }
+.file-editor-theme-panel.theme-with-label {
+  width: auto;
+  min-width: 66px;
+  gap: 4px;
+  justify-content: flex-start;
+  padding: 0 7px 0 4px;
+}
+.file-editor-theme-panel.theme-with-label::after {
+  content: attr(data-editor-theme-short);
+  color: currentColor;
+  font: 800 var(--ui-font-size-xs)/1 var(--font);
+  white-space: nowrap;
+}
 .file-editor-diff-panel {
   width: auto;
   min-width: 44px;
@@ -9251,6 +9414,7 @@ body.editor-theme-light .file-editor-code-preview {
   --editor-scheme-gutter-bg: var(--lt-editor-gutter-bg);
   --editor-scheme-preview-bg: var(--lt-editor-preview-bg);
   --code-keyword: var(--lt-code-keyword);
+  --code-control: var(--lt-code-control);
   --code-atom: var(--lt-code-atom);
   --code-string: var(--lt-code-string);
   --code-number: var(--lt-code-number);
@@ -9343,6 +9507,10 @@ body.editor-theme-light .file-editor-raw-panel .code-keyword,
 body.editor-theme-light .file-editor-code-preview .code-keyword {
   color: var(--lt-code-keyword);
 }
+body.editor-theme-light .file-editor-raw-panel .code-control,
+body.editor-theme-light .file-editor-code-preview .code-control {
+  color: var(--lt-code-control);
+}
 body.editor-theme-light .file-editor-raw-panel .md-code,
 body.editor-theme-light .file-editor-raw-panel .md-codeblock,
 body.editor-theme-light .file-editor-raw-panel .md-fence,
@@ -9369,17 +9537,23 @@ body.editor-theme-light .file-editor-code-preview .md-list-marker,
 body.editor-theme-light .file-editor-code-preview .code-comment {
   color: var(--lt-code-comment);
 }
-body.editor-theme-light .file-editor-raw-panel .code-constant,
 body.editor-theme-light .file-editor-raw-panel .code-variable,
-body.editor-theme-light .file-editor-code-preview .code-constant,
 body.editor-theme-light .file-editor-code-preview .code-variable {
   color: var(--lt-code-variable);
+}
+body.editor-theme-light .file-editor-raw-panel .code-constant,
+body.editor-theme-light .file-editor-code-preview .code-constant {
+  color: var(--lt-code-atom);
 }
 body.editor-theme-light .file-editor-raw-panel .code-type,
 body.editor-theme-light .file-editor-raw-panel .code-attr,
 body.editor-theme-light .file-editor-code-preview .code-type,
 body.editor-theme-light .file-editor-code-preview .code-attr {
   color: var(--lt-code-type);
+}
+body.editor-theme-light .file-editor-raw-panel .code-property,
+body.editor-theme-light .file-editor-code-preview .code-property {
+  color: var(--lt-code-property);
 }
 body.editor-theme-light .file-editor-raw-panel .md-html,
 body.editor-theme-light .file-editor-raw-panel .code-tag,
@@ -9988,6 +10162,11 @@ body.editor-theme-light .cm-content .md-code {
   color: var(--code-keyword);
   font-weight: 700;
 }
+.file-editor-raw-panel .code-control,
+.file-editor-code-preview .code-control {
+  color: var(--code-control);
+  font-weight: 700;
+}
 .file-editor-raw-panel .code-string,
 .file-editor-code-preview .code-string {
   color: var(--code-string);
@@ -9996,23 +10175,30 @@ body.editor-theme-light .cm-content .md-code {
 .file-editor-code-preview .code-number {
   color: var(--code-number);
 }
-.file-editor-raw-panel .code-constant,
 .file-editor-raw-panel .code-variable,
-.file-editor-code-preview .code-constant,
 .file-editor-code-preview .code-variable {
   color: var(--code-variable);
+}
+.file-editor-raw-panel .code-constant,
+.file-editor-code-preview .code-constant {
+  color: var(--code-atom);
 }
 .file-editor-raw-panel .code-builtin,
 .file-editor-raw-panel .code-function,
 .file-editor-code-preview .code-builtin,
 .file-editor-code-preview .code-function {
   color: var(--code-function);
+  font-weight: 700;
 }
 .file-editor-raw-panel .code-type,
 .file-editor-raw-panel .code-attr,
 .file-editor-code-preview .code-type,
 .file-editor-code-preview .code-attr {
   color: var(--code-type);
+}
+.file-editor-raw-panel .code-property,
+.file-editor-code-preview .code-property {
+  color: var(--code-property);
 }
 .file-editor-raw-panel .code-tag,
 .file-editor-code-preview .code-tag {

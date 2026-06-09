@@ -3921,13 +3921,27 @@ function codeMirrorHighlightExtension(api) {
     return api.defaultHighlightStyle ? safeCodeMirrorExtension('default highlight', () => api.syntaxHighlighting(api.defaultHighlightStyle, {fallback: true})) : [];
   }
   const t = api.tags;
-  const scheme = activeEditorScheme();
   const palette = {
-    ...scheme.syntax,
-    text: scheme.fg,
-    muted: scheme.syntax.comment,
+    text: 'var(--editor-scheme-fg)',
+    muted: 'var(--code-comment)',
+    keyword: 'var(--code-keyword)',
+    control: 'var(--code-control)',
+    atom: 'var(--code-atom)',
+    string: 'var(--code-string)',
+    number: 'var(--code-number)',
+    variable: 'var(--code-variable)',
+    function: 'var(--code-function)',
+    type: 'var(--code-type)',
+    property: 'var(--code-property)',
+    tag: 'var(--code-tag)',
     heading: 'var(--markdown-heading)',
     headingBg: 'var(--markdown-heading-bg)',
+    strong: 'var(--markdown-strong)',
+    emphasis: 'var(--markdown-emphasis)',
+    link: 'var(--markdown-link)',
+    inlineCode: 'var(--code-inline)',
+    inlineCodeBg: 'var(--code-inline-bg)',
+    invalid: 'var(--code-invalid)',
   };
   const tags = (...items) => items.filter(Boolean);
   const headingStyle = {tag: tags(t.heading, t.heading1, t.heading2), color: palette.heading, fontWeight: '700'};
@@ -3938,10 +3952,10 @@ function codeMirrorHighlightExtension(api) {
     {tag: tags(t.atom, t.bool, t.null), color: palette.atom},
     {tag: tags(t.string, t.special(t.string), t.regexp), color: palette.string},
     {tag: tags(t.number, t.integer, t.float), color: palette.number},
-    {tag: tags(t.variableName, t.self, t.definition(t.variableName)), color: palette.variable},
     {tag: tags(t.function(t.variableName), t.function(t.propertyName)), color: palette.function},
     {tag: tags(t.typeName, t.className, t.namespace), color: palette.type},
     {tag: tags(t.propertyName, t.attributeName), color: palette.property},
+    {tag: tags(t.variableName, t.self, t.definition(t.variableName)), color: palette.variable},
     {tag: tags(t.tagName, t.angleBracket), color: palette.tag},
     {tag: tags(t.comment, t.meta), color: palette.muted},
     headingStyle,
@@ -4005,12 +4019,18 @@ function codeMirrorThemeExtension(api) {
       backgroundColor: 'var(--pane-bar-bg)',
     },
     '.cm-searchMatch': {
-      backgroundColor: scheme.dark ? 'rgba(245, 197, 66, 0.62)' : 'rgba(255, 204, 0, 0.78)',
-      outline: `1px solid ${scheme.dark ? 'rgba(255, 224, 92, 0.76)' : 'rgba(132, 83, 0, 0.58)'}`,
+      color: scheme.dark ? '#0b1020' : '#111827',
+      backgroundColor: scheme.dark ? 'rgba(255, 213, 74, 0.86)' : 'rgba(255, 204, 0, 0.86)',
+      boxShadow: `inset 0 0 0 1px ${scheme.dark ? 'rgba(255, 244, 184, 0.95)' : 'rgba(132, 83, 0, 0.72)'}`,
+      borderRadius: '2px',
+      fontWeight: '700',
     },
     '.cm-searchMatch-selected': {
-      backgroundColor: scheme.dark ? 'rgba(118, 185, 0, 0.84)' : 'rgba(255, 125, 0, 0.86)',
-      outline: `2px solid ${scheme.dark ? 'rgba(210, 255, 110, 0.92)' : 'rgba(116, 59, 0, 0.76)'}`,
+      color: scheme.dark ? '#111827' : '#111827',
+      backgroundColor: scheme.dark ? '#ffd166' : '#ff9f1c',
+      boxShadow: `inset 0 0 0 2px ${scheme.dark ? '#fff2a8' : '#7c2d12'}, 0 0 0 1px ${scheme.dark ? 'rgba(0, 0, 0, 0.46)' : 'rgba(255, 255, 255, 0.68)'}`,
+      borderRadius: '2px',
+      fontWeight: '800',
     },
   }, {dark: scheme.dark});
 }
@@ -4248,6 +4268,33 @@ function codeMirrorMarkdownFallbackSyntaxExtension(api, path) {
     if (!markByClass.has(className)) markByClass.set(className, api.Decoration.mark({class: className}));
     return markByClass.get(className);
   };
+  const addMarkRange = (ranges, className, from, to) => {
+    if (to > from) ranges.push(mark(className).range(from, to));
+  };
+  const fenceMatch = lineText => String(lineText || '').match(/^\s*(```|~~~)\s*([A-Za-z0-9_+#.-]*)/);
+  const fenceStateBeforeLine = (doc, lineNo) => {
+    let inFence = false;
+    let language = '';
+    for (let scanLineNo = 1; scanLineNo < lineNo; scanLineNo += 1) {
+      const match = fenceMatch(doc.line(scanLineNo).text);
+      if (!match) continue;
+      if (inFence) {
+        inFence = false;
+        language = '';
+      } else {
+        inFence = true;
+        language = match[2] || '';
+      }
+    }
+    return {inFence, language};
+  };
+  const addFenceTokenMarks = (ranges, language, lineText, lineFrom) => {
+    if (typeof simpleCodeSyntaxTokens !== 'function') return;
+    for (const token of simpleCodeSyntaxTokens(language, lineText)) {
+      if (!token?.className || token.to <= token.from) continue;
+      addMarkRange(ranges, token.className, lineFrom + token.from, lineFrom + token.to);
+    }
+  };
   const addInlineMarks = (ranges, lineText, lineFrom) => {
     const inlinePatterns = [
       ['md-code', /`[^`\n]+`/g],
@@ -4265,7 +4312,7 @@ function codeMirrorMarkdownFallbackSyntaxExtension(api, path) {
         const groupOffset = groupIndex ? match[0].indexOf(text) : 0;
         const from = lineFrom + match.index + groupOffset;
         const to = from + text.length;
-        if (to > from) ranges.push(mark(className).range(from, to));
+        addMarkRange(ranges, className, from, to);
       }
     }
   };
@@ -4280,33 +4327,40 @@ function codeMirrorMarkdownFallbackSyntaxExtension(api, path) {
 
     build(view) {
       const ranges = [];
-      let inFence = false;
       const doc = view.state.doc;
       const visibleRanges = view.visibleRanges?.length ? view.visibleRanges : [{from: 0, to: doc.length}];
       for (const visible of visibleRanges) {
         const startLine = doc.lineAt(visible.from).number;
         const endLine = doc.lineAt(Math.max(visible.from, visible.to)).number;
+        let {inFence, language: fenceLanguage} = fenceStateBeforeLine(doc, startLine);
         for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
           const line = doc.line(lineNo);
           const text = line.text;
-          const fence = /^\s*(```|~~~)/.test(text);
+          const fence = fenceMatch(text);
           if (fence) {
-            ranges.push(mark('md-fence').range(line.from, line.to));
-            inFence = !inFence;
+            addMarkRange(ranges, 'md-fence', line.from, line.to);
+            if (inFence) {
+              inFence = false;
+              fenceLanguage = '';
+            } else {
+              inFence = true;
+              fenceLanguage = fence[2] || '';
+            }
             continue;
           }
           if (inFence) {
-            ranges.push(mark('md-codeblock').range(line.from, line.to));
+            addMarkRange(ranges, 'md-codeblock', line.from, line.to);
+            addFenceTokenMarks(ranges, fenceLanguage, text, line.from);
             continue;
           }
           const heading = text.match(/^(\s{0,3})(#{1,6})(\s+.*)$/);
           if (heading) {
-            ranges.push(mark(`md-heading md-heading-${heading[2].length}`).range(line.from, line.to));
+            addMarkRange(ranges, `md-heading md-heading-${heading[2].length}`, line.from, line.to);
             continue;
           }
-          if (/^\s*>\s?/.test(text)) ranges.push(mark('md-blockquote').range(line.from, line.to));
+          if (/^\s*>\s?/.test(text)) addMarkRange(ranges, 'md-blockquote', line.from, line.to);
           const list = text.match(/^\s*(?:[-*+]|\d+\.)\s+/);
-          if (list) ranges.push(mark('md-list-marker').range(line.from, line.from + list[0].length));
+          if (list) addMarkRange(ranges, 'md-list-marker', line.from, line.from + list[0].length);
           addInlineMarks(ranges, text, line.from);
         }
       }

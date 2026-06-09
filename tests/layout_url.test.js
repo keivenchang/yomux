@@ -1221,10 +1221,25 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*#111827[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*#0645ad/.test(editorCss), 'vanilla preview links use a conventional blue instead of scheme colors');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body pre code \*[\s\S]*color:\s*inherit !important/.test(editorCss), 'vanilla preview strips syntax token colors inside code blocks');
+  assert.ok(/\.markdown-body pre code \.hljs-keyword,[\s\S]*color:\s*var\(--code-keyword\) !important/.test(editorCss), 'themed markdown preview owns Highlight.js keyword color instead of relying on the external stylesheet');
+  assert.ok(/\.markdown-body pre code \.hljs-string,[\s\S]*color:\s*var\(--code-string\) !important/.test(editorCss), 'themed markdown preview owns Highlight.js string color');
+  const fileExplorerSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+  const highlightStart = fileExplorerSource.indexOf('function codeMirrorHighlightExtension');
+  const highlightEnd = fileExplorerSource.indexOf('function codeMirrorThemeExtension');
+  const highlightBlock = fileExplorerSource.slice(highlightStart, highlightEnd);
+  assert.ok(highlightBlock.includes("keyword: 'var(--code-keyword)'"), 'CodeMirror keywords use the same parent syntax variable as Preview');
+  assert.ok(highlightBlock.includes("control: 'var(--code-control)'"), 'CodeMirror control keywords use the same parent syntax variable as Preview');
+  assert.ok(highlightBlock.includes("string: 'var(--code-string)'"), 'CodeMirror strings use the same parent syntax variable as Preview');
+  assert.ok(highlightBlock.includes("function: 'var(--code-function)'"), 'CodeMirror functions use the same parent syntax variable as Preview');
+  assert.equal(highlightBlock.includes('scheme.syntax'), false, 'CodeMirror highlighting does not duplicate literal syntax colors outside the shared CSS variables');
   assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-comment'));
   assert.ok(api.simpleCodeSyntaxHtml('bash', '# comment\necho $HOME').includes('code-variable'));
   assert.ok(api.simpleCodeSyntaxHtml('json', '{"name": "yolomux", "ok": true}').includes('code-attr'));
   assert.ok(api.simpleCodeSyntaxHtml('json', '{"name": "yolomux", "ok": true}').includes('code-constant'));
+  assert.ok(api.simpleCodeSyntaxHtml('python', 'class ToolParser:\n    def extract_tool_calls(self, model_output: str) -> DeltaMessage | None:').includes('<span class="code-type">ToolParser</span>'), 'Python class declarations use the shared type token');
+  assert.ok(api.simpleCodeSyntaxHtml('python', 'class ToolParser:\n    def extract_tool_calls(self, model_output: str) -> DeltaMessage | None:').includes('<span class="code-type">str</span>'), 'Python annotations use the shared type token');
+  assert.ok(api.simpleCodeSyntaxHtml('rust', 'pub struct Tool { pub name: String, }').includes('<span class="code-control">pub</span>'), 'Rust pub uses the shared control token');
+  assert.ok(api.simpleCodeSyntaxHtml('rust', 'pub struct Tool { pub name: String, }').includes('<span class="code-type">String</span>'), 'Rust field types use the shared type token');
 
   assert.deepStrictEqual(Array.from(api.editorVisualLineFragments('abcdefghijkl', 5, true)), ['abcde', 'fghij', 'kl']);
   assert.deepStrictEqual(Array.from(api.editorVisualLineFragments('abcdefghijkl', 5, false)), ['abcdefghijkl']);
@@ -1583,6 +1598,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.codeMirrorSearchMatchSummary('Foo foo', 'foo', {head: 0}, {caseSensitive: true}).text, '1/1');
   assert.equal(api.codeMirrorSearchMatchSummary('food foo', 'foo', {head: 0}, {wholeWord: true}).text, '1/1');
   assert.equal(api.codeMirrorSearchMatchSummary('abc', '[', {head: 0}, {regexp: true}).text, '0/0');
+  assert.deepStrictEqual(canonical(api.codeMirrorSearchMatches('vllm_rust: v0.22.0 0b3ba (/home/keivenc/dynamo/vllm-0.22.0)', '/home/keivenc/dynamo/vllm-0.22.0')), [
+    {from: 26, to: 58},
+  ], 'absolute paths with dots and hyphens are searched as literal text');
 }
 
 {
@@ -2077,6 +2095,19 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(editorToolbarIdx > -1, '#42: editor controls render on a dedicated .file-editor-toolbar info line');
   assert.ok(editorGutterIdx > editorToolbarIdx, '#42: the # / line-numbers control lives in the toolbar row, not the tab strip');
   assert.ok(editorToolbarIdx < editorLeftZoneIdx && editorLeftZoneIdx < editorCenterZoneIdx && editorCenterZoneIdx < editorRightZoneIdx, 'editor toolbar renders shared left/center/right parent zones');
+  const editorToolbarTemplateEnd = source.indexOf('<div class="file-editor-panel-body panel-overlay-root">', editorToolbarIdx);
+  const editorToolbarTemplate = source.slice(editorToolbarIdx, editorToolbarTemplateEnd);
+  assert.ok(
+    editorToolbarTemplate.indexOf('class="file-editor-theme-panel"') < editorToolbarTemplate.indexOf('data-editor-mode="edit"'),
+    'editor toolbar renders the Bright/Dark/Vanilla selector immediately before Edit'
+  );
+  assert.ok(
+    editorToolbarTemplate.indexOf('class="file-editor-reload-panel"') > editorToolbarTemplate.indexOf('data-editor-mode="edit"'),
+    'editor toolbar keeps Reload with the trailing command buttons'
+  );
+  assert.equal(source.includes("cycleEditorThemeMode({includeVanilla: mode === 'preview' || mode === 'split'})"), false, 'editor theme button never falls back to two-state dark/light based on view mode');
+  assert.ok(/file-editor-theme-panel'\)\?\.addEventListener\('click'[\s\S]*cycleEditorThemeMode\(\{includeVanilla: true\}\)/.test(source), 'editor theme button always cycles Bright/Dark/Vanilla');
+  assert.ok(/updateEditorThemeButton\(themeButton, \{includeVanilla: true\}\)/.test(source), 'editor theme button always renders the visible three-state label');
   assert.ok(!/file-editor-gutter-panel|file-editor-find-panel|file-editor-diff-ref-panel|file-editor-wrap-panel/.test(source.slice(editorFrameActionsIdx, editorTabsIdx)), '#42: the editor tab strip is uncluttered — only tabs + frame controls remain');
   assert.ok(/\.panel\.file-editor-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(css), '#42: the editor panel grid reserves a row for the toolbar between tabs and body');
   assert.ok(/\.file-editor-toolbar\[hidden\]\s*\{\s*display:\s*none/.test(css), '#42: the editor toolbar row collapses when no controls are visible');
@@ -2460,6 +2491,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.setUploadedFilesCollapsedForTest(false);
   const uploadedExpandedHtml = api.fileExplorerChangesPanelHtml();
   assert.ok(uploadedExpandedHtml.includes('20260531-028.png</span>'), 'expanded uploaded group shows uploaded rows');
+  const uploadedSectionHtml = uploadedExpandedHtml.slice(uploadedExpandedHtml.indexOf('changes-uploaded-group'));
+  assert.ok(uploadedSectionHtml.includes('file-tree-row'), 'expanded uploaded group uses the shared Finder/Differ tree row renderer');
+  assert.ok(uploadedSectionHtml.includes('file-tree-icon file-icon-image'), 'uploaded image rows use the shared image icon class');
+  assert.equal(uploadedSectionHtml.includes('changes-file-row'), false, 'uploaded rows no longer use the legacy row renderer with separators');
   assert.equal(/changes-file-path[^>]*>20260531-028\.png</.test(uploadedExpandedHtml), false, 'uploaded Differ rows do not repeat the basename as the secondary path line');
   api.setFileExplorerModeForTest('files');
   api.setFileExplorerSessionFilesPayloadForTest({
@@ -3821,6 +3856,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const editorSelectionCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(editorSelectionSource.includes("&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground"), 'editor selection theme beats CodeMirror focused selection defaults');
   assert.ok(editorSelectionSource.includes("boxShadow: scheme.dark ? 'inset 0 0 0 1px rgba(191, 219, 254, 0.42)' : 'inset 0 0 0 1px rgba(29, 78, 216, 0.24)'"), 'editor selections get a visible edge without an opaque fill');
+  assert.equal(editorSelectionSource.includes("'.cm-searchMatch-selected': {\n      backgroundColor: scheme.dark ? 'rgba(118, 185, 0, 0.84)'"), false, 'selected editor search matches are not green, so they remain visible on green active/highlighted rows');
+  assert.ok(/'\.cm-searchMatch-selected': \{[\s\S]*backgroundColor: scheme\.dark \? '#ffd166' : '#ff9f1c'[\s\S]*fontWeight: '800'/.test(editorSelectionSource), 'selected editor search matches use high-contrast yellow/orange fill and bold text');
   assert.ok(editorSelectionSource.includes("}, {dark: scheme.dark});"), 'CodeMirror receives the active light/dark theme flag');
   assert.ok(editorSelectionSource.includes("backgroundColor: 'transparent !important'"), 'CodeMirror native editor selection background is suppressed so drawSelection owns the fill');
   assert.ok(/\.file-editor-codemirror \.cm-content ::selection,[\s\S]*?background:\s*transparent !important[\s\S]*?color:\s*inherit !important/.test(editorSelectionCss), 'static CSS keeps global browser selection colors out of CodeMirror');
@@ -3873,9 +3910,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'legacy light storage value maps to the YOLOmux Light default');
   assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'YOLOmux Light uses a bright white editor background');
   assert.equal(api.activeEditorSchemeForTest().previewBg, '#ffffff', 'YOLOmux Light preview background is bright white');
-  assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#64748b', 'YOLOmux Light uses muted-gray comments');
-  assert.equal(api.activeEditorSchemeForTest().syntax.string, '#00843d', 'YOLOmux Light strings are visibly green, not near-black green');
-  assert.equal(api.activeEditorSchemeForTest().syntax.heading, '#0f3d22', '#34: YOLOmux Light markdown headings are dark green (matching dark mode), not maroon');
+  assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#008000', 'YOLOmux Light uses Cursor-style green comments');
+  assert.equal(api.activeEditorSchemeForTest().syntax.keyword, '#0000ff', 'YOLOmux Light uses Cursor-style blue language keywords');
+  assert.equal(api.activeEditorSchemeForTest().syntax.control, '#af00db', 'YOLOmux Light uses Cursor-style magenta Rust control keywords');
+  assert.equal(api.activeEditorSchemeForTest().syntax.function, '#267f2e', 'YOLOmux Light uses Cursor-style green function declarations');
+  assert.equal(api.activeEditorSchemeForTest().syntax.type, '#008080', 'YOLOmux Light uses Cursor-style teal type declarations');
+  assert.equal(api.activeEditorSchemeForTest().syntax.property, '#5f3b00', 'YOLOmux Light uses Cursor-style brown field and parameter names');
   api.setFileEditorPreviewDisplayMode('vanilla');
   assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla', 'vanilla preview mode is stored separately from the editor scheme');
   api.setFileEditorThemeMode('github-light');
@@ -6816,8 +6856,39 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const variableBlock = source.slice(start, end);
   assert.equal(variableBlock.includes("'--text'"), false, 'preview pop-out does not copy --text inline');
   assert.ok(variableBlock.includes("['--editor-scheme-fg', '--popout-editor-scheme-fg']"), 'preview pop-out aliases active editor text instead of copying it onto --text');
+  assert.ok(variableBlock.includes("'--code-keyword'") && variableBlock.includes("'--code-control'") && variableBlock.includes("'--code-string'"), 'preview pop-out copies syntax token variables for highlighted fenced code');
   assert.ok(source.includes('.file-preview-popout-window.editor-theme-light .markdown-body pre'), 'preview pop-out has light-theme code block rules outside .file-editor-content');
   assert.ok(source.includes('.file-preview-popout-window .markdown-body'), 'preview pop-out sets readable body text in its standalone document');
+  assert.ok(/\.file-preview-popout-title\s*\{[\s\S]*display:\s*grid[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto minmax\(0,\s*1fr\)/.test(source), 'preview pop-out top bar uses left/title, centered font, and right theme zones');
+  assert.ok(/\.file-preview-popout-title\s*\{[\s\S]*position:\s*sticky[\s\S]*z-index:\s*20/.test(source), 'preview pop-out top bar stays above the preview body while scrolling');
+  assert.ok(/<span class="file-preview-popout-title-path">[\s\S]*\$\{previewPopoutToolbarHtml\(\)\}/.test(source), 'preview pop-out header renders the path before the shared pop-out toolbar controls');
+  assert.ok(/function previewPopoutToolbarHtml\(\)[\s\S]*file-editor-preview-font-panel[\s\S]*class="file-editor-theme-panel" data-preview-popout-theme/.test(source), 'preview pop-out toolbar renders font selector before the theme selector');
+  assert.ok(/updateEditorThemeButton\(themeButton, \{includeVanilla: true\}\)/.test(source), 'preview pop-out theme selector includes vanilla mode');
+  assert.ok(/cycleEditorThemeMode\(\{includeVanilla: true\}\)/.test(source), 'preview pop-out theme click cycles dark/light/vanilla');
+  assert.ok(source.includes('min-width: 66px;') && source.includes('width: auto;'), 'preview pop-out theme selector leaves room for the visible Dark/Bright/Vanilla label');
+  assert.ok(fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8').includes('.file-editor-theme-panel.theme-with-label::after'), 'preview theme selector renders the current mode label instead of hiding vanilla in the tooltip');
+  assert.ok(source.includes('applyMarkdownFenceFallbackHighlight(block);'), 'markdown fenced code falls back to editor syntax highlighting when hljs lacks the language');
+  assert.ok(source.includes("window.open(`/preview-popout?path=${encodeURIComponent(path)}`"), 'preview pop-out opens a same-origin URL instead of about:blank');
+  assert.ok(/file-editor-popout-preview-panel'\)\?\.addEventListener\('click'[\s\S]*if \(openFilePreviewPopout\(path, panel\)\) \{[\s\S]*setFileEditorViewMode\(path, 'edit', item\);[\s\S]*renderFileEditorPanel\(panel, item\);/.test(source), 'pressing Pop-out opens the preview window and returns the in-pane editor to Edit mode');
+  assert.ok(/function openFilePreviewPopout\(path, panel = null\)[\s\S]*return true;[\s\S]*return false;/.test(source), 'preview pop-out open path reports whether a pop-out was actually opened or focused');
+  assert.ok(/previewWindow\._yolomuxPreviewControlsCleanup[\s\S]*bind\(previewWindow, 'scroll', syncScroll\)[\s\S]*bind\(previewWindow, 'wheel', scheduleScrollSync\)[\s\S]*bind\(scroller, 'scroll', syncScroll\)[\s\S]*bind\(scroller, 'wheel', scheduleScrollSync\)/.test(source), 'preview pop-out window and scrolling element sync immediately on scroll and schedule next-frame sync on wheel without stale document listeners');
+  assert.ok(/function scrollSyncTargetPosition\(from, to, axis = 'top'\)[\s\S]*const edgeSnap = Math\.max\(2, Math\.ceil\(sourceClient \* 0\.01\)\);[\s\S]*if \(maxTo <= 0 \|\| current <= edgeSnap\) return 0;[\s\S]*if \(maxFrom <= edgeSnap \|\| current >= maxFrom - edgeSnap\) return maxTo;[\s\S]*const sourceCenter = Math\.min\(maxFrom, current\) \+ \(sourceClient \/ 2\);[\s\S]*return Math\.min\(maxTo, Math\.max\(0, target\)\);/.test(source), 'pop-out scroll sync aligns viewport centers with fractional precision and explicit edge snaps');
+  assert.ok(/function syncFilePreviewPopoutFromPanel[\s\S]*syncScrollPositionByRatio\(from, scroller\)/.test(source), 'editor-to-popout scroll sync uses the shared proportional mapper');
+  assert.ok(/function syncFilePreviewPopoutScroll[\s\S]*syncScrollPositionByRatio\(scroller, editorScroller\)[\s\S]*syncScrollPositionByRatio\(scroller, previewPane\)/.test(source), 'popout-to-editor scroll sync uses the shared proportional mapper');
+  assert.ok(/function scheduleFilePreviewPopoutScrollSync\(path, previewWindow, options = \{\}\)[\s\S]*requestAnimationFrame\(run\)/.test(source), 'pop-out wheel/scroll sync is coalesced through requestAnimationFrame for smooth trackpad deltas');
+  assert.ok(/function syncFileEditorInPaneSplitScroll\(host, source\)[\s\S]*return syncScrollPositionByRatio\(from, to\);/.test(source), 'split Preview scroll sync uses the same fractional center/edge mapper as pop-out preview');
+  const splitSyncStart = source.indexOf('function syncFileEditorInPaneSplitScroll');
+  const splitSyncBody = source.slice(splitSyncStart, source.indexOf('\nfunction ', splitSyncStart + 1));
+  assert.equal(/previewSourceLineForScroll|scrollPreviewToSourceLine|scrollIntoView/.test(splitSyncBody), false, 'split Preview scroll sync does not jump by source-line anchors');
+  assert.ok(/function fileEditorScrollSyncBlocked\(panel, source = ''\)[\s\S]*panel\?\._splitScrollSource !== source/.test(source), 'split Preview scroll guard suppresses only the opposite/programmatic side');
+  assert.ok(/function setFileEditorScrollSyncGuardForSource\(source, \.\.\.panels\)[\s\S]*panel\._splitScrollSource = source \|\| ''/.test(source), 'split Preview scroll guard records the active driver pane');
+  assert.ok(/function scheduleFileEditorSplitScrollSync\(host, source\)[\s\S]*host\._splitScrollPendingSource = source[\s\S]*requestAnimationFrame\(run\)/.test(source), 'split Preview scroll sync is coalesced through requestAnimationFrame for large-document trackpad deltas');
+  assert.ok(source.includes("addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'editor'))"), 'editor scroll listener uses the scheduled split-preview sync path');
+  assert.ok(source.includes("addEventListener('scroll', () => scheduleFileEditorSplitScrollSync(panel, 'preview'))"), 'preview scroll listener uses the scheduled split-preview sync path');
+  assert.ok(/function syncFileEditorSplitScroll[\s\S]*syncFilePreviewPopoutsFromPanel\(host, source\)/.test(source), 'editor preview/editor scroll drives open preview pop-outs');
+  assert.ok(/function closeFilePreviewPopout\(path\)[\s\S]*filePreviewPopouts\.delete\(path\)[\s\S]*previewWindow\.close\?\.\(\)/.test(source), 'preview pop-out close removes the registry entry and closes the window');
+  assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*mode === 'preview' \|\| mode === 'split'[\s\S]*closeFilePreviewPopout\(path\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'switching to in-editor Preview or Split closes any open pop-out preview for that file');
+  assert.ok(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8').includes("if (typeof refreshFilePreviewPopouts === 'function') refreshFilePreviewPopouts();"), 'settings refresh syncs open preview pop-outs');
   assert.ok(source.includes('position: static !important;'), 'preview pop-out resets the in-pane absolute preview positioning');
   assert.ok(source.includes('display: block !important;') && source.includes('grid-template-rows: none !important;'), 'preview pop-out resets the app body grid layout');
   assert.ok(source.includes('width: 100% !important;') && source.includes('left: auto !important;'), 'preview pop-out resets split-preview geometry that would clip content to the right half');
