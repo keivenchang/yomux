@@ -19,7 +19,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 - Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state + tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/sessions.py`; repo/PR/CI metadata `yolomux_lib/metadata.py`; file ops `yolomux_lib/filesystem.py`; shared helpers + paths `yolomux_lib/common.py`; server-rendered HTML `yolomux_lib/web.py`; all frontend logic `static/yolomux.js` (+ `static/yolomux.css`); YOLO approval detector `auto_approve_tmux.py` and worker `yolomux_lib/auto_approve_worker.py`.
 - State lives in `~/.config/yolomux/state.json`; the YOLO event log (great for confirming state-machine behavior) is `~/.local/state/yolomux/events.jsonl`.
 - NAVIGATION RULE: line numbers in this TODO drift because the source changes constantly. Always GREP THE NAMED SYMBOL (`function foo`, `def foo`, an `id=`/class string) rather than trusting a line number. Numbers here were last verified 2026-05-29.
-- START HERE: the old EF1-EF6 easy-fix list and the follow-up batches through `DOIT.10.md` are complete or folded back into this TODO. `DOIT.12.md` (top-screen topbar gap audit + the 5 ready-to-action items) is COMPLETE 2026-06-03 — all items archived to `DONE.md` and the file removed. DOIT.12 through DOIT.48 plus DOIT.50 are complete and archived or removed (their completed `DOIT.*.md` files were removed); DOIT.11's source work is complete, but its permission-hook WIRING into `~/.claude/settings.json` remains user-gated and tracked in Big-Bang #1. ACTIVE DOIT: none. NOTE: the `ask N` mock change (✻ think ~1s between each of N permission asks; `ask 10` now routes to the N-ask sequence) was implemented directly in `mock/mock_agent_common.py` — restart the mock to see it.
+- START HERE: the old EF1-EF6 easy-fix list and the follow-up batches through `DOIT.10.md` are complete or folded back into this TODO. `DOIT.12.md` (top-screen topbar gap audit + the 5 ready-to-action items) is COMPLETE 2026-06-03 — all items archived to `DONE.md` and the file removed. DOIT.12 through DOIT.48 plus DOIT.50, DOIT.52, and DOIT.53 are complete and archived or removed (their completed `DOIT.*.md` files were removed); DOIT.11's source work is complete, but its permission-hook WIRING into `~/.claude/settings.json` remains user-gated and tracked in Big-Bang #1. ACTIVE DOIT: `DOIT.51.md` small TODO follow-ups. NOTE: the `ask N` mock change (✻ think ~1s between each of N permission asks; `ask 10` now routes to the N-ask sequence) was implemented directly in `mock/mock_agent_common.py` — restart the mock to see it.
 
 ---
 
@@ -37,10 +37,7 @@ RECOMMENDED SEQUENCE (2026-06-04, after DOIT.36 archive): (1) Dev-velocity trio 
 
 
 ### Active bugs (2026-06-04, from live use)
-- [ ] [S] FOLLOW-UPS (DOIT.26, core shipped) — inline git blame works (toggle + dim current-line annotation + native-title hover + backend `/api/blame`). Optional spec extras not done: (a) a STYLED hover popover (author / absolute date / message / body via `git show -s --format=%b`) instead of the native `title` — the CM bundle exposes no `hoverTooltip`/`WidgetType`, so it needs a DOM mouseover handler + the `.session-popover` tokens; (b) optional Preference to annotate ALL lines (Cursor default is current-line only); (c) live-validate on a running editor over a git repo (annotation tracks the cursor line, uncommitted lines read "Uncommitted changes", toggle persists across files).
-- [ ] [S] FOLLOW-UPS (DOIT.22, core shipped) — the quick-open palette now collapses a file's editor+preview tabs into one row with edit/preview chips. Confirm-with-user extras from the spec: (a) make the `edit`/`preview` chips individually CLICKABLE to jump to that exact view (currently informational); (b) selection focuses the editor view by default — wire it to the file's MOST-RECENT view if recency tracking is added; (c) optionally suppress a RECENT row when the file is already an open TAB so it appears once total (confirm the RECENT/TABS/INDEXED precedence first). Also live-validate one row shows for a file open as both.
-- [ ] [S] FOLLOW-UPS (DOIT.21, button done 2026-06-03) — editor back/forward records file opens (Finder/preview-link/open-in-new-tab) AND user-initiated tab switches (added in activatePaneTab), and the ← / → toolbar buttons (before the find button) walk the history, show when there's history, and disable at the ends. Remaining OPTIONAL: (a) keyboard shortcuts — NOT added: Cmd/Ctrl+[ / ] collide with browser history-nav; pick a non-conflicting chord if wanted; (b) live-validate the back/forward RE-OPEN on a running multi-file session (open A→B→back→forward, preview-link jump then back, reopen a closed file) — the stack logic + recording are unit/source-tested, but the re-open path runs through the live editor.
-- [ ] [S] LIVE-VALIDATE the DOIT.17 fix (needs a real agent screen, can't be done headlessly): with auto-approve OFF, trigger the mock's `cp -r src/ dist/` step → QUES lights and the pane→command shows `cp -r src/ dist/`; with auto-approve ON under a rule that BLOCKS `cp -r` / allows `chmod`, confirm the decision is made on the REAL pending `cp -r` (the safety hole is closed), not the prior `chmod`. Also answers the user's question "why does the mock `cp -r` prompt not trigger QUES" — it was the stale-command extraction; confirm it now does. (Worker/server must be running the new code — restarted as part of this cps.)
+Small `[S]` follow-ups moved to `DOIT.51.md`.
 
 ## Dev velocity — bottlenecks & speedups (analysis 2026-06-03)
 
@@ -87,7 +84,7 @@ DESIGN GATE (mostly satisfied — the skeleton is built; remaining gate work is 
 
 - [ ] [L] Add an approval queue view for pending high-risk actions. Start read-only first if live interception is hard.
 - [ ] [M] Add per-session YOLO policy. Initial modes: `off`, `prompt-only`, `safe`, `edit`, `full`. Make policy visible on the tmux-session YOLO control.
-- [ ] [S] Risk labels should be boring and concrete: `read`, `edit`, `network`, `process`, `delete`, `credential`, `unknown`.
+Small risk-label cleanup moved to `DOIT.51.md`.
 
 ### P1: YOLO Rule Engine (user-configurable matching via YAML)
 
@@ -150,14 +147,14 @@ The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py
 ### P4: Launch And Resume
 
 - [ ] [L] Add a launch dialog behind `+ Claude`, `+ Codex`, and `+ Term` with cwd, agent, model/profile, permission mode, initial prompt, and optional session name.
-- [ ] [S] Keep the current quick `+` path for defaults; the dialog should not slow down simple launches.
+Small quick-launch guard moved to `DOIT.51.md`.
 - [ ] [M] Add a resume picker for recent Claude/Codex conversations scoped to the selected cwd.
 - [ ] [M] Add a `peek/reply` action for a session when it only needs a short response and the user does not need to attach to the full terminal.
 
 ### P5: Worktrees
 
 - [ ] [L] Add optional worktree-backed launch mode: create worktree, branch, tmux session, and initial agent prompt together.
-- [ ] [S] Show worktree path and parent repo in the info drawer.
+Small worktree info-drawer item moved to `DOIT.51.md`.
 - [ ] [M] Add cleanup guardrails: never delete a worktree with uncommitted changes; show the path and stop.
 - [ ] [M] Add a read-only file browser for a session worktree before adding edit controls.
 
@@ -170,20 +167,20 @@ The file editor today has a single Preview toggle (`#fileEditorPreview`, `web.py
 ### P7: Mobile And Network Use
 
 - [ ] [L] Add a single-pane mobile focus mode with larger controls for Esc/Tab/Ctrl, paste/upload, YOLO actions, and reply.
-- [ ] [S] Add network-access setup guidance that is explicit about auth, host binding, and local-only defaults.
+Small network-access docs item moved to `DOIT.51.md`.
 - [ ] [M] Consider installable PWA behavior only after mobile layout is usable.
 
 ### P8: Host And Process Vitals
 
 - [ ] [M] Add lightweight CPU/memory/load probes and per-session process trees.
 - [ ] [M] Add optional `nv-smi` GPU status when available, but do not make GPU support required.
-- [ ] [S] Show vitals in an info drawer or compact topbar popover, not as a dominant dashboard.
+Small vitals-placement item moved to `DOIT.51.md`.
 
 ### P9: Multi-Machine Connector
 
 - [ ] [XL] Defer until the local product is stable. This changes auth, networking, logging, and failure modes.
 - [ ] [XL] If built, use a small remote agent that reports tmux sessions, metadata, vitals, and WebSocket terminal streams back to one YOLOmux instance.
-- [ ] [S] Keep local-only as the default.
+Small local-default guard moved to `DOIT.51.md`.
 
 ### Session Share — view-only presenter URL (proposed 2026-06-06)
 
@@ -202,16 +199,16 @@ Phase 1 (MVP) — view-only LIVE TERMINAL mirror of one session via a tokened gu
 - [ ] [M] Token table on the app: `self.share_tokens: dict[token -> {session, expiry_ts, created_by, revoked}]` + a `threading.RLock` in `TmuxWebtermApp.__init__` (`app.py:207`, mirror the `auto_workers` pattern at `:209`). Mint with `secrets.token_urlsafe(32)` (pattern: `auth.py:181`). Verify = table lookup + `hmac.compare_digest` + `time.time() < expiry_ts and not revoked`, with lazy-pop of expired entries (pattern: `app.py:406`). In-memory only by default (tokens die with the server — safer for a capability URL); persisting under a `share_tokens` key via `update_yolomux_state` (`events.py:70`) is optional and then REQUIRES the expiry/kill sweep on load.
 - [ ] [M] Mint endpoint: admin-gated `POST /api/share {session, ttl}` → `app.create_share_token(session, ttl)` returning the token + absolute URL. Add to `do_POST` (`server.py:540`+, which is admin-only by default). Predefined TTL choices (e.g. 15m / 1h / 8h / until-session-ends).
 - [ ] [L] Recognize the token at the choke point: top of `require_auth` (`server_auth.py:183`), AFTER the `auth_setup_required()` gate and BEFORE `cookie_auth_identity()`. On a valid `?token=`/`X-Share-Token`: synthesize `AuthIdentity(username="guest", password="", role="readonly")` and stash the bound session on the handler (e.g. `self._share_session`). CRITICAL: `AuthIdentity` has no scope field, and several `readonly`-gated routes (`/api/tmux`, `/api/transcript`, `/api/context`, `/api/events`, `/api/search`) would leak ALL sessions to any readonly principal — so a tokened guest must be WHITELISTED to only `/`, `/ws`, `/static/*` (reject everything else), not merely assigned `role="readonly"`.
-- [ ] [S] Scope the stream to the one session: in `websocket()` (`server.py:1058`) reject if `self._share_session` is set and `?session=` ≠ the bound session. The readonly bridge itself is then reused verbatim (`server.py:1074` already passes `readonly=auth_readonly()`).
+Small one-session share-stream scope item moved to `DOIT.51.md`.
 - [ ] [M] Token → short-lived HttpOnly guest cookie, then strip the token from the URL (capability hygiene): on first valid token hit, mint a guest cookie (reuse `auth_cookie_*` / `send_auth_cookie_if_needed`, `server_auth.py:87`) bound to the session + the token's expiry, and redirect to the clean URL. ALSO scrub the token from `log_message` (`server.py:156`) so it doesn't land in stderr/access logs / Referer.
 - [ ] [M] Revoke-on-terminate: in `kill_session` (`app.py:1140`), right after the successful `tmux kill-session` (`:1145`, next to `stop_auto_approve_worker`), mark every token for that session `revoked=True`. Handle `rename_session` (`app.py:1117`) too (a name-bound token breaks on rename — revoke or migrate). Guests' live bridges auto-close on their own (the attach loop breaks when `session_exists()` fails, `server.py:1088/1134`) — but there's no bridge registry to push-disconnect, so revocation is what stops NEW connects.
-- [ ] [S] Out-of-band death sweep: a session killed from a shell (not via the UI) leaves the token valid until TTL. Add a sweep in `refresh_sessions` (`app.py:228`) that revokes tokens whose session is no longer in `list_tmux_session_names()`. (No background monitor exists; this is the pull-based catch-all.)
+Small share-token death-sweep item moved to `DOIT.51.md`.
 - [ ] [M] Host Share UI: a Share action (per-session, e.g. in the session popover / pane menu) → dialog with TTL choice + "until I close this session", a copy-link button, and a list of ACTIVE shares with a Revoke button (calls a `DELETE /api/share` / revoke). Make it loud that the link is view-only AND a secret.
 - [ ] [M] Guest landing client: visiting the share URL loads the normal app but LOCKED — single shared session only, `readOnlyMode` on (already disables xterm stdin, `99_terminal_boot.js`), no Finder/file API, no other tabs, no session switcher; show a "view-only — <host> is presenting <session>" banner and an "expired / session ended" state when the bridge closes or the token is revoked.
 - [ ] Validate: mint a 15-min link, open in a private window → see the session's live output + cursor, cannot type/scroll/resize, cannot reach any other session or the file API; kill the session as host → guest sees "session ended" and the link stops working; let the TTL lapse → link rejected.
 
 Phase 2 — mirror the OPEN WINDOW PANES (layout) so the guest sees the same pane arrangement, live (delivers "current opened window panes"):
-- [ ] [S] (free halves) Host capture = `layoutParamValue(slots)` + `layoutTabsParamValue(slots)` (`20_layout_state.js:416/431`); guest apply = `layoutFromParam(...)` → `applyLayoutSlots(...)` (`:265/2323`). At minimum, mint the share URL with the host's current `?layout=&tabs=` so the guest mirrors the layout AT LOAD (one-time, zero new transport).
+Small share-layout-at-load item moved to `DOIT.51.md`.
 - [ ] [L] (live) Net-new pipe: on every host `applyLayoutSlots`, POST the layout string to the server; server stores per-session "presenter layout" + broadcasts it; guest subscribes (SSE — model it on `tmux_wall.py:468`'s `text/event-stream` loop, or extend the existing event stream) and calls `layoutFromParam`→`applyLayoutSlots` on each update. Guest MUST suppress its own `updateActiveSessionParam` URL writes (`20_layout_state.js:2359`) so it doesn't fight the host's state.
 - [ ] Validate: host splits/moves/opens a pane → the guest's panes rearrange to match within ~1s; guest cannot edit its own layout.
 

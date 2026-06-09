@@ -2457,16 +2457,13 @@ function applyLayoutSlots(nextSlots, options = {}) {
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
-  if (prevShape === layoutShapeSignature(layoutSlots) && dragSession == null && grid.querySelector('.drop-slot[data-slot]')) {
-    // Cheap path: the tree shape is unchanged. Swap only the slots whose active item changed and
-    // reconcile the (already keyed) tab strips — no innerHTML='', no topbar rebuild.
-    syncActivePanelsInPlace();
-    renderPaneTabStrips();
-    syncPanelVisibility(previousActive);
-  } else {
-    renderSessionButtons();
-    renderPanels(previousActive, {prune: options.prune});
-  }
+  requestLayoutRender({
+    previousActive,
+    prevShape,
+    nextShape: layoutShapeSignature(layoutSlots),
+    options: {prune: options.prune},
+    reason: 'applyLayoutSlots',
+  });
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
   // DOIT.9 S1: do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
@@ -2482,6 +2479,65 @@ function applyLayoutSlots(nextSlots, options = {}) {
   } else {
     updateStatus();
   }
+}
+
+function layoutRenderRequest(request = {}) {
+  return {
+    previousActive: Array.isArray(request.previousActive) ? request.previousActive.slice() : [],
+    prevShape: String(request.prevShape || ''),
+    nextShape: String(request.nextShape || ''),
+    options: request.options || {},
+    reason: request.reason || '',
+    forceFull: request.forceFull === true,
+  };
+}
+
+function mergePendingLayoutRender(current, next) {
+  if (!current) return next;
+  return layoutRenderRequest({
+    previousActive: current.previousActive,
+    prevShape: current.prevShape,
+    nextShape: next.nextShape || current.nextShape,
+    options: {...current.options, ...next.options},
+    reason: [current.reason, next.reason].filter(Boolean).join('+'),
+    forceFull: current.forceFull || next.forceFull,
+  });
+}
+
+function layoutRenderCanUseCheap(request) {
+  return !request.forceFull
+    && request.prevShape === request.nextShape
+    && grid.querySelector('.drop-slot[data-slot]');
+}
+
+function performLayoutRender(request = {}) {
+  const renderRequest = layoutRenderRequest(request);
+  const previousActive = renderRequest.previousActive;
+  if (layoutRenderCanUseCheap(renderRequest)) {
+    // Cheap path: the tree shape is unchanged. Swap only the slots whose active item changed and
+    // reconcile the (already keyed) tab strips — no innerHTML='', no topbar rebuild.
+    syncActivePanelsInPlace();
+    renderPaneTabStrips();
+    syncPanelVisibility(previousActive);
+    return;
+  }
+  renderSessionButtons();
+  renderPanels(previousActive, {prune: renderRequest.options.prune});
+}
+
+function requestLayoutRender(request = {}) {
+  const renderRequest = layoutRenderRequest(request);
+  if (dragSession != null) {
+    pendingLayoutRender = mergePendingLayoutRender(pendingLayoutRender, renderRequest);
+    return;
+  }
+  performLayoutRender(renderRequest);
+}
+
+function flushPendingLayoutRender(reason = 'drag-flush') {
+  const renderRequest = pendingLayoutRender;
+  pendingLayoutRender = null;
+  if (renderRequest) requestLayoutRender({...renderRequest, reason});
 }
 
 function updateActiveSessionParam() {

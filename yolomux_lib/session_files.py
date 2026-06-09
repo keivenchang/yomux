@@ -375,9 +375,13 @@ def session_file_entry(
     added: int | None = None,
     removed: int | None = None,
     mtime: float | None = None,
+    diff_tracked: bool | None = None,
 ) -> dict[str, Any]:
     rel_path = repo_relative_path(path, repo) if repo else None
     agent_list = [a for a in agents if a]
+    tracked_diff = bool(repo) and source == "git" and status != "?"
+    if diff_tracked is not None:
+        tracked_diff = diff_tracked
     return {
         "session": session,
         # C5: a changed file can be touched by 0, 1, or several agents, so carry the full list (the UI
@@ -393,6 +397,7 @@ def session_file_entry(
         "source": source,
         "added": added,
         "removed": removed,
+        "diff_tracked": tracked_diff,
         "uploaded": is_generated_upload_name(path),
     }
 
@@ -400,6 +405,8 @@ def session_file_entry(
 def line_total(entries: list[dict[str, Any]], key: str) -> int:
     total = 0
     for entry in entries:
+        if entry.get("diff_tracked") is not True:
+            continue
         value = entry.get(key)
         if isinstance(value, int):
             total += value
@@ -464,11 +471,14 @@ def session_files_payload_for_info(
     touched = touched_files_for_info(info, cutoff, errors)
 
     repos: dict[str, set[str]] = {}
+    outside_repo_paths: set[str] = set()
     for path_text, metadata in touched.items():
         path = Path(path_text)
         repo_text = git_root_for_path(path)
         if repo_text:
             repos.setdefault(repo_text, set()).add(path_text)
+        else:
+            outside_repo_paths.add(path_text)
     for repo_text in session_candidate_repo_roots(info):
         repos.setdefault(repo_text, set())
 
@@ -513,13 +523,14 @@ def session_files_payload_for_info(
             counts = numstat.get(rel_path, {})
             added = counts.get("added")
             removed = counts.get("removed")
+            diff_tracked = status != "?" and rel_path in numstat
             if status in {"A", "?"} and rel_path not in numstat:
                 added = untracked_added_line_count(path)
                 removed = 0
             # C5: attribute the file to exactly the agents the transcripts say touched it — no fallback.
             # A repo-only change with no transcript attribution gets an empty list (zero agent icons).
             agents = merge_agent_lists(touched_by_rel.get(rel_path, {}).get("agents", []), (agent_attribution or {}).get(str(path), []))
-            repo_entries.append(session_file_entry(info.session, agents, status, path, repo, "git", added, removed))
+            repo_entries.append(session_file_entry(info.session, agents, status, path, repo, "git", added=added, removed=removed, diff_tracked=diff_tracked))
         for rel_path, metadata in touched_by_rel.items():
             if rel_path in statuses:
                 continue
@@ -551,6 +562,37 @@ def session_files_payload_for_info(
         }
         repo_payload.update(git_ahead_behind(repo, sel_from or None, sel_to or None))
         repo_payloads.append(repo_payload)
+
+    outside_entries: list[dict[str, Any]] = []
+    if outside_repo_paths and not refs_active:
+        for path_text in sorted(outside_repo_paths):
+            path = Path(path_text)
+            metadata = touched.get(path_text, {})
+            status = str(metadata.get("status") or "?")
+            outside_entries.append(session_file_entry(
+                info.session,
+                merge_agent_lists(metadata.get("agents", []), (agent_attribution or {}).get(str(path), [])),
+                status if status in {"A", "D", "M", "?"} else "?",
+                path,
+                None,
+                "transcript",
+                untracked_added_line_count(path) if path.exists() and path.is_file() else None,
+                0 if path.exists() and path.is_file() else None,
+                mtime=float(metadata.get("mtime") or 0.0),
+                diff_tracked=False,
+            ))
+        outside_entries.sort(key=lambda item: (-float(item.get("mtime") or 0), item["path"]))
+        files.extend(outside_entries)
+        repo_payloads.append({
+            "repo": "",
+            "count": len(outside_entries),
+            "touched_count": len(outside_entries),
+            "added": 0,
+            "removed": 0,
+            "from_ref": "default",
+            "to_ref": "base",
+            "error": "",
+        })
 
     files.sort(key=lambda item: (-float(item.get("mtime") or 0), item["repo"], item["path"]))
     payload_from_ref = selected_from or "default"

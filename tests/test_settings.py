@@ -49,7 +49,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
             "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
-            "performance": {"metadata_refresh_ms": 15000, "pane_state_refresh_ms": 1200},
+            "performance": {"metadata_refresh_ms": 15002, "pane_state_refresh_ms": 1200},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100},
             "uploads": {"max_bytes": 999999999},
@@ -83,7 +83,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
     assert settings["uploads"]["max_bytes"] == 512 * 1024 * 1024
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
-    assert settings["performance"]["metadata_refresh_ms"] == 15000
+    assert settings["performance"]["metadata_refresh_ms"] == 15002
     assert settings["performance"]["pane_state_refresh_ms"] == 1200
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False
@@ -282,6 +282,43 @@ def test_file_explorer_refresh_uses_seconds_and_migrates_legacy_ms():
     assert migrated["file_explorer"]["refresh_seconds"] == 42
     default_legacy = sanitize_settings({"file_explorer": {"refresh_ms": 3000}})
     assert default_legacy["file_explorer"]["refresh_seconds"] == 5
+
+
+def test_stale_saved_poll_defaults_migrate_to_current_defaults():
+    migrated = sanitize_settings({
+        "file_explorer": {"refresh_seconds": 1},
+        "performance": {
+            "metadata_refresh_ms": 15000,
+            "pane_state_refresh_ms": 1250,
+            "latency_refresh_ms": 3000,
+            "event_log_refresh_ms": 5000,
+            "watched_pr_refresh_ms": 60000,
+        },
+    })
+    defaults = default_settings()
+    assert migrated["file_explorer"]["refresh_seconds"] == defaults["file_explorer"]["refresh_seconds"]
+    assert migrated["performance"]["metadata_refresh_ms"] == defaults["performance"]["metadata_refresh_ms"]
+    assert migrated["performance"]["pane_state_refresh_ms"] == defaults["performance"]["pane_state_refresh_ms"]
+    assert migrated["performance"]["latency_refresh_ms"] == defaults["performance"]["latency_refresh_ms"]
+    assert migrated["performance"]["event_log_refresh_ms"] == defaults["performance"]["event_log_refresh_ms"]
+    assert migrated["performance"]["watched_pr_refresh_ms"] == defaults["performance"]["watched_pr_refresh_ms"]
+
+    custom = sanitize_settings({
+        "file_explorer": {"refresh_seconds": 2},
+        "performance": {
+            "metadata_refresh_ms": 15002,
+            "pane_state_refresh_ms": 1254,
+            "latency_refresh_ms": 3002,
+            "event_log_refresh_ms": 5004,
+            "watched_pr_refresh_ms": 60002,
+        },
+    })
+    assert custom["file_explorer"]["refresh_seconds"] == 2
+    assert custom["performance"]["metadata_refresh_ms"] == 15002
+    assert custom["performance"]["pane_state_refresh_ms"] == 1254
+    assert custom["performance"]["latency_refresh_ms"] == 3002
+    assert custom["performance"]["event_log_refresh_ms"] == 5004
+    assert custom["performance"]["watched_pr_refresh_ms"] == 60002
 
 
 def test_notify_transitions_accepts_pr_keys_and_drops_unknown():

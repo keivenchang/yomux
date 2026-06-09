@@ -784,8 +784,9 @@ function sessionFileDisplayTimeText(mtime) {
 }
 
 function sessionFileDiffText(item) {
+  const addKind = item?.diff_tracked === false ? 'add-neutral' : 'add';
   return [
-    Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: 'add', text: `+${Number(item.added)}`} : null,
+    Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: addKind, text: `+${Number(item.added)}`} : null,
     Number.isFinite(Number(item?.removed)) && Number(item.removed) !== 0 ? {kind: 'remove', text: `-${Number(item.removed)}`} : null,
   ].filter(Boolean);
 }
@@ -905,6 +906,7 @@ function changeFileTotals(files) {
   let added = 0;
   let removed = 0;
   for (const item of Array.isArray(files) ? files : []) {
+    if (item?.diff_tracked !== true) continue;
     const add = Number(item?.added);
     const remove = Number(item?.removed);
     if (Number.isFinite(add)) added += add;
@@ -1098,13 +1100,14 @@ function buildSessionFileTree(repoPath, sessionFiles) {
 
 // Render changed files for one repo section using the shared file-tree renderer.
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
-  const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(repoPath, sessionFiles);
-  renderTreeChildren(container, repoPath, entries, 0, {
+  const treeRoot = repoPath === 'Outside repo' ? '/' : repoPath;
+  const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(treeRoot, sessionFiles);
+  renderTreeChildren(container, treeRoot, entries, 0, {
     entriesByDir,
     sessionFilesMap,
     differMode: true,
     compact: options.compact,
-    repoForDiffer: repoPath,
+    repoForDiffer: treeRoot,
     treeSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
     includeHidden: true,
   });
@@ -1721,15 +1724,14 @@ function bindChangesPanel(panel) {
   panel.addEventListener('click', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (!fileRow || !panel.contains(fileRow)) return;
-    selectChangedFileRow(fileRow.dataset.openChangeFile || '');
+    updateFileTreeSelectionFromClick(fileRow, fileRow.dataset.path || fileRow.dataset.openChangeFile || '', event);
   });
-  // C5: Finder-like right-click menu with the SAFE read actions only (no Rename/Delete on Modified files).
   panel.addEventListener('contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (fileRow && panel.contains(fileRow)) {
       event.preventDefault();
-      selectChangedFileRow(fileRow.dataset.openChangeFile || '');
-      showChangedFileContextMenu(fileRow, event.clientX, event.clientY);
+      const path = fileRow.dataset.path || fileRow.dataset.openChangeFile || '';
+      showFileTreeContextMenu(fileRow, path, changedFileRowEntry(fileRow), event.clientX, event.clientY);
       return;
     }
     const directoryRow = event.target.closest('[data-open-change-directory]');
@@ -1739,38 +1741,13 @@ function bindChangesPanel(panel) {
   });
 }
 
-// C5: highlight one Modified-files row across every Changes/Finder surface, persisting the choice so a
-// background poll re-render keeps the highlight (bindChangedFileRowBehaviors re-applies it).
-function selectChangedFileRow(path) {
-  changesSelectedPath = path || '';
-  document.querySelectorAll('[data-open-change-file].selected').forEach(row => {
-    if (row.dataset.openChangeFile !== changesSelectedPath) row.classList.remove('selected');
-  });
-  if (!changesSelectedPath) return;
-  document.querySelectorAll(`[data-open-change-file="${cssEscape(changesSelectedPath)}"]`)
-    .forEach(row => row.classList.add('selected'));
-}
-
-// C5: open the safe Finder-style context menu for a Modified-files row — copy row/absolute paths,
-// optionally open image files, and download. Deliberately omits Rename/Delete because Modified files is a
-// read surface.
-function showChangedFileContextMenu(row, x, y) {
-  closeFileContextMenu();
-  closeFileImagePreview();
-  const path = row.dataset.openChangeFile || '';
-  if (!path) return;
-  const name = basenameOf(path);
-  const rel = row.dataset.changeRel || '';
-  const isImage = IMAGE_EXTENSIONS.has(fileExtensionOf(name));
-  const entry = {kind: 'file', name, path};
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu file-context-menu';
-  menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, 'Copy relative path', () => copyChangedPath(rel || path, 'relative path'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy full path', () => copyChangedPath(path, 'full path'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(path, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: !isImage || readOnlyMode});
-  appendContextMenuButton(menu, 'Download', () => triggerFileDownload(path), closeFileContextMenu, {disabled: readOnlyMode});
-  fileContextMenu.open(menu, x, y);
+function changedFileRowEntry(row) {
+  const path = row?.dataset?.openChangeFile || row?.dataset?.path || '';
+  return {
+    kind: row?.dataset?.kind || 'file',
+    name: row?.dataset?.name || basenameOf(path),
+    path,
+  };
 }
 
 function showChangedDirectoryContextMenu(row, x, y) {
@@ -1822,7 +1799,7 @@ async function openChangedDirectoryInFinder(path) {
 
 // C5: per-render binding for Modified-files rows (rows are recreated each render). Binds the Finder image
 // hover preview on image rows under the preview cap (unknown size -> bind and let /api/fs/raw fail
-// gracefully, like Finder) and re-applies the persisted row highlight.
+// gracefully, like Finder).
 function bindChangedFileRowBehaviors(panel) {
   if (!panel) return;
   panel.querySelectorAll('[data-open-change-file]').forEach(row => {
@@ -1836,7 +1813,6 @@ function bindChangedFileRowBehaviors(panel) {
         bindFileImagePreview(row, path, {kind: 'file', name, size});
       }
     }
-    if (changesSelectedPath && path === changesSelectedPath) row.classList.add('selected');
   });
 }
 

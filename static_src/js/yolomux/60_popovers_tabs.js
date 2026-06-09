@@ -9,7 +9,10 @@ function toggleHiddenFiles() {
 async function expandDirectoryRow(row, fullPath, options = {}) {
   const entries = await fetchDirectory(fullPath);
   if (!entries) return;
-  if (options.manual === true) forgetFileExplorerSyncManualCollapse(fullPath);
+  if (options.manual === true) {
+    forgetFileExplorerSyncManualCollapse(fullPath);
+    resetFileExplorerAppliedSyncPlan();
+  }
   fileExplorerExpanded.add(fullPath);
   row.classList.add('expanded');
   row.setAttribute('aria-expanded', 'true');
@@ -24,7 +27,10 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
 }
 
 function collapseDirectoryRow(row, fullPath, options = {}) {
-  if (options.manual === true) rememberFileExplorerSyncManualCollapse(fullPath);
+  if (options.manual === true) {
+    rememberFileExplorerSyncManualCollapse(fullPath);
+    resetFileExplorerAppliedSyncPlan();
+  }
   fileExplorerExpanded.delete(fullPath);
   row.classList.remove('expanded');
   row.setAttribute('aria-expanded', 'false');
@@ -1034,6 +1040,6 @@ function endSessionDrag(event) {
   // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
-  // DOIT.6 #114: flush the full panel re-render deferred during the drag (dragSession is null now).
-  if (pendingPanelsRender) { pendingPanelsRender = false; renderPanels(); }
+  // DOIT.52: flush through the shared layout render scheduler so same-shape drops keep the cheap path.
+  flushPendingLayoutRender();
 }

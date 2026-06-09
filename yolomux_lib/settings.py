@@ -177,6 +177,15 @@ PR_TRANSITION_KEYS = {
 # The full allowlist accepted in notifications.notify_transitions (session states + PR transitions).
 NOTIFY_TRANSITION_KEYS = SESSION_STATE_KEYS | PR_TRANSITION_KEYS
 
+STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
+    ("file_explorer", "refresh_seconds"): 1,
+    ("performance", "metadata_refresh_ms"): 15000,
+    ("performance", "pane_state_refresh_ms"): 1250,
+    ("performance", "latency_refresh_ms"): 3000,
+    ("performance", "event_log_refresh_ms"): 5000,
+    ("performance", "watched_pr_refresh_ms"): 60000,
+}
+
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("appearance", "ui_font_size"): (6, 20),
     ("appearance", "terminal_font_size"): (6, 28),
@@ -375,6 +384,20 @@ def coerce_string_list(value: Any, default: list[str]) -> list[str]:
     return result
 
 
+def migrate_stale_default(section: str, key: str, value: Any, default: Any) -> Any:
+    stale_value = STALE_DEFAULT_MIGRATIONS.get((section, key))
+    if stale_value is None:
+        return value
+    try:
+        stale_number = float(stale_value)
+        value_number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if value_number == stale_number:
+        return default
+    return value
+
+
 def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, Any]:
     # DOIT.6 #84: pass a `coerced` list to collect "<section>.<key>" for every PRESENT incoming value
     # that had to be clamped/reverted, so the API can report it instead of silently changing the value.
@@ -399,6 +422,8 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
         for key, default in values.items():
             present = key in incoming
             value = incoming.get(key, default)
+            if present:
+                value = migrate_stale_default(section, key, value, default)
             if section == "yoagent" and key in LEGACY_YOAGENT_DEFAULTS and value == LEGACY_YOAGENT_DEFAULTS[key]:
                 value = default
             legacy_markers = LEGACY_YOAGENT_PROMPT_MARKERS.get(key, []) if section == "yoagent" else []

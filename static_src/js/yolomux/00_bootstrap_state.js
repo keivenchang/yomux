@@ -296,7 +296,6 @@ let fileExplorerVisibleSyncRoot = '';
 let fileExplorerLastInteractionAt = 0;
 let fileExplorerRefreshDeferred = false;
 let sessionFilesSortMode = 'newest';
-let changesSelectedPath = '';  // C5: the currently highlighted Modified-files row (persists across re-renders)
 let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
@@ -393,7 +392,7 @@ function fileExplorerRefreshMsFromValues(secondsValue, legacyMsValue = 15001) {
   return Math.max(1000, Math.min(60000, Number.isFinite(legacyMs) ? legacyMs : 15001));
 }
 let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
-  initialSetting('file_explorer.refresh_seconds', 1),
+  initialSetting('file_explorer.refresh_seconds', 5),
   initialSetting('file_explorer.refresh_ms', 15001),
 );
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
@@ -739,10 +738,9 @@ let dragSourceSlot = null;
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
 let pendingPreferencesRender = false;
-// DOIT.6 #114: renderPanels() pools every panel and clears the grid (grid.innerHTML='').
-// If it fires mid-drag (e.g. a metadata poll), it detaches the dragged node and the native
-// HTML5 drag aborts. renderPanels defers to this flag while dragging; endSessionDrag flushes it.
-let pendingPanelsRender = false;
+// DOIT.52: panel renders deferred during tab drag keep the cheap/full render decision that was made
+// while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
+let pendingLayoutRender = null;
 let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
@@ -782,4 +780,5 @@ let openAppMenuId = null;
 let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
 let fileExplorerSyncPathInFlight = '';
+let fileExplorerLastAppliedSyncPlanKey = '';
 let fileExplorerSyncGeneration = 0;

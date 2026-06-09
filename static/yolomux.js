@@ -297,7 +297,6 @@ let fileExplorerVisibleSyncRoot = '';
 let fileExplorerLastInteractionAt = 0;
 let fileExplorerRefreshDeferred = false;
 let sessionFilesSortMode = 'newest';
-let changesSelectedPath = '';  // C5: the currently highlighted Modified-files row (persists across re-renders)
 let fileExplorerTreeDateMode = readStoredFileExplorerTreeDateMode();
 let fileExplorerTreeSortMode = readStoredFileExplorerTreeSortMode();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
@@ -394,7 +393,7 @@ function fileExplorerRefreshMsFromValues(secondsValue, legacyMsValue = 15001) {
   return Math.max(1000, Math.min(60000, Number.isFinite(legacyMs) ? legacyMs : 15001));
 }
 let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
-  initialSetting('file_explorer.refresh_seconds', 1),
+  initialSetting('file_explorer.refresh_seconds', 5),
   initialSetting('file_explorer.refresh_ms', 15001),
 );
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds', 120);
@@ -740,10 +739,9 @@ let dragSourceSlot = null;
 // dragged DOM node mid-drag (which aborts the native HTML5 drag). endSessionDrag flushes these.
 let pendingTabStripRender = false;
 let pendingPreferencesRender = false;
-// DOIT.6 #114: renderPanels() pools every panel and clears the grid (grid.innerHTML='').
-// If it fires mid-drag (e.g. a metadata poll), it detaches the dragged node and the native
-// HTML5 drag aborts. renderPanels defers to this flag while dragging; endSessionDrag flushes it.
-let pendingPanelsRender = false;
+// DOIT.52: panel renders deferred during tab drag keep the cheap/full render decision that was made
+// while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
+let pendingLayoutRender = null;
 let dragFilePayloadState = null;
 let customDragPreview = null;
 let customDragPreviewOffset = {x: 0, y: 0};
@@ -783,6 +781,7 @@ let openAppMenuId = null;
 let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
 let fileExplorerSyncPathInFlight = '';
+let fileExplorerLastAppliedSyncPlanKey = '';
 let fileExplorerSyncGeneration = 0;
 // i18n runtime: a tiny key-based string catalog with a t() helper. Catalogs are fetched from
 // /static/locales/<locale>.json (all-static-fetch delivery); `en` is the source-of-truth fallback.
@@ -4929,16 +4928,13 @@ function applyLayoutSlots(nextSlots, options = {}) {
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
-  if (prevShape === layoutShapeSignature(layoutSlots) && dragSession == null && grid.querySelector('.drop-slot[data-slot]')) {
-    // Cheap path: the tree shape is unchanged. Swap only the slots whose active item changed and
-    // reconcile the (already keyed) tab strips — no innerHTML='', no topbar rebuild.
-    syncActivePanelsInPlace();
-    renderPaneTabStrips();
-    syncPanelVisibility(previousActive);
-  } else {
-    renderSessionButtons();
-    renderPanels(previousActive, {prune: options.prune});
-  }
+  requestLayoutRender({
+    previousActive,
+    prevShape,
+    nextShape: layoutShapeSignature(layoutSlots),
+    options: {prune: options.prune},
+    reason: 'applyLayoutSlots',
+  });
   for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
   // DOIT.9 S1: do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
@@ -4954,6 +4950,65 @@ function applyLayoutSlots(nextSlots, options = {}) {
   } else {
     updateStatus();
   }
+}
+
+function layoutRenderRequest(request = {}) {
+  return {
+    previousActive: Array.isArray(request.previousActive) ? request.previousActive.slice() : [],
+    prevShape: String(request.prevShape || ''),
+    nextShape: String(request.nextShape || ''),
+    options: request.options || {},
+    reason: request.reason || '',
+    forceFull: request.forceFull === true,
+  };
+}
+
+function mergePendingLayoutRender(current, next) {
+  if (!current) return next;
+  return layoutRenderRequest({
+    previousActive: current.previousActive,
+    prevShape: current.prevShape,
+    nextShape: next.nextShape || current.nextShape,
+    options: {...current.options, ...next.options},
+    reason: [current.reason, next.reason].filter(Boolean).join('+'),
+    forceFull: current.forceFull || next.forceFull,
+  });
+}
+
+function layoutRenderCanUseCheap(request) {
+  return !request.forceFull
+    && request.prevShape === request.nextShape
+    && grid.querySelector('.drop-slot[data-slot]');
+}
+
+function performLayoutRender(request = {}) {
+  const renderRequest = layoutRenderRequest(request);
+  const previousActive = renderRequest.previousActive;
+  if (layoutRenderCanUseCheap(renderRequest)) {
+    // Cheap path: the tree shape is unchanged. Swap only the slots whose active item changed and
+    // reconcile the (already keyed) tab strips — no innerHTML='', no topbar rebuild.
+    syncActivePanelsInPlace();
+    renderPaneTabStrips();
+    syncPanelVisibility(previousActive);
+    return;
+  }
+  renderSessionButtons();
+  renderPanels(previousActive, {prune: renderRequest.options.prune});
+}
+
+function requestLayoutRender(request = {}) {
+  const renderRequest = layoutRenderRequest(request);
+  if (dragSession != null) {
+    pendingLayoutRender = mergePendingLayoutRender(pendingLayoutRender, renderRequest);
+    return;
+  }
+  performLayoutRender(renderRequest);
+}
+
+function flushPendingLayoutRender(reason = 'drag-flush') {
+  const renderRequest = pendingLayoutRender;
+  pendingLayoutRender = null;
+  if (renderRequest) requestLayoutRender({...renderRequest, reason});
 }
 
 function updateActiveSessionParam() {
@@ -6221,6 +6276,10 @@ async function openFileExplorerAt(path, options = {}) {
   return true;
 }
 
+function resetFileExplorerAppliedSyncPlan() {
+  fileExplorerLastAppliedSyncPlanKey = '';
+}
+
 async function saveFileExplorerRootMode(mode) {
   if (readOnlyMode) return;
   try {
@@ -6497,6 +6556,7 @@ function renderFileExplorerQuickAccessControls() {
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
+  resetFileExplorerAppliedSyncPlan();
   fileExplorerRootMode = mode === 'sync' ? 'sync' : 'fixed';
   writeStoredFileExplorerRootMode(fileExplorerRootMode);
   renderFileExplorerRootModeControls();
@@ -6767,6 +6827,26 @@ function fileExplorerSyncPlanSignature(plan) {
   return [plan.session || '', plan.root, ...(plan.expandPaths || [])].join('\x1f');
 }
 
+function fileExplorerSyncPlanKey(plan) {
+  if (!plan?.root) return '';
+  const expandPaths = fileExplorerSyncExpansionPaths(plan)
+    .map(path => normalizeDirectoryPath(path))
+    .filter(Boolean)
+    .sort();
+  return [String(plan.session || ''), normalizeDirectoryPath(plan.root), ...expandPaths].join('\x1f');
+}
+
+function fileExplorerSyncPlanAlreadyApplied(plan) {
+  const key = fileExplorerSyncPlanKey(plan);
+  return Boolean(key)
+    && key === fileExplorerLastAppliedSyncPlanKey
+    && normalizeDirectoryPath(plan.root) === normalizeDirectoryPath(currentFileExplorerRoot());
+}
+
+function markFileExplorerSyncPlanApplied(plan) {
+  fileExplorerLastAppliedSyncPlanKey = fileExplorerSyncPlanKey(plan);
+}
+
 function fileExplorerSyncManualCollapseKey(plan) {
   return plan?.root ? fileExplorerSyncTargetKey(plan.session, plan.root) : '';
 }
@@ -6837,6 +6917,7 @@ function rememberFileExplorerSyncManualCollapse(path) {
   resetFileExplorerSyncManualCollapsesIfNeeded(plan);
   fileExplorerSyncManualCollapsedPaths.add(normalizeDirectoryPath(path));
   rememberFileExplorerSyncManualCollapseState();
+  resetFileExplorerAppliedSyncPlan();
 }
 
 function forgetFileExplorerSyncManualCollapse(path) {
@@ -6854,6 +6935,7 @@ function forgetFileExplorerSyncManualCollapse(path) {
     }
   }
   if (changed) rememberFileExplorerSyncManualCollapseState();
+  if (changed) resetFileExplorerAppliedSyncPlan();
 }
 
 function emptyFileExplorerSessionHighlightSets() {
@@ -7183,13 +7265,14 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
     syncPlan.root
     && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length)
     && fileExplorerSyncPathInFlight !== syncSignature
+    && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
     const interactionGeneration = fileExplorerInteractionGeneration;
     requestAnimationFrame(() => {
       if (interactionGeneration !== fileExplorerInteractionGeneration) return;
       const syncPromise = fileSyncPath
-        ? syncFileExplorerRootToActiveFile(fileSyncPath)
-        : syncFileExplorerRootToActiveTmux(syncItem);
+        ? syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})
+        : syncFileExplorerRootToActiveTmux(syncItem, {force: explicit});
       syncPromise.catch(error => {
         console.warn('Finder root sync failed', error);
       });
@@ -7200,23 +7283,29 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
 
 function cancelPendingFileExplorerActiveSync() {
   fileExplorerInteractionGeneration += 1;
+  resetFileExplorerAppliedSyncPlan();
 }
 
-async function syncFileExplorerRootToActiveTmux(preferredItem = null) {
+async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
-  return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem);
+  return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem, options);
 }
 
-async function syncFileExplorerRootToActiveFile(path) {
+async function syncFileExplorerRootToActiveFile(path, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
   forgetFileExplorerSyncManualCollapse(path);
-  return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path));
+  return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
 
-async function syncFileExplorerRootToPlan(plan, preferredItem = null) {
+async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = {}) {
   const signature = fileExplorerSyncPlanSignature(plan);
   const expandPaths = fileExplorerSyncExpansionPaths(plan);
   if (!plan.root || fileExplorerSyncPathInFlight === signature) return false;
+  if (options.force !== true && fileExplorerSyncPlanAlreadyApplied(plan)) {
+    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+    updateFileExplorerSessionHighlightRows(preferredItem);
+    return false;
+  }
   fileExplorerSyncPathInFlight = signature;
   try {
     let changed = false;
@@ -7242,6 +7331,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null) {
     }
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     rememberFileExplorerSyncExpandedState(plan.session, plan.root);
+    markFileExplorerSyncPlanApplied(plan);
     updateFileExplorerSessionHighlightRows(preferredItem);
     return changed;
   } finally {
@@ -7251,6 +7341,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null) {
 
 async function syncFileExplorerToActiveTab(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return false;
+  if (fileExplorerRootMode !== 'sync' && options.explicit !== true) return false;
   const path = options.explicit === true ? explicitFinderTargetPath(preferredItem) : activeFinderTargetPath(preferredItem);
   if (!path || fileExplorerSyncPathInFlight === path) return false;
   const root = currentFileExplorerRoot();
@@ -8727,6 +8818,9 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
     statusEl.textContent = deletePaths.length === 1 ? `deleted ${basenameOf(deletePaths[0])}` : `deleted ${deletePaths.length} items`;
     await refreshFileExplorerTrees();
+    if (typeof fetchSessionFiles === 'function') {
+      await fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+    }
     renderSessionButtons();
     renderPaneTabStrips();
   } catch (error) {
@@ -11827,7 +11921,10 @@ function toggleHiddenFiles() {
 async function expandDirectoryRow(row, fullPath, options = {}) {
   const entries = await fetchDirectory(fullPath);
   if (!entries) return;
-  if (options.manual === true) forgetFileExplorerSyncManualCollapse(fullPath);
+  if (options.manual === true) {
+    forgetFileExplorerSyncManualCollapse(fullPath);
+    resetFileExplorerAppliedSyncPlan();
+  }
   fileExplorerExpanded.add(fullPath);
   row.classList.add('expanded');
   row.setAttribute('aria-expanded', 'true');
@@ -11842,7 +11939,10 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
 }
 
 function collapseDirectoryRow(row, fullPath, options = {}) {
-  if (options.manual === true) rememberFileExplorerSyncManualCollapse(fullPath);
+  if (options.manual === true) {
+    rememberFileExplorerSyncManualCollapse(fullPath);
+    resetFileExplorerAppliedSyncPlan();
+  }
   fileExplorerExpanded.delete(fullPath);
   row.classList.remove('expanded');
   row.setAttribute('aria-expanded', 'false');
@@ -12852,8 +12952,8 @@ function endSessionDrag(event) {
   // DOIT.6 #30: flush any tab/preferences re-renders that were deferred during the drag.
   if (pendingTabStripRender) { pendingTabStripRender = false; renderPaneTabStrips(); }
   if (pendingPreferencesRender) { pendingPreferencesRender = false; renderPreferencesPanels(); }
-  // DOIT.6 #114: flush the full panel re-render deferred during the drag (dragSession is null now).
-  if (pendingPanelsRender) { pendingPanelsRender = false; renderPanels(); }
+  // DOIT.52: flush through the shared layout render scheduler so same-shape drops keep the cheap path.
+  flushPendingLayoutRender();
 }
 function layoutWithoutItemFromSlots(item, slots = layoutSlots, options = {}) {
   const next = emptyLayoutSlots();
@@ -14782,9 +14882,17 @@ function handleDropDragLeave(event) {
 function renderPanels(previousActive = [], options = {}) {
   // DOIT.6 #114: a full panel re-render pools every panel and clears the grid, which detaches
   // the node being dragged and aborts the native HTML5 drag. Defer the re-render until the drag
-  // ends; endSessionDrag flushes pendingPanelsRender. Drops still render because endSessionDrag
-  // clears dragSession before flushing.
-  if (dragSession != null) { pendingPanelsRender = true; return; }
+  // ends. The shared layout scheduler stores a forced-full request so metadata-driven renders do
+  // not get mistaken for a cheap same-shape layout update on drop.
+  if (dragSession != null) {
+    requestLayoutRender({
+      previousActive,
+      options,
+      reason: 'renderPanels',
+      forceFull: true,
+    });
+    return;
+  }
   movePanelsToPool();
   const activePaneCount = layoutSlotKeys().filter(side => activeItemForSide(side) || paneIsPlaceholder(side)).length;
   grid.className = `grid ${activePaneCount === 1 ? 'full' : ''} ${activePaneCount === 0 ? 'empty' : ''}`.trim();
@@ -18109,8 +18217,9 @@ function sessionFileDisplayTimeText(mtime) {
 }
 
 function sessionFileDiffText(item) {
+  const addKind = item?.diff_tracked === false ? 'add-neutral' : 'add';
   return [
-    Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: 'add', text: `+${Number(item.added)}`} : null,
+    Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: addKind, text: `+${Number(item.added)}`} : null,
     Number.isFinite(Number(item?.removed)) && Number(item.removed) !== 0 ? {kind: 'remove', text: `-${Number(item.removed)}`} : null,
   ].filter(Boolean);
 }
@@ -18230,6 +18339,7 @@ function changeFileTotals(files) {
   let added = 0;
   let removed = 0;
   for (const item of Array.isArray(files) ? files : []) {
+    if (item?.diff_tracked !== true) continue;
     const add = Number(item?.added);
     const remove = Number(item?.removed);
     if (Number.isFinite(add)) added += add;
@@ -18423,13 +18533,14 @@ function buildSessionFileTree(repoPath, sessionFiles) {
 
 // Render changed files for one repo section using the shared file-tree renderer.
 function renderChangedFileList(container, repoPath, sessionFiles, options = {}) {
-  const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(repoPath, sessionFiles);
-  renderTreeChildren(container, repoPath, entries, 0, {
+  const treeRoot = repoPath === 'Outside repo' ? '/' : repoPath;
+  const {entries, entriesByDir, sessionFilesMap} = buildSessionFileTree(treeRoot, sessionFiles);
+  renderTreeChildren(container, treeRoot, entries, 0, {
     entriesByDir,
     sessionFilesMap,
     differMode: true,
     compact: options.compact,
-    repoForDiffer: repoPath,
+    repoForDiffer: treeRoot,
     treeSortMode: normalizeSessionFilesSortMode(sessionFilesSortMode),
     includeHidden: true,
   });
@@ -19046,15 +19157,14 @@ function bindChangesPanel(panel) {
   panel.addEventListener('click', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (!fileRow || !panel.contains(fileRow)) return;
-    selectChangedFileRow(fileRow.dataset.openChangeFile || '');
+    updateFileTreeSelectionFromClick(fileRow, fileRow.dataset.path || fileRow.dataset.openChangeFile || '', event);
   });
-  // C5: Finder-like right-click menu with the SAFE read actions only (no Rename/Delete on Modified files).
   panel.addEventListener('contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (fileRow && panel.contains(fileRow)) {
       event.preventDefault();
-      selectChangedFileRow(fileRow.dataset.openChangeFile || '');
-      showChangedFileContextMenu(fileRow, event.clientX, event.clientY);
+      const path = fileRow.dataset.path || fileRow.dataset.openChangeFile || '';
+      showFileTreeContextMenu(fileRow, path, changedFileRowEntry(fileRow), event.clientX, event.clientY);
       return;
     }
     const directoryRow = event.target.closest('[data-open-change-directory]');
@@ -19064,38 +19174,13 @@ function bindChangesPanel(panel) {
   });
 }
 
-// C5: highlight one Modified-files row across every Changes/Finder surface, persisting the choice so a
-// background poll re-render keeps the highlight (bindChangedFileRowBehaviors re-applies it).
-function selectChangedFileRow(path) {
-  changesSelectedPath = path || '';
-  document.querySelectorAll('[data-open-change-file].selected').forEach(row => {
-    if (row.dataset.openChangeFile !== changesSelectedPath) row.classList.remove('selected');
-  });
-  if (!changesSelectedPath) return;
-  document.querySelectorAll(`[data-open-change-file="${cssEscape(changesSelectedPath)}"]`)
-    .forEach(row => row.classList.add('selected'));
-}
-
-// C5: open the safe Finder-style context menu for a Modified-files row — copy row/absolute paths,
-// optionally open image files, and download. Deliberately omits Rename/Delete because Modified files is a
-// read surface.
-function showChangedFileContextMenu(row, x, y) {
-  closeFileContextMenu();
-  closeFileImagePreview();
-  const path = row.dataset.openChangeFile || '';
-  if (!path) return;
-  const name = basenameOf(path);
-  const rel = row.dataset.changeRel || '';
-  const isImage = IMAGE_EXTENSIONS.has(fileExtensionOf(name));
-  const entry = {kind: 'file', name, path};
-  const menu = document.createElement('div');
-  menu.className = 'terminal-context-menu file-context-menu';
-  menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, 'Copy relative path', () => copyChangedPath(rel || path, 'relative path'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Copy full path', () => copyChangedPath(path, 'full path'), closeFileContextMenu);
-  appendContextMenuButton(menu, 'Open in new tab', () => openFileInEditor(path, entry, {forceNewTab: true}), closeFileContextMenu, {disabled: !isImage || readOnlyMode});
-  appendContextMenuButton(menu, 'Download', () => triggerFileDownload(path), closeFileContextMenu, {disabled: readOnlyMode});
-  fileContextMenu.open(menu, x, y);
+function changedFileRowEntry(row) {
+  const path = row?.dataset?.openChangeFile || row?.dataset?.path || '';
+  return {
+    kind: row?.dataset?.kind || 'file',
+    name: row?.dataset?.name || basenameOf(path),
+    path,
+  };
 }
 
 function showChangedDirectoryContextMenu(row, x, y) {
@@ -19147,7 +19232,7 @@ async function openChangedDirectoryInFinder(path) {
 
 // C5: per-render binding for Modified-files rows (rows are recreated each render). Binds the Finder image
 // hover preview on image rows under the preview cap (unknown size -> bind and let /api/fs/raw fail
-// gracefully, like Finder) and re-applies the persisted row highlight.
+// gracefully, like Finder).
 function bindChangedFileRowBehaviors(panel) {
   if (!panel) return;
   panel.querySelectorAll('[data-open-change-file]').forEach(row => {
@@ -19161,7 +19246,6 @@ function bindChangedFileRowBehaviors(panel) {
         bindFileImagePreview(row, path, {kind: 'file', name, size});
       }
     }
-    if (changesSelectedPath && path === changesSelectedPath) row.classList.add('selected');
   });
 }
 

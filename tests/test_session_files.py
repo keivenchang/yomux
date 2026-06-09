@@ -90,11 +90,13 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert by_path["tracked.txt"]["size"] == (repo / "tracked.txt").stat().st_size  # C5: size for image-preview gating
     assert by_path["tracked.txt"]["added"] == 1
     assert by_path["tracked.txt"]["removed"] == 1
+    assert by_path["tracked.txt"]["diff_tracked"] is True
     # new.txt is untracked (never `git add`ed) -> "?", distinct from a staged/committed add "A".
     assert by_path["new.txt"]["status"] == "?"
     assert by_path["new.txt"]["added"] == 1
     assert by_path["new.txt"]["removed"] == 0
-    assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2, "added": 2, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
+    assert by_path["new.txt"]["diff_tracked"] is False
+    assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2, "added": 1, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
 
 
 def test_session_files_payload_keeps_transcript_paths_when_branch_is_clean(tmp_path):
@@ -212,7 +214,7 @@ def test_selected_session_rows_include_cross_session_agent_attribution(tmp_path)
     assert sorted(by_path["tracked.txt"]["agents"]) == ["claude", "codex"]
 
 
-def test_session_files_payload_excludes_non_repo_transcript_artifacts(tmp_path):
+def test_session_files_payload_includes_non_repo_transcript_files_without_counting_them(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init")
@@ -234,8 +236,19 @@ def test_session_files_payload_excludes_non_repo_transcript_artifacts(tmp_path):
 
     payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
 
-    assert [item["path"] for item in payload["files"]] == ["tracked.txt"]
-    assert all(not str(item["abs_path"]).startswith(str(tmp_path / "scratch")) for item in payload["files"])
+    by_abs = {item["abs_path"]: item for item in payload["files"]}
+    assert str(tracked) in by_abs
+    assert str(tmp_artifact) in by_abs
+    assert by_abs[str(tmp_artifact)]["repo"] == ""
+    assert by_abs[str(tmp_artifact)]["path"] == str(tmp_artifact)
+    assert by_abs[str(tmp_artifact)]["added"] == 1
+    assert by_abs[str(tmp_artifact)]["removed"] == 0
+    assert by_abs[str(tmp_artifact)]["diff_tracked"] is False
+    by_repo = {item["repo"]: item for item in payload["repos"]}
+    assert by_repo[str(repo)]["added"] == 1
+    assert by_repo[str(repo)]["removed"] == 1
+    assert by_repo[""]["added"] == 0
+    assert by_repo[""]["removed"] == 0
 
 
 def test_git_status_parses_renames_and_tab_paths(tmp_path):
@@ -281,6 +294,33 @@ def test_git_status_labels_untracked_question_distinct_from_staged_add_A(tmp_pat
     assert error == ""
     assert statuses["staged.txt"] == "A"
     assert statuses["loose.txt"] == "?"
+
+
+def test_session_files_payload_counts_staged_added_file_as_tracked_diff(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test User")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    git(repo, "add", "base.txt")
+    git(repo, "commit", "-m", "base")
+    staged = repo / "staged.txt"
+    staged.write_text("one\ntwo\n", encoding="utf-8")
+    git(repo, "add", "staged.txt")
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text('{"msg":"*** Begin Patch\\n*** Add File: staged.txt\\n"}\n', encoding="utf-8")
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("codex", rollout, repo)])
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+    item = {entry["path"]: entry for entry in payload["files"]}["staged.txt"]
+
+    assert item["status"] == "A"
+    assert item["added"] == 2
+    assert item["removed"] == 0
+    assert item["diff_tracked"] is True
+    assert payload["repos"][0]["added"] == 2
+    assert payload["repos"][0]["removed"] == 0
 
 
 def test_session_files_payload_preserves_untracked_symlink_paths(tmp_path):

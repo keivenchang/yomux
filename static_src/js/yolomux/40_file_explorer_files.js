@@ -39,6 +39,10 @@ async function openFileExplorerAt(path, options = {}) {
   return true;
 }
 
+function resetFileExplorerAppliedSyncPlan() {
+  fileExplorerLastAppliedSyncPlanKey = '';
+}
+
 async function saveFileExplorerRootMode(mode) {
   if (readOnlyMode) return;
   try {
@@ -315,6 +319,7 @@ function renderFileExplorerQuickAccessControls() {
 }
 
 function setFileExplorerRootMode(mode, options = {}) {
+  resetFileExplorerAppliedSyncPlan();
   fileExplorerRootMode = mode === 'sync' ? 'sync' : 'fixed';
   writeStoredFileExplorerRootMode(fileExplorerRootMode);
   renderFileExplorerRootModeControls();
@@ -585,6 +590,26 @@ function fileExplorerSyncPlanSignature(plan) {
   return [plan.session || '', plan.root, ...(plan.expandPaths || [])].join('\x1f');
 }
 
+function fileExplorerSyncPlanKey(plan) {
+  if (!plan?.root) return '';
+  const expandPaths = fileExplorerSyncExpansionPaths(plan)
+    .map(path => normalizeDirectoryPath(path))
+    .filter(Boolean)
+    .sort();
+  return [String(plan.session || ''), normalizeDirectoryPath(plan.root), ...expandPaths].join('\x1f');
+}
+
+function fileExplorerSyncPlanAlreadyApplied(plan) {
+  const key = fileExplorerSyncPlanKey(plan);
+  return Boolean(key)
+    && key === fileExplorerLastAppliedSyncPlanKey
+    && normalizeDirectoryPath(plan.root) === normalizeDirectoryPath(currentFileExplorerRoot());
+}
+
+function markFileExplorerSyncPlanApplied(plan) {
+  fileExplorerLastAppliedSyncPlanKey = fileExplorerSyncPlanKey(plan);
+}
+
 function fileExplorerSyncManualCollapseKey(plan) {
   return plan?.root ? fileExplorerSyncTargetKey(plan.session, plan.root) : '';
 }
@@ -655,6 +680,7 @@ function rememberFileExplorerSyncManualCollapse(path) {
   resetFileExplorerSyncManualCollapsesIfNeeded(plan);
   fileExplorerSyncManualCollapsedPaths.add(normalizeDirectoryPath(path));
   rememberFileExplorerSyncManualCollapseState();
+  resetFileExplorerAppliedSyncPlan();
 }
 
 function forgetFileExplorerSyncManualCollapse(path) {
@@ -672,6 +698,7 @@ function forgetFileExplorerSyncManualCollapse(path) {
     }
   }
   if (changed) rememberFileExplorerSyncManualCollapseState();
+  if (changed) resetFileExplorerAppliedSyncPlan();
 }
 
 function emptyFileExplorerSessionHighlightSets() {
@@ -1001,13 +1028,14 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
     syncPlan.root
     && (syncPlan.root !== currentFileExplorerRoot() || expandPaths.length)
     && fileExplorerSyncPathInFlight !== syncSignature
+    && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
     const interactionGeneration = fileExplorerInteractionGeneration;
     requestAnimationFrame(() => {
       if (interactionGeneration !== fileExplorerInteractionGeneration) return;
       const syncPromise = fileSyncPath
-        ? syncFileExplorerRootToActiveFile(fileSyncPath)
-        : syncFileExplorerRootToActiveTmux(syncItem);
+        ? syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})
+        : syncFileExplorerRootToActiveTmux(syncItem, {force: explicit});
       syncPromise.catch(error => {
         console.warn('Finder root sync failed', error);
       });
@@ -1018,23 +1046,29 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
 
 function cancelPendingFileExplorerActiveSync() {
   fileExplorerInteractionGeneration += 1;
+  resetFileExplorerAppliedSyncPlan();
 }
 
-async function syncFileExplorerRootToActiveTmux(preferredItem = null) {
+async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
-  return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem);
+  return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem, options);
 }
 
-async function syncFileExplorerRootToActiveFile(path) {
+async function syncFileExplorerRootToActiveFile(path, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
   forgetFileExplorerSyncManualCollapse(path);
-  return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path));
+  return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
 
-async function syncFileExplorerRootToPlan(plan, preferredItem = null) {
+async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = {}) {
   const signature = fileExplorerSyncPlanSignature(plan);
   const expandPaths = fileExplorerSyncExpansionPaths(plan);
   if (!plan.root || fileExplorerSyncPathInFlight === signature) return false;
+  if (options.force !== true && fileExplorerSyncPlanAlreadyApplied(plan)) {
+    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+    updateFileExplorerSessionHighlightRows(preferredItem);
+    return false;
+  }
   fileExplorerSyncPathInFlight = signature;
   try {
     let changed = false;
@@ -1060,6 +1094,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null) {
     }
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     rememberFileExplorerSyncExpandedState(plan.session, plan.root);
+    markFileExplorerSyncPlanApplied(plan);
     updateFileExplorerSessionHighlightRows(preferredItem);
     return changed;
   } finally {
@@ -1069,6 +1104,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null) {
 
 async function syncFileExplorerToActiveTab(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return false;
+  if (fileExplorerRootMode !== 'sync' && options.explicit !== true) return false;
   const path = options.explicit === true ? explicitFinderTargetPath(preferredItem) : activeFinderTargetPath(preferredItem);
   if (!path || fileExplorerSyncPathInFlight === path) return false;
   const root = currentFileExplorerRoot();
@@ -2545,6 +2581,9 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
     statusEl.textContent = deletePaths.length === 1 ? `deleted ${basenameOf(deletePaths[0])}` : `deleted ${deletePaths.length} items`;
     await refreshFileExplorerTrees();
+    if (typeof fetchSessionFiles === 'function') {
+      await fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+    }
     renderSessionButtons();
     renderPaneTabStrips();
   } catch (error) {

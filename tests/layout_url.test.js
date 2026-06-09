@@ -648,8 +648,11 @@ globalThis.__layoutTestApi = {
   setPreferencesScrollActiveUntilForTest(value) { preferencesScrollActiveUntil = Number(value) || 0; },
   notePreferencesScrollActivityForTest: notePreferencesScrollActivity,
   renderPanels,
-  pendingPanelsRenderForTest() { return pendingPanelsRender; },
-  setPendingPanelsRenderForTest(value) { pendingPanelsRender = Boolean(value); },
+  pendingPanelsRenderForTest() { return Boolean(pendingLayoutRender); },
+  pendingLayoutRenderForTest() { return pendingLayoutRender; },
+  setPendingPanelsRenderForTest(value) {
+    pendingLayoutRender = value ? {previousActive: [], prevShape: '', nextShape: '', options: {}, reason: 'test', forceFull: true} : null;
+  },
   setClientSettingsPatchForTest(patch) {
     clientSettings = mergeSettingObjects(clientSettings, patch || {});
   },
@@ -2326,10 +2329,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     loaded: true,
     errors: [],
     refs_by_repo: {'/repo/app': [{ref: 'abc123def456', short: 'abc123d', subject: 'older base commit'}]},
-    repos: [{repo: '/repo/app', count: 2, touched_count: 3, added: 10, removed: 1, behind: 0, ahead: 2}],
+    repos: [{repo: '/repo/app', count: 3, touched_count: 4, added: 10, removed: 1, behind: 0, ahead: 2}],
     files: [
       {session: '1', agent: 'codex', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
-      {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200, added: 8, removed: 0},
+      {session: '1', agent: 'codex', status: 'A', repo: '/repo/app', path: 'src/new.py', abs_path: '/repo/app/src/new.py', mtime: 200, added: 8, removed: 0, diff_tracked: true},
+      {session: '1', agent: 'codex', status: '?', repo: '/repo/app', path: 'src/raw.txt', abs_path: '/repo/app/src/raw.txt', mtime: 220, added: 4, removed: 0, diff_tracked: false},
       {session: '1', agent: 'codex', status: 'T', repo: '/repo/app', path: 'src/touched-only.py', abs_path: '/repo/app/src/touched-only.py', mtime: 300, added: 0, removed: 0, source: 'transcript'},
     ],
   });
@@ -2338,14 +2342,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(changesHtml.includes('/repo/app'));
   const repoHeadStart = changesHtml.indexOf('class="changes-repo-head"');
   const repoHead = changesHtml.slice(repoHeadStart, changesHtml.indexOf('</button>', repoHeadStart));
-  assert.ok(/changes-repo-caret[\s\S]*changes-repo-title[^>]*>\/repo\/app<[\s\S]*changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+10<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>2<\/span>/.test(repoHead), 'repo disclosure header shows repo name, +added, -removed, and file count');
+  assert.ok(/changes-repo-caret[\s\S]*changes-repo-title[^>]*>\/repo\/app<[\s\S]*changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+10<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>3<\/span>/.test(repoHead), 'repo disclosure header shows repo name, tracked +added, -removed, and file count');
   assert.equal(/Behind|Ahead/.test(repoHead), false, 'ahead/behind stays out of the repo disclosure header');
-  assert.ok(changesHtml.includes('1 repo, 2 files changed in &#39;1&#39;'), 'Finder diff summary names repo count, file count, and session explicitly');
+  assert.ok(changesHtml.includes('1 repo, 3 files changed in &#39;1&#39;'), 'Finder diff summary names repo count, file count, and session explicitly');
   const comparisonSummaryStart = changesHtml.indexOf('class="changes-comparison-summary"');
   const comparisonSummary = changesHtml.slice(comparisonSummaryStart, changesHtml.indexOf('</div>', comparisonSummaryStart));
   assert.equal(/changes-summary-totals|changes-diff-add|changes-diff-remove|changes-repo-count/.test(comparisonSummary), false, 'Finder diff summary does not repeat global +line/-line/file totals');
   assert.ok(/changes-repo-refs[\s\S]*changes-repo-compare-title[\s\S]*Comparing[\s\S]*data-diff-ref-from[\s\S]*to[\s\S]*data-diff-ref-to/.test(changesHtml), 'Finder diff shows a per-repo comparison row with inline FROM/TO controls');
-  assert.equal((changesHtml.match(/repo, 2 files changed in &#39;1&#39;/g) || []).length, 1, '#24: the repo/file-count summary appears exactly once (in the comparison card), not duplicated in the toolbar');
+  assert.equal((changesHtml.match(/repo, 3 files changed in &#39;1&#39;/g) || []).length, 1, '#24: the repo/file-count summary appears exactly once (in the comparison card), not duplicated in the toolbar');
   assert.equal(changesHtml.includes('class="changes-summary"'), false, '#24: the standalone toolbar summary duplicate is removed');
   assert.ok(changesHtml.includes('class="changes-comparison-summary"'), '#24: the summary lives in the comparison card');
   assert.equal(changesHtml.includes('touched-only.py'), false, 'Differ hides transcript-only T rows that have no real diff');
@@ -2360,11 +2364,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(changesHtml.includes('data-change-rel="src"'), 'Changes tree folders carry the relative directory path for copy');
   assert.ok(changesHtml.includes('data-open-change-file="/repo/app/src/new.py"'), 'file leaves keep the open-file action');
   assert.ok(changesHtml.includes('changes-diff-add">+8</span>'), 'changed-file rows include green added counts');
+  assert.ok(changesHtml.includes('changes-diff-add-neutral">+4</span>'), 'non-git-diff raw added counts stay visible but neutral');
   assert.ok(changesHtml.includes('changes-file-agent'), 'changed-file rows show the agent icon slot');
   assert.ok(changesHtml.includes('file-tree-row kind-file git-modified has-agent'), 'changed-file rows use the shared file-tree row renderer and inline-agent layout');
   assert.ok(/file-tree-git-status"[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(changesHtml), 'changed-file rows show and label the M status badge in the shared file-tree status slot');
   assert.ok(/file-tree-git-status"[^>]*title="A: added"[^>]*aria-label="A: added"[^>]*>A<\/span>/.test(changesHtml), 'added changed-file rows label the A status badge');
-  assert.ok(changesHtml.includes('file-tree-dir-count">1</span>'), 'changed-file folders show a recursive changed-file count from the shared row renderer');
+  assert.ok(changesHtml.includes('file-tree-dir-count">2</span>'), 'changed-file folders show a recursive changed-file count from the shared row renderer');
   assert.ok(changesHtml.includes('file-tree-icon'), 'changed-file rows show a file-type icon slot');
   assert.ok(changesHtml.includes('file-tree-date'), 'changed-file rows wrap the date for skinny styling');
   assert.ok(/class="file-tree-row kind-dir[^"]*"[^>]*data-path="\/repo\/app\/src"[\s\S]*<span class="file-tree-date"[^>]*>[^<]+<\/span>/.test(changesHtml), 'Differ directory rows show the same non-empty date slot as Finder');
@@ -2506,19 +2511,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(imageRow.includes('data-change-size="4096"'), 'C5: image rows carry the file size for preview gating');
   assert.ok(imageRow.includes('data-change-rel="pic.png"'), 'C5: rows carry the relative path for Copy path');
   assert.equal(/title="[^"]*pic\.png"/.test(imageRow), false, 'C5: image rows drop the native title so it does not duplicate the hover preview');
-  // C5: per-render row binder + safe Finder-style context menu (no destructive Rename/Delete on Modified files).
+  // C5 / DOIT.53: per-render row binder + shared Finder selection/context menu for Modified-files rows.
   assert.ok(changedFilesSource.includes('function bindChangedFileRowBehaviors('), 'C5: a per-render binder hooks Modified-files rows');
   assert.ok(/function bindChangedFileRowBehaviors\([\s\S]*?bindFileImagePreview\(row, path/.test(changedFilesSource), 'C5: image rows get the Finder hover preview');
-  assert.ok(changedFilesSource.includes('function showChangedFileContextMenu('), 'C5: Modified-files rows have a right-click menu');
-  const ctxStart = changedFilesSource.indexOf('function showChangedFileContextMenu(');
-  const ctxBody = changedFilesSource.slice(ctxStart, changedFilesSource.indexOf('\nfunction ', ctxStart + 1));
-  for (const action of ['Copy relative path', 'Copy full path', 'Open in new tab', 'Download']) {
-    assert.ok(ctxBody.includes(action), `C5: the changed-file menu offers "${action}"`);
-  }
-  assert.ok(ctxBody.includes('copyChangedPath(rel || path'), 'C5: Copy relative path uses the row path when present');
-  assert.ok(ctxBody.includes("copyChangedPath(path, 'full path')"), 'C5: Copy full path uses the full filesystem path');
-  assert.equal(ctxBody.includes('Open directory in '), false, 'C5: file rows do not offer a directory jump');
-  assert.equal(/'Rename'|'Delete'|"Rename"|"Delete"/.test(ctxBody), false, 'C5: the Modified-files menu omits destructive Rename/Delete');
+  assert.equal(changedFilesSource.includes('function selectChangedFileRow('), false, 'DOIT.53: Differ no longer has bespoke single-row selected state');
+  assert.equal(changedFilesSource.includes('function showChangedFileContextMenu('), false, 'DOIT.53: Differ file rows no longer fork a safe-only context menu');
+  assert.ok(/data-open-change-file[\s\S]{0,260}updateFileTreeSelectionFromClick\(fileRow,\s*fileRow\.dataset\.path/.test(changedFilesSource), 'DOIT.53: Differ click selection routes through the shared Finder selection parent');
+  assert.ok(/data-open-change-file[\s\S]{0,360}showFileTreeContextMenu\(fileRow,\s*path,\s*changedFileRowEntry\(fileRow\)/.test(changedFilesSource), 'DOIT.53: Differ file right-click routes through the shared Finder context menu, including Delete');
+  assert.ok(/async function deleteFileTreePath[\s\S]*fetchSessionFiles\(\{destination: 'finder', session: fileExplorerSessionFilesTargetSession\(\), silent: true, force: true\}\)/.test(changedFilesSource), 'DOIT.53: shared delete refreshes session-files so Differ rows disappear immediately');
   assert.ok(changedFilesSource.includes('function showChangedDirectoryContextMenu('), 'C5: Modified-files folder rows have a right-click menu');
   const dirCtxStart = changedFilesSource.indexOf('function showChangedDirectoryContextMenu(');
   const dirCtxBody = changedFilesSource.slice(dirCtxStart, changedFilesSource.indexOf('\nfunction ', dirCtxStart + 1));
@@ -2528,7 +2528,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(dirCtxBody.includes('copyChangedPath(rel || path'), 'C5: directory Copy relative path uses the folder-relative path when present');
   assert.ok(/function openChangedDirectoryInFinder\([\s\S]*?openFileExplorerPane\(\)[\s\S]*?setFileExplorerMode\('files'\)[\s\S]*?expandFileExplorerTreesToPath\(path\)[\s\S]*?selectFileTreePath\(path\)/.test(changedFilesSource), 'C5: Modified-files folder menu switches to Finder mode and expands the directory in-place');
   assert.equal(/'Open in new tab'|'Download'|'Rename'|'Delete'|"Open in new tab"|"Download"|"Rename"|"Delete"/.test(dirCtxBody), false, 'C5: the Modified-files folder menu stays directory-only and non-destructive');
-  assert.ok(/contextmenu'[\s\S]*?data-open-change-file[\s\S]*?showChangedFileContextMenu[\s\S]*?data-open-change-directory[\s\S]*?showChangedDirectoryContextMenu/.test(changedFilesSource), 'C5: right-click dispatches file and folder rows through separate menus');
+  assert.ok(/contextmenu'[\s\S]*?data-open-change-file[\s\S]*?showFileTreeContextMenu[\s\S]*?data-open-change-directory[\s\S]*?showChangedDirectoryContextMenu/.test(changedFilesSource), 'DOIT.53: right-click dispatches file rows through the shared Finder menu and folder rows through the directory menu');
   assert.ok(changedFilesSource.includes("multiple ? 'Copy full paths' : 'Copy full path'"), 'Finder context menu uses Copy full path label');
   const fileExplorerSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
   assert.equal(/Copy raw paths?/.test(fileExplorerSource), false, 'Finder context menu no longer exposes a duplicate raw path action');
@@ -3749,6 +3749,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/data-setting-path="file_explorer\.refresh_seconds"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Finder refresh interval is edited in seconds, not raw milliseconds');
   assert.equal(preferencesHtml.includes('data-setting-path="file_explorer.refresh_ms"'), false, 'Finder refresh interval no longer exposes the legacy millisecond setting');
   assert.ok(diffBundle.includes("fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings()"), 'Finder refresh interval is derived from the seconds setting at runtime');
+  assert.ok(diffBundle.includes("initialSetting('file_explorer.refresh_seconds', 5)"), '#DOIT.52 R5: JS Finder refresh fallback matches the server default');
   assert.ok(/function fileExplorerRefreshMsFromValues\([\s\S]*Math\.max\(1,\s*Math\.min\(60,\s*seconds\)\)\s*\* 1000 \+ 1/.test(diffBundle), 'Finder refresh seconds convert through one shared odd-millisecond polling helper');
   assert.ok(/function fileExplorerRefreshMsFromSettings\(\)[\s\S]*fileExplorerRefreshMsFromValues\([\s\S]*file_explorer\.refresh_seconds[\s\S]*file_explorer\.refresh_ms/.test(diffBundle), 'Finder refresh setting reads seconds with legacy millisecond fallback through the shared helper');
   assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
@@ -4203,7 +4204,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.about-brand-yo\s*\{[\s\S]*animation:\s*yolo-marker-rotate/.test(preferencesCss), 'About YO glyph spins with the shared YOLO marker animation');
   assert.ok(/\.about-brand-yo\s*\{[\s\S]*background:\s*var\(--pane-tab-yolo-bg\)/.test(preferencesCss), 'About YO glyph follows the active theme color');
   const brandCss = fs.readFileSync('static/brand.css', 'utf8');
-  assert.ok(/--brand-primary-green:\s*var\(--active-control-bg/.test(brandCss), 'topbar YOLOmux wordmark follows the active theme color');
+  assert.ok(/--brand-primary-green:\s*var\(--brand-green,\s*#76b900\)/.test(brandCss), 'topbar YOLOmux LO stays brand green regardless of active color');
+  assert.equal(/--brand-primary-green:\s*var\(--active-control-bg/.test(brandCss), false, 'topbar YOLOmux LO is not routed through the active color preference');
   assert.equal(api.testElementForId('closeModal').textContent || 'X', 'X', 'About modal close button is an X');
   assert.ok(fs.readFileSync('yolomux_lib/web.py', 'utf8').includes('<button id="closeModal" title="Close" aria-label="Close">X</button>'), 'HTML shell renders the modal close button as X');
   // DOIT.8: File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
@@ -4342,8 +4344,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(finderSyncBody.includes('const fileSyncPath = explicit && isFileEditorItem(preferredItem) ? fileItemPath(preferredItem) : \'\';'), 'explicit editor clicks become Finder Sync file targets');
   assert.ok(/const syncItem = fileSyncPath \? preferredItem : \(isTmuxSession\(preferredItem\) \? preferredItem : explicitSession\);[\s\S]*if \(!syncItem \|\| \(!fileSyncPath && syncItem !== explicitSession\)\) return/.test(finderSyncBody), 'Finder Sync accepts clicked editor files without requiring a tmux target');
   assert.ok(finderSyncBody.includes('fileExplorerSyncPlanForFile(fileSyncPath)'), 'Finder Sync can plan from an explicit editor file');
-  assert.ok(finderSyncBody.includes('syncFileExplorerRootToActiveFile(fileSyncPath)'), 'Finder Sync can move the root to a clicked editor file');
+  assert.ok(finderSyncBody.includes('syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})'), 'Finder Sync can move the root to a clicked editor file and explicit sync forces a re-apply');
+  assert.ok(finderSyncBody.includes('(explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))'), '#DOIT.52 B1: automatic Finder Sync skips a repeated already-applied plan');
   assert.equal(finderSyncBody.includes('syncFileExplorerToActiveTab(preferredItem'), false, 'fixed Finder mode never follows explicit tmux/editor clicks');
+  assert.ok(source.includes('function fileExplorerSyncPlanKey(plan)'), '#DOIT.52 R3: Finder Sync has one shared sync-plan key helper');
+  assert.ok(source.includes('function fileExplorerSyncPlanAlreadyApplied(plan)'), '#DOIT.52 R3/B1: Finder Sync has one shared already-applied helper');
+  assert.ok(source.includes('function markFileExplorerSyncPlanApplied(plan)'), '#DOIT.52 R3/B1: Finder Sync marks successful plan application');
   const finderCandidatesStart = source.indexOf('function finderCandidateItems(');
   const finderCandidatesEnd = source.indexOf('function firstFinderPath(', finderCandidatesStart);
   const finderCandidatesBody = source.slice(finderCandidatesStart, finderCandidatesEnd);
@@ -6741,9 +6747,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const layoutSrc = fs.readFileSync('static/yolomux.js', 'utf8');
   const applyBody = layoutSrc.slice(layoutSrc.indexOf('function applyLayoutSlots'), layoutSrc.indexOf('function updateActiveSessionParam'));
   assert.equal(/refreshTranscripts\(\);/.test(applyBody), false, '#DOIT.9 S1: applyLayoutSlots does not call refreshTranscripts() (no server re-poll on a local layout change)');
-  // S2: applyLayoutSlots shape-gates the expensive rebuilds and uses the in-place swap on same shape.
-  assert.ok(/layoutShapeSignature\(layoutSlots\)[\s\S]*?syncActivePanelsInPlace\(\)/.test(applyBody), '#DOIT.9 S2: same-shape changes take the in-place branch');
-  assert.ok(/renderSessionButtons\(\);\s*renderPanels\(previousActive/.test(applyBody), '#DOIT.9 S2: shape changes still fall through to the full rebuild');
+  // S2/DOIT.52: applyLayoutSlots delegates the shape decision to the shared scheduler.
+  const schedulerBody = layoutSrc.slice(layoutSrc.indexOf('function performLayoutRender'), layoutSrc.indexOf('function updateActiveSessionParam'));
+  assert.ok(/requestLayoutRender\(\{[\s\S]*?prevShape[\s\S]*?nextShape: layoutShapeSignature\(layoutSlots\)/.test(applyBody), '#DOIT.52 R1: applyLayoutSlots sends prev/next shape to the shared layout scheduler');
+  assert.ok(/function requestLayoutRender[\s\S]*?pendingLayoutRender = mergePendingLayoutRender/.test(schedulerBody), '#DOIT.52 R1/R2: scheduler stores structured deferred render state during drag');
+  assert.ok(/layoutRenderCanUseCheap\(renderRequest\)[\s\S]*?syncActivePanelsInPlace\(\)/.test(schedulerBody), '#DOIT.9 S2/DOIT.52: same-shape changes take the in-place branch');
+  assert.ok(/renderSessionButtons\(\);\s*renderPanels\(previousActive/.test(schedulerBody), '#DOIT.9 S2/DOIT.52: shape changes still fall through to the full rebuild');
   assert.ok(layoutSrc.includes('function syncActivePanelsInPlace'), '#DOIT.9 S2: the in-place panel swap exists');
   // fix 6: the markdown preview render is guarded by a path+content signature.
   assert.ok(/container\._previewPath !== path \|\| container\._previewText !== text/.test(layoutSrc), '#DOIT.9 fix 6: renderEditorPreviewPane skips re-rendering unchanged markdown');
@@ -7182,12 +7191,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   api.renderPaneTabStrips();
   assert.equal(api.pendingTabStripRenderForTest(), true, '#30: tab-strip re-render is DEFERRED during a drag (node not replaced)');
   assert.equal(api.focusPreferencesSearch(), false, '#30: search focus is suppressed during a drag');
-  // DOIT.6 #114: a full renderPanels() pools every panel + clears the grid, which detaches the
-  // dragged node and aborts the native drag. It must defer to pendingPanelsRender mid-drag, NOT
+  // DOIT.6 #114 / DOIT.52: a full renderPanels() pools every panel + clears the grid, which detaches the
+  // dragged node and aborts the native drag. It must defer to a pendingLayoutRender request mid-drag, NOT
   // touch the grid. (If the guard were missing this call would throw on the absent grid element.)
   api.setPendingPanelsRenderForTest(false);
   api.renderPanels();
   assert.equal(api.pendingPanelsRenderForTest(), true, '#114: full panel re-render is DEFERRED during a drag (grid not wiped)');
+  assert.equal(api.pendingLayoutRenderForTest().forceFull, true, '#DOIT.52 R2: renderPanels stores an explicit forced-full render request');
   api.setDragSessionForTest(null);
   const strip3 = tabStrip([tabElement('A', 100, 100), tabElement('B', 203, 100), tabElement('C', 306, 100)]);
   assert.equal(api.paneTabDropPlacement(strip3, {clientX: 330, clientY: 8}, 'A').index, 2, '#30: 3-tab L->R drop on the far tab lands after it');
@@ -7204,10 +7214,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/\.topbar:hover,\s*\.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'topbar bg matches the green tab strip on hover/focus');
   assert.ok(/body\.theme-light \.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), 'light-mode topbar is neutral at rest');
   assert.ok(/body\.theme-light \.topbar:hover,\s*body\.theme-light \.topbar:focus-within\s*\{[^}]*background:\s*var\(--pane-tab-strip-bg\)/.test(dragCss), 'light-mode topbar uses the green tab-strip bg on hover/focus');
-  // DOIT.6 #114: the dragSession guard MUST precede movePanelsToPool()/grid.innerHTML in renderPanels,
-  // and endSessionDrag MUST flush the deferred render after clearing dragSession.
-  assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,400}?if \(dragSession != null\) \{ pendingPanelsRender = true; return; \}[\s\S]{0,40}movePanelsToPool\(\)/.test(dragSrc), '#114: renderPanels defers (sets pendingPanelsRender) before pooling panels / clearing the grid');
-  assert.ok(/dragSession = null;[\s\S]*?if \(pendingPanelsRender\) \{ pendingPanelsRender = false; renderPanels\(\); \}/.test(dragSrc), '#114: endSessionDrag flushes the deferred panel re-render after clearing dragSession');
+  // DOIT.6 #114 / DOIT.52: the dragSession guard MUST precede movePanelsToPool()/grid.innerHTML in
+  // renderPanels, and endSessionDrag MUST flush via the scheduler instead of direct renderPanels().
+  assert.ok(/function renderPanels\([^)]*\)\s*\{[\s\S]{0,700}?if \(dragSession != null\) \{[\s\S]*?requestLayoutRender\(\{[\s\S]*?forceFull: true[\s\S]*?return;[\s\S]{0,80}movePanelsToPool\(\)/.test(dragSrc), '#114/#52: renderPanels defers a structured forced-full request before pooling panels / clearing the grid');
+  const endDragStart = dragSrc.indexOf('function endSessionDrag');
+  const endDragBody = dragSrc.slice(endDragStart, endDragStart + 1200);
+  assert.ok(/dragSession = null;[\s\S]*?flushPendingLayoutRender\(\);/.test(endDragBody), '#DOIT.52 R1/R2: endSessionDrag flushes through the shared layout scheduler after clearing dragSession');
+  assert.equal(/pendingPanelsRender/.test(endDragBody), false, '#DOIT.52 R2: endSessionDrag no longer uses the old boolean pendingPanelsRender flag');
 }
 
 {

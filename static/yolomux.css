@@ -2522,6 +2522,10 @@ body.theme-light .branch-link {
   color: #78dd6f;
   font-weight: 800;
 }
+.changes-diff-add-neutral {
+  color: var(--muted);
+  font-weight: 800;
+}
 .changes-diff-remove {
   color: var(--bad);
   font-weight: 800;
@@ -3173,6 +3177,9 @@ body.theme-light .changes-repo-title {
 }
 body.theme-light .changes-diff-add {
   color: #166534;
+}
+body.theme-light .changes-diff-add-neutral {
+  color: var(--muted);
 }
 body.theme-light .changes-diff-remove {
   color: #b91c1c;
