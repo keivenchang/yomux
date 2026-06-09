@@ -6228,8 +6228,19 @@ async function saveFileExplorerRootMode(mode) {
   } catch (_) {}
 }
 
+// Short-TTL cache of directory listings. A live Differ/Finder of a busy session re-renders many times a
+// second and each render walks every expanded dir, which without this fans out into a /api/fs/list storm
+// (one request per dir per render — the cause of the 7778 fs/list loop). Repeated fetches of the same dir
+// within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
+const fileExplorerDirListingCache = new Map();
+
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
+  const dirListingTtlMs = Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
+  if (options.fresh !== true && dirListingTtlMs > 0) {
+    const cached = fileExplorerDirListingCache.get(root);
+    if (cached && Date.now() - cached.at < dirListingTtlMs) return cached.entries;
+  }
   try {
     hydrateFileExplorerRepoInfoCache();
     const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(root)}`);
@@ -6239,6 +6250,7 @@ async function fetchDirectory(path, options = {}) {
     cacheFileExplorerRepoInfoEntries(root, entries);
     markNewDirectoryEntries(root, entries);
     if (options.recordSignature !== false) recordDirectorySignature(root, entries);
+    setLimitedMapEntry(fileExplorerDirListingCache, root, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
     return entries;
   } catch (err) {
     const status = Number(err?.status) || 0;
@@ -9809,6 +9821,10 @@ async function reloadOpenFileFromDisk(path, options = {}) {
 async function refreshOpenFilesIfChanged() {
   for (const [path, state] of Array.from(openFiles.entries())) {
     if (!state || state.loading) continue;
+    // Poll on-disk staleness only for the file editor that is the visible/active tab; a file sitting in a
+    // background tab does not need ~1/sec polling (it is re-checked when activated). Dirty files are always
+    // polled — external-change conflict detection and autosave must never be skipped just because hidden.
+    if (!state.dirty && !itemIsActivePaneTab(fileEditorItemPrefix + path)) continue;
     const fetched = await fetchFileEntryStatus(path);
     const entry = fetched.entry;
     if (!entry) {
@@ -9867,7 +9883,7 @@ async function refreshFileExplorerIfChanged() {
   const entriesByDir = new Map();
   const signaturesByDir = new Map();
   for (const directory of directories) {
-    const entries = await fetchDirectory(directory, {recordSignature: false});
+    const entries = await fetchDirectory(directory, {recordSignature: false, fresh: true});
     if (!entries) continue;
     const normalizedDirectory = normalizeDirectoryPath(directory);
     entriesByDir.set(normalizedDirectory, entries);
@@ -16684,6 +16700,7 @@ function preferenceSections() {
       {path: 'file_explorer.index_refresh_seconds', label: t('pref.file_explorer.index_refresh_seconds.label'), type: 'number', min: 0, max: 3600, step: 10, suffix: 's', help: t('pref.file_explorer.index_refresh_seconds.help')},
       {path: 'file_explorer.companion_dirs', label: t('pref.file_explorer.companion_dirs.label'), type: 'list', help: t('pref.file_explorer.companion_dirs.help')},
       {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
+      {path: 'file_explorer.dir_cache_ms', label: t('pref.file_explorer.dir_cache_ms.label'), type: 'number', min: 0, max: 10000, step: 100, suffix: 'ms', help: t('pref.file_explorer.dir_cache_ms.help')},
       {path: 'file_explorer.new_entry_highlight_ms', label: t('pref.file_explorer.new_entry_highlight_ms.label'), type: 'number', min: 0, max: 600000, step: 1000, suffix: 'ms', help: t('pref.file_explorer.new_entry_highlight_ms.help')},
     ]},
     {title: t('pref.section.uploads'), items: [
@@ -16703,12 +16720,12 @@ function preferenceSections() {
       {path: 'performance.tab_popover_show_delay_ms', label: t('pref.performance.tab_popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.tab_popover_show_delay_ms.help')},
       {path: 'performance.tab_popover_follow_delay_ms', label: t('pref.performance.tab_popover_follow_delay_ms.label'), type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: t('pref.performance.tab_popover_follow_delay_ms.help')},
       {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: t('pref.performance.remote_resize_delay_ms.help')},
-      {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
     ]},
     {title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
     ]},
     {id: 'yolo', title: t('pref.section.yolo'), items: [
+      {path: 'performance.auto_approve_interval_seconds', label: t('pref.performance.auto_approve_interval_seconds.label'), type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's', help: t('pref.performance.auto_approve_interval_seconds.help')},
       {path: 'yolo.rule_file_path', label: t('pref.yolo.rule_file_path.label'), type: 'text', action: 'open-yolo-rule', wide: true, help: t('pref.yolo.rule_file_path.help')},
       {path: 'yolo.dry_run', label: t('pref.yolo.dry_run.label'), type: 'boolean', help: t('pref.yolo.dry_run.help')},
       {path: 'yolo.prompt_source', label: t('pref.yolo.prompt_source.label'), type: 'radio', choices: [
@@ -24303,6 +24320,10 @@ function startTerminal(session) {
     disableStdin: readOnlyMode,
     theme: terminalThemeForSession(session),
     minimumContrastRatio: terminalMinimumContrastRatio(),
+    // Alt-screen TUIs (claude, vim, less) enable mouse reporting, which makes xterm send drags to the app
+    // instead of selecting text — so Ctrl-C/Cmd-C has nothing to copy. Option-click (Mac) forces a text
+    // selection anyway; on Linux/Windows hold Shift while dragging (xterm's built-in bypass).
+    macOptionClickForcesSelection: true,
   });
   term.open(container);
   // DOIT.6 #32: match the container bg to the terminal theme so every pane shares one white.

@@ -1334,6 +1334,10 @@ function startTerminal(session) {
     disableStdin: readOnlyMode,
     theme: terminalThemeForSession(session),
     minimumContrastRatio: terminalMinimumContrastRatio(),
+    // Alt-screen TUIs (claude, vim, less) enable mouse reporting, which makes xterm send drags to the app
+    // instead of selecting text — so Ctrl-C/Cmd-C has nothing to copy. Option-click (Mac) forces a text
+    // selection anyway; on Linux/Windows hold Shift while dragging (xterm's built-in bypass).
+    macOptionClickForcesSelection: true,
   });
   term.open(container);
   // DOIT.6 #32: match the container bg to the terminal theme so every pane shares one white.

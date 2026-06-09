@@ -398,6 +398,8 @@
   "pref.editor.blame_all_lines.label": "标注所有行",
   "pref.file_explorer.companion_dirs.help": "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Add repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates.",
   "pref.file_explorer.companion_dirs.label": "Companion directories",
+  "pref.file_explorer.dir_cache_ms.help": "How long YOLOmux reuses a directory listing (milliseconds) so a busy live diff or tree does not re-list every directory on every render. 0 disables the cache.",
+  "pref.file_explorer.dir_cache_ms.label": "Directory listing cache",
   "pref.file_explorer.image_open_mode.help": "“同标签页”在浏览时重用一个图像查看器。“新标签页”为每个文件保留一个图像标签页。",
   "pref.file_explorer.image_open_mode.label": "图像打开模式",
   "pref.file_explorer.image_preview_max_px.help": "文件浏览器中悬停预览的最大宽度和高度。",

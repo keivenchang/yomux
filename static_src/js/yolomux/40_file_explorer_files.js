@@ -46,8 +46,19 @@ async function saveFileExplorerRootMode(mode) {
   } catch (_) {}
 }
 
+// Short-TTL cache of directory listings. A live Differ/Finder of a busy session re-renders many times a
+// second and each render walks every expanded dir, which without this fans out into a /api/fs/list storm
+// (one request per dir per render — the cause of the 7778 fs/list loop). Repeated fetches of the same dir
+// within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
+const fileExplorerDirListingCache = new Map();
+
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
+  const dirListingTtlMs = Math.max(0, numberSetting('file_explorer.dir_cache_ms', 1500) || 0);
+  if (options.fresh !== true && dirListingTtlMs > 0) {
+    const cached = fileExplorerDirListingCache.get(root);
+    if (cached && Date.now() - cached.at < dirListingTtlMs) return cached.entries;
+  }
   try {
     hydrateFileExplorerRepoInfoCache();
     const payload = await apiFetchJson(`/api/fs/list?path=${encodeURIComponent(root)}`);
@@ -57,6 +68,7 @@ async function fetchDirectory(path, options = {}) {
     cacheFileExplorerRepoInfoEntries(root, entries);
     markNewDirectoryEntries(root, entries);
     if (options.recordSignature !== false) recordDirectorySignature(root, entries);
+    setLimitedMapEntry(fileExplorerDirListingCache, root, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
     return entries;
   } catch (err) {
     const status = Number(err?.status) || 0;
@@ -3627,6 +3639,10 @@ async function reloadOpenFileFromDisk(path, options = {}) {
 async function refreshOpenFilesIfChanged() {
   for (const [path, state] of Array.from(openFiles.entries())) {
     if (!state || state.loading) continue;
+    // Poll on-disk staleness only for the file editor that is the visible/active tab; a file sitting in a
+    // background tab does not need ~1/sec polling (it is re-checked when activated). Dirty files are always
+    // polled — external-change conflict detection and autosave must never be skipped just because hidden.
+    if (!state.dirty && !itemIsActivePaneTab(fileEditorItemPrefix + path)) continue;
     const fetched = await fetchFileEntryStatus(path);
     const entry = fetched.entry;
     if (!entry) {
@@ -3685,7 +3701,7 @@ async function refreshFileExplorerIfChanged() {
   const entriesByDir = new Map();
   const signaturesByDir = new Map();
   for (const directory of directories) {
-    const entries = await fetchDirectory(directory, {recordSignature: false});
+    const entries = await fetchDirectory(directory, {recordSignature: false, fresh: true});
     if (!entries) continue;
     const normalizedDirectory = normalizeDirectoryPath(directory);
     entriesByDir.set(normalizedDirectory, entries);

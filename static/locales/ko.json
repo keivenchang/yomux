@@ -398,6 +398,8 @@
   "pref.editor.blame_all_lines.label": "모든 줄에 blame 표시",
   "pref.file_explorer.companion_dirs.help": "Extra directories always included when computing per-session repo status (branch, dirty count, ahead/behind), one path per line. Add repos that sit alongside your session workdirs but are rarely the active pane cwd — e.g. ~/dynamo/frontend-crates.",
   "pref.file_explorer.companion_dirs.label": "Companion directories",
+  "pref.file_explorer.dir_cache_ms.help": "How long YOLOmux reuses a directory listing (milliseconds) so a busy live diff or tree does not re-list every directory on every render. 0 disables the cache.",
+  "pref.file_explorer.dir_cache_ms.label": "Directory listing cache",
   "pref.file_explorer.image_open_mode.help": "같은 탭은 탐색 중 하나의 이미지 뷰어를 재사용합니다. 새 탭은 파일마다 하나의 이미지 탭을 유지합니다.",
   "pref.file_explorer.image_open_mode.label": "이미지 열기 모드",
   "pref.file_explorer.image_preview_max_px.help": "Finder/파일 탐색기의 호버 미리보기 최대 너비 및 높이입니다.",

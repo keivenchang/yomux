@@ -106,7 +106,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "indexed_dirs": [],
         "index_refresh_seconds": 120,
         "companion_dirs": [],
-        "refresh_seconds": 1,
+        "refresh_seconds": 5,
+        "dir_cache_ms": 1500,
         "new_entry_highlight_ms": 60000,
     },
     "uploads": {
@@ -210,6 +211,7 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("file_explorer", "image_preview_max_px"): (120, 1200),
     ("file_explorer", "index_refresh_seconds"): (0, 3600),
     ("file_explorer", "refresh_seconds"): (1, 60),
+    ("file_explorer", "dir_cache_ms"): (0, 10000),
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
     ("uploads", "max_bytes"): (1 * 1024 * 1024, 512 * 1024 * 1024),
 }
@@ -319,6 +321,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "image_preview_max_px"): "Pixels, 120-1200. Maximum width and height for hover image previews.",
     ("file_explorer", "quick_access_paths"): "List of paths for File Explorer shortcuts.",
     ("file_explorer", "refresh_seconds"): "Seconds, 1-60. Refreshes changed File Explorer directories and open files; client-side jitter avoids synchronized polling.",
+    ("file_explorer", "dir_cache_ms"): "Milliseconds, 0-10000. Reuse a directory listing for this long so a busy live diff/tree does not re-list every directory on every render. 0 disables the cache.",
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
     ("uploads", "max_bytes"): "Bytes, 1048576-536870912. Maximum buffered browser upload size. Prefer rsync for large files.",
