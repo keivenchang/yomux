@@ -7143,6 +7143,27 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(!api.commandPaletteItems().some(item => item.group === 'Tabs'), '#7: @ stays reserved for symbols');
 }
 
+// S2 (DOIT.51) BEHAVIORAL PROOF: a file that is an open tab appears ONCE in the on-type palette — as its
+// Tabs row — with its Recent/Files duplicate suppressed. Without the dedup it would appear twice.
+{
+  const path = '/repo/app/notes.py';
+  const enc = encodeURIComponent('file:' + path);   // file%3A%2Frepo%2Fapp%2Fnotes.py
+  // open the file as a real tab (slot3) via the layout URL — same shape as the passing test above
+  const search = `?sessions=files,${enc},5&layout=row@20.7(slot2,row@42(slot3,slot1))&tabs=slot2:files;slot3:${enc};slot1:5`;
+  const api = loadYolomux(search, ['5']);
+  const panes = api.serialize(api.currentSlots()).panes;
+  assert.ok(Object.values(panes).some(p => (p.tabs || []).includes('file:' + path)), 'S2 setup: the file is an open tab');
+  // the SAME file is also recently-open (Recent) and a search candidate (Files) — both would dupe it
+  api.setOpenFileStateForTest(path, {name: 'notes.py'});
+  api.setFileQuickOpenCandidatesForTest('/repo/app', [{name: 'notes.py', path, relative_path: 'notes.py'}]);
+  api.setCommandPaletteStateForTest('files', 'notes');
+  const items = api.commandPaletteItems();
+  const fileGroupRows = items.filter(it => it.category === 'file' && (it.searchFields?.[1] || it.detail) === path);
+  const tabRows = items.filter(it => it.category === 'action' && api.fileItemPath(it.targetItem || '') === path);
+  assert.equal(fileGroupRows.length, 0, 'S2: the open file is NOT duplicated as a Recent/Files row');
+  assert.ok(tabRows.length >= 1, 'S2: the open file still appears as its Tabs row');
+}
+
 {
   // DOIT.6 #8-#13: renames, toggles, theme propagation, README preview.
   const api = loadYolomux('', ['1']);
@@ -7611,4 +7632,5 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes("dragTimingMark('startSessionDrag:begin')") && source.includes("dragTimingMark('startSessionDrag:end')"), 'S14: startSessionDrag is bracketed by timing marks');
   assert.ok(source.includes("dragTimingMarkOnce('dragMeasureStrip:first')") && source.includes("dragTimingMarkOnce('paneTabDropPlacement:first')"), 'S14: first strip-measure and drop-placement are marked');
   assert.ok(source.includes('dragTimingReport()'), 'S14: the per-bucket report fires at drag end');
+  assert.ok(source.includes('function showDragTimingOverlay(') && source.includes("el.className = 'drag-timing-overlay'"), 'S14: a copyable on-page timing overlay (no DevTools) is rendered at drag end');
 }

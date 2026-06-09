@@ -12949,14 +12949,40 @@ function dragTimingMarkOnce(label) {
 function dragTimingReport() {
   if (dragTimingMarks && dragTimingMarks.length >= 2) {
     const first = dragTimingMarks[0].t;
-    console.table(dragTimingMarks.map((mark, i) => ({
+    const rows = dragTimingMarks.map((mark, i) => ({
       mark: mark.label,
       deltaMs: i ? Number((mark.t - dragTimingMarks[i - 1].t).toFixed(1)) : 0,
       sinceStartMs: Number((mark.t - first).toFixed(1)),
-    })));
+    }));
+    console.table(rows);
+    showDragTimingOverlay(rows);   // copyable on-page readout — no DevTools needed
   }
   dragTimingMarks = null;
   dragTimingSeen.clear();
+}
+
+// S14 (DOIT.51): render the last drag's timing into a fixed, click-to-select-all box so it can be
+// copy-pasted (or screenshotted) back without opening DevTools. Created lazily; only the flag-gated
+// dragTimingReport calls it, so it never appears in normal use.
+function showDragTimingOverlay(rows) {
+  let el = document.getElementById('drag-timing-overlay');
+  if (!el) {
+    el = document.createElement('pre');
+    el.id = 'drag-timing-overlay';
+    el.className = 'drag-timing-overlay';
+    el.title = 'drag timing (flag: yolomux.debugDragTiming) — click to select, then copy';
+    el.addEventListener('click', () => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    document.body.appendChild(el);
+  }
+  const width = Math.max(...rows.map(row => row.mark.length));
+  el.textContent = ['drag timing (ms) — click to select, copy, paste back:',
+    ...rows.map(row => `${row.mark.padEnd(width)}  +${String(row.deltaMs).padStart(7)}  total ${String(row.sinceStartMs).padStart(7)}`)].join('\n');
 }
 
 function startSessionDrag(event, session, sourceSlot = null) {

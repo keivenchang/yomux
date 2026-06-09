@@ -1847,6 +1847,27 @@ body.theme-light .ci-indicator.branch-indicator {
   border-inline-start: 1px solid var(--active-control-soft-border);
   border-top: 1px solid var(--active-control-soft-border);
 }
+/* S14 (DOIT.51): opt-in drag-timing readout — a copyable on-page box so the timing can be captured
+   without DevTools. Only shown after a tab drag while the yolomux.debugDragTiming flag is set; click
+   it to select-all, then copy. Theme-aware (no hardcoded colors). */
+.drag-timing-overlay {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: var(--z-terminal-popover);
+  max-width: 460px;
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--active-control-soft-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font: 11px/1.4 var(--mono-font);
+  white-space: pre;
+  user-select: text;
+  cursor: text;
+}
 /* Light mode: use a neutral card with the active accent only as border/labels. */
 body.theme-light .session-popover {
   color: var(--pc-control-fg);
