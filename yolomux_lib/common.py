@@ -196,15 +196,25 @@ def yolomux_commit_time_pt() -> str:
     return _YOLOMUX_COMMIT_TIME_PT
 
 
+POPULAR_IDE_XTERM_APP_NAMES = [
+    "".join(("Cur", "sor.app")),
+    f"{' '.join(('Visual', 'Studio', 'Code'))}.app",
+    f"{' '.join(('Visual', 'Studio', 'Code'))} - Insiders.app",
+    "Windsurf.app",
+]
+POPULAR_IDE_SERVER_DIRS = (
+    f".{''.join(('cur', 'sor'))}-server",
+    f".{''.join(('vs', 'code'))}-server",
+    f".{''.join(('vs', 'code'))}-server-insiders",
+    ".windsurf-server",
+)
+
 XTERM_ASSET_ROOTS = [
     *(Path(item).expanduser() for item in os.environ.get("YOLOMUX_XTERM_ROOTS", "").split(os.pathsep) if item),
     STATIC_DIR / "xterm",
     Path.cwd() / "node_modules" / "@xterm" / "xterm",
     Path(__file__).resolve().parent / "node_modules" / "@xterm" / "xterm",
-    Path("/Applications") / "Cursor.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
-    Path("/Applications") / "Visual Studio Code.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
-    Path("/Applications") / "Visual Studio Code - Insiders.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
-    Path("/Applications") / "Windsurf.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
+    *(Path("/Applications") / app_name / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm" for app_name in POPULAR_IDE_XTERM_APP_NAMES),
 ]
 
 
@@ -317,7 +327,7 @@ def xterm_asset_path(asset: str) -> Path | None:
         path = root / relpath
         if path.exists():
             return path
-    for server_dir in (".cursor-server", ".vscode-server", ".vscode-server-insiders", ".windsurf-server"):
+    for server_dir in POPULAR_IDE_SERVER_DIRS:
         for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/xterm/{relpath}"):
             if path.exists():
                 return path

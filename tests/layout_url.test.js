@@ -154,6 +154,7 @@ class TestElement {
     if (dataPaneTabMatch) {
       return this.classList.contains('pane-tab') && this.dataset.paneTab === dataPaneTabMatch[1];
     }
+    if (selector === '[data-window-dir]') return this.dataset.windowDir !== undefined;
     if (selector === '[role="tree"]') return this.attributes.role === 'tree';
     if (selector === '.file-explorer-tree-panel') return this.classList.contains('file-explorer-tree-panel');
     if (selector === '.file-tree-row[data-path]') return this.classList.contains('file-tree-row') && Boolean(this.dataset.path);
@@ -368,6 +369,7 @@ globalThis.__layoutTestApi = {
   emptyLayoutSlots,
   editorNav,
   recordEditorNav,
+  cursorStyleFileReference,
   fileEditorPaneTabHtml,
   fileQuickOpenItem,
   fileQuickOpenItems,
@@ -376,6 +378,7 @@ globalThis.__layoutTestApi = {
   fileQuickOpenRootForFile,
   fileQuickOpenRootForSearch,
   fileQuickOpenRootsForSearch,
+  fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
   fileExplorerDirectoryIsIndexed,
   fileExplorerIndexBadgeText,
@@ -532,6 +535,7 @@ globalThis.__layoutTestApi = {
   bindClipboardPasteForTest: bindClipboardPaste,
   documentListenersForTest(type) { return [...(document.__listeners.get(type) || [])]; },
   commandPaletteItemScore,
+  commandPaletteSearchQuery,
   commandPaletteCommandItems,
   commandPaletteItems,
   dedupeFileSearchResults,
@@ -568,6 +572,18 @@ globalThis.__layoutTestApi = {
   replaceTmuxSessionInClient,
   normalizedSessionOrder,
   normalizeLayoutSlots,
+  isPinnableTab,
+  tabIsPinned,
+  orderPaneTabs,
+  pinnedTabIconHtml,
+  setTabPinned,
+  toggleTabPinned,
+  toggleActiveTabPinned,
+  pinnedTabsForTest() { return [...pinnedTabItems]; },
+  setPinnedTabsForTest(items) {
+    pinnedTabItems = normalizePinnedTabItems(items || []);
+    writeStoredPinnedTabs();
+  },
   paneIsPlaceholder,
   panelControlsHtml,
   platformWindowControlClass,
@@ -581,12 +597,17 @@ globalThis.__layoutTestApi = {
   paneTabPopoverItemToRestore,
   clearPaneTabDropPreview,
   showSessionContextMenu,
+  showTabContextMenu,
   bodyChildren() { return document.body.children; },
   defaultLayoutSlots,
   layoutShapeSignature,
   dedentSelectionText,
   dropIntentForEvent,
   dropIntentAllowsSession,
+  paneSwapAllowed,
+  paneSwapIntentForEvent,
+  paneSwapIntentAllowed,
+  swapPaneSlots,
   directoryEntriesSignature,
   editorWrapValue,
   editorViewModeFor,
@@ -756,6 +777,9 @@ globalThis.__layoutTestApi = {
   clearDropPreview,
   shouldPreserveSourceSlotForSplit,
   startSessionDrag,
+  startPaneDrag,
+  paneDragPayload,
+  endSessionDrag,
   startFileTreeDrag,
   stopCustomDragPreview,
   syncInitialLayoutUrl,
@@ -774,6 +798,9 @@ globalThis.__layoutTestApi = {
   updateActiveSessionParam,
   paneTabDropIndex,
   paneTabDropPlacement,
+  dockviewTabDropWouldNoop,
+  dockviewTabEdgeReorderIntent,
+  windowStepButtonFromEvent,
   tabMenuItems,
   sortTabItemsForMenu,
   setTabsMenuSortMode,
@@ -783,6 +810,9 @@ globalThis.__layoutTestApi = {
   windowStepVisibility,
   markdownSyntaxHtml,
   markdownTextWithSourceAnchors,
+  markdownTaskLineEntries,
+  markdownTextWithTaskLineToggled,
+  markdownPreviewBlockedTagsForTest() { return Array.from(MARKDOWN_PREVIEW_BLOCKED_TAGS); },
   moveSessionToSlot,
   openFileEditorPane,
   onFileTreeRowClick,
@@ -1315,9 +1345,20 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(anchoredMarkdown.includes('markdown-source-anchor'), false, 'Markdown source is not mutated before marked parses GFM tables and rules');
   assert.ok(anchoredMarkdown.includes('|---|---|'), 'GFM table delimiter rows stay intact before parsing');
   assert.ok(anchoredMarkdown.includes('\n---'), 'thematic breaks stay intact before parsing');
+  assert.deepStrictEqual(canonical(api.markdownTaskLineEntries('- [ ] Open\n- [x] Done\ntext')), [
+    {line: 1, checked: false},
+    {line: 2, checked: true},
+  ], 'Markdown task lines are detected in source order for Preview checkbox binding');
+  assert.equal(api.markdownTextWithTaskLineToggled('- [ ] Open\n- [x] Done', 1, true), '- [x] Open\n- [x] Done', 'Preview can toggle an unchecked task line to checked source');
+  assert.equal(api.markdownTextWithTaskLineToggled('- [ ] Open\n- [x] Done', 2, false), '- [ ] Open\n- [ ] Done', 'Preview can toggle a checked task line to unchecked source');
+  assert.equal(api.markdownTextWithTaskLineToggled('plain text', 1, true), null, 'Preview task toggles reject non-task source lines');
+  assert.equal(api.markdownPreviewBlockedTagsForTest().includes('input'), false, 'Markdown sanitizer preserves checkbox inputs for task-list Preview controls');
+  assert.ok(/bindMarkdownTaskCheckboxes\(container, text, markdownPath\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown Preview wires rendered task checkboxes after parsing');
+  assert.ok(/tagName === 'input'[\s\S]*getAttribute\('type'\)[\s\S]*checkbox/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown sanitizer removes non-checkbox inputs while allowing task checkboxes');
   const editorCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(editorCss.includes('.markdown-body th { background: var(--panel2); }'), 'Markdown table headers get a readable preview background');
   assert.ok(editorCss.includes('.markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }'), 'Markdown thematic breaks render as preview rules');
+  assert.ok(editorCss.includes('.markdown-body li.task-list-item > input[type="checkbox"]'), 'Markdown Preview task checkboxes have visible interactive styling');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body[\s\S]*background:\s*#ffffff[\s\S]*color:\s*#111827/.test(editorCss), 'vanilla preview uses a neutral white email-friendly surface');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body h1[\s\S]*color:\s*#111827[\s\S]*background:\s*transparent/.test(editorCss), 'vanilla preview headings do not use YOLOmux accent coloring');
   assert.ok(/\.file-editor-preview-pane(?:-panel)?\.vanilla-preview-body a[\s\S]*color:\s*#0645ad/.test(editorCss), 'vanilla preview links use a conventional blue instead of scheme colors');
@@ -1935,6 +1976,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   tab.dataset.popoverHoverState = 'closing';
   tab.querySelector = selector => selector.includes('session-popover') ? popover : null;
   assert.equal(api.paneTabShouldPreserve(tab), true);
+  const detachedTab = new TestElement('detached-tab');
+  const detachedPopover = new TestElement('detached-popover');
+  detachedTab.classList.add('pane-tab', 'dockview-pane-tab', 'popover-open');
+  detachedTab.dataset.paneTab = '1';
+  detachedTab.dataset.popoverHoverState = 'open';
+  detachedTab.__yolomuxDetachedPopover = detachedPopover;
+  detachedTab.querySelector = () => null;
+  assert.equal(api.paneTabShouldPreserve(detachedTab), true, 'Dockview detached popovers keep their tab renderer from rebuilding');
 
   const fresh = new TestElement('fresh');
   fresh.className = 'pane-tab active';
@@ -2051,6 +2100,18 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const evicted = api.tabsToEvictForCap(withDirty, '5');
   assert.ok(!evicted.includes(editorItem), 'a dirty/unsaved editor tab is never auto-closed');
   assert.ok(evicted.includes('1'), 'the oldest non-dirty tab is evicted instead of the dirty editor');
+  api.setPinnedTabsForTest(['1']);
+  assert.deepStrictEqual([...api.paneStateWithTabs(['2', '1', '3'], '3').tabs], ['1', '2', '3'], 'pinned tabs normalize to the front of their pane');
+  assert.deepStrictEqual([...api.orderPaneTabs(['2', '1', '3'])], ['1', '2', '3'], 'shared tab-order helper preserves pinned-first ordering');
+  const rawPinnedSlots = api.emptyLayoutSlots();
+  rawPinnedSlots[api.layoutTreeKey] = api.leafNode('left');
+  rawPinnedSlots.left = {tabs: ['2', '1', '3'], active: '3'};
+  assert.deepStrictEqual([...api.normalizeLayoutSlots(rawPinnedSlots).left.tabs], ['1', '2', '3'], 'raw layout normalization also enforces pinned-first ordering');
+  assert.ok(api.pinnedTabIconHtml('1').includes('pane-tab-pin-icon'), 'pinned tabs render a pin icon helper');
+  assert.deepStrictEqual([...api.tabsToEvictForCap(['1', '2', '3', '4'], '4')], ['3', '2'], 'LRU eviction skips pinned tabs');
+  assert.equal(api.isPinnableTab(api.fileExplorerItemId), false, 'Finder/Differ is not pinnable');
+  assert.equal(api.isPinnableTab('2'), true, 'normal tmux tabs are pinnable');
+  api.setPinnedTabsForTest([]);
   assert.ok(source.includes('const evicted = tabsToEvictForCap(tabs, session);'), 'moveSessionToSlot enforces the tab cap when a tab joins a pane');
 }
 
@@ -2283,7 +2344,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/findButton && mode === 'preview'/.test(source), 'preview mode hides Search because the CodeMirror search panel is not available there');
   assert.equal(source.includes('file-editor-pure-preview'), false, 'old side-preview-only editor mode class is removed');
   assert.equal(source.includes('isFilePreviewItem'), false, 'old file-preview tab type is removed from runtime');
-  assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session\)/.test(source), 'switching a pane to a file editor tab re-renders editor chrome');
+  assert.ok(/function updatePanelSlot[\s\S]*panel\.dataset\.layoutItem = session[\s\S]*isFileEditorItem\(session\)[\s\S]*renderFileEditorPanel\(panel, session, \{updateActiveFile: !dockviewLayoutActive\(\)\}\)/.test(source), 'switching a pane to a file editor tab re-renders editor chrome without making Dockview background renders active');
 }
 
 {
@@ -3596,12 +3657,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(preferencesCss.includes('box-shadow: inset 0 2px 0 var(--pane-tab-active-accent)'), false, 'focused active pane tabs do not paint a contrasting top line');
   assert.ok(preferencesCss.includes('--pane-tab-width: 180px'), 'pane tabs default to the compact 180px width');
   assert.ok(changedFilesSource.includes("numberSetting('appearance.tab_width', 180)"), 'runtime settings fallback keeps the 180px tab width default');
-  assert.ok(preferencesCss.includes('--active-accent-dim: color-mix(in srgb, var(--active-accent) 22%, var(--panel))'), 'dark/root theme uses the greener shared pane tab-strip background (active-accent-dim)');
+  assert.ok(preferencesCss.includes('--active-accent-dim: color-mix(in srgb, var(--active-accent) 26%, var(--panel))'), 'dark/root theme uses the brighter shared pane tab-strip background (active-accent-dim)');
   assert.equal(/body\.theme-dark\s*\{[^}]*--pane-tab-strip-bg\s*:/.test(preferencesCss), false, 'dark theme inherits the shared pane tab-strip token instead of restating a separate color');
   assert.equal(preferencesCss.includes('--pane-tab-strip-hover-bg:'), false, 'dark theme no longer defines a separate pane tab-container hover token');
   const themeLightTokenBlock = preferencesCss.match(/body\.theme-light\s*\{[^}]*\}/)?.[0] || '';
   assert.equal(themeLightTokenBlock.includes('--pane-tab-strip-hover-bg'), false, 'light theme does not define the dark-only pane tab-container hover token');
-  assert.ok(/body\.theme-light\s*\{[\s\S]*--active-accent-dim:\s*#dce8d2/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background (active-accent-dim)');
+  assert.ok(/body\.theme-light\s*\{[\s\S]*--active-accent-dim:\s*#e1edda/.test(preferencesCss), 'light theme uses a greenish-light pane tab-strip background (active-accent-dim)');
   assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), 'unfocused active tabs use the SAME full green as the focused active tab (DOIT.6 #6 + images 003/004: undimmed, un-lightened per-pane highlight)');
   assert.equal(preferencesCss.includes('--pane-tab-unfocused-active-bg: #aeb7c4'), false, 'gray unfocused-active pane tabs must not return');
   assert.ok(preferencesCss.includes('--pane-tab-panel-ring-width: 4px'), 'the pane ring uses the 4px width token (DOIT.20)');
@@ -3637,7 +3698,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(255, 225, 77, 0.72)'), 'dark pane splitter is a visible bright-yellow divider at rest');
   assert.ok(preferencesCss.includes('--pane-resizer-hover-bg: rgba(255, 225, 77, 0.96)'), 'dark pane splitter turns brighter on hover/resize');
   assert.ok(preferencesCss.includes('--pane-resizer-bg: rgba(37, 99, 235, 0.72)'), 'light pane splitter is blue at rest');
-  assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 1.5px'), 'pane splitter hover thickens only modestly (1.5px) over the 1px resting line');
+  assert.ok(preferencesCss.includes('--pane-resizer-hover-line-size: 5px'), 'pane splitter hover thickens to a clearly visible 5px line over the 1px resting line');
   assert.ok(preferencesCss.includes('--pane-tile-radius: 0'), 'adjacent panes meet flush with square corners (no rounded-corner seam wedges)');
   // #29 + DOIT.21: the nav (←/→) and search are centered as a PAIR — the nav absorbs the left free
   // space (margin-inline-start:auto) and the search absorbs the right (margin-inline: 6px auto), so the
@@ -3679,6 +3740,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   // An inactive pane's inactive tabs follow the gray bar (--pane-bar-bg, which is --panel2 when unfocused);
   // the bars themselves go gray via --pane-bar-bg (asserted above), so only the tabs need this rule.
   assert.ok(/\.panel:not\(\.active-pane\):not\(\.typing-ready-pane\) \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'an inactive pane\'s inactive tabs follow the gray bar (--pane-bar-bg)');
+  assert.ok(/\.panel\.active-pane \.pane-tab:not\(\.active\),\s*\.panel\.typing-ready-pane \.pane-tab:not\(\.active\)\s*\{[^}]*background:\s*var\(--pane-bar-bg\)/.test(preferencesCss), 'an active pane\'s inactive tabs match the bright tab-strip bar (--pane-bar-bg)');
   assert.ok(/--pane-tab-unfocused-active-bg:\s*var\(--pane-tab-active-bg\)/.test(preferencesCss), "an inactive pane's active tab is full green (unfocused-active aliases the focused token)");
   assert.equal(/--pane-tab-unfocused-active-bg:\s*#d2ecc2/.test(preferencesCss), false, 'no lightened light-mode unfocused-active green remains');
   assert.ok(/--inactive-pane-opacity-scale:\s*1/.test(preferencesCss), 'inactive-pane dim defaults to full strength');
@@ -3690,7 +3752,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     // #261: a 0-20px pane spacing setting drives the inter-pane gap; the active pane's green box width
     // == that gap (--pane-split-gap), so it's 0 at spacing 0 and fills the active side up to the line.
     const paneSpacingSrc = fs.readFileSync('static/yolomux.js', 'utf8');
-    assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 4)"), 'DOIT.20: runtime reads appearance.pane_spacing with a 4px fallback (matches the backend default)');
+    assert.ok(paneSpacingSrc.includes("numberSetting('appearance.pane_spacing', 3)"), 'DOIT.20: runtime reads appearance.pane_spacing with a 3px fallback (matches the backend default)');
     assert.ok(paneSpacingSrc.includes("setProperty('--pane-split-gap'"), '#261: pane spacing drives the --pane-split-gap inter-pane gap');
     assert.equal(paneSpacingSrc.includes('paneSpacing / 5'), false, '#261: the active green box width is NOT a separate scaled value — it uses --pane-split-gap directly');
     assert.ok(/path: 'appearance\.pane_spacing'[\s\S]{0,90}min: 0, max: 20/.test(paneSpacingSrc), '#261: Preferences exposes a 0-20px pane spacing field');
@@ -3910,13 +3972,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_dark_color_scheme"'), 'preferences expose the dark editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_light_color_scheme"'), 'preferences expose the light editor scheme setting');
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_cursor_style"'), 'preferences expose the editor cursor style setting');
-  // Cursor color is a preference shared by the active terminal caret, editor caret, and pane scrollbar thumb.
+  // Cursor color is a preference shared by the active terminal cursor, editor cursor, and pane scrollbar thumb.
   assert.ok(preferencesHtml.includes('data-setting-path="appearance.editor_cursor_color"'), 'preferences expose the editor cursor color setting');
   {
     const cursorSrc = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(cursorSrc), 'cursor color: yellow remains the named default');
-    assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursor:\s*'#ffd000'/.test(cursorSrc), 'cursor color: the shared UI color parent owns the yellow cursor value');
-    assert.ok(/function editorCursorColorForScheme[\s\S]*value === 'theme' \? scheme\.cursor : UI_COLOR_PRESETS\[value\]\.cursor/.test(cursorSrc), 'cursor color: theme uses the scheme caret, color choices use the shared UI color parent');
+    assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.yellow',\s*cursor:\s*'#ffea00'/.test(cursorSrc), 'cursor color: the shared UI color parent owns the bright yellow cursor value');
+    assert.ok(/function editorCursorColorForScheme[\s\S]*value === 'theme' \? scheme\.cursor : UI_COLOR_PRESETS\[value\]\.cursor/.test(cursorSrc), 'cursor color: theme uses the scheme cursor, color choices use the shared UI color parent');
     assert.ok(/function activeTerminalCursorColorForTheme[\s\S]*value === 'theme' \? baseTheme\.cursor : UI_COLOR_PRESETS\[value\]\.cursor/.test(cursorSrc), 'cursor color: active terminal uses the same shared UI color parent');
     assert.ok(cursorSrc.includes("initialSetting('appearance.editor_cursor_color', DEFAULT_CURSOR_COLOR)"), 'editor cursor color defaults through the shared cursor default');
   }
@@ -3953,7 +4015,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     ['appearance.terminal_theme', ['follow-app', 'dark', 'light']],
     ['appearance.date_time_hour_cycle', ['24', '12']],
     ['appearance.editor_cursor_style', ['line', 'block']],
-    ['appearance.editor_cursor_color', ['yellow', 'green', 'blue', 'orange', 'purple', 'white', 'theme']],
+    ['appearance.editor_cursor_color', ['green', 'blue', 'orange', 'yellow', 'purple', 'white', 'theme']],
     ['yolo.prompt_source', ['hybrid', 'pane']],
     ['file_explorer.root_mode', ['fixed', 'sync']],
     ['file_explorer.image_open_mode', ['same-tab', 'new-tab']],
@@ -3988,8 +4050,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(preferencesHtml.includes('data-setting-path="appearance.editor_color_scheme"'), false, 'preferences do not show the legacy single mixed editor scheme setting');
   assert.ok(preferencesHtml.includes('<optgroup label="Dark">'), 'dark editor schemes are grouped under Dark');
   assert.ok(preferencesHtml.includes('<optgroup label="Light">'), 'light editor schemes are grouped under Light');
-  assert.ok(preferencesHtml.indexOf('YOLOmux Dark') < preferencesHtml.indexOf('VS Code Dark+'), 'YOLOmux dark scheme appears first');
-  assert.ok(preferencesHtml.indexOf('VS Code Light+') < preferencesHtml.indexOf('YOLOmux Light'), 'VS Code Light+ is the first light scheme');
+  assert.ok(preferencesHtml.indexOf('YOLOmux Dark') < preferencesHtml.indexOf('Popular IDE Dark+'), 'YOLOmux dark scheme appears first');
+  assert.ok(preferencesHtml.indexOf('Popular IDE Light+') < preferencesHtml.indexOf('YOLOmux Light'), 'Popular IDE Light+ is the first light scheme');
   assert.ok(preferencesHtml.indexOf('YOLOmux Light') < preferencesHtml.indexOf('GitHub Light'), 'YOLOmux light scheme remains ahead of GitHub Light');
   assert.equal(api.globalThemeModeForTest(), 'dark');
   assert.equal(api.globalThemeIsDark(), true, 'global theme defaults dark');
@@ -4069,7 +4131,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(editorSelectionSource.includes("backgroundColor: 'transparent !important'"), 'CodeMirror native editor selection background is suppressed so drawSelection owns the fill');
   assert.ok(/\.file-editor-codemirror \.cm-content ::selection,[\s\S]*?background:\s*transparent !important[\s\S]*?color:\s*inherit !important/.test(editorSelectionCss), 'static CSS keeps global browser selection colors out of CodeMirror');
   assert.equal(/body\.editor-theme-light \.file-editor-codemirror \.cm-content,[\s\S]*?background:\s*var\(--editor-bg\) !important/.test(editorSelectionCss), false, 'light CodeMirror content stays transparent so the selection layer remains visible');
-  for (const scheme of ['one-dark', 'dracula', 'monokai', 'vscode-dark-plus', 'nord']) {
+  for (const scheme of ['one-dark', 'dracula', 'monokai', 'popular-ide-dark-plus', 'nord']) {
     api.setFileEditorThemeMode(scheme);
     assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(96, 165, 250, 0.38)', `${scheme} uses the audited dark editor selection fill`);
   }
@@ -4077,10 +4139,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.fileEditorThemeModeForTest(), 'github-light');
   assert.equal(api.activeEditorSchemeForTest().label, 'GitHub Light');
   assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(37, 99, 235, 0.34)', 'light editor schemes use a visible blue selection fill');
-  for (const scheme of ['yolomux-light', 'vscode-light-plus', 'one-light', 'solarized-light']) {
+  for (const scheme of ['yolomux-light', 'popular-ide-light-plus', 'one-light', 'solarized-light']) {
     api.setFileEditorThemeMode(scheme);
     assert.equal(api.activeEditorSchemeForTest().selection, 'rgba(37, 99, 235, 0.34)', `${scheme} uses the audited light editor selection fill`);
   }
+  const legacySchemePrefix = ['vs', 'code'].join('');
+  api.setFileEditorThemeMode(`${legacySchemePrefix}-dark-plus`);
+  assert.equal(api.fileEditorThemeModeForTest(), 'popular-ide-dark-plus', 'legacy dark scheme id migrates to the Popular IDE dark scheme');
   api.setFileEditorThemeMode('github-light');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--editor-scheme-bg'), '#ffffff');
   assert.equal(api.documentElementStyleForTest().getPropertyValue('--code-keyword'), '#cf222e');
@@ -4117,12 +4182,12 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.fileEditorThemeModeForTest(), 'yolomux-light', 'legacy light storage value maps to the YOLOmux Light default');
   assert.equal(api.activeEditorSchemeForTest().bg, '#ffffff', 'YOLOmux Light uses a bright white editor background');
   assert.equal(api.activeEditorSchemeForTest().previewBg, '#ffffff', 'YOLOmux Light preview background is bright white');
-  assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#008000', 'YOLOmux Light uses Cursor-style green comments');
-  assert.equal(api.activeEditorSchemeForTest().syntax.keyword, '#0000ff', 'YOLOmux Light uses Cursor-style blue language keywords');
-  assert.equal(api.activeEditorSchemeForTest().syntax.control, '#af00db', 'YOLOmux Light uses Cursor-style magenta Rust control keywords');
-  assert.equal(api.activeEditorSchemeForTest().syntax.function, '#267f2e', 'YOLOmux Light uses Cursor-style green function declarations');
-  assert.equal(api.activeEditorSchemeForTest().syntax.type, '#008080', 'YOLOmux Light uses Cursor-style teal type declarations');
-  assert.equal(api.activeEditorSchemeForTest().syntax.property, '#5f3b00', 'YOLOmux Light uses Cursor-style brown field and parameter names');
+  assert.equal(api.activeEditorSchemeForTest().syntax.comment, '#008000', 'YOLOmux Light uses Popular IDE-style green comments');
+  assert.equal(api.activeEditorSchemeForTest().syntax.keyword, '#0000ff', 'YOLOmux Light uses Popular IDE-style blue language keywords');
+  assert.equal(api.activeEditorSchemeForTest().syntax.control, '#af00db', 'YOLOmux Light uses Popular IDE-style magenta Rust control keywords');
+  assert.equal(api.activeEditorSchemeForTest().syntax.function, '#267f2e', 'YOLOmux Light uses Popular IDE-style green function declarations');
+  assert.equal(api.activeEditorSchemeForTest().syntax.type, '#008080', 'YOLOmux Light uses Popular IDE-style teal type declarations');
+  assert.equal(api.activeEditorSchemeForTest().syntax.property, '#5f3b00', 'YOLOmux Light uses Popular IDE-style brown field and parameter names');
   api.setFileEditorPreviewDisplayMode('vanilla');
   assert.equal(api.fileEditorPreviewDisplayModeForTest(), 'vanilla', 'vanilla preview mode is stored separately from the editor scheme');
   api.setFileEditorThemeMode('github-light');
@@ -4457,6 +4522,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('else openFileQuickOpen();'), 'Plain app modifier plus P opens file quick-open');
   assert.ok(source.includes("if (event.key === ',')"), 'Preferences keeps best-effort comma shortcut in browser tabs');
   assert.ok(source.includes('selectSession(prefsItemId);'), 'Preferences shortcut opens the pane, while menu and palette remain fallbacks');
+  assert.ok(source.includes('function startPinTabShortcutChord()'), 'Pin Tab shortcut uses an explicit chord starter');
+  assert.ok(source.includes("pendingGlobalShortcutChord = 'pin-tab'"), 'Pin Tab shortcut records the pending chord');
+  assert.ok(source.includes("if (pendingGlobalShortcutChord === 'pin-tab' && key === 'enter')"), 'Pin Tab shortcut completes on Enter');
+  assert.ok(source.includes('toggleActiveTabPinned();'), 'Pin Tab shortcut toggles the active tab');
   assert.ok(source.includes("window.addEventListener('keydown', handleGlobalShortcutKeydown, true)"), 'global shortcuts run in capture phase before focused controls swallow them');
   assert.ok(source.includes("if (mod && key === 'w')"), 'Cmd/Ctrl+W is captured before browser/app defaults');
   assert.ok(source.includes('function itemCanCloseWithAppShortcut(item)'), 'global close shortcut is scoped through a shared item guard');
@@ -4526,6 +4595,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(shortcutsMenu.type, 'command');
   assert.equal(shortcutsMenu.detail, '?');
   assert.ok(source.includes('function keyboardShortcutCatalog()'), 'shortcut help is driven from one catalog');
+  assert.ok(api.keyboardShortcutsHtml().includes('Pin / unpin active tab'), 'shortcut overlay lists the Pin Tab chord');
+  assert.ok(api.keyboardShortcutsHtml().includes('Ctrl+K Enter'), 'shortcut overlay renders the platform Pin Tab chord on PC/Linux');
   assert.ok(api.keyboardShortcutsHtml().includes('outside text'), 'shortcut overlay scopes the Backspace close-tab fallback');
   assert.ok(/async function copyTextToClipboard\(text\)[\s\S]*?if \(clipboard\?\.writeText\) \{[\s\S]*?try \{[\s\S]*?await clipboard\.writeText\(value\);[\s\S]*?\} catch/.test(source), 'clipboard copy falls back when navigator.clipboard exists but rejects');
   assert.ok(source.includes('function copyTerminalSelectionToClipboardEvent(session, term, event)'), 'terminal copy has a DOM copy-event fallback');
@@ -4629,6 +4700,36 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const quickItem = api.fileQuickOpenItems().find(item => item.label === 'helloXandYyy.py');
   assert.ok(quickItem, 'file quick-open uses the same command-palette item shell');
   assert.equal(api.commandPaletteMatches(quickItem, 'xy'), true, 'file quick-open uses fuzzy matching');
+  const doitApi = loadYolomux('', ['1']);
+  doitApi.setFileQuickOpenCandidatesForTest('/repo/yolomux', [
+    {name: 'websocket.py', path: '/repo/yolomux/yolomux_lib/websocket.py', relative_path: 'yolomux_lib/websocket.py', kind: 'file'},
+    {name: 'DOIT.53.md', path: '/repo/yolomux/DOIT.53.md', relative_path: 'DOIT.53.md', kind: 'file'},
+    {name: 'DOIT.parser-performance-v2-audit.md', path: '/repo/yolomux/frontend-crates/DOIT.parser-performance-v2-audit.md', relative_path: 'frontend-crates/DOIT.parser-performance-v2-audit.md', kind: 'file'},
+    {name: 'DOIT.51.md', path: '/repo/yolomux/DOIT.51.md', relative_path: 'DOIT.51.md', kind: 'file'},
+    {name: 'events.py', path: '/repo/yolomux/yolomux_lib/events.py', relative_path: 'yolomux_lib/events.py', kind: 'file'},
+  ]);
+  doitApi.setCommandPaletteStateForTest('files', 'DOIT:');
+  assert.equal(doitApi.fileQuickOpenSearchText('DOIT:'), 'DOIT', 'file quick-open ignores a trailing colon with no line number');
+  assert.equal(doitApi.commandPaletteSearchQuery(), 'DOIT', 'command palette scores the normalized file query');
+  const doitRows = doitApi.commandPaletteItems()
+    .filter(item => item.category === 'file')
+    .map((item, index) => ({...item, index, score: doitApi.commandPaletteItemScore(item, 'DOIT')}))
+    .filter(item => Number.isFinite(item.score))
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label) || left.index - right.index)
+    .map(item => item.label);
+  assert.deepStrictEqual(canonical(doitRows.slice(0, 2)), ['DOIT.51.md', 'DOIT.53.md'], 'DOIT-numbered files stay contiguous for a DOIT: query');
+  assert.deepStrictEqual(
+    canonical(api.cursorStyleFileReference('/home/keivenc/yolomux.dev1/20260609-001.png', {imageIndex: 1})),
+    {label: '[Image #1]', detail: "'/home/keivenc/yolomux.dev1/20260609-001.png'"},
+    'file quick-open can render image hits in Popular IDE-style reference form'
+  );
+  api.setFileQuickOpenCandidatesForTest('/home/keivenc/yolomux.dev1', [
+    {name: '20260609-001.png', path: '/home/keivenc/yolomux.dev1/20260609-001.png', relative_path: '20260609-001.png', kind: 'file'},
+    {name: '20260609-002.png', path: '/home/keivenc/yolomux.dev1/20260609-002.png', relative_path: '20260609-002.png', kind: 'file'},
+  ]);
+  const imageItems = api.fileQuickOpenItems().filter(item => item.key.includes('20260609-00'));
+  assert.deepStrictEqual(canonical(imageItems.map(item => item.label)), ['[Image #1]', '[Image #2]'], 'Search image results use Popular IDE-style image numbering');
+  assert.equal(imageItems[0].detail, "'/home/keivenc/yolomux.dev1/20260609-001.png'", 'Search image result details show the quoted absolute path');
   // C15 follow-up: cmd-P path mode offers a pinned "Open folder in Finder" row (Enter opens the typed
   // directory), while a subfolder entry descends and a file entry opens.
   api.setFileQuickOpenCandidatesForTest('/repo/app', [
@@ -4751,10 +4852,24 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const bodyChildCount = api.bodyChildren().length;
   api.showSessionContextMenu('1', 10, 10);
   const contextMenu = api.bodyChildren()[bodyChildCount];
+  assert.ok(contextMenu.children[0].innerHTML.includes('Pin Tab'), 'tab context menu starts with Pin Tab');
+  assert.ok(contextMenu.children[0].innerHTML.includes('app-menu-ui-icon-pin'), 'Pin Tab context menu row has the shared pin icon');
+  assert.equal(contextMenu.children[0].getAttribute('aria-label'), 'Pin Tab', 'Pin Tab context menu row has an accessible label');
   assert.deepStrictEqual(canonical(Array.from(contextMenu.children).map(child => child.textContent).filter(Boolean)), ["Enable YOLO for Tmux Session '1'", "Rename tmux session '1'", "Transcript for session '1'", "AI Transcript for session '1'", "Event log for session '1'", "Kill tmux session '1'"]);
   assert.equal(contextMenu.children.some(child => child.className === 'terminal-context-menu-separator'), true);
   const contextButtons = Array.from(contextMenu.children).filter(child => child.textContent);
   assert.equal(contextButtons[contextButtons.length - 1].classList.contains('danger'), true, 'Kill is styled as the final destructive action');
+  api.setPinnedTabsForTest(['1']);
+  api.showSessionContextMenu('1', 20, 20);
+  const pinnedContextMenu = api.bodyChildren()[bodyChildCount];
+  assert.ok(pinnedContextMenu.children[0].innerHTML.includes('Unpin Tab'), 'pinned tab context menu flips to Unpin Tab');
+  assert.equal(pinnedContextMenu.children[0].getAttribute('aria-checked'), 'true', 'pinned tab context menu row is checked');
+  const fileItemForMenu = api.registerFileEditorLayoutItem('/home/test/yolomux.dev/README.md');
+  api.showTabContextMenu(fileItemForMenu, 30, 30);
+  const fileContextMenu = api.bodyChildren()[bodyChildCount];
+  assert.ok(fileContextMenu.children[0].innerHTML.includes('Pin Tab'), 'file editor tabs also get the Pin Tab context menu');
+  assert.equal(fileContextMenu.children.length, 1, 'non-tmux tab context menu only shows tab-level actions today');
+  api.setPinnedTabsForTest([]);
   const sessionViews = api.tmuxSessionViewCommands('1');
   assert.deepStrictEqual(canonical(sessionViews.map(item => item.label)), ["Transcript for session '1'", "AI Transcript for session '1'", "Event log for session '1'", 'Pane details']);
   assert.equal(api.fileIconFor('screenshot.png'), '🖼');
@@ -5613,31 +5728,46 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   });
 
   api.setLayoutSlotsForTest(finderOnly);
-  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'middle'}), false);
-  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'left'}), false);
-  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'right'}), false);
-  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'top'}), true);
-  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom'}), true);
+  const roomyFinderDropRect = {left: 0, top: 0, right: 720, bottom: 520, width: 720, height: 520};
+  const narrowFinderDropRect = {left: 0, top: 0, right: 300, bottom: 520, width: 300, height: 520};
+  const shortFinderDropRect = {left: 0, top: 0, right: 720, bottom: 420, width: 720, height: 420};
+  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'middle', targetRect: roomyFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'left', targetRect: roomyFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'right', targetRect: roomyFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
+  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession('1', {targetSlot: 'left', zone: 'bottom', targetRect: shortFinderDropRect}), false);
   const editorItem = api.registerFileEditorLayoutItem('/home/test/AGENTS.md');
-  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'middle'}), false);
-  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'left'}), false);
-  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'right'}), false);
-  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'top'}), true);
-  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'bottom'}), true);
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'middle', targetRect: roomyFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'left', targetRect: roomyFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'right', targetRect: roomyFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession(editorItem, {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
   const legacyChangesOnly = api.emptyLayoutSlots();
   legacyChangesOnly[api.layoutTreeKey] = api.leafNode('left');
   legacyChangesOnly.left = api.paneStateWithTabs(['__changes__'], '__changes__');
   api.setLayoutSlotsForTest(legacyChangesOnly);
   assert.equal(api.itemInLayout('__changes__'), false, 'retired standalone Differ is pruned if it appears outside URL alias resolution');
   api.setLayoutSlotsForTest(finderOnly);
-  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'top', targetRect: {width: 300}}), false);
-  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: {width: 300}}), false);
-  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'top', targetRect: {width: 520}}), true);
-  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: {width: 520}}), true);
+  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'top', targetRect: roomyFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: narrowFinderDropRect}), false);
+  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: roomyFinderDropRect}), true);
+  assert.equal(api.dropIntentAllowsSession('__prefs__', {targetSlot: 'left', zone: 'bottom', targetRect: shortFinderDropRect}), false);
   assert.equal(api.dropIntentAllowsSession('__files__', {targetSlot: 'slot1', zone: 'left'}), false, 'Finder pane drags never advertise a pane split preview');
   assert.equal(api.dropIntentAllowsSession('__changes__', {targetSlot: 'slot1', zone: 'left'}), false, 'retired standalone Differ is not draggable as a layout item');
   assert.equal(api.dropIntentAllowsSession('__files__', {boundary: 'root', zone: 'right', targetSlot: 'slot1'}), false, 'Finder pane drags never advertise a root split preview');
   assert.equal(api.dropIntentAllowsSession('__changes__', {boundary: 'gutter', zone: 'right', targetSlot: 'slot1'}), false, 'retired standalone Differ cannot be dropped at a gutter');
+  const normalSplitSlots = api.emptyLayoutSlots();
+  normalSplitSlots[api.layoutTreeKey] = api.leafNode('slot1');
+  normalSplitSlots.slot1 = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(normalSplitSlots);
+  assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: {width: 620, height: 520}}), false, 'pane edge previews require enough width for both panes');
+  assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'right', targetRect: {width: 720, height: 520}}), true);
+  assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'bottom', targetRect: {width: 720, height: 420}}), false, 'pane edge previews require enough height for both panes');
+  assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 300, height: 520}}), false, 'middle drops do not preview when the target cannot display the incoming tab');
+  assert.equal(api.dropIntentAllowsSession('2', {targetSlot: 'slot1', zone: 'middle', targetRect: {width: 420, height: 520}}), true);
+  api.setLayoutSlotsForTest(finderOnly);
   api.splitSessionAtSlot(editorItem, 'left', 'bottom');
   const editorSplit = api.serialize(api.currentSlots());
   assert.deepStrictEqual(canonical(Object.values(editorSplit.panes).filter(pane => pane.tabs.includes('__files__'))), [{tabs: ['__files__'], active: '__files__'}]);
@@ -6787,11 +6917,11 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     tabElement('3', 306, 100),
   ]);
 
-  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(strip, {clientX: 110, clientY: 8}, '9')), {index: 0, x: 2, y: 0, height: 27});
-  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(strip, {clientX: 225, clientY: 8}, '9')), {index: 1, x: 103, y: 0, height: 27});
-  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(strip, {clientX: 390, clientY: 8}, '9')), {index: 3, x: 304, y: 0, height: 27});
-  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(strip, {clientX: 225, clientY: 8}, '2')), {index: 1, x: 206, y: 0, height: 27});
-  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(tabStrip([]), {clientX: 180, clientY: 8}, '9')), {index: 0, x: 80, y: 0, height: 28});
+  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(strip, {clientX: 110, clientY: 8}, '9')), {index: 0, x: 2, y: 0, height: 27, noop: false});
+  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(strip, {clientX: 225, clientY: 8}, '9')), {index: 1, x: 103, y: 0, height: 27, noop: false});
+  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(strip, {clientX: 390, clientY: 8}, '9')), {index: 3, x: 304, y: 0, height: 27, noop: false});
+  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(strip, {clientX: 225, clientY: 8}, '2')), {index: 1, x: 206, y: 0, height: 27, noop: true});
+  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(tabStrip([]), {clientX: 180, clientY: 8}, '9')), {index: 0, x: 80, y: 0, height: 28, noop: false});
   assert.equal(api.paneTabDropIndex(strip, {clientX: 225, clientY: 8}, '9'), 1);
 
   const multiLineStrip = tabStrip([
@@ -6801,8 +6931,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     tabElement('4', 203, 100, 30),
   ]);
   multiLineStrip.rect = {left: 100, right: 406, top: 0, bottom: 58, width: 306, height: 58};
-  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(multiLineStrip, {clientX: 110, clientY: 38}, '9')), {index: 2, x: 2, y: 30, height: 27});
-  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(multiLineStrip, {clientX: 225, clientY: 38}, '9')), {index: 3, x: 103, y: 30, height: 27});
+  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(multiLineStrip, {clientX: 110, clientY: 38}, '9')), {index: 2, x: 2, y: 30, height: 27, noop: false});
+  assert.deepStrictEqual(canonical(api.paneTabDropPlacement(multiLineStrip, {clientX: 225, clientY: 38}, '9')), {index: 3, x: 103, y: 30, height: 27, noop: false});
 }
 
 {
@@ -6841,7 +6971,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(/function cycleGlobalThemeSetting[\s\S]*?patch\.appearance\.terminal_theme/.test(source), false, '#261: cycleGlobalThemeSetting no longer pins appearance.terminal_theme');
   // Active-terminal cursor: the focused pane's terminal shows the configured cursor color.
   assert.ok(/const DEFAULT_CURSOR_COLOR\s*=\s*'yellow'/.test(source), 'active-terminal cursor: yellow remains the default cursor color');
-  assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursor:\s*'#ffd000'/.test(source), 'active-terminal cursor: yellow cursor color lives in the shared UI color parent');
+  assert.ok(/const UI_COLOR_PRESETS\s*=\s*\{[\s\S]*yellow:\s*\{labelKey:\s*'pref\.appearance\.active_color\.yellow',\s*cursorLabelKey:\s*'pref\.appearance\.editor_cursor_color\.yellow',\s*cursor:\s*'#ffea00'/.test(source), 'active-terminal cursor: bright yellow cursor color lives in the shared UI color parent');
   assert.ok(/function terminalThemeForSession[\s\S]*?session === focusedPanelItem \? \{\.\.\.theme, cursor: activeTerminalCursorColorForTheme\(theme\)\}/.test(source), 'active-terminal cursor: the focused session gets the configured cursor color, others keep theme default');
   assert.ok(/item\.term\.options\.theme = terminalThemeForSession\(session, theme\)/.test(source), 'active-terminal cursor: applyTerminalRuntimeSettings themes the active terminal with the configured cursor color');
   assert.ok(/theme: terminalThemeForSession\(session\)/.test(source), 'active-terminal cursor: a newly-created terminal uses terminalThemeForSession');
@@ -7045,7 +7175,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.ok(css.includes('--inactive-pane-overlay-alpha: 0.09'), '#259: light-mode inactive panes keep the softer alpha base');
     // Light-mode pane header (image 043): greenish-light tab-strip container + light frame-control
     // buttons (the minimize/zoom squares used to render dark/"black" with no light values).
-    assert.ok(/body\.theme-light\s*\{[\s\S]*?--active-accent-dim:\s*#dce8d2/.test(css), 'light mode: the pane tab-strip container is greenish-light (active-accent-dim)');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*?--active-accent-dim:\s*#e1edda/.test(css), 'light mode: the pane tab-strip container is greenish-light (active-accent-dim)');
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-control-bg:\s*#f7f9fc/.test(css), 'light mode: the pane minimize/frame button has a light fill (not a dark square)');
     assert.ok(/body\.theme-light\s*\{[\s\S]*?--pane-tab-zoom-bg:\s*var\(--active-control-bg\)/.test(css), 'light mode: the pane zoom button uses the shared active-control fill, not a dark square');
     assert.equal(css.includes('--inactive-pane-overlay-rgb: 124 82 88'), false, '#259: the earlier warm/red tint is gone (superseded by gray)');
@@ -7336,9 +7466,80 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 
 {
   // User screenshot 20260608-004: pane tabs should sit tight to the pane border and to each other.
+  const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
   const css = fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+  const popoverCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8');
   assert.ok(/\.panel-head\s*\{[\s\S]*?padding:\s*2px 1px 0;/.test(css), 'pane tab strip has a 1px left/right edge gap');
   assert.ok(/\.pane-tab\s*\{[\s\S]*?margin:\s*0 1px 0 0;/.test(css), 'pane tabs have a 1px horizontal gap');
+  assert.ok(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?flex-wrap:\s*wrap/.test(css), 'Dockview pane tabs keep the old wrapping YOLOmux tab-strip behavior');
+  assert.ok(/\.yolomux-dockview \.dv-tabs-container\s*\{[\s\S]*?padding-inline-end:\s*var\(--dockview-header-actions-reserved-inline-size,\s*0px\)/.test(css), 'Dockview tab strips reserve measured space for the overlaid right-side action buttons');
+  assert.ok(/\.yolomux-dockview \.dv-tab\s*\{[\s\S]*?flex:\s*0 0 min\(var\(--dockview-tab-inline-size,\s*var\(--pane-tab-width\)\),\s*100%\)/.test(css), 'Dockview pane tabs use the measured header width while keeping the normal pane-tab width as the default');
+  assert.ok(/\.yolomux-dockview \.dv-tab > \.dockview-pane-tab\s*\{[\s\S]*?border-radius:\s*6px 6px 0 0/.test(css), 'Dockview active tabs keep the old rounded top corners');
+  assert.ok(/\.yolomux-dockview \.dv-groupview\s*\{[\s\S]*?border:\s*0;/.test(css), 'Dockview groups do not add a fat pane-spacing border around the skinny sash separator');
+  assert.ok(/\.yolomux-dockview \.dv-groupview\s*\{[\s\S]*?padding:\s*var\(--pane-split-gap\);/.test(css), 'Dockview groups reserve pane-spacing width inside the active ring so terminals do not render under it');
+  assert.ok(/\.yolomux-dockview \.dv-groupview::after\s*\{[\s\S]*?border:\s*var\(--pane-split-gap\) solid color-mix\(in srgb, var\(--panel-ring-color\) var\(--panel-ring-opacity\), transparent\)/.test(css), 'Dockview groups draw the active surround as a pane-spacing-width pseudo-ring without thickening the sash');
+  assert.ok(/\.yolomux-dockview \.dv-groupview:has\(\.panel\.active-pane\),[\s\S]*?\.dv-groupview:has\(\.panel\.typing-ready-pane\)\s*\{[\s\S]*?--panel-ring-color:\s*var\(--pane-tab-panel-ring\)/.test(css), 'Dockview active/typing panes feed the same active ring color into the group pseudo-ring');
+  assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\s*\{[\s\S]*?border-width:\s*0;/.test(css), 'Dockview-mounted panes do not keep the legacy pane-spacing border');
+  assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel\.dockview-inner-head-collapsed\s*\{[\s\S]*?grid-template-rows:\s*auto minmax\(0,\s*1fr\)/.test(css), 'Dockview-mounted panes switch from header/detail/content rows to detail/content rows when the inner header is hidden');
+  assert.ok(/\.yolomux-dockview \.dockview-panel-content > \.panel > \.panel-head\.dockview-inner-head-hidden,[\s\S]*?\.panel-head\[hidden\]\s*\{[\s\S]*?display:\s*none;/.test(css), 'Dockview hidden inner pane headers really stop rendering instead of leaving a green band');
+  assert.ok(/\.yolomux-dockview \.dv-tab\.dv-inactive-tab > \.dockview-pane-tab:not\(\.active\)\s*\{[\s\S]*?background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(css), 'Dockview inactive tabs match the pane tab-strip background');
+  assert.ok(/\.yolomux-dockview \.dockview-pane-header-actions \.pane-drag-handle\s*\{[\s\S]*?cursor:\s*grab/.test(css), 'Dockview exposes a compact whole-pane drag handle in the header actions');
+  assert.ok(/\.yolomux-dockview \.dockview-pane-header-actions \.tab\s*\{[\s\S]*?height:\s*min\(18px,\s*var\(--pane-tab-height\)\)/.test(css), 'Dockview header action buttons stay compact instead of growing taller than the tab row');
+  assert.ok(/\.yolomux-dockview \.dv-split-view-container > \.dv-sash-container > \.dv-sash,[\s\S]*?\.dv-sash:not\(\.disabled\):hover,[\s\S]*?\.dv-sash:not\(\.disabled\):active\s*\{[\s\S]*?background-color:\s*transparent;/.test(css), 'Dockview sash hit targets stay transparent so only the skinny pseudo-line is visible');
+  assert.ok(/\.yolomux-dockview \.dv-sash::before\s*\{[\s\S]*?background:\s*var\(--pane-resizer-bg\)/.test(css), 'Dockview sashes draw the shared skinny pane separator at rest');
+  assert.ok(/\.yolomux-dockview \.dv-split-view-container\.dv-horizontal > \.dv-sash-container > \.dv-sash::before\s*\{[\s\S]*?left:\s*calc\(50% - \(var\(--pane-resizer-line-size\) \/ 2\)\)/.test(css), 'Dockview horizontal sashes center the 1px resting separator');
+  assert.ok(/\.yolomux-dockview \.dv-split-view-container\.dv-horizontal > \.dv-sash-container > \.dv-sash:hover::before,[\s\S]*?var\(--pane-resizer-hover-line-size\)/.test(css), 'Dockview horizontal sashes thicken only to the shared hover separator size');
+  assert.ok(css.includes('--dv-drag-over-border: 2px dashed var(--pane-resizer-hover-bg)'), 'Dockview drag overlays use the configurable pane separator color');
+  assert.ok(tokenCss.includes('--tab-insert-preview-width: 24px'), 'tab insertion previews use a large enough between-tabs box to see while dragging');
+  assert.ok(/\.grid\.drop-preview::before\s*\{[\s\S]*?border:\s*2px dashed var\(--pane-resizer-hover-bg\)/.test(css), 'root tab-drag previews use the configurable pane separator color');
+  assert.ok(/\.yolomux-dockview \.dv-groupview\.drop-preview::before/.test(css), 'Dockview panes can draw the shared dashed file/tab drop preview');
+  assert.ok(/\.pane-tabs\.tab-drop-preview::after\s*\{[\s\S]*?width:\s*var\(--tab-insert-preview-width\);[\s\S]*?border:\s*2px dashed var\(--pane-resizer-hover-bg\)/.test(css), 'legacy tab insertion previews render as a visible dashed between-tabs box');
+  assert.ok(/\.yolomux-dockview \.dv-tab\.dv-drop-target \.dv-drop-target-selection\.dv-drop-target-left,[\s\S]*?\.dv-drop-target-selection\.dv-drop-target-right\s*\{[\s\S]*?width:\s*var\(--tab-insert-preview-width\) !important;[\s\S]*?border:\s*2px dashed var\(--pane-resizer-hover-bg\) !important/.test(css), 'Dockview tab insertion previews render as a visible dashed between-tabs box instead of a half-tab overlay');
+  assert.ok(/\.pane-drag-image\.drag-image\s*\{[\s\S]*?border:\s*2px dotted var\(--pane-resizer-hover-bg\)/.test(popoverCss), 'whole-pane drag preview renders as a dotted box using the shared separator color');
+  assert.ok(/\.yolomux-dockview \.dv-tab\.dv-drop-target \.dv-drop-target-selection\.dv-drop-target-right\s*\{[\s\S]*?left:\s*100% !important;[\s\S]*?translateX\(-50%\)/.test(css), 'Dockview right-side tab insertion marker is centered on the target tab edge');
+  const dockviewSrc = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+  assert.ok(/function dockviewRootBoundaryDropIntent\(event\)[\s\S]*rootBoundaryDropZoneForEvent\(nativeEvent, rect\)[\s\S]*splitSessionAtLayoutBoundary\(rootIntent\.item, rootIntent\.zone, rootIntent\.sourceSlot\)/.test(dockviewSrc), 'Dockview content-edge drops in the root band use the legacy full-span boundary split');
+  assert.ok(/function dockviewRootBoundaryDropIntent\(event\)[\s\S]*event\?\.kind !== 'content' && event\?\.kind !== 'edge'/.test(dockviewSrc), 'Dockview edge overlays in the app root band use the bounded YOLOmux root preview instead of the native full-width overlay');
+  assert.ok(/function dockviewRootBoundaryDropIntent\(event\)[\s\S]*event\.kind === 'content' && event\.group && !dockviewContentDropCanUseRootBoundary\(nativeEvent, zone\)[\s\S]*return null/.test(dockviewSrc), 'Dockview pane-content drops keep the native local group split unless the pointer is on a root-edge cross-gutter');
+  assert.ok(/function dockviewContentDropCanUseRootBoundary\(event, zone\)[\s\S]*const crossSplit = zone === 'left' \|\| zone === 'right' \? 'column' : 'row'[\s\S]*Math\.abs\(pointer - boundary\) <= tolerance/.test(dockviewSrc), 'Dockview root-boundary content drops are limited to the cross-gutter between existing panes');
+  assert.ok(/function dockviewContentDropCanUseRootBoundary\(event, zone\)[\s\S]*const tolerance = Math\.max\(48, layoutBoundaryDropBandPx/.test(dockviewSrc), 'Dockview outer-edge drops beside stacked panes use a usable cross-gutter tolerance without stealing normal pane-edge drops');
+  assert.ok(/function dockviewPaneContentDropInfo\(event\)[\s\S]*targetSlot[\s\S]*targetRect: layoutSlotScreenRect\(targetSlot\)[\s\S]*function dockviewPaneContentDropIntent\(event\)[\s\S]*dropIntentAllowsSession\(info\.item, info\.intent\)/.test(dockviewSrc), 'Dockview pane-content edge drops are converted to YOLOmux local pane split intents with real target geometry');
+  assert.ok(/function dockviewShouldSuppressPaneContentDrop\(event\)[\s\S]*!dropIntentAllowsSession\(info\.item, info\.intent\)[\s\S]*function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dockviewShouldSuppressPaneContentDrop\(event\)[\s\S]*event\.preventDefault\?\.\(\)/.test(dockviewSrc), 'Dockview suppresses native previews for invalid pane drops before a dashed box is advertised');
+  assert.ok(/api\.onWillDrop\(event => \{[\s\S]*const rootIntent = dockviewRootBoundaryDropIntent\(event\)[\s\S]*const paneIntent = dockviewPaneContentDropIntent\(event\)[\s\S]*splitSessionAtSlot\(paneIntent\.item, paneIntent\.targetSlot, paneIntent\.zone, paneIntent\.sourceSlot\)/.test(dockviewSrc), 'Dockview pane edge drops use splitSessionAtSlot so same-axis splits preserve 1/2 + 1/4 + 1/4 sizing');
+  assert.ok(/function dockviewRootBoundaryDropIntent\(event\)[\s\S]*rootBoundaryDropOverDockedFileExplorer\(nativeEvent, zone\)[\s\S]*return null/.test(dockviewSrc), 'Dockview root top/bottom previews defer when the pointer is inside the docked Finder/Differ column');
+  assert.ok(/function dockviewTrackRootBoundaryOverlay\(event\)[\s\S]*dockviewShowRootBoundaryPreview\(intent\)[\s\S]*event\.preventDefault\?\.\(\)/.test(dockviewSrc), 'Dockview root-band drags show the bounded YOLOmux preview and suppress the native full-width Dockview overlay');
+  assert.ok(dockviewSrc.includes('createRightHeaderActionComponent: () => createDockviewHeaderActionsRenderer()'), 'Dockview renders YOLOmux pane controls in the Dockview header row');
+  assert.ok(/function dockviewLayoutToHost[\s\S]*api\.layout\?\.\(width, height\)/.test(dockviewSrc), 'Dockview is explicitly laid out to the host size instead of staying at the default 100px shell');
+  assert.ok(/function hideDockviewInnerPaneTabs\(panel\)[\s\S]*panel\.classList\.add\('dockview-inner-head-collapsed'\)/.test(dockviewSrc), 'Dockview marks panels whose inner header was hidden so their content row still fills the pane');
+  assert.ok(/function preserveDockviewDockedFileExplorerSplit[\s\S]*dockviewLayoutState\.reloadAfterAdoption = true/.test(dockviewSrc), 'Dockview adoption preserves and reapplies the docked Finder root split width');
+  assert.ok(/function dockviewInstallFileDropBridge[\s\S]*dockviewHandleFileDragOver[\s\S]*dockviewHandleFileDrop/.test(dockviewSrc), 'Dockview panes bridge Finder/Differ file drags into the shared pane drop behavior');
+  assert.ok(/function dockviewHandleFileDrop[\s\S]*openDraggedFilesInEditor\(payload, \{targetSlot: intent\.targetSlot, targetZone: intent\.zone\}\)/.test(dockviewSrc), 'Dockview file drops open dragged files in the intended pane split');
+  assert.ok(/function dockviewHandleFileDragOver\(event\)[\s\S]*paneDragPayload\(event\)[\s\S]*paneSwapIntentForEvent\(event, panePayload\.slot\)[\s\S]*showDropPreview\(intent\)/.test(dockviewSrc), 'Dockview host dragover handles whole-pane swap previews separately from tab drags');
+  assert.ok(/function dockviewHandleFileDrop\(event\)[\s\S]*paneDragPayload\(event\)[\s\S]*swapPaneSlots\(intent\.sourceSlot, intent\.targetSlot\)/.test(dockviewSrc), 'Dockview host drops swap whole panes when the pane payload is accepted');
+  assert.ok(/function paneDragHandleHtml\(item\)[\s\S]*data-pane-drag=/.test(dockviewSrc), 'Dockview header actions include a dedicated pane-drag payload handle');
+  assert.ok(/function dockviewSyncHeaderBackgroundDragSources\(\)[\s\S]*\.dv-tabs-and-actions-container[\s\S]*pane-drag-source[\s\S]*dockviewBeginPanePointerDrag\(event, sourceSlot\)/.test(dockviewSrc), 'Dockview tab-container background starts whole-pane drags without marking the tab container draggable');
+  assert.ok(/function dockviewSyncHeaderBackgroundDragSources\(\)[\s\S]*\.panel-detail-row[\s\S]*syncDragSource\(detail\)/.test(dockviewSrc), 'Dockview pane info/detail rows start the same whole-pane pointer drag as the tab-container background');
+  assert.ok(/function dockviewSyncHeaderBackgroundDragSources\(\)[\s\S]*\.file-editor-toolbar[\s\S]*syncDragSource\(editorToolbar\)/.test(dockviewSrc), 'Dockview editor toolbars start the same whole-pane pointer drag as other pane info bars');
+  assert.ok(/function dockviewSyncHeaderActionReservations\(\)[\s\S]*--dockview-header-actions-reserved-inline-size[\s\S]*reservedWidth[\s\S]*--dockview-tab-inline-size/.test(dockviewSrc), 'Dockview measures the right-side action buttons and tab width so crowded tabs do not collide or spill past two rows');
+  assert.ok(/function dockviewTrackPanePointerDrag\(event\)[\s\S]*startPaneDragPreview\(event, state\.sourceSlot\)[\s\S]*moveCustomDragPreview\(event\)/.test(dockviewSrc), 'Dockview pane-background pointer drags show and move the same pane drag preview as native pane drags');
+  assert.ok(/function dockviewFinishPanePointerDrag\(event\)[\s\S]*stopCustomDragPreview\(\)[\s\S]*clearDropPreview\(\)/.test(dockviewSrc), 'Dockview pane-background pointer drags remove the pane preview on drop/cancel');
+  assert.equal(/header\.draggable = draggable/.test(dockviewSrc), false, 'Dockview tab-container background must not become a native draggable ancestor that steals tab drags');
+  assert.ok(/api\.onWillDrop\(event => \{[\s\S]*const edgeReorder = dockviewTabEdgeReorderIntent\(event\)[\s\S]*moveSessionToSlot\(edgeReorder\.item, edgeReorder\.targetSlot, edgeReorder\.sourceSlot, edgeReorder\.insertIndex\)/.test(dockviewSrc), 'Dockview manually reorders edge tabs dragged onto their adjacent neighbor');
+  assert.ok(/function dockviewInstallTabPointerReorderFallback\(\)[\s\S]*document\.addEventListener\('pointerup', finish, true\)[\s\S]*document\.addEventListener\('mouseup', finish, true\)/.test(dockviewSrc), 'Dockview edge-tab reorder fallback listens to both pointer and mouse release paths');
+  assert.ok(/function dockviewFinishTabPointerDrag\(event\)[\s\S]*dockviewTabForPoint[\s\S]*dockviewAdjacentEdgeTabInsertIndex[\s\S]*moveSessionToSlot\(state\.item, targetSlot, targetSlot, currentInsertIndex\)/.test(dockviewSrc), 'Dockview edge-tab pointer fallback reorders against the tab under the release point');
+  assert.ok(/\.pane-tab > \.session-popover,\s*\.pane-tab-detached-popover\s*\{[\s\S]*position:\s*fixed/.test(css), 'Dockview tab hover popovers use the shared fixed-position tab popover surface');
+  assert.ok(/function bindPaneTabPopover\(tab, session\)[\s\S]*tab\.classList\?\.contains\('dockview-pane-tab'\)[\s\S]*detachPaneTabPopover\(tab, popover\)/.test(fs.readFileSync('static_src/js/yolomux/80_panes_preferences.js', 'utf8')), 'Dockview tab hover popovers detach from the clipped Dockview tab scroller');
+  assert.ok(/function preserveDockviewDockedFileExplorerSplit\(next, previous = layoutSlots\)[\s\S]*dockviewLayoutContentSignature\(next\) === dockviewLayoutContentSignature\(previous\)[\s\S]*return/.test(dockviewSrc), 'Dockview lets sash-only Finder/Differ resize updates change the root split pct');
+  assert.ok(/function preserveDockviewContentSplitPercentagesAfterDockResize\(nextRoot, previousRoot, nextDocked, previousDocked\)[\s\S]*copyLayoutSplitPercentagesByShape\(nextContent, previousContent\)[\s\S]*reloadAfterAdoption = true/.test(dockviewSrc), 'Dockview Finder/Differ sash resize preserves nested content split percentages while the root pct changes');
+  assert.ok(/function copyLayoutSplitPercentagesByShape\(target, source\)[\s\S]*target\.pct = sourcePct[\s\S]*copyLayoutSplitPercentagesByShape\(targetChildren\[index\], sourceChildren\[index\]\)/.test(dockviewSrc), 'Dockview content pct preservation recurses through matching nested split shapes');
+  assert.ok(/function dockviewLayoutContentSignature\(slots = layoutSlots\)[\s\S]*nodeSignature[\s\S]*paneSignature/.test(dockviewSrc), 'Dockview compares content/topology separately from split percentages before preserving Finder width');
+  const layoutActionSrc = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
+  assert.ok(/function layoutNodeScreenRect\(layoutNode\)[\s\S]*\.map\(slot => layoutSlotScreenRect\(slot\)\)/.test(layoutActionSrc), 'Docked Finder preview geometry uses slot screen rects that work for Dockview groups');
+  assert.ok(/function layoutSlotScreenRect\(slot\)[\s\S]*\.dockview-panel-content > \.panel\[data-slot=/.test(layoutActionSrc), 'Dockview layout slots can resolve their visible group rectangle');
+  assert.ok(/function rootBoundaryDropIntentForEvent\(event\)[\s\S]*rootBoundaryDropOverDockedFileExplorer\(event, zone\)[\s\S]*return null/.test(layoutActionSrc), 'legacy root top/bottom previews also defer inside a docked Finder/Differ column');
+  assert.ok(/function fileDropIntentAllowsPayload\(payload, intent\)[\s\S]*dropIntentAllowsSession\(item, intent, \{allowCandidate: true\}\)/.test(layoutActionSrc), 'file drag previews use the same pane/Finder/min-size validator as tab drags');
+  assert.ok(/function itemCanSplitSinglePurposePane\(item, intent\)[\s\S]*zone !== 'bottom'[\s\S]*return false[\s\S]*dropIntentHasRoomForItem\(item, intent\)/.test(layoutActionSrc), 'Finder/Differ target panes accept only bottom splits and only when the resulting pane can fit');
+  assert.ok(/function dropIntentHasRoomForItem\(item, intent\)[\s\S]*minWidthForLayoutItem\(targetItem\)[\s\S]*targetMinWidth \+ itemMinWidth[\s\S]*targetMinHeight \+ itemMinHeight/.test(layoutActionSrc), 'pane drop previews are suppressed when the target is too small for both resulting panes');
 }
 
 {
@@ -7432,14 +7633,20 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(appearanceHtml.includes('Solar gold'), 'Active color Yellow is labeled Solar gold');
   assert.ok(appearanceHtml.includes('Royal violet'), 'Active color Purple is labeled Royal violet');
   assert.ok(appearanceHtml.includes('Moon white'), 'Active color White is labeled Moon white');
+  assert.ok(appearanceHtml.includes('Laser lime'), 'Cursor color Green is labeled Laser lime');
+  assert.ok(appearanceHtml.includes('Electric azure'), 'Cursor color Blue is labeled Electric azure');
+  assert.ok(appearanceHtml.includes('Flare orange'), 'Cursor color Orange is labeled Flare orange');
+  assert.ok(appearanceHtml.includes('Lightning yellow'), 'Cursor color Yellow is labeled Lightning yellow');
+  assert.ok(appearanceHtml.includes('Plasma violet'), 'Cursor color Purple is labeled Plasma violet');
+  assert.ok(appearanceHtml.includes('Starlight white'), 'Cursor color White is labeled Starlight white');
   assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.active_color"/.test(appearanceHtml), 'Active color Blue renders as a radio');
   assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.yolo_rotate_ms"/.test(appearanceHtml), 'Cursor color sits immediately after Active color in Appearance');
   assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.editor_cursor_color"/.test(appearanceHtml), 'Cursor color Blue renders as a radio');
   const preferencesSource = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(/function layoutModePreferenceChoices\(\)\s*\{[\s\S]*layoutModeValues\.map\(value => \(\{value, label: t\(`menu\.view\.layout\.\$\{value\}`\)\}\)\)/.test(preferencesSource), 'Default layout choices derive from the shared View layout modes');
   assert.ok(/function activeColorPreferenceChoices\(\)\s*\{[\s\S]*UI_COLOR_CHOICES\.map\(value => activeColorPreferenceChoice\(value, t\(UI_COLOR_PRESETS\[value\]\.labelKey\)\)\)/.test(preferencesSource), 'Active color choices derive labels from the shared UI color parent');
-  assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*\[DEFAULT_CURSOR_COLOR, \.\.\.UI_COLOR_CHOICES\.filter\(value => value !== DEFAULT_CURSOR_COLOR\), 'theme'\][\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices derive order from the shared UI color parent and default');
-  assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*value === 'theme' \? t\('pref\.appearance\.editor_cursor_color\.theme'\) : t\(preset\.labelKey\)/.test(preferencesSource), 'Cursor color labels reuse the Active color label keys from the shared parent');
+  assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*\[\.\.\.UI_COLOR_CHOICES, 'theme'\][\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices follow the Active color order while keeping yellow as the default value');
+  assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*value === 'theme' \? t\('pref\.appearance\.editor_cursor_color\.theme'\) : t\(preset\.cursorLabelKey\)/.test(preferencesSource), 'Cursor color labels use cursor-specific bright color names from the shared parent');
   assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#3b82f6[\s\S]*--preferences-radio-swatch:#2563eb/.test(appearanceHtml), 'Active color Blue radio shows connected actual dark/light accent swatches');
   assert.ok(appearanceHtml.includes('preferences-setting-note') && appearanceHtml.includes('Editor/Terminal font sizes are in Terminal / Editor.'), 'Appearance shows a note after Finder font size pointing editor/terminal font sizes to Terminal / Editor');
   assert.ok(/data-setting-path="appearance\.file_explorer_font_size"[\s\S]*preferences-setting-note[\s\S]*data-setting-path="appearance\.tab_width"/.test(appearanceHtml), 'Appearance font-size note sits directly after Finder font size');
@@ -7745,6 +7952,58 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     tabElement('2', 203, 100),
     tabElement('3', 306, 100),
   ]);
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 225, clientY: 8}, '2').noop, true, 'dragging 2 into the 1|2 adjacent gap is a no-op');
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 290, clientY: 8}, '2').noop, true, 'dragging 2 into the 2|3 adjacent gap is a no-op');
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 120, clientY: 8}, '2').noop, false, 'dragging 2 before tab 1 still reorders');
+  assert.equal(api.paneTabDropPlacement(strip, {clientX: 330, clientY: 8}, '2').noop, false, 'dragging 2 after tab 3 still reorders');
+}
+
+{
+  const api = loadYolomux();
+  const strip = new TestElement('dock-tabs');
+  const dockTab = item => {
+    const tab = new TestElement(`dv-${item}`);
+    tab.classList.add('dv-tab');
+    const inner = new TestElement(`tab-${item}`);
+    inner.classList.add('dockview-pane-tab');
+    inner.dataset.paneTab = item;
+    tab.appendChild(inner);
+    strip.appendChild(tab);
+    return {tab, inner};
+  };
+  const one = dockTab('1');
+  const two = dockTab('2');
+  const three = dockTab('3');
+  const eventFor = (target, position, panelId = '2') => ({
+    kind: 'tab',
+    position,
+    group: {id: 'left'},
+    nativeEvent: {target},
+    getData: () => ({panelId, groupId: 'left'}),
+  });
+  assert.equal(api.dockviewTabDropWouldNoop(eventFor(one.inner, 'right')), true, 'Dockview suppresses the 1|2 no-op insertion preview');
+  assert.equal(api.dockviewTabDropWouldNoop(eventFor(three.inner, 'left')), true, 'Dockview suppresses the 2|3 no-op insertion preview');
+  assert.equal(api.dockviewTabDropWouldNoop(eventFor(one.inner, 'left')), false, 'Dockview still allows moving 2 before tab 1');
+  assert.equal(api.dockviewTabDropWouldNoop(eventFor(three.inner, 'right')), false, 'Dockview still allows moving 2 after tab 3');
+  api.setPinnedTabsForTest(['1', '2']);
+  const firstToSecond = eventFor(two.inner, 'left', '1');
+  assert.equal(api.dockviewTabDropWouldNoop(firstToSecond), false, 'Dockview must not suppress dragging the first tab onto the second tab');
+  assert.deepStrictEqual(canonical(api.dockviewTabEdgeReorderIntent(firstToSecond)), {
+    insertIndex: 1,
+    item: '1',
+    sourceSlot: 'left',
+    targetSlot: 'left',
+  }, 'Dockview manually reorders an edge tab dragged onto its adjacent neighbor');
+  api.setPinnedTabsForTest([]);
+}
+
+{
+  const api = loadYolomux();
+  const strip = tabStrip([
+    tabElement('1', 100, 100),
+    tabElement('2', 203, 100),
+    tabElement('3', 306, 100),
+  ]);
 
   api.showPaneTabDropPreview(strip, {clientX: 225, clientY: 8}, '9');
 
@@ -7761,6 +8020,26 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(strip.style.getPropertyValue('--tab-drop-x'), '');
   assert.equal(strip.style.getPropertyValue('--tab-drop-y'), '');
   assert.equal(strip.style.getPropertyValue('--tab-drop-height'), '');
+
+  api.showPaneTabDropPreview(strip, {clientX: 225, clientY: 8}, '2');
+  assert.equal(strip.classList.contains('drag-over'), false, 'same-strip adjacent no-op does not show a tab-strip target outline');
+  assert.equal(strip.classList.contains('tab-drop-preview'), false, 'same-strip adjacent no-op does not show an insertion preview');
+  assert.equal(strip.style.getPropertyValue('--tab-drop-x'), '');
+  assert.equal(strip.style.getPropertyValue('--tab-drop-y'), '');
+  assert.equal(strip.style.getPropertyValue('--tab-drop-height'), '');
+}
+
+{
+  const api = loadYolomux();
+  const container = new TestElement('dockview-actions');
+  const button = new TestElement('window-next', 'button');
+  button.dataset.windowDir = 'next';
+  button.dataset.windowSession = 'codex';
+  const glyph = new TestElement('glyph', 'span');
+  button.appendChild(glyph);
+  container.appendChild(button);
+  assert.equal(api.windowStepButtonFromEvent({currentTarget: button, target: glyph}), button, 'legacy direct window-step clicks resolve the button currentTarget');
+  assert.equal(api.windowStepButtonFromEvent({currentTarget: container, target: glyph}), button, 'Dockview delegated window-step clicks resolve the closest data-window-dir button');
 }
 
 {
@@ -7902,6 +8181,76 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 }
 
 {
+  const api = loadYolomux('', ['1', '2', '3']);
+  const slots = api.emptyLayoutSlots();
+  slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
+  slots.left = api.paneStateWithTabs(['1', '2'], '2');
+  slots.right = api.paneStateWithTabs(['3'], '3');
+  api.setLayoutSlotsForTest(slots);
+  api.setLayoutColumnRectsForTest({
+    left: {left: 0, top: 0, right: 800, bottom: 520, width: 800, height: 520},
+    right: {left: 800, top: 0, right: 1600, bottom: 520, width: 800, height: 520},
+  });
+  const handle = new TestElement('pane-handle');
+  const event = dragEvent(820, '1');
+  event.currentTarget = handle;
+  event.target = handle;
+  event.offsetX = 7;
+  event.offsetY = 8;
+
+  api.startPaneDrag(event, 'left');
+
+  assert.equal(event.dataTransfer.effectAllowed, 'move');
+  assert.equal(event.dataTransfer['application/x-yolomux-pane'], JSON.stringify({slot: 'left'}));
+  assert.equal(api.paneDragPayload(event).slot, 'left', 'pane drags use a distinct pane payload');
+  assert.equal(event.dataTransfer.dragImage.node.className, 'transparent-drag-image', 'pane drags hide the browser snapshot behind the custom pane preview');
+  assert.equal(event.dataTransfer.dragImage.x, 0, 'pane drags use a transparent native image at origin');
+  assert.equal(event.dataTransfer.dragImage.y, 0, 'pane drags use a transparent native image at origin');
+  const panePreview = api.customDragPreviewForTest();
+  assert.ok(panePreview, 'pane drags install a custom pane preview');
+  assert.ok(panePreview.classList.contains('pane-drag-image'), 'pane drag preview uses the pane ghost class');
+  assert.equal(panePreview.dataset.dragSlot, 'left', 'pane drag preview records the dragged pane slot');
+  assert.ok(panePreview.innerHTML.includes('2 tabs'), 'pane drag preview summarizes the pane tab count');
+  assert.ok(parseFloat(panePreview.style.getPropertyValue('width') || panePreview.style.width || '0') > 0, 'pane drag preview has a measured width');
+  assert.ok(parseFloat(panePreview.style.getPropertyValue('height') || panePreview.style.height || '0') > 0, 'pane drag preview has a measured height');
+
+  const target = new TestElement('right-slot');
+  target.classList.add('drop-slot');
+  target.dataset.slot = 'right';
+  target.rect = {left: 800, top: 0, right: 1600, bottom: 520, width: 800, height: 520};
+  api.setGridPreviewNodesForTest([target]);
+  event.target = target;
+  api.handleDropDragOver(event);
+  assert.equal(event.dataTransfer.dropEffect, 'move');
+  assert.ok(target.classList.contains('drop-preview-middle'), 'pane swap previews the whole target pane, not an edge subpane');
+  assert.equal(target.dataset.dropLabel, 'swap');
+  assert.equal(api.paneSwapAllowed('left', 'right'), true, 'similarly sized panes can swap whole pane tab stacks');
+
+  assert.equal(api.swapPaneSlots('left', 'right'), true);
+  assert.deepStrictEqual([...api.currentSlots().left.tabs], ['3'], 'target pane tabs moved as a whole into the source slot');
+  assert.deepStrictEqual([...api.currentSlots().right.tabs], ['1', '2'], 'source pane tabs moved as a whole into the target slot');
+  assert.equal(api.currentSlots()[api.layoutTreeKey].split, 'row', 'pane swaps keep the existing split tree');
+
+  const smallSlots = api.emptyLayoutSlots();
+  smallSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'), 50);
+  smallSlots.left = api.paneStateWithTabs(['1', '2'], '2');
+  smallSlots.right = api.paneStateWithTabs(['3'], '3');
+  api.setLayoutSlotsForTest(smallSlots);
+  api.clearDropPreview();
+  api.setLayoutColumnRectsForTest({
+    left: {left: 0, top: 0, right: 800, bottom: 520, width: 800, height: 520},
+    right: {left: 800, top: 0, right: 980, bottom: 520, width: 180, height: 520},
+  });
+  api.startPaneDrag(event, 'left');
+  api.handleDropDragOver(event);
+  assert.equal(event.dataTransfer.dropEffect, 'none', 'too-small target panes reject whole-pane swaps');
+  assert.equal(target.classList.contains('drop-preview-middle'), false, 'too-small target panes do not advertise a pane swap preview');
+  assert.equal(api.paneSwapAllowed('left', 'right'), false);
+  api.endSessionDrag(event);
+  assert.equal(api.customDragPreviewForTest(), null, 'pane drag preview is removed on cleanup');
+}
+
+{
   const api = loadYolomux();
   const strip = tabStrip([
     tabElement('1', 100, 100),
@@ -7936,7 +8285,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(strip.style.getPropertyValue('--tab-drop-height'), '27px');
 }
 
-// DOIT.21: editor back/forward navigation history (Cursor-style file stack). Tests the record/dedupe/
+// DOIT.21: editor back/forward navigation history (Popular IDE-style file stack). Tests the record/dedupe/
 // truncate logic of recordEditorNav (the async back/forward re-open goes through the live open path).
 {
   const api = loadYolomux();

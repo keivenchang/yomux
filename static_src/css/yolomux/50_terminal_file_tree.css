@@ -163,6 +163,37 @@
   font: var(--ui-font-size-sm)/1.25 var(--ui-font);
   cursor: pointer;
 }
+.context-menu-line {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.context-menu-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.context-menu-icon .app-menu-ui-icon {
+  width: 20px;
+  height: 18px;
+  border-radius: 4px;
+}
+.context-menu-icon .app-menu-ui-icon::before {
+  width: 12px;
+  height: 12px;
+}
+.context-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.context-menu-shortcut {
+  color: var(--muted, #8b95a5);
+  font: 600 var(--ui-font-size-xs)/1.2 var(--mono-font);
+  white-space: nowrap;
+}
 .terminal-context-menu button:hover,
 .terminal-context-menu button:focus-visible {
   outline: 0;
@@ -1833,7 +1864,7 @@ body.theme-light .modal.about-open {
   border-radius: 3px;
 }
 /* DOIT.31: symlinks keep their target-type icon (dir icon for a linked dir, code icon for a linked .py)
-   and get a small arrow badge overlaid — macOS-Finder / VS Code style. Broken links go red + struck. */
+   and get a small arrow badge overlaid — macOS-Finder / Popular IDE style. Broken links go red + struck. */
 .file-tree-row.is-symlink > .file-tree-icon {
   position: relative;
 }

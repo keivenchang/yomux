@@ -80,10 +80,10 @@ function maxTabsPerPane() {
   return Math.max(2, Math.min(30, raw));
 }
 
-// A tab may be auto-evicted unless it is the one being kept active, the Finder dock, or a
-// dirty/unsaved editor (never silently drop unsaved edits).
+// A tab may be auto-evicted unless it is the one being kept active, pinned, the Finder dock,
+// or a dirty/unsaved editor (never silently drop unsaved edits).
 function tabIsEvictableForCap(item, keepItem) {
-  if (item === keepItem || isFileExplorerItem(item)) return false;
+  if (item === keepItem || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
     const state = openFiles.get(fileItemPath(item));
     if (state && state.dirty) return false;
@@ -1683,6 +1683,7 @@ function rootBoundaryDropIntentForEvent(event) {
   const targetRect = grid.getBoundingClientRect();
   const zone = rootBoundaryDropZoneForEvent(event, targetRect);
   if (!zone) return null;
+  if (rootBoundaryDropOverDockedFileExplorer(event, zone)) return null;
   return {targetSlot: slotForDropEvent(event), zone, previewNode: grid, targetRect, boundary: 'root'};
 }
 
@@ -1734,29 +1735,154 @@ function slotIsFileExplorerPane(slot) {
   return isFileExplorerItem(activeItemForSide(slot));
 }
 
+function dropIntentTargetRect(intent) {
+  if (!intent || typeof intent === 'string') return null;
+  return intent.targetRect || intent.previewNode?.getBoundingClientRect?.() || null;
+}
+
+function minHeightForLayoutItem(_item) {
+  return rootCssLengthPx('--min-split-pane-height') || 220;
+}
+
 function dropIntentInlineSize(intent) {
   if (!intent || typeof intent === 'string') return 0;
-  const rect = intent.targetRect || intent.previewNode?.getBoundingClientRect?.();
+  const rect = dropIntentTargetRect(intent);
   return Math.max(0, Number(rect?.width) || 0);
+}
+
+function dropItemCanBeDragged(item, options = {}) {
+  if (isLayoutItem(item)) return !isFileExplorerItem(item);
+  return options.allowCandidate === true && isFileEditorItem(item);
+}
+
+function rectCanShowLayoutItem(rect, item) {
+  if (!rect) return true;
+  return (Number(rect.width) || 0) >= minWidthForLayoutItem(item)
+    && (Number(rect.height) || 0) >= minHeightForLayoutItem(item);
+}
+
+function rectCanShowPaneTabs(rect, tabs) {
+  if (!rect) return true;
+  const items = (tabs || []).filter(isLayoutItem);
+  if (!items.length) return false;
+  const minWidth = Math.max(...items.map(minWidthForLayoutItem));
+  const minHeight = Math.max(...items.map(minHeightForLayoutItem));
+  return (Number(rect.width) || 0) >= minWidth
+    && (Number(rect.height) || 0) >= minHeight;
+}
+
+function paneSwapAllowed(sourceSlot, targetSlot, slots = layoutSlots) {
+  if (!sourceSlot || !targetSlot || sourceSlot === targetSlot) return false;
+  const keys = layoutSlotKeys(slots);
+  if (!keys.includes(sourceSlot) || !keys.includes(targetSlot)) return false;
+  if (paneIsPlaceholder(sourceSlot, slots) || paneIsPlaceholder(targetSlot, slots)) return false;
+  if (isFileExplorerItem(activeItemForSide(sourceSlot, slots)) || isFileExplorerItem(activeItemForSide(targetSlot, slots))) return false;
+  const sourceTabs = paneTabs(sourceSlot, slots);
+  const targetTabs = paneTabs(targetSlot, slots);
+  if (!sourceTabs.length || !targetTabs.length) return false;
+  return rectCanShowPaneTabs(layoutSlotScreenRect(targetSlot), sourceTabs)
+    && rectCanShowPaneTabs(layoutSlotScreenRect(sourceSlot), targetTabs);
+}
+
+function paneSwapTargetForEvent(event) {
+  const slotNode = event.target?.closest?.('.drop-slot');
+  if (slotNode?.dataset.slot) return {slot: slotNode.dataset.slot, previewNode: slotNode};
+  const panel = event.target?.closest?.('.panel');
+  if (panel?.dataset.slot) return {slot: panel.dataset.slot, previewNode: panel.closest?.('.drop-slot') || panel};
+  if (typeof dockviewSlotForGroupElement === 'function') {
+    const group = event.target?.closest?.('.dv-groupview');
+    const slot = group ? dockviewSlotForGroupElement(group) : null;
+    if (slot) return {slot, previewNode: group};
+  }
+  return {slot: null, previewNode: null};
+}
+
+function paneSwapIntentForEvent(event, sourceSlot) {
+  const target = paneSwapTargetForEvent(event);
+  if (!target.slot || target.slot === sourceSlot) return null;
+  return {
+    sourceSlot,
+    targetSlot: target.slot,
+    zone: 'middle',
+    swap: true,
+    previewNode: target.previewNode,
+    targetRect: layoutSlotScreenRect(target.slot),
+  };
+}
+
+function paneSwapIntentAllowed(intent) {
+  return Boolean(intent?.swap && paneSwapAllowed(intent.sourceSlot, intent.targetSlot));
+}
+
+function swapPaneSlots(sourceSlot, targetSlot) {
+  if (!paneSwapAllowed(sourceSlot, targetSlot)) return false;
+  const next = cloneLayoutSlots(layoutSlots);
+  const sourceState = paneStateForLayoutSlot(sourceSlot);
+  const targetState = paneStateForLayoutSlot(targetSlot);
+  next[sourceSlot] = targetState;
+  next[targetSlot] = sourceState;
+  applyLayoutSlots(next, {
+    focusSession: activeItemForSide(targetSlot, next) || activeItemForSide(sourceSlot, next),
+    prune: false,
+    forceFull: dockviewLayoutActive(),
+    message: 'panes swapped',
+  });
+  return true;
+}
+
+function dropIntentHasRoomForItem(item, intent) {
+  if (!intent || typeof intent === 'string') return true;
+  if (intent.boundary === 'root' || intent.boundary === 'gutter') return true;
+  const rect = dropIntentTargetRect(intent);
+  if (!rect) return true;
+  const zone = intent.zone || 'middle';
+  if (!layoutSplitZone(zone)) return rectCanShowLayoutItem(rect, item);
+  const targetItem = activeItemForSide(intent.targetSlot);
+  const targetMinWidth = minWidthForLayoutItem(targetItem);
+  const itemMinWidth = minWidthForLayoutItem(item);
+  const targetMinHeight = minHeightForLayoutItem(targetItem);
+  const itemMinHeight = minHeightForLayoutItem(item);
+  if (zone === 'left' || zone === 'right') {
+    return (Number(rect.width) || 0) >= targetMinWidth + itemMinWidth
+      && (Number(rect.height) || 0) >= Math.max(targetMinHeight, itemMinHeight);
+  }
+  return (Number(rect.width) || 0) >= Math.max(targetMinWidth, itemMinWidth)
+    && (Number(rect.height) || 0) >= targetMinHeight + itemMinHeight;
 }
 
 function itemCanSplitSinglePurposePane(item, intent) {
   const zone = typeof intent === 'string' ? intent : intent?.zone;
-  if (zone !== 'top' && zone !== 'bottom') return false;
+  if (zone !== 'bottom') return false;
   if (isFileExplorerItem(item)) return false;
-  const inlineSize = dropIntentInlineSize(intent);
-  return !inlineSize || inlineSize >= minWidthForLayoutItem(item);
+  if (!dropIntentTargetRect(intent)) return false;
+  return dropIntentHasRoomForItem(item, intent);
 }
 
-function dropIntentAllowsSession(session, intent) {
-  if (!isLayoutItem(session)) return false;
-  if (isFileExplorerItem(session)) return false;
+function dropIntentAllowsSession(session, intent, options = {}) {
+  if (!dropItemCanBeDragged(session, options)) return false;
   if ((intent?.boundary === 'root' || intent?.boundary === 'gutter') && layoutSplitZone(intent.zone)) return true;
   if (!intent?.targetSlot) return false;
   if (slotIsFileExplorerPane(intent.targetSlot)) {
     return itemCanSplitSinglePurposePane(session, intent);
   }
-  return true;
+  return dropIntentHasRoomForItem(session, intent);
+}
+
+function fileDragLayoutItem(payload) {
+  const path = payload?.path || payload?.paths?.find?.(Boolean) || '';
+  if (!path || payload?.kind === 'dir') return null;
+  return fileEditorItemFor(path);
+}
+
+function fileDropIntentAllowsPayload(payload, intent) {
+  const item = fileDragLayoutItem(payload);
+  return Boolean(item && dropIntentAllowsSession(item, intent, {allowCandidate: true}));
+}
+
+function pathDropIntentAllowsPayload(payload, intent) {
+  const path = payload?.path || payload?.paths?.find?.(Boolean) || '';
+  const item = path ? fileEditorItemFor(path) : null;
+  return Boolean(item && dropIntentAllowsSession(item, intent, {allowCandidate: true}));
 }
 
 function clearDropPreview() {
@@ -1803,7 +1929,7 @@ function applyGutterDropPreviewGeometry(node, intent) {
 
 function layoutNodeScreenRect(layoutNode) {
   const rects = layoutLeafSlots(layoutNode)
-    .map(slot => layoutColumnNode(slot)?.getBoundingClientRect?.())
+    .map(slot => layoutSlotScreenRect(slot))
     .filter(rect => rect && rect.width > 0 && rect.height > 0);
   if (!rects.length) return null;
   const left = Math.min(...rects.map(rect => rect.left));
@@ -1811,6 +1937,42 @@ function layoutNodeScreenRect(layoutNode) {
   const right = Math.max(...rects.map(rect => rect.right));
   const bottom = Math.max(...rects.map(rect => rect.bottom));
   return {left, top, right, bottom, width: right - left, height: bottom - top};
+}
+
+function layoutSlotScreenRect(slot) {
+  const column = layoutColumnNode(slot);
+  const columnRect = column?.getBoundingClientRect?.();
+  if (columnRect?.width > 0 && columnRect?.height > 0) return columnRect;
+  const panel = grid?.querySelector(`.dockview-panel-content > .panel[data-slot="${cssEscape(slot)}"]`);
+  const panelGroup = panel?.closest?.('.dv-groupview');
+  const panelGroupRect = panelGroup?.getBoundingClientRect?.();
+  if (panelGroupRect?.width > 0 && panelGroupRect?.height > 0) return panelGroupRect;
+  const item = activeItemForSide(slot) || paneTabs(slot)[0] || '';
+  const tabGroup = item
+    ? grid?.querySelector(`.dockview-pane-tab[data-pane-tab="${cssEscape(item)}"]`)?.closest?.('.dv-groupview')
+    : null;
+  const tabGroupRect = tabGroup?.getBoundingClientRect?.();
+  return tabGroupRect?.width > 0 && tabGroupRect?.height > 0 ? tabGroupRect : null;
+}
+
+function dockedFileExplorerScreenRect(slots = layoutSlots) {
+  const root = slots?.[layoutTreeKey];
+  const docked = dockedFileExplorerRootSplit(root, slots);
+  if (!docked) return null;
+  return layoutNodeScreenRect(root?.children?.[docked.finderIndex]);
+}
+
+function eventInsideRect(event, rect) {
+  return Boolean(
+    event && rect
+    && event.clientX >= rect.left && event.clientX <= rect.right
+    && event.clientY >= rect.top && event.clientY <= rect.bottom
+  );
+}
+
+function rootBoundaryDropOverDockedFileExplorer(event, zone, slots = layoutSlots) {
+  if (!layoutSplitZone(zone)) return false;
+  return eventInsideRect(event, dockedFileExplorerScreenRect(slots));
 }
 
 function applyDockedFileExplorerBoundaryPreviewGeometry(node, intent) {
@@ -1833,7 +1995,9 @@ function showDropPreview(intent) {
   const zone = intent.zone || 'middle';
   node.classList.add(CLS.dragOver, CLS.dropPreview, `drop-preview-${zone}`);
   if (intent.boundary) node.classList.add(`drop-preview-${intent.boundary}`);
-  node.dataset.dropLabel = intent.boundary === 'root'
+  node.dataset.dropLabel = intent.swap === true
+    ? 'swap'
+    : intent.boundary === 'root'
     ? `full ${zone}`
     : intent.boundary === 'gutter'
       ? 'full span'
@@ -1845,16 +2009,23 @@ function showDropPreview(intent) {
 }
 
 function dropSessionAtEvent(event) {
+  const panePayload = paneDragPayload(event);
+  if (panePayload?.slot) {
+    event.preventDefault();
+    event.stopPropagation();
+    const intent = paneSwapIntentForEvent(event, panePayload.slot);
+    clearDropPreview();
+    if (paneSwapIntentAllowed(intent)) swapPaneSlots(intent.sourceSlot, intent.targetSlot);
+    return;
+  }
   const filePayload = fileDragPayload(event);
   if (filePayload?.path) {
     event.preventDefault();
     event.stopPropagation();
     const intent = dropIntentForEvent(event, {allowBoundary: false});
     clearDropPreview();
-    if (!intent?.targetSlot) return;
-    if (slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle') return;
-    const zone = slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle' ? 'right' : intent.zone;
-    openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: zone});
+    if (!intent?.targetSlot || !fileDropIntentAllowsPayload(filePayload, intent)) return;
+    openDraggedFilesInEditor(filePayload, {targetSlot: intent.targetSlot, targetZone: intent.zone});
     return;
   }
   const payload = dragPayload(event);
@@ -1874,10 +2045,24 @@ function dropSessionAtEvent(event) {
 }
 
 function handleDropDragOver(event) {
+  const panePayload = paneDragPayload(event);
+  if (panePayload?.slot) {
+    const intent = paneSwapIntentForEvent(event, panePayload.slot);
+    event.preventDefault();
+    event.stopPropagation();
+    if (!paneSwapIntentAllowed(intent)) {
+      event.dataTransfer.dropEffect = 'none';
+      clearDropPreview();
+      return;
+    }
+    event.dataTransfer.dropEffect = 'move';
+    showDropPreview(intent);
+    return;
+  }
   const filePayload = fileDragPayload(event);
   if (filePayload?.path) {
     const intent = dropIntentForEvent(event, {allowBoundary: false});
-    if (slotIsFileExplorerPane(intent.targetSlot) && intent.zone === 'middle') {
+    if (!fileDropIntentAllowsPayload(filePayload, intent)) {
       event.preventDefault();
       event.stopPropagation();
       event.dataTransfer.dropEffect = 'none';
