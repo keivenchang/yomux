@@ -7158,6 +7158,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/pathIsInsideDirectory\(child\.dataset\.path, leadPath\)/.test(source), 'Right on an expanded folder steps into the first child');
   assert.ok(/rows\.find\(item => item\.dataset\.path === dirnameOf\(leadPath\)\)/.test(source), 'Left on a collapsed folder/file steps to the parent');
   assert.ok(source.includes('fileExplorerSelectionLead = fullPath'), 'click/range selection seeds the same lead so keyboard continues from the clicked row');
+  assert.ok(/if \(isEnter\)[\s\S]*beginFileTreeRename\(leadRow, leadRow\.dataset\.path/.test(source), 'Enter renames the selected Finder row (macOS Finder Return)');
+  assert.ok(/if \(leadRow\.dataset\.openChangeFile !== undefined\) return false/.test(source), 'Enter is a no-op on Differ rows (not a Finder rename target)');
+  assert.ok(source.includes('fileTreeRepoPopoverCursor.x + 14'), 'the repo-row hover popover anchors to the RIGHT of the cursor');
 }
 
 // S2 (DOIT.51) BEHAVIORAL PROOF: a file that is an open tab appears ONCE in the on-type palette — as its

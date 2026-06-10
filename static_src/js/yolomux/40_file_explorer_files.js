@@ -858,6 +858,7 @@ function fileTreeRepoPopoverNode() {
 
 let fileTreeRepoPopoverTimer = null;
 let fileTreeRepoPopoverHoverToken = 0;
+let fileTreeRepoPopoverCursor = {x: 0, y: 0};   // last pointer pos over the hovered repo row; popover anchors to its RIGHT
 
 function cancelFileTreeRepoPopoverTimer() {
   if (fileTreeRepoPopoverTimer) {
@@ -872,15 +873,17 @@ function showFileTreeRepoPopover(row, repo) {
   const node = fileTreeRepoPopoverNode();
   node.innerHTML = repoInfoPopoverHtml(repo);
   node.hidden = false;
-  const rect = row?.getBoundingClientRect?.();
-  if (rect) {
-    // DOIT.6 #87: clamp to the viewport so the popover stays fully on-screen near the right/bottom edge
-    // (it was placed at the row's left/bottom with no clamp and overflowed off-screen).
-    const popRect = node.getBoundingClientRect?.();
-    const pos = clampToViewport(Math.floor(rect.left), Math.ceil(rect.bottom + 4), Math.ceil(popRect?.width || 0), Math.ceil(popRect?.height || 0));
-    node.style.left = `${Math.round(pos.left)}px`;
-    node.style.top = `${Math.round(pos.top)}px`;
-  }
+  // Anchor to the RIGHT of the cursor (like a tooltip following the pointer), not centered under the row.
+  // Clamp to the viewport so it stays fully on-screen near the right/bottom edge.
+  const popRect = node.getBoundingClientRect?.();
+  const pos = clampToViewport(
+    Math.round(fileTreeRepoPopoverCursor.x + 14),
+    Math.round(fileTreeRepoPopoverCursor.y + 4),
+    Math.ceil(popRect?.width || 0),
+    Math.ceil(popRect?.height || 0),
+  );
+  node.style.left = `${Math.round(pos.left)}px`;
+  node.style.top = `${Math.round(pos.top)}px`;
 }
 
 function hideFileTreeRepoPopover() {
@@ -1681,11 +1684,13 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   }
   if (!differMode && entry.kind === 'dir' && entry.is_repo === true) {
     row.removeAttribute('title');
-    row.onmouseenter = () => scheduleRepoRowHoverPopover(row, fullPath);
+    row.onmouseenter = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; scheduleRepoRowHoverPopover(row, fullPath); };
+    row.onmousemove = event => { fileTreeRepoPopoverCursor = {x: event.clientX, y: event.clientY}; };
     row.onmouseleave = () => hideFileTreeRepoPopover();
   } else if (!differMode) {
     cancelFileTreeRepoPopoverTimer();
     row.onmouseenter = null;
+    row.onmousemove = null;
     row.onmouseleave = null;
     if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
     if (entry.is_symlink === true && entry.symlink_target) {
@@ -2608,8 +2613,9 @@ function handleFileExplorerArrowNav(event) {
   const key = event.key;
   const isVertical = key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End';
   const isHorizontal = key === 'ArrowRight' || key === 'ArrowLeft';
+  const isEnter = key === 'Enter' && !event.metaKey && !event.ctrlKey && !event.shiftKey;
   const isSelectAll = (event.metaKey || event.ctrlKey) && (key === 'a' || key === 'A');
-  if (!isVertical && !isHorizontal && !isSelectAll) return false;
+  if (!isVertical && !isHorizontal && !isEnter && !isSelectAll) return false;
   if ((isVertical || isHorizontal) && (event.metaKey || event.ctrlKey)) return false;   // leave Mod+Arrow for other shortcuts
   if (!eventTargetIsFileExplorerSurface(event.target) && !isFileExplorerItem(focusedPanelItem)) return false;
   if (!globalShortcutTargetAllowsAppAction(event.target)) return false;
@@ -2641,6 +2647,17 @@ function handleFileExplorerArrowNav(event) {
   }
   let leadIndex = rows.findIndex(item => item.dataset.path === fileExplorerSelectionLead);
   if (leadIndex < 0) leadIndex = rows.findIndex(item => fileExplorerSelectedPaths.has(item.dataset.path));
+  // macOS Finder: Return/Enter renames the selected item (open is double-click / Cmd-O). Differ rows
+  // (data-open-change-file) are not Finder rename targets, so leave Enter alone there.
+  if (isEnter) {
+    if (leadIndex < 0) return false;
+    const leadRow = rows[leadIndex];
+    if (leadRow.dataset.openChangeFile !== undefined) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    beginFileTreeRename(leadRow, leadRow.dataset.path, {kind: leadRow.dataset.kind, name: leadRow.dataset.name || basenameOf(leadRow.dataset.path), is_repo: leadRow.dataset.isRepo === 'true'});
+    return true;
+  }
   // macOS Finder list view: Right expands a collapsed folder, or steps into the first child if already
   // expanded; Left collapses an expanded folder, or steps to the parent. (Files: Right is a no-op, Left -> parent.)
   if (isHorizontal) {
