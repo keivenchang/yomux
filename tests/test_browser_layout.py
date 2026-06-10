@@ -8806,16 +8806,19 @@ def test_codemirror_search_toggle_labels_collapse_to_glyph_not_overflow(browser,
     # text ("match case"/"regexp"/"by word") so it overflows the 24px box and collides with our
     # compact ::after glyph (images 019/021). The +1-class override must keep the label font-size 0.
     load_codemirror_search_panel_fixture(browser, tmp_path)
-    labels = browser.execute_script(
-        """
-        const panel = document.querySelector('.cm-search');
-        if (!panel) return null;
-        return [...panel.querySelectorAll('label')].map(l => ({
-          fontSize: getComputedStyle(l).fontSize,
-          boxWidth: Math.round(l.getBoundingClientRect().width),
-          scrollWidth: l.scrollWidth,
-        }));
-        """
+    labels = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const panel = document.querySelector('.cm-search');
+            if (!panel) return false;
+            const labels = [...panel.querySelectorAll('label')].map(l => ({
+              fontSize: getComputedStyle(l).fontSize,
+              boxWidth: Math.round(l.getBoundingClientRect().width),
+              scrollWidth: l.scrollWidth,
+            }));
+            return labels.length ? labels : false;
+            """
+        )
     )
     assert labels, "search panel did not open (CodeMirror bundle missing search export?)"
     assert len(labels) == 3
