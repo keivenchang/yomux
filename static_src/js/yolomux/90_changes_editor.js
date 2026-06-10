@@ -514,7 +514,6 @@ function diffRefResetButtonHtml(refs = repoDiffRefs('')) {
 
 function invalidateSessionFilesCaches() {
   fileExplorerSessionFilesCache.clear();
-  sessionFilesLastPollTs = 0;
 }
 
 // C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
@@ -718,7 +717,6 @@ async function fetchSessionFiles(options = {}) {
     return;
   }
   setSessionFilesLoadingForDestination(destination, true);
-  sessionFilesLastPollTs = Date.now();
   if (!options.silent) statusEl.textContent = 'loading changed files...';
   if (!options.silent) {
     renderSessionFilesDestination(destination, {force: true});
@@ -790,7 +788,6 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   setSessionFilesPayloadForDestination(destination, nextPayload);
   setSessionFilesSignatureForDestination(destination, signature);
   fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
-  sessionFilesLastPollTs = Date.now();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (shouldRender) {
     renderSessionFilesDestination(destination, {force: true});

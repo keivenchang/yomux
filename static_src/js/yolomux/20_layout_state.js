@@ -87,6 +87,106 @@ function nextLayoutSlot(slots = layoutSlots) {
   return `slot${index}`;
 }
 
+function normalizeLayoutMode(value) {
+  const text = String(value || '').trim();
+  return layoutModeValues.includes(text) ? text : defaultLayoutMode;
+}
+
+function configuredDefaultLayoutMode() {
+  return normalizeLayoutMode(initialSetting('general.default_layout', defaultLayoutMode));
+}
+
+function layoutModePaneCount(mode, items) {
+  const count = Array.isArray(items) ? items.length : 0;
+  if (!count) return 0;
+  const normalized = normalizeLayoutMode(mode);
+  if (normalized === 'single') return 1;
+  if (normalized === 'split') return Math.min(2, count);
+  if (normalized === 'grid') return Math.min(4, count);
+  return count;
+}
+
+function layoutModeBaseSlots(mode) {
+  if (mode === 'grid') return ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
+  if (mode === 'split') return ['left', 'right'];
+  if (mode === 'wall') return ['left', 'right'];
+  return ['left'];
+}
+
+function layoutModeSlotNames(mode, count, options = {}) {
+  const finderSlot = options.finderSlot || null;
+  const used = {[layoutTreeKey]: null};
+  if (finderSlot) used[finderSlot] = emptyPaneState();
+  const slots = [];
+  for (const slot of options.preferredSlots || []) {
+    if (slots.length >= count) break;
+    if (!slot || slot === finderSlot || used[slot]) continue;
+    slots.push(slot);
+    used[slot] = emptyPaneState();
+  }
+  for (const slot of layoutModeBaseSlots(normalizeLayoutMode(mode))) {
+    if (slots.length >= count) break;
+    if (slot === finderSlot || used[slot]) continue;
+    slots.push(slot);
+    used[slot] = emptyPaneState();
+  }
+  while (slots.length < count) {
+    const slot = nextLayoutSlot(used);
+    slots.push(slot);
+    used[slot] = emptyPaneState();
+  }
+  return slots;
+}
+
+function partitionLayoutItems(items, count) {
+  const groups = [];
+  let start = 0;
+  for (let index = 0; index < count; index += 1) {
+    const remainingItems = items.length - start;
+    const remainingGroups = count - index;
+    const size = Math.ceil(remainingItems / remainingGroups);
+    groups.push(items.slice(start, start + size));
+    start += size;
+  }
+  return groups;
+}
+
+function rowTreeForSlots(slots) {
+  return slots.map(leafNode).reduce((tree, leaf) => (tree ? splitNode('row', tree, leaf) : leaf), null);
+}
+
+function columnTreeForSlots(slots) {
+  return slots.map(leafNode).reduce((tree, leaf) => (tree ? splitNode('column', tree, leaf) : leaf), null);
+}
+
+function gridTreeForSlots(slots) {
+  if (slots.length <= 2) return rowTreeForSlots(slots);
+  const left = columnTreeForSlots([slots[0], slots[2]].filter(Boolean));
+  const right = columnTreeForSlots([slots[1], slots[3]].filter(Boolean));
+  return right ? splitNode('row', left, right) : left;
+}
+
+function layoutModeTreeForSlots(mode, slots) {
+  return normalizeLayoutMode(mode) === 'grid' ? gridTreeForSlots(slots) : rowTreeForSlots(slots);
+}
+
+function layoutSlotsForItems(items, mode, options = {}) {
+  const selected = (Array.isArray(items) ? items : []).filter(item => isLayoutItem(item));
+  if (!selected.length) return emptyPlaceholderLayoutSlots(options.emptySlot || 'left');
+  const normalizedMode = normalizeLayoutMode(mode);
+  const paneCount = layoutModePaneCount(normalizedMode, selected);
+  const slots = layoutModeSlotNames(normalizedMode, paneCount, options);
+  const groups = partitionLayoutItems(selected, slots.length);
+  const active = selected.includes(options.active) ? options.active : selected[0];
+  const next = emptyLayoutSlots();
+  for (let index = 0; index < slots.length; index += 1) {
+    const group = groups[index] || [];
+    next[slots[index]] = paneStateWithTabs(group, group.includes(active) ? active : group[0]);
+  }
+  next[layoutTreeKey] = layoutModeTreeForSlots(normalizedMode, slots);
+  return compactLayoutSlots(next);
+}
+
 function normalizePaneState(raw, seen, options = {}) {
   const state = emptyPaneState();
   const items = Array.isArray(raw) ? raw : Array.isArray(raw?.tabs) ? raw.tabs : [];
@@ -247,19 +347,15 @@ function normalizeFileExplorerDock(slots) {
 }
 
 function layoutFromSessionList(values) {
-  const next = emptyLayoutSlots();
   const seen = new Set();
+  const items = [];
   for (const raw of values) {
     const item = resolveLayoutItem(raw);
     if (!isLayoutItem(item) || seen.has(item)) continue;
-    const state = next.left || emptyPaneState();
-    state.tabs.push(item);
-    if (!state.active) state.active = item;
-    next.left = state;
+    items.push(item);
     seen.add(item);
   }
-  next[layoutTreeKey] = legacyLayoutTree(next);
-  return compactLayoutSlots(next);
+  return layoutSlotsForItems(items, configuredDefaultLayoutMode());
 }
 
 function layoutFromParam(raw, tabsRaw = '') {
@@ -549,14 +645,7 @@ function layoutWithDebugPaneActive(slots) {
 
 function defaultLayoutSlots() {
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  const next = emptyLayoutSlots();
-  if (!sorted.length) {
-    next.left = emptyPlaceholderPaneState();
-  } else {
-    next.left = paneStateWithTabs(sorted, sorted[0]);
-  }
-  next[layoutTreeKey] = legacyLayoutTree(next);
-  return compactLayoutSlots(next);
+  return layoutSlotsForItems(sorted, configuredDefaultLayoutMode());
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {

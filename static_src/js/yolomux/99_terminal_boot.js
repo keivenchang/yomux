@@ -317,9 +317,7 @@ async function refreshWatchedPrs() {
   try {
     const data = await apiFetchJson('/api/watched-prs');
     applyWatchedPrsPayload(data);
-  } catch (error) {
-    // Non-fatal: keep the last good render; the next poll retries.
-  }
+  } catch (_error) {}
 }
 
 function applyWatchedPrsPayload(data) {
@@ -328,7 +326,6 @@ function applyWatchedPrsPayload(data) {
     watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
     truncated: Number(data.truncated) || 0,
     invalid: Array.isArray(data.invalid) ? data.invalid : [],
-    refresh_ms: Number(data.refresh_ms) || watchedPrRefreshMs,
   };
   notifyWatchedPrTransitions(watchedPrsData.watched_prs);
   renderWatchedPrs();
@@ -1697,7 +1694,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   updateMetadataBadgePulses(transcriptMeta);
   const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
-  if (options.refreshAuto !== false && !(typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling())) {
+  if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
   if (sessionsChanged) renderPanels(previousActive);
@@ -1732,11 +1729,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   }
   renderPaneTabStrips();
   scheduleFileExplorerActiveTabSync();
-  if (typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling()) {
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
-  } else {
-    refreshWatchedFilesystem();
-  }
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
   trackSessionStateChanges();
   refreshOpenEventLogs();
   return true;
@@ -1754,7 +1747,11 @@ async function refreshTranscripts(options = {}) {
       if (options.force === true) params.set('force', '1');
       const suffix = params.toString();
       const payload = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
-      await applyTranscriptsPayload(payload, {refreshAuto: true, refreshContext: true, refreshActivity: true});
+      await applyTranscriptsPayload(payload, {
+        refreshAuto: options.refreshAuto !== false,
+        refreshContext: true,
+        refreshActivity: true,
+      });
     } catch (error) {
       transcriptMetaLoadError = String(error);
       for (const session of activeSessions.filter(isTmuxSession)) {
@@ -2059,17 +2056,6 @@ function refreshAll() {
   refreshWatchedFilesystem();
 }
 
-function scheduleInitialTranscriptRefreshFallback() {
-  if (!clientPushCanSupplyData()) {
-    refreshTranscripts();
-    return;
-  }
-  setTimeout(() => {
-    const loaded = transcriptMeta?.sessions && Object.keys(transcriptMeta.sessions).length > 0;
-    if (!loaded) refreshTranscripts();
-  }, 15000);
-}
-
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installClientEventStream();
@@ -2087,14 +2073,15 @@ async function boot() {
   statusEl.textContent = 'loading YOLO status...';
   await loadNotifyStatus();
   await loadAutoStatuses();
+  bindClipboardPaste();
+  await refreshTranscripts({refreshAuto: false});
   renderSessionButtons();
   renderPanels([], {prune: false});
   seedVisualActivePaneItem(activeSessions);
   updatePanelInactiveOverlays();
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  scheduleInitialTranscriptRefreshFallback();
-  refreshWatchedPrs();   // DOIT.29: first watched-PR fetch at boot; thereafter on its own interval
+  refreshWatchedPrs();
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();
@@ -2145,24 +2132,11 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
   });
 }
 
-function scheduleSessionFilesPushRefresh() {
-  if (!document.querySelector('.file-explorer-changes-panel') || typeof fetchSessionFiles !== 'function') return;
-  if (sessionFilesPushRefreshTimer) clearTimeout(sessionFilesPushRefreshTimer);
-  const elapsed = sessionFilesLastPollTs ? Date.now() - sessionFilesLastPollTs : sessionFilesRefreshMs;
-  const delay = Math.max(0, sessionFilesRefreshMs - elapsed);
-  sessionFilesPushRefreshTimer = setTimeout(() => {
-    sessionFilesPushRefreshTimer = null;
-    fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
-  }, delay);
-}
-
 function handleClientPushEvent(type, payload = {}) {
   if (type === 'settings_changed') {
     if (payload.data && typeof payload.data === 'object') {
       applySettingsPayload(payload.data, {force: true});
-      return;
     }
-    refreshSettings({force: true, silent: true});
     return;
   }
   if (type === 'auto_approve_changed') {
@@ -2176,8 +2150,6 @@ function handleClientPushEvent(type, payload = {}) {
   if (type === 'transcripts_changed') {
     if (payload.data) {
       applyTranscriptsPayload(payload.data, {refreshAuto: false, refreshContext: false, refreshActivity: false});
-    } else {
-      refreshTranscripts({force: true});
     }
     return;
   }
@@ -2195,8 +2167,10 @@ function handleClientPushEvent(type, payload = {}) {
     }
     return;
   }
-  if (type === 'session_files_changed') {
-    scheduleSessionFilesPushRefresh();
+  if (type === 'files_changed') {
+    if (typeof refreshOpenFilesFromPush === 'function') {
+      refreshOpenFilesFromPush(payload).catch(error => console.warn('client file push refresh failed', error));
+    }
     return;
   }
   if (type === 'fs_changed') {
@@ -2225,7 +2199,7 @@ function installClientEventStream() {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'fs_changed', 'session_files_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       const envelope = clientEventEnvelope(event);

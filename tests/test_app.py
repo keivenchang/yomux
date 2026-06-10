@@ -34,6 +34,58 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
     assert payload["sessions"] == {"new": {"target": "new"}}
 
 
+def test_server_event_poll_seconds_accepts_fast_server_side_interval(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(
+            app_module,
+            "settings_payload",
+            lambda: {"settings": {"performance": {"server_event_poll_ms": 100}}},
+        )
+        assert webapp.server_event_poll_seconds() == 0.25
+        monkeypatch.setattr(
+            app_module,
+            "settings_payload",
+            lambda: {"settings": {"performance": {"server_event_poll_ms": 850}}},
+        )
+        assert webapp.server_event_poll_seconds() == 0.85
+    finally:
+        webapp.control_server.stop()
+
+
+def test_server_directory_event_poll_seconds_uses_own_interval(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(
+            app_module,
+            "settings_payload",
+            lambda: {"settings": {"performance": {"server_event_poll_ms": 250, "server_directory_event_poll_ms": 1250}}},
+        )
+        assert webapp.server_event_poll_seconds() == 0.25
+        assert webapp.server_directory_event_poll_seconds() == 1.25
+    finally:
+        webapp.control_server.stop()
+
+
+def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(
+            app_module,
+            "settings_payload",
+            lambda: {"settings": {"performance": {"server_event_poll_ms": 250}}},
+        )
+        webapp.client_event_next_file_poll_at = 100.5
+        webapp.client_event_next_signature_poll_at = 100.25
+        webapp.client_event_next_auto_poll_at = 101.0
+        webapp.client_event_next_watched_pr_poll_at = 200.0
+        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
+        webapp.client_event_next_signature_poll_at = 0.0
+        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
+    finally:
+        webapp.control_server.stop()
+
+
 @pytest.mark.parametrize("method_name", ["events_payload", "search_payload", "auto_approve_status"])
 def test_session_scoped_endpoints_refresh_before_unknown_session_guard(monkeypatch, method_name):
     webapp = app_module.TmuxWebtermApp(["old"])
@@ -137,13 +189,12 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
-    monkeypatch.setattr(webapp, "metadata_refresh_seconds", lambda: 1.0)
     webapp.start_transcripts_payload_refresh = lambda: (webapp.refresh_transcripts_payload_cache() or True)
     try:
         first = webapp.transcripts_payload()
         with webapp.transcripts_payload_cache_lock:
             stored_at, value = webapp.transcripts_payload_cache
-            webapp.transcripts_payload_cache = (stored_at - 2.0, value)
+            webapp.transcripts_payload_cache = (stored_at - app_module.TRANSCRIPTS_PAYLOAD_CACHE_SECONDS - 1.0, value)
         second = webapp.transcripts_payload()
         third = webapp.transcripts_payload()
     finally:
@@ -402,14 +453,13 @@ def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
     monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.refresh_sessions = lambda: []
-    webapp.session_files_refresh_seconds = lambda: 1.0
     webapp.start_session_files_cache_refresh = lambda cache_key, target, *args: (target(cache_key, *args) or True)
     try:
         first, first_status = webapp.session_files_payload("5")
         key = next(iter(webapp.session_files_cache))
         with webapp.session_files_cache_lock:
             stored_at, value = webapp.session_files_cache[key]
-            webapp.session_files_cache[key] = (stored_at - 2.0, value)
+            webapp.session_files_cache[key] = (stored_at - app_module.SESSION_FILES_CACHE_SECONDS - 1.0, value)
         second, second_status = webapp.session_files_payload("5")
     finally:
         webapp.control_server.stop()
@@ -427,11 +477,14 @@ def test_update_client_watch_roots_filters_and_expires(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
     try:
-        payload = webapp.update_client_watch_roots(["/repo", "relative", "", "/repo"])
+        payload = webapp.update_client_watch_roots({"roots": ["/repo", "relative", "", "/repo"], "files": ["/repo/DOIT.51.md", "relative"]})
         assert payload["roots"] == ["/repo"]
+        assert payload["files"] == ["/repo/DOIT.51.md"]
         assert webapp.client_watch_roots_snapshot() == ["/repo"]
+        assert webapp.client_watch_files_snapshot() == ["/repo/DOIT.51.md"]
         monkeypatch.setattr(app_module.time, "monotonic", lambda: 1000.0)
         assert webapp.client_watch_roots_snapshot() == []
+        assert webapp.client_watch_files_snapshot() == []
     finally:
         webapp.control_server.stop()
 
@@ -532,8 +585,27 @@ def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
     assert webapp.transcripts_payload_cache is not None
 
 
-def test_filesystem_roots_for_watch_excludes_transcript_parent(monkeypatch, tmp_path):
+def test_poll_client_file_events_once_publishes_active_file_changes(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    signatures = [
+        (("/repo/DOIT.51.md", ("/repo/DOIT.51.md", "file", 100, 10)),),
+        (("/repo/DOIT.51.md", ("/repo/DOIT.51.md", "file", 200, 12)),),
+    ]
+    monkeypatch.setattr(webapp, "files_watch_signature", lambda: signatures.pop(0))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        assert webapp.poll_client_file_events_once() == []
+        assert webapp.poll_client_file_events_once() == ["files_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert events == [("files_changed", {"files": [{"path": "/repo/DOIT.51.md", "signature": ("/repo/DOIT.51.md", "file", 200, 12)}], "count": 1})]
+
+
+def test_filesystem_roots_for_watch_uses_client_roots_not_agent_cwd(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
+    watched = tmp_path / "watched"
     transcript = tmp_path / "transcripts" / "codex.jsonl"
     info = SessionInfo(
         session="5",
@@ -557,11 +629,13 @@ def test_filesystem_roots_for_watch_excludes_transcript_parent(monkeypatch, tmp_
     monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
     webapp = app_module.TmuxWebtermApp([])
     try:
+        webapp.update_client_watch_roots({"roots": [str(watched)]})
         roots = webapp.filesystem_roots_for_watch({"5": info})
     finally:
         webapp.control_server.stop()
 
-    assert str(repo) in roots
+    assert str(watched) in roots
+    assert str(repo) not in roots
     assert str(transcript.parent) not in roots
 
 
@@ -1003,7 +1077,7 @@ def test_yoagent_codex_cli_persists_then_resumes(monkeypatch):
 
 
 def test_watched_prs_payload_shapes_result_and_logs_truncation_once(monkeypatch):
-    # DOIT.29: watched_prs_payload returns {watched_prs, truncated, invalid, refresh_ms}.
+    # DOIT.29: watched_prs_payload returns {watched_prs, truncated, invalid}.
     # DOIT.34 #4: the cap is logged only when the capped state CHANGES — not on every poll.
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp([])
@@ -1024,7 +1098,7 @@ def test_watched_prs_payload_shapes_result_and_logs_truncation_once(monkeypatch)
     assert payload["watched_prs"][0]["ref"] == "o/r#1"
     assert payload["truncated"] == 3
     assert payload["invalid"] == ["bad"]
-    assert isinstance(payload["refresh_ms"], (int, float))
+    assert "refresh_ms" not in payload
     truncation_events = lambda: [a for a in events if "watched_pr_truncated" in str(a)]
     assert len(truncation_events()) == 1, "logs the truncation on first cap"
 

@@ -361,18 +361,12 @@ const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
-let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 200);
-let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15001);
-// DOIT.29: watched PRs poll on their own (longer) cadence; the latest payload + last-seen status per
-// PR ref (for notify-on-transition diffing) live here.
-let watchedPrRefreshMs = initialSetting('performance.watched_pr_refresh_ms', 60001);
-let watchedPrsData = {watched_prs: [], truncated: 0, invalid: [], refresh_ms: watchedPrRefreshMs};
+let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
+// The latest watched-PR payload + last-seen status per PR ref (for notify-on-transition diffing) live here.
+let watchedPrsData = {watched_prs: [], truncated: 0, invalid: []};
 const watchedPrLastStatus = new Map();
-let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1253);
-let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3001);
-let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5003);
-let settingsRefreshMs = initialSetting('performance.settings_refresh_ms', 5009);
-let activitySummaryBackgroundRefreshMs = initialSetting('performance.activity_summary_refresh_ms', 60001);
+let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
+let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
 let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
 const latencySamplesMax = 24;
@@ -388,23 +382,6 @@ let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_m
 let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms', 120);
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
-function fileExplorerRefreshMsFromValues(secondsValue, legacyMsValue = 15001) {
-  const seconds = Number(secondsValue);
-  if (Number.isFinite(seconds)) return Math.max(1, Math.min(60, seconds)) * 1000 + 1;
-  const legacyMs = Number(legacyMsValue);
-  return Math.max(1000, Math.min(60000, Number.isFinite(legacyMs) ? legacyMs : 15001));
-}
-let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
-  initialSetting('file_explorer.refresh_seconds', 5),
-  initialSetting('file_explorer.refresh_ms', 15001),
-);
-function sessionFilesRefreshMsFromValues(secondsValue) {
-  const seconds = Number(secondsValue);
-  return Math.max(1, Math.min(60, Number.isFinite(seconds) ? seconds : 5)) * 1000 + 1;
-}
-let sessionFilesRefreshMs = sessionFilesRefreshMsFromValues(initialSetting('file_explorer.session_files_refresh_seconds', 5));
-let sessionFilesLastPollTs = 0;
-let sessionFilesPushRefreshTimer = null;
 let serverWatchRootsSignature = '';
 let serverWatchRootsInFlight = false;
 let serverWatchRootsSyncedAt = 0;
@@ -435,6 +412,8 @@ const layoutTreeParamPrefix = 'tree:';
 
 const defaultSplitPercent = 50;
 const fileExplorerSplitPercent = 22;
+const defaultLayoutMode = 'split';
+const layoutModeValues = ['single', 'split', 'grid', 'wall'];
 const layoutBoundaryDropFraction = 0.08;
 const layoutBoundaryDropMinPx = 28;
 const layoutBoundaryDropMaxPx = 64;
@@ -2810,6 +2789,106 @@ function nextLayoutSlot(slots = layoutSlots) {
   return `slot${index}`;
 }
 
+function normalizeLayoutMode(value) {
+  const text = String(value || '').trim();
+  return layoutModeValues.includes(text) ? text : defaultLayoutMode;
+}
+
+function configuredDefaultLayoutMode() {
+  return normalizeLayoutMode(initialSetting('general.default_layout', defaultLayoutMode));
+}
+
+function layoutModePaneCount(mode, items) {
+  const count = Array.isArray(items) ? items.length : 0;
+  if (!count) return 0;
+  const normalized = normalizeLayoutMode(mode);
+  if (normalized === 'single') return 1;
+  if (normalized === 'split') return Math.min(2, count);
+  if (normalized === 'grid') return Math.min(4, count);
+  return count;
+}
+
+function layoutModeBaseSlots(mode) {
+  if (mode === 'grid') return ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
+  if (mode === 'split') return ['left', 'right'];
+  if (mode === 'wall') return ['left', 'right'];
+  return ['left'];
+}
+
+function layoutModeSlotNames(mode, count, options = {}) {
+  const finderSlot = options.finderSlot || null;
+  const used = {[layoutTreeKey]: null};
+  if (finderSlot) used[finderSlot] = emptyPaneState();
+  const slots = [];
+  for (const slot of options.preferredSlots || []) {
+    if (slots.length >= count) break;
+    if (!slot || slot === finderSlot || used[slot]) continue;
+    slots.push(slot);
+    used[slot] = emptyPaneState();
+  }
+  for (const slot of layoutModeBaseSlots(normalizeLayoutMode(mode))) {
+    if (slots.length >= count) break;
+    if (slot === finderSlot || used[slot]) continue;
+    slots.push(slot);
+    used[slot] = emptyPaneState();
+  }
+  while (slots.length < count) {
+    const slot = nextLayoutSlot(used);
+    slots.push(slot);
+    used[slot] = emptyPaneState();
+  }
+  return slots;
+}
+
+function partitionLayoutItems(items, count) {
+  const groups = [];
+  let start = 0;
+  for (let index = 0; index < count; index += 1) {
+    const remainingItems = items.length - start;
+    const remainingGroups = count - index;
+    const size = Math.ceil(remainingItems / remainingGroups);
+    groups.push(items.slice(start, start + size));
+    start += size;
+  }
+  return groups;
+}
+
+function rowTreeForSlots(slots) {
+  return slots.map(leafNode).reduce((tree, leaf) => (tree ? splitNode('row', tree, leaf) : leaf), null);
+}
+
+function columnTreeForSlots(slots) {
+  return slots.map(leafNode).reduce((tree, leaf) => (tree ? splitNode('column', tree, leaf) : leaf), null);
+}
+
+function gridTreeForSlots(slots) {
+  if (slots.length <= 2) return rowTreeForSlots(slots);
+  const left = columnTreeForSlots([slots[0], slots[2]].filter(Boolean));
+  const right = columnTreeForSlots([slots[1], slots[3]].filter(Boolean));
+  return right ? splitNode('row', left, right) : left;
+}
+
+function layoutModeTreeForSlots(mode, slots) {
+  return normalizeLayoutMode(mode) === 'grid' ? gridTreeForSlots(slots) : rowTreeForSlots(slots);
+}
+
+function layoutSlotsForItems(items, mode, options = {}) {
+  const selected = (Array.isArray(items) ? items : []).filter(item => isLayoutItem(item));
+  if (!selected.length) return emptyPlaceholderLayoutSlots(options.emptySlot || 'left');
+  const normalizedMode = normalizeLayoutMode(mode);
+  const paneCount = layoutModePaneCount(normalizedMode, selected);
+  const slots = layoutModeSlotNames(normalizedMode, paneCount, options);
+  const groups = partitionLayoutItems(selected, slots.length);
+  const active = selected.includes(options.active) ? options.active : selected[0];
+  const next = emptyLayoutSlots();
+  for (let index = 0; index < slots.length; index += 1) {
+    const group = groups[index] || [];
+    next[slots[index]] = paneStateWithTabs(group, group.includes(active) ? active : group[0]);
+  }
+  next[layoutTreeKey] = layoutModeTreeForSlots(normalizedMode, slots);
+  return compactLayoutSlots(next);
+}
+
 function normalizePaneState(raw, seen, options = {}) {
   const state = emptyPaneState();
   const items = Array.isArray(raw) ? raw : Array.isArray(raw?.tabs) ? raw.tabs : [];
@@ -2970,19 +3049,15 @@ function normalizeFileExplorerDock(slots) {
 }
 
 function layoutFromSessionList(values) {
-  const next = emptyLayoutSlots();
   const seen = new Set();
+  const items = [];
   for (const raw of values) {
     const item = resolveLayoutItem(raw);
     if (!isLayoutItem(item) || seen.has(item)) continue;
-    const state = next.left || emptyPaneState();
-    state.tabs.push(item);
-    if (!state.active) state.active = item;
-    next.left = state;
+    items.push(item);
     seen.add(item);
   }
-  next[layoutTreeKey] = legacyLayoutTree(next);
-  return compactLayoutSlots(next);
+  return layoutSlotsForItems(items, configuredDefaultLayoutMode());
 }
 
 function layoutFromParam(raw, tabsRaw = '') {
@@ -3272,14 +3347,7 @@ function layoutWithDebugPaneActive(slots) {
 
 function defaultLayoutSlots() {
   const sorted = visibleSessions.slice().sort((left, right) => String(left).localeCompare(String(right)));
-  const next = emptyLayoutSlots();
-  if (!sorted.length) {
-    next.left = emptyPlaceholderPaneState();
-  } else {
-    next.left = paneStateWithTabs(sorted, sorted[0]);
-  }
-  next[layoutTreeKey] = legacyLayoutTree(next);
-  return compactLayoutSlots(next);
+  return layoutSlotsForItems(sorted, configuredDefaultLayoutMode());
 }
 
 function layoutWithItems(value, items, preferredSlot = null) {
@@ -5376,6 +5444,16 @@ function menuGroups(...groups) {
   return items;
 }
 
+function layoutMenuCommand(mode) {
+  const normalized = normalizeLayoutMode(mode);
+  const detail = normalized === 'single'
+    ? t('menu.view.layout.single.detail', {name: fileExplorerLabel()})
+    : normalized === 'split'
+      ? t('menu.view.layout.split.detail', {name: fileExplorerLabel()})
+      : '';
+  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail});
+}
+
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
 
 function aboutDateTimeText() {
@@ -5956,12 +6034,7 @@ function appMenuTree() {
           menuCommand(t('menu.view.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
           menuCommand(t('menu.view.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
         ]),
-        menuSubmenu(t('menu.view.layout'), [
-          menuCommand(t('menu.view.layout.single'), setLayoutToSinglePane, {detail: t('menu.view.layout.single.detail', {name: fileExplorerLabel()})}),
-          menuCommand(t('menu.view.layout.split'), setLayoutToSplitPanes, {detail: t('menu.view.layout.split.detail', {name: fileExplorerLabel()})}),
-          menuCommand(t('menu.view.layout.grid'), null, {disabled: true, detail: t('menu.view.layout.grid.detail')}),
-          menuCommand(t('menu.view.layout.wall'), null, {disabled: true}),
-        ]),
+        menuSubmenu(t('menu.view.layout'), layoutModeValues.map(layoutMenuCommand)),
         menuSubmenu(t('menu.view.sortTabs'), [
           menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
           menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),
@@ -6778,6 +6851,41 @@ function entriesByDirFromFilesystemPush(payload = {}) {
     setLimitedMapEntry(fileExplorerDirListingCache, path, {entries, at: Date.now()}, fileExplorerMemoryCacheLimit);
   }
   return entriesByDir;
+}
+
+function fileEntryStatusFromWatchFilePayload(item) {
+  const signature = Array.isArray(item?.signature) ? item.signature : [];
+  const path = String(item?.path || signature[0] || '');
+  if (!path) return {path: '', entry: null, missing: false, error: '', network: false};
+  const kind = String(signature[1] || '');
+  if (kind === 'missing') return {path, entry: null, missing: true, error: `path not found: ${path}`, network: false};
+  if (kind !== 'file' && kind !== 'dir') return {path, entry: null, missing: false, error: `invalid file signature: ${path}`, network: false};
+  const mtime = Number(signature[2]) || 0;
+  const size = Number(signature[3]);
+  return {
+    path,
+    entry: {
+      name: basenameOf(path),
+      kind,
+      mtime_ns: mtime,
+      mtime,
+      size: Number.isFinite(size) ? size : null,
+    },
+    missing: false,
+    error: '',
+    network: false,
+  };
+}
+
+async function refreshOpenFilesFromPush(payload = {}) {
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  for (const item of files) {
+    const fetched = fileEntryStatusFromWatchFilePayload(item);
+    if (!fetched.path) continue;
+    const state = openFiles.get(fetched.path);
+    if (!state || state.loading) continue;
+    await refreshOpenFileFromFetchedStatus(fetched.path, state, fetched);
+  }
 }
 
 async function refreshFileExplorerFromPush(payload = {}) {
@@ -10601,52 +10709,61 @@ async function reloadOpenFileFromDisk(path, options = {}) {
   return replaceOpenFileStateFromDisk(path);
 }
 
-async function refreshOpenFilesIfChanged() {
+async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
+  const entry = fetched.entry;
+  if (!entry) {
+    if (fetched.missing) {
+      if (state.externalMissing) return;
+      clearFileAutosaveTimer(path);
+      markOpenFileMissing(path);
+    } else {
+      markOpenFileExternalError(path, fetched.error);
+    }
+    return;
+  }
+  if (!fileEntryChanged(state, entry)) {
+    if (state.externalChanged || state.externalMissing || state.externalError) {
+      delete state.externalMissing;
+      delete state.externalError;
+      if (!state.dirty) delete state.externalChanged;
+      if (!state.dirty) delete state.externalChangeEditPrompted;
+      renderOpenFilePath(path);
+    }
+    if (state.dirty) scheduleFileAutosave(path);
+    return;
+  }
+  if (state.dirty) {
+    const externalChanged = {mtime: fileEntryMtime(entry), size: entry.size ?? null};
+    if (state.externalChanged
+      && state.externalChanged.mtime === externalChanged.mtime
+      && state.externalChanged.size === externalChanged.size) {
+      return;
+    }
+    state.externalChanged = externalChanged;
+    delete state.externalChangeEditPrompted;
+    delete state.externalMissing;
+    delete state.externalError;
+    clearFileAutosaveTimer(path);
+    renderOpenFilePath(path);
+    return;
+  }
+  await replaceOpenFileStateFromDisk(path, entry);
+}
+
+async function refreshOpenFilesIfChanged(options = {}) {
+  const requestedPaths = new Set((Array.isArray(options.paths) ? options.paths : [])
+    .map(path => String(path || ''))
+    .filter(Boolean));
   for (const [path, state] of Array.from(openFiles.entries())) {
+    const requested = requestedPaths.has(path);
+    if (requestedPaths.size && !requested) continue;
     if (!state || state.loading) continue;
     // Poll on-disk staleness only for the file editor that is the visible/active tab; a file sitting in a
     // background tab does not need ~1/sec polling (it is re-checked when activated). Dirty files are always
     // polled — external-change conflict detection and autosave must never be skipped just because hidden.
-    if (!state.dirty && !itemIsActivePaneTab(fileEditorItemPrefix + path)) continue;
+    if (!requested && !state.dirty && !itemIsActivePaneTab(fileEditorItemPrefix + path)) continue;
     const fetched = await fetchFileEntryStatus(path);
-    const entry = fetched.entry;
-    if (!entry) {
-      if (fetched.missing) {
-        if (state.externalMissing) continue;
-        clearFileAutosaveTimer(path);
-        markOpenFileMissing(path);
-      } else {
-        markOpenFileExternalError(path, fetched.error);
-      }
-      continue;
-    }
-    if (!fileEntryChanged(state, entry)) {
-      if (state.externalChanged || state.externalMissing || state.externalError) {
-        delete state.externalMissing;
-        delete state.externalError;
-        if (!state.dirty) delete state.externalChanged;
-        if (!state.dirty) delete state.externalChangeEditPrompted;
-        renderOpenFilePath(path);
-      }
-      if (state.dirty) scheduleFileAutosave(path);
-      continue;
-    }
-    if (state.dirty) {
-      const externalChanged = {mtime: fileEntryMtime(entry), size: entry.size ?? null};
-      if (state.externalChanged
-        && state.externalChanged.mtime === externalChanged.mtime
-        && state.externalChanged.size === externalChanged.size) {
-        continue;
-      }
-      state.externalChanged = externalChanged;
-      delete state.externalChangeEditPrompted;
-      delete state.externalMissing;
-      delete state.externalError;
-      clearFileAutosaveTimer(path);
-      renderOpenFilePath(path);
-      continue;
-    }
-    await replaceOpenFileStateFromDisk(path, entry);
+    await refreshOpenFileFromFetchedStatus(path, state, fetched);
   }
 }
 
@@ -10660,11 +10777,16 @@ function watchedFileExplorerDirectories() {
   return Array.from(directories);
 }
 
+function visibleFileEditorWatchFiles() {
+  return Array.from(new Set(paneItems()
+    .filter(isFileEditorItem)
+    .map(item => fileItemPath(item))
+    .filter(path => path && path.startsWith('/'))))
+    .sort();
+}
+
 function clientServerWatchRoots() {
   const roots = new Set(watchedFileExplorerDirectories());
-  for (const path of openFiles.keys()) {
-    roots.add(dirnameOf(path));
-  }
   for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
     const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
     if (path && path !== '/') roots.add(path);
@@ -10682,6 +10804,7 @@ function clientServerWatchRoots() {
 function clientServerWatchState() {
   const state = {
     roots: clientServerWatchRoots(),
+    files: visibleFileEditorWatchFiles(),
     context_items: activeSessions
       .filter(isTmuxSession)
       .map(session => ({session, messages: transcriptPreviewMessages})),
@@ -10754,8 +10877,7 @@ async function refreshWatchedFilesystem() {
     await refreshFileExplorerIfChanged();
     await refreshOpenFilesIfChanged();
     if (document.querySelector('.file-explorer-changes-panel')) {
-      const due = !sessionFilesLastPollTs || Date.now() - sessionFilesLastPollTs >= sessionFilesRefreshMs;
-      if (due) fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
     syncServerWatchRoots();
   } finally {
@@ -12285,17 +12407,6 @@ function numberSetting(path, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
-function fileExplorerRefreshMsFromSettings() {
-  return fileExplorerRefreshMsFromValues(
-    numberSetting('file_explorer.refresh_seconds', Number.NaN),
-    numberSetting('file_explorer.refresh_ms', 15001),
-  );
-}
-
-function sessionFilesRefreshMsFromSettings() {
-  return sessionFilesRefreshMsFromValues(numberSetting('file_explorer.session_files_refresh_seconds', 5));
-}
-
 function boolSetting(path, fallback) {
   const value = initialSetting(path, fallback);
   return value === true || value === 'true' || value === 1;
@@ -12312,8 +12423,8 @@ const DEFAULT_CURSOR_COLOR = 'yellow';
 const UI_COLOR_PRESETS = {
   green:  {labelKey: 'pref.appearance.active_color.green', cursor: '#76b900', active: null},
   blue:   {labelKey: 'pref.appearance.active_color.blue', cursor: '#3b82f6', active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
-  orange: {labelKey: 'pref.appearance.active_color.orange', cursor: '#f97316', active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#c2570a', bright: '#c2570a', text: '#ffffff'}}},
-  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursor: '#ffd000', active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#a16207', bright: '#a16207', text: '#ffffff'}}},
+  orange: {labelKey: 'pref.appearance.active_color.orange', cursor: '#f97316', active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
+  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursor: '#ffd000', active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
   purple: {labelKey: 'pref.appearance.active_color.purple', cursor: '#a855f7', active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
   white:  {labelKey: 'pref.appearance.active_color.white', cursor: '#f8fafc', active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
 };
@@ -12502,7 +12613,7 @@ function refreshMetaButtonTitle() {
     'Refresh git, PR, Linear, and agent metadata.',
     'Refresh YOLO status and open event logs.',
     'Refresh active transcript previews.',
-    `Auto-refresh: YOLO ${seconds(paneStateRefreshMs)}, metadata ${seconds(metadataRefreshMs)}, settings ${seconds(settingsRefreshMs)}, ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
+    `Live updates arrive over SSE. Local timers: ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
     'Does not reload the page or reconnect terminals.',
   ].join('\n');
 }
@@ -12517,14 +12628,9 @@ function applySettingsPayload(payload, options = {}) {
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
   clientSettingsMtimeNs = nextMtime;
-  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 200);
-  metadataRefreshMs = numberSetting('performance.metadata_refresh_ms', 15001);
-  watchedPrRefreshMs = numberSetting('performance.watched_pr_refresh_ms', 60001);
-  paneStateRefreshMs = numberSetting('performance.pane_state_refresh_ms', 1253);
-  latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3001);
-  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5003);
-  settingsRefreshMs = numberSetting('performance.settings_refresh_ms', 5009);
-  activitySummaryBackgroundRefreshMs = numberSetting('performance.activity_summary_refresh_ms', 60001);
+  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 220);
+  latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3000);
+  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5000);
   redReminderMs = numberSetting('appearance.red_reminder_ms', 1550);
   yoloRotateMs = numberSetting('appearance.yolo_rotate_ms', 20000);
   toastDurationMs = numberSetting('notifications.toast_duration_ms', 10000);
@@ -12535,8 +12641,6 @@ function applySettingsPayload(payload, options = {}) {
   menuHoverCloseDelayMs = hoverCloseDelayMs;
   tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
-  fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings();
-  sessionFilesRefreshMs = sessionFilesRefreshMsFromSettings();
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
@@ -12617,10 +12721,9 @@ async function refreshSettings(options = {}) {
 
 const runtimeIntervals = new Map();
 
-function runtimeJitteredDelay(baseDelay, randomValue = Math.random()) {
+function runtimeIntervalDelay(baseDelay) {
   const base = Math.max(1, Math.round(Number(baseDelay) || 1));
-  const normalizedRandom = Math.min(1, Math.max(0, Number(randomValue) || 0));
-  return Math.max(1, Math.round(base * (1.01 + normalizedRandom * 0.09)));
+  return base;
 }
 
 function resetRuntimeInterval(name, callback, delay) {
@@ -12637,7 +12740,7 @@ function resetRuntimeInterval(name, callback, delay) {
   const state = {active: true, timer: null, delay: normalizedDelay, callback};
   const scheduleNext = () => {
     if (!state.active) return;
-    state.timer = setTimeout(run, runtimeJitteredDelay(state.delay));
+    state.timer = setTimeout(run, runtimeIntervalDelay(state.delay));
   };
   const run = () => {
     if (!state.active) return;
@@ -12656,46 +12759,16 @@ function clearRuntimeInterval(name) {
   runtimeIntervals.delete(name);
 }
 
-function clientPushSuppressesPolling() {
-  return clientPushConnectedForData();
-}
-
-function refreshTranscriptsFromRuntime() {
-  if (clientPushSuppressesPolling()) return;
-  refreshTranscripts();
-}
-
-function refreshAutoStatusesFromRuntime() {
-  if (clientPushSuppressesPolling()) return;
-  refreshAutoStatuses();
-}
-
-function refreshWatchedPrsFromRuntime() {
-  if (clientPushSuppressesPolling()) return;
-  refreshWatchedPrs();
-}
-
-function refreshWatchedFilesystemFromRuntime() {
-  if (clientPushSuppressesPolling()) {
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
-    return;
+function renewServerWatchRootsFromRuntime() {
+  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') {
+    syncServerWatchRoots({renew: true});
   }
-  refreshWatchedFilesystem();
-}
-
-function refreshSettingsFromRuntime() {
-  if (clientPushSuppressesPolling()) return;
-  refreshSettings({silent: true});
 }
 
 function installRuntimeIntervals() {
-  resetRuntimeInterval('auto', refreshAutoStatusesFromRuntime, paneStateRefreshMs);
-  resetRuntimeInterval('metadata', refreshTranscriptsFromRuntime, metadataRefreshMs);
-  resetRuntimeInterval('watched-prs', refreshWatchedPrsFromRuntime, watchedPrRefreshMs);
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
-  resetRuntimeInterval('filesystem', refreshWatchedFilesystemFromRuntime, fileExplorerRefreshMs);
-  resetRuntimeInterval('settings', refreshSettingsFromRuntime, settingsRefreshMs);
+  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, 60000);
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
   } else {
@@ -14007,68 +14080,60 @@ function firstNonFinderPaneSlot(slots = layoutSlots) {
   return layoutSlotKeys(slots).find(slot => !isFileExplorerItem(activeItemForSide(slot, slots)) && paneTabsWithoutFinder(slot, slots).length > 0) || null;
 }
 
-function setLayoutToSinglePane() {
-  const items = visibleNonFinderPaneItems();
-  if (!items.length) return;
-  const active = items.includes(focusedPanelItem) ? focusedPanelItem : items[0];
-  const finderSlot = slotForSession(fileExplorerItemId);
-  const targetSlot = firstNonFinderPaneSlot() || (finderSlot === 'left' ? 'right' : 'left');
-  const next = emptyLayoutSlots();
-  next[targetSlot] = paneStateWithTabs(items, active);
-  if (finderSlot) {
-    next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
-    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
-    next[layoutTreeKey] = finderFirst
-      ? splitNode('row', leafNode(finderSlot), leafNode(targetSlot), fileExplorerSplitPercent)
-      : splitNode('row', leafNode(targetSlot), leafNode(finderSlot), 100 - fileExplorerSplitPercent);
-  } else {
-    next[layoutTreeKey] = leafNode(targetSlot);
-  }
-  applyLayoutSlots(next, {focusSession: active, prune: false, message: 'single pane layout'});
+function preferredNonFinderLayoutSlots(finderSlot = null) {
+  return layoutSlotKeys().filter(slot => slot !== finderSlot && paneTabsWithoutFinder(slot).length > 0);
 }
 
-function setLayoutToSplitPanes() {
+function layoutModeStatusMessage(mode) {
+  const normalized = normalizeLayoutMode(mode);
+  if (normalized === 'single') return 'single pane layout';
+  if (normalized === 'split') return 'split layout';
+  if (normalized === 'grid') return 'grid layout';
+  return 'wall layout';
+}
+
+function applyNonFinderLayoutMode(mode) {
   const items = visibleNonFinderPaneItems();
   if (!items.length) return;
-  const finderSlot = slotForSession(fileExplorerItemId);
-  const preferredSlots = basePaneKeys.filter(slot => slot !== finderSlot);
-  while (preferredSlots.length < 2) preferredSlots.push(nextLayoutSlot({...layoutSlots, [preferredSlots[0] || 'left']: emptyPaneState()}));
-  const leftSlot = preferredSlots[0] || 'left';
-  const rightSlot = preferredSlots[1] || 'right';
-  const groups = [[], []];
-  const assigned = new Set();
-  for (const item of items) {
-    const slot = slotForSession(item);
-    if (slot === leftSlot) {
-      groups[0].push(item);
-      assigned.add(item);
-    } else if (slot === rightSlot) {
-      groups[1].push(item);
-      assigned.add(item);
-    }
-  }
-  for (const item of items) {
-    if (assigned.has(item)) continue;
-    groups[groups[0].length <= groups[1].length ? 0 : 1].push(item);
-  }
-  if (!groups[1].length && groups[0].length > 1) groups[1].push(...groups[0].splice(Math.ceil(groups[0].length / 2)));
+  const normalized = normalizeLayoutMode(mode);
   const active = items.includes(focusedPanelItem) ? focusedPanelItem : items[0];
-  const next = emptyLayoutSlots();
-  next[leftSlot] = paneStateWithTabs(groups[0], groups[0].includes(active) ? active : groups[0][0]);
-  if (groups[1].length) next[rightSlot] = paneStateWithTabs(groups[1], groups[1].includes(active) ? active : groups[1][0]);
-  const nonFinderTree = groups[1].length
-    ? splitNode('row', leafNode(leftSlot), leafNode(rightSlot), defaultSplitPercent)
-    : leafNode(leftSlot);
+  const finderSlot = slotForSession(fileExplorerItemId);
+  const preserveSlots = normalized === 'single' || normalized === 'split';
+  const next = layoutSlotsForItems(items, normalized, {
+    active,
+    finderSlot,
+    preferredSlots: preserveSlots ? preferredNonFinderLayoutSlots(finderSlot) : [],
+  });
   if (finderSlot) {
     next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
-    const finderFirst = finderLeadsExpandedPane(finderSlot, leftSlot);
+    const targetSlot = layoutLeafSlots(next[layoutTreeKey]).find(slot => slot !== finderSlot) || firstNonFinderPaneSlot() || 'right';
+    const nonFinderTree = next[layoutTreeKey];
+    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
     next[layoutTreeKey] = finderFirst
       ? splitNode('row', leafNode(finderSlot), nonFinderTree, fileExplorerSplitPercent)
       : splitNode('row', nonFinderTree, leafNode(finderSlot), 100 - fileExplorerSplitPercent);
-  } else {
-    next[layoutTreeKey] = nonFinderTree;
   }
-  applyLayoutSlots(next, {focusSession: active, prune: false, message: 'split layout'});
+  applyLayoutSlots(next, {focusSession: active, prune: false, message: layoutModeStatusMessage(normalized)});
+}
+
+function applyLayoutMode(mode) {
+  applyNonFinderLayoutMode(normalizeLayoutMode(mode));
+}
+
+function setLayoutToSinglePane() {
+  applyLayoutMode('single');
+}
+
+function setLayoutToSplitPanes() {
+  applyLayoutMode('split');
+}
+
+function setLayoutToGridPanes() {
+  applyLayoutMode('grid');
+}
+
+function setLayoutToWallPanes() {
+  applyLayoutMode('wall');
 }
 
 function layoutWithFileExplorerDockedLeft(slots = layoutSlots) {
@@ -17514,20 +17579,12 @@ function activitySummaryIsVisible() {
   return infoPanelSubTab === 'yoagent' && itemIsActivePaneTab(infoItemId);
 }
 
-function shouldSkipSilentActivitySummary(options = {}) {
-  if (options.force === true || options.silent !== true) return false;
-  if (activitySummaryIsVisible()) return false;
-  if (!activitySummaryLastRefreshTs) return false;
-  return Date.now() - activitySummaryLastRefreshTs < activitySummaryBackgroundRefreshMs;
-}
-
 async function refreshActivitySummary(options = {}) {
-  if (clientPushCanSupplyData() && options.silent === true) {
+  if (options.silent === true) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
   }
   if (activitySummaryRefreshing && options.force !== true) return;
-  if (shouldSkipSilentActivitySummary(options)) return;
   const requestIsCurrent = activitySummaryGuard.begin();
   activitySummaryRefreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
@@ -17598,6 +17655,10 @@ function globalThemePreferenceChoices() {
   ];
 }
 
+function layoutModePreferenceChoices() {
+  return layoutModeValues.map(value => ({value, label: t(`menu.view.layout.${value}`)}));
+}
+
 function activeColorPreferenceChoice(value, label) {
   const preset = ACTIVE_COLOR_PRESETS[value];
   const swatches = preset
@@ -17649,7 +17710,7 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.appearance'), items: [
       {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
-      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
+      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: layoutModePreferenceChoices(), help: t('pref.general.default_layout.help')},
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 6, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
       {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 6, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {type: 'note', text: t('pref.appearance.font_sizes.note')},
@@ -17713,22 +17774,16 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.performance'), items: [
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
-      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.server_event_poll_ms.help')},
-      {path: 'performance.activity_summary_refresh_ms', label: t('pref.performance.activity_summary_refresh_ms.label'), type: 'number', min: 10, max: 600, step: 1, suffix: 's', scale: 1000, displayDecimals: 0, help: t('pref.performance.activity_summary_refresh_ms.help')},
-      {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
-      {path: 'file_explorer.session_files_refresh_seconds', label: t('pref.file_explorer.session_files_refresh_seconds.label'), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.session_files_refresh_seconds.help')},
-      {path: 'performance.settings_refresh_ms', label: t('pref.performance.settings_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.settings_refresh_ms.help')},
-      {path: 'performance.metadata_refresh_ms', label: t('pref.performance.metadata_refresh_ms.label'), type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: t('pref.performance.metadata_refresh_ms.help')},
-      {path: 'performance.watched_pr_refresh_ms', label: t('pref.performance.watched_pr_refresh_ms.label'), type: 'number', min: 15000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.watched_pr_refresh_ms.help')},
-      {path: 'performance.pane_state_refresh_ms', label: t('pref.performance.pane_state_refresh_ms.label'), type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.pane_state_refresh_ms.help')},
-      {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1000, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.latency_refresh_ms.help')},
-      {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.event_log_refresh_ms.help')},
+      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
+      {path: 'performance.server_directory_event_poll_ms', label: t('pref.performance.server_directory_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_directory_event_poll_ms.help')},
+      {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1, max: 30, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.latency_refresh_ms.help')},
+      {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.event_log_refresh_ms.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
       {path: 'performance.tab_popover_show_delay_ms', label: t('pref.performance.tab_popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.tab_popover_show_delay_ms.help')},
       {path: 'performance.tab_popover_follow_delay_ms', label: t('pref.performance.tab_popover_follow_delay_ms.label'), type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: t('pref.performance.tab_popover_follow_delay_ms.help')},
-      {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: t('pref.performance.remote_resize_delay_ms.help')},
+      {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 0.05, max: 2, step: 0.01, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.remote_resize_delay_ms.help')},
     ]},
     {title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
@@ -17859,7 +17914,7 @@ function preferenceSearchKeywordsForItem(item) {
   const add = terms => keywords.push(...terms);
   if (path.includes('font_size') || path === 'appearance.tab_width') add(['large', 'larger', 'big', 'bigger', 'huge', 'small', 'smaller', 'tiny', 'text', 'scale', 'zoom', 'wide', 'narrow']);
   if (/(_ms|_seconds|_delay|_refresh|_interval|duration|period|pulse|rotate|throttle|resize)/.test(path)) add(['duration', 'timeout', 'time', 'timing', 'milliseconds', 'seconds', 'speed', 'fast', 'slow', 'quick', 'lag', 'wait', 'debounce', 'period', 'rate', 'frequency', 'often']);
-  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_seconds' || path === 'file_explorer.session_files_refresh_seconds') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
+  if (path.includes('_refresh_ms')) add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);
@@ -19177,7 +19232,6 @@ function diffRefResetButtonHtml(refs = repoDiffRefs('')) {
 
 function invalidateSessionFilesCaches() {
   fileExplorerSessionFilesCache.clear();
-  sessionFilesLastPollTs = 0;
 }
 
 // C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
@@ -19381,7 +19435,6 @@ async function fetchSessionFiles(options = {}) {
     return;
   }
   setSessionFilesLoadingForDestination(destination, true);
-  sessionFilesLastPollTs = Date.now();
   if (!options.silent) statusEl.textContent = 'loading changed files...';
   if (!options.silent) {
     renderSessionFilesDestination(destination, {force: true});
@@ -19453,7 +19506,6 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   setSessionFilesPayloadForDestination(destination, nextPayload);
   setSessionFilesSignatureForDestination(destination, signature);
   fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
-  sessionFilesLastPollTs = Date.now();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (shouldRender) {
     renderSessionFilesDestination(destination, {force: true});
@@ -24701,9 +24753,7 @@ async function refreshWatchedPrs() {
   try {
     const data = await apiFetchJson('/api/watched-prs');
     applyWatchedPrsPayload(data);
-  } catch (error) {
-    // Non-fatal: keep the last good render; the next poll retries.
-  }
+  } catch (_error) {}
 }
 
 function applyWatchedPrsPayload(data) {
@@ -24712,7 +24762,6 @@ function applyWatchedPrsPayload(data) {
     watched_prs: Array.isArray(data.watched_prs) ? data.watched_prs : [],
     truncated: Number(data.truncated) || 0,
     invalid: Array.isArray(data.invalid) ? data.invalid : [],
-    refresh_ms: Number(data.refresh_ms) || watchedPrRefreshMs,
   };
   notifyWatchedPrTransitions(watchedPrsData.watched_prs);
   renderWatchedPrs();
@@ -26081,7 +26130,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   updateMetadataBadgePulses(transcriptMeta);
   const previousActive = activeSessions.slice();
   const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
-  if (options.refreshAuto !== false && !(typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling())) {
+  if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
   if (sessionsChanged) renderPanels(previousActive);
@@ -26116,11 +26165,7 @@ async function applyTranscriptsPayload(payload, options = {}) {
   }
   renderPaneTabStrips();
   scheduleFileExplorerActiveTabSync();
-  if (typeof clientPushSuppressesPolling === 'function' && clientPushSuppressesPolling()) {
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
-  } else {
-    refreshWatchedFilesystem();
-  }
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
   trackSessionStateChanges();
   refreshOpenEventLogs();
   return true;
@@ -26138,7 +26183,11 @@ async function refreshTranscripts(options = {}) {
       if (options.force === true) params.set('force', '1');
       const suffix = params.toString();
       const payload = await apiFetchJson(`/api/transcripts${suffix ? `?${suffix}` : ''}`);
-      await applyTranscriptsPayload(payload, {refreshAuto: true, refreshContext: true, refreshActivity: true});
+      await applyTranscriptsPayload(payload, {
+        refreshAuto: options.refreshAuto !== false,
+        refreshContext: true,
+        refreshActivity: true,
+      });
     } catch (error) {
       transcriptMetaLoadError = String(error);
       for (const session of activeSessions.filter(isTmuxSession)) {
@@ -26443,17 +26492,6 @@ function refreshAll() {
   refreshWatchedFilesystem();
 }
 
-function scheduleInitialTranscriptRefreshFallback() {
-  if (!clientPushCanSupplyData()) {
-    refreshTranscripts();
-    return;
-  }
-  setTimeout(() => {
-    const loaded = transcriptMeta?.sessions && Object.keys(transcriptMeta.sessions).length > 0;
-    if (!loaded) refreshTranscripts();
-  }, 15000);
-}
-
 async function boot() {
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installClientEventStream();
@@ -26471,14 +26509,15 @@ async function boot() {
   statusEl.textContent = 'loading YOLO status...';
   await loadNotifyStatus();
   await loadAutoStatuses();
+  bindClipboardPaste();
+  await refreshTranscripts({refreshAuto: false});
   renderSessionButtons();
   renderPanels([], {prune: false});
   seedVisualActivePaneItem(activeSessions);
   updatePanelInactiveOverlays();
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  scheduleInitialTranscriptRefreshFallback();
-  refreshWatchedPrs();   // DOIT.29: first watched-PR fetch at boot; thereafter on its own interval
+  refreshWatchedPrs();
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();
@@ -26529,24 +26568,11 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
   });
 }
 
-function scheduleSessionFilesPushRefresh() {
-  if (!document.querySelector('.file-explorer-changes-panel') || typeof fetchSessionFiles !== 'function') return;
-  if (sessionFilesPushRefreshTimer) clearTimeout(sessionFilesPushRefreshTimer);
-  const elapsed = sessionFilesLastPollTs ? Date.now() - sessionFilesLastPollTs : sessionFilesRefreshMs;
-  const delay = Math.max(0, sessionFilesRefreshMs - elapsed);
-  sessionFilesPushRefreshTimer = setTimeout(() => {
-    sessionFilesPushRefreshTimer = null;
-    fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
-  }, delay);
-}
-
 function handleClientPushEvent(type, payload = {}) {
   if (type === 'settings_changed') {
     if (payload.data && typeof payload.data === 'object') {
       applySettingsPayload(payload.data, {force: true});
-      return;
     }
-    refreshSettings({force: true, silent: true});
     return;
   }
   if (type === 'auto_approve_changed') {
@@ -26560,8 +26586,6 @@ function handleClientPushEvent(type, payload = {}) {
   if (type === 'transcripts_changed') {
     if (payload.data) {
       applyTranscriptsPayload(payload.data, {refreshAuto: false, refreshContext: false, refreshActivity: false});
-    } else {
-      refreshTranscripts({force: true});
     }
     return;
   }
@@ -26579,8 +26603,10 @@ function handleClientPushEvent(type, payload = {}) {
     }
     return;
   }
-  if (type === 'session_files_changed') {
-    scheduleSessionFilesPushRefresh();
+  if (type === 'files_changed') {
+    if (typeof refreshOpenFilesFromPush === 'function') {
+      refreshOpenFilesFromPush(payload).catch(error => console.warn('client file push refresh failed', error));
+    }
     return;
   }
   if (type === 'fs_changed') {
@@ -26609,7 +26635,7 @@ function installClientEventStream() {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => { clientEventsConnected = false; };
-  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'fs_changed', 'session_files_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']) {
+  for (const type of ['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']) {
     source.addEventListener(type, event => {
       clientEventsConnected = true;
       const envelope = clientEventEnvelope(event);

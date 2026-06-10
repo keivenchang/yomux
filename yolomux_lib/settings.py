@@ -30,7 +30,7 @@ CURSOR_COLOR_CHOICES: tuple[str, ...] = (DEFAULT_CURSOR_COLOR, "green", "blue", 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "general": {
         "auto_focus": False,
-        "default_layout": "single",
+        "default_layout": "split",
         "default_sessions": [],
         "language": "system",
         "reload_on_update": False,
@@ -62,14 +62,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "metadata_badge_pulse_seconds": 20,
     },
     "performance": {
-        # Backend polling defaults use odd rounded-up values so clients do not align on the same tick.
-        "metadata_refresh_ms": 15001,
-        "pane_state_refresh_ms": 1253,
-        "latency_refresh_ms": 3001,
-        "event_log_refresh_ms": 5003,
-        "settings_refresh_ms": 5009,
-        "activity_summary_refresh_ms": 60001,
-        "server_event_poll_ms": 5009,
+        "latency_refresh_ms": 3000,
+        "event_log_refresh_ms": 5000,
+        "server_event_poll_ms": 850,
+        "server_directory_event_poll_ms": 3000,
         "popover_show_delay_ms": 1000,
         "popover_hide_delay_ms": 300,
         "menu_hover_open_delay_ms": 800,
@@ -77,9 +73,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "tab_popover_follow_delay_ms": 120,
         "remote_resize_delay_ms": 220,
         "auto_approve_interval_seconds": 0.5,
-        # DOIT.29: watched PRs poll on their OWN, longer interval so a big watchlist doesn't burn the
-        # GitHub rate limit at the (15s) session-metadata cadence.
-        "watched_pr_refresh_ms": 60001,
     },
     "notifications": {
         "toast_duration_ms": 10000,
@@ -109,8 +102,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "indexed_dirs": [],
         "index_refresh_seconds": 120,
         "companion_dirs": [],
-        "refresh_seconds": 5,
-        "session_files_refresh_seconds": 5,
         "dir_cache_ms": 1500,
         "new_entry_highlight_ms": 60000,
     },
@@ -182,15 +173,10 @@ PR_TRANSITION_KEYS = {
 NOTIFY_TRANSITION_KEYS = SESSION_STATE_KEYS | PR_TRANSITION_KEYS
 
 STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
-    ("file_explorer", "refresh_seconds"): 1,
-    ("performance", "metadata_refresh_ms"): 15000,
-    ("performance", "pane_state_refresh_ms"): 1250,
-    ("performance", "latency_refresh_ms"): 3000,
-    ("performance", "event_log_refresh_ms"): 5000,
-    ("performance", "settings_refresh_ms"): 5000,
-    ("performance", "activity_summary_refresh_ms"): 60000,
-    ("performance", "server_event_poll_ms"): 5000,
-    ("performance", "watched_pr_refresh_ms"): 60000,
+    ("performance", "latency_refresh_ms"): 3_001,
+    ("performance", "event_log_refresh_ms"): 5_003,
+    ("performance", "server_event_poll_ms"): (5_000, 5_009),
+    ("performance", "server_directory_event_poll_ms"): (5_000, 5_009),
 }
 
 SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
@@ -207,13 +193,10 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("appearance", "red_reminder_ms"): (0, 10000),
     ("appearance", "yolo_rotate_ms"): (0, 60000),
     ("appearance", "metadata_badge_pulse_seconds"): (0, 120),
-    ("performance", "metadata_refresh_ms"): (3000, 120000),
-    ("performance", "pane_state_refresh_ms"): (500, 30000),
     ("performance", "latency_refresh_ms"): (1000, 30000),
     ("performance", "event_log_refresh_ms"): (1000, 60000),
-    ("performance", "settings_refresh_ms"): (1000, 60000),
-    ("performance", "activity_summary_refresh_ms"): (10000, 600000),
-    ("performance", "server_event_poll_ms"): (1000, 60000),
+    ("performance", "server_event_poll_ms"): (250, 60000),
+    ("performance", "server_directory_event_poll_ms"): (250, 60000),
     ("performance", "popover_show_delay_ms"): (0, 3000),
     ("performance", "popover_hide_delay_ms"): (0, 3000),
     ("performance", "menu_hover_open_delay_ms"): (0, 3000),
@@ -221,7 +204,6 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("performance", "tab_popover_follow_delay_ms"): (0, 1000),
     ("performance", "remote_resize_delay_ms"): (50, 2000),
     ("performance", "auto_approve_interval_seconds"): (0.1, 10),
-    ("performance", "watched_pr_refresh_ms"): (15000, 600000),
     ("yoagent", "refresh_interval_seconds"): (30, 3600),
     ("notifications", "toast_duration_ms"): (1000, 60000),
     ("notifications", "throttle_seconds"): (0, 600),
@@ -229,15 +211,13 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("editor", "autosave_delay_seconds"): (0.5, 60),
     ("file_explorer", "image_preview_max_px"): (120, 1200),
     ("file_explorer", "index_refresh_seconds"): (0, 3600),
-    ("file_explorer", "refresh_seconds"): (1, 60),
-    ("file_explorer", "session_files_refresh_seconds"): (1, 60),
     ("file_explorer", "dir_cache_ms"): (0, 10000),
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
     ("uploads", "max_bytes"): (1 * 1024 * 1024, 512 * 1024 * 1024),
 }
 
 SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
-    ("general", "default_layout"): {"single", "grid", "wall"},
+    ("general", "default_layout"): {"single", "split", "grid", "wall"},
     # i18n (DOIT.8 Phase 0): only locales that ship a catalog are accepted; "system" matches the
     # browser/OS. Phase 1 will widen this as real locale catalogs are added.
     ("general", "language"): {"system", "en", "zh-Hant", "zh-Hans", "es", "ja", "de", "fr", "pt-BR", "ru", "ko", "hi", "ar", "he", "en-XA"},
@@ -284,7 +264,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
 
 SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("general", "auto_focus"): "true/false. Default false. When false, layout switches and hover gestures do not move focus or auto-open menus, panes, terminals, editors, Finder/File Explorer, Preferences, or other views.",
-    ("general", "default_layout"): "single | grid | wall. Reserved default for new visits.",
+    ("general", "default_layout"): "single | split | grid | wall. Reserved default for new visits.",
     ("general", "language"): "UI language. system matches the browser/OS; otherwise a locale code with a shipped catalog (en, zh-Hant, zh-Hans, es, ja, de, fr, pt-BR, ru, ko, hi, ar, he, en-XA pseudo).",
     ("general", "default_sessions"): "List of tmux sessions to prefer on load. Empty means discovered sessions.",
     ("general", "reload_on_update"): "true/false. Default false. When true, an open client shows a 'New version available' banner once the server ships a newer YOLOMUX_VERSION.",
@@ -315,21 +295,17 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "red_reminder_ms"): "Milliseconds, 0 disables the attention pulse cycle.",
     ("appearance", "yolo_rotate_ms"): "Milliseconds, 0 disables YO rotation timing.",
     ("appearance", "metadata_badge_pulse_seconds"): "Seconds, 0-120. Duration for PR/branch metadata badge pulses.",
-    ("performance", "metadata_refresh_ms"): "Milliseconds, 3000-120000. Client pull fallback for branch, PR, cwd, process, and transcript metadata when SSE is unavailable; client-side jitter avoids synchronized polling.",
-    ("performance", "pane_state_refresh_ms"): "Milliseconds, 500-30000. Client pull interval for YOLO status, prompt state, and tmux session roster; client-side jitter avoids synchronized polling.",
-    ("performance", "latency_refresh_ms"): "Milliseconds, 1000-30000. Client pull interval for browser-to-server health pings; client-side jitter avoids synchronized polling.",
-    ("performance", "event_log_refresh_ms"): "Milliseconds, 1000-60000. Client pull interval for open YOLO/event-log panes; client-side jitter avoids synchronized polling.",
-    ("performance", "settings_refresh_ms"): "Milliseconds, 1000-60000. Client pull fallback for Preferences/settings state when SSE is unavailable.",
-    ("performance", "activity_summary_refresh_ms"): "Milliseconds, 10000-600000; shown as seconds in Preferences. Server SSE/fallback cadence for hidden YO!agent activity-summary refreshes.",
-    ("performance", "server_event_poll_ms"): "Milliseconds, 1000-60000. Server-side SSE poll interval for filesystem/transcript/settings signatures before pushing changed events to browsers; this is the backend file-changed interval.",
+    ("performance", "latency_refresh_ms"): "Client-side browser-to-server health ping interval. Stored as milliseconds, shown as seconds in Preferences, 1-30.",
+    ("performance", "event_log_refresh_ms"): "Client-side refresh interval for open YOLO/event-log panes. Stored as milliseconds, shown as seconds in Preferences, 1-60.",
+    ("performance", "server_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for open editor file signatures in visible panes before pushing files_changed events to browsers.",
+    ("performance", "server_directory_event_poll_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.250-60. Server-side SSE poll interval for Finder/Differ directory signatures before pushing fs_changed events to browsers.",
     ("performance", "popover_show_delay_ms"): "Milliseconds, 0-3000. Hover delay before regular help and preview popovers open.",
     ("performance", "popover_hide_delay_ms"): "Milliseconds, 0-3000. Delay before popovers close after pointer leaves.",
     ("performance", "menu_hover_open_delay_ms"): "Milliseconds, 0-3000. Hover delay before top menus open.",
     ("performance", "tab_popover_show_delay_ms"): "Milliseconds, 0-3000. First hover delay before a tab details popover opens.",
     ("performance", "tab_popover_follow_delay_ms"): "Milliseconds, 0-1000. Delay when moving between tab details after one is already open.",
-    ("performance", "remote_resize_delay_ms"): "Milliseconds, 50-2000. Debounce for tmux remote resize.",
+    ("performance", "remote_resize_delay_ms"): "Stored as milliseconds, shown as seconds in Preferences, 0.050-2. Debounce for tmux remote resize.",
     ("performance", "auto_approve_interval_seconds"): "Seconds, 0.1-10. Poll loop interval for newly enabled YOLO workers.",
-    ("performance", "watched_pr_refresh_ms"): "Milliseconds, 15000-600000. How often watched PRs (github.watched_prs) are polled — a longer interval than session metadata so a big watchlist does not exhaust the GitHub rate limit.",
     ("notifications", "toast_duration_ms"): "Milliseconds, 1000-60000. How long in-page notification popups stay visible.",
     ("notifications", "notify_transitions"): "Event keys that may show notifications. Session states (needs-input, needs-approval, blocked, …) plus watched-PR transitions (pr-merged, pr-ci-failing, pr-review). Unknown keys are ignored.",
     ("notifications", "throttle_seconds"): "Seconds, 0-600. Minimum time before repeating a notification signature.",
@@ -343,8 +319,6 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("file_explorer", "image_open_mode"): "same-tab | new-tab. same-tab reuses one image viewer while browsing; new-tab keeps one image tab per file.",
     ("file_explorer", "image_preview_max_px"): "Pixels, 120-1200. Maximum width and height for hover image previews.",
     ("file_explorer", "quick_access_paths"): "List of paths for File Explorer shortcuts.",
-    ("file_explorer", "refresh_seconds"): "Seconds, 1-60. Client pull fallback for changed File Explorer directories and open files when SSE is unavailable.",
-    ("file_explorer", "session_files_refresh_seconds"): "Seconds, 1-60. Client pull fallback for changed-files/Differ data from /api/session-files when SSE is unavailable.",
     ("file_explorer", "dir_cache_ms"): "Milliseconds, 0-10000. Reuse a directory listing for this long so a busy live diff/tree does not re-list every directory on every render. 0 disables the cache.",
     ("file_explorer", "new_entry_highlight_ms"): "Milliseconds, 0-600000. How long new File Explorer entries stay highlighted.",
     ("uploads", "filename_template"): "Upload filename template. Supported fields: {date:%Y%m%d}, {seq:03d}, {name}, {ext}. When {name} is empty, a preceding dash is omitted.",
@@ -403,13 +377,18 @@ def migrate_stale_default(section: str, key: str, value: Any, default: Any) -> A
     stale_value = STALE_DEFAULT_MIGRATIONS.get((section, key))
     if stale_value is None:
         return value
+    stale_values = stale_value if isinstance(stale_value, tuple) else (stale_value,)
     try:
-        stale_number = float(stale_value)
         value_number = float(value)
     except (TypeError, ValueError):
         return value
-    if value_number == stale_number:
-        return default
+    for candidate in stale_values:
+        try:
+            stale_number = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if value_number == stale_number:
+            return default
     return value
 
 
@@ -423,14 +402,6 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
         incoming = source.get(section, {})
         if not isinstance(incoming, dict):
             incoming = {}
-        if section == "file_explorer" and "refresh_seconds" not in incoming and "refresh_ms" in incoming:
-            incoming = dict(incoming)
-            try:
-                legacy_ms = float(incoming["refresh_ms"])
-            except (TypeError, ValueError):
-                legacy_ms = 3000
-            if round(legacy_ms) != 3000:
-                incoming["refresh_seconds"] = legacy_ms / 1000
         if section == "general" and "startup_tips" not in incoming and "startup_helpers" in incoming:
             incoming = dict(incoming)
             incoming["startup_tips"] = incoming["startup_helpers"]
@@ -573,6 +544,7 @@ def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
         "settings": settings,
         "defaults": default_settings(),
         "choices": {
+            "general.default_layout": ["single", "split", "grid", "wall"],
             "appearance.active_color": list(UI_COLOR_CHOICES),
             "appearance.editor_cursor_color": list(CURSOR_COLOR_CHOICES),
         },

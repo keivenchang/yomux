@@ -46,10 +46,11 @@ def test_legacy_yoagent_default_prompts_migrate_without_overwriting_custom_text(
 def test_sanitize_settings_clamps_numbers_and_choices():
     settings = sanitize_settings(
         {
+            "general": {"default_layout": "bad"},
             "appearance": {"theme": "neon", "terminal_theme": "neon", "date_time_hour_cycle": "bogus", "ui_font_size": 1, "terminal_font_size": 100, "editor_font_size": 100, "editor_color_scheme": "bogus", "editor_dark_color_scheme": "github-light", "editor_light_color_scheme": "vscode-dark-plus", "editor_cursor_style": "beam", "editor_cursor_color": "bogus-cursor", "file_explorer_font_size": 1, "tab_width": 20, "pane_spacing": 50, "pane_ring_opacity": 1, "inactive_pane_opacity": 500},
-            "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000, "refresh_seconds": 99},
+            "file_explorer": {"root_mode": "bad", "image_open_mode": "bad", "image_preview_max_px": 5000},
             "notifications": {"notify_transitions": ["needs-input", "bogus", "done"]},
-            "performance": {"metadata_refresh_ms": 15002, "pane_state_refresh_ms": 1200},
+            "performance": {"latency_refresh_ms": 100, "event_log_refresh_ms": 100000},
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100},
             "uploads": {"max_bytes": 999999999},
@@ -58,6 +59,7 @@ def test_sanitize_settings_clamps_numbers_and_choices():
         }
     )
 
+    assert settings["general"]["default_layout"] == "split"
     assert settings["appearance"]["theme"] == "dark"
     assert settings["appearance"]["terminal_theme"] == "follow-app"
     assert settings["appearance"]["date_time_hour_cycle"] == "24"
@@ -79,12 +81,11 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["file_explorer"]["image_preview_max_px"] == 1200
     assert settings["editor"]["autosave"] is True
     assert settings["editor"]["autosave_delay_seconds"] == 60
-    assert settings["file_explorer"]["refresh_seconds"] == 60
     assert settings["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
     assert settings["uploads"]["max_bytes"] == 512 * 1024 * 1024
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
-    assert settings["performance"]["metadata_refresh_ms"] == 15002
-    assert settings["performance"]["pane_state_refresh_ms"] == 1200
+    assert settings["performance"]["latency_refresh_ms"] == 1000
+    assert settings["performance"]["event_log_refresh_ms"] == 60000
     assert settings["terminal_editor"]["word_wrap"] is True
     assert settings["terminal_editor"]["line_numbers"] is False
     assert settings["yoagent"]["backend"] == "auto"
@@ -106,6 +107,8 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["settings"]["appearance"]["terminal_theme"] == "follow-app"
     assert payload["settings"]["appearance"]["date_time_hour_cycle"] == "24"
     assert payload["settings"]["appearance"]["tab_width"] == 180
+    assert payload["settings"]["general"]["default_layout"] == "split"
+    assert payload["choices"]["general.default_layout"] == ["single", "split", "grid", "wall"]
     assert payload["choices"]["appearance.active_color"] == ["green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.editor_cursor_color"] == ["yellow", "green", "blue", "orange", "purple", "white", "theme"]
     assert payload["settings"]["general"]["startup_tips"] is True
@@ -268,72 +271,78 @@ def test_deterministic_yoagent_reply_localizes_framing():
     assert "応答する AI バックエンドがありません" in ja_reply
 
 
-def test_watched_prs_and_watched_pr_refresh_defaults():
-    # DOIT.29: the watched-PR settings ship with safe empty/longer-interval defaults.
+def test_watched_prs_and_server_event_defaults():
+    # DOIT.29: watched PRs ship with a safe empty default; refresh cadence is server-internal.
     d = default_settings()
     assert d["github"]["watched_prs"] == []
-    assert d["performance"]["watched_pr_refresh_ms"] == 60001
-    assert d["performance"]["settings_refresh_ms"] == 5009
-    assert d["performance"]["activity_summary_refresh_ms"] == 60001
-    assert d["performance"]["server_event_poll_ms"] == 5009
+    assert d["performance"]["server_event_poll_ms"] == 850
+    assert d["performance"]["server_directory_event_poll_ms"] == 3000
 
 
-def test_file_explorer_refresh_uses_seconds_and_migrates_legacy_ms():
+def test_removed_client_poll_settings_are_not_saved():
     d = default_settings()
-    assert d["file_explorer"]["refresh_seconds"] == 5
-    migrated = sanitize_settings({"file_explorer": {"refresh_ms": 42000}})
-    assert migrated["file_explorer"]["refresh_seconds"] == 42
-    default_legacy = sanitize_settings({"file_explorer": {"refresh_ms": 3000}})
-    assert default_legacy["file_explorer"]["refresh_seconds"] == 5
+    assert "refresh_seconds" not in d["file_explorer"]
+    assert "session_files_refresh_seconds" not in d["file_explorer"]
+    for key in [
+        "metadata_refresh_ms",
+        "pane_state_refresh_ms",
+        "settings_refresh_ms",
+        "activity_summary_refresh_ms",
+        "watched_pr_refresh_ms",
+    ]:
+        assert key not in d["performance"]
+    migrated = sanitize_settings({
+        "file_explorer": {"refresh_ms": 42000, "refresh_seconds": 7, "session_files_refresh_seconds": 12},
+        "performance": {
+            "metadata_refresh_ms": 15002,
+            "pane_state_refresh_ms": 1254,
+            "settings_refresh_ms": 5010,
+            "activity_summary_refresh_ms": 61000,
+            "watched_pr_refresh_ms": 60002,
+        },
+    })
+    assert "refresh_seconds" not in migrated["file_explorer"]
+    for key in [
+        "metadata_refresh_ms",
+        "pane_state_refresh_ms",
+        "settings_refresh_ms",
+        "activity_summary_refresh_ms",
+        "watched_pr_refresh_ms",
+    ]:
+        assert key not in migrated["performance"]
 
 
 def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     migrated = sanitize_settings({
-        "file_explorer": {"refresh_seconds": 1},
         "performance": {
-            "metadata_refresh_ms": 15000,
-            "pane_state_refresh_ms": 1250,
-            "latency_refresh_ms": 3000,
-            "event_log_refresh_ms": 5000,
-            "settings_refresh_ms": 5000,
-            "activity_summary_refresh_ms": 60000,
-            "server_event_poll_ms": 5000,
-            "watched_pr_refresh_ms": 60000,
+            "latency_refresh_ms": 3_001,
+            "event_log_refresh_ms": 5_003,
+            "server_event_poll_ms": 5_009,
+            "server_directory_event_poll_ms": 5_009,
         },
     })
     defaults = default_settings()
-    assert migrated["file_explorer"]["refresh_seconds"] == defaults["file_explorer"]["refresh_seconds"]
-    assert migrated["performance"]["metadata_refresh_ms"] == defaults["performance"]["metadata_refresh_ms"]
-    assert migrated["performance"]["pane_state_refresh_ms"] == defaults["performance"]["pane_state_refresh_ms"]
     assert migrated["performance"]["latency_refresh_ms"] == defaults["performance"]["latency_refresh_ms"]
     assert migrated["performance"]["event_log_refresh_ms"] == defaults["performance"]["event_log_refresh_ms"]
-    assert migrated["performance"]["settings_refresh_ms"] == defaults["performance"]["settings_refresh_ms"]
-    assert migrated["performance"]["activity_summary_refresh_ms"] == defaults["performance"]["activity_summary_refresh_ms"]
     assert migrated["performance"]["server_event_poll_ms"] == defaults["performance"]["server_event_poll_ms"]
-    assert migrated["performance"]["watched_pr_refresh_ms"] == defaults["performance"]["watched_pr_refresh_ms"]
+    assert migrated["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
+    rounded_legacy = sanitize_settings({"performance": {"server_event_poll_ms": 5000}})
+    assert rounded_legacy["performance"]["server_event_poll_ms"] == defaults["performance"]["server_event_poll_ms"]
+    rounded_directory_legacy = sanitize_settings({"performance": {"server_directory_event_poll_ms": 5000}})
+    assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
 
     custom = sanitize_settings({
-        "file_explorer": {"refresh_seconds": 2},
         "performance": {
-            "metadata_refresh_ms": 15002,
-            "pane_state_refresh_ms": 1254,
             "latency_refresh_ms": 3002,
             "event_log_refresh_ms": 5004,
-            "settings_refresh_ms": 5010,
-            "activity_summary_refresh_ms": 61000,
-            "server_event_poll_ms": 5011,
-            "watched_pr_refresh_ms": 60002,
+            "server_event_poll_ms": 251,
+            "server_directory_event_poll_ms": 252,
         },
     })
-    assert custom["file_explorer"]["refresh_seconds"] == 2
-    assert custom["performance"]["metadata_refresh_ms"] == 15002
-    assert custom["performance"]["pane_state_refresh_ms"] == 1254
     assert custom["performance"]["latency_refresh_ms"] == 3002
     assert custom["performance"]["event_log_refresh_ms"] == 5004
-    assert custom["performance"]["settings_refresh_ms"] == 5010
-    assert custom["performance"]["activity_summary_refresh_ms"] == 61000
-    assert custom["performance"]["server_event_poll_ms"] == 5011
-    assert custom["performance"]["watched_pr_refresh_ms"] == 60002
+    assert custom["performance"]["server_event_poll_ms"] == 251
+    assert custom["performance"]["server_directory_event_poll_ms"] == 252
 
 
 def test_notify_transitions_accepts_pr_keys_and_drops_unknown():
@@ -345,23 +354,13 @@ def test_notify_transitions_accepts_pr_keys_and_drops_unknown():
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "pr-merged", "pr-ci-failing", "pr-review"]
 
 
-def test_watched_pr_refresh_ms_is_clamped_to_range():
-    # DOIT.29: below the 15000ms floor / above the 600000ms ceiling clamp to the bounds.
-    low = sanitize_settings({"performance": {"watched_pr_refresh_ms": 100}})
-    high = sanitize_settings({"performance": {"watched_pr_refresh_ms": 10_000_000}})
-    assert low["performance"]["watched_pr_refresh_ms"] == 15000
-    assert high["performance"]["watched_pr_refresh_ms"] == 600000
-
-
 def test_new_poll_intervals_are_clamped_to_range():
-    low = sanitize_settings({"performance": {"settings_refresh_ms": 100, "activity_summary_refresh_ms": 100, "server_event_poll_ms": 100}})
-    high = sanitize_settings({"performance": {"settings_refresh_ms": 10_000_000, "activity_summary_refresh_ms": 10_000_000, "server_event_poll_ms": 10_000_000}})
-    assert low["performance"]["settings_refresh_ms"] == 1000
-    assert high["performance"]["settings_refresh_ms"] == 60000
-    assert low["performance"]["activity_summary_refresh_ms"] == 10000
-    assert high["performance"]["activity_summary_refresh_ms"] == 600000
-    assert low["performance"]["server_event_poll_ms"] == 1000
+    low = sanitize_settings({"performance": {"server_event_poll_ms": 100, "server_directory_event_poll_ms": 100}})
+    high = sanitize_settings({"performance": {"server_event_poll_ms": 10_000_000, "server_directory_event_poll_ms": 10_000_000}})
+    assert low["performance"]["server_event_poll_ms"] == 250
     assert high["performance"]["server_event_poll_ms"] == 60000
+    assert low["performance"]["server_directory_event_poll_ms"] == 250
+    assert high["performance"]["server_directory_event_poll_ms"] == 60000
 
 
 def test_watched_prs_setting_round_trips_in_template(tmp_path):

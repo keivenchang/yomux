@@ -218,6 +218,25 @@ class TestElement {
   setAttribute(name, value) { this.attributes[name] = String(value); }
 }
 
+class TestFile {
+  constructor(parts, name, options = {}) {
+    this.parts = parts;
+    this.name = name;
+    this.type = options.type || '';
+    this.size = parts.reduce((total, part) => total + (Number(part?.size) || String(part || '').length), 0);
+  }
+}
+
+class TestFormData {
+  constructor() {
+    this.fields = [];
+  }
+
+  append(name, value, filename = undefined) {
+    this.fields.push({name, value, filename});
+  }
+}
+
 function assertNoStandalonePrBadge(html, label) {
   assert.equal(html.includes('>PR<'), false, `${label} avoids redundant PR text`);
   assert.equal(/class="[^"]*pr-indicator[^"]*"[^>]*>PR</.test(html), false, `${label} never renders a standalone PR text pill`);
@@ -247,6 +266,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'))},
   });
   const elements = new Map();
+  const documentListeners = new Map();
   const storage = new Map();
   const localStorage = {
     getItem(key) { return storage.has(String(key)) ? storage.get(String(key)) : null; },
@@ -261,19 +281,27 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   };
   const context = {
     console,
+    File: TestFile,
+    FormData: TestFormData,
     URLSearchParams,
     WebSocket: {OPEN: 1, CLOSING: 2, CLOSED: 3},
     clearInterval() {},
     clearTimeout() {},
     document: {
-      addEventListener() {},
+      addEventListener(type, listener) {
+        if (!documentListeners.has(type)) documentListeners.set(type, []);
+        documentListeners.get(type).push(listener);
+      },
       body: element('body'),
       createElement: tag => new TestElement('', tag),
       documentElement: element('html'),
       getElementById: element,
       querySelector: () => null,
       querySelectorAll: () => [],
-      removeEventListener() {},
+      removeEventListener(type, listener) {
+        const listeners = documentListeners.get(type) || [];
+        documentListeners.set(type, listeners.filter(item => item !== listener));
+      },
     },
     fetch() { return Promise.reject(new Error('fetch disabled in layout URL tests')); },
     history: {
@@ -465,8 +493,12 @@ globalThis.__layoutTestApi = {
   layoutWithReplacedItem,
   layoutWithoutItem,
   layoutWithItems,
+  applyLayoutMode,
   setLayoutToSinglePane,
   setLayoutToSplitPanes,
+  setLayoutToGridPanes,
+  setLayoutToWallPanes,
+  layoutModeValues,
   layoutTabsParamValue,
   layoutTreeKey,
   leafNode,
@@ -494,6 +526,8 @@ globalThis.__layoutTestApi = {
   globalShortcutTargetAllowsAppAction,
   installTerminalCopyShortcutForTest: installTerminalCopyShortcut,
   setFetchForTest(fn) { globalThis.fetch = fn; },
+  bindClipboardPasteForTest: bindClipboardPaste,
+  documentListenersForTest(type) { return [...(document.__listeners.get(type) || [])]; },
   commandPaletteItemScore,
   commandPaletteCommandItems,
   commandPaletteItems,
@@ -690,7 +724,7 @@ globalThis.__layoutTestApi = {
   minimizePaneFromLayout,
   removePaneFromLayout,
   removeSessionFromLayout,
-  runtimeJitteredDelay,
+  runtimeIntervalDelay,
   sessionPopoverHtml,
   setFileQuickOpenCandidatesForTest(root, files) {
     fileQuickOpenRoot = root;
@@ -891,6 +925,7 @@ globalThis.__layoutTestApi = {
     return document.documentElement.style;
   },
 };`, context);
+  context.document.__listeners = documentListeners;
   const api = context.__layoutTestApi;
   // Mirror production boot: preload the en catalog so t() resolves to English in tests (fetch is
   // disabled here, so the live applyLocale() never runs).
@@ -976,6 +1011,10 @@ function jsonResponse(payload, status = 200) {
   };
 }
 
+function flushAsyncWork() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
 function terminalLine(text, isWrapped = false) {
   return {
     isWrapped,
@@ -1043,12 +1082,18 @@ function makeFileTree(paths) {
 {
   const api = loadYolomux('', ['1', '2', '3']);
   const layout = api.defaultLayoutForTest();
-  assert.deepStrictEqual(canonical(layout.panes), {left: {tabs: ['1', '2', '3'], active: '1'}});
+  assert.deepStrictEqual(canonical(layout), {
+    tree: {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]},
+    panes: {
+      left: {tabs: ['1', '2'], active: '1'},
+      right: {tabs: ['3'], active: '3'},
+    },
+  });
   const url = api.syncInitialLayoutUrlForTest();
   const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
-  assert.equal(params.get('sessions'), '1');
-  assert.equal(params.get('layout'), 'left');
-  assert.equal(params.get('tabs'), 'left:1,2,3');
+  assert.equal(params.get('sessions'), '1,3');
+  assert.equal(params.get('layout'), 'row@50(left,right)');
+  assert.equal(params.get('tabs'), 'left:1,2;right:3');
 }
 
 {
@@ -1063,8 +1108,12 @@ function makeFileTree(paths) {
 
 {
   const api = loadYolomux('?sessions=3,2,1', ['1', '2', '3']);
-  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
-    left: {tabs: ['3', '2', '1'], active: '3'},
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]},
+    panes: {
+      left: {tabs: ['3', '2'], active: '3'},
+      right: {tabs: ['1'], active: '1'},
+    },
   });
 }
 
@@ -1639,10 +1688,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 
 {
   const api = loadYolomux('', ['1']);
-  assert.equal(api.runtimeJitteredDelay(3000, 0), 3030);
-  assert.equal(api.runtimeJitteredDelay(3000, 1), 3300);
-  assert.ok(api.runtimeJitteredDelay(1250, 0.5) > 1250);
-  assert.ok(api.runtimeJitteredDelay(1250, 0.5) < 1376);
+  assert.equal(api.runtimeIntervalDelay(3000), 3000);
+  assert.equal(api.runtimeIntervalDelay(1250), 1250);
+  assert.equal(api.runtimeIntervalDelay(0), 1);
 }
 
 {
@@ -1704,6 +1752,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');
   assert.ok(source.includes('setLimitedMapEntry(notificationLastSent, key, now, notificationLastSentLimit);'), 'notification signatures use the shared bounded-map helper');
   assert.ok(source.includes('existing?.delay === normalizedDelay'), 'runtime intervals keep their timer phase when refresh delays are unchanged');
+  assert.ok(/async function boot\(\)[\s\S]*?await loadAutoStatuses\(\);\s*bindClipboardPaste\(\);/.test(source), 'image paste binding is installed during boot and does not depend on background auto-status refresh');
   // C12 F3: terminal fit scheduling collapsed from rAF + 80ms + 250ms (three fits) to one rAF + a single
   // trailing fit; the redundant middle timer (fitFinalTimer) is gone.
   assert.equal(source.includes('item.fitFinalTimer'), false, 'C12 F3: the redundant third fit timer is removed');
@@ -1851,8 +1900,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(refreshStart > 0 && refreshEnd > refreshStart, 'could not locate refreshOpenFilesIfChanged body');
   const refreshBody = source.slice(refreshStart, refreshEnd);
   assert.ok(refreshBody.includes('const fetched = await fetchFileEntryStatus(path);'), 'open-file refresh uses a structured file lookup');
-  assert.ok(refreshBody.includes('if (fetched.missing)'), 'open-file refresh only marks missing after an explicit missing result');
-  assert.ok(refreshBody.includes('markOpenFileExternalError'), 'open-file refresh keeps network/list errors separate from deletion');
+  assert.ok(refreshBody.includes('refreshOpenFileFromFetchedStatus(path, state, fetched)'), 'open-file polling routes structured status through the shared refresh helper');
+  const statusRefreshStart = source.indexOf('async function refreshOpenFileFromFetchedStatus(');
+  const statusRefreshEnd = source.indexOf('async function refreshOpenFilesIfChanged(', statusRefreshStart);
+  assert.ok(statusRefreshStart > 0 && statusRefreshEnd > statusRefreshStart, 'could not locate refreshOpenFileFromFetchedStatus body');
+  const statusRefreshBody = source.slice(statusRefreshStart, statusRefreshEnd);
+  assert.ok(statusRefreshBody.includes('if (fetched.missing)'), 'open-file refresh only marks missing after an explicit missing result');
+  assert.ok(statusRefreshBody.includes('markOpenFileExternalError'), 'open-file refresh keeps network/list errors separate from deletion');
 }
 
 {
@@ -3281,7 +3335,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   exactOwnerApi.setSessionFilesCachePayloadForTest('2', {loaded: true, files: [{abs_path: exactPath, status: 'M'}], repos: [], errors: []});
   exactOwnerApi.setOpenFileOwner(exactPath, exactItem, {ownerSession: '1'});
   exactOwnerApi.setOpenFileOwner(exactPath, exactItem, {ownerSession: '2'});
-  const exactOwnerSlots = exactOwnerApi.defaultLayoutSlots();
+  const exactOwnerSlots = exactOwnerApi.emptyLayoutSlots();
+  exactOwnerSlots[exactOwnerApi.layoutTreeKey] = exactOwnerApi.leafNode('left');
   exactOwnerSlots.left = exactOwnerApi.paneStateWithTabs([exactItem, '5'], '5');
   exactOwnerApi.setLayoutSlotsForTest(exactOwnerSlots);
   exactOwnerApi.activatePaneTab('left', exactItem, {userInitiated: true});
@@ -3318,6 +3373,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.platformWindowControlClass('zoom'), 'pc-window-control pc-zoom');
   assert.equal(api.fileExplorerPanelCloseClass(), 'file-explorer-panel-close pc-window-control pc-close');
   assert.equal(api.fileEditorPanelCloseClass(), 'file-editor-panel-close pc-window-control pc-close');
+  const pcSingleSlots = api.emptyLayoutSlots();
+  pcSingleSlots[api.layoutTreeKey] = api.leafNode('left');
+  pcSingleSlots.left = api.paneStateWithTabs(['1'], '1');
+  api.setLayoutSlotsForTest(pcSingleSlots);
   const pcPaneControls = api.panelControlsHtml('1');
   assert.ok(pcPaneControls.includes('pane-minimize pc-window-control pc-minimize'));
   assert.ok(pcPaneControls.includes('pane-expand pc-window-control pc-zoom'));
@@ -3426,9 +3485,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const delayHtml = api.preferencesPanelHtmlForTest('delay', ['Performance']);
   assert.ok(delayHtml.includes('data-preference-section="Performance"'), 'delay search shows Performance');
   assert.equal(/data-preference-section="Performance"[\s\S]*preferences-settings" hidden/.test(delayHtml), false, 'search expands matching collapsed sections');
-  assert.ok(delayHtml.includes('Client pull: metadata fallback'), 'delay search surfaces refresh interval settings');
+  assert.ok(delayHtml.includes('Server SSE: editor file-change poll'), 'delay search surfaces server SSE timing settings');
   const preferencesCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(preferencesCss.startsWith('/* GENERATED by tools/static_build.py from static_src/'), 'generated CSS has a do-not-edit header');
+  assert.ok(/\.preferences-section-toggle\s*\{[\s\S]*color:\s*var\(--pane-tab-text\)[\s\S]*background:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(preferencesCss), 'Preferences section headers use the same background token as the pane tab container');
   assert.ok(/\.preferences-search-button\s*\{[\s\S]*font:\s*700 var\(--ui-font-size-sm\)\/1\.1 var\(--ui-font\)/.test(preferencesCss), 'YOsearch uses the normal UI font, not condensed tab text');
   assert.ok(preferencesCss.includes('--file-explorer-changes-min-block-size: 96px'), 'modified-files resizer shares a stable min-size token');
   assert.ok(preferencesCss.includes('--drop-outline: #ffffff'), '#40: dark-mode drag preview/outline is white (light mode stays blue, asserted below)');
@@ -3744,6 +3804,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(preferencesCss.includes('cm-insertedText'), false, '#44: the dead intra-line token rules are removed');
   assert.equal(preferencesCss.includes('--diff-add-text-bg'), false, '#44: the unused intra-line text-bg token is removed');
   assert.ok(preferencesCss.includes('.file-tree-row.repo-non-main'), 'Finder repo rows have non-main branch styling');
+  api.setClientSettingsPatchForTest({performance: {server_event_poll_ms: 850, server_directory_event_poll_ms: 3000, remote_resize_delay_ms: 220}});
   const preferencesHtml = api.preferencesPanelHtmlForTest('', []);
   assert.ok(preferencesHtml.indexOf('preferences-search-row') < preferencesHtml.indexOf('preferences-path-rows'), 'preferences search is first');
   assert.ok(preferencesHtml.includes('data-preferences-search-action>YOsearch</button>'), 'preferences search has an explicit YOsearch action');
@@ -3773,23 +3834,39 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(resetConfirmHtml.includes('preferences-global-reset confirming'), 'reset-all confirmation makes the warning visibly change');
   assert.ok(preferencesHtml.includes('preferences-setting-control setting-type-number'), 'number controls are identifiable for compact sizing');
   assert.ok(preferencesHtml.includes('data-setting-path="file_explorer.image_preview_max_px"'), 'preferences expose Finder image preview sizing');
-  assert.ok(/data-setting-path="file_explorer\.refresh_seconds"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Finder refresh interval is edited in seconds, not raw milliseconds');
-  assert.ok(/data-setting-path="file_explorer\.session_files_refresh_seconds"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'Changed-files refresh interval is edited in seconds');
-  assert.ok(preferencesHtml.includes('data-setting-path="performance.settings_refresh_ms"'), 'Preferences expose the settings refresh interval');
-  assert.ok(preferencesHtml.includes('data-setting-path="performance.activity_summary_refresh_ms"'), 'Preferences expose the hidden activity-summary refresh interval');
-  assert.ok(/data-setting-path="performance\.activity_summary_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'YO!agent background refresh displays seconds instead of raw milliseconds');
-  assert.ok(preferencesHtml.includes('data-setting-path="performance.server_event_poll_ms"'), 'Preferences expose the server push fallback poll interval');
+  assert.ok(preferencesHtml.includes('data-setting-path="performance.server_event_poll_ms"'), 'Preferences expose the server SSE editor file-change poll interval');
+  assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*?value="0\.850"[\s\S]*?min="0\.25"[\s\S]*?step="0\.05"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE editor file-change poll displays seconds with a 0.250s minimum');
+  assert.ok(/data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*?value="3\.000"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'server-side SSE directory-change poll displays seconds');
+  assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
+  assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
+  assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'hover popover timing remains in milliseconds');
+  assert.ok(/data-setting-path="performance\.menu_hover_open_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'menu hover timing remains in milliseconds');
+  assert.ok(/data-setting-path="performance\.tab_popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover timing remains in milliseconds');
+  assert.ok(/data-setting-path="performance\.tab_popover_follow_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover follow timing remains in milliseconds');
+  assert.ok(/data-setting-path="performance\.remote_resize_delay_ms"[\s\S]*?value="0\.220"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'remote resize client/server debounce displays seconds');
   const performanceHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="Performance"'), preferencesHtml.indexOf('data-preference-section="GitHub"'));
-  assert.ok(performanceHtml.includes('Server SSE: file-change poll'), 'Performance labels the server-side SSE file-change interval');
-  assert.ok(performanceHtml.includes('Client pull: file-change fallback'), 'Performance labels the client-side file-change fallback interval');
-  assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*data-setting-path="performance\.activity_summary_refresh_ms"[\s\S]*data-setting-path="file_explorer\.refresh_seconds"[\s\S]*data-setting-path="file_explorer\.session_files_refresh_seconds"[\s\S]*data-setting-path="performance\.settings_refresh_ms"/.test(performanceHtml), 'Performance order groups server SSE settings before client pull fallbacks');
+  assert.ok(performanceHtml.includes('Server SSE: editor file-change poll'), 'Performance labels the server-side SSE editor file-change interval');
+  assert.ok(performanceHtml.includes('Server SSE: directory-change poll'), 'Performance labels the server-side SSE directory-change interval');
+  assert.equal(performanceHtml.includes('Client pull: file-change/Differ fallback'), false, 'Performance no longer exposes the removed client file-change fallback interval');
+  for (const removedPath of [
+    'file_explorer.refresh_seconds',
+    'file_explorer.session_files_refresh_seconds',
+    'performance.activity_summary_refresh_ms',
+    'performance.settings_refresh_ms',
+    'performance.metadata_refresh_ms',
+    'performance.watched_pr_refresh_ms',
+    'performance.pane_state_refresh_ms',
+  ]) {
+    assert.equal(preferencesHtml.includes(`data-setting-path="${removedPath}"`), false, `${removedPath} is no longer exposed in Preferences`);
+  }
+  assert.ok(/data-setting-path="performance\.server_event_poll_ms"[\s\S]*data-setting-path="performance\.server_directory_event_poll_ms"[\s\S]*data-setting-path="performance\.latency_refresh_ms"[\s\S]*data-setting-path="performance\.event_log_refresh_ms"/.test(performanceHtml), 'Performance order groups server SSE settings before remaining client timers');
   assert.equal(preferencesHtml.includes('data-setting-path="file_explorer.refresh_ms"'), false, 'Finder refresh interval no longer exposes the legacy millisecond setting');
-  assert.ok(diffBundle.includes("fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings()"), 'Finder refresh interval is derived from the seconds setting at runtime');
-  assert.ok(diffBundle.includes("sessionFilesRefreshMs = sessionFilesRefreshMsFromSettings()"), 'Changed-files refresh interval is derived from the seconds setting at runtime');
-  assert.ok(diffBundle.includes("initialSetting('file_explorer.refresh_seconds', 5)"), '#DOIT.52 R5: JS Finder refresh fallback matches the server default');
-  assert.ok(diffBundle.includes("path: 'performance.activity_summary_refresh_ms'") && diffBundle.includes('scale: 1000') && diffBundle.includes('displayDecimals: 0'), 'YO!agent background refresh stores milliseconds but displays rounded seconds');
-  assert.ok(/function fileExplorerRefreshMsFromValues\([\s\S]*Math\.max\(1,\s*Math\.min\(60,\s*seconds\)\)\s*\* 1000 \+ 1/.test(diffBundle), 'Finder refresh seconds convert through one shared odd-millisecond polling helper');
-  assert.ok(/function fileExplorerRefreshMsFromSettings\(\)[\s\S]*fileExplorerRefreshMsFromValues\([\s\S]*file_explorer\.refresh_seconds[\s\S]*file_explorer\.refresh_ms/.test(diffBundle), 'Finder refresh setting reads seconds with legacy millisecond fallback through the shared helper');
+  assert.equal(diffBundle.includes('fileExplorerRefreshMsFromSettings'), false, 'Finder client-pull refresh setting helper is removed');
+  assert.equal(diffBundle.includes('sessionFilesRefreshMsFromSettings'), false, 'Changed-files client-pull refresh setting helper is removed');
+  assert.equal(diffBundle.includes("initialSetting('file_explorer.refresh_seconds'"), false, 'JS no longer reads the removed Finder fallback setting');
+  assert.equal(diffBundle.includes("initialSetting('file_explorer.session_files_refresh_seconds'"), false, 'Changed-files/Differ fallback does not read a separate setting');
+  assert.ok(diffBundle.includes("path: 'performance.server_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server file-change poll stores milliseconds but displays 0.850-style seconds');
+  assert.ok(diffBundle.includes("path: 'performance.server_directory_event_poll_ms'") && diffBundle.includes('displayDecimals: 3'), 'server directory-change poll stores milliseconds but displays 0.850-style seconds');
   assert.ok(preferencesHtml.includes('data-setting-path="uploads.max_bytes"'), 'preferences expose the upload size cap');
   api.setClientSettingsPatchForTest({uploads: {max_bytes: 64 * 1024 * 1024}});
   const largeUploadPreferencesHtml = api.preferencesPanelHtmlForTest('upload', []);
@@ -3846,7 +3923,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/preferences-setting-row preferences-setting-row--wide"><label class="preferences-setting-label" for="preference-yolo-rule_file_path"/.test(preferencesHtml), '#38: the YOLO rule file path is a full-width row so the long path is not clipped');
   assert.ok(/\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-text input\[type="text"\][\s\S]*?\.preferences-setting-row--wide \.preferences-setting-control\.setting-type-select select\s*\{[\s\S]*?width:\s*100%/.test(preferencesCss), '#38: text/select inputs fill the full width inside wide rows');
   const radioModePaths = new Map([
-    ['general.default_layout', ['single', 'grid', 'wall']],
+    ['general.default_layout', ['single', 'split', 'grid', 'wall']],
     ['appearance.theme', ['system', 'dark', 'light']],
     ['appearance.active_color', ['green', 'blue', 'orange', 'yellow', 'purple', 'white']],
     ['appearance.terminal_theme', ['follow-app', 'dark', 'light']],
@@ -3870,6 +3947,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(/data-setting-path="appearance\.theme"[\s\S]{0,180}preferences-radio-swatches/.test(preferencesHtml), false, 'Global color theme radios do not show color swatches');
   assert.equal(/<select[^>]*data-setting-path="appearance\.active_color"/.test(preferencesHtml), false, 'Active color renders as radios, not a select');
   assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#86d600[\s\S]*--preferences-radio-swatch:#4f9e3a/.test(preferencesHtml), 'Active color Green radio shows joined actual dark/light accent swatches');
+  assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#f97316[\s\S]*--preferences-radio-swatch:#b91c1c/.test(preferencesHtml), 'Active color Blood orange light swatch is redder than Solar gold');
+  assert.ok(/preferences-radio-swatches joined[\s\S]*--preferences-radio-swatch:#eab308[\s\S]*--preferences-radio-swatch:#d6a400/.test(preferencesHtml), 'Active color Solar gold light swatch is a brighter gold');
   assert.ok(/\.preferences-radio-group\.has-swatches\s*\{[\s\S]*display:\s*grid[\s\S]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(148px,\s*1fr\)\)/.test(preferencesCss), 'swatched Preferences radio groups use a shared grid so wrapped rows align');
   assert.ok(/\.preferences-radio\.has-swatches\s*\{[\s\S]*grid-template-columns:\s*18px 34px minmax\(0,\s*1fr\)/.test(preferencesCss), 'swatched Preferences radios align radio, color chips, and label in fixed columns');
   assert.ok(/\.preferences-radio-swatch\s*\{[\s\S]*border-radius:\s*2px/.test(preferencesCss), 'Preferences color swatches are boxed, not round dots');
@@ -4214,6 +4293,10 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const sortSubmenu = sortViewMenu.items.find(item => item.type === 'submenu' && item.label === api.t('menu.view.sortTabs'));
   assert.ok(sortSubmenu, 'View menu has a Sort tab list submenu');
   assert.deepEqual(sortSubmenu.items.map(item => item.label), [api.t('menu.view.sortTabs.default'), api.t('menu.view.sortTabs.attention'), api.t('menu.view.sortTabs.name')], 'the sort submenu offers default / needs-me / name');
+  const layoutSubmenu = sortViewMenu.items.find(item => item.type === 'submenu' && item.label === api.t('menu.view.layout'));
+  assert.ok(layoutSubmenu, 'View menu has a Layout submenu');
+  assert.deepEqual(layoutSubmenu.items.map(item => item.label), api.layoutModeValues.map(mode => api.t(`menu.view.layout.${mode}`)), 'View layout options match the shared layout modes');
+  assert.equal(layoutSubmenu.items.some(item => item.disabled), false, 'Every View layout option is implemented');
   const menus = api.appMenuTree();
   assert.equal(menus.map(menu => menu.label).join(','), 'File,View,tmux,Tabs,Help');
   assert.equal(menus.some(menu => menu.id === 'yolo'), false);
@@ -5243,11 +5326,78 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   });
   api.setLayoutToSplitPanes();
   assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {split: 'row', pct: 50, children: [{slot: 'right'}, {slot: 'slot2'}]}]},
+    tree: {split: 'row', pct: 22, children: [{slot: 'left'}, {split: 'row', pct: 50, children: [{slot: 'slot1'}, {slot: 'right'}]}]},
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      slot1: {tabs: ['1'], active: '1'},
+      right: {tabs: ['2'], active: '2'},
+    },
+  });
+
+  const layoutModeSource = api.emptyLayoutSlots();
+  const extraWallItem = api.registerFileEditorLayoutItem('/home/test/b.md');
+  layoutModeSource[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 22);
+  layoutModeSource.left = api.paneStateWithTabs(['__files__'], '__files__');
+  layoutModeSource.slot1 = api.paneStateWithTabs(['1', '2', extraPaneItem, extraWallItem], extraPaneItem);
+  api.setLayoutSlotsForTest(layoutModeSource);
+  api.setFocusedPanelItem(extraPaneItem);
+  api.setLayoutToGridPanes();
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {
+      split: 'row',
+      pct: 22,
+      children: [
+        {slot: 'left'},
+        {
+          split: 'row',
+          pct: 50,
+          children: [
+            {split: 'column', pct: 50, children: [{slot: 'leftTop'}, {slot: 'leftBottom'}]},
+            {split: 'column', pct: 50, children: [{slot: 'rightTop'}, {slot: 'rightBottom'}]},
+          ],
+        },
+      ],
+    },
+    panes: {
+      left: {tabs: ['__files__'], active: '__files__'},
+      leftTop: {tabs: ['1'], active: '1'},
+      rightTop: {tabs: ['2'], active: '2'},
+      leftBottom: {tabs: [extraPaneItem], active: extraPaneItem},
+      rightBottom: {tabs: [extraWallItem], active: extraWallItem},
+    },
+  });
+  api.setLayoutSlotsForTest(layoutModeSource);
+  api.setFocusedPanelItem(extraPaneItem);
+  api.setLayoutToWallPanes();
+  assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
+    tree: {
+      split: 'row',
+      pct: 22,
+      children: [
+        {slot: 'left'},
+        {
+          split: 'row',
+          pct: 50,
+          children: [
+            {
+              split: 'row',
+              pct: 50,
+              children: [
+                {split: 'row', pct: 50, children: [{slot: 'right'}, {slot: 'slot1'}]},
+                {slot: 'slot2'},
+              ],
+            },
+            {slot: 'slot3'},
+          ],
+        },
+      ],
+    },
     panes: {
       left: {tabs: ['__files__'], active: '__files__'},
       right: {tabs: ['1'], active: '1'},
-      slot2: {tabs: ['2'], active: '2'},
+      slot1: {tabs: ['2'], active: '2'},
+      slot2: {tabs: [extraPaneItem], active: extraPaneItem},
+      slot3: {tabs: [extraWallItem], active: extraWallItem},
     },
   });
 
@@ -6166,9 +6316,9 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   const debugPaneCss = fs.readFileSync('static/yolomux.css', 'utf8');
   assert.ok(!/panel\.className = 'panel preferences-panel js-debug-panel'/.test(debugPaneSource), 'Debug panel does not use the Preferences class; Preferences rerenders must not overwrite it');
   assert.ok(/\.preferences-panel,\s*\.js-debug-panel\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\)/.test(debugPaneCss), 'Debug panel gets the shared panel grid without being a Preferences panel');
-  assert.ok(debugPaneSource.includes("initialSetting('performance.activity_summary_refresh_ms', 60001)"), 'silent activity-summary refreshes use the Preferences-backed interval');
-  assert.ok(debugPaneSource.includes("activitySummaryBackgroundRefreshMs = numberSetting('performance.activity_summary_refresh_ms', 60001)"), 'activity-summary interval updates when settings reload');
-  assert.ok(debugPaneSource.includes('function activitySummaryIsVisible()'), 'activity-summary polling can refresh normally when YO!agent is active');
+  assert.equal(debugPaneSource.includes("initialSetting('performance.activity_summary_refresh_ms'"), false, 'silent activity-summary polling preference is removed');
+  assert.equal(debugPaneSource.includes('activitySummaryBackgroundRefreshMs'), false, 'activity-summary no longer keeps a client background refresh timer');
+  assert.ok(debugPaneSource.includes('function activitySummaryIsVisible()'), 'activity-summary visibility tracking remains available for server watch state');
   const debugText = api.jsDebugTextForClipboardForTest();
   assert.ok(debugText.includes('page=/?debug=1'), 'debug text includes the active URL path and query');
   assert.ok(debugText.includes('API') && debugText.includes('GET /api/ping'), 'debug text exports API rows');
@@ -6521,13 +6671,13 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.equal(api.shouldNotifyTransitionKey('pr-merged'), false, 'DOIT.29: pr-merged is opt-in, off by default');
 }
 
-// DOIT.29: the watched-PR poll, endpoint, container, and topbar nav are wired into the bundle.
+// DOIT.29: watched PRs have an initial fetch, SSE updates, container, and transition notifications.
 {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
-  assert.ok(source.includes("resetRuntimeInterval('watched-prs', refreshWatchedPrs"), 'DOIT.29: watched PRs poll on their own runtime interval');
-  assert.ok(source.includes("apiFetchJson('/api/watched-prs')"), 'DOIT.29: refreshWatchedPrs fetches the watched-PRs endpoint');
+  assert.equal(source.includes("resetRuntimeInterval('watched-prs', refreshWatchedPrs"), false, 'DOIT.29: watched PRs no longer run a recurring browser poll');
+  assert.ok(source.includes("apiFetchJson('/api/watched-prs')"), 'DOIT.29: refreshWatchedPrs keeps the boot/manual watched-PR endpoint fetch');
   assert.ok(source.includes('id="info-watched"'), 'DOIT.29: YO!info renders a watched-PRs container');
-  assert.ok(source.includes('notifyWatchedPrTransitions(watchedPrsData.watched_prs)'), 'DOIT.29: each poll diffs statuses to fire transition notifications');
+  assert.ok(source.includes('notifyWatchedPrTransitions(watchedPrsData.watched_prs)'), 'DOIT.29: incoming snapshots diff statuses to fire transition notifications');
 }
 
 // Dev-velocity #1b: in --dev mode the page subscribes to /api/dev-reload and reloads on bundle change.
@@ -6539,19 +6689,21 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(source.includes('installDevAutoReload()'), 'the dev auto-reload is installed at boot');
 }
 
-// DOIT.52: browser clients subscribe to server push events, while existing pollers remain installed as fallback.
+// DOIT.52: browser clients subscribe to server push events for the expensive live datasets.
 {
   const source = fs.readFileSync('static/yolomux.js', 'utf8');
   assert.ok(source.includes("new EventSource('/api/client-events')"), 'client subscribes to the general server event stream');
-  assert.ok(source.includes("installRuntimeIntervals();") && source.includes("installClientEventStream();"), 'push is installed without removing runtime polling fallback');
-  assert.ok(source.includes('function clientPushSuppressesPolling()'), 'connected push stream gates expensive runtime polling');
-  assert.ok(source.includes("resetRuntimeInterval('metadata', refreshTranscriptsFromRuntime"), 'metadata polling uses the push-aware fallback wrapper');
-  assert.ok(source.includes("resetRuntimeInterval('filesystem', refreshWatchedFilesystemFromRuntime"), 'filesystem polling uses the push-aware fallback wrapper');
-  assert.ok(source.includes("resetRuntimeInterval('settings', refreshSettingsFromRuntime"), 'settings polling uses the push-aware fallback wrapper');
+  assert.ok(source.includes("installRuntimeIntervals();") && source.includes("installClientEventStream();"), 'SSE is installed alongside the remaining local ping/log timers');
+  assert.equal(source.includes('function clientPushSuppressesPolling()'), false, 'expensive client polling gate is removed');
+  assert.equal(source.includes('refreshTranscriptsFromRuntime'), false, 'metadata fallback poll wrapper is removed');
+  assert.equal(source.includes('refreshWatchedFilesystemFromRuntime'), false, 'filesystem fallback poll wrapper is removed');
+  assert.equal(source.includes('refreshSettingsFromRuntime'), false, 'settings fallback poll wrapper is removed');
   assert.ok(source.includes('syncServerWatchRoots({renew: true})'), 'connected push mode renews watched roots without polling the filesystem');
-  assert.ok(source.includes("apiFetch('/api/watch/roots'"), 'client registers watched roots for server-side fallback polling');
-  assert.ok(source.includes('function clientServerWatchRoots()'), 'client derives watched roots from Finder/open-file/session-file state');
-  assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'fs_changed', 'session_files_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']"), 'client listens for the expected push event types');
+  assert.ok(source.includes("apiFetch('/api/watch/roots'"), 'client registers watched roots for server-side SSE polling');
+  assert.ok(source.includes('function clientServerWatchRoots()'), 'client derives watched directory roots from Finder/session-file state');
+  assert.ok(/function visibleFileEditorWatchFiles\(\)[\s\S]*?paneItems\(\)/.test(source), 'client reports open editor files in visible panes separately from directory roots');
+  assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
+  assert.ok(source.includes("['settings_changed', 'auto_approve_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready']"), 'client listens for the expected push event types');
   assert.ok(/if \(type === 'settings_changed'\)[\s\S]{0,220}applySettingsPayload\(payload\.data, \{force: true\}\)/.test(source), 'settings_changed applies direct payloads without polling settings again');
   assert.ok(/if \(type === 'auto_approve_changed'\)[\s\S]{0,120}applyAutoApprovePayload\(payload\.data\)/.test(source), 'auto_approve_changed applies direct payloads');
   assert.ok(/if \(type === 'watched_prs_changed'\)[\s\S]{0,120}applyWatchedPrsPayload\(payload\.data\)/.test(source), 'watched_prs_changed applies direct payloads');
@@ -6559,10 +6711,14 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/if \(type === 'context_items_ready'\)[\s\S]{0,160}applyContextItemsPayloadFromPush\(payload\.data/.test(source), 'context_items_ready applies direct context payloads');
   assert.ok(/if \(type === 'activity_summary_ready'\)[\s\S]{0,120}applyActivitySummaryPayloadFromPush\(payload\.data\)/.test(source), 'activity_summary_ready applies direct summary payloads');
   assert.ok(/if \(type === 'session_files_ready'\)[\s\S]{0,180}applySessionFilesPayloadFromPush\(payload\.data, payload\.request/.test(source), 'session_files_ready applies direct session-files payloads');
-  assert.ok(/if \(type === 'session_files_changed'\)[\s\S]{0,120}scheduleSessionFilesPushRefresh\(\)/.test(source), 'session_files_changed coalesces changed-file refreshes through the cached path');
-  const sessionFilesPushHelper = source.slice(source.indexOf('function scheduleSessionFilesPushRefresh()'), source.indexOf('function handleClientPushEvent'));
-  assert.ok(sessionFilesPushHelper.includes("fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true})"), 'session-files push refreshes do not pass force=true');
-  assert.equal(sessionFilesPushHelper.includes('force: true'), false, 'session-files push refreshes must not bypass the server stale cache');
+  assert.equal(source.includes('session_files_changed'), false, 'stale session_files_changed refetch event path is removed');
+  assert.ok(/if \(type === 'files_changed'\)[\s\S]{0,180}refreshOpenFilesFromPush\(payload\)/.test(source), 'files_changed refreshes visible editor files without waiting for directory payloads');
+  const filePushHelper = source.slice(source.indexOf('async function refreshOpenFilesFromPush'), source.indexOf('async function refreshFileExplorerFromPush'));
+  assert.equal(filePushHelper.includes('fetchDirectory'), false, 'files_changed uses the server file signature directly, not a parent-directory listing');
+  assert.equal(filePushHelper.includes('refreshOpenFilesIfChanged'), false, 'files_changed does not route through the directory-backed polling helper');
+  assert.equal(source.includes('function scheduleSessionFilesPushRefresh()'), false, 'session-files push no longer triggers a client refetch helper');
+  const watchRootsHelper = source.slice(source.indexOf('function clientServerWatchRoots()'), source.indexOf('function clientServerWatchState()'));
+  assert.equal(watchRootsHelper.includes('openFiles.keys()'), false, 'open editor file dirs are not folded into the slower directory watch roots');
   const fsPushHelper = source.slice(source.indexOf('async function refreshFileExplorerFromPush'), source.indexOf('function expandUserPath'));
   assert.equal(fsPushHelper.includes('fetchSessionFiles'), false, 'fs_changed refreshes Finder/open-file state without also fetching session-files');
   assert.ok(/if \(type === 'fs_changed'\)[\s\S]{0,180}refreshFileExplorerFromPush\(payload\)/.test(source), 'fs_changed refreshes Finder/open-file state through the shared push helper');
@@ -7019,8 +7175,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   for (const key of [
     'pref.appearance.theme.label', 'pref.appearance.terminal_theme.help',
     'pref.appearance.date_time_hour_cycle.label', 'pref.appearance.font_sizes.note',
-    'pref.performance.metadata_refresh_ms.label', 'pref.performance.settings_refresh_ms.label',
-    'pref.performance.activity_summary_refresh_ms.label', 'pref.performance.server_event_poll_ms.label',
+    'pref.performance.latency_refresh_ms.label', 'pref.performance.event_log_refresh_ms.label',
+    'pref.performance.server_event_poll_ms.label', 'pref.performance.server_directory_event_poll_ms.label',
     'pref.notifications.throttle_seconds.label',
     'pref.terminal_editor.scrollback.label', 'pref.uploads.max_bytes.label',
     'pref.yoagent.backend.label', 'pref.yolo.dry_run.label',
@@ -7028,7 +7184,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
     assert.ok(html.includes(enXA[key]), `pseudo-locale renders ${key}`);
   }
   for (const englishLeak of [
-    'Global color theme', 'Editor/Terminal font sizes are in Terminal / Editor.', 'Client pull: metadata fallback', 'Notification throttle',
+    'Global color theme', 'Editor/Terminal font sizes are in Terminal / Editor.', 'Client pull: latency ping', 'Notification throttle',
     'Terminal scrollback', 'Upload size cap', 'YO!agent backend', 'Dry run',
   ]) {
     assert.equal(html.includes(englishLeak), false, `no plain-English "${englishLeak}" leaks under the pseudo-locale`);
@@ -7240,6 +7396,8 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(sectionHtml(api.t('pref.section.performance')).includes('data-setting-path="general.reload_on_update_auto"'), 'Auto-reload on server update is in Performance');
   const appearanceHtml = sectionHtml(api.t('pref.section.appearance'));
   assert.ok(appearanceHtml.includes('data-setting-path="general.default_layout"'), 'Default layout is in Appearance');
+  assert.ok(/type="radio"[^>]*value="split"[^>]*data-setting-path="general\.default_layout"/.test(appearanceHtml), 'Default layout offers Split');
+  assert.ok(appearanceHtml.includes('Single pane') && appearanceHtml.includes('Split') && appearanceHtml.includes('Grid') && appearanceHtml.includes('Wall'), 'Default layout labels match View layout labels');
   assert.ok(appearanceHtml.includes('Envy green'), 'Active color Green is labeled Envy green');
   assert.ok(appearanceHtml.includes('Deep ocean blue'), 'Active color Blue is labeled Deep ocean blue');
   assert.ok(appearanceHtml.includes('Blood orange'), 'Active color Orange is labeled Blood orange');
@@ -7250,6 +7408,7 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
   assert.ok(/data-setting-path="appearance\.active_color"[\s\S]*data-setting-path="appearance\.editor_cursor_color"[\s\S]*data-setting-path="appearance\.yolo_rotate_ms"/.test(appearanceHtml), 'Cursor color sits immediately after Active color in Appearance');
   assert.ok(/type="radio"[^>]*value="blue"[^>]*data-setting-path="appearance\.editor_cursor_color"/.test(appearanceHtml), 'Cursor color Blue renders as a radio');
   const preferencesSource = fs.readFileSync('static/yolomux.js', 'utf8');
+  assert.ok(/function layoutModePreferenceChoices\(\)\s*\{[\s\S]*layoutModeValues\.map\(value => \(\{value, label: t\(`menu\.view\.layout\.\$\{value\}`\)\}\)\)/.test(preferencesSource), 'Default layout choices derive from the shared View layout modes');
   assert.ok(/function activeColorPreferenceChoices\(\)\s*\{[\s\S]*UI_COLOR_CHOICES\.map\(value => activeColorPreferenceChoice\(value, t\(UI_COLOR_PRESETS\[value\]\.labelKey\)\)\)/.test(preferencesSource), 'Active color choices derive labels from the shared UI color parent');
   assert.ok(/function cursorColorPreferenceChoices\(\)\s*\{[\s\S]*\[DEFAULT_CURSOR_COLOR, \.\.\.UI_COLOR_CHOICES\.filter\(value => value !== DEFAULT_CURSOR_COLOR\), 'theme'\][\s\S]*\.map\(cursorColorPreferenceChoice\)/.test(preferencesSource), 'Cursor color choices derive order from the shared UI color parent and default');
   assert.ok(/function cursorColorPreferenceChoice\(value\)\s*\{[\s\S]*value === 'theme' \? t\('pref\.appearance\.editor_cursor_color\.theme'\) : t\(preset\.labelKey\)/.test(preferencesSource), 'Cursor color labels reuse the Active color label keys from the shared parent');
@@ -7928,6 +8087,72 @@ for (const yoagentToken of ['yoagent', '__yoagent__', '__yosup__']) {
 }
 
 (async () => {
+  {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.leafNode('left');
+    slots.left = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+
+    const sent = [];
+    api.registerTerminalForTest('1', {focus() {}}, {
+      readyState: 1,
+      send(message) {
+        sent.push(JSON.parse(message));
+      },
+    });
+
+    const calls = [];
+    api.setFetchForTest((url, options = {}) => {
+      calls.push({url: String(url), method: options.method || 'GET', body: options.body});
+      if (String(url).startsWith('/api/upload')) {
+        return Promise.resolve(jsonResponse({files: [{path: '/home/test/20260610-001.png'}]}));
+      }
+      if (String(url).startsWith('/api/transcripts')) {
+        return Promise.resolve(jsonResponse({session_order: ['1'], sessions: {'1': {agents: []}}}));
+      }
+      if (String(url).startsWith('/api/auto-approve')) {
+        return Promise.resolve(jsonResponse({sessions: {}}));
+      }
+      return Promise.resolve(jsonResponse({items: [], session: '1'}));
+    });
+
+    api.bindClipboardPasteForTest();
+    api.bindClipboardPasteForTest();
+    const pasteListeners = api.documentListenersForTest('paste');
+    assert.equal(pasteListeners.length, 1, 'image paste installs one document paste listener');
+
+    const pasteEvent = {
+      clipboardData: {
+        items: [{
+          kind: 'file',
+          type: 'image/png',
+          getAsFile() {
+            return {name: 'image.png', type: 'image/png', size: 7};
+          },
+        }],
+      },
+      target: null,
+      defaultPrevented: false,
+      propagationStopped: false,
+      preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() { this.propagationStopped = true; },
+    };
+    pasteListeners[0](pasteEvent);
+    await flushAsyncWork();
+
+    assert.equal(pasteEvent.defaultPrevented, true, 'image paste is captured before xterm receives raw clipboard data');
+    assert.equal(pasteEvent.propagationStopped, true, 'image paste stops propagation after starting upload');
+    assert.equal(calls[0].url, '/api/upload?session=1', 'image paste uploads to the active terminal session');
+    assert.equal(calls[0].method, 'POST');
+    assert.equal(calls[0].body.fields[0].name, 'files');
+    assert.equal(calls[0].body.fields[0].filename, '20260610-001.png');
+    assert.deepStrictEqual(sent[0], {
+      type: 'input',
+      data: "[Image #1] '/home/test/20260610-001.png' ",
+    }, 'pasted image upload inserts the image reference into xterm');
+  }
+
   {
     const api = loadYolomux();
     const calls = [];

@@ -25,6 +25,16 @@ function menuGroups(...groups) {
   return items;
 }
 
+function layoutMenuCommand(mode) {
+  const normalized = normalizeLayoutMode(mode);
+  const detail = normalized === 'single'
+    ? t('menu.view.layout.single.detail', {name: fileExplorerLabel()})
+    : normalized === 'split'
+      ? t('menu.view.layout.split.detail', {name: fileExplorerLabel()})
+      : '';
+  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail});
+}
+
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
 
 function aboutDateTimeText() {
@@ -605,12 +615,7 @@ function appMenuTree() {
           menuCommand(t('menu.view.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark'}),
           menuCommand(t('menu.view.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light'}),
         ]),
-        menuSubmenu(t('menu.view.layout'), [
-          menuCommand(t('menu.view.layout.single'), setLayoutToSinglePane, {detail: t('menu.view.layout.single.detail', {name: fileExplorerLabel()})}),
-          menuCommand(t('menu.view.layout.split'), setLayoutToSplitPanes, {detail: t('menu.view.layout.split.detail', {name: fileExplorerLabel()})}),
-          menuCommand(t('menu.view.layout.grid'), null, {disabled: true, detail: t('menu.view.layout.grid.detail')}),
-          menuCommand(t('menu.view.layout.wall'), null, {disabled: true}),
-        ]),
+        menuSubmenu(t('menu.view.layout'), layoutModeValues.map(layoutMenuCommand)),
         menuSubmenu(t('menu.view.sortTabs'), [
           menuCommand(t('menu.view.sortTabs.default'), () => setTabsMenuSortMode('default'), {checked: tabsMenuSortMode === 'default', detail: t('menu.view.sortTabs.default.detail')}),
           menuCommand(t('menu.view.sortTabs.attention'), () => setTabsMenuSortMode('attention'), {checked: tabsMenuSortMode === 'attention', detail: t('menu.view.sortTabs.attention.detail')}),

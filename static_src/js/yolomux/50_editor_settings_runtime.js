@@ -466,17 +466,6 @@ function numberSetting(path, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
-function fileExplorerRefreshMsFromSettings() {
-  return fileExplorerRefreshMsFromValues(
-    numberSetting('file_explorer.refresh_seconds', Number.NaN),
-    numberSetting('file_explorer.refresh_ms', 15001),
-  );
-}
-
-function sessionFilesRefreshMsFromSettings() {
-  return sessionFilesRefreshMsFromValues(numberSetting('file_explorer.session_files_refresh_seconds', 5));
-}
-
 function boolSetting(path, fallback) {
   const value = initialSetting(path, fallback);
   return value === true || value === 'true' || value === 1;
@@ -493,8 +482,8 @@ const DEFAULT_CURSOR_COLOR = 'yellow';
 const UI_COLOR_PRESETS = {
   green:  {labelKey: 'pref.appearance.active_color.green', cursor: '#76b900', active: null},
   blue:   {labelKey: 'pref.appearance.active_color.blue', cursor: '#3b82f6', active: {dark: {accent: '#3b82f6', bright: '#3b82f6', text: '#ffffff'}, light: {accent: '#2563eb', bright: '#2563eb', text: '#ffffff'}}},
-  orange: {labelKey: 'pref.appearance.active_color.orange', cursor: '#f97316', active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#c2570a', bright: '#c2570a', text: '#ffffff'}}},
-  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursor: '#ffd000', active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#a16207', bright: '#a16207', text: '#ffffff'}}},
+  orange: {labelKey: 'pref.appearance.active_color.orange', cursor: '#f97316', active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
+  yellow: {labelKey: 'pref.appearance.active_color.yellow', cursor: '#ffd000', active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
   purple: {labelKey: 'pref.appearance.active_color.purple', cursor: '#a855f7', active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
   white:  {labelKey: 'pref.appearance.active_color.white', cursor: '#f8fafc', active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
 };
@@ -683,7 +672,7 @@ function refreshMetaButtonTitle() {
     'Refresh git, PR, Linear, and agent metadata.',
     'Refresh YOLO status and open event logs.',
     'Refresh active transcript previews.',
-    `Auto-refresh: YOLO ${seconds(paneStateRefreshMs)}, metadata ${seconds(metadataRefreshMs)}, settings ${seconds(settingsRefreshMs)}, ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
+    `Live updates arrive over SSE. Local timers: ping ${seconds(latencyRefreshMs)}, open logs ${seconds(eventLogRefreshMs)}.`,
     'Does not reload the page or reconnect terminals.',
   ].join('\n');
 }
@@ -698,14 +687,9 @@ function applySettingsPayload(payload, options = {}) {
   clientSettingsDefaults = payload.defaults || clientSettingsDefaults;
   clientSettings = mergeSettingObjects(clientSettingsDefaults, payload.settings || {});
   clientSettingsMtimeNs = nextMtime;
-  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 200);
-  metadataRefreshMs = numberSetting('performance.metadata_refresh_ms', 15001);
-  watchedPrRefreshMs = numberSetting('performance.watched_pr_refresh_ms', 60001);
-  paneStateRefreshMs = numberSetting('performance.pane_state_refresh_ms', 1253);
-  latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3001);
-  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5003);
-  settingsRefreshMs = numberSetting('performance.settings_refresh_ms', 5009);
-  activitySummaryBackgroundRefreshMs = numberSetting('performance.activity_summary_refresh_ms', 60001);
+  remoteResizeDelayMs = numberSetting('performance.remote_resize_delay_ms', 220);
+  latencyRefreshMs = numberSetting('performance.latency_refresh_ms', 3000);
+  eventLogRefreshMs = numberSetting('performance.event_log_refresh_ms', 5000);
   redReminderMs = numberSetting('appearance.red_reminder_ms', 1550);
   yoloRotateMs = numberSetting('appearance.yolo_rotate_ms', 20000);
   toastDurationMs = numberSetting('notifications.toast_duration_ms', 10000);
@@ -716,8 +700,6 @@ function applySettingsPayload(payload, options = {}) {
   menuHoverCloseDelayMs = hoverCloseDelayMs;
   tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms', 1000);
   tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms', 120);
-  fileExplorerRefreshMs = fileExplorerRefreshMsFromSettings();
-  sessionFilesRefreshMs = sessionFilesRefreshMsFromSettings();
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds', 120);
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms', 60000);
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px', 320);
@@ -798,10 +780,9 @@ async function refreshSettings(options = {}) {
 
 const runtimeIntervals = new Map();
 
-function runtimeJitteredDelay(baseDelay, randomValue = Math.random()) {
+function runtimeIntervalDelay(baseDelay) {
   const base = Math.max(1, Math.round(Number(baseDelay) || 1));
-  const normalizedRandom = Math.min(1, Math.max(0, Number(randomValue) || 0));
-  return Math.max(1, Math.round(base * (1.01 + normalizedRandom * 0.09)));
+  return base;
 }
 
 function resetRuntimeInterval(name, callback, delay) {
@@ -818,7 +799,7 @@ function resetRuntimeInterval(name, callback, delay) {
   const state = {active: true, timer: null, delay: normalizedDelay, callback};
   const scheduleNext = () => {
     if (!state.active) return;
-    state.timer = setTimeout(run, runtimeJitteredDelay(state.delay));
+    state.timer = setTimeout(run, runtimeIntervalDelay(state.delay));
   };
   const run = () => {
     if (!state.active) return;
@@ -837,46 +818,16 @@ function clearRuntimeInterval(name) {
   runtimeIntervals.delete(name);
 }
 
-function clientPushSuppressesPolling() {
-  return clientPushConnectedForData();
-}
-
-function refreshTranscriptsFromRuntime() {
-  if (clientPushSuppressesPolling()) return;
-  refreshTranscripts();
-}
-
-function refreshAutoStatusesFromRuntime() {
-  if (clientPushSuppressesPolling()) return;
-  refreshAutoStatuses();
-}
-
-function refreshWatchedPrsFromRuntime() {
-  if (clientPushSuppressesPolling()) return;
-  refreshWatchedPrs();
-}
-
-function refreshWatchedFilesystemFromRuntime() {
-  if (clientPushSuppressesPolling()) {
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
-    return;
+function renewServerWatchRootsFromRuntime() {
+  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') {
+    syncServerWatchRoots({renew: true});
   }
-  refreshWatchedFilesystem();
-}
-
-function refreshSettingsFromRuntime() {
-  if (clientPushSuppressesPolling()) return;
-  refreshSettings({silent: true});
 }
 
 function installRuntimeIntervals() {
-  resetRuntimeInterval('auto', refreshAutoStatusesFromRuntime, paneStateRefreshMs);
-  resetRuntimeInterval('metadata', refreshTranscriptsFromRuntime, metadataRefreshMs);
-  resetRuntimeInterval('watched-prs', refreshWatchedPrsFromRuntime, watchedPrRefreshMs);
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
   resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
-  resetRuntimeInterval('filesystem', refreshWatchedFilesystemFromRuntime, fileExplorerRefreshMs);
-  resetRuntimeInterval('settings', refreshSettingsFromRuntime, settingsRefreshMs);
+  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, 60000);
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
   } else {

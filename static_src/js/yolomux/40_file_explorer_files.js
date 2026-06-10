@@ -226,6 +226,41 @@ function entriesByDirFromFilesystemPush(payload = {}) {
   return entriesByDir;
 }
 
+function fileEntryStatusFromWatchFilePayload(item) {
+  const signature = Array.isArray(item?.signature) ? item.signature : [];
+  const path = String(item?.path || signature[0] || '');
+  if (!path) return {path: '', entry: null, missing: false, error: '', network: false};
+  const kind = String(signature[1] || '');
+  if (kind === 'missing') return {path, entry: null, missing: true, error: `path not found: ${path}`, network: false};
+  if (kind !== 'file' && kind !== 'dir') return {path, entry: null, missing: false, error: `invalid file signature: ${path}`, network: false};
+  const mtime = Number(signature[2]) || 0;
+  const size = Number(signature[3]);
+  return {
+    path,
+    entry: {
+      name: basenameOf(path),
+      kind,
+      mtime_ns: mtime,
+      mtime,
+      size: Number.isFinite(size) ? size : null,
+    },
+    missing: false,
+    error: '',
+    network: false,
+  };
+}
+
+async function refreshOpenFilesFromPush(payload = {}) {
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  for (const item of files) {
+    const fetched = fileEntryStatusFromWatchFilePayload(item);
+    if (!fetched.path) continue;
+    const state = openFiles.get(fetched.path);
+    if (!state || state.loading) continue;
+    await refreshOpenFileFromFetchedStatus(fetched.path, state, fetched);
+  }
+}
+
 async function refreshFileExplorerFromPush(payload = {}) {
   const entriesByDir = entriesByDirFromFilesystemPush(payload);
   if (!entriesByDir.size) return;
@@ -4047,52 +4082,61 @@ async function reloadOpenFileFromDisk(path, options = {}) {
   return replaceOpenFileStateFromDisk(path);
 }
 
-async function refreshOpenFilesIfChanged() {
+async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
+  const entry = fetched.entry;
+  if (!entry) {
+    if (fetched.missing) {
+      if (state.externalMissing) return;
+      clearFileAutosaveTimer(path);
+      markOpenFileMissing(path);
+    } else {
+      markOpenFileExternalError(path, fetched.error);
+    }
+    return;
+  }
+  if (!fileEntryChanged(state, entry)) {
+    if (state.externalChanged || state.externalMissing || state.externalError) {
+      delete state.externalMissing;
+      delete state.externalError;
+      if (!state.dirty) delete state.externalChanged;
+      if (!state.dirty) delete state.externalChangeEditPrompted;
+      renderOpenFilePath(path);
+    }
+    if (state.dirty) scheduleFileAutosave(path);
+    return;
+  }
+  if (state.dirty) {
+    const externalChanged = {mtime: fileEntryMtime(entry), size: entry.size ?? null};
+    if (state.externalChanged
+      && state.externalChanged.mtime === externalChanged.mtime
+      && state.externalChanged.size === externalChanged.size) {
+      return;
+    }
+    state.externalChanged = externalChanged;
+    delete state.externalChangeEditPrompted;
+    delete state.externalMissing;
+    delete state.externalError;
+    clearFileAutosaveTimer(path);
+    renderOpenFilePath(path);
+    return;
+  }
+  await replaceOpenFileStateFromDisk(path, entry);
+}
+
+async function refreshOpenFilesIfChanged(options = {}) {
+  const requestedPaths = new Set((Array.isArray(options.paths) ? options.paths : [])
+    .map(path => String(path || ''))
+    .filter(Boolean));
   for (const [path, state] of Array.from(openFiles.entries())) {
+    const requested = requestedPaths.has(path);
+    if (requestedPaths.size && !requested) continue;
     if (!state || state.loading) continue;
     // Poll on-disk staleness only for the file editor that is the visible/active tab; a file sitting in a
     // background tab does not need ~1/sec polling (it is re-checked when activated). Dirty files are always
     // polled — external-change conflict detection and autosave must never be skipped just because hidden.
-    if (!state.dirty && !itemIsActivePaneTab(fileEditorItemPrefix + path)) continue;
+    if (!requested && !state.dirty && !itemIsActivePaneTab(fileEditorItemPrefix + path)) continue;
     const fetched = await fetchFileEntryStatus(path);
-    const entry = fetched.entry;
-    if (!entry) {
-      if (fetched.missing) {
-        if (state.externalMissing) continue;
-        clearFileAutosaveTimer(path);
-        markOpenFileMissing(path);
-      } else {
-        markOpenFileExternalError(path, fetched.error);
-      }
-      continue;
-    }
-    if (!fileEntryChanged(state, entry)) {
-      if (state.externalChanged || state.externalMissing || state.externalError) {
-        delete state.externalMissing;
-        delete state.externalError;
-        if (!state.dirty) delete state.externalChanged;
-        if (!state.dirty) delete state.externalChangeEditPrompted;
-        renderOpenFilePath(path);
-      }
-      if (state.dirty) scheduleFileAutosave(path);
-      continue;
-    }
-    if (state.dirty) {
-      const externalChanged = {mtime: fileEntryMtime(entry), size: entry.size ?? null};
-      if (state.externalChanged
-        && state.externalChanged.mtime === externalChanged.mtime
-        && state.externalChanged.size === externalChanged.size) {
-        continue;
-      }
-      state.externalChanged = externalChanged;
-      delete state.externalChangeEditPrompted;
-      delete state.externalMissing;
-      delete state.externalError;
-      clearFileAutosaveTimer(path);
-      renderOpenFilePath(path);
-      continue;
-    }
-    await replaceOpenFileStateFromDisk(path, entry);
+    await refreshOpenFileFromFetchedStatus(path, state, fetched);
   }
 }
 
@@ -4106,11 +4150,16 @@ function watchedFileExplorerDirectories() {
   return Array.from(directories);
 }
 
+function visibleFileEditorWatchFiles() {
+  return Array.from(new Set(paneItems()
+    .filter(isFileEditorItem)
+    .map(item => fileItemPath(item))
+    .filter(path => path && path.startsWith('/'))))
+    .sort();
+}
+
 function clientServerWatchRoots() {
   const roots = new Set(watchedFileExplorerDirectories());
-  for (const path of openFiles.keys()) {
-    roots.add(dirnameOf(path));
-  }
   for (const repo of fileExplorerSessionFilesPayload?.repos || []) {
     const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
     if (path && path !== '/') roots.add(path);
@@ -4128,6 +4177,7 @@ function clientServerWatchRoots() {
 function clientServerWatchState() {
   const state = {
     roots: clientServerWatchRoots(),
+    files: visibleFileEditorWatchFiles(),
     context_items: activeSessions
       .filter(isTmuxSession)
       .map(session => ({session, messages: transcriptPreviewMessages})),
@@ -4200,8 +4250,7 @@ async function refreshWatchedFilesystem() {
     await refreshFileExplorerIfChanged();
     await refreshOpenFilesIfChanged();
     if (document.querySelector('.file-explorer-changes-panel')) {
-      const due = !sessionFilesLastPollTs || Date.now() - sessionFilesLastPollTs >= sessionFilesRefreshMs;
-      if (due) fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
     syncServerWatchRoots();
   } finally {

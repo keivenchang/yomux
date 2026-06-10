@@ -360,18 +360,12 @@ const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // sub-tab is remembered across reloads.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const transcriptPreviewMessages = 200;
-let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 200);
-let metadataRefreshMs = initialSetting('performance.metadata_refresh_ms', 15001);
-// DOIT.29: watched PRs poll on their own (longer) cadence; the latest payload + last-seen status per
-// PR ref (for notify-on-transition diffing) live here.
-let watchedPrRefreshMs = initialSetting('performance.watched_pr_refresh_ms', 60001);
-let watchedPrsData = {watched_prs: [], truncated: 0, invalid: [], refresh_ms: watchedPrRefreshMs};
+let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms', 220);
+// The latest watched-PR payload + last-seen status per PR ref (for notify-on-transition diffing) live here.
+let watchedPrsData = {watched_prs: [], truncated: 0, invalid: []};
 const watchedPrLastStatus = new Map();
-let paneStateRefreshMs = initialSetting('performance.pane_state_refresh_ms', 1253);
-let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3001);
-let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5003);
-let settingsRefreshMs = initialSetting('performance.settings_refresh_ms', 5009);
-let activitySummaryBackgroundRefreshMs = initialSetting('performance.activity_summary_refresh_ms', 60001);
+let latencyRefreshMs = initialSetting('performance.latency_refresh_ms', 3000);
+let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms', 5000);
 let redReminderMs = initialSetting('appearance.red_reminder_ms', 1550);
 let yoloRotateMs = initialSetting('appearance.yolo_rotate_ms', 20000);
 const latencySamplesMax = 24;
@@ -387,23 +381,6 @@ let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_m
 let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms', 120);
 const fileImagePreviewMinShowDelayMs = 800;
 const fileEditorScrollSyncSuppressMs = 150;
-function fileExplorerRefreshMsFromValues(secondsValue, legacyMsValue = 15001) {
-  const seconds = Number(secondsValue);
-  if (Number.isFinite(seconds)) return Math.max(1, Math.min(60, seconds)) * 1000 + 1;
-  const legacyMs = Number(legacyMsValue);
-  return Math.max(1000, Math.min(60000, Number.isFinite(legacyMs) ? legacyMs : 15001));
-}
-let fileExplorerRefreshMs = fileExplorerRefreshMsFromValues(
-  initialSetting('file_explorer.refresh_seconds', 5),
-  initialSetting('file_explorer.refresh_ms', 15001),
-);
-function sessionFilesRefreshMsFromValues(secondsValue) {
-  const seconds = Number(secondsValue);
-  return Math.max(1, Math.min(60, Number.isFinite(seconds) ? seconds : 5)) * 1000 + 1;
-}
-let sessionFilesRefreshMs = sessionFilesRefreshMsFromValues(initialSetting('file_explorer.session_files_refresh_seconds', 5));
-let sessionFilesLastPollTs = 0;
-let sessionFilesPushRefreshTimer = null;
 let serverWatchRootsSignature = '';
 let serverWatchRootsInFlight = false;
 let serverWatchRootsSyncedAt = 0;
@@ -434,6 +411,8 @@ const layoutTreeParamPrefix = 'tree:';
 
 const defaultSplitPercent = 50;
 const fileExplorerSplitPercent = 22;
+const defaultLayoutMode = 'split';
+const layoutModeValues = ['single', 'split', 'grid', 'wall'];
 const layoutBoundaryDropFraction = 0.08;
 const layoutBoundaryDropMinPx = 28;
 const layoutBoundaryDropMaxPx = 64;

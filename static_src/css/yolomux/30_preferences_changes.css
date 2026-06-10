@@ -572,8 +572,8 @@
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 6px 6px 0 0;
-  color: var(--text);
-  background: transparent;
+  color: var(--pane-tab-text);
+  background: var(--pane-bar-bg, var(--panel2));
   font: 700 var(--ui-font-size)/1.2 var(--ui-font);
   text-align: start;
   cursor: pointer;
@@ -599,7 +599,8 @@
   text-overflow: ellipsis;
 }
 .preferences-section-count {
-  color: var(--muted);
+  color: currentColor;
+  opacity: 0.72;
   font-size: var(--ui-font-size-xs);
 }
 .preferences-settings {

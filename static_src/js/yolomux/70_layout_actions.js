@@ -192,68 +192,60 @@ function firstNonFinderPaneSlot(slots = layoutSlots) {
   return layoutSlotKeys(slots).find(slot => !isFileExplorerItem(activeItemForSide(slot, slots)) && paneTabsWithoutFinder(slot, slots).length > 0) || null;
 }
 
-function setLayoutToSinglePane() {
-  const items = visibleNonFinderPaneItems();
-  if (!items.length) return;
-  const active = items.includes(focusedPanelItem) ? focusedPanelItem : items[0];
-  const finderSlot = slotForSession(fileExplorerItemId);
-  const targetSlot = firstNonFinderPaneSlot() || (finderSlot === 'left' ? 'right' : 'left');
-  const next = emptyLayoutSlots();
-  next[targetSlot] = paneStateWithTabs(items, active);
-  if (finderSlot) {
-    next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
-    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
-    next[layoutTreeKey] = finderFirst
-      ? splitNode('row', leafNode(finderSlot), leafNode(targetSlot), fileExplorerSplitPercent)
-      : splitNode('row', leafNode(targetSlot), leafNode(finderSlot), 100 - fileExplorerSplitPercent);
-  } else {
-    next[layoutTreeKey] = leafNode(targetSlot);
-  }
-  applyLayoutSlots(next, {focusSession: active, prune: false, message: 'single pane layout'});
+function preferredNonFinderLayoutSlots(finderSlot = null) {
+  return layoutSlotKeys().filter(slot => slot !== finderSlot && paneTabsWithoutFinder(slot).length > 0);
 }
 
-function setLayoutToSplitPanes() {
+function layoutModeStatusMessage(mode) {
+  const normalized = normalizeLayoutMode(mode);
+  if (normalized === 'single') return 'single pane layout';
+  if (normalized === 'split') return 'split layout';
+  if (normalized === 'grid') return 'grid layout';
+  return 'wall layout';
+}
+
+function applyNonFinderLayoutMode(mode) {
   const items = visibleNonFinderPaneItems();
   if (!items.length) return;
-  const finderSlot = slotForSession(fileExplorerItemId);
-  const preferredSlots = basePaneKeys.filter(slot => slot !== finderSlot);
-  while (preferredSlots.length < 2) preferredSlots.push(nextLayoutSlot({...layoutSlots, [preferredSlots[0] || 'left']: emptyPaneState()}));
-  const leftSlot = preferredSlots[0] || 'left';
-  const rightSlot = preferredSlots[1] || 'right';
-  const groups = [[], []];
-  const assigned = new Set();
-  for (const item of items) {
-    const slot = slotForSession(item);
-    if (slot === leftSlot) {
-      groups[0].push(item);
-      assigned.add(item);
-    } else if (slot === rightSlot) {
-      groups[1].push(item);
-      assigned.add(item);
-    }
-  }
-  for (const item of items) {
-    if (assigned.has(item)) continue;
-    groups[groups[0].length <= groups[1].length ? 0 : 1].push(item);
-  }
-  if (!groups[1].length && groups[0].length > 1) groups[1].push(...groups[0].splice(Math.ceil(groups[0].length / 2)));
+  const normalized = normalizeLayoutMode(mode);
   const active = items.includes(focusedPanelItem) ? focusedPanelItem : items[0];
-  const next = emptyLayoutSlots();
-  next[leftSlot] = paneStateWithTabs(groups[0], groups[0].includes(active) ? active : groups[0][0]);
-  if (groups[1].length) next[rightSlot] = paneStateWithTabs(groups[1], groups[1].includes(active) ? active : groups[1][0]);
-  const nonFinderTree = groups[1].length
-    ? splitNode('row', leafNode(leftSlot), leafNode(rightSlot), defaultSplitPercent)
-    : leafNode(leftSlot);
+  const finderSlot = slotForSession(fileExplorerItemId);
+  const preserveSlots = normalized === 'single' || normalized === 'split';
+  const next = layoutSlotsForItems(items, normalized, {
+    active,
+    finderSlot,
+    preferredSlots: preserveSlots ? preferredNonFinderLayoutSlots(finderSlot) : [],
+  });
   if (finderSlot) {
     next[finderSlot] = paneStateWithTabs([fileExplorerItemId], fileExplorerItemId);
-    const finderFirst = finderLeadsExpandedPane(finderSlot, leftSlot);
+    const targetSlot = layoutLeafSlots(next[layoutTreeKey]).find(slot => slot !== finderSlot) || firstNonFinderPaneSlot() || 'right';
+    const nonFinderTree = next[layoutTreeKey];
+    const finderFirst = finderLeadsExpandedPane(finderSlot, targetSlot);
     next[layoutTreeKey] = finderFirst
       ? splitNode('row', leafNode(finderSlot), nonFinderTree, fileExplorerSplitPercent)
       : splitNode('row', nonFinderTree, leafNode(finderSlot), 100 - fileExplorerSplitPercent);
-  } else {
-    next[layoutTreeKey] = nonFinderTree;
   }
-  applyLayoutSlots(next, {focusSession: active, prune: false, message: 'split layout'});
+  applyLayoutSlots(next, {focusSession: active, prune: false, message: layoutModeStatusMessage(normalized)});
+}
+
+function applyLayoutMode(mode) {
+  applyNonFinderLayoutMode(normalizeLayoutMode(mode));
+}
+
+function setLayoutToSinglePane() {
+  applyLayoutMode('single');
+}
+
+function setLayoutToSplitPanes() {
+  applyLayoutMode('split');
+}
+
+function setLayoutToGridPanes() {
+  applyLayoutMode('grid');
+}
+
+function setLayoutToWallPanes() {
+  applyLayoutMode('wall');
 }
 
 function layoutWithFileExplorerDockedLeft(slots = layoutSlots) {

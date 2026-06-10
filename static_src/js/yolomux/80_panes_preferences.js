@@ -1775,20 +1775,12 @@ function activitySummaryIsVisible() {
   return infoPanelSubTab === 'yoagent' && itemIsActivePaneTab(infoItemId);
 }
 
-function shouldSkipSilentActivitySummary(options = {}) {
-  if (options.force === true || options.silent !== true) return false;
-  if (activitySummaryIsVisible()) return false;
-  if (!activitySummaryLastRefreshTs) return false;
-  return Date.now() - activitySummaryLastRefreshTs < activitySummaryBackgroundRefreshMs;
-}
-
 async function refreshActivitySummary(options = {}) {
-  if (clientPushCanSupplyData() && options.silent === true) {
+  if (options.silent === true) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
   }
   if (activitySummaryRefreshing && options.force !== true) return;
-  if (shouldSkipSilentActivitySummary(options)) return;
   const requestIsCurrent = activitySummaryGuard.begin();
   activitySummaryRefreshing = true;
   renderYoagentPanel({preserveDraft: true, scrollBottom: false, summaryOnly: true});
@@ -1859,6 +1851,10 @@ function globalThemePreferenceChoices() {
   ];
 }
 
+function layoutModePreferenceChoices() {
+  return layoutModeValues.map(value => ({value, label: t(`menu.view.layout.${value}`)}));
+}
+
 function activeColorPreferenceChoice(value, label) {
   const preset = ACTIVE_COLOR_PRESETS[value];
   const swatches = preset
@@ -1910,7 +1906,7 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.appearance'), items: [
       {path: 'appearance.theme', label: t('pref.appearance.theme.label'), type: 'radio', choices: globalThemePreferenceChoices(), help: t('pref.appearance.theme.help')},
-      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: ['single', 'grid', 'wall'], help: t('pref.general.default_layout.help')},
+      {path: 'general.default_layout', label: t('pref.general.default_layout.label'), type: 'radio', choices: layoutModePreferenceChoices(), help: t('pref.general.default_layout.help')},
       {path: 'appearance.ui_font_size', label: t('pref.appearance.ui_font_size.label'), type: 'number', min: 6, max: 20, step: 1, suffix: 'px', help: t('pref.appearance.ui_font_size.help')},
       {path: 'appearance.file_explorer_font_size', label: t('pref.appearance.file_explorer_font_size.label', {name: fileExplorerLabel()}), type: 'number', min: 6, max: 24, step: 1, suffix: 'px', help: t('pref.appearance.file_explorer_font_size.help')},
       {type: 'note', text: t('pref.appearance.font_sizes.note')},
@@ -1974,22 +1970,16 @@ function preferenceSections() {
     ]},
     {title: t('pref.section.performance'), items: [
       {path: 'general.reload_on_update_auto', label: t('pref.general.reload_on_update_auto.label'), type: 'boolean', help: t('pref.general.reload_on_update_auto.help')},
-      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.server_event_poll_ms.help')},
-      {path: 'performance.activity_summary_refresh_ms', label: t('pref.performance.activity_summary_refresh_ms.label'), type: 'number', min: 10, max: 600, step: 1, suffix: 's', scale: 1000, displayDecimals: 0, help: t('pref.performance.activity_summary_refresh_ms.help')},
-      {path: 'file_explorer.refresh_seconds', label: t('pref.file_explorer.refresh_seconds.label', {name: fileExplorerLabel()}), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.refresh_seconds.help')},
-      {path: 'file_explorer.session_files_refresh_seconds', label: t('pref.file_explorer.session_files_refresh_seconds.label'), type: 'number', min: 1, max: 60, step: 1, suffix: 's', help: t('pref.file_explorer.session_files_refresh_seconds.help')},
-      {path: 'performance.settings_refresh_ms', label: t('pref.performance.settings_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.settings_refresh_ms.help')},
-      {path: 'performance.metadata_refresh_ms', label: t('pref.performance.metadata_refresh_ms.label'), type: 'number', min: 3000, max: 120000, step: 100, suffix: 'ms', help: t('pref.performance.metadata_refresh_ms.help')},
-      {path: 'performance.watched_pr_refresh_ms', label: t('pref.performance.watched_pr_refresh_ms.label'), type: 'number', min: 15000, max: 600000, step: 1000, suffix: 'ms', help: t('pref.performance.watched_pr_refresh_ms.help')},
-      {path: 'performance.pane_state_refresh_ms', label: t('pref.performance.pane_state_refresh_ms.label'), type: 'number', min: 500, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.pane_state_refresh_ms.help')},
-      {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1000, max: 30000, step: 100, suffix: 'ms', help: t('pref.performance.latency_refresh_ms.help')},
-      {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1000, max: 60000, step: 100, suffix: 'ms', help: t('pref.performance.event_log_refresh_ms.help')},
+      {path: 'performance.server_event_poll_ms', label: t('pref.performance.server_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_event_poll_ms.help')},
+      {path: 'performance.server_directory_event_poll_ms', label: t('pref.performance.server_directory_event_poll_ms.label'), type: 'number', min: 0.25, max: 60, step: 0.05, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.server_directory_event_poll_ms.help')},
+      {path: 'performance.latency_refresh_ms', label: t('pref.performance.latency_refresh_ms.label'), type: 'number', min: 1, max: 30, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.latency_refresh_ms.help')},
+      {path: 'performance.event_log_refresh_ms', label: t('pref.performance.event_log_refresh_ms.label'), type: 'number', min: 1, max: 60, step: 0.1, suffix: 's', scale: 1000, help: t('pref.performance.event_log_refresh_ms.help')},
       {path: 'performance.popover_show_delay_ms', label: t('pref.performance.popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_show_delay_ms.help')},
       {path: 'performance.popover_hide_delay_ms', label: t('pref.performance.popover_hide_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.popover_hide_delay_ms.help')},
       {path: 'performance.menu_hover_open_delay_ms', label: t('pref.performance.menu_hover_open_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.menu_hover_open_delay_ms.help')},
       {path: 'performance.tab_popover_show_delay_ms', label: t('pref.performance.tab_popover_show_delay_ms.label'), type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms', help: t('pref.performance.tab_popover_show_delay_ms.help')},
       {path: 'performance.tab_popover_follow_delay_ms', label: t('pref.performance.tab_popover_follow_delay_ms.label'), type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms', help: t('pref.performance.tab_popover_follow_delay_ms.help')},
-      {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms', help: t('pref.performance.remote_resize_delay_ms.help')},
+      {path: 'performance.remote_resize_delay_ms', label: t('pref.performance.remote_resize_delay_ms.label'), type: 'number', min: 0.05, max: 2, step: 0.01, suffix: 's', scale: 1000, displayDecimals: 3, help: t('pref.performance.remote_resize_delay_ms.help')},
     ]},
     {title: t('pref.section.github'), items: [
       {path: 'github.watched_prs', label: t('pref.github.watched_prs.label'), type: 'list', wide: true, help: t('pref.github.watched_prs.help')},
@@ -2120,7 +2110,7 @@ function preferenceSearchKeywordsForItem(item) {
   const add = terms => keywords.push(...terms);
   if (path.includes('font_size') || path === 'appearance.tab_width') add(['large', 'larger', 'big', 'bigger', 'huge', 'small', 'smaller', 'tiny', 'text', 'scale', 'zoom', 'wide', 'narrow']);
   if (/(_ms|_seconds|_delay|_refresh|_interval|duration|period|pulse|rotate|throttle|resize)/.test(path)) add(['duration', 'timeout', 'time', 'timing', 'milliseconds', 'seconds', 'speed', 'fast', 'slow', 'quick', 'lag', 'wait', 'debounce', 'period', 'rate', 'frequency', 'often']);
-  if (path.includes('_refresh_ms') || path === 'file_explorer.refresh_seconds' || path === 'file_explorer.session_files_refresh_seconds') add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
+  if (path.includes('_refresh_ms')) add(['reload', 'update', 'poll', 'polling', 'sync', 'live', 'auto']);
   if (path.includes('popover') || path.includes('hover')) add(['tooltip', 'popup', 'peek', 'flyout']);
   if (path.includes('red_reminder') || path.includes('yolo_rotate') || path.includes('badge_pulse')) add(['animation', 'animate', 'blink', 'flash', 'glow', 'attention', 'reminder']);
   if (path.startsWith('appearance.')) add(['color', 'colour', 'theme', 'dark', 'light', 'background', 'bg', 'contrast', 'style', 'look']);

@@ -116,10 +116,15 @@ YOAGENT_AUTH_FAILURE_RE = re.compile(
     re.IGNORECASE,
 )
 SESSION_FILES_CACHE_MAX_ITEMS = 64
+SESSION_FILES_CACHE_SECONDS = 5.0
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
+TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
+SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = 1.25
+SERVER_WATCHED_PR_EVENT_POLL_SECONDS = 60.0
 CLIENT_WATCH_ROOT_TTL_SECONDS = 300
 CLIENT_WATCH_ROOT_LIMIT = 128
+CLIENT_WATCH_FILE_LIMIT = 128
 DIRECTORY_WATCH_ENTRY_LIMIT = 512
 # Keep in sync with tmuxSessionNameError() in static/yolomux.js.
 TMUX_SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_. -]{1,64}$")
@@ -156,6 +161,16 @@ def filesystem_watch_signature(path: str | Path) -> tuple[Any, ...]:
         kind = "dir" if child.is_dir() else "file"
         entries.append((child.name, kind, int(child_stat.st_mtime_ns), int(child_stat.st_size)))
     return (str(target), "dir", int(stat.st_mtime_ns), int(stat.st_size), tuple(entries))
+
+
+def file_watch_signature(path: str | Path) -> tuple[Any, ...]:
+    target = Path(path).expanduser()
+    try:
+        stat = target.lstat()
+    except OSError:
+        return (str(target), "missing")
+    kind = "dir" if target.is_dir() else "file"
+    return (str(target), kind, int(stat.st_mtime_ns), int(stat.st_size))
 
 
 def filesystem_signature_entry_map(signature: tuple[Any, ...] | None) -> dict[str, tuple[str, int, int]]:
@@ -372,6 +387,7 @@ class TmuxWebtermApp:
         self.client_events = ClientEventBroker()
         self.client_watch_lock = threading.RLock()
         self.client_watch_roots: dict[str, float] = {}
+        self.client_watch_files: dict[str, float] = {}
         self.client_watch_context_items: list[dict[str, Any]] = []
         self.client_watch_session_files: list[dict[str, Any]] = []
         self.client_watch_activity_summary: dict[str, Any] = {}
@@ -379,6 +395,7 @@ class TmuxWebtermApp:
         self.client_watch_settings_signature: tuple[Any, ...] | None = None
         self.client_watch_transcripts_signature: tuple[Any, ...] | None = None
         self.client_watch_filesystem_signature: tuple[Any, ...] | None = None
+        self.client_watch_file_signature: tuple[Any, ...] | None = None
         self.client_watch_auto_approve_signature: str = ""
         self.client_watch_watched_prs_signature: str = ""
         self.client_watch_context_item_payload_signatures: dict[str, str] = {}
@@ -387,9 +404,12 @@ class TmuxWebtermApp:
         self.client_watch_activity_summary_signature: str = ""
         self.client_watch_filesystem_payload_signature: str = ""
         self.client_watch_snapshot_running = False
+        self.client_directory_poll_running = False
         self.client_watch_thread: threading.Thread | None = None
         self.client_watch_running = False
+        self.client_watch_wake_event = threading.Event()
         self.client_event_next_signature_poll_at = 0.0
+        self.client_event_next_file_poll_at = 0.0
         self.client_event_next_auto_poll_at = 0.0
         self.client_event_next_watched_pr_poll_at = 0.0
         self.activity_summary_lock = threading.RLock()
@@ -490,8 +510,31 @@ class TmuxWebtermApp:
     def server_event_poll_seconds(self) -> float:
         settings = settings_payload().get("settings", {})
         performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
-        value = performance.get("server_event_poll_ms", 5009) if isinstance(performance, dict) else 5009
-        return max(1.0, min(60.0, self.float_value(value, 5009.0) / 1000.0))
+        value = performance.get("server_event_poll_ms", 850) if isinstance(performance, dict) else 850
+        return max(0.25, min(60.0, self.float_value(value, 850.0) / 1000.0))
+
+    def server_directory_event_poll_seconds(self) -> float:
+        settings = settings_payload().get("settings", {})
+        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
+        value = performance.get("server_directory_event_poll_ms", 3000) if isinstance(performance, dict) else 3000
+        return max(0.25, min(60.0, self.float_value(value, 3000.0) / 1000.0))
+
+    def server_auto_approve_event_poll_seconds(self) -> float:
+        return SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS
+
+    def server_watched_pr_event_poll_seconds(self) -> float:
+        return SERVER_WATCHED_PR_EVENT_POLL_SECONDS
+
+    def client_event_watch_sleep_seconds(self, now: float) -> float:
+        next_due = min(
+            self.client_event_next_signature_poll_at,
+            self.client_event_next_file_poll_at,
+            self.client_event_next_auto_poll_at,
+            self.client_event_next_watched_pr_poll_at,
+        )
+        if next_due <= 0:
+            return self.server_event_poll_seconds()
+        return max(0.01, min(60.0, next_due - now))
 
     def update_client_watch_roots(self, roots: Any) -> dict[str, Any]:
         now = time.monotonic()
@@ -505,14 +548,25 @@ class TmuxWebtermApp:
                     continue
                 normalized.append(str(Path(path).expanduser()))
         unique = sorted(set(normalized))[:CLIENT_WATCH_ROOT_LIMIT]
+        normalized_files: list[str] = []
+        raw_files = payload.get("files", []) if isinstance(payload, dict) else []
+        if isinstance(raw_files, list):
+            for item in raw_files:
+                path = str(item or "").strip()
+                if not path.startswith("/"):
+                    continue
+                normalized_files.append(str(Path(path).expanduser()))
+        unique_files = sorted(set(normalized_files))[:CLIENT_WATCH_FILE_LIMIT]
         context_items = self.normalized_client_context_items(payload.get("context_items", []))
         session_files_requests = self.normalized_client_session_files(payload.get("session_files", []))
         activity_summary = self.normalized_client_activity_summary(payload.get("activity_summary", {}))
         with self.client_watch_lock:
             self.client_watch_roots = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique}
+            self.client_watch_files = {path: now + CLIENT_WATCH_ROOT_TTL_SECONDS for path in unique_files}
             self.client_watch_context_items = context_items
             self.client_watch_session_files = session_files_requests
             self.client_watch_activity_summary = activity_summary
+        self.client_watch_wake_event.set()
         with self.client_events.lock:
             has_client_event_subscribers = bool(self.client_events.subscribers)
         if has_client_event_subscribers:
@@ -520,6 +574,7 @@ class TmuxWebtermApp:
         return {
             "ok": True,
             "roots": unique,
+            "files": unique_files,
             "context_items": context_items,
             "session_files": session_files_requests,
             "activity_summary": activity_summary,
@@ -598,6 +653,14 @@ class TmuxWebtermApp:
                 self.client_watch_roots = current
             return sorted(current)
 
+    def client_watch_files_snapshot(self) -> list[str]:
+        now = time.monotonic()
+        with self.client_watch_lock:
+            current = {path: expires for path, expires in self.client_watch_files.items() if expires > now}
+            if len(current) != len(self.client_watch_files):
+                self.client_watch_files = current
+            return sorted(current)
+
     def settings_watch_signature(self) -> tuple[Any, ...]:
         try:
             return file_stat_signature(SETTINGS_PATH)
@@ -627,16 +690,40 @@ class TmuxWebtermApp:
                 path = str(item or "").strip()
                 if path.startswith("/"):
                     roots.add(path)
-        for info in sessions.values():
-            if info.selected_pane and info.selected_pane.current_path:
-                roots.add(info.selected_pane.current_path)
-            for agent in info.agents:
-                if agent.cwd:
-                    roots.add(agent.cwd)
         return sorted(str(Path(root).expanduser()) for root in roots if str(root or "").startswith("/"))[:CLIENT_WATCH_ROOT_LIMIT]
 
     def filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
         return tuple((root, filesystem_watch_signature(root)) for root in self.filesystem_roots_for_watch(sessions))
+
+    def files_for_watch(self) -> list[str]:
+        return self.client_watch_files_snapshot()[:CLIENT_WATCH_FILE_LIMIT]
+
+    def files_watch_signature(self) -> tuple[Any, ...]:
+        return tuple((path, file_watch_signature(path)) for path in self.files_for_watch())
+
+    def publish_files_changed_event(self, previous: tuple[Any, ...] | None, current: tuple[Any, ...], compute_ms: float = 0.0) -> list[str]:
+        if previous == current:
+            return []
+        previous_by_path = {str(item[0]): item[1] for item in previous or () if isinstance(item, tuple) and len(item) >= 2}
+        changed: list[dict[str, Any]] = []
+        for item in current:
+            if not isinstance(item, tuple) or len(item) < 2:
+                continue
+            path = str(item[0])
+            signature = item[1]
+            if previous_by_path.get(path) == signature:
+                continue
+            changed.append({"path": path, "signature": signature})
+        if not changed:
+            return []
+        self.publish_client_event(
+            "files_changed",
+            {"files": changed, "count": len(changed)},
+            trigger="watch",
+            cache="ready",
+            compute_ms=compute_ms,
+        )
+        return ["files_changed"]
 
     def publish_filesystem_ready_event(
         self,
@@ -794,6 +881,18 @@ class TmuxWebtermApp:
                 events.extend(session_file_events)
         return events
 
+    def poll_client_file_events_once(self) -> list[str]:
+        started = time.perf_counter()
+        files_signature = self.files_watch_signature()
+        compute_ms = (time.perf_counter() - started) * 1000
+        with self.client_watch_lock:
+            initialized = self.client_watch_file_signature is not None
+            previous = self.client_watch_file_signature
+            self.client_watch_file_signature = files_signature
+        if not initialized:
+            return []
+        return self.publish_files_changed_event(previous, files_signature, compute_ms=compute_ms)
+
     def publish_context_items_ready_events(self, trigger: str = "watch") -> list[str]:
         context_items, _session_files, _activity = self.client_watch_state_snapshot()
         events: list[str] = []
@@ -920,46 +1019,49 @@ class TmuxWebtermApp:
         self.client_watch_thread = worker
         worker.start()
 
+    def start_client_directory_poll(self) -> bool:
+        with self.client_watch_lock:
+            if self.client_directory_poll_running:
+                return False
+            self.client_directory_poll_running = True
+        worker = threading.Thread(target=self.run_client_directory_poll_once, daemon=True)
+        worker.start()
+        return True
+
+    def run_client_directory_poll_once(self) -> None:
+        try:
+            self.poll_client_events_once()
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.log_event(None, "client_event_watch_error", f"client directory event watch failed: {exc}", {})
+        finally:
+            with self.client_watch_lock:
+                self.client_directory_poll_running = False
+
     def client_event_watch_loop(self) -> None:
         while True:
             try:
                 now = time.monotonic()
+                if now >= self.client_event_next_file_poll_at:
+                    self.poll_client_file_events_once()
+                    self.client_event_next_file_poll_at = now + self.server_event_poll_seconds()
                 if now >= self.client_event_next_signature_poll_at:
-                    self.poll_client_events_once()
-                    self.client_event_next_signature_poll_at = now + self.server_event_poll_seconds()
+                    self.client_event_next_signature_poll_at = now + self.server_directory_event_poll_seconds()
+                    self.start_client_directory_poll()
                 if now >= self.client_event_next_auto_poll_at:
                     self.poll_auto_approve_client_event_once()
-                    settings = settings_payload().get("settings", {})
-                    performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
-                    value = performance.get("pane_state_refresh_ms", 1253) if isinstance(performance, dict) else 1253
-                    self.client_event_next_auto_poll_at = now + max(0.5, min(30.0, self.float_value(value, 1253.0) / 1000.0))
+                    self.client_event_next_auto_poll_at = now + self.server_auto_approve_event_poll_seconds()
                 if now >= self.client_event_next_watched_pr_poll_at:
                     self.poll_watched_prs_client_event_once()
-                    settings = settings_payload().get("settings", {})
-                    performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
-                    value = performance.get("watched_pr_refresh_ms", 60001) if isinstance(performance, dict) else 60001
-                    self.client_event_next_watched_pr_poll_at = now + max(15.0, min(600.0, self.float_value(value, 60001.0) / 1000.0))
+                    self.client_event_next_watched_pr_poll_at = now + self.server_watched_pr_event_poll_seconds()
             except (OSError, RuntimeError, ValueError) as exc:
                 self.log_event(None, "client_event_watch_error", f"client event watch failed: {exc}", {})
-            time.sleep(0.5)
+            if self.client_watch_wake_event.wait(self.client_event_watch_sleep_seconds(time.monotonic())):
+                self.client_watch_wake_event.clear()
 
     def cache_set_limited(self, cache: dict[Any, Any], key: Any, value: Any, limit: int) -> None:
         cache[key] = value
         while len(cache) > limit:
             cache.pop(next(iter(cache)))
-
-    def session_files_refresh_seconds(self) -> float:
-        settings = settings_payload().get("settings", {})
-        file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
-        fallback = file_explorer.get("refresh_seconds", 5) if isinstance(file_explorer, dict) else 5
-        value = file_explorer.get("session_files_refresh_seconds", fallback) if isinstance(file_explorer, dict) else fallback
-        return max(1.0, min(60.0, self.float_value(value, 5.0)))
-
-    def metadata_refresh_seconds(self) -> float:
-        settings = settings_payload().get("settings", {})
-        performance = settings.get("performance", {}) if isinstance(settings, dict) else {}
-        value = performance.get("metadata_refresh_ms", 15001) if isinstance(performance, dict) else 15001
-        return max(3.0, min(120.0, self.float_value(value, 15001.0) / 1000.0))
 
     def session_files_cache_key(
         self,
@@ -1066,7 +1168,7 @@ class TmuxWebtermApp:
     ) -> dict[str, Any]:
         infos = {info.session: info}
         key = self.session_files_cache_key("info", infos, info.session, hours, from_ref, to_ref, repo_refs)
-        cached = self.get_session_files_cache(key, max_age_seconds=self.session_files_refresh_seconds(), allow_stale=True)
+        cached = self.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=True)
         if cached:
             payload, _status, fresh, _age = cached
             if not fresh:
@@ -1111,11 +1213,10 @@ class TmuxWebtermApp:
 
     def watched_prs_payload(self, allow_network: bool = True) -> dict[str, Any]:
         # DOIT.29: resolve the github.watched_prs watchlist to live PR metadata, independent of any open
-        # session's branch. Shares the session-metadata cache (same per-PR TTL) but is polled on its own
-        # (longer) interval client-side so a big watchlist does not exhaust the GitHub rate limit.
+        # session's branch. The server-side SSE loop refreshes it on a fixed slow cadence so a big watchlist
+        # does not exhaust the GitHub rate limit.
         settings = settings_payload().get("settings", {})
         refs = settings.get("github", {}).get("watched_prs", [])
-        refresh_ms = settings.get("performance", {}).get("watched_pr_refresh_ms", 60000)
         result = watched_pr_metadata(refs, self.metadata_cache, allow_network=allow_network)
         # DOIT.34 #4: log the truncation only when the capped state CHANGES (count or watchlist), not on
         # every poll — otherwise the event log fills with one identical entry per refresh.
@@ -1134,7 +1235,6 @@ class TmuxWebtermApp:
             "watched_prs": result["watched_prs"],
             "truncated": result["truncated"],
             "invalid": result["invalid"],
-            "refresh_ms": refresh_ms,
         }
 
     def activity_summary_payload(self, force: bool = False, locale: str = "en") -> dict[str, Any]:
@@ -1624,6 +1724,7 @@ class TmuxWebtermApp:
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         payload = save_settings(patch)
         self.publish_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
+        self.client_watch_wake_event.set()
         if payload.get("settings", {}).get("yoagent", {}).get("auto_refresh", False):
             self.maybe_start_yoagent_summary_worker()
         return payload
@@ -1754,7 +1855,7 @@ class TmuxWebtermApp:
         discover_scope = self.sessions if session else scope
         infos, errors = discover_sessions(discover_scope)
         cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
-        max_age = self.session_files_refresh_seconds()
+        max_age = SESSION_FILES_CACHE_SECONDS
         cached = None if force else self.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
         cache_meta: dict[str, Any] | None = None
         if cached:
@@ -1854,7 +1955,7 @@ class TmuxWebtermApp:
         return payload
 
     def transcripts_payload(self, force: bool = False) -> dict[str, Any]:
-        max_age = self.metadata_refresh_seconds()
+        max_age = TRANSCRIPTS_PAYLOAD_CACHE_SECONDS
         cached = None if force else self.get_transcripts_payload_cache(max_age, allow_stale=True)
         if cached:
             payload, fresh, age_seconds = cached
