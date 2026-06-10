@@ -305,6 +305,7 @@
   "popover.kind.text": "محرر الملفات",
   "popover.path": "المسار",
   "popover.repo": "المستودع",
+  "popover.worktree": "worktree",
   "popover.size": "الحجم",
   "popover.state": "الحالة",
   "popover.status": "الحالة",

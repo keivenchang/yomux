@@ -305,6 +305,7 @@
   "popover.kind.text": "Dateieditor",
   "popover.path": "Pfad",
   "popover.repo": "Repo",
+  "popover.worktree": "worktree",
   "popover.size": "Größe",
   "popover.state": "Zustand",
   "popover.status": "Status",

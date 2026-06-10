@@ -305,6 +305,7 @@
   "popover.kind.text": "editor de arquivo",
   "popover.path": "caminho",
   "popover.repo": "repo",
+  "popover.worktree": "worktree",
   "popover.size": "tamanho",
   "popover.state": "estado",
   "popover.status": "status",

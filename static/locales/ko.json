@@ -309,6 +309,7 @@
   "popover.state": "상태",
   "popover.status": "상태",
   "popover.type": "유형",
+  "popover.worktree": "worktree",
   "pr.approved": "승인됨",
   "pr.authorBy": "by {author}",
   "pr.by": " ({logins})",

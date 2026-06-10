@@ -305,6 +305,7 @@
   "popover.kind.text": "파일 에디터",
   "popover.path": "경로",
   "popover.repo": "저장소",
+  "popover.worktree": "worktree",
   "popover.size": "크기",
   "popover.state": "상태",
   "popover.status": "상태",

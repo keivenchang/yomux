@@ -305,6 +305,7 @@
   "popover.kind.text": "文件编辑器",
   "popover.path": "路径",
   "popover.repo": "仓库",
+  "popover.worktree": "worktree",
   "popover.size": "大小",
   "popover.state": "状态",
   "popover.status": "状态",

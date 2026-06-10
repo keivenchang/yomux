@@ -305,6 +305,7 @@
   "popover.kind.text": "עורך קבצים",
   "popover.path": "נתיב",
   "popover.repo": "מאגר",
+  "popover.worktree": "worktree",
   "popover.size": "גודל",
   "popover.state": "מצב",
   "popover.status": "סטטוס",

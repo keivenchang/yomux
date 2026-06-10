@@ -309,6 +309,7 @@
   "popover.state": "الحالة",
   "popover.status": "الحالة",
   "popover.type": "النوع",
+  "popover.worktree": "worktree",
   "pr.approved": "معتمد",
   "pr.authorBy": "by {author}",
   "pr.by": " بواسطة {logins}",

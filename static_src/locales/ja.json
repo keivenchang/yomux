@@ -305,6 +305,7 @@
   "popover.kind.text": "ファイルエディター",
   "popover.path": "パス",
   "popover.repo": "リポジトリ",
+  "popover.worktree": "worktree",
   "popover.size": "サイズ",
   "popover.state": "状態",
   "popover.status": "状態",

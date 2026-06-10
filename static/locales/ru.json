@@ -309,6 +309,7 @@
   "popover.state": "состояние",
   "popover.status": "статус",
   "popover.type": "тип",
+  "popover.worktree": "worktree",
   "pr.approved": "Одобрено",
   "pr.authorBy": "by {author}",
   "pr.by": " от {logins}",

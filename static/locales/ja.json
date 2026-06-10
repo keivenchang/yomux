@@ -309,6 +309,7 @@
   "popover.state": "状態",
   "popover.status": "状態",
   "popover.type": "種類",
+  "popover.worktree": "worktree",
   "pr.approved": "承認済み",
   "pr.authorBy": "by {author}",
   "pr.by": "（{logins}）",

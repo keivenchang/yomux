@@ -305,6 +305,7 @@
   "popover.kind.text": "file editor",
   "popover.path": "path",
   "popover.repo": "repo",
+  "popover.worktree": "worktree",
   "popover.size": "साइज़",
   "popover.state": "state",
   "popover.status": "स्थिति",

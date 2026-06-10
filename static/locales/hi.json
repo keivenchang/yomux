@@ -309,6 +309,7 @@
   "popover.state": "state",
   "popover.status": "स्थिति",
   "popover.type": "प्रकार",
+  "popover.worktree": "worktree",
   "pr.approved": "अनुमोदित",
   "pr.authorBy": "by {author}",
   "pr.by": " {logins} द्वारा",

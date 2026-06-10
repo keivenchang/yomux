@@ -309,6 +309,7 @@
   "popover.state": "מצב",
   "popover.status": "סטטוס",
   "popover.type": "סוג",
+  "popover.worktree": "worktree",
   "pr.approved": "אושר",
   "pr.authorBy": "by {author}",
   "pr.by": " על ידי {logins}",

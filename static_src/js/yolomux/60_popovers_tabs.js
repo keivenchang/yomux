@@ -646,6 +646,8 @@ function sessionPopoverHtml(session, info, agentKind, autoEnabled, state = sessi
   const subject = currentBranchSubject(git);
   if (subject && !pr?.number) rows.push(popoverRow(t('popover.desc'), `<div class="popover-desc">${esc(subject)}</div>`));
   if (git?.root && git.root !== displayPath) rows.push(popoverRow(t('popover.repo'), git.root));
+  // S7 (DOIT.51): name a linked worktree vs its parent repo so the focused path isn't mistaken for the main checkout.
+  if (git?.worktree) rows.push(popoverRow(t('popover.worktree'), `${esc(git.worktree.name || git.worktree.path)} — worktree of ${esc(git.worktree.parent_root)}`));
   if (git?.head) rows.push(popoverRow('HEAD', gitHeadValueHtml(git)));
   if (gitStatusHasFacts(git)) rows.push(popoverRow(t('popover.git'), gitStatusText(git)));
   return `<div class="session-popover" role="tooltip">

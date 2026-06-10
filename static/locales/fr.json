@@ -309,6 +309,7 @@
   "popover.state": "état",
   "popover.status": "statut",
   "popover.type": "type",
+  "popover.worktree": "worktree",
   "pr.approved": "Approuvé",
   "pr.authorBy": "by {author}",
   "pr.by": " par {logins}",

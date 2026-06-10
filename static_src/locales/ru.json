@@ -305,6 +305,7 @@
   "popover.kind.text": "редактор файлов",
   "popover.path": "путь",
   "popover.repo": "репозиторий",
+  "popover.worktree": "worktree",
   "popover.size": "размер",
   "popover.state": "состояние",
   "popover.status": "статус",

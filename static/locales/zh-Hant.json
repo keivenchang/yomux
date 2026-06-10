@@ -309,6 +309,7 @@
   "popover.state": "狀態",
   "popover.status": "狀態",
   "popover.type": "類型",
+  "popover.worktree": "worktree",
   "pr.approved": "已核准",
   "pr.authorBy": "作者 {author}",
   "pr.by": " 由 {logins}",

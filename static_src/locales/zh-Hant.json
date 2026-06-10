@@ -305,6 +305,7 @@
   "popover.kind.text": "檔案編輯器",
   "popover.path": "路徑",
   "popover.repo": "儲存庫",
+  "popover.worktree": "worktree",
   "popover.size": "大小",
   "popover.state": "狀態",
   "popover.status": "狀態",
